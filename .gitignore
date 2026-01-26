@@ -1,0 +1,16 @@
+# Dependencies
+/deps/
+
+# Build artifacts
+/_build/
+/cover/
+/doc/
+/erl_crash.dump
+*.ez
+*.beam
+*.plt
+.elixir_ls/
+
+# Environment
+.env
+*.secret.*
