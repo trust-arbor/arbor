@@ -1,0 +1,109 @@
+defmodule Arbor.SignalsTest do
+  use ExUnit.Case, async: true
+
+  alias Arbor.Signals
+  alias Arbor.Signals.Signal
+
+  describe "emit/3,4" do
+    test "emits a signal and stores it" do
+      assert :ok = Signals.emit(:activity, :test_event, %{value: 42})
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, category: :activity, type: :test_event)
+      assert signal.category == :activity
+      assert signal.type == :test_event
+      assert signal.data.value == 42
+    end
+
+    test "accepts options" do
+      assert :ok =
+               Signals.emit(:activity, :test_event, %{}, source: "test", correlation_id: "corr_1")
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, type: :test_event)
+      assert signal.source == "test"
+      assert signal.correlation_id == "corr_1"
+    end
+  end
+
+  describe "subscribe/3 and unsubscribe/1" do
+    test "subscribes to signals and receives them" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Signals.subscribe("activity.sub_test", fn signal ->
+          send(test_pid, {:signal, signal})
+          :ok
+        end, async: false)
+
+      Signals.emit(:activity, :sub_test, %{value: 123})
+
+      assert_receive {:signal, %Signal{type: :sub_test, data: %{value: 123}}}, 1000
+
+      assert :ok = Signals.unsubscribe(sub_id)
+    end
+
+    test "unsubscribe stops delivery" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Signals.subscribe("activity.unsub_test", fn signal ->
+          send(test_pid, {:signal, signal})
+          :ok
+        end, async: false)
+
+      Signals.unsubscribe(sub_id)
+      Signals.emit(:activity, :unsub_test, %{})
+
+      refute_receive {:signal, _}, 100
+    end
+  end
+
+  describe "query/1" do
+    test "filters by category" do
+      Signals.emit(:activity, :query_test_1, %{})
+      Signals.emit(:security, :query_test_2, %{})
+
+      {:ok, signals} = Signals.query(category: :activity, type: :query_test_1)
+      assert Enum.all?(signals, &(&1.category == :activity))
+    end
+
+    test "respects limit" do
+      for i <- 1..10 do
+        Signals.emit(:activity, :limit_test, %{i: i})
+      end
+
+      {:ok, signals} = Signals.query(type: :limit_test, limit: 3)
+      assert length(signals) == 3
+    end
+  end
+
+  describe "get_signal/1" do
+    test "retrieves signal by ID" do
+      Signals.emit(:activity, :get_test, %{unique: "value"})
+      {:ok, [signal | _]} = Signals.recent(type: :get_test, limit: 1)
+
+      {:ok, retrieved} = Signals.get_signal(signal.id)
+      assert retrieved.id == signal.id
+      assert retrieved.data.unique == "value"
+    end
+
+    test "returns error for unknown ID" do
+      assert {:error, :not_found} = Signals.get_signal("sig_nonexistent")
+    end
+  end
+
+  describe "healthy?/0" do
+    test "returns true when system is running" do
+      assert Signals.healthy?() == true
+    end
+  end
+
+  describe "stats/0" do
+    test "returns combined statistics" do
+      stats = Signals.stats()
+
+      assert Map.has_key?(stats, :store)
+      assert Map.has_key?(stats, :bus)
+      assert Map.has_key?(stats, :healthy)
+    end
+  end
+end
