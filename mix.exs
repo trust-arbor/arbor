@@ -12,7 +12,11 @@ defmodule Arbor.MixProject do
   end
 
   defp deps do
-    []
+    [
+      # Jido ecosystem (path deps for local development)
+      {:jido, path: "../jido", override: true},
+      {:jido_ai, path: "../jido_ai", override: true}
+    ]
   end
 
   defp aliases do
