@@ -4,14 +4,40 @@ defmodule ArborEval.Checks.PIIDetection do
 
   Based on patterns from Microsoft Presidio and industry best practices.
 
-  Scans for: # arbor:allow pii (documentation examples below)
+  ## References & Attribution
+
+  Patterns in this module are derived from:
+
+  - **Microsoft Presidio** - Open-source PII detection framework
+    - GitHub: https://github.com/microsoft/presidio
+    - Supported entities: https://microsoft.github.io/presidio/supported_entities/
+    - Patterns used: Credit cards, SSN, phone numbers, email validation
+
+  - **Bearer CLI** - SAST tool with 120+ sensitive data types
+    - GitHub: https://github.com/Bearer/bearer
+    - Data types: https://docs.bearer.com/reference/datatypes/
+    - Patterns used: API key formats, secret detection patterns
+
+  - **OWASP** - Sensitive data exposure guidelines
+    - https://owasp.org/www-project-web-security-testing-guide/
+
+  ## Detected PII Types
+  # arbor:allow pii
   - Hardcoded paths with usernames (/Users/username/, /home/username/)
   - Email addresses
   - Phone numbers (US and international formats)
-  - Credit card numbers (with Luhn validation)
+  - Credit card numbers (with Luhn checksum validation)
   - US Social Security Numbers (SSN)
   - Names (configurable list)
-  - API keys and secrets patterns (OpenAI, GitHub, AWS, Slack, etc.)
+  - API keys and secrets:
+    - OpenAI (sk-...)
+    - GitHub (ghp_, gho_, ghu_, ghs_, ghr_)
+    - AWS (AKIA..., secret access keys)
+    - Google (AIza...)
+    - Stripe (sk_live_, sk_test_, pk_live_, pk_test_)
+    - Slack (xoxb, xoxa, xoxp, xoxr, xoxs)
+    - JWT tokens
+    - Private keys (PEM format)
   - IP addresses
 
   ## Configuration
@@ -29,6 +55,17 @@ defmodule ArborEval.Checks.PIIDetection do
 
       # arbor:allow pii
       @test_email "test@example.com"
+
+  ## Future Enhancements
+
+  Consider adding from Presidio/Bearer:
+  - IBAN (International Bank Account Numbers)
+  - UK NHS numbers
+  - Passport numbers (various countries)
+  - Driver's license patterns
+  - Medical record numbers
+  - Bitcoin/crypto addresses
+  - Azure/GCP credentials
 
   """
 
@@ -56,8 +93,11 @@ defmodule ArborEval.Checks.PIIDetection do
     ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
   ]
 
-  # Credit card patterns (validated with Luhn algorithm in check)
-  # Patterns from Microsoft Presidio
+  # ===========================================================================
+  # Credit Card Patterns
+  # Source: Microsoft Presidio - https://microsoft.github.io/presidio/supported_entities/
+  # Validated with Luhn algorithm to reduce false positives
+  # ===========================================================================
   @credit_card_patterns [
     # Visa: starts with 4, 13-16 digits
     ~r/\b4[0-9]{12}(?:[0-9]{3})?\b/,
@@ -70,33 +110,50 @@ defmodule ArborEval.Checks.PIIDetection do
     ~r/\b6(?:011|5[0-9]{2})[0-9]{12}\b/
   ]
 
-  # US Social Security Number pattern
+  # ===========================================================================
+  # US Social Security Number
+  # Source: Microsoft Presidio - https://microsoft.github.io/presidio/supported_entities/
   # Format: XXX-XX-XXXX (with or without dashes)
-  # Excludes invalid patterns like 000, 666, 900-999 in area number
+  # Excludes invalid patterns: 000, 666, 900-999 in area number
+  # ===========================================================================
   @ssn_pattern ~r/\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/
 
-  # API key / secret patterns (expanded based on Presidio and Bearer)
+  # ===========================================================================
+  # API Key / Secret Patterns
+  # Sources:
+  #   - Bearer CLI: https://docs.bearer.com/reference/datatypes/
+  #   - GitHub secret scanning: https://docs.github.com/en/code-security/secret-scanning
+  #   - AWS documentation
+  #   - Stripe documentation
+  # ===========================================================================
   @secret_patterns [
     # Generic API key patterns
     ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
     ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
     # OpenAI-style keys (sk-...)
+    # Source: OpenAI API documentation
     ~r/sk-[a-zA-Z0-9]{32,}/,
     # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+    # Source: https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
     ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
     # Slack tokens (xoxb, xoxa, xoxp, xoxr, xoxs)
+    # Source: Slack API documentation
     ~r/xox[baprs]-[a-zA-Z0-9-]+/,
     # AWS Access Key ID (starts with AKIA, ABIA, ACCA, ASIA)
+    # Source: AWS IAM documentation
     ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
     # AWS Secret Access Key (40 char base64)
     ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
     # Google API key
+    # Source: Google Cloud documentation
     ~r/AIza[0-9A-Za-z\-_]{35}/,
     # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
+    # Source: Stripe API documentation
     ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
     # Private keys (PEM format marker)
     ~r/-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
     # JWT tokens (three base64 segments)
+    # Source: RFC 7519
     ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/
   ]
 
@@ -624,8 +681,12 @@ defmodule ArborEval.Checks.PIIDetection do
       Regex.match?(~r/\d+\.\d+\.\d+-\d+/, line)
   end
 
-  # Luhn algorithm for credit card validation
+  # ===========================================================================
+  # Luhn Algorithm (ISO/IEC 7812-1)
+  # Used by Microsoft Presidio for credit card validation
   # Reduces false positives by validating checksum
+  # Reference: https://en.wikipedia.org/wiki/Luhn_algorithm
+  # ===========================================================================
   defp valid_luhn?(number) do
     digits =
       number
