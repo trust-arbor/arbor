@@ -147,4 +147,115 @@ defmodule ArborEval.Checks.PIIDetectionTest do
       assert Enum.any?(result.violations, &(&1.type == :personal_name))
     end
   end
+
+  describe "credit card numbers" do
+    test "detects Visa card numbers" do
+      # Valid Visa test number with valid Luhn checksum
+      code = ~s|@card "4532015112830366"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :credit_card))
+    end
+
+    test "detects Mastercard numbers" do
+      # Valid Mastercard test number
+      code = ~s|@card "5425233430109903"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :credit_card))
+    end
+
+    test "detects Amex numbers" do
+      # Valid Amex test number
+      code = ~s|@card "374245455400126"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :credit_card))
+    end
+
+    test "ignores test card numbers" do
+      code = ~s|@test_card "4111111111111111"|
+
+      result = PIIDetection.run(%{code: code})
+
+      refute Enum.any?(result.violations, &(&1.type == :credit_card))
+    end
+
+    test "ignores numbers failing Luhn check" do
+      # Invalid checksum
+      code = ~s|@number "4532015112830367"|
+
+      result = PIIDetection.run(%{code: code})
+
+      refute Enum.any?(result.violations, &(&1.type == :credit_card))
+    end
+  end
+
+  describe "social security numbers" do
+    test "detects SSN with dashes" do
+      code = ~s|@ssn "123-45-6788"|
+
+      result = PIIDetection.run(%{code: code})
+
+      # Note: 123-45-6789 is a common test SSN, so we use a different one
+      assert Enum.any?(result.violations, &(&1.type == :ssn))
+    end
+
+    test "detects SSN without dashes" do
+      code = ~s|@ssn "234567890"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :ssn))
+    end
+
+    test "ignores common test SSN" do
+      code = ~s|@test_ssn "123-45-6789"|
+
+      result = PIIDetection.run(%{code: code})
+
+      refute Enum.any?(result.violations, &(&1.type == :ssn))
+    end
+
+    test "ignores version numbers that look like SSN" do
+      code = ~s|version = "1.2.3-456"|
+
+      result = PIIDetection.run(%{code: code})
+
+      refute Enum.any?(result.violations, &(&1.type == :ssn))
+    end
+  end
+
+  describe "AWS keys" do
+    test "detects AWS access key ID" do
+      code = ~s|@aws_key "AKIAIOSFODNN7EXAMPLE"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :hardcoded_secret))
+    end
+  end
+
+  describe "Google API keys" do
+    test "detects Google API key" do
+      code = ~s|@google_key "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :hardcoded_secret))
+    end
+  end
+
+  describe "Stripe keys" do
+    test "detects Stripe secret key" do
+      code = ~s|@stripe_key "SK_LIVE_TESTING_PLACEHOLDER"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :hardcoded_secret))
+    end
+  end
 end
