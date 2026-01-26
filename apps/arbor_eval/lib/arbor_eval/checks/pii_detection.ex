@@ -2,12 +2,16 @@ defmodule ArborEval.Checks.PIIDetection do
   @moduledoc """
   Detects potential personally identifiable information (PII) in code.
 
+  Based on patterns from Microsoft Presidio and industry best practices.
+
   Scans for: # arbor:allow pii (documentation examples below)
   - Hardcoded paths with usernames (/Users/username/, /home/username/)
   - Email addresses
-  - Phone numbers
+  - Phone numbers (US and international formats)
+  - Credit card numbers (with Luhn validation)
+  - US Social Security Numbers (SSN)
   - Names (configurable list)
-  - API keys and secrets patterns
+  - API keys and secrets patterns (OpenAI, GitHub, AWS, Slack, etc.)
   - IP addresses
 
   ## Configuration
@@ -52,16 +56,48 @@ defmodule ArborEval.Checks.PIIDetection do
     ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
   ]
 
-  # API key / secret patterns
+  # Credit card patterns (validated with Luhn algorithm in check)
+  # Patterns from Microsoft Presidio
+  @credit_card_patterns [
+    # Visa: starts with 4, 13-16 digits
+    ~r/\b4[0-9]{12}(?:[0-9]{3})?\b/,
+    # Mastercard: starts with 51-55 or 2221-2720, 16 digits
+    ~r/\b5[1-5][0-9]{14}\b/,
+    ~r/\b2(?:2[2-9][1-9]|2[3-9][0-9]{2}|[3-6][0-9]{3}|7[0-1][0-9]{2}|720[0-9])[0-9]{12}\b/,
+    # American Express: starts with 34 or 37, 15 digits
+    ~r/\b3[47][0-9]{13}\b/,
+    # Discover: starts with 6011, 622126-622925, 644-649, 65
+    ~r/\b6(?:011|5[0-9]{2})[0-9]{12}\b/
+  ]
+
+  # US Social Security Number pattern
+  # Format: XXX-XX-XXXX (with or without dashes)
+  # Excludes invalid patterns like 000, 666, 900-999 in area number
+  @ssn_pattern ~r/\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/
+
+  # API key / secret patterns (expanded based on Presidio and Bearer)
   @secret_patterns [
+    # Generic API key patterns
     ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
     ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
-    # OpenAI-style keys
+    # OpenAI-style keys (sk-...)
     ~r/sk-[a-zA-Z0-9]{32,}/,
-    # GitHub personal access tokens
-    ~r/ghp_[a-zA-Z0-9]{36}/,
-    # Slack tokens
-    ~r/xox[baprs]-[a-zA-Z0-9-]+/
+    # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+    ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
+    # Slack tokens (xoxb, xoxa, xoxp, xoxr, xoxs)
+    ~r/xox[baprs]-[a-zA-Z0-9-]+/,
+    # AWS Access Key ID (starts with AKIA, ABIA, ACCA, ASIA)
+    ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
+    # AWS Secret Access Key (40 char base64)
+    ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
+    # Google API key
+    ~r/AIza[0-9A-Za-z\-_]{35}/,
+    # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
+    ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
+    # Private keys (PEM format marker)
+    ~r/-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
+    # JWT tokens (three base64 segments)
+    ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/
   ]
 
   # IP address pattern (basic IPv4)
@@ -90,6 +126,8 @@ defmodule ArborEval.Checks.PIIDetection do
       |> check_paths(lines, allowlisted_lines)
       |> check_emails(lines, allowlisted_lines)
       |> check_phones(lines, allowlisted_lines)
+      |> check_credit_cards(lines, allowlisted_lines)
+      |> check_ssn(lines, allowlisted_lines)
       |> check_secrets(lines, allowlisted_lines)
       |> check_ips(lines, allowlisted_lines)
       |> check_names(lines, allowlisted_lines, additional_names)
@@ -207,6 +245,86 @@ defmodule ArborEval.Checks.PIIDetection do
               }
             end)
             |> Enum.take(1)
+          end
+        end
+      end)
+
+    violations ++ new_violations
+  end
+
+  defp check_credit_cards(violations, lines, allowlisted) do
+    new_violations =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {line, idx} ->
+        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
+          []
+        else
+          # Skip lines that look like test data or documentation
+          if looks_like_test_card?(line) do
+            []
+          else
+            @credit_card_patterns
+            |> Enum.flat_map(fn pattern ->
+              case Regex.run(pattern, line) do
+                [match | _] ->
+                  # Validate with Luhn algorithm to reduce false positives
+                  if valid_luhn?(match) do
+                    [match]
+                  else
+                    []
+                  end
+
+                nil ->
+                  []
+              end
+            end)
+            |> Enum.take(1)
+            |> Enum.map(fn card ->
+              %{
+                type: :credit_card,
+                message: "Credit card number detected: #{mask_credit_card(card)}",
+                line: idx,
+                column: nil,
+                severity: :error,
+                suggestion: "Never hardcode credit card numbers in source code"
+              }
+            end)
+          end
+        end
+      end)
+
+    violations ++ new_violations
+  end
+
+  defp check_ssn(violations, lines, allowlisted) do
+    new_violations =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {line, idx} ->
+        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
+          []
+        else
+          # Skip lines that look like test data or version numbers
+          if looks_like_test_ssn?(line) or looks_like_version_number?(line) do
+            []
+          else
+            if Regex.match?(@ssn_pattern, line) do
+              ssn = extract_match(@ssn_pattern, line)
+
+              [
+                %{
+                  type: :ssn,
+                  message: "US Social Security Number detected: #{mask_ssn(ssn)}",
+                  line: idx,
+                  column: nil,
+                  severity: :error,
+                  suggestion: "Never hardcode SSNs in source code"
+                }
+              ]
+            else
+              []
+            end
           end
         end
       end)
@@ -396,6 +514,8 @@ defmodule ArborEval.Checks.PIIDetection do
       # Just a number in a docstring example
       Regex.match?(~r/^\s*#.*\d{10,13}/, line) -> true
       Regex.match?(~r/^\s*@doc.*\d{10,13}/, line) -> true
+      # Lines with 13+ digit sequences are likely credit card numbers, not phones
+      Regex.match?(~r/\d{13,}/, line) -> true
       true -> false
     end
   end
@@ -443,6 +563,94 @@ defmodule ArborEval.Checks.PIIDetection do
       String.slice(digits, 0, 3) <> "***" <> String.slice(digits, -2, 2)
     else
       "***"
+    end
+  end
+
+  defp mask_credit_card(card) do
+    # Keep first 4 and last 4 digits (standard PCI masking)
+    digits = Regex.replace(~r/\D/, card, "")
+
+    if String.length(digits) >= 8 do
+      String.slice(digits, 0, 4) <> "****" <> String.slice(digits, -4, 4)
+    else
+      "****"
+    end
+  end
+
+  defp mask_ssn(ssn) do
+    # Keep only last 4 digits (standard SSN masking)
+    digits = Regex.replace(~r/\D/, ssn, "")
+
+    if String.length(digits) >= 4 do
+      "***-**-" <> String.slice(digits, -4, 4)
+    else
+      "***-**-****"
+    end
+  end
+
+  defp looks_like_test_card?(line) do
+    # Common test card numbers and patterns
+    String.contains?(line, [
+      "4111111111111111",
+      "5500000000000004",
+      "340000000000009",
+      "test_card",
+      "test_cc",
+      "fake_card",
+      "sample_card"
+    ]) or
+      # Lines with "test" or "example" context
+      Regex.match?(~r/(?i)(test|example|sample|mock|fake|dummy)\s*[:=]/, line)
+  end
+
+  defp looks_like_test_ssn?(line) do
+    # Common test SSN patterns and context
+    String.contains?(line, [
+      "123-45-6789",
+      "000-00-0000",
+      "test_ssn",
+      "fake_ssn",
+      "sample_ssn"
+    ]) or
+      # Lines with "test" or "example" context
+      Regex.match?(~r/(?i)(test|example|sample|mock|fake|dummy)\s*[:=]/, line)
+  end
+
+  defp looks_like_version_number?(line) do
+    # Version numbers like "1.2.3-456" can look like SSN
+    # Check for version context
+    Regex.match?(~r/(?i)(version|v\d|release|build)\s*[:=]/, line) or
+      # Semantic versioning patterns
+      Regex.match?(~r/\d+\.\d+\.\d+-\d+/, line)
+  end
+
+  # Luhn algorithm for credit card validation
+  # Reduces false positives by validating checksum
+  defp valid_luhn?(number) do
+    digits =
+      number
+      |> String.replace(~r/\D/, "")
+      |> String.graphemes()
+      |> Enum.map(&String.to_integer/1)
+      |> Enum.reverse()
+
+    if length(digits) < 13 do
+      false
+    else
+      {sum, _} =
+        Enum.reduce(digits, {0, 0}, fn digit, {sum, idx} ->
+          value =
+            if rem(idx, 2) == 1 do
+              doubled = digit * 2
+              if doubled > 9, do: doubled - 9, else: doubled
+            else
+              digit
+            end
+
+          {sum + value, idx + 1}
+        end)
+
+      rem(sum, 10) == 0
     end
   end
 end
