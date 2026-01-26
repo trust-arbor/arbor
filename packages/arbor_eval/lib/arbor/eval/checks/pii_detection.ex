@@ -1,4 +1,4 @@
-defmodule ArborEval.Checks.PIIDetection do
+defmodule Arbor.Eval.Checks.PIIDetection do
   @moduledoc """
   Detects potential personally identifiable information (PII) in code.
 
@@ -44,7 +44,7 @@ defmodule ArborEval.Checks.PIIDetection do
 
   You can configure additional patterns or names to check:
 
-      ArborEval.run(PIIDetection, code: code,
+      Arbor.Eval.run(PIIDetection, code: code,
         additional_names: ["alice", "bob"],
         additional_patterns: [~r/my-secret-pattern/]
       )
@@ -69,7 +69,7 @@ defmodule ArborEval.Checks.PIIDetection do
 
   """
 
-  use ArborEval,
+  use Arbor.Eval,
     name: "pii_detection",
     category: :security,
     description: "Detects potential PII in source code"
@@ -163,7 +163,7 @@ defmodule ArborEval.Checks.PIIDetection do
   # Allowlist pattern in comments
   @allowlist_pattern ~r/#\s*arbor:allow\s+pii/i
 
-  @impl ArborEval
+  @impl Arbor.Eval
   def run(%{code: code} = context) do
     additional_names = Map.get(context, :additional_names, [])
     additional_patterns = Map.get(context, :additional_patterns, [])

@@ -1,4 +1,4 @@
-defmodule ArborEval.Suite do
+defmodule Arbor.Eval.Suite do
   @moduledoc """
   A suite is a collection of evals that run together.
 
@@ -11,15 +11,15 @@ defmodule ArborEval.Suite do
   ## Defining a Suite
 
       defmodule MySuite do
-        use ArborEval.Suite,
+        use Arbor.Eval.Suite,
           name: "my_suite",
           description: "Checks for my specific needs"
 
         @impl true
         def evals do
           [
-            ArborEval.Checks.ElixirIdioms,
-            ArborEval.Checks.PIIDetection,
+            Arbor.Eval.Checks.ElixirIdioms,
+            Arbor.Eval.Checks.PIIDetection,
             MyCustomCheck
           ]
         end
@@ -42,7 +42,7 @@ defmodule ArborEval.Suite do
 
   @type check_result :: %{
           file: String.t(),
-          results: [ArborEval.result()],
+          results: [Arbor.Eval.result()],
           passed: boolean()
         }
 
@@ -73,21 +73,21 @@ defmodule ArborEval.Suite do
 
   defmacro __using__(opts) do
     quote do
-      @behaviour ArborEval.Suite
+      @behaviour Arbor.Eval.Suite
 
       @suite_name unquote(opts[:name]) || to_string(__MODULE__)
       @suite_description unquote(opts[:description]) || ""
 
-      @impl ArborEval.Suite
+      @impl Arbor.Eval.Suite
       def filter_files(files), do: files
 
-      @impl ArborEval.Suite
+      @impl Arbor.Eval.Suite
       def setup(context), do: {:ok, context}
 
-      @impl ArborEval.Suite
+      @impl Arbor.Eval.Suite
       def teardown(_context), do: :ok
 
-      @impl ArborEval.Suite
+      @impl Arbor.Eval.Suite
       def __suite_info__ do
         %{name: @suite_name, description: @suite_description}
       end
@@ -96,15 +96,15 @@ defmodule ArborEval.Suite do
 
       # Convenience functions
       def check_file(path, opts \\ []) do
-        ArborEval.Suite.check_file(__MODULE__, path, opts)
+        Arbor.Eval.Suite.check_file(__MODULE__, path, opts)
       end
 
       def check_files(paths, opts \\ []) do
-        ArborEval.Suite.check_files(__MODULE__, paths, opts)
+        Arbor.Eval.Suite.check_files(__MODULE__, paths, opts)
       end
 
       def check_directory(path, opts \\ []) do
-        ArborEval.Suite.check_directory(__MODULE__, path, opts)
+        Arbor.Eval.Suite.check_directory(__MODULE__, path, opts)
       end
     end
   end
@@ -201,7 +201,7 @@ defmodule ArborEval.Suite do
   defp check_single_file(path, evals, _opts) do
     case File.read(path) do
       {:ok, code} ->
-        ArborEval.run_all(evals, %{code: code, file: path})
+        Arbor.Eval.run_all(evals, %{code: code, file: path})
 
       {:error, reason} ->
         {:error, {:file_read_failed, path, reason}}
