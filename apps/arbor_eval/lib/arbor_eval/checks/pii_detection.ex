@@ -44,9 +44,12 @@ defmodule ArborEval.Checks.PIIDetection do
   @email_pattern ~r/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
 
   # Phone number patterns (various formats)
+  # Note: We use word boundaries and specific formats to avoid matching timestamps
   @phone_patterns [
-    ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/,
-    ~r/\+\d{1,3}[-.\s]?\d{6,14}/
+    # US format with area code and 7 digits
+    ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/,
+    # International format with country code prefix
+    ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
   ]
 
   # API key / secret patterns
@@ -118,23 +121,28 @@ defmodule ArborEval.Checks.PIIDetection do
         if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
           []
         else
-          @path_patterns
-          |> Enum.filter(&Regex.match?(&1, line))
-          |> Enum.map(fn _pattern ->
-            # Extract the matched path for the message
-            path = extract_first_match(@path_patterns, line)
+          # Skip lines in docstrings that look like examples or URIs
+          if looks_like_docstring_example?(line) or looks_like_uri_path?(line) do
+            []
+          else
+            @path_patterns
+            |> Enum.filter(&Regex.match?(&1, line))
+            |> Enum.map(fn _pattern ->
+              # Extract the matched path for the message
+              path = extract_first_match(@path_patterns, line)
 
-            %{
-              type: :hardcoded_path,
-              message: "Hardcoded user path detected: #{path}",
-              line: idx,
-              column: nil,
-              severity: :error,
-              suggestion: "Use Path.expand(\"~\") or environment variables"
-            }
-          end)
-          # One violation per line
-          |> Enum.take(1)
+              %{
+                type: :hardcoded_path,
+                message: "Hardcoded user path detected: #{path}",
+                line: idx,
+                column: nil,
+                severity: :error,
+                suggestion: "Use Path.expand(\"~\") or environment variables"
+              }
+            end)
+            # One violation per line
+            |> Enum.take(1)
+          end
         end
       end)
 
@@ -180,21 +188,26 @@ defmodule ArborEval.Checks.PIIDetection do
         if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
           []
         else
-          @phone_patterns
-          |> Enum.filter(&Regex.match?(&1, line))
-          |> Enum.map(fn pattern ->
-            phone = extract_match(pattern, line)
+          # Skip lines that look like they contain timestamps or cursor formats
+          if looks_like_timestamp_context?(line) do
+            []
+          else
+            @phone_patterns
+            |> Enum.filter(&Regex.match?(&1, line))
+            |> Enum.map(fn pattern ->
+              phone = extract_match(pattern, line)
 
-            %{
-              type: :phone_number,
-              message: "Phone number detected: #{mask_phone(phone)}",
-              line: idx,
-              column: nil,
-              severity: :error,
-              suggestion: "Use configuration or environment variable for phone numbers"
-            }
-          end)
-          |> Enum.take(1)
+              %{
+                type: :phone_number,
+                message: "Phone number detected: #{mask_phone(phone)}",
+                line: idx,
+                column: nil,
+                severity: :error,
+                suggestion: "Use configuration or environment variable for phone numbers"
+              }
+            end)
+            |> Enum.take(1)
+          end
         end
       end)
 
@@ -362,6 +375,53 @@ defmodule ArborEval.Checks.PIIDetection do
 
   defp localhost_ip?(line) do
     String.contains?(line, ["127.0.0.1", "0.0.0.0", "192.168.", "10.0.", "172.16."])
+  end
+
+  defp looks_like_timestamp_context?(line) do
+    # Lines containing Unix timestamps (10-13 digits starting with 1) in contexts like:
+    # - "1705123456789:evt_123" (cursor format)
+    # - timestamp_ms, DateTime.from_unix, etc.
+    cond do
+      # Cursor format: timestamp:id
+      Regex.match?(~r/\d{10,13}:[a-zA-Z_]/, line) -> true
+      # Timestamp variable/function context
+      String.contains?(line, ["timestamp", "unix", "epoch", "millisecond", "DateTime"]) -> true
+      # Docstring examples with timestamps (iex> or result lines)
+      Regex.match?(~r/iex>.*\d{10,13}/, line) -> true
+      # Result tuple with timestamp: {:ok, {1705..., ...}}
+      Regex.match?(~r/\{:ok,\s*\{\d{10,13}/, line) -> true
+      # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
+      # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
+      Regex.match?(~r/\b1[67]\d{8,11}\b/, line) -> true
+      # Just a number in a docstring example
+      Regex.match?(~r/^\s*#.*\d{10,13}/, line) -> true
+      Regex.match?(~r/^\s*@doc.*\d{10,13}/, line) -> true
+      true -> false
+    end
+  end
+
+  defp looks_like_docstring_example?(line) do
+    # Lines that appear to be in @doc or @moduledoc examples
+    cond do
+      # iex> examples
+      String.contains?(line, "iex>") -> true
+      # Docstring markers with path examples
+      Regex.match?(~r/^\s*(#|##|Example|Format|URI).*\/home\//, line) -> true
+      # Quoted examples in docs
+      Regex.match?(~r/`[^`]*\/home\/[^`]*`/, line) -> true
+      true -> false
+    end
+  end
+
+  defp looks_like_uri_path?(line) do
+    # Lines containing URIs that happen to have path components
+    # e.g., "arbor://fs/read/home/user/documents"
+    cond do
+      Regex.match?(~r/arbor:\/\//, line) -> true
+      Regex.match?(~r/https?:\/\//, line) -> true
+      Regex.match?(~r/file:\/\//, line) -> true
+      true -> false
+    end
   end
 
   defp mask_email(email) do
