@@ -15,7 +15,10 @@ defmodule Arbor.MixProject do
     [
       # Jido ecosystem (path deps for local development)
       {:jido, path: "../jido", override: true},
-      {:jido_ai, path: "../jido_ai", override: true}
+      {:jido_ai, path: "../jido_ai", override: true},
+
+      # Dev/test tools
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
