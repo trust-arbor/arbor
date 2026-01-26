@@ -1,9 +1,9 @@
-defmodule ArborEval.Checks.ElixirIdiomsTest do
+defmodule Arbor.Eval.Checks.ElixirIdiomsTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias ArborEval.Checks.ElixirIdioms
+  alias Arbor.Eval.Checks.ElixirIdioms
 
   describe "defensive nil checks" do
     test "detects != nil pattern" do

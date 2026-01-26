@@ -1,9 +1,9 @@
-defmodule ArborEval.SuiteTest do
+defmodule Arbor.Eval.SuiteTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias ArborEval.Suites.LibraryConstruction
+  alias Arbor.Eval.Suites.LibraryConstruction
 
   describe "check_file/2" do
     test "checks a single file" do

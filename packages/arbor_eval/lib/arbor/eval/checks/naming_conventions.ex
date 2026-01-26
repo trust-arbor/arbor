@@ -1,4 +1,4 @@
-defmodule ArborEval.Checks.NamingConventions do
+defmodule Arbor.Eval.Checks.NamingConventions do
   @moduledoc """
   Checks for AI-readable naming conventions in Arbor libraries.
 
@@ -39,7 +39,7 @@ defmodule ArborEval.Checks.NamingConventions do
       def process_incoming_message(message), do: ...
   """
 
-  use ArborEval,
+  use Arbor.Eval,
     name: "naming_conventions",
     category: :code_quality,
     description: "Checks for AI-readable naming conventions"
@@ -172,7 +172,7 @@ defmodule ArborEval.Checks.NamingConventions do
     "update"
   ]
 
-  @impl ArborEval
+  @impl Arbor.Eval
   def run(%{ast: ast} = context) do
     strictness = Map.get(context, :strictness, :standard)
 
@@ -205,6 +205,11 @@ defmodule ArborEval.Checks.NamingConventions do
     case ast do
       {:defmodule, meta, [{:__aliases__, _, parts}, _]} ->
         module_name = Enum.map_join(parts, ".", &to_string/1)
+        first_part = to_string(hd(parts))
+
+        # Check for Arbor module naming convention
+        # Modules should be Arbor.* not ArborSomething
+        naming_violations = check_arbor_module_naming(module_name, first_part, meta, strictness)
 
         # Check for implementation technology in name
         tech_violations =
@@ -229,10 +234,37 @@ defmodule ArborEval.Checks.NamingConventions do
             []
           end
 
-        violations ++ tech_violations
+        violations ++ naming_violations ++ tech_violations
 
       _ ->
         violations
+    end
+  end
+
+  # Check that Arbor modules use dotted naming (Arbor.Foo) not concatenated (ArborFoo)
+  defp check_arbor_module_naming(module_name, first_part, meta, _strictness) do
+    # Check if module starts with "Arbor" but isn't properly namespaced
+    cond do
+      # ArborEval, ArborCommon, etc. - should be Arbor.Eval, Arbor.Common
+      String.starts_with?(first_part, "Arbor") and first_part != "Arbor" ->
+        expected = "Arbor." <> String.replace_prefix(first_part, "Arbor", "")
+        rest = module_name |> String.split(".") |> tl() |> Enum.join(".")
+        full_expected = if rest == "", do: expected, else: "#{expected}.#{rest}"
+
+        [
+          %{
+            type: :arbor_module_naming,
+            message:
+              "Module '#{module_name}' uses concatenated naming instead of dotted namespace",
+            line: meta[:line],
+            column: nil,
+            severity: :error,
+            suggestion: "Rename to '#{full_expected}' (use Arbor.* namespace, not Arbor* prefix)"
+          }
+        ]
+
+      true ->
+        []
     end
   end
 

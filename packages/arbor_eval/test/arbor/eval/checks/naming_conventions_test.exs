@@ -1,9 +1,66 @@
-defmodule ArborEval.Checks.NamingConventionsTest do
+defmodule Arbor.Eval.Checks.NamingConventionsTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias ArborEval.Checks.NamingConventions
+  alias Arbor.Eval.Checks.NamingConventions
+
+  describe "Arbor module naming convention" do
+    test "flags concatenated Arbor module names (ArborFoo should be Arbor.Foo)" do
+      ast =
+        quote do
+          defmodule ArborEval do
+          end
+        end
+
+      result = NamingConventions.run(%{ast: ast, strictness: :standard})
+
+      assert Enum.any?(result.violations, fn v ->
+               v.type == :arbor_module_naming and
+                 String.contains?(v.message, "ArborEval") and
+                 String.contains?(v.suggestion, "Arbor.Eval")
+             end)
+    end
+
+    test "flags nested concatenated Arbor modules (ArborCommon.Time)" do
+      ast =
+        quote do
+          defmodule ArborCommon.Time do
+          end
+        end
+
+      result = NamingConventions.run(%{ast: ast, strictness: :standard})
+
+      assert Enum.any?(result.violations, fn v ->
+               v.type == :arbor_module_naming and
+                 String.contains?(v.suggestion, "Arbor.Common.Time")
+             end)
+    end
+
+    test "does not flag properly namespaced Arbor modules" do
+      ast =
+        quote do
+          defmodule Arbor.Eval do
+          end
+        end
+
+      result = NamingConventions.run(%{ast: ast, strictness: :standard})
+
+      refute Enum.any?(result.violations, &(&1.type == :arbor_module_naming))
+    end
+
+    test "does not flag non-Arbor modules" do
+      ast =
+        quote do
+          defmodule MyApp.SomeModule do
+          end
+        end
+
+      result = NamingConventions.run(%{ast: ast, strictness: :standard})
+
+      refute Enum.any?(result.violations, &(&1.type == :arbor_module_naming))
+    end
+  end
 
   describe "module names with implementation technology" do
     test "flags module names with implementation technology in standard mode" do

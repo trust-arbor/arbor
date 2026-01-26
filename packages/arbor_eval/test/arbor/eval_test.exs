@@ -1,4 +1,4 @@
-defmodule ArborEvalTest do
+defmodule Arbor.EvalTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
@@ -12,15 +12,15 @@ defmodule ArborEvalTest do
       end
       """
 
-      {:ok, result} = ArborEval.run(ArborEval.Checks.Documentation, code: code)
+      {:ok, result} = Arbor.Eval.run(Arbor.Eval.Checks.Documentation, code: code)
 
-      assert result.eval == ArborEval.Checks.Documentation
+      assert result.eval == Arbor.Eval.Checks.Documentation
       assert result.name == "documentation"
       assert result.category == :code_quality
     end
 
     test "returns error for invalid code" do
-      assert {:error, {:parse_error, _, _}} = ArborEval.run(ArborEval.Checks.Documentation, code: "def invalid(")
+      assert {:error, {:parse_error, _, _}} = Arbor.Eval.run(Arbor.Eval.Checks.Documentation, code: "def invalid(")
     end
   end
 
@@ -33,8 +33,8 @@ defmodule ArborEvalTest do
       end
       """
 
-      {:ok, results} = ArborEval.run_all(
-        [ArborEval.Checks.Documentation, ArborEval.Checks.ElixirIdioms],
+      {:ok, results} = Arbor.Eval.run_all(
+        [Arbor.Eval.Checks.Documentation, Arbor.Eval.Checks.ElixirIdioms],
         code: code
       )
 
@@ -57,7 +57,7 @@ defmodule ArborEvalTest do
       """)
 
       try do
-        {:ok, results} = ArborEval.check_file(path)
+        {:ok, results} = Arbor.Eval.check_file(path)
         assert is_list(results)
       after
         File.rm!(path)
@@ -65,7 +65,7 @@ defmodule ArborEvalTest do
     end
 
     test "returns error for missing file" do
-      assert {:error, {:file_read_failed, _, :enoent}} = ArborEval.check_file("/nonexistent/file.ex")
+      assert {:error, {:file_read_failed, _, :enoent}} = Arbor.Eval.check_file("/nonexistent/file.ex")
     end
   end
 
@@ -78,7 +78,7 @@ defmodule ArborEvalTest do
       end
       """
 
-      {:ok, results} = ArborEval.check_code(code)
+      {:ok, results} = Arbor.Eval.check_code(code)
       assert is_list(results)
       assert length(results) > 0
     end
@@ -91,7 +91,7 @@ defmodule ArborEvalTest do
       end
       """
 
-      {:ok, results} = ArborEval.check_code(code, evals: [ArborEval.Checks.Documentation])
+      {:ok, results} = Arbor.Eval.check_code(code, evals: [Arbor.Eval.Checks.Documentation])
       assert length(results) == 1
       assert hd(results).name == "documentation"
     end
@@ -105,8 +105,8 @@ defmodule ArborEvalTest do
       end
       """
 
-      {:ok, results} = ArborEval.check_code(code)
-      summary = ArborEval.summary(results)
+      {:ok, results} = Arbor.Eval.check_code(code)
+      summary = Arbor.Eval.summary(results)
 
       assert is_integer(summary.total)
       assert is_integer(summary.passed)

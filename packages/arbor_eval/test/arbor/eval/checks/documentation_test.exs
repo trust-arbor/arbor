@@ -1,9 +1,9 @@
-defmodule ArborEval.Checks.DocumentationTest do
+defmodule Arbor.Eval.Checks.DocumentationTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias ArborEval.Checks.Documentation
+  alias Arbor.Eval.Checks.Documentation
 
   describe "moduledoc checks" do
     test "detects missing moduledoc" do

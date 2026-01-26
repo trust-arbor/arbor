@@ -1,4 +1,4 @@
-defmodule ArborEval.Checks.Documentation do
+defmodule Arbor.Eval.Checks.Documentation do
   @moduledoc """
   Checks for documentation coverage in modules.
 
@@ -29,12 +29,12 @@ defmodule ArborEval.Checks.Documentation do
       end
   """
 
-  use ArborEval,
+  use Arbor.Eval,
     name: "documentation",
     category: :code_quality,
     description: "Checks for documentation coverage"
 
-  @impl ArborEval
+  @impl Arbor.Eval
   def run(%{ast: ast} = context) do
     require_moduledoc = Map.get(context, :require_moduledoc, true)
     require_doc = Map.get(context, :require_doc, true)

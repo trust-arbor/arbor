@@ -1,4 +1,4 @@
-defmodule ArborEval.Checks.ElixirIdioms do
+defmodule Arbor.Eval.Checks.ElixirIdioms do
   @moduledoc """
   Checks for idiomatic Elixir patterns and flags common AI-generated anti-patterns.
 
@@ -20,12 +20,12 @@ defmodule ArborEval.Checks.ElixirIdioms do
   - https://getboothiq.com/blog/150k-lines-vibe-coded-elixir-good-bad-ugly
   """
 
-  use ArborEval,
+  use Arbor.Eval,
     name: "elixir_idioms",
     category: :code_quality,
     description: "Checks for idiomatic Elixir patterns"
 
-  @impl ArborEval
+  @impl Arbor.Eval
   def run(%{ast: ast} = context) do
     violations =
       []
