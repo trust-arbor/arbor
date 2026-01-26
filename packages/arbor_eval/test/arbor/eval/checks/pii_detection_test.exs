@@ -1,9 +1,9 @@
-defmodule ArborEval.Checks.PIIDetectionTest do
+defmodule Arbor.Eval.Checks.PIIDetectionTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias ArborEval.Checks.PIIDetection
+  alias Arbor.Eval.Checks.PIIDetection
 
   describe "hardcoded paths" do
     test "detects /Users/username/ paths" do

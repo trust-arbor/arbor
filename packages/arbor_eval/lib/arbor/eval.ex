@@ -1,4 +1,4 @@
-defmodule ArborEval do
+defmodule Arbor.Eval do
   @moduledoc """
   Evaluation framework for code quality, safety, and behavior.
 
@@ -8,21 +8,21 @@ defmodule ArborEval do
   ## Usage
 
       # Run a single eval
-      {:ok, result} = ArborEval.run(ArborEval.Checks.ElixirIdioms, code: code_string)
+      {:ok, result} = Arbor.Eval.run(Arbor.Eval.Checks.ElixirIdioms, code: code_string)
 
       # Run multiple evals
-      {:ok, results} = ArborEval.run_all([
-        ArborEval.Checks.ElixirIdioms,
-        ArborEval.Checks.Documentation
+      {:ok, results} = Arbor.Eval.run_all([
+        Arbor.Eval.Checks.ElixirIdioms,
+        Arbor.Eval.Checks.Documentation
       ], code: code_string)
 
       # Check a file
-      {:ok, result} = ArborEval.check_file("lib/my_module.ex")
+      {:ok, result} = Arbor.Eval.check_file("lib/my_module.ex")
 
   ## Defining an Eval
 
       defmodule MyEval do
-        use ArborEval,
+        use Arbor.Eval,
           name: "my_eval",
           category: :code_quality,
           description: "Checks for something specific"
@@ -91,19 +91,19 @@ defmodule ArborEval do
 
   defmacro __using__(opts) do
     quote do
-      @behaviour ArborEval
+      @behaviour Arbor.Eval
 
       @eval_name unquote(opts[:name]) || to_string(__MODULE__)
       @eval_category unquote(opts[:category]) || :general
       @eval_description unquote(opts[:description]) || ""
 
-      @impl ArborEval
+      @impl Arbor.Eval
       def setup(context), do: {:ok, context}
 
-      @impl ArborEval
+      @impl Arbor.Eval
       def teardown(_context), do: :ok
 
-      @impl ArborEval
+      @impl Arbor.Eval
       def __eval_info__ do
         %{
           name: @eval_name,
@@ -244,10 +244,10 @@ defmodule ArborEval do
 
   defp default_code_quality_evals do
     [
-      ArborEval.Checks.ElixirIdioms,
-      ArborEval.Checks.Documentation,
-      ArborEval.Checks.PIIDetection,
-      ArborEval.Checks.NamingConventions
+      Arbor.Eval.Checks.ElixirIdioms,
+      Arbor.Eval.Checks.Documentation,
+      Arbor.Eval.Checks.PIIDetection,
+      Arbor.Eval.Checks.NamingConventions
     ]
   end
 end

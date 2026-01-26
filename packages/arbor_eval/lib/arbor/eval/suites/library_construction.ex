@@ -1,4 +1,4 @@
-defmodule ArborEval.Suites.LibraryConstruction do
+defmodule Arbor.Eval.Suites.LibraryConstruction do
   @moduledoc """
   Comprehensive evaluation suite for Arbor library construction.
 
@@ -38,18 +38,18 @@ defmodule ArborEval.Suites.LibraryConstruction do
   - `:strict` - Full AI-readable requirements (for new libraries)
   """
 
-  use ArborEval.Suite,
+  use Arbor.Eval.Suite,
     name: "library_construction",
     description: "Quality checks for Arbor library construction"
 
-  alias ArborEval.Checks.{
+  alias Arbor.Eval.Checks.{
     ElixirIdioms,
     PIIDetection,
     NamingConventions,
     Documentation
   }
 
-  @impl ArborEval.Suite
+  @impl Arbor.Eval.Suite
   def evals do
     [
       ElixirIdioms,
@@ -59,7 +59,7 @@ defmodule ArborEval.Suites.LibraryConstruction do
     ]
   end
 
-  @impl ArborEval.Suite
+  @impl Arbor.Eval.Suite
   def filter_files(files) do
     Enum.reject(files, fn file ->
       # Skip test files and scripts by default
@@ -69,7 +69,7 @@ defmodule ArborEval.Suites.LibraryConstruction do
     end)
   end
 
-  @impl ArborEval.Suite
+  @impl Arbor.Eval.Suite
   def setup(context) do
     # Pass through configuration to individual evals
     opts = Map.get(context, :opts, [])
