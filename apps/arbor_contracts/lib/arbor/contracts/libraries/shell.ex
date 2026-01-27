@@ -50,41 +50,45 @@ defmodule Arbor.Contracts.Libraries.Shell do
         ]
 
   @doc """
-  Execute a shell command synchronously.
+  Execute a shell command synchronously with the given options.
+
+  Applies sandbox rules, registers the execution, and returns the result.
   """
-  @callback execute(command :: String.t(), execute_opts()) ::
+  @callback execute_shell_command_with_options(command :: String.t(), execute_opts()) ::
               {:ok, result()} | {:error, :timeout | :unauthorized | term()}
 
   @doc """
-  Execute a shell command asynchronously.
+  Execute a shell command asynchronously with the given options.
+
+  Returns an execution ID for tracking.
   """
-  @callback execute_async(command :: String.t(), execute_opts()) ::
+  @callback execute_shell_command_async_with_options(command :: String.t(), execute_opts()) ::
               {:ok, execution_id()} | {:error, :unauthorized | term()}
 
   @doc """
-  Get the status of an async execution.
+  Get the execution status by its ID.
   """
-  @callback get_status(execution_id()) ::
+  @callback get_execution_status_by_id(execution_id()) ::
               {:ok, execution_status()} | {:error, :not_found}
 
   @doc """
-  Get the result of an async execution.
+  Get the execution result by its ID.
   """
-  @callback get_result(execution_id(), opts :: keyword()) ::
+  @callback get_execution_result_by_id(execution_id(), opts :: keyword()) ::
               {:ok, result()}
               | {:pending, partial :: result()}
               | {:error, :not_found | :timeout}
 
   @doc """
-  Kill a running async execution.
+  Kill a running execution by its ID.
   """
-  @callback kill(execution_id(), opts :: keyword()) ::
+  @callback kill_running_execution_by_id(execution_id(), opts :: keyword()) ::
               :ok | {:error, :not_found | :not_running}
 
   @doc """
-  List all active executions.
+  List all active executions with optional filters.
   """
-  @callback list_executions(opts :: keyword()) :: {:ok, [map()]}
+  @callback list_active_executions_with_filters(opts :: keyword()) :: {:ok, [map()]}
 
   @doc """
   Start the shell system.
@@ -97,9 +101,9 @@ defmodule Arbor.Contracts.Libraries.Shell do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    get_status: 1,
-    get_result: 2,
-    kill: 2,
-    list_executions: 1
+    get_execution_status_by_id: 1,
+    get_execution_result_by_id: 2,
+    kill_running_execution_by_id: 2,
+    list_active_executions_with_filters: 1
   ]
 end

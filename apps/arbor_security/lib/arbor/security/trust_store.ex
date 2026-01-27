@@ -8,7 +8,7 @@ defmodule Arbor.Security.TrustStore do
 
   use GenServer
 
-  alias Arbor.Contracts.Security.TrustProfile
+  alias Arbor.Contracts.Trust.Profile, as: TrustProfile
 
   # Client API
 

@@ -24,15 +24,19 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.Core.Session` - Execution contexts
 
   ### Security
-  - `Arbor.Contracts.Security.Trust` - Trust level definitions
-  - `Arbor.Contracts.Security.TrustProfile` - Agent trust state
   - `Arbor.Contracts.Security.AuditEvent` - Security audit trail
   - `Arbor.Contracts.Security.Enforcer` - Authorization enforcement behaviour
+
+  ### Trust
+  - `Arbor.Contracts.Trust` - Trust system behaviour and helpers
+  - `Arbor.Contracts.Trust.Profile` - Agent trust state
+  - `Arbor.Contracts.Trust.Event` - Trust-affecting events
 
   ### Library Interfaces
   - `Arbor.Contracts.Libraries.Shell` - Command execution interface
   - `Arbor.Contracts.Libraries.Signals` - Event emission interface
   - `Arbor.Contracts.Libraries.Security` - Security facade interface
+  - `Arbor.Contracts.Libraries.Trust` - Trust facade interface
 
   ## Usage
 
@@ -71,14 +75,17 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Core.Capability,
       Arbor.Contracts.Core.Session,
       # Security
-      Arbor.Contracts.Security.Trust,
-      Arbor.Contracts.Security.TrustProfile,
       Arbor.Contracts.Security.AuditEvent,
       Arbor.Contracts.Security.Enforcer,
+      # Trust
+      Arbor.Contracts.Trust,
+      Arbor.Contracts.Trust.Profile,
+      Arbor.Contracts.Trust.Event,
       # Library interfaces
       Arbor.Contracts.Libraries.Shell,
       Arbor.Contracts.Libraries.Signals,
-      Arbor.Contracts.Libraries.Security
+      Arbor.Contracts.Libraries.Security,
+      Arbor.Contracts.Libraries.Trust
     ]
   end
 end

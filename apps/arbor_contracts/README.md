@@ -30,15 +30,19 @@ end
 - `Arbor.Contracts.Core.Session` - Execution contexts
 
 ### Security
-- `Arbor.Contracts.Security.Trust` - Trust level definitions
-- `Arbor.Contracts.Security.TrustProfile` - Agent trust state
 - `Arbor.Contracts.Security.AuditEvent` - Security audit trail
 - `Arbor.Contracts.Security.Enforcer` - Authorization enforcement behaviour
+
+### Trust
+- `Arbor.Contracts.Trust` - Trust system behaviour and helpers
+- `Arbor.Contracts.Trust.Profile` - Agent trust state
+- `Arbor.Contracts.Trust.Event` - Trust-affecting events
 
 ### Library Interfaces
 - `Arbor.Contracts.Libraries.Shell` - Command execution interface
 - `Arbor.Contracts.Libraries.Signals` - Event emission interface
 - `Arbor.Contracts.Libraries.Security` - Security facade interface
+- `Arbor.Contracts.Libraries.Trust` - Trust facade interface
 
 ## Usage
 

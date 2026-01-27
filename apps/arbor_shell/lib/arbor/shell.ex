@@ -50,7 +50,9 @@ defmodule Arbor.Shell do
 
   @default_sandbox :basic
 
-  # Execution API
+  # ===========================================================================
+  # Public API — short, human-friendly names
+  # ===========================================================================
 
   @doc """
   Execute a shell command synchronously.
@@ -63,23 +65,55 @@ defmodule Arbor.Shell do
   - `:sandbox` - Sandbox mode: `:none`, `:basic`, `:strict` (default: `:basic`)
   - `:stdin` - Input to send to the process
 
-  ## Returns
-
-  - `{:ok, result}` - Command completed (check exit_code for success)
-  - `{:error, {:blocked_command, cmd}}` - Command blocked by sandbox
-  - `{:error, {:dangerous_flags, flags}}` - Flags blocked by sandbox
-  - `{:error, reason}` - Other error
-
   ## Examples
 
       {:ok, result} = Arbor.Shell.execute("echo hello")
       result.exit_code  # => 0
       result.stdout     # => "hello\\n"
   """
-  @impl true
   @spec execute(String.t(), keyword()) ::
           {:ok, map()} | {:error, :timeout | :unauthorized | term()}
-  def execute(command, opts \\ []) do
+  def execute(command, opts \\ []),
+    do: execute_shell_command_with_options(command, opts)
+
+  @doc """
+  Execute a shell command asynchronously.
+
+  Returns an execution ID that can be used to check status and get results.
+
+  ## Examples
+
+      {:ok, exec_id} = Arbor.Shell.execute_async("long-running-command")
+      {:ok, result} = Arbor.Shell.get_result(exec_id)
+  """
+  @spec execute_async(String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, :unauthorized | term()}
+  def execute_async(command, opts \\ []),
+    do: execute_shell_command_async_with_options(command, opts)
+
+  @doc "Get the status of an async execution."
+  @spec get_status(String.t()) :: {:ok, atom()} | {:error, :not_found}
+  def get_status(execution_id), do: get_execution_status_by_id(execution_id)
+
+  @doc "Get the result of an async execution."
+  @spec get_result(String.t(), keyword()) ::
+          {:ok, map()} | {:pending, map()} | {:error, :not_found | :timeout}
+  def get_result(execution_id, opts \\ []), do: get_execution_result_by_id(execution_id, opts)
+
+  @doc "Kill a running async execution."
+  @spec kill(String.t(), keyword()) :: :ok | {:error, :not_found | :not_running}
+  def kill(execution_id, opts \\ []), do: kill_running_execution_by_id(execution_id, opts)
+
+  @doc "List all executions."
+  @spec list_executions(keyword()) :: {:ok, [map()]}
+  def list_executions(opts \\ []), do: list_active_executions_with_filters(opts)
+
+  # ===========================================================================
+  # Contract implementations — verbose, AI-readable names
+  # ===========================================================================
+
+  @impl true
+  def execute_shell_command_with_options(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
     with {:ok, :allowed} <- Sandbox.check(command, sandbox),
@@ -104,37 +138,14 @@ defmodule Arbor.Shell do
     end
   end
 
-  @doc """
-  Execute a shell command asynchronously.
-
-  Returns an execution ID that can be used to check status and get results.
-
-  ## Options
-
-  Same as `execute/2`.
-
-  ## Returns
-
-  - `{:ok, execution_id}` - Command started
-  - `{:error, reason}` - Failed to start
-
-  ## Examples
-
-      {:ok, exec_id} = Arbor.Shell.execute_async("long-running-command")
-      # ... later ...
-      {:ok, result} = Arbor.Shell.get_result(exec_id)
-  """
   @impl true
-  @spec execute_async(String.t(), keyword()) ::
-          {:ok, String.t()} | {:error, :unauthorized | term()}
-  def execute_async(command, opts \\ []) do
+  def execute_shell_command_async_with_options(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
     with {:ok, :allowed} <- Sandbox.check(command, sandbox),
          {:ok, execution_id} <- register_execution(command, opts) do
       emit_started(command, execution_id, opts)
 
-      # Spawn async execution
       Task.start(fn ->
         case Executor.run(command, opts) do
           {:ok, result} ->
@@ -151,30 +162,16 @@ defmodule Arbor.Shell do
     end
   end
 
-  @doc """
-  Get the status of an async execution.
-  """
   @impl true
-  @spec get_status(String.t()) :: {:ok, atom()} | {:error, :not_found}
-  def get_status(execution_id) do
+  def get_execution_status_by_id(execution_id) do
     case ExecutionRegistry.get(execution_id) do
       {:ok, execution} -> {:ok, execution.status}
       error -> error
     end
   end
 
-  @doc """
-  Get the result of an async execution.
-
-  ## Options
-
-  - `:wait` - Wait for completion (default: false)
-  - `:timeout` - Wait timeout in milliseconds (default: 5000)
-  """
   @impl true
-  @spec get_result(String.t(), keyword()) ::
-          {:ok, map()} | {:pending, map()} | {:error, :not_found | :timeout}
-  def get_result(execution_id, opts \\ []) do
+  def get_execution_result_by_id(execution_id, opts) do
     wait = Keyword.get(opts, :wait, false)
     timeout = Keyword.get(opts, :timeout, 5000)
 
@@ -194,12 +191,8 @@ defmodule Arbor.Shell do
     end
   end
 
-  @doc """
-  Kill a running async execution.
-  """
   @impl true
-  @spec kill(String.t(), keyword()) :: :ok | {:error, :not_found | :not_running}
-  def kill(execution_id, _opts \\ []) do
+  def kill_running_execution_by_id(execution_id, _opts) do
     case ExecutionRegistry.get(execution_id) do
       {:ok, %{status: :running, port: port}} when not is_nil(port) ->
         Executor.kill_port(port)
@@ -214,17 +207,8 @@ defmodule Arbor.Shell do
     end
   end
 
-  @doc """
-  List all executions.
-
-  ## Options
-
-  - `:status` - Filter by status
-  - `:limit` - Maximum results (default: 100)
-  """
   @impl true
-  @spec list_executions(keyword()) :: {:ok, [map()]}
-  def list_executions(opts \\ []) do
+  def list_active_executions_with_filters(opts) do
     ExecutionRegistry.list(opts)
   end
 

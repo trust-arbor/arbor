@@ -50,41 +50,51 @@ defmodule Arbor.Contracts.Libraries.Signals do
         ]
 
   @doc """
-  Emit a signal to the signal bus.
+  Emit a signal for the given category and type with data and options.
   """
-  @callback emit(category(), signal_type(), data :: map(), emit_opts()) ::
-              :ok | {:error, term()}
+  @callback emit_signal_for_category_and_type(
+              category(),
+              signal_type(),
+              data :: map(),
+              emit_opts()
+            ) :: :ok | {:error, term()}
 
   @doc """
-  Emit a pre-constructed signal.
+  Emit a preconstructed signal directly to the signal bus.
   """
-  @callback emit_signal(signal()) :: :ok | {:error, term()}
+  @callback emit_preconstructed_signal(signal()) :: :ok | {:error, term()}
 
   @doc """
-  Subscribe to signals matching a pattern.
+  Subscribe to signals matching a pattern with a handler function.
   """
-  @callback subscribe(pattern(), handler(), subscribe_opts()) ::
-              {:ok, subscription_id()} | {:error, term()}
+  @callback subscribe_to_signals_matching_pattern(
+              pattern(),
+              handler(),
+              subscribe_opts()
+            ) :: {:ok, subscription_id()} | {:error, term()}
 
   @doc """
-  Unsubscribe from signals.
+  Unsubscribe from signals by subscription ID.
   """
-  @callback unsubscribe(subscription_id()) :: :ok | {:error, :not_found}
+  @callback unsubscribe_from_signals_by_subscription_id(subscription_id()) ::
+              :ok | {:error, :not_found}
 
   @doc """
-  Get a signal by ID.
+  Get a signal by its ID.
   """
-  @callback get_signal(signal_id()) :: {:ok, signal()} | {:error, :not_found}
+  @callback get_signal_by_id(signal_id()) :: {:ok, signal()} | {:error, :not_found}
 
   @doc """
   Query signals with filters.
   """
-  @callback query(filters :: keyword()) :: {:ok, [signal()]} | {:error, term()}
+  @callback query_signals_with_filters(filters :: keyword()) ::
+              {:ok, [signal()]} | {:error, term()}
 
   @doc """
-  Get recent signals from memory buffer.
+  Get recent signals from the in-memory buffer.
   """
-  @callback recent(opts :: keyword()) :: {:ok, [signal()]} | {:error, term()}
+  @callback get_recent_signals_from_buffer(opts :: keyword()) ::
+              {:ok, [signal()]} | {:error, term()}
 
   @doc """
   Start the signals system.
@@ -97,9 +107,9 @@ defmodule Arbor.Contracts.Libraries.Signals do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    emit_signal: 1,
-    get_signal: 1,
-    query: 1,
-    recent: 1
+    emit_preconstructed_signal: 1,
+    get_signal_by_id: 1,
+    query_signals_with_filters: 1,
+    get_recent_signals_from_buffer: 1
   ]
 end
