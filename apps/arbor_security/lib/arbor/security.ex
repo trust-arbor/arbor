@@ -53,41 +53,91 @@ defmodule Arbor.Security do
   @behaviour Arbor.Contracts.Libraries.Security
 
   alias Arbor.Contracts.Core.Capability
-  alias Arbor.Contracts.Security.TrustProfile
+  alias Arbor.Contracts.Trust.Profile, as: TrustProfile
   alias Arbor.Security.{CapabilityStore, TrustStore}
   alias Arbor.Signals
 
-  # Core Authorization
+  # ===========================================================================
+  # Public API — short, human-friendly names
+  # ===========================================================================
 
   @doc """
   Authorize an operation on a resource.
 
   The resource URI includes the action: `arbor://{type}/{action}/{path}`
 
-  Checks both capability and trust requirements. Returns:
-
-  - `{:ok, :authorized}` - Operation allowed
-  - `{:error, :unauthorized}` - No valid capability
-  - `{:error, :capability_expired}` - Capability has expired
-  - `{:error, :trust_frozen}` - Agent's trust is frozen
-
-  ## Options
-
-  - `:context` - Additional context for authorization decision
-  - `:skip_consensus` - Skip consensus check (default: false)
-  - `:trace_id` - Trace ID for correlation
-
   ## Examples
 
-      # Action is in the URI
       Arbor.Security.authorize("agent_001", "arbor://fs/read/docs")
   """
-  @impl true
   @spec authorize(String.t(), String.t(), atom(), keyword()) ::
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
-  def authorize(principal_id, resource_uri, _action \\ nil, opts \\ []) do
+  def authorize(principal_id, resource_uri, action \\ nil, opts \\ []),
+    do: check_if_principal_has_capability_for_resource_action(principal_id, resource_uri, action, opts)
+
+  @doc """
+  Fast capability-only check. Does not verify trust status.
+  """
+  @spec can?(String.t(), String.t(), atom()) :: boolean()
+  def can?(principal_id, resource_uri, action \\ nil),
+    do: check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, action)
+
+  @doc """
+  Grant a capability to an agent.
+
+  ## Options
+
+  - `:principal` - Agent ID (required)
+  - `:resource` - Resource URI (required)
+  - `:constraints` - Additional constraints map
+  - `:expires_at` - Expiration DateTime
+  - `:delegation_depth` - How many times this can be delegated (default: 3)
+  """
+  @spec grant(keyword()) :: {:ok, Capability.t()} | {:error, term()}
+  def grant(opts), do: grant_capability_to_principal_for_resource(opts)
+
+  @doc "Revoke a capability."
+  @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
+  def revoke(capability_id, opts \\ []), do: revoke_capability_by_id(capability_id, opts)
+
+  @doc "List capabilities for an agent."
+  @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
+  def list_capabilities(principal_id, opts \\ []), do: list_capabilities_for_principal(principal_id, opts)
+
+  @doc "Create a trust profile for a new agent."
+  @spec create_trust_profile(String.t()) :: {:ok, TrustProfile.t()} | {:error, :already_exists | term()}
+  def create_trust_profile(principal_id), do: create_trust_profile_for_principal(principal_id)
+
+  @doc "Get the trust profile for an agent."
+  @spec get_trust_profile(String.t()) :: {:ok, TrustProfile.t()} | {:error, :not_found}
+  def get_trust_profile(principal_id), do: get_trust_profile_for_principal(principal_id)
+
+  @doc "Get the current trust tier for an agent."
+  @spec get_trust_tier(String.t()) :: {:ok, atom()} | {:error, :not_found}
+  def get_trust_tier(principal_id), do: get_current_trust_tier_for_principal(principal_id)
+
+  @doc "Record a trust-affecting event."
+  @spec record_trust_event(String.t(), atom(), map()) :: :ok
+  def record_trust_event(principal_id, event_type, metadata \\ %{}),
+    do: record_trust_event_for_principal_with_metadata(principal_id, event_type, metadata)
+
+  @doc "Freeze an agent's trust progression."
+  @spec freeze_trust(String.t(), atom()) :: :ok | {:error, term()}
+  def freeze_trust(principal_id, reason),
+    do: freeze_trust_progression_for_principal_with_reason(principal_id, reason)
+
+  @doc "Unfreeze an agent's trust progression."
+  @spec unfreeze_trust(String.t()) :: :ok | {:error, term()}
+  def unfreeze_trust(principal_id), do: unfreeze_trust_progression_for_principal(principal_id)
+
+  # ===========================================================================
+  # Contract implementations — verbose, AI-readable names
+  # ===========================================================================
+
+  @impl true
+  def check_if_principal_has_capability_for_resource_action(principal_id, resource_uri, _action, opts) do
     with {:ok, _profile} <- check_trust_not_frozen(principal_id),
          {:ok, _cap} <- find_capability(principal_id, resource_uri) do
       emit_authorization_granted(principal_id, resource_uri, opts)
@@ -99,39 +149,16 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc """
-  Fast capability-only check.
-
-  Returns true if the principal has a valid capability for the resource URI.
-  Does not check trust status. The action is encoded in the URI.
-  """
   @impl true
-  @spec can?(String.t(), String.t(), atom()) :: boolean()
-  def can?(principal_id, resource_uri, _action \\ nil) do
+  def check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, _action) do
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
       {:ok, _cap} -> true
       {:error, _} -> false
     end
   end
 
-  # Capability Management
-
-  @doc """
-  Grant a capability to an agent.
-
-  The action is encoded in the resource URI: `arbor://{type}/{action}/{path}`
-
-  ## Options
-
-  - `:principal` - Agent ID (required)
-  - `:resource` - Resource URI (required), e.g. "arbor://fs/read/project/docs"
-  - `:constraints` - Additional constraints map
-  - `:expires_at` - Expiration DateTime
-  - `:delegation_depth` - How many times this can be delegated (default: 3)
-  """
   @impl true
-  @spec grant(keyword()) :: {:ok, Capability.t()} | {:error, term()}
-  def grant(opts) do
+  def grant_capability_to_principal_for_resource(opts) do
     principal_id = Keyword.fetch!(opts, :principal)
     resource_uri = Keyword.fetch!(opts, :resource)
 
@@ -152,12 +179,8 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc """
-  Revoke a capability.
-  """
   @impl true
-  @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
-  def revoke(capability_id, _opts \\ []) do
+  def revoke_capability_by_id(capability_id, _opts) do
     case CapabilityStore.revoke(capability_id) do
       :ok ->
         emit_capability_revoked(capability_id)
@@ -168,28 +191,13 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc """
-  List capabilities for an agent.
-
-  ## Options
-
-  - `:include_expired` - Include expired capabilities (default: false)
-  """
   @impl true
-  @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
-  def list_capabilities(principal_id, opts \\ []) do
+  def list_capabilities_for_principal(principal_id, opts) do
     CapabilityStore.list_for_principal(principal_id, opts)
   end
 
-  # Trust Management
-
-  @doc """
-  Create a trust profile for a new agent.
-  """
   @impl true
-  @spec create_trust_profile(String.t()) ::
-          {:ok, TrustProfile.t()} | {:error, :already_exists | term()}
-  def create_trust_profile(principal_id) do
+  def create_trust_profile_for_principal(principal_id) do
     case TrustStore.create(principal_id) do
       {:ok, profile} ->
         emit_trust_profile_created(profile)
@@ -200,38 +208,18 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc """
-  Get the trust profile for an agent.
-  """
   @impl true
-  @spec get_trust_profile(String.t()) :: {:ok, TrustProfile.t()} | {:error, :not_found}
-  def get_trust_profile(principal_id) do
+  def get_trust_profile_for_principal(principal_id) do
     TrustStore.get(principal_id)
   end
 
-  @doc """
-  Get the current trust tier for an agent.
-  """
   @impl true
-  @spec get_trust_tier(String.t()) :: {:ok, atom()} | {:error, :not_found}
-  def get_trust_tier(principal_id) do
+  def get_current_trust_tier_for_principal(principal_id) do
     TrustStore.get_tier(principal_id)
   end
 
-  @doc """
-  Record a trust-affecting event.
-
-  ## Event Types
-
-  - `:action_success` - Successful action completion
-  - `:action_failure` - Failed action
-  - `:security_violation` - Security boundary violation
-  - `:test_passed` - Test passed
-  - `:test_failed` - Test failed
-  """
   @impl true
-  @spec record_trust_event(String.t(), atom(), map()) :: :ok
-  def record_trust_event(principal_id, event_type, metadata \\ %{}) do
+  def record_trust_event_for_principal_with_metadata(principal_id, event_type, metadata) do
     result =
       case event_type do
         :action_success -> TrustStore.record_success(principal_id)
@@ -251,15 +239,8 @@ defmodule Arbor.Security do
     :ok
   end
 
-  @doc """
-  Freeze an agent's trust progression.
-
-  When frozen, the agent cannot earn additional trust and may have
-  reduced capabilities.
-  """
   @impl true
-  @spec freeze_trust(String.t(), atom()) :: :ok | {:error, term()}
-  def freeze_trust(principal_id, reason) do
+  def freeze_trust_progression_for_principal_with_reason(principal_id, reason) do
     case TrustStore.freeze(principal_id, reason) do
       {:ok, profile} ->
         emit_trust_frozen(profile, reason)
@@ -270,12 +251,8 @@ defmodule Arbor.Security do
     end
   end
 
-  @doc """
-  Unfreeze an agent's trust progression.
-  """
   @impl true
-  @spec unfreeze_trust(String.t()) :: :ok | {:error, term()}
-  def unfreeze_trust(principal_id) do
+  def unfreeze_trust_progression_for_principal(principal_id) do
     case TrustStore.unfreeze(principal_id) do
       {:ok, profile} ->
         emit_trust_unfrozen(profile)

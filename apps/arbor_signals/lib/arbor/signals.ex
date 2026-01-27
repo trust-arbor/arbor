@@ -52,7 +52,9 @@ defmodule Arbor.Signals do
 
   alias Arbor.Signals.{Bus, Signal, Store}
 
-  # Emission API
+  # ===========================================================================
+  # Public API — short, human-friendly names
+  # ===========================================================================
 
   @doc """
   Emit a signal with the given category, type, and data.
@@ -68,35 +70,61 @@ defmodule Arbor.Signals do
   ## Examples
 
       :ok = Arbor.Signals.emit(:activity, :agent_started, %{agent_id: "agent_001"})
-
-      :ok = Arbor.Signals.emit(:security, :auth_attempt, %{
-        user_id: "user_123",
-        success: true
-      }, source: "auth_service")
   """
-  @impl true
   @spec emit(atom(), atom(), map(), keyword()) :: :ok | {:error, term()}
-  def emit(category, type, data \\ %{}, opts \\ []) do
-    signal = Signal.new(category, type, data, opts)
-    emit_signal(signal)
-  end
+  def emit(category, type, data \\ %{}, opts \\ []),
+    do: emit_signal_for_category_and_type(category, type, data, opts)
+
+  @doc "Emit a pre-constructed signal."
+  @spec emit_signal(Signal.t()) :: :ok | {:error, term()}
+  def emit_signal(%Signal{} = signal), do: emit_preconstructed_signal(signal)
 
   @doc """
-  Emit a pre-constructed signal.
+  Subscribe to signals matching a pattern.
 
-  Useful when you need to create the signal separately from emission,
-  or when replaying signals.
+  ## Patterns
+
+  - `"activity.*"` - All activity signals
+  - `"*.agent_started"` - Agent started from any category
+  - `"*"` - All signals
   """
-  @impl true
-  @spec emit_signal(Signal.t()) :: :ok | {:error, term()}
-  def emit_signal(%Signal{} = signal) do
-    # Store the signal
-    Store.put(signal)
+  @spec subscribe(String.t(), (Signal.t() -> :ok | {:error, term()}), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def subscribe(pattern, handler, opts \\ []),
+    do: subscribe_to_signals_matching_pattern(pattern, handler, opts)
 
-    # Publish to subscribers
+  @doc "Unsubscribe from signals."
+  @spec unsubscribe(String.t()) :: :ok | {:error, :not_found}
+  def unsubscribe(subscription_id),
+    do: unsubscribe_from_signals_by_subscription_id(subscription_id)
+
+  @doc "Get a signal by ID."
+  @spec get_signal(String.t()) :: {:ok, Signal.t()} | {:error, :not_found}
+  def get_signal(signal_id), do: get_signal_by_id(signal_id)
+
+  @doc "Query signals with filters."
+  @spec query(keyword()) :: {:ok, [Signal.t()]} | {:error, term()}
+  def query(filters \\ []), do: query_signals_with_filters(filters)
+
+  @doc "Get recent signals."
+  @spec recent(keyword()) :: {:ok, [Signal.t()]} | {:error, term()}
+  def recent(opts \\ []), do: get_recent_signals_from_buffer(opts)
+
+  # ===========================================================================
+  # Contract implementations — verbose, AI-readable names
+  # ===========================================================================
+
+  @impl true
+  def emit_signal_for_category_and_type(category, type, data, opts) do
+    signal = Signal.new(category, type, data, opts)
+    emit_preconstructed_signal(signal)
+  end
+
+  @impl true
+  def emit_preconstructed_signal(%Signal{} = signal) do
+    Store.put(signal)
     Bus.publish(signal)
 
-    # Emit telemetry event
     :telemetry.execute(
       [:arbor, :signals, :emitted],
       %{count: 1},
@@ -106,98 +134,28 @@ defmodule Arbor.Signals do
     :ok
   end
 
-  # Subscription API
-
-  @doc """
-  Subscribe to signals matching a pattern.
-
-  ## Patterns
-
-  - `"activity.*"` - All activity signals
-  - `"*.agent_started"` - Agent started from any category
-  - `"activity.agent_started"` - Specific category and type
-  - `"*"` - All signals
-
-  ## Options
-
-  - `:async` - Deliver signals asynchronously (default: true)
-  - `:filter` - Additional filter function `(signal -> boolean)`
-
-  ## Examples
-
-      {:ok, sub_id} = Arbor.Signals.subscribe("activity.*", fn signal ->
-        Logger.info("Activity: \#{signal.type}")
-        :ok
-      end)
-  """
   @impl true
-  @spec subscribe(String.t(), (Signal.t() -> :ok | {:error, term()}), keyword()) ::
-          {:ok, String.t()} | {:error, term()}
-  def subscribe(pattern, handler, opts \\ []) do
+  def subscribe_to_signals_matching_pattern(pattern, handler, opts) do
     Bus.subscribe(pattern, handler, opts)
   end
 
-  @doc """
-  Unsubscribe from signals.
-  """
   @impl true
-  @spec unsubscribe(String.t()) :: :ok | {:error, :not_found}
-  def unsubscribe(subscription_id) do
+  def unsubscribe_from_signals_by_subscription_id(subscription_id) do
     Bus.unsubscribe(subscription_id)
   end
 
-  # Query API
-
-  @doc """
-  Get a signal by ID.
-  """
   @impl true
-  @spec get_signal(String.t()) :: {:ok, Signal.t()} | {:error, :not_found}
-  def get_signal(signal_id) do
+  def get_signal_by_id(signal_id) do
     Store.get(signal_id)
   end
 
-  @doc """
-  Query signals with filters.
-
-  ## Filters
-
-  - `:category` - Filter by category (atom or list)
-  - `:type` - Filter by type (atom or list)
-  - `:source` - Filter by source
-  - `:since` - Only signals after DateTime
-  - `:until` - Only signals before DateTime
-  - `:correlation_id` - Filter by correlation ID
-  - `:limit` - Maximum signals to return (default: 100)
-
-  ## Examples
-
-      {:ok, signals} = Arbor.Signals.query(
-        category: :activity,
-        since: DateTime.add(DateTime.utc_now(), -3600, :second),
-        limit: 50
-      )
-  """
   @impl true
-  @spec query(keyword()) :: {:ok, [Signal.t()]} | {:error, term()}
-  def query(filters \\ []) do
+  def query_signals_with_filters(filters) do
     Store.query(filters)
   end
 
-  @doc """
-  Get recent signals.
-
-  Returns the most recent signals, optionally filtered.
-
-  ## Options
-
-  - `:limit` - Maximum signals to return (default: 50)
-  - `:category` - Filter by category
-  - `:type` - Filter by type
-  """
   @impl true
-  @spec recent(keyword()) :: {:ok, [Signal.t()]} | {:error, term()}
-  def recent(opts \\ []) do
+  def get_recent_signals_from_buffer(opts) do
     Store.recent(opts)
   end
 

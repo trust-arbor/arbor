@@ -62,71 +62,98 @@ defmodule Arbor.Contracts.Libraries.Security do
   # Core Authorization
 
   @doc """
-  Authorize an operation on a resource.
+  Check if a principal has a valid capability for a resource action.
+
+  Verifies both capability existence and trust status.
   """
-  @callback authorize(principal_id(), resource(), action(), authorize_opts()) ::
-              authorization_result()
+  @callback check_if_principal_has_capability_for_resource_action(
+              principal_id(),
+              resource(),
+              action(),
+              authorize_opts()
+            ) :: authorization_result()
 
   # Capability Management
 
   @doc """
-  Grant a capability to an agent.
+  Grant a capability to a principal for a specific resource.
   """
-  @callback grant(grant_opts()) :: {:ok, capability()} | {:error, term()}
+  @callback grant_capability_to_principal_for_resource(grant_opts()) ::
+              {:ok, capability()} | {:error, term()}
 
   @doc """
-  Revoke a capability.
+  Revoke a previously granted capability by its ID.
   """
-  @callback revoke(capability_id :: String.t(), opts :: keyword()) ::
+  @callback revoke_capability_by_id(capability_id :: String.t(), opts :: keyword()) ::
               :ok | {:error, :not_found | term()}
 
   @doc """
-  List capabilities for an agent.
+  List all capabilities granted to a principal.
   """
-  @callback list_capabilities(principal_id(), opts :: keyword()) ::
+  @callback list_capabilities_for_principal(principal_id(), opts :: keyword()) ::
               {:ok, [capability()]} | {:error, term()}
 
   # Trust Management
 
   @doc """
-  Create a trust profile for a new agent.
+  Create a new trust profile for a principal.
+
+  Initializes the principal with default untrusted tier.
   """
-  @callback create_trust_profile(principal_id()) ::
+  @callback create_trust_profile_for_principal(principal_id()) ::
               {:ok, trust_profile()} | {:error, :already_exists | term()}
 
   @doc """
-  Get the trust profile for an agent.
+  Get the complete trust profile for a principal.
   """
-  @callback get_trust_profile(principal_id()) ::
+  @callback get_trust_profile_for_principal(principal_id()) ::
               {:ok, trust_profile()} | {:error, :not_found}
 
   @doc """
-  Get the current trust tier for an agent.
+  Get the current trust tier for a principal.
   """
-  @callback get_trust_tier(principal_id()) ::
+  @callback get_current_trust_tier_for_principal(principal_id()) ::
               {:ok, trust_tier()} | {:error, :not_found}
 
   @doc """
-  Record a trust-affecting event.
+  Record a trust-affecting event for a principal with metadata.
+
+  Events modify the principal's trust score and may trigger tier changes.
   """
-  @callback record_trust_event(principal_id(), event_type :: atom(), metadata :: map()) :: :ok
+  @callback record_trust_event_for_principal_with_metadata(
+              principal_id(),
+              event_type :: atom(),
+              metadata :: map()
+            ) :: :ok
 
   @doc """
-  Freeze an agent's trust progression.
+  Freeze trust progression for a principal with a stated reason.
+
+  Frozen principals keep current capabilities but cannot earn more trust.
   """
-  @callback freeze_trust(principal_id(), reason :: atom()) :: :ok | {:error, term()}
+  @callback freeze_trust_progression_for_principal_with_reason(
+              principal_id(),
+              reason :: atom()
+            ) :: :ok | {:error, term()}
 
   @doc """
-  Unfreeze an agent's trust progression.
+  Unfreeze trust progression for a principal.
   """
-  @callback unfreeze_trust(principal_id()) :: :ok | {:error, term()}
+  @callback unfreeze_trust_progression_for_principal(principal_id()) ::
+              :ok | {:error, term()}
 
   # Fast Authorization
 
   @doc """
-  Fast capability-only check.
+  Check if a principal can perform an operation on a resource.
+
+  Fast boolean check — capability only, does not verify trust status.
   """
-  @callback can?(principal_id(), resource_uri :: String.t(), operation :: atom()) :: boolean()
+  @callback check_if_principal_can_perform_operation_on_resource(
+              principal_id(),
+              resource_uri :: String.t(),
+              operation :: atom()
+            ) :: boolean()
 
   # Lifecycle
 
@@ -141,6 +168,6 @@ defmodule Arbor.Contracts.Libraries.Security do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    can?: 3
+    check_if_principal_can_perform_operation_on_resource: 3
   ]
 end
