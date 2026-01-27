@@ -29,7 +29,8 @@ defmodule Arbor.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
 
       # Internal packages (path deps for local development, eventual Hex publishing)
-      {:arbor_eval, path: "packages/arbor_eval", only: [:dev, :test]}
+      {:arbor_eval, path: "packages/arbor_eval", only: [:dev, :test]},
+      {:arbor_checkpoint, path: "packages/arbor_checkpoint"}
     ]
   end
 
