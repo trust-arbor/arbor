@@ -37,6 +37,13 @@ defmodule Arbor.Types do
   @type agent_uri :: String.t()
   @type timestamp :: DateTime.t()
 
+  # Identity / cryptographic types
+  @type public_key :: binary()
+  @type private_key :: binary()
+  @type signature :: binary()
+  @type nonce :: binary()
+  @type key_version :: non_neg_integer()
+
   # Classification types
   @type resource_type :: :fs | :api | :db | :tool | :agent | :network
   @type operation :: :read | :write | :execute | :delete | :list | :call

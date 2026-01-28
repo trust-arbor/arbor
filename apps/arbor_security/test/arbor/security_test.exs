@@ -1,6 +1,7 @@
 defmodule Arbor.SecurityTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security
 
   setup do
@@ -23,21 +24,6 @@ defmodule Arbor.SecurityTest do
         )
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://fs/read/docs")
-    end
-
-    test "returns trust_frozen when agent is frozen", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-
-      {:ok, _cap} =
-        Security.grant(
-          principal: agent_id,
-          resource: "arbor://fs/read/docs"
-        )
-
-      :ok = Security.freeze_trust(agent_id, :anomaly_detected)
-
-      assert {:error, :trust_frozen} =
                Security.authorize(agent_id, "arbor://fs/read/docs")
     end
   end
@@ -99,78 +85,6 @@ defmodule Arbor.SecurityTest do
     end
   end
 
-  describe "trust management" do
-    test "creates trust profile", %{agent_id: agent_id} do
-      {:ok, profile} = Security.create_trust_profile(agent_id)
-
-      assert profile.agent_id == agent_id
-      assert profile.tier == :untrusted
-      assert profile.trust_score == 0
-    end
-
-    test "returns error for duplicate profile", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-      assert {:error, :already_exists} = Security.create_trust_profile(agent_id)
-    end
-
-    test "gets trust profile", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-      {:ok, profile} = Security.get_trust_profile(agent_id)
-
-      assert profile.agent_id == agent_id
-    end
-
-    test "gets trust tier", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-      {:ok, tier} = Security.get_trust_tier(agent_id)
-
-      assert tier == :untrusted
-    end
-
-    test "returns not_found for unknown agent" do
-      assert {:error, :not_found} = Security.get_trust_profile("unknown_agent")
-      assert {:error, :not_found} = Security.get_trust_tier("unknown_agent")
-    end
-  end
-
-  describe "record_trust_event/3" do
-    test "records action success", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-
-      :ok = Security.record_trust_event(agent_id, :action_success, %{})
-
-      {:ok, profile} = Security.get_trust_profile(agent_id)
-      assert profile.total_actions == 1
-      assert profile.successful_actions == 1
-    end
-
-    test "records security violation", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-
-      :ok = Security.record_trust_event(agent_id, :security_violation, %{})
-
-      {:ok, profile} = Security.get_trust_profile(agent_id)
-      assert profile.security_violations == 1
-    end
-  end
-
-  describe "freeze_trust/2 and unfreeze_trust/1" do
-    test "freezes and unfreezes trust", %{agent_id: agent_id} do
-      {:ok, _} = Security.create_trust_profile(agent_id)
-
-      :ok = Security.freeze_trust(agent_id, :anomaly_detected)
-
-      {:ok, frozen_profile} = Security.get_trust_profile(agent_id)
-      assert frozen_profile.frozen == true
-      assert frozen_profile.frozen_reason == :anomaly_detected
-
-      :ok = Security.unfreeze_trust(agent_id)
-
-      {:ok, unfrozen_profile} = Security.get_trust_profile(agent_id)
-      assert unfrozen_profile.frozen == false
-    end
-  end
-
   describe "healthy?/0" do
     test "returns true when system is running" do
       assert Security.healthy?() == true
@@ -178,12 +92,118 @@ defmodule Arbor.SecurityTest do
   end
 
   describe "stats/0" do
-    test "returns combined statistics" do
+    test "returns capability and identity statistics" do
       stats = Security.stats()
 
       assert Map.has_key?(stats, :capabilities)
-      assert Map.has_key?(stats, :trust)
+      assert Map.has_key?(stats, :identities)
       assert Map.has_key?(stats, :healthy)
+    end
+  end
+
+  # ===========================================================================
+  # Identity facade tests
+  # ===========================================================================
+
+  describe "generate_identity/1" do
+    test "returns identity with keypair" do
+      {:ok, identity} = Security.generate_identity()
+
+      assert String.starts_with?(identity.agent_id, "agent_")
+      assert byte_size(identity.public_key) == 32
+      assert byte_size(identity.private_key) == 32
+    end
+  end
+
+  describe "register_identity/1 and lookup_public_key/1" do
+    test "round-trip works" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+
+      assert {:ok, pk} = Security.lookup_public_key(identity.agent_id)
+      assert pk == identity.public_key
+    end
+  end
+
+  describe "verify_request/1" do
+    test "valid request verifies successfully" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+
+      {:ok, signed} =
+        SignedRequest.sign(
+          "payload",
+          identity.agent_id,
+          identity.private_key
+        )
+
+      assert {:ok, agent_id} = Security.verify_request(signed)
+      assert agent_id == identity.agent_id
+    end
+  end
+
+  describe "authorize/4 with identity verification" do
+    test "succeeds with valid signed_request for registered agent with capability" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: identity.agent_id,
+          resource: "arbor://fs/read/docs"
+        )
+
+      {:ok, signed} =
+        SignedRequest.sign(
+          "authorize",
+          identity.agent_id,
+          identity.private_key
+        )
+
+      assert {:ok, :authorized} =
+               Security.authorize(identity.agent_id, "arbor://fs/read/docs", nil,
+                 signed_request: signed,
+                 verify_identity: true
+               )
+    end
+
+    test "fails with invalid signed_request" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: identity.agent_id,
+          resource: "arbor://fs/read/docs"
+        )
+
+      {:ok, signed} =
+        SignedRequest.sign(
+          "authorize",
+          identity.agent_id,
+          identity.private_key
+        )
+
+      # Tamper with signature
+      tampered = %{signed | signature: :crypto.strong_rand_bytes(byte_size(signed.signature))}
+
+      assert {:error, :invalid_signature} =
+               Security.authorize(identity.agent_id, "arbor://fs/read/docs", nil,
+                 signed_request: tampered,
+                 verify_identity: true
+               )
+    end
+
+    test "works without signed_request (backward compatible)", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/legacy"
+        )
+
+      # No signed_request, identity verification not forced
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read/legacy")
     end
   end
 end

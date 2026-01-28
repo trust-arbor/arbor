@@ -2,9 +2,14 @@ defmodule Arbor.Security do
   @moduledoc """
   Capability-based security for the Arbor platform.
 
-  Arbor.Security provides authorization through unforgeable capability tokens
-  and trust-based access control. Agents earn trust through successful actions
-  and can have their trust frozen when anomalous behavior is detected.
+  Arbor.Security provides authorization through unforgeable capability tokens,
+  manages capability lifecycle (grant, revoke, list), and handles cryptographic
+  agent identity (keypair generation, registration, signed request verification).
+
+  Trust profile management (creation, scoring, tier progression, freezing) is
+  handled by the separate `Arbor.Trust` library. Security focuses on capabilities
+  and identity — callers that need trust operations should use `Arbor.Trust`
+  directly.
 
   ## Quick Start
 
@@ -18,16 +23,6 @@ defmodule Arbor.Security do
       if Arbor.Security.can?("agent_001", "arbor://fs/read/docs", :read) do
         # proceed
       end
-
-  ## Trust Tiers
-
-  | Tier | Score | Capabilities |
-  |------|-------|--------------|
-  | `:untrusted` | 0-19 | Read own code only |
-  | `:probationary` | 20-49 | Limited access |
-  | `:trusted` | 50-74 | Standard access |
-  | `:veteran` | 75-89 | Extended access |
-  | `:autonomous` | 90-100 | Self-modification |
 
   ## Capability Model
 
@@ -47,14 +42,19 @@ defmodule Arbor.Security do
   - `{:security, :authorization_granted, %{...}}`
   - `{:security, :authorization_denied, %{...}}`
   - `{:security, :capability_granted, %{...}}`
-  - `{:security, :trust_tier_changed, %{...}}`
+  - `{:security, :capability_revoked, %{...}}`
   """
 
   @behaviour Arbor.Contracts.API.Security
+  @behaviour Arbor.Contracts.API.Identity
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Contracts.Trust.Profile, as: TrustProfile
-  alias Arbor.Security.{CapabilityStore, TrustStore}
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Config
+  alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.Identity.Verifier
   alias Arbor.Signals
 
   # ===========================================================================
@@ -64,7 +64,7 @@ defmodule Arbor.Security do
   @doc """
   Authorize an operation on a resource.
 
-  The resource URI includes the action: `arbor://{type}/{action}/{path}`
+  Checks whether the principal holds a valid capability for the resource.
 
   ## Examples
 
@@ -75,10 +75,16 @@ defmodule Arbor.Security do
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
   def authorize(principal_id, resource_uri, action \\ nil, opts \\ []),
-    do: check_if_principal_has_capability_for_resource_action(principal_id, resource_uri, action, opts)
+    do:
+      check_if_principal_has_capability_for_resource_action(
+        principal_id,
+        resource_uri,
+        action,
+        opts
+      )
 
   @doc """
-  Fast capability-only check. Does not verify trust status.
+  Fast capability-only boolean check.
   """
   @spec can?(String.t(), String.t(), atom()) :: boolean()
   def can?(principal_id, resource_uri, action \\ nil),
@@ -104,52 +110,81 @@ defmodule Arbor.Security do
 
   @doc "List capabilities for an agent."
   @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
-  def list_capabilities(principal_id, opts \\ []), do: list_capabilities_for_principal(principal_id, opts)
+  def list_capabilities(principal_id, opts \\ []),
+    do: list_capabilities_for_principal(principal_id, opts)
 
-  @doc "Create a trust profile for a new agent."
-  @spec create_trust_profile(String.t()) :: {:ok, TrustProfile.t()} | {:error, :already_exists | term()}
-  def create_trust_profile(principal_id), do: create_trust_profile_for_principal(principal_id)
+  # ===========================================================================
+  # Public API — Identity (short names)
+  # ===========================================================================
 
-  @doc "Get the trust profile for an agent."
-  @spec get_trust_profile(String.t()) :: {:ok, TrustProfile.t()} | {:error, :not_found}
-  def get_trust_profile(principal_id), do: get_trust_profile_for_principal(principal_id)
+  @doc """
+  Generate a new cryptographic identity.
 
-  @doc "Get the current trust tier for an agent."
-  @spec get_trust_tier(String.t()) :: {:ok, atom()} | {:error, :not_found}
-  def get_trust_tier(principal_id), do: get_current_trust_tier_for_principal(principal_id)
+  ## Examples
 
-  @doc "Record a trust-affecting event."
-  @spec record_trust_event(String.t(), atom(), map()) :: :ok
-  def record_trust_event(principal_id, event_type, metadata \\ %{}),
-    do: record_trust_event_for_principal_with_metadata(principal_id, event_type, metadata)
+      {:ok, identity} = Arbor.Security.generate_identity()
+      identity.agent_id
+      #=> "agent_a1b2c3..."
+  """
+  @spec generate_identity(keyword()) :: {:ok, Identity.t()} | {:error, term()}
+  def generate_identity(opts \\ []),
+    do: generate_cryptographic_identity_keypair(opts)
 
-  @doc "Freeze an agent's trust progression."
-  @spec freeze_trust(String.t(), atom()) :: :ok | {:error, term()}
-  def freeze_trust(principal_id, reason),
-    do: freeze_trust_progression_for_principal_with_reason(principal_id, reason)
+  @doc """
+  Register an agent's identity (public key).
 
-  @doc "Unfreeze an agent's trust progression."
-  @spec unfreeze_trust(String.t()) :: :ok | {:error, term()}
-  def unfreeze_trust(principal_id), do: unfreeze_trust_progression_for_principal(principal_id)
+  ## Examples
+
+      :ok = Arbor.Security.register_identity(identity)
+  """
+  @spec register_identity(Identity.t()) :: :ok | {:error, term()}
+  def register_identity(identity),
+    do: register_agent_identity_with_public_key(identity)
+
+  @doc """
+  Look up the public key for an agent.
+  """
+  @spec lookup_public_key(String.t()) :: {:ok, binary()} | {:error, :not_found}
+  def lookup_public_key(agent_id),
+    do: lookup_public_key_for_agent(agent_id)
+
+  @doc """
+  Verify a signed request's authenticity.
+  """
+  @spec verify_request(SignedRequest.t()) :: {:ok, String.t()} | {:error, atom()}
+  def verify_request(signed_request),
+    do: verify_signed_request_authenticity(signed_request)
 
   # ===========================================================================
   # Contract implementations — verbose, AI-readable names
   # ===========================================================================
 
-  @impl true
-  def check_if_principal_has_capability_for_resource_action(principal_id, resource_uri, _action, opts) do
-    with {:ok, _profile} <- check_trust_not_frozen(principal_id),
-         {:ok, _cap} <- find_capability(principal_id, resource_uri) do
-      emit_authorization_granted(principal_id, resource_uri, opts)
-      {:ok, :authorized}
-    else
+  @impl Arbor.Contracts.API.Security
+  def check_if_principal_has_capability_for_resource_action(
+        principal_id,
+        resource_uri,
+        _action,
+        opts
+      ) do
+    case maybe_verify_identity(opts) do
+      :ok ->
+        case find_capability(principal_id, resource_uri) do
+          {:ok, _cap} ->
+            emit_authorization_granted(principal_id, resource_uri, opts)
+            {:ok, :authorized}
+
+          {:error, reason} = error ->
+            emit_authorization_denied(principal_id, resource_uri, reason, opts)
+            error
+        end
+
       {:error, reason} = error ->
         emit_authorization_denied(principal_id, resource_uri, reason, opts)
         error
     end
   end
 
-  @impl true
+  @impl Arbor.Contracts.API.Security
   def check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, _action) do
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
       {:ok, _cap} -> true
@@ -157,7 +192,7 @@ defmodule Arbor.Security do
     end
   end
 
-  @impl true
+  @impl Arbor.Contracts.API.Security
   def grant_capability_to_principal_for_resource(opts) do
     principal_id = Keyword.fetch!(opts, :principal)
     resource_uri = Keyword.fetch!(opts, :resource)
@@ -180,7 +215,7 @@ defmodule Arbor.Security do
     end
   end
 
-  @impl true
+  @impl Arbor.Contracts.API.Security
   def revoke_capability_by_id(capability_id, _opts) do
     case CapabilityStore.revoke(capability_id) do
       :ok ->
@@ -192,86 +227,60 @@ defmodule Arbor.Security do
     end
   end
 
-  @impl true
+  @impl Arbor.Contracts.API.Security
   def list_capabilities_for_principal(principal_id, opts) do
     CapabilityStore.list_for_principal(principal_id, opts)
   end
 
-  @impl true
-  def create_trust_profile_for_principal(principal_id) do
-    case TrustStore.create(principal_id) do
-      {:ok, profile} ->
-        emit_trust_profile_created(profile)
-        {:ok, profile}
+  # ===========================================================================
+  # Identity contract implementations
+  # ===========================================================================
 
-      error ->
+  @impl Arbor.Contracts.API.Identity
+  def generate_cryptographic_identity_keypair(opts) do
+    Identity.generate(opts)
+  end
+
+  @impl Arbor.Contracts.API.Identity
+  def register_agent_identity_with_public_key(%Identity{} = identity) do
+    case Registry.register(Identity.public_only(identity)) do
+      :ok ->
+        emit_identity_registered(identity.agent_id)
+        :ok
+
+      {:error, _} = error ->
         error
     end
   end
 
-  @impl true
-  def get_trust_profile_for_principal(principal_id) do
-    TrustStore.get(principal_id)
+  @impl Arbor.Contracts.API.Identity
+  def lookup_public_key_for_agent(agent_id) do
+    Registry.lookup(agent_id)
   end
 
-  @impl true
-  def get_current_trust_tier_for_principal(principal_id) do
-    TrustStore.get_tier(principal_id)
-  end
+  @impl Arbor.Contracts.API.Identity
+  def verify_signed_request_authenticity(%SignedRequest{} = request) do
+    case Verifier.verify(request) do
+      {:ok, agent_id} ->
+        emit_identity_verification_succeeded(agent_id)
+        {:ok, agent_id}
 
-  @impl true
-  def record_trust_event_for_principal_with_metadata(principal_id, event_type, metadata) do
-    result =
-      case event_type do
-        :action_success -> TrustStore.record_success(principal_id)
-        :action_failure -> TrustStore.record_failure(principal_id)
-        :security_violation -> TrustStore.record_violation(principal_id)
-        _ -> {:ok, :ignored}
-      end
-
-    case result do
-      {:ok, profile} when is_map(profile) ->
-        emit_trust_event(principal_id, event_type, profile, metadata)
-
-      _ ->
-        :ok
-    end
-
-    :ok
-  end
-
-  @impl true
-  def freeze_trust_progression_for_principal_with_reason(principal_id, reason) do
-    case TrustStore.freeze(principal_id, reason) do
-      {:ok, profile} ->
-        emit_trust_frozen(profile, reason)
-        :ok
-
-      error ->
+      {:error, reason} = error ->
+        emit_identity_verification_failed(request.agent_id, reason)
         error
     end
   end
 
-  @impl true
-  def unfreeze_trust_progression_for_principal(principal_id) do
-    case TrustStore.unfreeze(principal_id) do
-      {:ok, profile} ->
-        emit_trust_unfrozen(profile)
-        :ok
-
-      error ->
-        error
-    end
-  end
-
-  # System API
+  # ===========================================================================
+  # Lifecycle
+  # ===========================================================================
 
   @doc """
   Start the security system.
 
   Normally started automatically by the application supervisor.
   """
-  @impl true
+  @impl Arbor.Contracts.API.Security
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     Arbor.Security.Application.start(:normal, opts)
@@ -280,10 +289,12 @@ defmodule Arbor.Security do
   @doc """
   Check if the security system is healthy.
   """
-  @impl true
+  @impl Arbor.Contracts.API.Security
   @spec healthy?() :: boolean()
   def healthy? do
-    Process.whereis(CapabilityStore) != nil and Process.whereis(TrustStore) != nil
+    Process.whereis(CapabilityStore) != nil and
+      Process.whereis(Registry) != nil and
+      Process.whereis(Arbor.Security.Identity.NonceCache) != nil
   end
 
   @doc """
@@ -293,18 +304,32 @@ defmodule Arbor.Security do
   def stats do
     %{
       capabilities: CapabilityStore.stats(),
-      trust: TrustStore.stats(),
+      identities: Registry.stats(),
       healthy: healthy?()
     }
   end
 
+  # ===========================================================================
   # Private functions
+  # ===========================================================================
 
-  defp check_trust_not_frozen(principal_id) do
-    case TrustStore.get(principal_id) do
-      {:ok, %{frozen: true}} -> {:error, :trust_frozen}
-      {:ok, profile} -> {:ok, profile}
-      {:error, :not_found} -> {:ok, nil}
+  defp maybe_verify_identity(opts) do
+    verify? = Keyword.get(opts, :verify_identity, Config.identity_verification_enabled?())
+    signed_request = Keyword.get(opts, :signed_request)
+
+    cond do
+      not verify? ->
+        :ok
+
+      is_nil(signed_request) ->
+        # No signed request provided — allow if verification not forced
+        :ok
+
+      true ->
+        case Verifier.verify(signed_request) do
+          {:ok, _agent_id} -> :ok
+          {:error, _} = error -> error
+        end
     end
   end
 
@@ -348,33 +373,24 @@ defmodule Arbor.Security do
     })
   end
 
-  defp emit_trust_profile_created(profile) do
-    Signals.emit(:security, :trust_profile_created, %{
-      agent_id: profile.agent_id,
-      tier: profile.tier
+  # Identity signals
+
+  defp emit_identity_registered(agent_id) do
+    Signals.emit(:security, :identity_registered, %{
+      agent_id: agent_id
     })
   end
 
-  defp emit_trust_event(principal_id, event_type, profile, metadata) do
-    Signals.emit(:security, :trust_event, %{
-      principal_id: principal_id,
-      event_type: event_type,
-      new_score: profile.trust_score,
-      new_tier: profile.tier,
-      metadata: metadata
+  defp emit_identity_verification_succeeded(agent_id) do
+    Signals.emit(:security, :identity_verification_succeeded, %{
+      agent_id: agent_id
     })
   end
 
-  defp emit_trust_frozen(profile, reason) do
-    Signals.emit(:security, :trust_frozen, %{
-      agent_id: profile.agent_id,
+  defp emit_identity_verification_failed(agent_id, reason) do
+    Signals.emit(:security, :identity_verification_failed, %{
+      agent_id: agent_id,
       reason: reason
-    })
-  end
-
-  defp emit_trust_unfrozen(profile) do
-    Signals.emit(:security, :trust_unfrozen, %{
-      agent_id: profile.agent_id
     })
   end
 end

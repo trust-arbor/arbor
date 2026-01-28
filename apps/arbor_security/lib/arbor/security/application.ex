@@ -7,7 +7,8 @@ defmodule Arbor.Security.Application do
   def start(_type, _args) do
     children = [
       {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.TrustStore, []}
+      {Arbor.Security.Identity.Registry, []},
+      {Arbor.Security.Identity.NonceCache, []}
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Security.Supervisor]
