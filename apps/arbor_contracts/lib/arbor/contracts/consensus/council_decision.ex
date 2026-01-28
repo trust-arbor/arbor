@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Autonomous.CouncilDecision do
+defmodule Arbor.Contracts.Consensus.CouncilDecision do
   @moduledoc """
   Data structure for council decisions.
 
@@ -8,7 +8,7 @@ defmodule Arbor.Contracts.Autonomous.CouncilDecision do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Autonomous.{Consensus, Evaluation, Proposal}
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal, Protocol}
 
   @type decision :: :approved | :rejected | :deadlock
 
@@ -45,7 +45,8 @@ defmodule Arbor.Contracts.Autonomous.CouncilDecision do
   Create a decision from a proposal and its evaluations.
   """
   @spec from_evaluations(Proposal.t(), [Evaluation.t()]) :: {:ok, t()} | {:error, term()}
-  def from_evaluations(%Proposal{} = proposal, evaluations) when is_list(evaluations) do
+  def from_evaluations(proposal, evaluations)
+      when is_struct(proposal, Proposal) and is_list(evaluations) do
     now = DateTime.utc_now()
     id = "decision_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
@@ -87,9 +88,9 @@ defmodule Arbor.Contracts.Autonomous.CouncilDecision do
   @doc """
   Check if the decision is final (not deadlock).
   """
-  @spec is_final?(t()) :: boolean()
-  def is_final?(%__MODULE__{decision: :deadlock}), do: false
-  def is_final?(_), do: true
+  @spec final?(t()) :: boolean()
+  def final?(%__MODULE__{decision: :deadlock}), do: false
+  def final?(_), do: true
 
   @doc """
   Check if the proposal was approved.
@@ -132,7 +133,7 @@ defmodule Arbor.Contracts.Autonomous.CouncilDecision do
   @doc """
   Get evaluations by perspective.
   """
-  @spec evaluations_by_perspective(t(), Consensus.evaluator_perspective()) :: [Evaluation.t()]
+  @spec evaluations_by_perspective(t(), Protocol.evaluator_perspective()) :: [Evaluation.t()]
   def evaluations_by_perspective(%__MODULE__{evaluations: evals}, perspective) do
     Enum.filter(evals, &(&1.perspective == perspective))
   end

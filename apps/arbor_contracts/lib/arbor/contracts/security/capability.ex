@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Core.Capability do
+defmodule Arbor.Contracts.Security.Capability do
   @moduledoc """
   Represents a permission grant for resource access.
 

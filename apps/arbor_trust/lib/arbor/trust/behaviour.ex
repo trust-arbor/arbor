@@ -1,9 +1,13 @@
-defmodule Arbor.Contracts.Trust do
+defmodule Arbor.Trust.Behaviour do
   @moduledoc """
-  Contract for the progressive trust system.
+  Internal behaviour for the progressive trust system.
 
-  This behaviour defines the interface for managing agent trust levels,
-  which determine what self-modification capabilities an agent has earned.
+  This behaviour defines the interface that `Arbor.Trust.Manager` implements.
+  It lives inside arbor_trust because it is an internal contract — only
+  `Trust.Manager` implements it, and no other library depends on it.
+
+  For the **public API** contract that external consumers use, see
+  `Arbor.Contracts.API.Trust`.
 
   ## Trust Tiers
 
@@ -32,20 +36,6 @@ defmodule Arbor.Contracts.Trust do
   - **Circuit Breaker**: Freezes trust on anomalous behavior
   - **Decay**: Trust decays 1 point/day after 7 days of inactivity
   - **Minimum Floor**: Trust never decays below 10 (preserves read access)
-
-  ## Usage
-
-      # Check if agent has sufficient trust
-      case Trust.check_trust_authorization(agent_id, :trusted) do
-        {:ok, :authorized} -> proceed_with_modification()
-        {:error, :insufficient_trust} -> deny_modification()
-      end
-
-      # Record trust-affecting events
-      Trust.record_trust_event(agent_id, :action_success, %{action: "sort"})
-      Trust.record_trust_event(agent_id, :security_violation, %{reason: :blocked_module})
-
-  @version "1.0.0"
   """
 
   alias Arbor.Contracts.Trust.Profile
@@ -76,128 +66,24 @@ defmodule Arbor.Contracts.Trust do
     autonomous: 90
   }
 
-  @doc """
-  Get the trust profile for an agent.
-
-  Returns the complete trust profile including score, tier, and all
-  component metrics.
-
-  ## Example
-
-      {:ok, profile} = Trust.get_trust_profile("agent_123")
-      profile.tier
-      #=> :probationary
-  """
   @callback get_trust_profile(agent_id()) ::
               {:ok, Profile.t()} | {:error, :not_found | term()}
 
-  @doc """
-  Calculate the current trust score for an agent.
-
-  Recalculates the score based on current metrics. This is typically
-  called automatically when trust-affecting events occur.
-
-  ## Example
-
-      {:ok, 67} = Trust.calculate_trust_score("agent_123")
-  """
   @callback calculate_trust_score(agent_id()) :: {:ok, trust_score()} | {:error, term()}
 
-  @doc """
-  Get the capability tier for a given trust score.
-
-  Pure function that maps a score to a tier.
-
-  ## Example
-
-      Trust.get_capability_tier(67)
-      #=> :trusted
-  """
   @callback get_capability_tier(trust_score()) :: trust_tier()
 
-  @doc """
-  Check if an agent has sufficient trust for an operation.
-
-  Used by the security enforcer to gate self-modification capabilities.
-
-  ## Example
-
-      {:ok, :authorized} = Trust.check_trust_authorization("agent_123", :trusted)
-      {:error, :insufficient_trust} = Trust.check_trust_authorization("agent_456", :veteran)
-  """
   @callback check_trust_authorization(agent_id(), required_tier :: trust_tier()) ::
               {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
 
-  @doc """
-  Record a trust-affecting event.
-
-  Events are processed asynchronously and may trigger trust recalculation.
-
-  ## Event Types
-
-  - `:action_success` - Successful action execution (+success_rate)
-  - `:action_failure` - Failed action execution (-success_rate)
-  - `:test_passed` - Test passed (+test_pass_rate)
-  - `:test_failed` - Test failed (-test_pass_rate)
-  - `:rollback_executed` - Code rollback occurred (-rollback_stability)
-  - `:security_violation` - Security policy violated (-security_compliance)
-  - `:improvement_applied` - Self-improvement was applied (+improvement_count)
-
-  ## Example
-
-      :ok = Trust.record_trust_event("agent_123", :action_success, %{
-        action: "sort_list",
-        duration_ms: 42
-      })
-  """
   @callback record_trust_event(agent_id(), trust_event_type(), metadata :: map()) :: :ok
 
-  @doc """
-  Freeze an agent's trust, preventing capability upgrades.
-
-  Used by circuit breakers when anomalous behavior is detected.
-  Frozen agents retain their current capabilities but cannot earn more.
-
-  ## Example
-
-      :ok = Trust.freeze_trust("agent_123", :rapid_failures)
-  """
   @callback freeze_trust(agent_id(), reason :: atom()) :: :ok | {:error, term()}
 
-  @doc """
-  Unfreeze an agent's trust, allowing normal trust progression.
-
-  Should be called after manual review or automatic cooldown period.
-
-  ## Example
-
-      :ok = Trust.unfreeze_trust("agent_123")
-  """
   @callback unfreeze_trust(agent_id()) :: :ok | {:error, term()}
 
-  @doc """
-  Create a new trust profile for an agent.
-
-  Called when a new self-improving agent is spawned. Initial trust
-  score is 0 (untrusted tier).
-
-  ## Example
-
-      {:ok, profile} = Trust.create_trust_profile("agent_new")
-      profile.tier
-      #=> :untrusted
-  """
   @callback create_trust_profile(agent_id()) :: {:ok, Profile.t()} | {:error, term()}
 
-  @doc """
-  Delete a trust profile.
-
-  Called when an agent is permanently removed from the system.
-
-  ## Example
-
-      :ok = Trust.delete_trust_profile("agent_123")
-  """
   @callback delete_trust_profile(agent_id()) :: :ok | {:error, term()}
 
   # Helper functions available to all implementations

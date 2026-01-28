@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Libraries.Trust do
+defmodule Arbor.Contracts.API.Trust do
   @moduledoc """
   Public API contract for the Arbor.Trust library.
 

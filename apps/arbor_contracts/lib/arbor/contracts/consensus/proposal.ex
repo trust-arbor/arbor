@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Autonomous.Proposal do
+defmodule Arbor.Contracts.Consensus.Proposal do
   @moduledoc """
   Data structure for consensus proposals.
 
@@ -8,10 +8,10 @@ defmodule Arbor.Contracts.Autonomous.Proposal do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Autonomous.Consensus
+  alias Arbor.Contracts.Consensus.Protocol
 
-  @type change_type :: Consensus.change_type()
-  @type layer :: Consensus.layer()
+  @type change_type :: Protocol.change_type()
+  @type layer :: Protocol.layer()
   @type status :: :pending | :evaluating | :approved | :rejected | :deadlock | :vetoed
 
   typedstruct enforce: true do
@@ -88,20 +88,20 @@ defmodule Arbor.Contracts.Autonomous.Proposal do
   @doc """
   Check if this is a meta-change proposal.
   """
-  @spec is_meta_change?(t()) :: boolean()
-  def is_meta_change?(%__MODULE__{change_type: :governance_change}), do: true
-  def is_meta_change?(%__MODULE__{target_layer: layer}) when layer <= 1, do: true
-  def is_meta_change?(_), do: false
+  @spec meta_change?(t()) :: boolean()
+  def meta_change?(%__MODULE__{change_type: :governance_change}), do: true
+  def meta_change?(%__MODULE__{target_layer: layer}) when layer <= 1, do: true
+  def meta_change?(_), do: false
 
   @doc """
   Get the required quorum for this proposal.
   """
   @spec required_quorum(t()) :: 5 | 6
   def required_quorum(%__MODULE__{} = proposal) do
-    if is_meta_change?(proposal) do
-      Consensus.meta_quorum()
+    if meta_change?(proposal) do
+      Protocol.meta_quorum()
     else
-      Consensus.standard_quorum()
+      Protocol.standard_quorum()
     end
   end
 
@@ -111,10 +111,10 @@ defmodule Arbor.Contracts.Autonomous.Proposal do
   @spec violates_invariants?(t()) :: {boolean(), [atom()]}
   def violates_invariants?(%__MODULE__{} = proposal) do
     violated =
-      Consensus.immutable_invariants()
+      Protocol.immutable_invariants()
       |> Enum.filter(&violates_invariant?(proposal, &1))
 
-    {length(violated) > 0, violated}
+    {violated != [], violated}
   end
 
   # Private functions
@@ -126,7 +126,7 @@ defmodule Arbor.Contracts.Autonomous.Proposal do
   defp infer_layer(attrs) do
     case Map.get(attrs, :target_module) do
       nil -> 4
-      module -> Consensus.layer_for_module(module)
+      module -> Protocol.layer_for_module(module)
     end
   end
 

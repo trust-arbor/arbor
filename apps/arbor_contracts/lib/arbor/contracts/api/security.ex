@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Libraries.Security do
+defmodule Arbor.Contracts.API.Security do
   @moduledoc """
   Public API contract for the Arbor.Security library.
 

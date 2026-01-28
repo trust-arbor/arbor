@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Autonomous.ConsensusEvent do
+defmodule Arbor.Contracts.Consensus.ConsensusEvent do
   @moduledoc """
   Data structure for consensus system events.
 
