@@ -257,59 +257,41 @@ func isSystemMessage(msg string) bool {
 func buildContextDocument(userMessages []string, toolsUsed map[string]int, assistantTexts []string, totalRecords int) string {
 	var sb strings.Builder
 
-	// Header
-	sb.WriteString("# Session Context Before Compaction\n\n")
-	sb.WriteString(fmt.Sprintf("*Saved at: %s*\n", time.Now().UTC().Format(time.RFC3339)))
-	sb.WriteString(fmt.Sprintf("*Total records in transcript: %d*\n", totalRecords))
-	sb.WriteString(fmt.Sprintf("*User messages extracted: %d*\n\n", len(userMessages)))
+	// Compact header
+	sb.WriteString(fmt.Sprintf("# Previous Session (%s)\n\n",
+		time.Now().UTC().Format("2006-01-02 15:04 UTC")))
 
-	// Recent user messages (last 5)
-	sb.WriteString("## Recent User Messages\n\n")
-	start := len(userMessages) - 5
+	// Last 3 user messages, compact format
+	sb.WriteString("**Recent requests:**\n")
+	start := len(userMessages) - 3
 	if start < 0 {
 		start = 0
 	}
 	recentMessages := userMessages[start:]
 
 	if len(recentMessages) == 0 {
-		sb.WriteString("(No user messages extracted)\n\n")
+		sb.WriteString("- (none extracted)\n")
 	} else {
-		for i, msg := range recentMessages {
+		for _, msg := range recentMessages {
 			truncated := msg
-			if len(truncated) > 1000 {
-				truncated = truncated[:1000] + "..."
+			if len(truncated) > 200 {
+				truncated = truncated[:200] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("### Message %d\n%s\n\n", i+1, truncated))
+			// Single line per message
+			truncated = strings.ReplaceAll(truncated, "\n", " ")
+			sb.WriteString(fmt.Sprintf("- \"%s\"\n", truncated))
 		}
 	}
+	sb.WriteString("\n")
 
-	// Tools used
-	sb.WriteString("## Tools Used This Session\n\n")
-	if len(toolsUsed) == 0 {
-		sb.WriteString("(No tools recorded)\n\n")
-	} else {
-		for tool, count := range toolsUsed {
-			sb.WriteString(fmt.Sprintf("- %s: %dx\n", tool, count))
+	// Last assistant response only (where we left off)
+	if len(assistantTexts) > 0 {
+		last := assistantTexts[len(assistantTexts)-1]
+		if len(last) > 300 {
+			last = last[:300] + "..."
 		}
-		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("**Where we left off:** %s\n", last))
 	}
-
-	// Recent assistant responses (last 3)
-	sb.WriteString("## Recent Assistant Responses\n\n")
-	start = len(assistantTexts) - 3
-	if start < 0 {
-		start = 0
-	}
-	recentAssistant := assistantTexts[start:]
-
-	if len(recentAssistant) == 0 {
-		sb.WriteString("(No text responses extracted)\n\n")
-	} else {
-		sb.WriteString(strings.Join(recentAssistant, "\n\n---\n\n"))
-		sb.WriteString("\n\n")
-	}
-
-	sb.WriteString("---\n*This context was automatically saved by the PreCompact hook for continuity.*\n")
 
 	return sb.String()
 }

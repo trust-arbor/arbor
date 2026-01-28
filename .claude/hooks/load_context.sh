@@ -12,11 +12,18 @@ JOURNAL_INDEX="$PERSONAL_DIR/journal-index.md"
 if [ -f "$MEMORY_FILE" ] && [ -s "$MEMORY_FILE" ]; then
   REMINDERS=$(jq -r '.reminders[]? // empty' "$MEMORY_FILE" 2>/dev/null)
   LEARNINGS=$(jq -r '.learnings[-5:][]?.content // empty' "$MEMORY_FILE" 2>/dev/null)
+  CAPABILITIES=$(jq -r '.capabilities[]? | ("- **" + .name + "**: " + .description + (if .command then " (`" + .command + "`)" else "" end))' "$MEMORY_FILE" 2>/dev/null)
 
-  if [ -n "$REMINDERS" ] || [ -n "$LEARNINGS" ]; then
+  if [ -n "$REMINDERS" ] || [ -n "$LEARNINGS" ] || [ -n "$CAPABILITIES" ]; then
     echo ""
     echo "## My Memory"
     echo ""
+
+    if [ -n "$CAPABILITIES" ]; then
+      echo "### My Tools"
+      echo "$CAPABILITIES"
+      echo ""
+    fi
 
     if [ -n "$REMINDERS" ]; then
       echo "### Reminders"

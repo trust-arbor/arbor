@@ -70,3 +70,5 @@ _rel/
 .venv/
 venv/
 .aider*
+
+.arbor/
