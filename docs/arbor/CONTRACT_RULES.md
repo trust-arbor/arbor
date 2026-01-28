@@ -10,18 +10,15 @@ Contracts (`arbor_contracts`) contains three things:
 
 **Shared data types** — Structs that appear in multiple libraries' APIs.
 ```
-Capability, Event, Proposal, Evaluation, CouncilDecision, Trust.Profile, Trust.Event
+Security.Capability, Trust.Profile, Trust.Event
+Consensus.Protocol, Consensus.Proposal, Consensus.Evaluation,
+Consensus.CouncilDecision, Consensus.ConsensusEvent
 ```
 
-**External dep abstractions** — Behaviours that let implementations swap Horde, Postgres, Redis, etc. without changing consumers.
+**Facade behaviours** — Interfaces that define how the Arbor ecosystem consumes libraries. Located in `contracts/api/`.
 ```
-contracts/distributed/  — abstracts Horde, pg, :global
-contracts/persistence/  — abstracts Ecto/Postgres, Redis, ETS
-```
-
-**Facade behaviours** — Interfaces that define how the Arbor ecosystem consumes libraries. Located in `contracts/libraries/`.
-```
-Libraries.Shell, Libraries.Signals, Libraries.Security, Libraries.Trust
+API.Shell, API.Signals, API.Security, API.Trust,
+API.Consensus, API.Historian, API.Persistence
 ```
 
 ## 2. What Stays in Libraries
@@ -38,7 +35,7 @@ arbor_historian owns: EventLog (its own internal backend interface)
 
 ## 3. Contract Callback Naming
 
-**Facade contract callbacks** (`contracts/libraries/`) use **AI-readable verbose naming** to prevent semantic drift. The function name encodes what the implementation must do, what it operates on, and key constraints.
+**Facade contract callbacks** (`contracts/api/`) use **AI-readable verbose naming** to prevent semantic drift. The function name encodes what the implementation must do, what it operates on, and key constraints.
 
 **Pattern**: `verb_object_qualifier`
 
@@ -64,7 +61,7 @@ arbor_historian owns: EventLog (its own internal backend interface)
 
 ```elixir
 defmodule Arbor.Security do
-  @behaviour Arbor.Contracts.Libraries.Security
+  @behaviour Arbor.Contracts.API.Security
 
   # Public API — short, human-friendly
   def authorize(principal_id, resource_uri, action, opts \\ []),
@@ -78,7 +75,7 @@ defmodule Arbor.Security do
 end
 ```
 
-**Scope**: Verbose naming applies to **facade behaviours only** (`Libraries.Shell`, `Libraries.Signals`, `Libraries.Security`, `Libraries.Trust`). Domain behaviours in contracts (`Security.Enforcer`, `Autonomous.Consensus`, etc.) and library-specific behaviours use standard Elixir naming — they serve different audiences and don't need semantic disambiguation at the ecosystem boundary.
+**Scope**: Verbose naming applies to **facade behaviours only** (`API.Shell`, `API.Signals`, `API.Security`, `API.Trust`, `API.Consensus`, `API.Historian`, `API.Persistence`). Domain data types in contracts (`Consensus.Protocol`, `Trust.Profile`, etc.) and library-specific behaviours use standard Elixir naming — they serve different audiences and don't need semantic disambiguation at the ecosystem boundary.
 
 ## 4. Return Types
 
@@ -209,14 +206,12 @@ Contracts must never depend on any Arbor library. If you find yourself wanting c
 
 ```
 arbor_contracts/lib/arbor/contracts/
-  core/           # Shared data types: Capability, Session, Message
-  events/         # Event struct (used by historian, persistence, trust)
-  trust/          # Trust.Profile, Trust.Event
-  security/       # Enforcer behaviour, AuditEvent
-  autonomous/     # Proposal, Evaluation, CouncilDecision, ConsensusEvent
-  distributed/    # Behaviours abstracting Horde, pg, :global
-  persistence/    # Behaviours abstracting Postgres, Redis (database adapters)
-  libraries/      # Facade behaviours: Shell, Signals, Security, Trust
+  api/            # Facade behaviours: Shell, Signals, Security, Trust,
+                  #   Consensus, Historian, Persistence
+  consensus/      # Consensus data types: Protocol, Proposal, Evaluation,
+                  #   CouncilDecision, ConsensusEvent
+  security/       # Security data types: Capability
+  trust/          # Trust data types: Profile, Event
 ```
 
-`distributed/` and `persistence/` abstract external dependencies. They are NOT the same as `arbor_persistence`'s Store/QueryableStore (which are application-level storage interfaces that stay in that library).
+The `api/` directory contains facade behaviours that define how the Arbor ecosystem consumes libraries. Data type directories (`consensus/`, `security/`, `trust/`) contain shared structs used across library boundaries.

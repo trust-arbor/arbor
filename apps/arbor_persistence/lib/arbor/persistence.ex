@@ -22,6 +22,8 @@ defmodule Arbor.Persistence do
       Arbor.Persistence.Store.ETS.put("key", "value", name: :my_store)
   """
 
+  @behaviour Arbor.Contracts.API.Persistence
+
   alias Arbor.Persistence.{Event, Filter, Record}
 
   # ---------------------------------------------------------------
@@ -145,4 +147,78 @@ defmodule Arbor.Persistence do
   def event_count(name, backend, opts \\ []) do
     backend.event_count(Keyword.put(opts, :name, name))
   end
+
+  # ============================================================================
+  # Contract Callbacks (Arbor.Contracts.API.Persistence)
+  # ============================================================================
+
+  # -- Store (required) --
+
+  @impl Arbor.Contracts.API.Persistence
+  def store_value_by_key_using_backend(name, backend, key, value, opts),
+    do: put(name, backend, key, value, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def retrieve_value_by_key_using_backend(name, backend, key, opts),
+    do: get(name, backend, key, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def delete_value_by_key_using_backend(name, backend, key, opts),
+    do: delete(name, backend, key, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def list_all_keys_using_backend(name, backend, opts),
+    do: list(name, backend, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def check_key_exists_using_backend(name, backend, key, opts),
+    do: exists?(name, backend, key, opts)
+
+  # -- QueryableStore (optional) --
+
+  @impl Arbor.Contracts.API.Persistence
+  def query_records_by_filter_using_backend(name, backend, filter, opts),
+    do: query(name, backend, filter, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def count_records_by_filter_using_backend(name, backend, filter, opts),
+    do: count(name, backend, filter, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def aggregate_field_by_filter_using_backend(name, backend, filter, field, operation, opts),
+    do: aggregate(name, backend, filter, field, operation, opts)
+
+  # -- EventLog (optional) --
+
+  @impl Arbor.Contracts.API.Persistence
+  def append_events_to_stream_using_backend(name, backend, stream_id, events, opts),
+    do: append(name, backend, stream_id, events, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def read_events_from_stream_using_backend(name, backend, stream_id, opts),
+    do: read_stream(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def read_all_events_using_backend(name, backend, opts),
+    do: read_all(name, backend, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def check_stream_exists_using_backend(name, backend, stream_id, opts),
+    do: stream_exists?(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def get_stream_version_using_backend(name, backend, stream_id, opts),
+    do: stream_version(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def list_all_streams_using_backend(name, backend, opts),
+    do: list_streams(name, backend, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def get_stream_count_using_backend(name, backend, opts),
+    do: stream_count(name, backend, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def get_event_count_using_backend(name, backend, opts),
+    do: event_count(name, backend, opts)
 end

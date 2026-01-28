@@ -41,6 +41,8 @@ defmodule Arbor.Consensus do
       {:ok, decision} = Arbor.Consensus.get_decision(proposal_id)
   """
 
+  @behaviour Arbor.Contracts.API.Consensus
+
   alias Arbor.Consensus.{Coordinator, EventStore}
 
   # ============================================================================
@@ -172,4 +174,82 @@ defmodule Arbor.Consensus do
   @spec timeline(String.t(), GenServer.server()) ::
           [{non_neg_integer(), Arbor.Contracts.Consensus.ConsensusEvent.t()}]
   defdelegate timeline(proposal_id, server \\ EventStore), to: EventStore, as: :get_timeline
+
+  # ============================================================================
+  # Contract Callbacks (Arbor.Contracts.API.Consensus)
+  # ============================================================================
+
+  @impl Arbor.Contracts.API.Consensus
+  def submit_proposal_for_consensus_evaluation(proposal_or_attrs, opts),
+    do: Coordinator.submit(proposal_or_attrs, opts)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_proposal_status_by_id(proposal_id),
+    do: Coordinator.get_status(proposal_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_council_decision_for_proposal(proposal_id),
+    do: Coordinator.get_decision(proposal_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_proposal_by_id(proposal_id),
+    do: Coordinator.get_proposal(proposal_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def cancel_proposal_by_id(proposal_id),
+    do: Coordinator.cancel(proposal_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def start_link(opts) do
+    children = [
+      Arbor.Consensus.EventStore,
+      {Arbor.Consensus.Coordinator, opts}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Consensus.Supervisor)
+  end
+
+  @impl Arbor.Contracts.API.Consensus
+  def healthy? do
+    case Process.whereis(Arbor.Consensus.Supervisor) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  @impl Arbor.Contracts.API.Consensus
+  def list_pending_proposals, do: Coordinator.list_pending()
+
+  @impl Arbor.Contracts.API.Consensus
+  def list_all_proposals, do: Coordinator.list_proposals()
+
+  @impl Arbor.Contracts.API.Consensus
+  def list_all_decisions, do: Coordinator.list_decisions()
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_recent_decisions_with_limit(limit),
+    do: Coordinator.recent_decisions(limit)
+
+  @impl Arbor.Contracts.API.Consensus
+  def force_approve_proposal_by_authority(proposal_id, approver_id),
+    do: Coordinator.force_approve(proposal_id, approver_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def force_reject_proposal_by_authority(proposal_id, rejector_id),
+    do: Coordinator.force_reject(proposal_id, rejector_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_consensus_system_stats, do: Coordinator.stats()
+
+  @impl Arbor.Contracts.API.Consensus
+  def query_consensus_events_with_filters(filters),
+    do: EventStore.query(filters)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_events_for_proposal(proposal_id),
+    do: EventStore.get_by_proposal(proposal_id)
+
+  @impl Arbor.Contracts.API.Consensus
+  def get_timeline_for_proposal(proposal_id),
+    do: EventStore.get_timeline(proposal_id)
 end
