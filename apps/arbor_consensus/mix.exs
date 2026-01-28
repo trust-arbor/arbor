@@ -36,6 +36,7 @@ defmodule Arbor.Consensus.MixProject do
   defp deps do
     [
       # Umbrella dependencies
+      {:arbor_common, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},

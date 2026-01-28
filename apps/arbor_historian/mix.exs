@@ -35,6 +35,7 @@ defmodule Arbor.Historian.MixProject do
 
   defp deps do
     [
+      {:arbor_common, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:typed_struct, "~> 0.3"},
