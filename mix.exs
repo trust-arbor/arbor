@@ -28,9 +28,9 @@ defmodule Arbor.MixProject do
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
 
-      # Internal packages (path deps for local development, eventual Hex publishing)
-      {:arbor_eval, path: "packages/arbor_eval", only: [:dev, :test]},
-      {:arbor_checkpoint, path: "packages/arbor_checkpoint"}
+      # These are umbrella apps now, auto-discovered via apps_path
+      # arbor_eval — code quality evaluation (dev/test only via its mix.exs)
+      # arbor_checkpoint — generic checkpoint/restore
     ]
   end
 

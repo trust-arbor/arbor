@@ -19,7 +19,7 @@ defmodule ArborCommon.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {ArborCommon.Application, []}
+      mod: {Arbor.Common.Application, []}
     ]
   end
 

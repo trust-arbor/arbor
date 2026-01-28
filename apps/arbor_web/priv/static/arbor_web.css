@@ -1,0 +1,634 @@
+/* ArborWeb Foundation Styles
+ * All classes use the `aw-` prefix to avoid conflicts with app-specific styles.
+ * Colors are defined as CSS custom properties (--aw-*).
+ */
+
+/* ── Theme Variables ─────────────────────────────────────────────── */
+
+:root {
+  --aw-bg-dark: #0d1117;
+  --aw-bg-card: #161b22;
+  --aw-bg-card-hover: #1c2129;
+  --aw-border: #30363d;
+  --aw-text-primary: #c9d1d9;
+  --aw-text-secondary: #8b949e;
+  --aw-accent-green: #3fb950;
+  --aw-accent-yellow: #d29922;
+  --aw-accent-red: #f85149;
+  --aw-accent-blue: #58a6ff;
+  --aw-accent-purple: #bc8cff;
+  --aw-accent-orange: #f0883e;
+  --aw-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --aw-font-mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  --aw-radius: 0.5rem;
+  --aw-radius-sm: 0.375rem;
+}
+
+/* ── Reset / Base ────────────────────────────────────────────────── */
+
+.aw-body {
+  background: var(--aw-bg-dark);
+  color: var(--aw-text-primary);
+  font-family: var(--aw-font-sans);
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.aw-body *, .aw-body *::before, .aw-body *::after {
+  box-sizing: border-box;
+}
+
+/* ── Header ──────────────────────────────────────────────────────── */
+
+.aw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: var(--aw-bg-card);
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.aw-logo-icon {
+  font-size: 1.5rem;
+  color: var(--aw-accent-blue);
+}
+
+.aw-nav {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.aw-nav-link {
+  color: var(--aw-text-secondary);
+  text-decoration: none;
+  transition: color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.aw-nav-link:hover {
+  color: var(--aw-text-primary);
+}
+
+.aw-nav-active {
+  color: var(--aw-text-primary);
+  font-weight: 500;
+}
+
+.aw-nav-icon {
+  font-size: 1rem;
+}
+
+.aw-node-badge {
+  background: var(--aw-bg-dark);
+  padding: 0.25rem 0.75rem;
+  border-radius: 1rem;
+  font-size: 0.75rem;
+  font-family: var(--aw-font-mono);
+  color: var(--aw-text-secondary);
+}
+
+/* ── Main Content ────────────────────────────────────────────────── */
+
+.aw-main {
+  padding: 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ── Dashboard Header ────────────────────────────────────────────── */
+
+.aw-dashboard-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.aw-dashboard-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.aw-dashboard-subtitle {
+  font-size: 0.875rem;
+  color: var(--aw-text-secondary);
+  margin: 0.25rem 0 0 0;
+}
+
+.aw-dashboard-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* ── Stat Card ───────────────────────────────────────────────────── */
+
+.aw-stat-card {
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  padding: 1.25rem;
+  border-left-width: 3px;
+  transition: background 0.2s;
+}
+
+.aw-stat-card:hover {
+  background: var(--aw-bg-card-hover);
+}
+
+.aw-stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  font-family: var(--aw-font-mono);
+  line-height: 1.2;
+}
+
+.aw-stat-trend {
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-left: 0.5rem;
+  opacity: 0.8;
+}
+
+.aw-stat-label {
+  font-size: 0.8rem;
+  color: var(--aw-text-secondary);
+  margin-top: 0.375rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Event Card ──────────────────────────────────────────────────── */
+
+.aw-event-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  font-size: 0.875rem;
+}
+
+.aw-event-icon {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--aw-border);
+  border-radius: 50%;
+  font-size: 0.875rem;
+  flex-shrink: 0;
+}
+
+.aw-event-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.aw-event-title {
+  font-weight: 500;
+}
+
+.aw-event-subtitle {
+  font-family: var(--aw-font-mono);
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-event-time {
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Badge ───────────────────────────────────────────────────────── */
+
+.aw-badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* ── Card ────────────────────────────────────────────────────────── */
+
+.aw-card {
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  overflow: hidden;
+}
+
+.aw-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-card-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--aw-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+.aw-card-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.aw-card-body {
+  padding: 1rem;
+}
+
+.aw-card-body-flush {
+  padding: 0;
+}
+
+/* ── Modal ───────────────────────────────────────────────────────── */
+
+.aw-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.aw-modal {
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  min-width: 400px;
+  max-width: 90vw;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.aw-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.aw-modal-close {
+  background: none;
+  border: none;
+  color: var(--aw-text-secondary);
+  cursor: pointer;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.aw-modal-close:hover {
+  color: var(--aw-text-primary);
+}
+
+.aw-modal-body {
+  padding: 1.25rem;
+}
+
+/* ── Filter Bar ──────────────────────────────────────────────────── */
+
+.aw-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  margin-bottom: 1rem;
+}
+
+/* ── Flash Messages ──────────────────────────────────────────────── */
+
+.aw-flash-group {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1000;
+}
+
+.aw-flash {
+  padding: 1rem;
+  border-radius: var(--aw-radius);
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: 300px;
+}
+
+.aw-flash p {
+  margin: 0;
+}
+
+.aw-flash-info {
+  background: rgba(88, 166, 255, 0.15);
+  border: 1px solid var(--aw-accent-blue);
+}
+
+.aw-flash-error {
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid var(--aw-accent-red);
+}
+
+.aw-flash-warning {
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid var(--aw-accent-yellow);
+}
+
+.aw-flash-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0;
+}
+
+/* ── Empty State ─────────────────────────────────────────────────── */
+
+.aw-empty-state {
+  text-align: center;
+  padding: 3rem 2rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-empty-icon {
+  font-size: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+.aw-empty-title {
+  font-size: 1rem;
+  margin: 0 0 0.5rem 0;
+}
+
+.aw-empty-hint {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin: 0;
+}
+
+/* ── Loading Spinner ─────────────────────────────────────────────── */
+
+.aw-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--aw-border);
+  border-top-color: var(--aw-accent-blue);
+  border-radius: 50%;
+  animation: aw-spin 0.8s linear infinite;
+}
+
+@keyframes aw-spin {
+  to { transform: rotate(360deg); }
+}
+
+.aw-loading-label {
+  font-size: 0.875rem;
+}
+
+/* ── Color Utility Classes ───────────────────────────────────────── */
+
+/* Background colors */
+.aw-bg-green { background: rgba(63, 185, 80, 0.2); color: var(--aw-accent-green); }
+.aw-bg-yellow { background: rgba(210, 153, 34, 0.2); color: var(--aw-accent-yellow); }
+.aw-bg-red { background: rgba(248, 81, 73, 0.2); color: var(--aw-accent-red); }
+.aw-bg-blue { background: rgba(88, 166, 255, 0.2); color: var(--aw-accent-blue); }
+.aw-bg-purple { background: rgba(188, 140, 255, 0.2); color: var(--aw-accent-purple); }
+.aw-bg-orange { background: rgba(240, 136, 62, 0.2); color: var(--aw-accent-orange); }
+.aw-bg-gray { background: rgba(139, 148, 158, 0.2); color: var(--aw-text-secondary); }
+
+/* Text colors */
+.aw-text-green { color: var(--aw-accent-green); }
+.aw-text-yellow { color: var(--aw-accent-yellow); }
+.aw-text-red { color: var(--aw-accent-red); }
+.aw-text-blue { color: var(--aw-accent-blue); }
+.aw-text-purple { color: var(--aw-accent-purple); }
+.aw-text-orange { color: var(--aw-accent-orange); }
+.aw-text-gray { color: var(--aw-text-secondary); }
+
+/* Border colors */
+.aw-border-green { border-left-color: var(--aw-accent-green); }
+.aw-border-yellow { border-left-color: var(--aw-accent-yellow); }
+.aw-border-red { border-left-color: var(--aw-accent-red); }
+.aw-border-blue { border-left-color: var(--aw-accent-blue); }
+.aw-border-purple { border-left-color: var(--aw-accent-purple); }
+.aw-border-orange { border-left-color: var(--aw-accent-orange); }
+.aw-border-gray { border-left-color: var(--aw-text-secondary); }
+
+/* ── Status Classes ──────────────────────────────────────────────── */
+
+.aw-status-ok,
+.aw-status-success,
+.aw-status-running,
+.aw-status-healthy { color: var(--aw-accent-green); }
+
+.aw-status-warning,
+.aw-status-pending,
+.aw-status-degraded { color: var(--aw-accent-yellow); }
+
+.aw-status-error,
+.aw-status-failed,
+.aw-status-critical,
+.aw-status-offline { color: var(--aw-accent-red); }
+
+.aw-status-info,
+.aw-status-active { color: var(--aw-accent-blue); }
+
+.aw-status-unknown { color: var(--aw-text-secondary); }
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+
+.aw-btn {
+  background: var(--aw-bg-dark);
+  border: 1px solid var(--aw-border);
+  color: var(--aw-text-primary);
+  padding: 0.5rem 1rem;
+  border-radius: var(--aw-radius-sm);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-family: var(--aw-font-sans);
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.aw-btn:hover {
+  background: var(--aw-border);
+  border-color: var(--aw-accent-blue);
+}
+
+.aw-btn-primary {
+  background: var(--aw-accent-blue);
+  border-color: var(--aw-accent-blue);
+  color: var(--aw-bg-dark);
+  font-weight: 600;
+}
+
+.aw-btn-primary:hover {
+  opacity: 0.9;
+}
+
+.aw-btn-danger {
+  border-color: var(--aw-accent-red);
+  color: var(--aw-accent-red);
+}
+
+.aw-btn-danger:hover {
+  background: rgba(248, 81, 73, 0.15);
+}
+
+.aw-btn-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* ── Form Controls ───────────────────────────────────────────────── */
+
+.aw-input,
+.aw-select {
+  background: var(--aw-bg-dark);
+  border: 1px solid var(--aw-border);
+  color: var(--aw-text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--aw-radius-sm);
+  font-size: 0.875rem;
+  font-family: var(--aw-font-sans);
+}
+
+.aw-input:focus,
+.aw-select:focus {
+  outline: none;
+  border-color: var(--aw-accent-blue);
+}
+
+.aw-input::placeholder {
+  color: var(--aw-text-secondary);
+}
+
+/* ── Grid Utilities ──────────────────────────────────────────────── */
+
+.aw-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.aw-grid-2 { grid-template-columns: repeat(2, 1fr); }
+.aw-grid-3 { grid-template-columns: repeat(3, 1fr); }
+.aw-grid-4 { grid-template-columns: repeat(4, 1fr); }
+.aw-grid-auto { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+
+@media (max-width: 768px) {
+  .aw-grid-2, .aw-grid-3, .aw-grid-4 {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1024px) {
+  .aw-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ── LiveView States ─────────────────────────────────────────────── */
+
+.phx-disconnected { cursor: wait; }
+.phx-loading { cursor: wait; }
+.phx-loading * { pointer-events: none; }
+
+/* ── Scrollable Container ────────────────────────────────────────── */
+
+.aw-scroll {
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.aw-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.aw-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.aw-scroll::-webkit-scrollbar-thumb {
+  background: var(--aw-border);
+  border-radius: 3px;
+}
+
+.aw-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--aw-text-secondary);
+}
+
+/* ── Animation Utilities ─────────────────────────────────────────── */
+
+@keyframes aw-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.aw-pulse {
+  animation: aw-pulse 2s infinite;
+}
+
+.aw-fade-in {
+  animation: aw-fade-in 0.2s ease-in;
+}
+
+@keyframes aw-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

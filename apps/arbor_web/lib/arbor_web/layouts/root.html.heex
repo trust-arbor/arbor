@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title><%= assigns[:page_title] || assigns[:app_name] || "Arbor" %></title>
+    <link rel="stylesheet" href={assigns[:css_path] || "/assets/arbor_web.css"} />
+    <%= if extra_css = assigns[:extra_css] do %>
+      <link :for={css <- List.wrap(extra_css)} rel="stylesheet" href={css} />
+    <% end %>
+    <script type="importmap">
+      {
+        "imports": {
+          "phoenix": "https://cdn.jsdelivr.net/npm/phoenix@1.7.14/priv/static/phoenix.min.mjs",
+          "phoenix_live_view": "https://cdn.jsdelivr.net/npm/phoenix_live_view@1.1.19/priv/static/phoenix_live_view.esm.js"
+        }
+      }
+    </script>
+    <script defer phx-track-static type="module" src={assigns[:js_path] || "/assets/arbor_web.js"}></script>
+    <%= if extra_js = assigns[:extra_js] do %>
+      <script :for={js <- List.wrap(extra_js)} defer type="module" src={js}></script>
+    <% end %>
+  </head>
+  <body class="aw-body">
+    <%= @inner_content %>
+  </body>
+</html>

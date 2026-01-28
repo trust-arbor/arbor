@@ -5,14 +5,68 @@
 /_build/
 /cover/
 /doc/
-/erl_crash.dump
+erl_crash.dump
 *.ez
 *.beam
+*.tar
+
+# Phoenix build artifacts
+/priv/static/assets/
+/priv/static/cache_manifest.json
+/priv/cache/
+
+# Dialyzer
 *.plt
-.elixir_ls/
+*.plt.hash
+/_plt/
 
 # Environment
 .env
+.env.local
+.env.*.local
 *.secret.*
-packages/*/_build/
-packages/*/deps/
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+
+# Elixir Language Server
+.elixir_ls/
+
+# Logs
+*.log
+logs/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.dets
+Mnesia.*
+
+# Test artifacts
+/tmp/
+.test_results/
+coverage.xml
+coverage/
+
+# Release artifacts
+rel/
+_rel/
+*.tar.gz
+
+# Agent sandbox runtime data
+/sandbox/
+**/sandbox/agents/
+
+# Other AI tool artifacts
+.goose/
+.venv/
+venv/
+.aider*

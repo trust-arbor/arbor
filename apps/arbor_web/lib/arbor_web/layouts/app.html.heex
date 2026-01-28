@@ -1,0 +1,23 @@
+<header class="aw-header">
+  <div class="aw-logo">
+    <span class="aw-logo-icon">&#x2B22;</span>
+    <span class="aw-logo-text"><%= assigns[:app_name] || "Arbor" %></span>
+  </div>
+  <nav :if={nav_items = assigns[:nav_items]} class="aw-nav">
+    <.nav_link
+      :for={item <- nav_items}
+      href={item.href}
+      label={item.label}
+      icon={Map.get(item, :icon)}
+      active={Map.get(item, :active, false)}
+    />
+  </nav>
+  <div :if={node_info = assigns[:node_info]} class="aw-node-badge">
+    <%= node_info %>
+  </div>
+</header>
+
+<main class="aw-main">
+  <.flash_group flash={@flash} />
+  <%= @inner_content %>
+</main>

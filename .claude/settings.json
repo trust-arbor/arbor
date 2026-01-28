@@ -1,5 +1,73 @@
 {
   "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/save_context.sh",
+            "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/save_context.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '\\n## Umbrella Status\\n' && cd /Users/azmaveth/code/trust-arbor/arbor && mix compile --no-deps-check 2>&1 | tail -5 || echo 'Compile check skipped'; INBOX_COUNT=$(find .arbor/roadmap/0-inbox -name '*.md' -not -name 'README.md' 2>/dev/null | wc -l | tr -d ' '); if [ \"$INBOX_COUNT\" -gt 0 ]; then echo \"\\nINBOX: $INBOX_COUNT idea(s) to review\"; ls -1 .arbor/roadmap/0-inbox/*.md 2>/dev/null | head -5; fi"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/load_context.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/load_context.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/load_context.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/load_context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [
