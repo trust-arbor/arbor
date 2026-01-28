@@ -39,6 +39,8 @@ defmodule Arbor.Historian do
       stats = Arbor.Historian.stats()
   """
 
+  @behaviour Arbor.Contracts.API.Historian
+
   alias Arbor.Historian.{Collector, QueryEngine, StreamRegistry, Timeline}
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
@@ -157,4 +159,114 @@ defmodule Arbor.Historian do
       total_events: total_events
     })
   end
+
+  # ============================================================================
+  # Contract Callbacks (Arbor.Contracts.API.Historian)
+  # ============================================================================
+
+  # -- Collection --
+
+  @impl Arbor.Contracts.API.Historian
+  def collect_signal_into_event_log(signal), do: Collector.collect(signal)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_collected_event_count, do: Collector.event_count()
+
+  # -- Querying --
+
+  @impl Arbor.Contracts.API.Historian
+  def read_recent_history_entries(opts), do: QueryEngine.read_global(opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_history_entries_for_agent(agent_id, opts),
+    do: QueryEngine.read_agent(agent_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_history_entries_for_category(category, opts),
+    do: QueryEngine.read_category(category, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_history_entries_for_session(session_id, opts),
+    do: QueryEngine.read_session(session_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_history_entries_for_correlation(correlation_id, opts),
+    do: QueryEngine.read_correlation(correlation_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def query_history_entries_with_filters(opts), do: QueryEngine.query(opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def find_history_entry_by_signal_id(signal_id, opts),
+    do: QueryEngine.find_by_signal_id(signal_id, opts)
+
+  # -- Lifecycle --
+
+  @impl Arbor.Contracts.API.Historian
+  def start_link(opts) do
+    children = [
+      {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
+      {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry},
+      {Arbor.Historian.Collector, opts}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Historian.Supervisor)
+  end
+
+  @impl Arbor.Contracts.API.Historian
+  def healthy? do
+    case Process.whereis(Arbor.Historian.Supervisor) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  # -- Aggregation (optional) --
+
+  @impl Arbor.Contracts.API.Historian
+  def count_history_entries_by_category(category, opts),
+    do: Aggregator.count_by_category(category, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def count_error_history_entries(opts), do: Aggregator.error_count(opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_category_distribution(opts), do: Aggregator.category_distribution(opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_type_distribution(opts), do: Aggregator.type_distribution(opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_agent_activity_summary(agent_id, opts),
+    do: Aggregator.agent_activity(agent_id, opts)
+
+  # -- Timeline (optional) --
+
+  @impl Arbor.Contracts.API.Historian
+  def reconstruct_timeline_for_span(span, opts), do: Timeline.reconstruct(span, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_timeline_for_agent(agent_id, from, to, opts),
+    do: Timeline.for_agent(agent_id, from, to, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_causality_chain_for_signal(signal_id, opts),
+    do: Timeline.for_causality_chain(signal_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_timeline_summary_for_span(span, opts), do: Timeline.summary(span, opts)
+
+  # -- Streams (optional) --
+
+  @impl Arbor.Contracts.API.Historian
+  def list_all_stream_ids, do: StreamRegistry.list_streams()
+
+  @impl Arbor.Contracts.API.Historian
+  def read_stream_info_by_id(stream_id), do: StreamRegistry.get_stream(stream_id)
+
+  @impl Arbor.Contracts.API.Historian
+  def read_all_streams_metadata, do: StreamRegistry.all_streams()
+
+  @impl Arbor.Contracts.API.Historian
+  def read_historian_stats, do: stats()
 end

@@ -42,6 +42,9 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.API.Signals` - Event emission interface
   - `Arbor.Contracts.API.Security` - Security facade interface
   - `Arbor.Contracts.API.Trust` - Trust facade interface
+  - `Arbor.Contracts.API.Consensus` - Consensus engine interface
+  - `Arbor.Contracts.API.Historian` - Activity stream and audit log interface
+  - `Arbor.Contracts.API.Persistence` - Pluggable storage interface
 
   ## Usage
 
@@ -90,7 +93,10 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.API.Shell,
       Arbor.Contracts.API.Signals,
       Arbor.Contracts.API.Security,
-      Arbor.Contracts.API.Trust
+      Arbor.Contracts.API.Trust,
+      Arbor.Contracts.API.Consensus,
+      Arbor.Contracts.API.Historian,
+      Arbor.Contracts.API.Persistence
     ]
   end
 end
