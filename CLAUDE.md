@@ -21,6 +21,13 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
   - `to_existing/1` — only converts if atom already exists
   - `to_allowed/2` — only converts if in allowed list
   - `atomize_keys/2` — safely atomize known map keys
+- **SafePath**: Never trust user-provided paths. Use `Arbor.Common.SafePath` for path traversal protection:
+  - `resolve_within/2` — resolve path and verify it stays within allowed root
+  - `safe_join/2` — join paths without allowing escape
+  - `sanitize_filename/1` — clean user-provided filenames
+- **FileGuard**: For capability-based file access, use `Arbor.Security.FileGuard`:
+  - `authorize/3` — verify agent has capability and path is within bounds
+  - `can?/3` — boolean check for file access authorization
 - Search existing facades before writing new code. Expand a facade rather than reaching into internals.
 
 ## Architecture Triggers
