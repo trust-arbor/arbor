@@ -268,7 +268,7 @@ defmodule Arbor.Consensus.Analytics do
     # Count outcomes
     outcomes =
       Enum.reduce(history, %{approved: 0, rejected: 0, deadlock: 0, pending: 0}, fn
-        {proposal, nil}, acc ->
+        {_proposal, nil}, acc ->
           Map.update!(acc, :pending, &(&1 + 1))
 
         {_proposal, decision}, acc ->
