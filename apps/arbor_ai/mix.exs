@@ -25,7 +25,9 @@ defmodule ArborAi.MixProject do
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
+      {:arbor_shell, in_umbrella: true},
       {:jason, "~> 1.4"},
+      {:req, "~> 0.5"},
       # jido_ai and req_llm come from root mix.exs path deps
       {:jido_ai, path: "../../../jido_ai", override: true},
       {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true}
