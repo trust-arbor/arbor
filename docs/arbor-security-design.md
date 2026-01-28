@@ -298,9 +298,27 @@ When an agent crosses a trust boundary (node → cluster → federation), it arr
 
 This is a configuration concern, not an infrastructure one. No new code or cryptographic machinery needed — just operator-configurable trust policies for foreign agents.
 
-### 4.7 Resource Quotas (not started)
+### 4.7 Resource Quotas (COMPLETE)
 
-No limits on capabilities per agent, active proposals, delegation chain growth, or storage.
+Resource exhaustion is prevented through configurable quotas enforced at store/coordinator level:
+
+**Capability Store quotas (`arbor_security`):**
+- `max_capabilities_per_agent` (default: 1000) — per-agent limit
+- `max_global_capabilities` (default: 100,000) — system-wide limit
+- `max_delegation_depth` (default: 10) — prevents runaway delegation chains
+- `quota_enforcement_enabled` — toggle for testing/migration
+
+**Consensus quotas (`arbor_consensus`):**
+- `max_proposals_per_agent` (default: 10) — active proposals per proposer
+- `proposal_quota_enabled` — toggle for testing
+
+Quotas are checked on `put/1` (CapabilityStore) and `submit/2` (Coordinator). Errors return detailed context:
+- `{:error, {:quota_exceeded, :per_agent_capability_limit, %{agent_id, current, limit}}}`
+- `{:error, {:quota_exceeded, :global_capability_limit, %{current, limit}}}`
+- `{:error, {:quota_exceeded, :delegation_depth_limit, %{depth, limit}}}`
+- `{:error, :agent_proposal_quota_exceeded}`
+
+`stats/0` includes quota health information for monitoring.
 
 **Where it belongs:** `arbor_security` (capability quotas), `arbor_consensus` (proposal quotas)
 
@@ -504,7 +522,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 **Libraries touched:** `arbor_consensus`, `arbor_shell`
 
-### Phase 7: Resource Quotas (T6, T10)
+### Phase 7: Resource Quotas (DONE ✓)
 
 **Goal:** Prevent resource exhaustion.
 
@@ -514,7 +532,14 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 - Delegation chain depth enforcement at store level
 - Active proposal limits per agent in Consensus
 
-**Libraries touched:** `arbor_security`, `arbor_consensus`
+**Implemented:**
+- `Arbor.Security.Config`: `max_capabilities_per_agent/0`, `max_global_capabilities/0`, `max_delegation_depth/0`, `quota_enforcement_enabled?/0`
+- `Arbor.Security.CapabilityStore.put/1`: returns `{:ok, :stored}` or `{:error, {:quota_exceeded, type, context}}`
+- `Arbor.Consensus.Config`: `max_proposals_per_agent/0`, `proposal_quota_enabled?/0`
+- `Arbor.Consensus.Coordinator`: tracks `proposals_by_agent`, enforces per-agent quota on submit, frees on decision/cancel
+- Error types in `Arbor.Contracts.API.Security`: `quota_type`, `quota_context`
+
+**Libraries touched:** `arbor_contracts`, `arbor_security`, `arbor_consensus`
 
 ### Phase 8: LLM Evaluator
 

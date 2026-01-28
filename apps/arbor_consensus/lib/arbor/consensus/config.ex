@@ -197,4 +197,28 @@ defmodule Arbor.Consensus.Config do
   def deterministic_evaluator_default_cwd do
     Application.get_env(@app, :deterministic_evaluator_default_cwd, nil)
   end
+
+  # ===========================================================================
+  # Quota Configuration (Phase 7)
+  # ===========================================================================
+
+  @doc """
+  Maximum number of active proposals a single agent can have simultaneously.
+
+  Default: 10. When exceeded, `submit/2` returns `{:error, :agent_proposal_quota_exceeded}`.
+  """
+  @spec max_proposals_per_agent() :: pos_integer()
+  def max_proposals_per_agent do
+    Application.get_env(@app, :max_proposals_per_agent, 10)
+  end
+
+  @doc """
+  Whether per-agent proposal quota enforcement is enabled.
+
+  Default: true. When false, agents can submit unlimited proposals.
+  """
+  @spec proposal_quota_enabled?() :: boolean()
+  def proposal_quota_enabled? do
+    Application.get_env(@app, :proposal_quota_enabled, true)
+  end
 end

@@ -33,7 +33,8 @@ defmodule Arbor.Consensus.Coordinator do
     proposals: %{},
     decisions: %{},
     active_councils: %{},
-    pending_fingerprints: %{}
+    pending_fingerprints: %{},
+    proposals_by_agent: %{}
   ]
 
   @type t :: %__MODULE__{
@@ -45,7 +46,8 @@ defmodule Arbor.Consensus.Coordinator do
           proposals: map(),
           decisions: map(),
           active_councils: map(),
-          pending_fingerprints: map()
+          pending_fingerprints: map(),
+          proposals_by_agent: %{String.t() => [String.t()]}
         }
 
   # ============================================================================
@@ -205,6 +207,7 @@ defmodule Arbor.Consensus.Coordinator do
          :ok <- check_capacity(state),
          :ok <- check_duplicate(state, proposal),
          :ok <- check_invariants(proposal),
+         :ok <- check_agent_quota(state, proposal),
          :ok <- maybe_authorize(state.authorizer, proposal) do
       # Register proposal
       proposal = Proposal.update_status(proposal, :evaluating)
@@ -213,7 +216,8 @@ defmodule Arbor.Consensus.Coordinator do
       state = %{
         state
         | proposals: Map.put(state.proposals, proposal.id, proposal),
-          pending_fingerprints: Map.put(state.pending_fingerprints, fingerprint, proposal.id)
+          pending_fingerprints: Map.put(state.pending_fingerprints, fingerprint, proposal.id),
+          proposals_by_agent: add_proposal_to_agent(state.proposals_by_agent, proposal)
       }
 
       # Record submission event
@@ -313,7 +317,12 @@ defmodule Arbor.Consensus.Coordinator do
         state = kill_active_council(state, proposal_id)
 
         proposal = Proposal.update_status(proposal, :vetoed)
-        state = %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
+
+        state = %{
+          state
+          | proposals: Map.put(state.proposals, proposal_id, proposal),
+            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+        }
 
         record_event(state, :proposal_cancelled, %{
           proposal_id: proposal_id,
@@ -333,7 +342,12 @@ defmodule Arbor.Consensus.Coordinator do
       proposal ->
         state = kill_active_council(state, proposal_id)
         proposal = Proposal.update_status(proposal, :approved)
-        state = %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
+
+        state = %{
+          state
+          | proposals: Map.put(state.proposals, proposal_id, proposal),
+            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+        }
 
         record_event(state, :decision_reached, %{
           proposal_id: proposal_id,
@@ -358,7 +372,12 @@ defmodule Arbor.Consensus.Coordinator do
       proposal ->
         state = kill_active_council(state, proposal_id)
         proposal = Proposal.update_status(proposal, :rejected)
-        state = %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
+
+        state = %{
+          state
+          | proposals: Map.put(state.proposals, proposal_id, proposal),
+            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+        }
 
         record_event(state, :decision_reached, %{
           proposal_id: proposal_id,
@@ -387,7 +406,11 @@ defmodule Arbor.Consensus.Coordinator do
         council_size: state.config.council_size,
         max_concurrent: state.config.max_concurrent_proposals,
         auto_execute: state.config.auto_execute_approved
-      }
+      },
+      # Quota stats (Phase 7)
+      max_proposals_per_agent: Config.max_proposals_per_agent(),
+      agents_with_proposals: map_size(state.proposals_by_agent),
+      proposal_quota_enabled: Config.proposal_quota_enabled?()
     }
 
     {:reply, stats, state}
@@ -548,7 +571,8 @@ defmodule Arbor.Consensus.Coordinator do
     state = %{
       state
       | proposals: Map.put(state.proposals, proposal_id, proposal),
-        decisions: Map.put(state.decisions, proposal_id, decision)
+        decisions: Map.put(state.decisions, proposal_id, decision),
+        proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
     }
 
     record_event(state, :decision_reached, %{
@@ -624,9 +648,18 @@ defmodule Arbor.Consensus.Coordinator do
 
       proposal ->
         proposal = Proposal.update_status(proposal, status)
-        %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
+        state = %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
+
+        # Free quota on terminal statuses
+        if terminal_status?(status) do
+          %{state | proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)}
+        else
+          state
+        end
     end
   end
+
+  defp terminal_status?(status), do: status in [:approved, :rejected, :vetoed, :deadlock]
 
   defp kill_active_council(state, proposal_id) do
     case Map.get(state.active_councils, proposal_id) do
@@ -665,5 +698,47 @@ defmodule Arbor.Consensus.Coordinator do
     Task.start(fn ->
       event_sink.record(event)
     end)
+  end
+
+  # ===========================================================================
+  # Quota Enforcement (Phase 7)
+  # ===========================================================================
+
+  defp check_agent_quota(state, proposal) do
+    if Config.proposal_quota_enabled?() do
+      max_per_agent = Config.max_proposals_per_agent()
+      agent_proposals = Map.get(state.proposals_by_agent, proposal.proposer, [])
+      current_count = length(agent_proposals)
+
+      if current_count >= max_per_agent do
+        {:error, :agent_proposal_quota_exceeded}
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp add_proposal_to_agent(proposals_by_agent, proposal) do
+    Map.update(proposals_by_agent, proposal.proposer, [proposal.id], fn ids ->
+      [proposal.id | ids]
+    end)
+  end
+
+  defp remove_proposal_from_agent(proposals_by_agent, proposal) do
+    case Map.get(proposals_by_agent, proposal.proposer) do
+      nil ->
+        proposals_by_agent
+
+      ids ->
+        new_ids = List.delete(ids, proposal.id)
+
+        if new_ids == [] do
+          Map.delete(proposals_by_agent, proposal.proposer)
+        else
+          Map.put(proposals_by_agent, proposal.proposer, new_ids)
+        end
+    end
   end
 end

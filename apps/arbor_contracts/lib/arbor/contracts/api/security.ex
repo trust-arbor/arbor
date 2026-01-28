@@ -40,7 +40,16 @@ defmodule Arbor.Contracts.API.Security do
           | :expired_timestamp
           | :replayed_nonce
           | {:constraint_violated, constraint_type :: atom(), context :: map()}
+          | {:quota_exceeded, quota_type(), quota_context()}
           | term()
+
+  @type quota_type :: :per_agent_capability_limit | :global_capability_limit | :delegation_depth_limit
+  @type quota_context :: %{
+          optional(:current) => non_neg_integer(),
+          optional(:limit) => non_neg_integer(),
+          optional(:agent_id) => String.t(),
+          optional(:depth) => non_neg_integer()
+        }
 
   @type constraint_type :: :time_window | :allowed_paths | :rate_limit | :requires_approval
 

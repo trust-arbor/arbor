@@ -26,8 +26,13 @@ defmodule Arbor.Security.CapabilityStore do
 
   @doc """
   Store a capability.
+
+  Returns `{:ok, :stored}` on success, or `{:error, reason}` if quota is exceeded:
+  - `{:error, {:quota_exceeded, :per_agent_capability_limit, context}}`
+  - `{:error, {:quota_exceeded, :global_capability_limit, context}}`
+  - `{:error, {:quota_exceeded, :delegation_depth_limit, context}}`
   """
-  @spec put(Capability.t()) :: :ok
+  @spec put(Capability.t()) :: {:ok, :stored} | {:error, term()}
   def put(%Capability{} = cap) do
     GenServer.call(__MODULE__, {:put, cap})
   end
@@ -104,17 +109,23 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def handle_call({:put, cap}, _from, state) do
-    state =
-      state
-      |> put_in([:by_id, cap.id], cap)
-      |> update_in([:by_principal, cap.principal_id], fn
-        nil -> [cap.id]
-        ids -> [cap.id | ids]
-      end)
-      |> index_by_issuer(cap)
-      |> update_in([:stats, :total_granted], &(&1 + 1))
+    case check_quotas(state, cap) do
+      :ok ->
+        state =
+          state
+          |> put_in([:by_id, cap.id], cap)
+          |> update_in([:by_principal, cap.principal_id], fn
+            nil -> [cap.id]
+            ids -> [cap.id | ids]
+          end)
+          |> index_by_issuer(cap)
+          |> update_in([:stats, :total_granted], &(&1 + 1))
 
-    {:reply, :ok, state}
+        {:reply, {:ok, :stored}, state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -203,7 +214,11 @@ defmodule Arbor.Security.CapabilityStore do
     stats =
       Map.merge(state.stats, %{
         active_capabilities: map_size(state.by_id),
-        principals_with_capabilities: map_size(state.by_principal)
+        principals_with_capabilities: map_size(state.by_principal),
+        quota_max_per_agent: Config.max_capabilities_per_agent(),
+        quota_max_global: Config.max_global_capabilities(),
+        quota_max_delegation_depth: Config.max_delegation_depth(),
+        quota_enforcement_enabled: Config.quota_enforcement_enabled?()
       })
 
     {:reply, stats, state}
@@ -310,5 +325,66 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp schedule_cleanup do
     Process.send_after(self(), :cleanup, @cleanup_interval_ms)
+  end
+
+  # ===========================================================================
+  # Quota Enforcement (Phase 7)
+  # ===========================================================================
+
+  defp check_quotas(state, cap) do
+    if Config.quota_enforcement_enabled?() do
+      with :ok <- check_delegation_depth(cap),
+           :ok <- check_per_agent_limit(state, cap) do
+        check_global_limit(state)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp check_delegation_depth(cap) do
+    max_depth = Config.max_delegation_depth()
+    depth = Map.get(cap, :delegation_depth, 0)
+
+    cond do
+      depth < 0 ->
+        {:error,
+         {:quota_exceeded, :delegation_depth_limit,
+          %{depth: depth, limit: max_depth, reason: :negative_depth}}}
+
+      depth > max_depth ->
+        {:error,
+         {:quota_exceeded, :delegation_depth_limit, %{depth: depth, limit: max_depth}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_per_agent_limit(state, cap) do
+    max_per_agent = Config.max_capabilities_per_agent()
+    agent_cap_ids = Map.get(state.by_principal, cap.principal_id, [])
+    current_count = length(agent_cap_ids)
+
+    if current_count >= max_per_agent do
+      {:error,
+       {:quota_exceeded, :per_agent_capability_limit,
+        %{agent_id: cap.principal_id, current: current_count, limit: max_per_agent}}}
+    else
+      :ok
+    end
+  end
+
+  defp check_global_limit(state) do
+    max_global = Config.max_global_capabilities()
+    current_count = map_size(state.by_id)
+
+    if current_count >= max_global do
+      {:error,
+       {:quota_exceeded, :global_capability_limit,
+        %{current: current_count, limit: max_global}}}
+    else
+      :ok
+    end
   end
 end
