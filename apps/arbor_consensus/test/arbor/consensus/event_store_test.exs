@@ -2,7 +2,7 @@ defmodule Arbor.Consensus.EventStoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Consensus.EventStore
-  alias Arbor.Contracts.Autonomous.ConsensusEvent
+  alias Arbor.Contracts.Consensus.ConsensusEvent
 
   setup do
     table_name = :"test_events_#{:rand.uniform(1_000_000)}"

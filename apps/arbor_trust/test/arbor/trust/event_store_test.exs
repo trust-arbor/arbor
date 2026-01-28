@@ -4,16 +4,13 @@ defmodule Arbor.Trust.EventStoreTest do
   @moduletag :fast
 
   alias Arbor.Trust.EventStore
-  alias Arbor.Trust.EventStore.PostgresDB
   alias Arbor.Contracts.Trust.Event
 
   setup do
     # Stop existing processes if running
-    for mod <- [EventStore, PostgresDB] do
-      case GenServer.whereis(mod) do
-        nil -> :ok
-        pid -> GenServer.stop(pid, :normal)
-      end
+    case GenServer.whereis(EventStore) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
     end
 
     # Clean up named ETS tables if they linger
@@ -23,16 +20,14 @@ defmodule Arbor.Trust.EventStoreTest do
       end
     end
 
-    # Start the mock PostgresDB Agent and the EventStore
-    {:ok, db_pid} = PostgresDB.start_link()
-    {:ok, pid} = EventStore.start_link(db_module: PostgresDB)
+    # Start the EventStore
+    {:ok, pid} = EventStore.start_link()
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
-      if Process.alive?(db_pid), do: Agent.stop(db_pid)
     end)
 
-    {:ok, pid: pid, db_pid: db_pid}
+    {:ok, pid: pid}
   end
 
   # Helper to create a test event with optional overrides
@@ -121,9 +116,7 @@ defmodule Arbor.Trust.EventStoreTest do
       assert length(retrieved) == 5
     end
 
-    test "returns error on partial failure" do
-      # This tests the path where db_module.insert_event fails.
-      # Since PostgresDB mock is running, all should succeed by default.
+    test "records multiple events successfully" do
       events = create_timed_events("agent_batch_ok", 3)
       assert :ok = EventStore.record_events(events)
     end

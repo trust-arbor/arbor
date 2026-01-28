@@ -3,7 +3,7 @@ defmodule Arbor.Historian.Application do
   Supervisor for the Historian subsystem.
 
   Starts:
-  1. EventLog.ETS - ETS-backed event storage
+  1. Persistence.EventLog.ETS - Unified event storage (replaces Historian.EventLog.ETS)
   2. StreamRegistry - Tracks stream metadata
   3. Collector - Subscribes to signals Bus and persists events
   """
@@ -13,7 +13,7 @@ defmodule Arbor.Historian.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Arbor.Historian.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
+      {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
       {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry},
       {Arbor.Historian.Collector, []}
     ]

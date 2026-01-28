@@ -15,7 +15,7 @@ defmodule Arbor.Trust.Supervisor do
 
   Components are started in dependency order:
   1. Store (no dependencies)
-  2. EventStore.PostgresDB + EventStore (depends on PostgresDB)
+  2. EventStore (writes to Persistence.EventLog when configured)
   3. Manager (depends on Store)
   4. CircuitBreaker (depends on Manager)
   5. EventHandler (depends on Manager)
@@ -129,8 +129,7 @@ defmodule Arbor.Trust.Supervisor do
     # Core components (always started)
     children = [
       {Store, []},
-      {EventStore.PostgresDB, []},
-      {EventStore, [db_module: EventStore.PostgresDB]},
+      {EventStore, []},
       {Manager,
        [
          circuit_breaker: circuit_breaker_enabled,

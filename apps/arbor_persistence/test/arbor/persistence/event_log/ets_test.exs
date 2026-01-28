@@ -146,6 +146,49 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     end
   end
 
+  describe "list_streams/1" do
+    test "returns empty list when no streams exist", %{name: name} do
+      assert {:ok, []} = ETS.list_streams(name: name)
+    end
+
+    test "returns all stream IDs", %{name: name} do
+      ETS.append("stream-a", Event.new("stream-a", "t", %{}), name: name)
+      ETS.append("stream-b", Event.new("stream-b", "t", %{}), name: name)
+      ETS.append("stream-c", Event.new("stream-c", "t", %{}), name: name)
+
+      {:ok, streams} = ETS.list_streams(name: name)
+      assert Enum.sort(streams) == ["stream-a", "stream-b", "stream-c"]
+    end
+  end
+
+  describe "stream_count/1" do
+    test "returns 0 when no streams exist", %{name: name} do
+      assert {:ok, 0} = ETS.stream_count(name: name)
+    end
+
+    test "returns correct count of distinct streams", %{name: name} do
+      ETS.append("s1", Event.new("s1", "t", %{}), name: name)
+      ETS.append("s2", Event.new("s2", "t", %{}), name: name)
+      ETS.append("s1", Event.new("s1", "t", %{}), name: name)
+
+      assert {:ok, 2} = ETS.stream_count(name: name)
+    end
+  end
+
+  describe "event_count/1" do
+    test "returns 0 when no events exist", %{name: name} do
+      assert {:ok, 0} = ETS.event_count(name: name)
+    end
+
+    test "returns total events across all streams", %{name: name} do
+      ETS.append("s1", Event.new("s1", "t", %{}), name: name)
+      ETS.append("s2", Event.new("s2", "t", %{}), name: name)
+      ETS.append("s1", Event.new("s1", "t", %{}), name: name)
+
+      assert {:ok, 3} = ETS.event_count(name: name)
+    end
+  end
+
   describe "subscribe/3" do
     test "notifies subscriber of new events", %{name: name} do
       {:ok, _ref} = ETS.subscribe("s1", self(), name: name)

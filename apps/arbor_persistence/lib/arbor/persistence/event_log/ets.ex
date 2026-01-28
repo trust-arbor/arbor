@@ -58,6 +58,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, {:subscribe, stream_id_or_all, pid})
   end
 
+  @impl Arbor.Persistence.EventLog
+  def list_streams(opts \\ []) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, :list_streams)
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def stream_count(opts \\ []) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, :stream_count)
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def event_count(opts \\ []) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, :event_count)
+  end
+
   # --- GenServer ---
 
   def start_link(opts) do
@@ -130,6 +148,18 @@ defmodule Arbor.Persistence.EventLog.ETS do
     monitors = Map.put(state.monitors, ref, {sub_key, pid})
 
     {:reply, {:ok, ref}, %{state | subscribers: subscribers, monitors: monitors}}
+  end
+
+  def handle_call(:list_streams, _from, state) do
+    {:reply, {:ok, Map.keys(state.stream_versions)}, state}
+  end
+
+  def handle_call(:stream_count, _from, state) do
+    {:reply, {:ok, map_size(state.stream_versions)}, state}
+  end
+
+  def handle_call(:event_count, _from, state) do
+    {:reply, {:ok, state.global_position}, state}
   end
 
   @impl GenServer
