@@ -32,10 +32,11 @@ defmodule Arbor.AgentTest do
       {:ok, _pid} = Arbor.Agent.start("facade-action", TestAgent, %{value: 10})
       Process.sleep(50)
 
-      result = Arbor.Agent.run_action(
-        "facade-action",
-        {Arbor.Agent.Test.IncrementAction, %{amount: 3}}
-      )
+      result =
+        Arbor.Agent.run_action(
+          "facade-action",
+          {Arbor.Agent.Test.IncrementAction, %{amount: 3}}
+        )
 
       case result do
         {:ok, action_result} ->
@@ -144,19 +145,21 @@ defmodule Arbor.AgentTest do
     test "manually triggers checkpoint" do
       {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
-      {:ok, _pid} = Arbor.Agent.start("facade-cp", TestAgent, %{value: 55},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, _pid} =
+        Arbor.Agent.start("facade-cp", TestAgent, %{value: 55},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
 
       assert :ok = Arbor.Agent.checkpoint("facade-cp")
 
-      assert {:ok, _} = Arbor.Checkpoint.load(
-        "facade-cp",
-        Arbor.Checkpoint.Store.Agent,
-        retries: 0
-      )
+      assert {:ok, _} =
+               Arbor.Checkpoint.load(
+                 "facade-cp",
+                 Arbor.Checkpoint.Store.Agent,
+                 retries: 0
+               )
 
       on_exit(fn ->
         Arbor.Agent.stop("facade-cp")
@@ -174,9 +177,10 @@ defmodule Arbor.AgentTest do
       {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
       # Start agent
-      {:ok, pid1} = Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 0},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, pid1} =
+        Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 0},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
 
@@ -189,9 +193,10 @@ defmodule Arbor.AgentTest do
       refute Process.alive?(pid1)
 
       # Restart - should restore from checkpoint
-      {:ok, pid2} = Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 999},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, pid2} =
+        Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 999},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
       assert Process.alive?(pid2)

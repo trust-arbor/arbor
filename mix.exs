@@ -26,7 +26,7 @@ defmodule Arbor.MixProject do
       {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
 
       # Dev/test tools
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
 
       # These are umbrella apps now, auto-discovered via apps_path
       # arbor_eval — code quality evaluation (dev/test only via its mix.exs)

@@ -13,11 +13,12 @@ defmodule Arbor.Agent.SupervisorTest do
 
   describe "start_agent/1" do
     test "starts an agent under supervision" do
-      {:ok, pid} = AgentSupervisor.start_agent(
-        agent_id: "sup-test-1",
-        agent_module: TestAgent,
-        initial_state: %{value: 0}
-      )
+      {:ok, pid} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-test-1",
+          agent_module: TestAgent,
+          initial_state: %{value: 0}
+        )
 
       assert Process.alive?(pid)
 
@@ -27,10 +28,11 @@ defmodule Arbor.Agent.SupervisorTest do
     end
 
     test "agent appears in which_agents" do
-      {:ok, pid} = AgentSupervisor.start_agent(
-        agent_id: "sup-test-which",
-        agent_module: TestAgent
-      )
+      {:ok, pid} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-test-which",
+          agent_module: TestAgent
+        )
 
       Process.sleep(50)
 
@@ -45,10 +47,11 @@ defmodule Arbor.Agent.SupervisorTest do
 
   describe "stop_agent/1" do
     test "stops a supervised agent" do
-      {:ok, pid} = AgentSupervisor.start_agent(
-        agent_id: "sup-stop-1",
-        agent_module: TestAgent
-      )
+      {:ok, pid} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-stop-1",
+          agent_module: TestAgent
+        )
 
       assert :ok = AgentSupervisor.stop_agent(pid)
       Process.sleep(50)
@@ -64,10 +67,11 @@ defmodule Arbor.Agent.SupervisorTest do
 
   describe "stop_agent_by_id/1" do
     test "stops agent by ID" do
-      {:ok, pid} = AgentSupervisor.start_agent(
-        agent_id: "sup-stop-id",
-        agent_module: TestAgent
-      )
+      {:ok, pid} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-stop-id",
+          agent_module: TestAgent
+        )
 
       Process.sleep(50)
 
@@ -85,15 +89,17 @@ defmodule Arbor.Agent.SupervisorTest do
     test "counts active agents" do
       initial_count = AgentSupervisor.count()
 
-      {:ok, pid1} = AgentSupervisor.start_agent(
-        agent_id: "sup-count-1",
-        agent_module: TestAgent
-      )
+      {:ok, pid1} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-count-1",
+          agent_module: TestAgent
+        )
 
-      {:ok, pid2} = AgentSupervisor.start_agent(
-        agent_id: "sup-count-2",
-        agent_module: TestAgent
-      )
+      {:ok, pid2} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-count-2",
+          agent_module: TestAgent
+        )
 
       Process.sleep(50)
 
@@ -108,11 +114,12 @@ defmodule Arbor.Agent.SupervisorTest do
 
   describe "supervision" do
     test "agent restarts on crash (transient restart)" do
-      {:ok, pid} = AgentSupervisor.start_agent(
-        agent_id: "sup-crash-test",
-        agent_module: TestAgent,
-        restart: :temporary
-      )
+      {:ok, pid} =
+        AgentSupervisor.start_agent(
+          agent_id: "sup-crash-test",
+          agent_module: TestAgent,
+          restart: :temporary
+        )
 
       Process.sleep(50)
 

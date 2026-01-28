@@ -75,7 +75,9 @@ defmodule Arbor.Bridge do
   - `{:ok, :authorized, updated_input}` - Tool is allowed with modified parameters
   - `{:error, :unauthorized, reason}` - Tool is blocked
   """
-  defdelegate authorize(session_id, tool_name, tool_input, cwd), to: ClaudeSession, as: :authorize_tool
+  defdelegate authorize(session_id, tool_name, tool_input, cwd),
+    to: ClaudeSession,
+    as: :authorize_tool
 
   @doc """
   Ensure a Claude session is registered as an Arbor agent.

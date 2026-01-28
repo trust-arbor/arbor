@@ -14,11 +14,12 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "start_link/1" do
     test "starts an agent server" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "server-test-1",
-        agent_module: TestAgent,
-        initial_state: %{value: 0}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "server-test-1",
+          agent_module: TestAgent,
+          initial_state: %{value: 0}
+        )
 
       assert Process.alive?(pid)
 
@@ -28,11 +29,12 @@ defmodule Arbor.Agent.ServerTest do
     end
 
     test "registers with the agent registry" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "server-test-reg",
-        agent_module: TestAgent,
-        initial_state: %{value: 0}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "server-test-reg",
+          agent_module: TestAgent,
+          initial_state: %{value: 0}
+        )
 
       # Give time for post_init to complete
       Process.sleep(50)
@@ -48,11 +50,12 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "run_action/3" do
     setup do
-      {:ok, pid} = Server.start_link(
-        agent_id: "action-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 10}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "action-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 10}
+        )
 
       Process.sleep(50)
 
@@ -94,11 +97,12 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "get_state/1" do
     test "returns agent state" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "state-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 42}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "state-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 42}
+        )
 
       Process.sleep(50)
 
@@ -113,11 +117,12 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "get_metadata/1" do
     test "returns agent metadata" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "meta-test",
-        agent_module: TestAgent,
-        metadata: %{custom: "value"}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "meta-test",
+          agent_module: TestAgent,
+          metadata: %{custom: "value"}
+        )
 
       Process.sleep(50)
 
@@ -133,11 +138,12 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "extract_state/1" do
     test "returns checkpoint-ready data" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "extract-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 99}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "extract-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 99}
+        )
 
       Process.sleep(50)
 
@@ -160,12 +166,13 @@ defmodule Arbor.Agent.ServerTest do
       {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
       # Start agent with checkpoint storage
-      {:ok, pid} = Server.start_link(
-        agent_id: "checkpoint-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 100},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "checkpoint-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 100},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
 
@@ -173,23 +180,25 @@ defmodule Arbor.Agent.ServerTest do
       assert :ok = Server.save_checkpoint(pid)
 
       # Verify checkpoint was saved
-      assert {:ok, _data} = Arbor.Checkpoint.load(
-        "checkpoint-test",
-        Arbor.Checkpoint.Store.Agent,
-        retries: 0
-      )
+      assert {:ok, _data} =
+               Arbor.Checkpoint.load(
+                 "checkpoint-test",
+                 Arbor.Checkpoint.Store.Agent,
+                 retries: 0
+               )
 
       # Stop the agent
       GenServer.stop(pid)
       Process.sleep(50)
 
       # Start a new agent with the same ID - should restore
-      {:ok, pid2} = Server.start_link(
-        agent_id: "checkpoint-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 0},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, pid2} =
+        Server.start_link(
+          agent_id: "checkpoint-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 0},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
 
@@ -203,11 +212,12 @@ defmodule Arbor.Agent.ServerTest do
     end
 
     test "works without checkpoint storage" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "no-checkpoint",
-        agent_module: TestAgent,
-        initial_state: %{value: 0}
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "no-checkpoint",
+          agent_module: TestAgent,
+          initial_state: %{value: 0}
+        )
 
       Process.sleep(50)
 
@@ -224,13 +234,14 @@ defmodule Arbor.Agent.ServerTest do
     test "saves checkpoints at configured interval" do
       {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
-      {:ok, pid} = Server.start_link(
-        agent_id: "auto-cp-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 50},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent,
-        auto_checkpoint_interval: 100
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "auto-cp-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 50},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent,
+          auto_checkpoint_interval: 100
+        )
 
       Process.sleep(50)
 
@@ -238,11 +249,12 @@ defmodule Arbor.Agent.ServerTest do
       Process.sleep(200)
 
       # Should have at least one checkpoint saved
-      assert {:ok, _data} = Arbor.Checkpoint.load(
-        "auto-cp-test",
-        Arbor.Checkpoint.Store.Agent,
-        retries: 0
-      )
+      assert {:ok, _data} =
+               Arbor.Checkpoint.load(
+                 "auto-cp-test",
+                 Arbor.Checkpoint.Store.Agent,
+                 retries: 0
+               )
 
       on_exit(fn ->
         if Process.alive?(pid), do: GenServer.stop(pid)
@@ -255,12 +267,13 @@ defmodule Arbor.Agent.ServerTest do
     test "saves checkpoint on graceful stop" do
       {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
-      {:ok, pid} = Server.start_link(
-        agent_id: "term-test",
-        agent_module: TestAgent,
-        initial_state: %{value: 77},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "term-test",
+          agent_module: TestAgent,
+          initial_state: %{value: 77},
+          checkpoint_storage: Arbor.Checkpoint.Store.Agent
+        )
 
       Process.sleep(50)
 
@@ -269,11 +282,12 @@ defmodule Arbor.Agent.ServerTest do
       Process.sleep(50)
 
       # Checkpoint should have been saved during termination
-      assert {:ok, _data} = Arbor.Checkpoint.load(
-        "term-test",
-        Arbor.Checkpoint.Store.Agent,
-        retries: 0
-      )
+      assert {:ok, _data} =
+               Arbor.Checkpoint.load(
+                 "term-test",
+                 Arbor.Checkpoint.Store.Agent,
+                 retries: 0
+               )
 
       on_exit(fn ->
         if Process.alive?(storage_pid), do: Arbor.Checkpoint.Store.Agent.stop()
@@ -281,10 +295,11 @@ defmodule Arbor.Agent.ServerTest do
     end
 
     test "unregisters from registry on stop" do
-      {:ok, pid} = Server.start_link(
-        agent_id: "unreg-term",
-        agent_module: TestAgent
-      )
+      {:ok, pid} =
+        Server.start_link(
+          agent_id: "unreg-term",
+          agent_module: TestAgent
+        )
 
       Process.sleep(50)
       assert {:ok, _} = Arbor.Agent.Registry.lookup("unreg-term")

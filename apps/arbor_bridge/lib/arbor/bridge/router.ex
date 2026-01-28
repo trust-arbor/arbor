@@ -9,10 +9,10 @@ defmodule Arbor.Bridge.Router do
 
   require Logger
 
-  plug Plug.Logger
-  plug :match
-  plug Plug.Parsers, parsers: [:json], json_decoder: Jason
-  plug :dispatch
+  plug(Plug.Logger)
+  plug(:match)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+  plug(:dispatch)
 
   # GET /health - Health check endpoint
   get "/health" do
@@ -96,11 +96,15 @@ defmodule Arbor.Bridge.Router do
     try do
       agent_id = Arbor.Bridge.ClaudeSession.to_agent_id(session_id)
 
-      Arbor.Signals.emit(:tool_authorization, %{
-        tool_name: tool_name,
-        decision: result[:decision],
-        reason: result[:reason]
-      }, agent_id: agent_id)
+      Arbor.Signals.emit(
+        :tool_authorization,
+        %{
+          tool_name: tool_name,
+          decision: result[:decision],
+          reason: result[:reason]
+        },
+        agent_id: agent_id
+      )
     rescue
       _ -> :ok
     end
