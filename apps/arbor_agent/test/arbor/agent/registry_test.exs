@@ -12,9 +12,11 @@ defmodule Arbor.Agent.RegistryTest do
     Process.sleep(10)
     # Clean up any stale entries
     {:ok, agents} = Registry.list()
+
     for agent <- agents do
       Registry.unregister(agent.agent_id)
     end
+
     :ok
   end
 
@@ -101,11 +103,12 @@ defmodule Arbor.Agent.RegistryTest do
     end
 
     test "returns all registered live agents" do
-      pids = for i <- 1..3 do
-        pid = spawn(fn -> Process.sleep(:infinity) end)
-        :ok = Registry.register("test-list-#{i}", pid, %{})
-        pid
-      end
+      pids =
+        for i <- 1..3 do
+          pid = spawn(fn -> Process.sleep(:infinity) end)
+          :ok = Registry.register("test-list-#{i}", pid, %{})
+          pid
+        end
 
       assert {:ok, agents} = Registry.list()
       assert length(agents) == 3
@@ -150,11 +153,12 @@ defmodule Arbor.Agent.RegistryTest do
     end
 
     test "counts registered agents" do
-      pids = for i <- 1..5 do
-        pid = spawn(fn -> Process.sleep(:infinity) end)
-        :ok = Registry.register("test-count-#{i}", pid, %{})
-        pid
-      end
+      pids =
+        for i <- 1..5 do
+          pid = spawn(fn -> Process.sleep(:infinity) end)
+          :ok = Registry.register("test-count-#{i}", pid, %{})
+          pid
+        end
 
       assert Registry.count() == 5
 

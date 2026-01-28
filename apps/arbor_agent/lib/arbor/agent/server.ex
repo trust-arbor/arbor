@@ -170,7 +170,9 @@ defmodule Arbor.Agent.Server do
     register_result = register_agent(state)
 
     case register_result do
-      :ok -> :ok
+      :ok ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("Failed to register agent #{state.agent_id}: #{inspect(reason)}")
     end
@@ -313,9 +315,7 @@ defmodule Arbor.Agent.Server do
         state
 
       {:error, reason} ->
-        Logger.warning(
-          "Failed to restore checkpoint for #{state.agent_id}: #{inspect(reason)}"
-        )
+        Logger.warning("Failed to restore checkpoint for #{state.agent_id}: #{inspect(reason)}")
 
         state
     end

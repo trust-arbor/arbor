@@ -11,9 +11,7 @@ defmodule Arbor.Agent.ActionRunnerTest do
       agent = TestAgent.new(%{id: "test-1", state: %{value: 0}})
 
       assert {:ok, updated_agent, result} =
-               ActionRunner.run(agent, IncrementAction, %{amount: 5},
-                 agent_module: TestAgent
-               )
+               ActionRunner.run(agent, IncrementAction, %{amount: 5}, agent_module: TestAgent)
 
       assert result.action == :increment
       assert result.new_value == 5
@@ -24,13 +22,13 @@ defmodule Arbor.Agent.ActionRunnerTest do
       agent = TestAgent.new(%{id: "test-2", state: %{value: 0}})
 
       result =
-        ActionRunner.run(agent, FailingAction, %{reason: "test error"},
-          agent_module: TestAgent
-        )
+        ActionRunner.run(agent, FailingAction, %{reason: "test error"}, agent_module: TestAgent)
 
       # FailingAction returns {:error, ...} which Jido wraps in a Directive.Error
       case result do
-        {:error, _reason} -> assert true
+        {:error, _reason} ->
+          assert true
+
         {:ok, _agent, _result} ->
           # If Jido handles the error differently, that's also fine
           assert true
@@ -44,7 +42,9 @@ defmodule Arbor.Agent.ActionRunnerTest do
       result = ActionRunner.run(agent, NonExistentModule, %{}, agent_module: TestAgent)
 
       case result do
-        {:error, _reason} -> assert true
+        {:error, _reason} ->
+          assert true
+
         {:ok, _agent, _result} ->
           # Jido may handle missing modules differently
           assert true
