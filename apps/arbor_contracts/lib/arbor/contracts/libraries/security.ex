@@ -56,7 +56,8 @@ defmodule Arbor.Contracts.Libraries.Security do
           resource: resource(),
           constraints: map(),
           expires_at: DateTime.t() | nil,
-          delegation_depth: non_neg_integer()
+          delegation_depth: non_neg_integer(),
+          metadata: map()
         ]
 
   # Core Authorization

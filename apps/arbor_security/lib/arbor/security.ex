@@ -167,7 +167,8 @@ defmodule Arbor.Security do
            principal_id: principal_id,
            expires_at: Keyword.get(opts, :expires_at),
            constraints: Keyword.get(opts, :constraints, %{}),
-           delegation_depth: Keyword.get(opts, :delegation_depth, 3)
+           delegation_depth: Keyword.get(opts, :delegation_depth, 3),
+           metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
         :ok = CapabilityStore.put(cap)

@@ -38,12 +38,12 @@ arbor_historian owns: EventLog (its own internal backend interface)
 
 ## 3. Contract Callback Naming
 
-Contract `@callback` names use **AI-readable verbose naming** to prevent semantic drift. The function name encodes what the implementation must do, what it operates on, and key constraints.
+**Facade contract callbacks** (`contracts/libraries/`) use **AI-readable verbose naming** to prevent semantic drift. The function name encodes what the implementation must do, what it operates on, and key constraints.
 
 **Pattern**: `verb_object_qualifier`
 
 ```elixir
-# YES — verbose, semantically clear
+# YES — verbose, semantically clear (facade behaviours)
 @callback check_if_principal_has_capability_for_resource_action(
   principal_id(), resource_uri(), action(), opts()
 ) :: {:ok, :authorized} | {:error, :denied | :no_capability | :capability_expired}
@@ -51,7 +51,7 @@ Contract `@callback` names use **AI-readable verbose naming** to prevent semanti
 @callback grant_capability_to_principal_for_resource(grant_opts()) ::
   {:ok, Capability.t()} | {:error, :invalid_resource | :principal_not_found}
 
-@callback calculate_trust_score_for_principal_from_event_history(principal_id()) ::
+@callback calculate_trust_score_for_principal(principal_id()) ::
   {:ok, trust_score()} | {:error, :not_found}
 
 # NO — ambiguous, allows semantic drift
@@ -78,7 +78,7 @@ defmodule Arbor.Security do
 end
 ```
 
-**Library-specific behaviours** (those staying in libraries, not contracts) use standard Elixir naming. The verbose naming rule only applies to contract callbacks.
+**Scope**: Verbose naming applies to **facade behaviours only** (`Libraries.Shell`, `Libraries.Signals`, `Libraries.Security`, `Libraries.Trust`). Domain behaviours in contracts (`Security.Enforcer`, `Autonomous.Consensus`, etc.) and library-specific behaviours use standard Elixir naming — they serve different audiences and don't need semantic disambiguation at the ecosystem boundary.
 
 ## 4. Return Types
 
@@ -150,7 +150,7 @@ These triggers mean you should evaluate whether a contract needs to change:
 | Remove callback | HIGH | All `@impl true` uses break. Coordinated update. |
 | Change return type | MEDIUM | Only Dialyzer catches. Audit consumers. |
 
-**For breaking changes**: Update contracts + all consumers in the same commit. Run full umbrella compile + test. Update both repos (arbor + trust-arbor).
+**For breaking changes**: Update contracts + all consumers in the same commit. Run full umbrella compile + test.
 
 ## 8. Configuration Convention
 
@@ -159,9 +159,44 @@ Not a contract — a documented convention all libraries follow:
 - Each library has `Arbor.<Library>.Config` module
 - Reads from `Application.get_env(:<app_name>, key, default)`
 - One function per setting with hardcoded default matching current behaviour
-- PubSub is always configurable: `Config.pubsub()` defaulting to `Arbor.PubSub`
+- PubSub is always configurable: `Config.pubsub()` defaulting to `Arbor.Core.PubSub`
 
-## 9. Dependencies
+## 9. Cross-Library Dependencies Use Behaviour Injection
+
+When a library needs to call into another library's internals, use the **behaviour + adapter + config** pattern instead of direct module calls.
+
+```elixir
+# 1. Define what you need as a behaviour (in your library)
+defmodule Arbor.Trust.Behaviours.CapabilityProvider do
+  @callback grant_capability(keyword()) :: {:ok, Capability.t()} | {:error, term()}
+  @callback revoke_capability(keyword()) :: :ok | {:error, term()}
+  @callback list_capabilities(String.t()) :: {:ok, [Capability.t()]} | {:error, term()}
+end
+
+# 2. Default adapter bridges to the other library (in your library)
+defmodule Arbor.Trust.Adapters.SecurityCapabilityProvider do
+  @behaviour Arbor.Trust.Behaviours.CapabilityProvider
+  @impl true
+  def grant_capability(opts), do: Arbor.Security.Kernel.grant_capability(opts)
+  # ...
+end
+
+# 3. Config makes it swappable
+defmodule Arbor.Trust.Config do
+  def capability_provider,
+    do: Application.get_env(:arbor_trust, :capability_provider,
+      Arbor.Trust.Adapters.SecurityCapabilityProvider)
+end
+
+# 4. Consumer calls through config
+capability_provider().grant_capability(opts)
+```
+
+**Why**: Coupling is contained in one adapter module. The consuming code only knows about the behaviour. Tests can swap in mocks. If the upstream library changes its API, only the adapter needs updating.
+
+**When to apply**: Whenever a library reaches into another library's internal modules (not its public facade). Direct calls to a library's public facade (`Arbor.Security.authorize/4`) are fine — those are the intended API.
+
+## 10. Dependencies
 
 ```
 arbor_contracts depends on: NOTHING (typed_struct + jason only)
@@ -170,7 +205,7 @@ All libraries depend on: arbor_contracts (at minimum)
 
 Contracts must never depend on any Arbor library. If you find yourself wanting contracts to import from a library, the dependency direction is wrong.
 
-## 10. Organization
+## 11. Organization
 
 ```
 arbor_contracts/lib/arbor/contracts/

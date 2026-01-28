@@ -142,10 +142,10 @@ defmodule Arbor.AgentTest do
 
   describe "checkpoint/1" do
     test "manually triggers checkpoint" do
-      {:ok, storage_pid} = Arbor.Checkpoint.Storage.Agent.start_link()
+      {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
       {:ok, _pid} = Arbor.Agent.start("facade-cp", TestAgent, %{value: 55},
-        checkpoint_storage: Arbor.Checkpoint.Storage.Agent
+        checkpoint_storage: Arbor.Checkpoint.Store.Agent
       )
 
       Process.sleep(50)
@@ -154,13 +154,13 @@ defmodule Arbor.AgentTest do
 
       assert {:ok, _} = Arbor.Checkpoint.load(
         "facade-cp",
-        Arbor.Checkpoint.Storage.Agent,
+        Arbor.Checkpoint.Store.Agent,
         retries: 0
       )
 
       on_exit(fn ->
         Arbor.Agent.stop("facade-cp")
-        if Process.alive?(storage_pid), do: Arbor.Checkpoint.Storage.Agent.stop()
+        if Process.alive?(storage_pid), do: Arbor.Checkpoint.Store.Agent.stop()
       end)
     end
 
@@ -171,11 +171,11 @@ defmodule Arbor.AgentTest do
 
   describe "full lifecycle" do
     test "start -> action -> checkpoint -> stop -> restart -> restore" do
-      {:ok, storage_pid} = Arbor.Checkpoint.Storage.Agent.start_link()
+      {:ok, storage_pid} = Arbor.Checkpoint.Store.Agent.start_link()
 
       # Start agent
       {:ok, pid1} = Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 0},
-        checkpoint_storage: Arbor.Checkpoint.Storage.Agent
+        checkpoint_storage: Arbor.Checkpoint.Store.Agent
       )
 
       Process.sleep(50)
@@ -190,7 +190,7 @@ defmodule Arbor.AgentTest do
 
       # Restart - should restore from checkpoint
       {:ok, pid2} = Arbor.Agent.start("lifecycle-test", TestAgent, %{value: 999},
-        checkpoint_storage: Arbor.Checkpoint.Storage.Agent
+        checkpoint_storage: Arbor.Checkpoint.Store.Agent
       )
 
       Process.sleep(50)
@@ -203,7 +203,7 @@ defmodule Arbor.AgentTest do
 
       on_exit(fn ->
         Arbor.Agent.stop("lifecycle-test")
-        if Process.alive?(storage_pid), do: Arbor.Checkpoint.Storage.Agent.stop()
+        if Process.alive?(storage_pid), do: Arbor.Checkpoint.Store.Agent.stop()
       end)
     end
   end
