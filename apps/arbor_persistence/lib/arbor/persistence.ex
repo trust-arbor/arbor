@@ -127,4 +127,22 @@ defmodule Arbor.Persistence do
   def stream_version(name, backend, stream_id, opts \\ []) do
     backend.stream_version(stream_id, Keyword.put(opts, :name, name))
   end
+
+  @doc "List all known stream IDs."
+  @spec list_streams(atom(), module(), keyword()) :: {:ok, [String.t()]}
+  def list_streams(name, backend, opts \\ []) do
+    backend.list_streams(Keyword.put(opts, :name, name))
+  end
+
+  @doc "Get the number of distinct streams."
+  @spec stream_count(atom(), module(), keyword()) :: {:ok, non_neg_integer()}
+  def stream_count(name, backend, opts \\ []) do
+    backend.stream_count(Keyword.put(opts, :name, name))
+  end
+
+  @doc "Get the total number of events across all streams."
+  @spec event_count(atom(), module(), keyword()) :: {:ok, non_neg_integer()}
+  def event_count(name, backend, opts \\ []) do
+    backend.event_count(Keyword.put(opts, :name, name))
+  end
 end

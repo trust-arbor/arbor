@@ -7,8 +7,9 @@ defmodule Arbor.Historian.QueryEngine do
   """
 
   alias Arbor.Historian.Collector.{SignalTransformer, StreamRouter}
-  alias Arbor.Historian.EventLog
+  alias Arbor.Historian.EventConverter
   alias Arbor.Historian.HistoryEntry
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   @type query_opts :: [
           event_log: GenServer.server(),
@@ -26,11 +27,20 @@ defmodule Arbor.Historian.QueryEngine do
   """
   @spec read_stream(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def read_stream(stream_id, opts \\ []) do
-    event_log = Keyword.get(opts, :event_log, EventLog.ETS)
+    event_log = Keyword.get(opts, :event_log, Arbor.Historian.EventLog.ETS)
 
-    case EventLog.ETS.read_stream(event_log, stream_id) do
-      {:ok, events} ->
-        entries = Enum.map(events, &SignalTransformer.event_to_history_entry/1)
+    case PersistenceETS.read_stream(stream_id, name: event_log) do
+      {:ok, persistence_events} ->
+        entries =
+          persistence_events
+          |> Enum.map(fn pe ->
+            case EventConverter.from_persistence_event(pe) do
+              {:ok, historian_event} -> SignalTransformer.event_to_history_entry(historian_event)
+              {:error, _} -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
         {:ok, entries}
 
       error ->

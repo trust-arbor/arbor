@@ -19,8 +19,9 @@ defmodule Arbor.Historian.Collector do
   use GenServer
 
   alias Arbor.Historian.Collector.{SignalTransformer, StreamRouter}
-  alias Arbor.Historian.EventLog
+  alias Arbor.Historian.EventConverter
   alias Arbor.Historian.StreamRegistry
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   require Logger
 
@@ -62,7 +63,7 @@ defmodule Arbor.Historian.Collector do
 
   @impl GenServer
   def init(opts) do
-    event_log = Keyword.get(opts, :event_log, EventLog.ETS)
+    event_log = Keyword.get(opts, :event_log, Arbor.Historian.EventLog.ETS)
     registry = Keyword.get(opts, :registry, StreamRegistry)
     filter = Keyword.get(opts, :filter)
     subscribe? = Keyword.get(opts, :subscribe, true)
@@ -180,10 +181,11 @@ defmodule Arbor.Historian.Collector do
     timestamp = Map.get(signal, :timestamp) || Map.get(signal, :time) || DateTime.utc_now()
 
     Enum.each(stream_ids, fn stream_id ->
-      stream_event = %{event | stream_id: stream_id, aggregate_id: stream_id}
+      stream_event = %{event | stream_id: stream_id, subject_id: stream_id}
+      persistence_event = EventConverter.to_persistence_event(stream_event, stream_id)
 
-      case EventLog.ETS.append(state.event_log, stream_id, stream_event) do
-        {:ok, _pos} ->
+      case PersistenceETS.append(stream_id, persistence_event, name: state.event_log) do
+        {:ok, _persisted} ->
           StreamRegistry.record_event(state.registry, stream_id, timestamp)
 
         {:error, reason} ->

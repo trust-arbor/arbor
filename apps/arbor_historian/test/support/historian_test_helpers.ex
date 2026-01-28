@@ -40,7 +40,7 @@ defmodule Arbor.Historian.TestHelpers do
     collector_name = :"collector_#{test_name}"
 
     {:ok, event_log} =
-      Arbor.Historian.EventLog.ETS.start_link(name: event_log_name)
+      Arbor.Persistence.EventLog.ETS.start_link(name: event_log_name)
 
     {:ok, registry} =
       Arbor.Historian.StreamRegistry.start_link(name: registry_name)
