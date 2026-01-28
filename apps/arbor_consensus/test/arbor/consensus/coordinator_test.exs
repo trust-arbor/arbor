@@ -361,4 +361,245 @@ defmodule Arbor.Consensus.CoordinatorTest do
       assert status == :approved
     end
   end
+
+  # ===========================================================================
+  # Phase 7: Per-agent proposal quota enforcement
+  # ===========================================================================
+
+  describe "submit/2 per-agent quota enforcement" do
+    setup do
+      original_max = Application.get_env(:arbor_consensus, :max_proposals_per_agent)
+      original_enabled = Application.get_env(:arbor_consensus, :proposal_quota_enabled)
+
+      on_exit(fn ->
+        restore_config(:max_proposals_per_agent, original_max)
+        restore_config(:proposal_quota_enabled, original_enabled)
+      end)
+
+      :ok
+    end
+
+    test "succeeds within per-agent proposal limit" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 3)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = "agent_quota_test_#{:erlang.unique_integer([:positive])}"
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Coordinator.submit(
+            %{proposer: agent_id, change_type: :code_modification, description: "p#{i}"},
+            server: coord
+          )
+      end
+
+      # All 3 should succeed
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals == 3
+    end
+
+    test "fails when per-agent limit exceeded" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 2)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = "agent_quota_fail_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :code_modification, description: "p1"},
+          server: coord
+        )
+
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :test_change, description: "p2"},
+          server: coord
+        )
+
+      # 3rd should fail
+      result =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :documentation_change, description: "p3"},
+          server: coord
+        )
+
+      assert result == {:error, :agent_proposal_quota_exceeded}
+    end
+
+    test "decision reached frees quota space" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 1)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      agent_id = "agent_quota_free_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :code_modification, description: "first"},
+          server: coord
+        )
+
+      # Wait for decision
+      {:ok, :approved} = TestHelpers.wait_for_decision(coord, id1)
+
+      # Now should be able to submit another
+      {:ok, _id2} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :test_change, description: "second"},
+          server: coord
+        )
+    end
+
+    test "cancel frees quota space" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 1)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = "agent_quota_cancel_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :code_modification, description: "cancel me"},
+          server: coord
+        )
+
+      # At limit
+      result =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :test_change, description: "blocked"},
+          server: coord
+        )
+
+      assert result == {:error, :agent_proposal_quota_exceeded}
+
+      # Cancel the first
+      :ok = Coordinator.cancel(id1, coord)
+
+      # Now should succeed
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent_id, change_type: :test_change, description: "after cancel"},
+          server: coord
+        )
+    end
+
+    test "multiple agents can each have max proposals" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 2)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000, max_concurrent_proposals: 10]
+        )
+
+      agent1 = "multi_agent_1_#{:erlang.unique_integer([:positive])}"
+      agent2 = "multi_agent_2_#{:erlang.unique_integer([:positive])}"
+
+      # Agent 1: 2 proposals
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent1, change_type: :code_modification, description: "a1p1"},
+          server: coord
+        )
+
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent1, change_type: :test_change, description: "a1p2"},
+          server: coord
+        )
+
+      # Agent 2: 2 proposals
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent2, change_type: :code_modification, description: "a2p1"},
+          server: coord
+        )
+
+      {:ok, _} =
+        Coordinator.submit(
+          %{proposer: agent2, change_type: :test_change, description: "a2p2"},
+          server: coord
+        )
+
+      # Agent 1 at limit
+      result =
+        Coordinator.submit(
+          %{proposer: agent1, change_type: :documentation_change, description: "a1p3"},
+          server: coord
+        )
+
+      assert result == {:error, :agent_proposal_quota_exceeded}
+
+      # Agent 2 also at limit
+      result =
+        Coordinator.submit(
+          %{proposer: agent2, change_type: :documentation_change, description: "a2p3"},
+          server: coord
+        )
+
+      assert result == {:error, :agent_proposal_quota_exceeded}
+    end
+
+    test "quota disabled allows unlimited proposals" do
+      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 1)
+      Application.put_env(:arbor_consensus, :proposal_quota_enabled, false)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000, max_concurrent_proposals: 10]
+        )
+
+      agent_id = "agent_no_quota_#{:erlang.unique_integer([:positive])}"
+
+      # Should be able to submit more than the limit
+      for i <- 1..5 do
+        {:ok, _} =
+          Coordinator.submit(
+            %{proposer: agent_id, change_type: :code_modification, description: "p#{i}"},
+            server: coord
+          )
+      end
+    end
+  end
+
+  describe "stats/1 quota information" do
+    test "includes quota stats", %{coordinator: coord} do
+      stats = Coordinator.stats(coord)
+
+      assert Map.has_key?(stats, :max_proposals_per_agent)
+      assert Map.has_key?(stats, :agents_with_proposals)
+      assert Map.has_key?(stats, :proposal_quota_enabled)
+
+      assert is_integer(stats.max_proposals_per_agent)
+      assert is_integer(stats.agents_with_proposals)
+      assert is_boolean(stats.proposal_quota_enabled)
+    end
+  end
+
+  defp restore_config(key, nil), do: Application.delete_env(:arbor_consensus, key)
+  defp restore_config(key, value), do: Application.put_env(:arbor_consensus, key, value)
 end

@@ -119,4 +119,52 @@ defmodule Arbor.Security.Config do
   def consensus_module do
     Application.get_env(@app, :consensus_module, Arbor.Consensus)
   end
+
+  # ===========================================================================
+  # Quota Configuration (Phase 7)
+  # ===========================================================================
+
+  @doc """
+  Maximum number of capabilities a single agent can hold.
+
+  Default: 1000. When exceeded, `grant/1` returns
+  `{:error, {:quota_exceeded, :per_agent_capability_limit, ...}}`.
+  """
+  @spec max_capabilities_per_agent() :: pos_integer()
+  def max_capabilities_per_agent do
+    Application.get_env(@app, :max_capabilities_per_agent, 1000)
+  end
+
+  @doc """
+  Maximum total capabilities stored in the system.
+
+  Default: 100_000. When exceeded, `grant/1` returns
+  `{:error, {:quota_exceeded, :global_capability_limit, ...}}`.
+  """
+  @spec max_global_capabilities() :: pos_integer()
+  def max_global_capabilities do
+    Application.get_env(@app, :max_global_capabilities, 100_000)
+  end
+
+  @doc """
+  Maximum delegation chain depth allowed.
+
+  Default: 10. Capabilities with `delegation_depth > max_delegation_depth`
+  are rejected on store with `{:error, {:quota_exceeded, :delegation_depth_limit, ...}}`.
+  """
+  @spec max_delegation_depth() :: non_neg_integer()
+  def max_delegation_depth do
+    Application.get_env(@app, :max_delegation_depth, 10)
+  end
+
+  @doc """
+  Whether quota enforcement is enabled.
+
+  Default: true. When false, all quota checks are skipped.
+  Useful for testing or migration scenarios.
+  """
+  @spec quota_enforcement_enabled?() :: boolean()
+  def quota_enforcement_enabled? do
+    Application.get_env(@app, :quota_enforcement_enabled, true)
+  end
 end

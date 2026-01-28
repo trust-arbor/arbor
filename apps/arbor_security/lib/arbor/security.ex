@@ -233,9 +233,15 @@ defmodule Arbor.Security do
          ) do
       {:ok, cap} ->
         {:ok, signed_cap} = SystemAuthority.sign_capability(cap)
-        :ok = CapabilityStore.put(signed_cap)
-        emit_capability_granted(signed_cap)
-        {:ok, signed_cap}
+
+        case CapabilityStore.put(signed_cap) do
+          {:ok, :stored} ->
+            emit_capability_granted(signed_cap)
+            {:ok, signed_cap}
+
+          {:error, _} = error ->
+            error
+        end
 
       error ->
         error
@@ -280,8 +286,9 @@ defmodule Arbor.Security do
              delegation_record: delegation_record
            ),
          # Sign the new capability with system authority
-         {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain) do
-      :ok = CapabilityStore.put(signed_cap)
+         {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain),
+         # Store with quota enforcement
+         {:ok, :stored} <- CapabilityStore.put(signed_cap) do
       emit_capability_granted(signed_cap)
       {:ok, signed_cap}
     end

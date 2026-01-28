@@ -267,7 +267,7 @@ defmodule Arbor.SecurityTest do
       :ok = Security.revoke(cap.id)
 
       tampered = %{cap | resource_uri: "arbor://fs/write/evil"}
-      :ok = CapabilityStore.put(tampered)
+      {:ok, :stored} = CapabilityStore.put(tampered)
 
       # The tampered capability should fail signature verification
       assert {:error, :unauthorized} =
@@ -307,7 +307,7 @@ defmodule Arbor.SecurityTest do
           principal_id: agent_id
         )
 
-      :ok = CapabilityStore.put(unsigned_cap)
+      {:ok, :stored} = CapabilityStore.put(unsigned_cap)
 
       # Default config has capability_signing_required: false
       assert {:ok, :authorized} =
@@ -449,6 +449,69 @@ defmodule Arbor.SecurityTest do
       assert Map.has_key?(stats.rate_limiter, :bucket_count)
     end
   end
+
+  # ===========================================================================
+  # Phase 7: Quota enforcement integration tests
+  # ===========================================================================
+
+  describe "grant/1 quota enforcement" do
+    setup do
+      original_max_per_agent = Application.get_env(:arbor_security, :max_capabilities_per_agent)
+      original_enabled = Application.get_env(:arbor_security, :quota_enforcement_enabled)
+
+      on_exit(fn ->
+        restore_config(:max_capabilities_per_agent, original_max_per_agent)
+        restore_config(:quota_enforcement_enabled, original_enabled)
+      end)
+
+      :ok
+    end
+
+    test "returns error when per-agent quota exceeded", %{agent_id: agent_id} do
+      Application.put_env(:arbor_security, :max_capabilities_per_agent, 2)
+      Application.put_env(:arbor_security, :quota_enforcement_enabled, true)
+
+      base = :erlang.unique_integer([:positive])
+
+      {:ok, _} =
+        Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/1")
+
+      {:ok, _} =
+        Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/2")
+
+      # 3rd should fail
+      assert {:error, {:quota_exceeded, :per_agent_capability_limit, context}} =
+               Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/3")
+
+      assert context.agent_id == agent_id
+      assert context.current == 2
+      assert context.limit == 2
+    end
+
+    test "returns error when delegation_depth exceeds limit", %{agent_id: agent_id} do
+      original_max_depth = Application.get_env(:arbor_security, :max_delegation_depth)
+      Application.put_env(:arbor_security, :max_delegation_depth, 2)
+
+      on_exit(fn ->
+        restore_config(:max_delegation_depth, original_max_depth)
+      end)
+
+      base = :erlang.unique_integer([:positive])
+
+      assert {:error, {:quota_exceeded, :delegation_depth_limit, context}} =
+               Security.grant(
+                 principal: agent_id,
+                 resource: "arbor://fs/read/quota_depth/#{base}",
+                 delegation_depth: 5
+               )
+
+      assert context.depth == 5
+      assert context.limit == 2
+    end
+  end
+
+  defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
 
   # ===========================================================================
   # Phase 5: Consensus escalation integration tests
