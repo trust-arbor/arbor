@@ -141,6 +141,19 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   # 4/7 = majority for low-risk changes
   @low_risk_quorum 4
 
+  # Module name patterns mapped to architecture layers.
+  # Layer 1: Governance, Layer 2: Core Systems, Layer 3: Shared Infrastructure
+  @layer_patterns [
+    {"Consensus", 1},
+    {"Trust.Manager", 1},
+    {"CapabilityKernel", 1},
+    {"Supervisor", 2},
+    {"Registry", 2},
+    {"Gateway", 2},
+    {"Arbor.Core", 3},
+    {"Arbor.Security", 3}
+  ]
+
   @doc """
   Returns the council size.
   """
@@ -234,21 +247,12 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   def layer_for_module(module) do
     module_string = to_string(module)
 
-    cond do
-      # Layer 1: Governance
-      String.contains?(module_string, "Consensus") -> 1
-      String.contains?(module_string, "Trust.Manager") -> 1
-      String.contains?(module_string, "CapabilityKernel") -> 1
-      # Layer 2: Core Systems
-      String.contains?(module_string, "Supervisor") -> 2
-      String.contains?(module_string, "Registry") -> 2
-      String.contains?(module_string, "Gateway") -> 2
-      # Layer 3: Shared Infrastructure
-      String.contains?(module_string, "Arbor.Core") -> 3
-      String.contains?(module_string, "Arbor.Security") -> 3
-      # Layer 4: Agent Sandboxes (default)
-      true -> 4
-    end
+    @layer_patterns
+    |> Enum.find_value(fn {pattern, layer} ->
+      if String.contains?(module_string, pattern), do: layer
+    end)
+    # Layer 4: Agent Sandboxes (default)
+    |> Kernel.||(4)
   end
 
   @doc """

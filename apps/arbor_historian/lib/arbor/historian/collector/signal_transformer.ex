@@ -106,30 +106,15 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   end
 
   # Extract signal type from signal - handles both string and atom type fields.
-  defp extract_signal_type(signal) do
-    cond do
-      # Trust-arbor Arbor.Signals.Signal has :type as atom
-      is_atom(signal.type) ->
-        signal.type
+  defp extract_signal_type(%{type: type}) when is_atom(type), do: type
+  defp extract_signal_type(%{type: "arbor." <> rest}), do: parse_signal_type_segment(rest)
+  defp extract_signal_type(%{type: type}) when is_binary(type), do: parse_signal_type_segment(type)
+  defp extract_signal_type(_signal), do: :unknown
 
-      # CloudEvents / jido_signal style: type is "arbor.category.type"
-      is_binary(signal.type) ->
-        case signal.type do
-          "arbor." <> rest ->
-            case String.split(rest, ".", parts: 2) do
-              [_category, type] -> String.to_atom(type)
-              [single] -> String.to_atom(single)
-            end
-
-          type ->
-            case String.split(type, ".", parts: 2) do
-              [_first, second] -> String.to_atom(second)
-              [single] -> String.to_atom(single)
-            end
-        end
-
-      true ->
-        :unknown
+  defp parse_signal_type_segment(segment) do
+    case String.split(segment, ".", parts: 2) do
+      [_prefix, type] -> String.to_atom(type)
+      [single] -> String.to_atom(single)
     end
   end
 

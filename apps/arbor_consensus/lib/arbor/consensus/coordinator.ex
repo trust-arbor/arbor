@@ -509,63 +509,62 @@ defmodule Arbor.Consensus.Coordinator do
         state
 
       proposal ->
-        # Record individual evaluation events
-        Enum.each(evaluations, fn eval ->
-          record_event(state, :evaluation_submitted, %{
-            proposal_id: proposal_id,
-            evaluator_id: eval.evaluator_id,
-            vote: eval.vote,
-            perspective: eval.perspective,
-            confidence: eval.confidence
-          })
-        end)
-
-        # Record council complete
-        record_event(state, :council_complete, %{
-          proposal_id: proposal_id,
-          data: %{evaluation_count: length(evaluations)}
-        })
-
-        # Render decision
-        case CouncilDecision.from_evaluations(proposal, evaluations) do
-          {:ok, decision} ->
-            new_status =
-              case decision.decision do
-                :approved -> :approved
-                :rejected -> :rejected
-                :deadlock -> :deadlock
-              end
-
-            proposal = Proposal.update_status(proposal, new_status)
-
-            state = %{
-              state
-              | proposals: Map.put(state.proposals, proposal_id, proposal),
-                decisions: Map.put(state.decisions, proposal_id, decision)
-            }
-
-            # Record decision event
-            record_event(state, :decision_reached, %{
-              proposal_id: proposal_id,
-              decision_id: decision.id,
-              decision: decision.decision,
-              approve_count: decision.approve_count,
-              reject_count: decision.reject_count,
-              abstain_count: decision.abstain_count,
-              data: %{
-                quorum_met: decision.quorum_met,
-                average_confidence: decision.average_confidence
-              }
-            })
-
-            # Execute if approved and auto-execute is on
-            maybe_execute(state, proposal, decision)
-
-          {:error, reason} ->
-            Logger.error("Failed to render decision for #{proposal_id}: #{inspect(reason)}")
-            update_proposal_status(state, proposal_id, :deadlock)
-        end
+        record_evaluation_events(state, proposal_id, evaluations)
+        render_and_apply_decision(state, proposal_id, proposal, evaluations)
     end
+  end
+
+  defp record_evaluation_events(state, proposal_id, evaluations) do
+    Enum.each(evaluations, fn eval ->
+      record_event(state, :evaluation_submitted, %{
+        proposal_id: proposal_id,
+        evaluator_id: eval.evaluator_id,
+        vote: eval.vote,
+        perspective: eval.perspective,
+        confidence: eval.confidence
+      })
+    end)
+
+    record_event(state, :council_complete, %{
+      proposal_id: proposal_id,
+      data: %{evaluation_count: length(evaluations)}
+    })
+  end
+
+  defp render_and_apply_decision(state, proposal_id, proposal, evaluations) do
+    case CouncilDecision.from_evaluations(proposal, evaluations) do
+      {:ok, decision} ->
+        apply_decision(state, proposal_id, proposal, decision)
+
+      {:error, reason} ->
+        Logger.error("Failed to render decision for #{proposal_id}: #{inspect(reason)}")
+        update_proposal_status(state, proposal_id, :deadlock)
+    end
+  end
+
+  defp apply_decision(state, proposal_id, proposal, decision) do
+    proposal = Proposal.update_status(proposal, decision.decision)
+
+    state = %{
+      state
+      | proposals: Map.put(state.proposals, proposal_id, proposal),
+        decisions: Map.put(state.decisions, proposal_id, decision)
+    }
+
+    record_event(state, :decision_reached, %{
+      proposal_id: proposal_id,
+      decision_id: decision.id,
+      decision: decision.decision,
+      approve_count: decision.approve_count,
+      reject_count: decision.reject_count,
+      abstain_count: decision.abstain_count,
+      data: %{
+        quorum_met: decision.quorum_met,
+        average_confidence: decision.average_confidence
+      }
+    })
+
+    maybe_execute(state, proposal, decision)
   end
 
   defp maybe_execute(state, %{status: :approved} = proposal, decision) do
@@ -646,22 +645,25 @@ defmodule Arbor.Consensus.Coordinator do
 
     case ConsensusEvent.new(event_attrs) do
       {:ok, event} ->
-        # Store in ETS event store (best effort)
-        try do
-          EventStore.append(event)
-        rescue
-          _ -> :ok
-        end
-
-        # Forward to event sink if configured
-        if state.event_sink do
-          Task.start(fn ->
-            state.event_sink.record(event)
-          end)
-        end
+        store_event(event)
+        maybe_forward_to_sink(state.event_sink, event)
 
       {:error, reason} ->
         Logger.warning("Failed to create consensus event: #{inspect(reason)}")
     end
+  end
+
+  defp store_event(event) do
+    EventStore.append(event)
+  rescue
+    _ -> :ok
+  end
+
+  defp maybe_forward_to_sink(nil, _event), do: :ok
+
+  defp maybe_forward_to_sink(event_sink, event) do
+    Task.start(fn ->
+      event_sink.record(event)
+    end)
   end
 end

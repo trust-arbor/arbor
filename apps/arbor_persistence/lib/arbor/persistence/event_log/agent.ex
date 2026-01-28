@@ -39,18 +39,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
         state.streams
         |> Map.get(stream_id, [])
         |> Enum.filter(&(&1.event_number >= from_num))
-        |> then(fn evts ->
-          case direction do
-            :forward -> evts
-            :backward -> Enum.reverse(evts)
-          end
-        end)
-        |> then(fn evts ->
-          case limit do
-            nil -> evts
-            n -> Enum.take(evts, n)
-          end
-        end)
+        |> apply_direction(direction)
+        |> apply_limit(limit)
       end)
 
     {:ok, events}
@@ -66,12 +56,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
       Agent.get(name, fn state ->
         state.global
         |> Enum.filter(&(&1.global_position >= from_pos))
-        |> then(fn evts ->
-          case limit do
-            nil -> evts
-            n -> Enum.take(evts, n)
-          end
-        end)
+        |> apply_limit(limit)
       end)
 
     {:ok, events}
@@ -110,6 +95,12 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   # --- Private ---
+
+  defp apply_direction(events, :forward), do: events
+  defp apply_direction(events, :backward), do: Enum.reverse(events)
+
+  defp apply_limit(events, nil), do: events
+  defp apply_limit(events, n), do: Enum.take(events, n)
 
   defp do_append(stream_id, events, state) do
     current_version = Map.get(state.versions, stream_id, 0)
