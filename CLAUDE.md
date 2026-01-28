@@ -17,6 +17,10 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
 
 - **Contract-First**: Shared types and behaviours in `arbor_contracts`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
 - **Facade Pattern**: Each library exposes one public facade (e.g., `Arbor.Security`). Never alias internal modules from another library.
+- **SafeAtom**: Never use `String.to_atom/1` with untrusted input (DoS risk). Use `Arbor.Common.SafeAtom` instead:
+  - `to_existing/1` — only converts if atom already exists
+  - `to_allowed/2` — only converts if in allowed list
+  - `atomize_keys/2` — safely atomize known map keys
 - Search existing facades before writing new code. Expand a facade rather than reaching into internals.
 
 ## Architecture Triggers
