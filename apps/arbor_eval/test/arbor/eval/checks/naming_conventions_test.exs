@@ -1,3 +1,4 @@
+# credo:disable-for-this-file
 defmodule Arbor.Eval.Checks.NamingConventionsTest do
   use ExUnit.Case, async: true
 
