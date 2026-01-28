@@ -541,7 +541,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 **Libraries touched:** `arbor_contracts`, `arbor_security`, `arbor_consensus`
 
-### Phase 8: LLM Evaluator
+### Phase 8: LLM Evaluator (DONE ✓ `06e378c`)
 
 **Goal:** LLM-based evaluation perspectives for consensus.
 
@@ -551,7 +551,18 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 - Model diversity per perspective (reduces shared bias)
 - Cost controls (deterministic gate before LLM)
 
-**Libraries touched:** `arbor_consensus`
+**Implemented:**
+- `Arbor.Contracts.API.AI` — behaviour for LLM providers
+- `arbor_ai` umbrella app — facade over ReqLLM
+- `Arbor.Consensus.EvaluatorBackend.LLM` — four perspectives:
+  - `:security_llm` — vulnerability analysis
+  - `:architecture_llm` — design pattern review
+  - `:code_quality_llm` — code style assessment
+  - `:performance_llm` — algorithmic complexity review
+- Config: `llm_evaluator_timeout`, `llm_evaluator_ai_module`, `llm_evaluators_enabled?`
+- Graceful degradation: timeouts and API errors return `:abstain`
+
+**Libraries touched:** `arbor_contracts`, `arbor_ai` (new), `arbor_consensus`
 
 ### Phase 9: Federation Security
 
