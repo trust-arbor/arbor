@@ -221,4 +221,50 @@ defmodule Arbor.Consensus.Config do
   def proposal_quota_enabled? do
     Application.get_env(@app, :proposal_quota_enabled, true)
   end
+
+  # ===========================================================================
+  # LLM Evaluator Configuration (Phase 8)
+  # ===========================================================================
+
+  @doc """
+  Timeout for LLM evaluator calls in milliseconds.
+
+  Default: 60_000 (60 seconds). LLM calls can be slow; this should be
+  long enough for complex analysis but not indefinite.
+  """
+  @spec llm_evaluator_timeout() :: pos_integer()
+  def llm_evaluator_timeout do
+    Application.get_env(@app, :llm_evaluator_timeout, 60_000)
+  end
+
+  @doc """
+  Module implementing `Arbor.Contracts.API.AI` for LLM evaluators.
+
+  Default: `Arbor.AI`. Override for testing or custom providers.
+  """
+  @spec llm_evaluator_ai_module() :: module()
+  def llm_evaluator_ai_module do
+    Application.get_env(@app, :llm_evaluator_ai_module, Arbor.AI)
+  end
+
+  @doc """
+  Whether LLM evaluators are enabled.
+
+  Default: true. When false, LLM perspectives are skipped and return abstain.
+  Useful for environments without LLM API access.
+  """
+  @spec llm_evaluators_enabled?() :: boolean()
+  def llm_evaluators_enabled? do
+    Application.get_env(@app, :llm_evaluators_enabled, true)
+  end
+
+  @doc """
+  LLM-based perspectives available for consensus evaluation.
+
+  These perspectives use LLM analysis for subjective review.
+  """
+  @spec llm_perspectives() :: [atom()]
+  def llm_perspectives do
+    [:security_llm, :architecture_llm, :code_quality_llm, :performance_llm]
+  end
 end
