@@ -39,6 +39,10 @@ mix quality    # format --check-formatted + credo --strict
 mix test.fast  # unit tests only (--only fast)
 ```
 
+## Edit Tool Pitfalls
+
+**Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
+
 ## Roadmap
 
 Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` → `2-planned/` → `3-in-progress/` → `5-completed/`). Design decisions go in `.arbor/decisions/`.

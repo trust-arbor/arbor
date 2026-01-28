@@ -485,7 +485,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 **Why fifth:** Completes Layer 4. Depends on Layers 0-3 working correctly. Lives in Security so native agents (not just Bridge) get consensus escalation.
 
-### Phase 6: Deterministic Evaluator
+### Phase 6: Deterministic Evaluator (DONE ✓)
 
 **Goal:** Concrete, zero-cost evaluator perspectives for consensus.
 
@@ -494,6 +494,13 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 - `mix credo --strict` evaluator: vote on code quality
 - `mix compile --warnings-as-errors` evaluator
 - Integration with `arbor_shell` / `arbor_sandbox` for isolated execution
+
+**Implemented:**
+- `Arbor.Consensus.EvaluatorBackend.Deterministic` — runs actual shell commands via `Arbor.Shell`
+- Supported perspectives: `:mix_test`, `:mix_credo`, `:mix_compile`, `:mix_format_check`, `:mix_dialyzer`
+- Config: `deterministic_evaluator_timeout`, `deterministic_evaluator_sandbox`, `deterministic_evaluator_default_cwd`
+- Requires `project_path` in proposal metadata
+- Votes based on exit code (0 = approve, non-zero = reject)
 
 **Libraries touched:** `arbor_consensus`, `arbor_shell`
 
