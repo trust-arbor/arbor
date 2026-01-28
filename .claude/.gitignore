@@ -1,0 +1,13 @@
+# Local settings (user-specific)
+settings.local.json
+
+# Private skills
+skills/introspection/
+
+# Plan files (ephemeral)
+plans/
+
+# Compiled binaries (rebuild with `go build`)
+hooks/save_context
+hooks/memory
+hooks/search_sessions

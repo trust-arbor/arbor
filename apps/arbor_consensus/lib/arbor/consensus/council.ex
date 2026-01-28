@@ -1,0 +1,166 @@
+defmodule Arbor.Consensus.Council do
+  @moduledoc """
+  Council spawning and evaluation collection.
+
+  Spawns one evaluator task per perspective and collects results
+  with early termination once quorum is reached.
+
+  ## Flow
+
+  1. Determine required perspectives from config based on `change_type`
+  2. For each perspective, spawn a Task calling `EvaluatorBackend.evaluate/3`
+  3. Collect with early termination: return as soon as quorum is reached
+  4. All evaluations are sealed before returning
+  5. Kill remaining evaluator tasks on quorum
+  """
+
+  alias Arbor.Contracts.Autonomous.{Evaluation, Proposal}
+  alias Arbor.Consensus.Config
+
+  require Logger
+
+  @doc """
+  Evaluate a proposal by spawning evaluator tasks for each perspective.
+
+  Returns a list of sealed evaluations. Terminates early if quorum
+  can be determined before all evaluators complete.
+
+  ## Options
+
+    * `:timeout` - Per-evaluator timeout in ms (default: from config)
+    * `:evaluator_opts` - Extra opts passed to each evaluator
+  """
+  @spec evaluate(
+          proposal :: Proposal.t(),
+          perspectives :: [atom()],
+          evaluator_backend :: module(),
+          opts :: keyword()
+        ) :: {:ok, [Evaluation.t()]} | {:error, term()}
+  def evaluate(%Proposal{} = proposal, perspectives, evaluator_backend, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 90_000)
+    evaluator_opts = Keyword.get(opts, :evaluator_opts, [])
+    quorum = Keyword.get(opts, :quorum)
+
+    # Spawn one task per perspective
+    tasks =
+      Enum.map(perspectives, fn perspective ->
+        task =
+          Task.async(fn ->
+            evaluator_backend.evaluate(proposal, perspective, evaluator_opts)
+          end)
+
+        {perspective, task}
+      end)
+
+    # Collect results with early termination
+    {evaluations, _remaining} =
+      collect_with_early_termination(tasks, quorum, timeout)
+
+    if Enum.empty?(evaluations) do
+      {:error, :no_evaluations}
+    else
+      {:ok, evaluations}
+    end
+  end
+
+  @doc """
+  Determine the required perspectives for a proposal using the config.
+  """
+  @spec required_perspectives(Proposal.t(), Config.t()) :: [atom()]
+  def required_perspectives(%Proposal{change_type: change_type}, %Config{} = config) do
+    Config.perspectives_for(config, change_type)
+  end
+
+  # ============================================================================
+  # Private Functions
+  # ============================================================================
+
+  defp collect_with_early_termination(tasks, quorum, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_collect(tasks, [], quorum, deadline)
+  end
+
+  defp do_collect([], evaluations, _quorum, _deadline) do
+    {evaluations, []}
+  end
+
+  defp do_collect(remaining_tasks, evaluations, quorum, deadline) do
+    now = System.monotonic_time(:millisecond)
+    remaining_ms = max(deadline - now, 0)
+
+    if remaining_ms <= 0 do
+      # Timeout reached — kill remaining tasks
+      kill_tasks(remaining_tasks)
+      {evaluations, remaining_tasks}
+    else
+      # Check if we can already determine the outcome
+      if quorum && quorum_determinable?(evaluations, remaining_tasks, quorum) do
+        kill_tasks(remaining_tasks)
+        {evaluations, remaining_tasks}
+      else
+        # Wait for the next task to complete
+        task_refs = Enum.map(remaining_tasks, fn {_perspective, task} -> task end)
+
+        case Task.yield_many(task_refs, min(remaining_ms, 5_000)) do
+          results when is_list(results) ->
+            {new_evals, still_pending} =
+              process_yield_results(remaining_tasks, results)
+
+            do_collect(
+              still_pending,
+              evaluations ++ new_evals,
+              quorum,
+              deadline
+            )
+        end
+      end
+    end
+  end
+
+  defp process_yield_results(tasks, results) do
+    # Build a map from task ref to result
+    result_map =
+      Map.new(results, fn {task, result} -> {task.ref, result} end)
+
+    {completed_evals, still_pending} =
+      Enum.reduce(tasks, {[], []}, fn {perspective, task} = entry, {evals, pending} ->
+        case Map.get(result_map, task.ref) do
+          {:ok, {:ok, evaluation}} ->
+            {[evaluation | evals], pending}
+
+          {:ok, {:error, reason}} ->
+            Logger.warning("Evaluator #{perspective} failed: #{inspect(reason)}")
+            {evals, pending}
+
+          {:exit, reason} ->
+            Logger.warning("Evaluator #{perspective} crashed: #{inspect(reason)}")
+            {evals, pending}
+
+          nil ->
+            # Still running
+            {evals, [entry | pending]}
+        end
+      end)
+
+    {Enum.reverse(completed_evals), Enum.reverse(still_pending)}
+  end
+
+  defp quorum_determinable?(evaluations, remaining_tasks, quorum) do
+    approve_count = Enum.count(evaluations, &(&1.vote == :approve))
+    reject_count = Enum.count(evaluations, &(&1.vote == :reject))
+    remaining_count = length(remaining_tasks)
+
+    # Quorum reached for approval
+    approve_count >= quorum or
+      # Quorum reached for rejection
+      reject_count >= quorum or
+      # Even if all remaining approve, can't reach quorum (guaranteed rejection/deadlock)
+      approve_count + remaining_count < quorum
+  end
+
+  defp kill_tasks(tasks) do
+    Enum.each(tasks, fn {_perspective, task} ->
+      Task.shutdown(task, :brutal_kill)
+    end)
+  end
+end

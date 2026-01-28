@@ -30,7 +30,7 @@ defmodule ArborAgent.MixProject do
     [
       {:arbor_contracts, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
-      {:arbor_checkpoint, path: "../../packages/arbor_checkpoint"},
+      {:arbor_checkpoint, in_umbrella: true},
       {:jido, override: true},
       {:jido_action, override: true}
     ]
