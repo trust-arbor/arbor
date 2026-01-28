@@ -4,13 +4,15 @@ defmodule Arbor.Checkpoint.RetryTest do
   alias Arbor.Checkpoint
   alias Arbor.Checkpoint.Test.{DelayedStorage, FailingStorage}
 
+  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+
   @moduletag :fast
 
   describe "load with retry - eventually consistent storage" do
     setup do
       # Storage that fails 2 times before succeeding
       {:ok, _pid} = DelayedStorage.start_link(failures: 2)
-      on_exit(fn -> if Process.whereis(DelayedStorage), do: DelayedStorage.stop() end)
+      on_exit(fn -> safe_stop(DelayedStorage) end)
       :ok
     end
 
