@@ -311,4 +311,236 @@ defmodule Arbor.SecurityTest do
                Security.authorize(agent_id, "arbor://fs/read/legacy_unsigned")
     end
   end
+
+  # ===========================================================================
+  # Phase 3: Constraint enforcement integration tests
+  # ===========================================================================
+
+  describe "authorize/4 with rate_limit constraint" do
+    test "succeeds up to limit then fails", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/rate_limited_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{rate_limit: 3}
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+
+      assert {:error, {:constraint_violated, :rate_limit, %{limit: 3, remaining: 0}}} =
+               Security.authorize(agent_id, resource)
+    end
+  end
+
+  describe "authorize/4 with time_window constraint" do
+    test "respects time window (always-open window succeeds)", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/tw_open_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{time_window: %{start_hour: 0, end_hour: 24}}
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+    end
+
+    test "respects time window (closed window denies)", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/tw_closed_#{:erlang.unique_integer([:positive])}"
+      current_hour = DateTime.utc_now().hour
+      bad_start = rem(current_hour + 12, 24)
+      bad_end = rem(bad_start + 1, 24)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{time_window: %{start_hour: bad_start, end_hour: bad_end}}
+        )
+
+      assert {:error, {:constraint_violated, :time_window, _}} =
+               Security.authorize(agent_id, resource)
+    end
+  end
+
+  describe "authorize/4 with no constraints" do
+    test "succeeds normally (no enforcement needed)", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/no_constraints_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{}
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+    end
+  end
+
+  describe "can?/3 does NOT enforce constraints" do
+    test "can? returns true even after rate limit exhausted via authorize", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/can_no_consume_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{rate_limit: 1}
+        )
+
+      # Exhaust via authorize
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+
+      assert {:error, {:constraint_violated, :rate_limit, _}} =
+               Security.authorize(agent_id, resource)
+
+      # can? should still return true (no constraint enforcement)
+      assert Security.can?(agent_id, resource)
+    end
+  end
+
+  describe "constraint enforcement toggle" do
+    test "constraints ignored when enforcement disabled", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/toggle_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{rate_limit: 1}
+        )
+
+      # Exhaust rate limit
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+
+      assert {:error, {:constraint_violated, :rate_limit, _}} =
+               Security.authorize(agent_id, resource)
+
+      # Disable enforcement
+      prev = Application.get_env(:arbor_security, :constraint_enforcement_enabled)
+      Application.put_env(:arbor_security, :constraint_enforcement_enabled, false)
+
+      # Should succeed now despite exhausted rate limit
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+
+      # Restore config
+      if prev != nil do
+        Application.put_env(:arbor_security, :constraint_enforcement_enabled, prev)
+      else
+        Application.delete_env(:arbor_security, :constraint_enforcement_enabled)
+      end
+    end
+  end
+
+  describe "stats/0 includes rate_limiter" do
+    test "stats map contains rate_limiter key" do
+      stats = Security.stats()
+      assert Map.has_key?(stats, :rate_limiter)
+      assert is_map(stats.rate_limiter)
+      assert Map.has_key?(stats.rate_limiter, :bucket_count)
+    end
+  end
+
+  # ===========================================================================
+  # Phase 5: Consensus escalation integration tests
+  # ===========================================================================
+
+  describe "authorize/4 with requires_approval constraint" do
+    # Mock consensus module for testing
+    defmodule MockConsensus do
+      def submit(%{proposer: _} = _proposal) do
+        {:ok, "proposal_#{:erlang.unique_integer([:positive])}"}
+      end
+
+      def healthy?, do: true
+    end
+
+    setup do
+      # Save original config
+      original_enabled = Application.get_env(:arbor_security, :consensus_escalation_enabled)
+      original_module = Application.get_env(:arbor_security, :consensus_module)
+
+      on_exit(fn ->
+        if original_enabled do
+          Application.put_env(:arbor_security, :consensus_escalation_enabled, original_enabled)
+        else
+          Application.delete_env(:arbor_security, :consensus_escalation_enabled)
+        end
+
+        if original_module do
+          Application.put_env(:arbor_security, :consensus_module, original_module)
+        else
+          Application.delete_env(:arbor_security, :consensus_module)
+        end
+      end)
+
+      :ok
+    end
+
+    test "returns pending_approval when requires_approval is true", %{agent_id: agent_id} do
+      resource = "arbor://fs/write/approval_#{:erlang.unique_integer([:positive])}"
+
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{requires_approval: true}
+        )
+
+      assert {:ok, :pending_approval, proposal_id} = Security.authorize(agent_id, resource)
+      assert String.starts_with?(proposal_id, "proposal_")
+    end
+
+    test "returns authorized when requires_approval is false", %{agent_id: agent_id} do
+      resource = "arbor://fs/write/no_approval_#{:erlang.unique_integer([:positive])}"
+
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{requires_approval: false}
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+    end
+
+    test "returns authorized when escalation is disabled", %{agent_id: agent_id} do
+      resource = "arbor://fs/write/disabled_#{:erlang.unique_integer([:positive])}"
+
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{requires_approval: true}
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+    end
+
+    test "returns authorized when no constraints", %{agent_id: agent_id} do
+      resource = "arbor://fs/read/simple_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+    end
+  end
 end

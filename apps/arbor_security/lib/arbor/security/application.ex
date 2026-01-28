@@ -9,6 +9,7 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []}
     ]
 
