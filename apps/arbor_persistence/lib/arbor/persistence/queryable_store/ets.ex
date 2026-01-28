@@ -107,6 +107,8 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   @impl GenServer
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
+    # Safe: name is module atom from internal start_link opts, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     table_name = :"#{name}_ets"
     table = :ets.new(table_name, [:set, :protected, read_concurrency: true])
     {:ok, %{table: table}}

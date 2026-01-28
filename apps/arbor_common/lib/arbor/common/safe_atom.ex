@@ -235,4 +235,167 @@ defmodule Arbor.Common.SafeAtom do
       end
     end)
   end
+
+  # =============================================================================
+  # Arbor-specific allowlists and helpers
+  # =============================================================================
+
+  @doc """
+  Known signal/event categories in the Arbor system.
+
+  Used by event converters and signal processors to safely convert
+  category strings to atoms.
+  """
+  @signal_categories [:activity, :security, :metrics, :traces, :logs, :alerts, :custom, :unknown]
+
+  @spec signal_categories() :: [atom()]
+  def signal_categories, do: @signal_categories
+
+  @doc """
+  Known subject type prefixes for entity IDs.
+
+  Entity IDs follow the pattern "prefix_id" (e.g., "agent_001", "session_abc").
+  This list defines known prefixes for safe atom conversion.
+  """
+  @subject_types [:agent, :session, :task, :action, :event, :signal, :capability, :identity, :unknown]
+
+  @spec subject_types() :: [atom()]
+  def subject_types, do: @subject_types
+
+  @doc """
+  Safely convert a category string to an atom.
+
+  Returns `:unknown` for unrecognized categories rather than creating new atoms.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_category("activity")
+      :activity
+
+      iex> Arbor.Common.SafeAtom.to_category("malicious_category_from_attacker")
+      :unknown
+
+      iex> Arbor.Common.SafeAtom.to_category(:security)
+      :security
+  """
+  @spec to_category(String.t() | atom()) :: atom()
+  def to_category(category) when is_binary(category) do
+    case to_allowed(category, @signal_categories) do
+      {:ok, atom} -> atom
+      {:error, _} -> :unknown
+    end
+  end
+
+  def to_category(category) when is_atom(category) do
+    if category in @signal_categories, do: category, else: :unknown
+  end
+
+  @doc """
+  Safely convert a subject type prefix string to an atom.
+
+  Returns `:unknown` for unrecognized prefixes.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_subject_type("agent")
+      :agent
+
+      iex> Arbor.Common.SafeAtom.to_subject_type("evil_prefix")
+      :unknown
+  """
+  @spec to_subject_type(String.t() | atom()) :: atom()
+  def to_subject_type(prefix) when is_binary(prefix) do
+    case to_allowed(prefix, @subject_types) do
+      {:ok, atom} -> atom
+      {:error, _} -> :unknown
+    end
+  end
+
+  def to_subject_type(prefix) when is_atom(prefix) do
+    if prefix in @subject_types, do: prefix, else: :unknown
+  end
+
+  @doc """
+  Safely decode an event type string to {category, signal_type} tuple.
+
+  Event types are encoded as "category:signal_type" strings. This function
+  safely converts them back to atoms using allowlists.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.decode_event_type("activity:agent_started")
+      {:activity, :agent_started}
+
+      iex> Arbor.Common.SafeAtom.decode_event_type("evil:attack")
+      {:unknown, :unknown}
+
+      iex> Arbor.Common.SafeAtom.decode_event_type(:"security:auth_failed")
+      {:security, :auth_failed}
+  """
+  @spec decode_event_type(String.t() | atom()) :: {atom(), atom()}
+  def decode_event_type(event_type) when is_atom(event_type) do
+    decode_event_type(Atom.to_string(event_type))
+  end
+
+  def decode_event_type(event_type) when is_binary(event_type) do
+    case String.split(event_type, ":", parts: 2) do
+      [category_str, type_str] ->
+        category = to_category(category_str)
+        # Signal types are more open-ended, use to_existing with fallback
+        signal_type =
+          case to_existing(type_str) do
+            {:ok, atom} -> atom
+            {:error, _} -> :unknown
+          end
+
+        {category, signal_type}
+
+      [single] ->
+        # Single value without colon - try as category
+        {:unknown, to_category(single)}
+    end
+  end
+
+  @doc """
+  Safely encode a {category, signal_type} tuple to an atom.
+
+  Only creates the atom if both category and signal_type are valid atoms.
+  This is safe because we control the inputs (they must already be atoms).
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.encode_event_type(:activity, :agent_started)
+      :"activity:agent_started"
+  """
+  @spec encode_event_type(atom(), atom()) :: atom()
+  def encode_event_type(category, signal_type) when is_atom(category) and is_atom(signal_type) do
+    # Safe: both inputs are guaranteed atoms by guard clause, combining existing atoms
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    :"#{category}:#{signal_type}"
+  end
+
+  @doc """
+  Safely infer subject type from an entity ID string.
+
+  Entity IDs follow "prefix_id" pattern. Returns `:unknown` for
+  unrecognized prefixes.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.infer_subject_type("agent_001")
+      :agent
+
+      iex> Arbor.Common.SafeAtom.infer_subject_type("malicious_injection")
+      :unknown
+
+      iex> Arbor.Common.SafeAtom.infer_subject_type("no_underscore")
+      :unknown
+  """
+  @spec infer_subject_type(String.t()) :: atom()
+  def infer_subject_type(subject_id) when is_binary(subject_id) do
+    case String.split(subject_id, "_", parts: 2) do
+      [prefix, _rest] -> to_subject_type(prefix)
+      _ -> :unknown
+    end
+  end
 end

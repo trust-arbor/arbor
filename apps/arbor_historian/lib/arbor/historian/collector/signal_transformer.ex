@@ -6,6 +6,7 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   structs for storage, and back into HistoryEntry structs for querying.
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Historian.Event
   alias Arbor.Historian.HistoryEntry
 
@@ -62,11 +63,13 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   """
   @spec encode_type(atom(), atom()) :: atom()
   def encode_type(category, signal_type) do
-    :"#{category}:#{signal_type}"
+    SafeAtom.encode_event_type(category, signal_type)
   end
 
   @doc """
   Decode an event type atom back into {category, signal_type}.
+
+  Uses SafeAtom to prevent atom exhaustion from untrusted input.
 
   ## Examples
 
@@ -75,29 +78,28 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   """
   @spec decode_type(atom()) :: {atom(), atom()}
   def decode_type(event_type) when is_atom(event_type) do
-    case event_type |> Atom.to_string() |> String.split(":", parts: 2) do
-      [category, type] -> {String.to_atom(category), String.to_atom(type)}
-      [single] -> {:unknown, String.to_atom(single)}
-    end
+    SafeAtom.decode_event_type(event_type)
   end
 
   # Extract category from signal - handles both CloudEvents string types
   # (e.g. "arbor.activity.agent_started") and Arbor.Signals.Signal atom
   # category fields.
+  #
+  # Uses SafeAtom to prevent atom exhaustion from untrusted CloudEvents.
   defp extract_category(signal) do
     cond do
       # Trust-arbor Arbor.Signals.Signal has a :category atom field
       is_atom(Map.get(signal, :category)) and Map.get(signal, :category) != nil ->
-        signal.category
+        SafeAtom.to_category(signal.category)
 
       # CloudEvents / jido_signal style: type is "arbor.category.type"
       is_binary(signal.type) ->
         case signal.type do
           "arbor." <> rest ->
-            rest |> String.split(".", parts: 2) |> List.first() |> String.to_atom()
+            rest |> String.split(".", parts: 2) |> List.first() |> SafeAtom.to_category()
 
           type ->
-            type |> String.split(".", parts: 2) |> List.first() |> String.to_atom()
+            type |> String.split(".", parts: 2) |> List.first() |> SafeAtom.to_category()
         end
 
       true ->
@@ -106,6 +108,7 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   end
 
   # Extract signal type from signal - handles both string and atom type fields.
+  # Uses SafeAtom.to_existing to only convert known signal types.
   defp extract_signal_type(%{type: type}) when is_atom(type), do: type
   defp extract_signal_type(%{type: "arbor." <> rest}), do: parse_signal_type_segment(rest)
   defp extract_signal_type(%{type: type}) when is_binary(type), do: parse_signal_type_segment(type)
@@ -113,8 +116,16 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
 
   defp parse_signal_type_segment(segment) do
     case String.split(segment, ".", parts: 2) do
-      [_prefix, type] -> String.to_atom(type)
-      [single] -> String.to_atom(single)
+      [_prefix, type] -> safe_to_signal_type(type)
+      [single] -> safe_to_signal_type(single)
+    end
+  end
+
+  # Safely convert signal type string to atom - only if already exists
+  defp safe_to_signal_type(type_string) do
+    case SafeAtom.to_existing(type_string) do
+      {:ok, atom} -> atom
+      {:error, _} -> :unknown
     end
   end
 

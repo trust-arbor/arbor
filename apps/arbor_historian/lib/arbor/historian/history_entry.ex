@@ -8,6 +8,7 @@ defmodule Arbor.Historian.HistoryEntry do
 
   use TypedStruct
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Historian.Event
 
   @derive Jason.Encoder
@@ -90,13 +91,7 @@ defmodule Arbor.Historian.HistoryEntry do
   end
 
   defp parse_event_type_string(type_string) do
-    case String.split(type_string, ":", parts: 2) do
-      [category, signal_type] ->
-        {String.to_atom(category), String.to_atom(signal_type)}
-
-      [single] ->
-        {:unknown, String.to_atom(single)}
-    end
+    SafeAtom.decode_event_type(type_string)
   end
 
   defp generate_id do
