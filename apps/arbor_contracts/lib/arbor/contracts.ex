@@ -16,37 +16,42 @@ defmodule Arbor.Contracts do
   Only interfaces that have proven themselves through real usage become contracts.
   This prevents over-engineering and keeps the contract surface minimal.
 
+  ## Foundation Modules
+
+  - `Arbor.Types` - Shared type definitions and guards
+  - `Arbor.Identifiers` - ID generation, URI parsing, and validation
+
   ## Contract Categories
 
   ### Core Types
-  - `Arbor.Contracts.Core.Message` - Inter-agent communication
-  - `Arbor.Contracts.Core.Capability` - Permission tokens
-  - `Arbor.Contracts.Core.Session` - Execution contexts
+  - `Arbor.Contracts.Security.Capability` - Permission tokens
 
-  ### Security
-  - `Arbor.Contracts.Security.AuditEvent` - Security audit trail
-  - `Arbor.Contracts.Security.Enforcer` - Authorization enforcement behaviour
+  ### Consensus
+  - `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
+  - `Arbor.Contracts.Consensus.Proposal` - Change proposals
+  - `Arbor.Contracts.Consensus.Evaluation` - Evaluator assessments
+  - `Arbor.Contracts.Consensus.CouncilDecision` - Council decisions
+  - `Arbor.Contracts.Consensus.ConsensusEvent` - Consensus audit trail
 
   ### Trust
-  - `Arbor.Contracts.Trust` - Trust system behaviour and helpers
   - `Arbor.Contracts.Trust.Profile` - Agent trust state
   - `Arbor.Contracts.Trust.Event` - Trust-affecting events
 
   ### Library Interfaces
-  - `Arbor.Contracts.Libraries.Shell` - Command execution interface
-  - `Arbor.Contracts.Libraries.Signals` - Event emission interface
-  - `Arbor.Contracts.Libraries.Security` - Security facade interface
-  - `Arbor.Contracts.Libraries.Trust` - Trust facade interface
+  - `Arbor.Contracts.API.Shell` - Command execution interface
+  - `Arbor.Contracts.API.Signals` - Event emission interface
+  - `Arbor.Contracts.API.Security` - Security facade interface
+  - `Arbor.Contracts.API.Trust` - Trust facade interface
 
   ## Usage
 
-  Contracts are used via `use` or implementation of behaviours:
+  Contracts are used via implementation of behaviours:
 
-      defmodule MyEnforcer do
-        @behaviour Arbor.Contracts.Security.Enforcer
+      defmodule MyTrustManager do
+        @behaviour Arbor.Contracts.API.Trust
 
         @impl true
-        def authorize(agent_id, resource, action) do
+        def create_trust_profile_for_principal(agent_id) do
           # Your implementation
         end
       end
@@ -71,21 +76,21 @@ defmodule Arbor.Contracts do
   def list_contracts do
     [
       # Core types
-      Arbor.Contracts.Core.Message,
-      Arbor.Contracts.Core.Capability,
-      Arbor.Contracts.Core.Session,
-      # Security
-      Arbor.Contracts.Security.AuditEvent,
-      Arbor.Contracts.Security.Enforcer,
+      Arbor.Contracts.Security.Capability,
+      # Consensus
+      Arbor.Contracts.Consensus.Protocol,
+      Arbor.Contracts.Consensus.Proposal,
+      Arbor.Contracts.Consensus.Evaluation,
+      Arbor.Contracts.Consensus.CouncilDecision,
+      Arbor.Contracts.Consensus.ConsensusEvent,
       # Trust
-      Arbor.Contracts.Trust,
       Arbor.Contracts.Trust.Profile,
       Arbor.Contracts.Trust.Event,
       # Library interfaces
-      Arbor.Contracts.Libraries.Shell,
-      Arbor.Contracts.Libraries.Signals,
-      Arbor.Contracts.Libraries.Security,
-      Arbor.Contracts.Libraries.Trust
+      Arbor.Contracts.API.Shell,
+      Arbor.Contracts.API.Signals,
+      Arbor.Contracts.API.Security,
+      Arbor.Contracts.API.Trust
     ]
   end
 end

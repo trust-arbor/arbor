@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Autonomous.Consensus do
+defmodule Arbor.Contracts.Consensus.Protocol do
   @moduledoc """
   Contract for the autonomous consensus protocol.
 
@@ -131,8 +131,7 @@ defmodule Arbor.Contracts.Autonomous.Consensus do
   @doc """
   Check if a proposal violates immutable invariants.
   """
-  @callback violates_invariants?(proposal() | Arbor.Contracts.Autonomous.Proposal.t()) ::
-              boolean()
+  @callback violates_invariants?(proposal()) :: boolean()
 
   # Helper functions
 
@@ -199,8 +198,8 @@ defmodule Arbor.Contracts.Autonomous.Consensus do
   @spec quorum_for_change_type(change_type()) :: non_neg_integer()
   def quorum_for_change_type(change_type) do
     cond do
-      is_meta_change?(change_type) -> @meta_quorum
-      is_low_risk_change?(change_type) -> @low_risk_quorum
+      meta_change?(change_type) -> @meta_quorum
+      low_risk_change?(change_type) -> @low_risk_quorum
       true -> @standard_quorum
     end
   end
@@ -216,17 +215,17 @@ defmodule Arbor.Contracts.Autonomous.Consensus do
   @doc """
   Check if a change type is a meta-change (governance modification).
   """
-  @spec is_meta_change?(change_type()) :: boolean()
-  def is_meta_change?(:governance_change), do: true
-  def is_meta_change?(_), do: false
+  @spec meta_change?(change_type()) :: boolean()
+  def meta_change?(:governance_change), do: true
+  def meta_change?(_), do: false
 
   @doc """
   Check if a change type is a low-risk change (documentation, tests).
   """
-  @spec is_low_risk_change?(change_type()) :: boolean()
-  def is_low_risk_change?(:documentation_change), do: true
-  def is_low_risk_change?(:test_change), do: true
-  def is_low_risk_change?(_), do: false
+  @spec low_risk_change?(change_type()) :: boolean()
+  def low_risk_change?(:documentation_change), do: true
+  def low_risk_change?(:test_change), do: true
+  def low_risk_change?(_), do: false
 
   @doc """
   Determine which layer a module belongs to.

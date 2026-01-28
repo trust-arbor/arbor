@@ -25,35 +25,35 @@ end
 ## Contract Categories
 
 ### Core Types
-- `Arbor.Contracts.Core.Message` - Inter-agent communication
-- `Arbor.Contracts.Core.Capability` - Permission tokens
-- `Arbor.Contracts.Core.Session` - Execution contexts
+- `Arbor.Contracts.Security.Capability` - Permission tokens
 
-### Security
-- `Arbor.Contracts.Security.AuditEvent` - Security audit trail
-- `Arbor.Contracts.Security.Enforcer` - Authorization enforcement behaviour
+### Consensus
+- `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
+- `Arbor.Contracts.Consensus.Proposal` - Change proposals
+- `Arbor.Contracts.Consensus.Evaluation` - Evaluator assessments
+- `Arbor.Contracts.Consensus.CouncilDecision` - Council decisions
+- `Arbor.Contracts.Consensus.ConsensusEvent` - Consensus audit trail
 
 ### Trust
-- `Arbor.Contracts.Trust` - Trust system behaviour and helpers
 - `Arbor.Contracts.Trust.Profile` - Agent trust state
 - `Arbor.Contracts.Trust.Event` - Trust-affecting events
 
 ### Library Interfaces
-- `Arbor.Contracts.Libraries.Shell` - Command execution interface
-- `Arbor.Contracts.Libraries.Signals` - Event emission interface
-- `Arbor.Contracts.Libraries.Security` - Security facade interface
-- `Arbor.Contracts.Libraries.Trust` - Trust facade interface
+- `Arbor.Contracts.API.Shell` - Command execution interface
+- `Arbor.Contracts.API.Signals` - Event emission interface
+- `Arbor.Contracts.API.Security` - Security facade interface
+- `Arbor.Contracts.API.Trust` - Trust facade interface
 
 ## Usage
 
 Contracts are used via `use` or implementation of behaviours:
 
 ```elixir
-defmodule MyEnforcer do
-  @behaviour Arbor.Contracts.Security.Enforcer
+defmodule MyTrustManager do
+  @behaviour Arbor.Contracts.API.Trust
 
   @impl true
-  def authorize(agent_id, resource, action) do
+  def create_trust_profile_for_principal(agent_id) do
     # Your implementation
   end
 end

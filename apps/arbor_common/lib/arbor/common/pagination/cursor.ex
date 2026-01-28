@@ -1,9 +1,12 @@
-defmodule Arbor.Pagination.Cursor do
+defmodule Arbor.Common.Pagination.Cursor do
   @moduledoc """
-  Shared cursor-based pagination utilities.
+  Low-level cursor-based pagination utilities.
 
   Provides consistent cursor generation, parsing, and filtering logic
   for event stores and repositories across Arbor applications.
+
+  For higher-level pagination helpers (response building, record-based
+  cursor generation), see `Arbor.Common.Pagination`.
 
   ## Cursor Format
 

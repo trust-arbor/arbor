@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Autonomous.Evaluation do
+defmodule Arbor.Contracts.Consensus.Evaluation do
   @moduledoc """
   Data structure for evaluator assessments.
 
@@ -8,10 +8,10 @@ defmodule Arbor.Contracts.Autonomous.Evaluation do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Autonomous.Consensus
+  alias Arbor.Contracts.Consensus.Protocol
 
   @type vote :: :approve | :reject | :abstain
-  @type perspective :: Consensus.evaluator_perspective()
+  @type perspective :: Protocol.evaluator_perspective()
 
   typedstruct enforce: true do
     @typedoc "An evaluator's assessment of a proposal"
@@ -96,16 +96,16 @@ defmodule Arbor.Contracts.Autonomous.Evaluation do
   @doc """
   Check if vote is positive.
   """
-  @spec is_positive?(t()) :: boolean()
-  def is_positive?(%__MODULE__{vote: :approve}), do: true
-  def is_positive?(_), do: false
+  @spec positive?(t()) :: boolean()
+  def positive?(%__MODULE__{vote: :approve}), do: true
+  def positive?(_), do: false
 
   @doc """
   Check if vote is negative.
   """
-  @spec is_negative?(t()) :: boolean()
-  def is_negative?(%__MODULE__{vote: :reject}), do: true
-  def is_negative?(_), do: false
+  @spec negative?(t()) :: boolean()
+  def negative?(%__MODULE__{vote: :reject}), do: true
+  def negative?(_), do: false
 
   @doc """
   Get a summary of the evaluation.

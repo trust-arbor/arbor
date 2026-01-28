@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Libraries.Shell do
+defmodule Arbor.Contracts.API.Shell do
   @moduledoc """
   Public API contract for the Arbor.Shell library.
 

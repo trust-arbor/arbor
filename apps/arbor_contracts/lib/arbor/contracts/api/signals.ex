@@ -1,4 +1,4 @@
-defmodule Arbor.Contracts.Libraries.Signals do
+defmodule Arbor.Contracts.API.Signals do
   @moduledoc """
   Public API contract for the Arbor.Signals library.
 

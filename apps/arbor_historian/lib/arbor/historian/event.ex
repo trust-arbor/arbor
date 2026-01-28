@@ -1,22 +1,23 @@
-defmodule Arbor.Contracts.Events.Event do
+defmodule Arbor.Historian.Event do
   @moduledoc """
-  Core event structure for event sourcing in the Arbor system.
+  Domain event structure for the Arbor historian.
 
   Events are immutable facts that represent state changes in the system.
-  They form the foundation of our event sourcing architecture, providing
-  a complete audit trail and enabling state reconstruction.
+  They are the historian's primary data type — signals are transformed into
+  events for durable storage, and events are enriched into history entries
+  for querying.
 
   ## Event Design Principles
 
   - **Immutable**: Events are never modified after creation
-  - **Self-contained**: Events contain all data needed to apply them
+  - **Self-contained**: Events contain all data needed to understand what happened
   - **Versioned**: Events include schema version for evolution
   - **Traceable**: Full correlation IDs for distributed tracing
 
   ## Event Types
 
   Events are organized by domain:
-  - `agent.*` - Agent lifecycle and state changes
+  - `activity.*` - Agent lifecycle and state changes
   - `security.*` - Capability grants, revocations, violations
   - `session.*` - Session management events
   - `system.*` - System-level events (cluster, node changes)
@@ -25,7 +26,7 @@ defmodule Arbor.Contracts.Events.Event do
 
       event = Event.new(
         type: :agent_started,
-        aggregate_id: "agent_123",
+        subject_id: "agent_123",
         data: %{
           agent_type: :llm,
           capabilities: ["read", "write"]
@@ -35,12 +36,16 @@ defmodule Arbor.Contracts.Events.Event do
         metadata: %{user_id: "user_123"}
       )
 
+  ## Stream Positioning
+
+  Events gain stream positioning (`stream_id`, `stream_version`, `global_position`)
+  when stored via an EventLog backend. These fields are nil on creation and set
+  by the storage layer via `set_position/4`.
+
   @version "1.0.0"
   """
 
   use TypedStruct
-
-  alias Arbor.Types
 
   @derive Jason.Encoder
   typedstruct enforce: true do
@@ -51,18 +56,20 @@ defmodule Arbor.Contracts.Events.Event do
     field(:type, atom())
     field(:version, String.t(), default: "1.0.0")
 
+    # What this event is about
+    field(:subject_id, String.t())
+    field(:subject_type, atom())
+
     # Event data
-    field(:aggregate_id, String.t())
-    field(:aggregate_type, atom())
     field(:data, map())
     field(:timestamp, DateTime.t())
 
     # Correlation for distributed tracing
     field(:causation_id, String.t(), enforce: false)
     field(:correlation_id, String.t(), enforce: false)
-    field(:trace_id, Types.trace_id(), enforce: false)
+    field(:trace_id, String.t(), enforce: false)
 
-    # Stream positioning
+    # Stream positioning (set by EventLog backends on storage)
     field(:stream_id, String.t(), enforce: false)
     field(:stream_version, non_neg_integer(), enforce: false)
     field(:global_position, non_neg_integer(), enforce: false)
@@ -77,12 +84,12 @@ defmodule Arbor.Contracts.Events.Event do
   ## Required Fields
 
   - `:type` - Event type atom (e.g., :agent_started)
-  - `:aggregate_id` - ID of the aggregate this event belongs to
+  - `:subject_id` - ID of the entity this event is about
   - `:data` - Event payload data
 
   ## Optional Fields
 
-  - `:aggregate_type` - Type of aggregate (defaults from aggregate_id prefix)
+  - `:subject_type` - Type of subject (defaults from subject_id prefix)
   - `:version` - Event schema version
   - `:causation_id` - ID of the command/event that caused this event
   - `:correlation_id` - ID for correlating related events
@@ -94,7 +101,7 @@ defmodule Arbor.Contracts.Events.Event do
       # Basic event
       {:ok, event} = Event.new(
         type: :capability_granted,
-        aggregate_id: "agent_123",
+        subject_id: "agent_123",
         data: %{
           capability_id: "cap_456",
           resource_uri: "arbor://fs/read/docs"
@@ -104,7 +111,7 @@ defmodule Arbor.Contracts.Events.Event do
       # Event with full tracing
       {:ok, event} = Event.new(
         type: :task_completed,
-        aggregate_id: "agent_worker_789",
+        subject_id: "agent_worker_789",
         data: %{task_id: "task_123", result: "success"},
         causation_id: "msg_process_task_456",
         correlation_id: "session_abc",
@@ -117,8 +124,8 @@ defmodule Arbor.Contracts.Events.Event do
       id: attrs[:id] || generate_event_id(),
       type: Keyword.fetch!(attrs, :type),
       version: attrs[:version] || "1.0.0",
-      aggregate_id: Keyword.fetch!(attrs, :aggregate_id),
-      aggregate_type: attrs[:aggregate_type] || infer_aggregate_type(attrs[:aggregate_id]),
+      subject_id: Keyword.fetch!(attrs, :subject_id),
+      subject_type: attrs[:subject_type] || infer_subject_type(attrs[:subject_id]),
       data: Keyword.fetch!(attrs, :data),
       timestamp: attrs[:timestamp] || DateTime.utc_now(),
       causation_id: attrs[:causation_id],
@@ -137,51 +144,9 @@ defmodule Arbor.Contracts.Events.Event do
   end
 
   @doc """
-  Apply an event to a state, returning the new state.
-
-  This is used during event replay to reconstruct state from events.
-  The actual application logic is domain-specific and should be
-  implemented by the aggregate.
-
-  ## Example
-
-      defmodule AgentAggregate do
-        def apply_event(%Event{type: :agent_started} = event, nil) do
-          %{
-            id: event.aggregate_id,
-            status: :active,
-            started_at: event.timestamp,
-            capabilities: event.data.capabilities
-          }
-        end
-
-        def apply_event(%Event{type: :capability_granted} = event, state) do
-          %{state | capabilities: [event.data.capability | state.capabilities]}
-        end
-      end
-  """
-  @spec apply_event(t(), state :: any()) :: any()
-  def apply_event(%__MODULE__{} = event, state) do
-    # Delegate to domain-specific application logic
-    apply_module =
-      Module.concat([
-        "Arbor.Core.Aggregates",
-        Macro.camelize(to_string(event.aggregate_type)),
-        "Aggregate"
-      ])
-
-    if Code.ensure_loaded?(apply_module) and
-         function_exported?(apply_module, :apply_event, 2) do
-      apply_module.apply_event(event, state)
-    else
-      raise "No aggregate module found for type: #{event.aggregate_type}"
-    end
-  end
-
-  @doc """
   Set stream positioning information on an event.
 
-  Called by the event store when appending events to set their
+  Called by EventLog backends when appending events to set their
   position in the stream and globally.
   """
   @spec set_position(t(), String.t(), non_neg_integer(), non_neg_integer()) :: t()
@@ -216,8 +181,8 @@ defmodule Arbor.Contracts.Events.Event do
       id: get_field(map, :id),
       type: atomize_safely(get_field(map, :type)),
       version: get_field(map, :version),
-      aggregate_id: get_field(map, :aggregate_id),
-      aggregate_type: atomize_safely(get_field(map, :aggregate_type)),
+      subject_id: get_field(map, :subject_id),
+      subject_type: atomize_safely(get_field(map, :subject_type)),
       data: get_field(map, :data),
       timestamp: parse_timestamp(get_field(map, :timestamp)),
       causation_id: get_field(map, :causation_id),
@@ -240,19 +205,19 @@ defmodule Arbor.Contracts.Events.Event do
     "event_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   end
 
-  defp infer_aggregate_type(aggregate_id) when is_binary(aggregate_id) do
-    case String.split(aggregate_id, "_", parts: 2) do
+  defp infer_subject_type(subject_id) when is_binary(subject_id) do
+    case String.split(subject_id, "_", parts: 2) do
       [prefix, _] -> String.to_atom(prefix)
       _ -> :unknown
     end
   end
 
-  defp infer_aggregate_type(_), do: :unknown
+  defp infer_subject_type(_), do: :unknown
 
   defp validate_event(%__MODULE__{} = event) do
     validators = [
       &validate_type/1,
-      &validate_aggregate_id/1,
+      &validate_subject_id/1,
       &validate_data/1,
       &validate_version/1
     ]
@@ -268,10 +233,10 @@ defmodule Arbor.Contracts.Events.Event do
   defp validate_type(%{type: type}) when is_atom(type) and type != nil, do: :ok
   defp validate_type(%{type: type}), do: {:error, {:invalid_event_type, type}}
 
-  defp validate_aggregate_id(%{aggregate_id: id}) when is_binary(id) and byte_size(id) > 0,
+  defp validate_subject_id(%{subject_id: id}) when is_binary(id) and byte_size(id) > 0,
     do: :ok
 
-  defp validate_aggregate_id(%{aggregate_id: id}), do: {:error, {:invalid_aggregate_id, id}}
+  defp validate_subject_id(%{subject_id: id}), do: {:error, {:invalid_subject_id, id}}
 
   defp validate_data(%{data: data}) when is_map(data), do: :ok
   defp validate_data(%{data: data}), do: {:error, {:invalid_event_data, data}}
