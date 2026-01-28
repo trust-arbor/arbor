@@ -54,6 +54,9 @@ defmodule Arbor.Security do
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
+  alias Arbor.Security.Constraint
+  alias Arbor.Security.Constraint.RateLimiter
+  alias Arbor.Security.Escalation
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.SystemAuthority
@@ -183,18 +186,24 @@ defmodule Arbor.Security do
         _action,
         opts
       ) do
-    case maybe_verify_identity(opts) do
-      :ok ->
-        case find_capability(principal_id, resource_uri) do
-          {:ok, _cap} ->
-            emit_authorization_granted(principal_id, resource_uri, opts)
-            {:ok, :authorized}
+    with :ok <- maybe_verify_identity(opts),
+         {:ok, cap} <- find_capability(principal_id, resource_uri),
+         :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
+         escalation_result <- Escalation.maybe_escalate(cap, principal_id, resource_uri) do
+      case escalation_result do
+        :ok ->
+          emit_authorization_granted(principal_id, resource_uri, opts)
+          {:ok, :authorized}
 
-          {:error, reason} = error ->
-            emit_authorization_denied(principal_id, resource_uri, reason, opts)
-            error
-        end
+        {:ok, :pending_approval, proposal_id} ->
+          emit_authorization_pending(principal_id, resource_uri, proposal_id, opts)
+          {:ok, :pending_approval, proposal_id}
 
+        {:error, reason} ->
+          emit_authorization_denied(principal_id, resource_uri, reason, opts)
+          {:error, reason}
+      end
+    else
       {:error, reason} = error ->
         emit_authorization_denied(principal_id, resource_uri, reason, opts)
         error
@@ -341,7 +350,8 @@ defmodule Arbor.Security do
     Process.whereis(CapabilityStore) != nil and
       Process.whereis(Registry) != nil and
       Process.whereis(Arbor.Security.Identity.NonceCache) != nil and
-      Process.whereis(SystemAuthority) != nil
+      Process.whereis(SystemAuthority) != nil and
+      Process.whereis(RateLimiter) != nil
   end
 
   @doc """
@@ -354,9 +364,15 @@ defmodule Arbor.Security do
         do: SystemAuthority.agent_id(),
         else: nil
 
+    rate_limiter_stats =
+      if Process.whereis(RateLimiter),
+        do: RateLimiter.stats(),
+        else: %{bucket_count: 0, buckets: %{}}
+
     %{
       capabilities: CapabilityStore.stats(),
       identities: Registry.stats(),
+      rate_limiter: rate_limiter_stats,
       system_authority_id: system_authority_id,
       healthy: healthy?()
     }
@@ -393,12 +409,29 @@ defmodule Arbor.Security do
     end
   end
 
+  defp maybe_enforce_constraints(cap, principal_id, resource_uri) do
+    if Config.constraint_enforcement_enabled?() and cap.constraints != %{} do
+      Constraint.enforce(cap.constraints, principal_id, resource_uri)
+    else
+      :ok
+    end
+  end
+
   # Signal emission
 
   defp emit_authorization_granted(principal_id, resource_uri, opts) do
     Signals.emit(:security, :authorization_granted, %{
       principal_id: principal_id,
       resource_uri: resource_uri,
+      trace_id: Keyword.get(opts, :trace_id)
+    })
+  end
+
+  defp emit_authorization_pending(principal_id, resource_uri, proposal_id, opts) do
+    Signals.emit(:security, :authorization_pending, %{
+      principal_id: principal_id,
+      resource_uri: resource_uri,
+      proposal_id: proposal_id,
       trace_id: Keyword.get(opts, :trace_id)
     })
   end

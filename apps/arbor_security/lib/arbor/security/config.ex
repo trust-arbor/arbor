@@ -52,4 +52,71 @@ defmodule Arbor.Security.Config do
   def capability_signing_required? do
     Application.get_env(@app, :capability_signing_required, false)
   end
+
+  @doc """
+  Whether constraint enforcement is enabled for authorization.
+
+  When `true` (default), constraints on capabilities are evaluated during `authorize/4`.
+  When `false`, constraints are metadata-only and not enforced.
+  """
+  @spec constraint_enforcement_enabled?() :: boolean()
+  def constraint_enforcement_enabled? do
+    Application.get_env(@app, :constraint_enforcement_enabled, true)
+  end
+
+  @doc """
+  The period over which rate limit tokens fully refill (in seconds).
+
+  A capability with `rate_limit: 100` gets 100 tokens per refill period.
+  Default: 3600 (1 hour).
+  """
+  @spec rate_limit_refill_period_seconds() :: pos_integer()
+  def rate_limit_refill_period_seconds do
+    Application.get_env(@app, :rate_limit_refill_period_seconds, 3600)
+  end
+
+  @doc """
+  How long an inactive rate limit bucket is kept before cleanup (in seconds).
+
+  Default: 3600 (1 hour).
+  """
+  @spec rate_limit_bucket_ttl_seconds() :: pos_integer()
+  def rate_limit_bucket_ttl_seconds do
+    Application.get_env(@app, :rate_limit_bucket_ttl_seconds, 3600)
+  end
+
+  @doc """
+  Interval between stale bucket cleanup sweeps (in milliseconds).
+
+  Default: 300_000 (5 minutes).
+  """
+  @spec rate_limit_cleanup_interval_ms() :: pos_integer()
+  def rate_limit_cleanup_interval_ms do
+    Application.get_env(@app, :rate_limit_cleanup_interval_ms, 300_000)
+  end
+
+  @doc """
+  Whether consensus escalation is enabled for `requires_approval` constraints.
+
+  When `true` (default), capabilities with `requires_approval: true` trigger
+  consensus submission through the configured `consensus_module`.
+  When `false`, `requires_approval` is ignored (treated as always approved).
+  """
+  @spec consensus_escalation_enabled?() :: boolean()
+  def consensus_escalation_enabled? do
+    Application.get_env(@app, :consensus_escalation_enabled, true)
+  end
+
+  @doc """
+  The module to use for consensus submission.
+
+  Must implement `submit/2` returning `{:ok, proposal_id}` or `{:error, reason}`.
+  Default: `Arbor.Consensus` (if available).
+
+  Set to `nil` to disable consensus integration entirely.
+  """
+  @spec consensus_module() :: module() | nil
+  def consensus_module do
+    Application.get_env(@app, :consensus_module, Arbor.Consensus)
+  end
 end
