@@ -166,7 +166,7 @@ This is why **cryptographic identity is the foundation**, not a nice-to-have. Ev
 
 ## 4. Gaps Analysis
 
-### 4.1 Agent Identity (not started — CRITICAL FOUNDATION)
+### 4.1 Agent Identity (DONE — Phase 1, commit `baab417`)
 
 No cryptographic agent identity exists. Agents are string IDs like `"agent_claude_abc123"`. Consequences:
 
@@ -193,7 +193,7 @@ Signed Request Envelope
 
 **Where it belongs:** `arbor_security` — authentication is the first half of authorization.
 
-### 4.2 Self-Verifying Capabilities (not started — CRITICAL for federation)
+### 4.2 Self-Verifying Capabilities (DONE — Phase 2, commit `c6cee64`)
 
 Current capabilities are ETS records looked up by a local GenServer. In a federated environment, a node receiving a capability from a remote agent needs to verify it without calling the originating node.
 
@@ -217,7 +217,7 @@ Verification (local, no network call):
 
 **Where it belongs:** `arbor_security` + `arbor_contracts` (Capability struct evolves)
 
-### 4.3 Constraint Enforcement (not started)
+### 4.3 Constraint Enforcement (DONE — Phase 3)
 
 The `constraints` field exists on capabilities but is ignored during authorization. `rate_limit: 100` is metadata, not a gate.
 
@@ -228,7 +228,7 @@ The `constraints` field exists on capabilities but is ignored during authorizati
 
 **Where it belongs:** `arbor_security`
 
-### 4.4 Consensus Escalation (not wired)
+### 4.4 Consensus Escalation (DONE — Phase 5)
 
 Security's `authorize/4` type spec allows `{:ok, :pending_approval, proposal_id}` but no code path triggers it. High-risk operations get a binary answer.
 
@@ -260,7 +260,7 @@ config :arbor_security, :escalation_rules, [
 
 No cross-cluster consensus coordination is required. A capability granted after consensus on Node A is just a signed capability to Node B — Node B doesn't care how it was approved, only that the signature is valid. Node B then applies its own escalation rules to whatever that agent tries to do locally.
 
-### 4.5 Trust-Capability Synchronization (partially wired)
+### 4.5 Trust-Capability Synchronization (DONE — Phase 4)
 
 Trust profiles exist but don't dynamically control capabilities. Trust tier changes should automatically grant/revoke capabilities.
 
@@ -397,7 +397,7 @@ The **Deterministic** evaluator is the highest-value next addition. Running `mix
 
 Ordered by foundational dependency and security impact. Each phase compiles and passes tests independently. The key reordering from the original draft: **identity first**, because it's the foundation everything else builds on in a multi-node world.
 
-### Phase 1: Agent Identity (T8 — CRITICAL)
+### Phase 1: Agent Identity (T8 — DONE ✓ `baab417`)
 
 **Goal:** Cryptographic agent identity. Every agent has a keypair. Every request can be authenticated.
 
@@ -414,7 +414,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 **Single-node benefit:** Even on one node, identity prevents accidental privilege confusion between agents and provides non-repudiation for audit trails.
 
-### Phase 2: Self-Verifying Capabilities (T1 — CRITICAL)
+### Phase 2: Self-Verifying Capabilities (T1 — DONE ✓ `c6cee64`)
 
 **Goal:** Capabilities are cryptographically signed by their issuer and verifiable without network calls.
 
@@ -429,45 +429,59 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 **Why second:** Depends on Phase 1 (need identities to sign with). After this phase, capabilities are self-verifying — a remote node can validate a capability using only the capability itself and a set of trusted public keys.
 
-### Phase 3: Constraint Enforcement
+### Phase 3: Constraint Enforcement (DONE ✓)
 
 **Goal:** Make the `constraints` field on capabilities actually enforced.
 
 **Scope:**
 - Token bucket rate limiting per agent per resource
 - Constraint evaluation during `authorize/4`
-- Extensible constraint types: `rate_limit`, `time_window`, `max_size`, `allowed_paths`
+- Extensible constraint types: `rate_limit`, `time_window`, `allowed_paths`, `requires_approval` (placeholder)
 
-**Libraries touched:** `arbor_security`
+**Implemented:**
+- `Arbor.Security.Constraint` — stateless-first evaluator (time_window, allowed_paths before rate_limit)
+- `Arbor.Security.Constraint.RateLimiter` — GenServer, per-{agent, resource} token buckets, monotonic time, periodic cleanup
+- `authorize/4` enforces constraints; `can?/3` remains pure (no side effects)
+- Config: `constraint_enforcement_enabled?`, rate limiter tuning knobs
+
+**Libraries touched:** `arbor_security`, `arbor_contracts`
 
 **Why third:** Low risk, high practical value. Bridge's default capabilities already specify `rate_limit` values that aren't enforced. This makes them real.
 
-### Phase 4: Trust-Capability Synchronization
+### Phase 4: Trust-Capability Synchronization (DONE ✓)
 
 **Goal:** Trust tier changes automatically reflected in capabilities.
 
 **Scope:**
 - Tier promotion: grant capabilities from CapabilityTemplates (signed by system authority)
 - Tier demotion: revoke capabilities above new tier
-- Trust frozen: suspend all agent capabilities
-- Trust unfrozen: restore suspended capabilities
+- Trust frozen: revoke modifiable capabilities (non-readonly)
+- Trust unfrozen: restore capabilities from templates for current tier
 
-**Libraries touched:** `arbor_trust` (CapabilitySync trigger), `arbor_security` (grant/revoke/suspend)
+**Status:** Already implemented in `CapabilitySync` module. Phase 2's automatic capability signing made all synced capabilities cryptographically valid. Added integration tests to verify full flow.
+
+**Libraries touched:** `arbor_trust` (CapabilitySync), `arbor_security` (grant/revoke via facade)
 
 **Why fourth:** Completes Layer 3 (implicit trust gate). Capabilities now reflect trust state without a runtime trust check, preserving the hierarchy (no Security→Trust dependency).
 
-### Phase 5: Consensus Escalation
+### Phase 5: Consensus Escalation (DONE ✓)
 
 **Goal:** High-risk operations escalate to multi-perspective consensus review.
 
 **Scope:**
-- Configurable escalation rules: resource URI patterns → consensus requirement
-- `authorize/4` checks rules after capability check, before returning
-- If escalation triggered: call consensus submission module (injected via config, not hard dep)
-- Return `{:ok, :pending_approval, proposal_id}`
-- Signal emitted on consensus completion for async notification
+- Capabilities with `requires_approval: true` trigger consensus submission
+- `authorize/4` checks escalation after constraint enforcement
+- Consensus module injected via config (no hard dep from security → consensus)
+- Returns `{:ok, :pending_approval, proposal_id}` when escalated
+- Signal emitted: `:authorization_pending`
 
-**Libraries touched:** `arbor_security` (escalation check), `arbor_consensus` (evaluation)
+**Implemented:**
+- `Arbor.Security.Escalation` — handles consensus submission via configurable module
+- Config: `consensus_escalation_enabled?`, `consensus_module` (injectable)
+- Graceful degradation: returns error if consensus unavailable (fail closed)
+- Full test coverage for escalation paths
+
+**Libraries touched:** `arbor_security` (Escalation module, facade update)
 
 **Why fifth:** Completes Layer 4. Depends on Layers 0-3 working correctly. Lives in Security so native agents (not just Bridge) get consensus escalation.
 

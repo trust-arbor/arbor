@@ -39,7 +39,10 @@ defmodule Arbor.Contracts.API.Security do
           | :broken_delegation_chain
           | :expired_timestamp
           | :replayed_nonce
+          | {:constraint_violated, constraint_type :: atom(), context :: map()}
           | term()
+
+  @type constraint_type :: :time_window | :allowed_paths | :rate_limit | :requires_approval
 
   @type capability :: map()
 
