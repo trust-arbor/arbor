@@ -163,6 +163,24 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   # Allowlist pattern in comments
   @allowlist_pattern ~r/#\s*arbor:allow\s+pii/i
 
+  # Regex patterns that indicate a timestamp context rather than a phone number
+  @timestamp_regexes [
+    # Cursor format: timestamp:id
+    ~r/\d{10,13}:[a-zA-Z_]/,
+    # Docstring examples with timestamps (iex> or result lines)
+    ~r/iex>.*\d{10,13}/,
+    # Result tuple with timestamp: {:ok, {1705..., ...}}
+    ~r/\{:ok,\s*\{\d{10,13}/,
+    # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
+    # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
+    ~r/\b1[67]\d{8,11}\b/,
+    # Just a number in a docstring example
+    ~r/^\s*#.*\d{10,13}/,
+    ~r/^\s*@doc.*\d{10,13}/,
+    # Lines with 13+ digit sequences are likely credit card numbers, not phones
+    ~r/\d{13,}/
+  ]
+
   @impl Arbor.Eval
   def run(%{code: code} = context) do
     additional_names = Map.get(context, :additional_names, [])
@@ -213,35 +231,32 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          # Skip lines in docstrings that look like examples or URIs
-          if looks_like_docstring_example?(line) or looks_like_uri_path?(line) do
-            []
-          else
-            @path_patterns
-            |> Enum.filter(&Regex.match?(&1, line))
-            |> Enum.map(fn _pattern ->
-              # Extract the matched path for the message
-              path = extract_first_match(@path_patterns, line)
-
-              %{
-                type: :hardcoded_path,
-                message: "Hardcoded user path detected: #{path}",
-                line: idx,
-                column: nil,
-                severity: :error,
-                suggestion: "Use Path.expand(\"~\") or environment variables"
-              }
-            end)
-            # One violation per line
-            |> Enum.take(1)
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_paths_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_paths_line(line, idx) do
+    if looks_like_docstring_example?(line) or looks_like_uri_path?(line) do
+      []
+    else
+      @path_patterns
+      |> Enum.filter(&Regex.match?(&1, line))
+      |> Enum.take(1)
+      |> Enum.map(fn _pattern ->
+        path = extract_first_match(@path_patterns, line)
+
+        %{
+          type: :hardcoded_path,
+          message: "Hardcoded user path detected: #{path}",
+          line: idx,
+          column: nil,
+          severity: :error,
+          suggestion: "Use Path.expand(\"~\") or environment variables"
+        }
+      end)
+    end
   end
 
   defp check_emails(violations, lines, allowlisted) do
@@ -249,30 +264,29 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          # Skip if it looks like a test/example email
-          if Regex.match?(@email_pattern, line) and not test_email?(line) do
-            email = extract_match(@email_pattern, line)
-
-            [
-              %{
-                type: :email_address,
-                message: "Email address detected: #{mask_email(email)}",
-                line: idx,
-                column: nil,
-                severity: :warning,
-                suggestion: "Use configuration or environment variable for email addresses"
-              }
-            ]
-          else
-            []
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_emails_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_emails_line(line, idx) do
+    if Regex.match?(@email_pattern, line) and not test_email?(line) do
+      email = extract_match(@email_pattern, line)
+
+      [
+        %{
+          type: :email_address,
+          message: "Email address detected: #{mask_email(email)}",
+          line: idx,
+          column: nil,
+          severity: :warning,
+          suggestion: "Use configuration or environment variable for email addresses"
+        }
+      ]
+    else
+      []
+    end
   end
 
   defp check_phones(violations, lines, allowlisted) do
@@ -280,33 +294,32 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          # Skip lines that look like they contain timestamps or cursor formats
-          if looks_like_timestamp_context?(line) do
-            []
-          else
-            @phone_patterns
-            |> Enum.filter(&Regex.match?(&1, line))
-            |> Enum.map(fn pattern ->
-              phone = extract_match(pattern, line)
-
-              %{
-                type: :phone_number,
-                message: "Phone number detected: #{mask_phone(phone)}",
-                line: idx,
-                column: nil,
-                severity: :error,
-                suggestion: "Use configuration or environment variable for phone numbers"
-              }
-            end)
-            |> Enum.take(1)
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_phones_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_phones_line(line, idx) do
+    if looks_like_timestamp_context?(line) do
+      []
+    else
+      @phone_patterns
+      |> Enum.filter(&Regex.match?(&1, line))
+      |> Enum.take(1)
+      |> Enum.map(fn pattern ->
+        phone = extract_match(pattern, line)
+
+        %{
+          type: :phone_number,
+          message: "Phone number detected: #{mask_phone(phone)}",
+          line: idx,
+          column: nil,
+          severity: :error,
+          suggestion: "Use configuration or environment variable for phone numbers"
+        }
+      end)
+    end
   end
 
   defp check_credit_cards(violations, lines, allowlisted) do
@@ -314,44 +327,30 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          # Skip lines that look like test data or documentation
-          if looks_like_test_card?(line) do
-            []
-          else
-            @credit_card_patterns
-            |> Enum.flat_map(fn pattern ->
-              case Regex.run(pattern, line) do
-                [match | _] ->
-                  # Validate with Luhn algorithm to reduce false positives
-                  if valid_luhn?(match) do
-                    [match]
-                  else
-                    []
-                  end
-
-                nil ->
-                  []
-              end
-            end)
-            |> Enum.take(1)
-            |> Enum.map(fn card ->
-              %{
-                type: :credit_card,
-                message: "Credit card number detected: #{mask_credit_card(card)}",
-                line: idx,
-                column: nil,
-                severity: :error,
-                suggestion: "Never hardcode credit card numbers in source code"
-              }
-            end)
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_credit_cards_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_credit_cards_line(line, idx) do
+    if looks_like_test_card?(line) do
+      []
+    else
+      @credit_card_patterns
+      |> extract_luhn_matches(line)
+      |> Enum.take(1)
+      |> Enum.map(fn card ->
+        %{
+          type: :credit_card,
+          message: "Credit card number detected: #{mask_credit_card(card)}",
+          line: idx,
+          column: nil,
+          severity: :error,
+          suggestion: "Never hardcode credit card numbers in source code"
+        }
+      end)
+    end
   end
 
   defp check_ssn(violations, lines, allowlisted) do
@@ -359,34 +358,31 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          # Skip lines that look like test data or version numbers
-          if looks_like_test_ssn?(line) or looks_like_version_number?(line) do
-            []
-          else
-            if Regex.match?(@ssn_pattern, line) do
-              ssn = extract_match(@ssn_pattern, line)
-
-              [
-                %{
-                  type: :ssn,
-                  message: "US Social Security Number detected: #{mask_ssn(ssn)}",
-                  line: idx,
-                  column: nil,
-                  severity: :error,
-                  suggestion: "Never hardcode SSNs in source code"
-                }
-              ]
-            else
-              []
-            end
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_ssn_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_ssn_line(line, idx) do
+    skip? = looks_like_test_ssn?(line) or looks_like_version_number?(line)
+
+    if skip? or not Regex.match?(@ssn_pattern, line) do
+      []
+    else
+      ssn = extract_match(@ssn_pattern, line)
+
+      [
+        %{
+          type: :ssn,
+          message: "US Social Security Number detected: #{mask_ssn(ssn)}",
+          line: idx,
+          column: nil,
+          severity: :error,
+          suggestion: "Never hardcode SSNs in source code"
+        }
+      ]
+    end
   end
 
   defp check_secrets(violations, lines, allowlisted) do
@@ -394,26 +390,26 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          @secret_patterns
-          |> Enum.filter(&Regex.match?(&1, line))
-          |> Enum.map(fn _pattern ->
-            %{
-              type: :hardcoded_secret,
-              message: "Potential hardcoded secret or API key",
-              line: idx,
-              column: nil,
-              severity: :error,
-              suggestion: "Use environment variables or secure configuration for secrets"
-            }
-          end)
-          |> Enum.take(1)
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_secrets_line(line, idx)
       end)
 
     violations ++ new_violations
+  end
+
+  defp check_secrets_line(line, idx) do
+    @secret_patterns
+    |> Enum.filter(&Regex.match?(&1, line))
+    |> Enum.take(1)
+    |> Enum.map(fn _pattern ->
+      %{
+        type: :hardcoded_secret,
+        message: "Potential hardcoded secret or API key",
+        line: idx,
+        column: nil,
+        severity: :error,
+        suggestion: "Use environment variables or secure configuration for secrets"
+      }
+    end)
   end
 
   defp check_ips(violations, lines, allowlisted) do
@@ -421,96 +417,109 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-          []
-        else
-          if Regex.match?(@ip_pattern, line) and not localhost_ip?(line) do
-            ip = extract_match(@ip_pattern, line)
-
-            [
-              %{
-                type: :ip_address,
-                message: "IP address detected: #{ip}",
-                line: idx,
-                column: nil,
-                severity: :warning,
-                suggestion: "Use configuration for IP addresses"
-              }
-            ]
-          else
-            []
-          end
-        end
+        if skip_line?(idx, allowlisted), do: [], else: check_ips_line(line, idx)
       end)
 
     violations ++ new_violations
   end
 
-  defp check_names(violations, lines, allowlisted, additional_names) do
-    # Default names to check for (common in personal projects)
-    # These would be configured per-project
-    default_names = []
-    names = default_names ++ additional_names
+  defp check_ips_line(line, idx) do
+    if Regex.match?(@ip_pattern, line) and not localhost_ip?(line) do
+      ip = extract_match(@ip_pattern, line)
 
-    if names == [] do
-      violations
+      [
+        %{
+          type: :ip_address,
+          message: "IP address detected: #{ip}",
+          line: idx,
+          column: nil,
+          severity: :warning,
+          suggestion: "Use configuration for IP addresses"
+        }
+      ]
     else
-      name_pattern = ~r/\b(#{Enum.join(names, "|")})\b/i
-
-      new_violations =
-        lines
-        |> Enum.with_index(1)
-        |> Enum.flat_map(fn {line, idx} ->
-          if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-            []
-          else
-            if Regex.match?(name_pattern, line) do
-              [
-                %{
-                  type: :personal_name,
-                  message: "Personal name detected in code",
-                  line: idx,
-                  column: nil,
-                  severity: :warning,
-                  suggestion: "Remove personal names from code"
-                }
-              ]
-            else
-              []
-            end
-          end
-        end)
-
-      violations ++ new_violations
+      []
     end
   end
 
-  defp check_additional_patterns(violations, lines, allowlisted, patterns) do
-    if patterns == [] do
-      violations
-    else
-      new_violations =
-        lines
-        |> Enum.with_index(1)
-        |> Enum.flat_map(fn {line, idx} ->
-          if MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1) do
-            []
-          else
-            patterns
-            |> Enum.filter(&Regex.match?(&1, line))
-            |> Enum.map(fn pattern ->
-              %{
-                type: :custom_pii_pattern,
-                message: "Custom PII pattern matched: #{inspect(pattern.source)}",
-                line: idx,
-                column: nil,
-                severity: :warning
-              }
-            end)
-          end
-        end)
+  defp check_names(violations, _lines, _allowlisted, []), do: violations
 
-      violations ++ new_violations
+  defp check_names(violations, lines, allowlisted, additional_names) do
+    name_pattern = ~r/\b(#{Enum.join(additional_names, "|")})\b/i
+
+    new_violations =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {line, idx} ->
+        if skip_line?(idx, allowlisted), do: [], else: check_names_line(line, idx, name_pattern)
+      end)
+
+    violations ++ new_violations
+  end
+
+  defp check_names_line(line, idx, name_pattern) do
+    if Regex.match?(name_pattern, line) do
+      [
+        %{
+          type: :personal_name,
+          message: "Personal name detected in code",
+          line: idx,
+          column: nil,
+          severity: :warning,
+          suggestion: "Remove personal names from code"
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp check_additional_patterns(violations, _lines, _allowlisted, []), do: violations
+
+  defp check_additional_patterns(violations, lines, allowlisted, patterns) do
+    new_violations =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {line, idx} ->
+        if skip_line?(idx, allowlisted),
+          do: [],
+          else: check_additional_patterns_line(line, idx, patterns)
+      end)
+
+    violations ++ new_violations
+  end
+
+  defp check_additional_patterns_line(line, idx, patterns) do
+    patterns
+    |> Enum.filter(&Regex.match?(&1, line))
+    |> Enum.map(fn pattern ->
+      %{
+        type: :custom_pii_pattern,
+        message: "Custom PII pattern matched: #{inspect(pattern.source)}",
+        line: idx,
+        column: nil,
+        severity: :warning
+      }
+    end)
+  end
+
+  # ============================================================================
+  # Shared Helpers
+  # ============================================================================
+
+  defp skip_line?(idx, allowlisted) do
+    MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1)
+  end
+
+  # Extracts credit card matches from a line, validating each with Luhn algorithm.
+  defp extract_luhn_matches(patterns, line) do
+    Enum.flat_map(patterns, fn pattern -> extract_validated_match(pattern, line) end)
+  end
+
+  defp extract_validated_match(pattern, line) do
+    case Regex.run(pattern, line) do
+      [match | _] -> if valid_luhn?(match), do: [match], else: []
+      nil -> []
     end
   end
 
@@ -556,25 +565,16 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     # Lines containing Unix timestamps (10-13 digits starting with 1) in contexts like:
     # - "1705123456789:evt_123" (cursor format)
     # - timestamp_ms, DateTime.from_unix, etc.
-    cond do
-      # Cursor format: timestamp:id
-      Regex.match?(~r/\d{10,13}:[a-zA-Z_]/, line) -> true
-      # Timestamp variable/function context
-      String.contains?(line, ["timestamp", "unix", "epoch", "millisecond", "DateTime"]) -> true
-      # Docstring examples with timestamps (iex> or result lines)
-      Regex.match?(~r/iex>.*\d{10,13}/, line) -> true
-      # Result tuple with timestamp: {:ok, {1705..., ...}}
-      Regex.match?(~r/\{:ok,\s*\{\d{10,13}/, line) -> true
-      # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
-      # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
-      Regex.match?(~r/\b1[67]\d{8,11}\b/, line) -> true
-      # Just a number in a docstring example
-      Regex.match?(~r/^\s*#.*\d{10,13}/, line) -> true
-      Regex.match?(~r/^\s*@doc.*\d{10,13}/, line) -> true
-      # Lines with 13+ digit sequences are likely credit card numbers, not phones
-      Regex.match?(~r/\d{13,}/, line) -> true
-      true -> false
-    end
+    has_timestamp_keyword?(line) or matches_any_timestamp_regex?(line)
+  end
+
+  defp has_timestamp_keyword?(line) do
+    # Timestamp variable/function context
+    String.contains?(line, ["timestamp", "unix", "epoch", "millisecond", "DateTime"])
+  end
+
+  defp matches_any_timestamp_regex?(line) do
+    Enum.any?(@timestamp_regexes, &Regex.match?(&1, line))
   end
 
   defp looks_like_docstring_example?(line) do
@@ -698,20 +698,23 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     if length(digits) < 13 do
       false
     else
-      {sum, _} =
-        Enum.reduce(digits, {0, 0}, fn digit, {sum, idx} ->
-          value =
-            if rem(idx, 2) == 1 do
-              doubled = digit * 2
-              if doubled > 9, do: doubled - 9, else: doubled
-            else
-              digit
-            end
-
-          {sum + value, idx + 1}
-        end)
-
+      sum = luhn_checksum(digits)
       rem(sum, 10) == 0
     end
   end
+
+  defp luhn_checksum(digits) do
+    digits
+    |> Enum.with_index()
+    |> Enum.reduce(0, fn {digit, idx}, sum ->
+      sum + luhn_digit_value(digit, idx)
+    end)
+  end
+
+  defp luhn_digit_value(digit, idx) when rem(idx, 2) == 1 do
+    doubled = digit * 2
+    if doubled > 9, do: doubled - 9, else: doubled
+  end
+
+  defp luhn_digit_value(digit, _idx), do: digit
 end

@@ -80,16 +80,21 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
       attempts = Map.get(state.attempts, id, 0)
       new_attempts = attempts + 1
       new_state = %{state | attempts: Map.put(state.attempts, id, new_attempts)}
-
-      if attempts < state.failures_before_success do
-        {{:error, :not_found}, new_state}
-      else
-        case Map.fetch(state.data, id) do
-          {:ok, checkpoint} -> {{:ok, checkpoint}, new_state}
-          :error -> {{:error, :not_found}, new_state}
-        end
-      end
+      result = fetch_with_delay(state.data, id, attempts, state.failures_before_success)
+      {result, new_state}
     end)
+  end
+
+  defp fetch_with_delay(_data, _id, attempts, failures_before_success)
+       when attempts < failures_before_success do
+    {:error, :not_found}
+  end
+
+  defp fetch_with_delay(data, id, _attempts, _failures_before_success) do
+    case Map.fetch(data, id) do
+      {:ok, checkpoint} -> {:ok, checkpoint}
+      :error -> {:error, :not_found}
+    end
   end
 
   @impl Arbor.Checkpoint.Store

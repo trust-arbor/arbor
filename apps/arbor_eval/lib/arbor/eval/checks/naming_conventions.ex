@@ -207,32 +207,8 @@ defmodule Arbor.Eval.Checks.NamingConventions do
         module_name = Enum.map_join(parts, ".", &to_string/1)
         first_part = to_string(hd(parts))
 
-        # Check for Arbor module naming convention
-        # Modules should be Arbor.* not ArborSomething
         naming_violations = check_arbor_module_naming(module_name, first_part, meta, strictness)
-
-        # Check for implementation technology in name
-        tech_violations =
-          if strictness in [:standard, :strict] do
-            @implementation_terms
-            |> Enum.filter(fn term ->
-              String.contains?(module_name, term)
-            end)
-            |> Enum.map(fn term ->
-              %{
-                type: :implementation_in_module_name,
-                message:
-                  "Module name '#{module_name}' exposes implementation technology '#{term}'",
-                line: meta[:line],
-                column: nil,
-                severity: if(strictness == :strict, do: :warning, else: :suggestion),
-                suggestion:
-                  "Rename to expose concept, not implementation (e.g., DistributedSupervisor instead of HordeSupervisor)"
-              }
-            end)
-          else
-            []
-          end
+        tech_violations = check_implementation_terms(module_name, meta, strictness)
 
         violations ++ naming_violations ++ tech_violations
 
@@ -241,30 +217,48 @@ defmodule Arbor.Eval.Checks.NamingConventions do
     end
   end
 
+  defp check_implementation_terms(_module_name, _meta, strictness)
+       when strictness not in [:standard, :strict],
+       do: []
+
+  defp check_implementation_terms(module_name, meta, strictness) do
+    @implementation_terms
+    |> Enum.filter(fn term -> String.contains?(module_name, term) end)
+    |> Enum.map(fn term ->
+      %{
+        type: :implementation_in_module_name,
+        message:
+          "Module name '#{module_name}' exposes implementation technology '#{term}'",
+        line: meta[:line],
+        column: nil,
+        severity: if(strictness == :strict, do: :warning, else: :suggestion),
+        suggestion:
+          "Rename to expose concept, not implementation (e.g., DistributedSupervisor instead of HordeSupervisor)"
+      }
+    end)
+  end
+
   # Check that Arbor modules use dotted naming (Arbor.Foo) not concatenated (ArborFoo)
   defp check_arbor_module_naming(module_name, first_part, meta, _strictness) do
-    # Check if module starts with "Arbor" but isn't properly namespaced
-    cond do
-      # ArborEval, ArborCommon, etc. - should be Arbor.Eval, Arbor.Common
-      String.starts_with?(first_part, "Arbor") and first_part != "Arbor" ->
-        expected = "Arbor." <> String.replace_prefix(first_part, "Arbor", "")
-        rest = module_name |> String.split(".") |> tl() |> Enum.join(".")
-        full_expected = if rest == "", do: expected, else: "#{expected}.#{rest}"
+    # ArborEval, ArborCommon, etc. - should be Arbor.Eval, Arbor.Common
+    if String.starts_with?(first_part, "Arbor") and first_part != "Arbor" do
+      expected = "Arbor." <> String.replace_prefix(first_part, "Arbor", "")
+      rest = module_name |> String.split(".") |> tl() |> Enum.join(".")
+      full_expected = if rest == "", do: expected, else: "#{expected}.#{rest}"
 
-        [
-          %{
-            type: :arbor_module_naming,
-            message:
-              "Module '#{module_name}' uses concatenated naming instead of dotted namespace",
-            line: meta[:line],
-            column: nil,
-            severity: :error,
-            suggestion: "Rename to '#{full_expected}' (use Arbor.* namespace, not Arbor* prefix)"
-          }
-        ]
-
-      true ->
-        []
+      [
+        %{
+          type: :arbor_module_naming,
+          message:
+            "Module '#{module_name}' uses concatenated naming instead of dotted namespace",
+          line: meta[:line],
+          column: nil,
+          severity: :error,
+          suggestion: "Rename to '#{full_expected}' (use Arbor.* namespace, not Arbor* prefix)"
+        }
+      ]
+    else
+      []
     end
   end
 
@@ -328,41 +322,43 @@ defmodule Arbor.Eval.Checks.NamingConventions do
   # Parameter Name Checks
   # ============================================================================
 
-  defp check_parameter_names(violations, ast, strictness) do
-    if strictness != :strict do
-      violations
-    else
-      # Find function definitions with parameters
-      funs_with_params = find_functions_with_params(ast)
+  defp check_parameter_names(violations, _ast, strictness) when strictness != :strict,
+    do: violations
 
-      new_violations =
-        Enum.flat_map(funs_with_params, fn {fun_name, params, meta} ->
-          params
-          |> Enum.filter(fn
-            {name, _, _} when is_atom(name) ->
-              name_str = to_string(name)
-              # Single letter (but not _) and not a common pattern variable
-              String.length(name_str) == 1 and name_str != "_" and
-                name_str not in ["x", "y", "n", "i", "k", "v"]
+  defp check_parameter_names(violations, ast, :strict) do
+    funs_with_params = find_functions_with_params(ast)
 
-            _ ->
-              false
-          end)
-          |> Enum.map(fn {name, _, _} ->
-            %{
-              type: :single_letter_parameter,
-              message: "Single-letter parameter '#{name}' in function '#{fun_name}'",
-              line: meta[:line],
-              column: nil,
-              severity: :suggestion,
-              suggestion: "Use descriptive parameter names"
-            }
-          end)
-        end)
+    new_violations =
+      Enum.flat_map(funs_with_params, fn {fun_name, params, meta} ->
+        find_single_letter_params(params, fun_name, meta)
+      end)
 
-      violations ++ new_violations
-    end
+    violations ++ new_violations
   end
+
+  defp find_single_letter_params(params, fun_name, meta) do
+    params
+    |> Enum.filter(&single_letter_param?/1)
+    |> Enum.map(fn {name, _, _} ->
+      %{
+        type: :single_letter_parameter,
+        message: "Single-letter parameter '#{name}' in function '#{fun_name}'",
+        line: meta[:line],
+        column: nil,
+        severity: :suggestion,
+        suggestion: "Use descriptive parameter names"
+      }
+    end)
+  end
+
+  defp single_letter_param?({name, _, _}) when is_atom(name) do
+    name_str = to_string(name)
+
+    String.length(name_str) == 1 and name_str != "_" and
+      name_str not in ["x", "y", "n", "i", "k", "v"]
+  end
+
+  defp single_letter_param?(_), do: false
 
   # ============================================================================
   # Abbreviation Suggestions

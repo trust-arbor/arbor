@@ -169,16 +169,21 @@ defmodule Arbor.Persistence.EventLog.ETS do
         {:noreply, %{state | monitors: monitors}}
 
       {{sub_key, pid}, monitors} ->
-        subscribers =
-          Map.update(state.subscribers, sub_key, [], fn subs ->
-            Enum.reject(subs, fn {p, r} -> p == pid and r == ref end)
-          end)
-
+        subscribers = remove_subscriber(state.subscribers, sub_key, pid, ref)
         {:noreply, %{state | subscribers: subscribers, monitors: monitors}}
     end
   end
 
   # --- Private ---
+
+  defp remove_subscriber(subscribers, sub_key, pid, ref) do
+    Map.update(subscribers, sub_key, [], fn subs ->
+      Enum.reject(subs, fn {p, r} -> p == pid and r == ref end)
+    end)
+  end
+
+  defp decrement_limit(nil), do: nil
+  defp decrement_limit(n), do: n - 1
 
   defp do_append(stream_id, events, state) do
     current_version = Map.get(state.stream_versions, stream_id, 0)
@@ -258,23 +263,26 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp collect_global_events(table, pos, limit, acc) do
     case :ets.lookup(table, pos) do
       [{^pos, event}] ->
-        new_limit = if limit, do: limit - 1, else: nil
+        new_limit = decrement_limit(limit)
         collect_global_events(table, pos + 1, new_limit, [event | acc])
 
       [] ->
-        # Try next position (gaps shouldn't exist but handle gracefully)
-        case :ets.next(table, pos) do
-          :"$end_of_table" ->
-            acc
+        collect_from_next_position(table, pos, limit, acc)
+    end
+  end
 
-          next_pos when is_integer(next_pos) ->
-            [{^next_pos, event}] = :ets.lookup(table, next_pos)
-            new_limit = if limit, do: limit - 1, else: nil
-            collect_global_events(table, next_pos + 1, new_limit, [event | acc])
+  defp collect_from_next_position(table, pos, limit, acc) do
+    case :ets.next(table, pos) do
+      :"$end_of_table" ->
+        acc
 
-          _ ->
-            acc
-        end
+      next_pos when is_integer(next_pos) ->
+        [{^next_pos, event}] = :ets.lookup(table, next_pos)
+        new_limit = decrement_limit(limit)
+        collect_global_events(table, next_pos + 1, new_limit, [event | acc])
+
+      _ ->
+        acc
     end
   end
 

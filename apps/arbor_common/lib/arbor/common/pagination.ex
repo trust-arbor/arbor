@@ -81,16 +81,7 @@ defmodule Arbor.Common.Pagination do
   def parse_cursor(cursor) when is_binary(cursor) do
     case String.split(cursor, ":", parts: 2) do
       [timestamp_str, id] when byte_size(id) > 0 ->
-        case Integer.parse(timestamp_str) do
-          {timestamp_ms, ""} ->
-            case DateTime.from_unix(timestamp_ms, :millisecond) do
-              {:ok, timestamp} -> {:ok, {timestamp, id}}
-              _ -> :error
-            end
-
-          _ ->
-            :error
-        end
+        parse_timestamp_and_id(timestamp_str, id)
 
       _ ->
         :error
@@ -98,6 +89,23 @@ defmodule Arbor.Common.Pagination do
   end
 
   def parse_cursor(_), do: :error
+
+  defp parse_timestamp_and_id(timestamp_str, id) do
+    case Integer.parse(timestamp_str) do
+      {timestamp_ms, ""} ->
+        convert_unix_to_cursor(timestamp_ms, id)
+
+      _ ->
+        :error
+    end
+  end
+
+  defp convert_unix_to_cursor(timestamp_ms, id) do
+    case DateTime.from_unix(timestamp_ms, :millisecond) do
+      {:ok, timestamp} -> {:ok, {timestamp, id}}
+      _ -> :error
+    end
+  end
 
   @doc """
   Parse cursor and return components or nil values.

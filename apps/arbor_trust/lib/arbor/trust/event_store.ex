@@ -691,37 +691,64 @@ defmodule Arbor.Trust.EventStore do
   defp calculate_agent_stats(agent_id, events) do
     by_type = Enum.group_by(events, & &1.event_type)
 
-    success_count = length(by_type[:action_success] || [])
-    failure_count = length(by_type[:action_failure] || [])
-    total_actions = success_count + failure_count
-
-    test_passed = length(by_type[:test_passed] || [])
-    test_failed = length(by_type[:test_failed] || [])
-    total_tests = test_passed + test_failed
-
-    negative_events =
-      Enum.count(events, fn e ->
-        e.event_type in [:action_failure, :test_failed, :rollback_executed, :security_violation]
-      end)
-
     %{
       agent_id: agent_id,
       total_events: length(events),
       events_by_type: Map.new(by_type, fn {k, v} -> {k, length(v)} end),
-      action_success_rate: if(total_actions > 0, do: success_count / total_actions, else: nil),
-      test_pass_rate: if(total_tests > 0, do: test_passed / total_tests, else: nil),
-      security_violations: length(by_type[:security_violation] || []),
-      rollbacks: length(by_type[:rollback_executed] || []),
-      tier_changes: length(by_type[:tier_changed] || []),
-      freezes: length(by_type[:trust_frozen] || []),
-      negative_event_count: negative_events,
-      first_event_at:
-        List.last(Enum.sort_by(events, & &1.timestamp, DateTime)) &&
-          List.last(Enum.sort_by(events, & &1.timestamp, DateTime)).timestamp,
-      last_event_at:
-        List.first(Enum.sort_by(events, & &1.timestamp, {:desc, DateTime})) &&
-          List.first(Enum.sort_by(events, & &1.timestamp, {:desc, DateTime})).timestamp
+      action_success_rate: calculate_action_success_rate(by_type),
+      test_pass_rate: calculate_test_pass_rate(by_type),
+      security_violations: count_events_of_type(by_type, :security_violation),
+      rollbacks: count_events_of_type(by_type, :rollback_executed),
+      tier_changes: count_events_of_type(by_type, :tier_changed),
+      freezes: count_events_of_type(by_type, :trust_frozen),
+      negative_event_count: count_negative_events(events),
+      first_event_at: earliest_event_timestamp(events),
+      last_event_at: latest_event_timestamp(events)
     }
+  end
+
+  defp calculate_action_success_rate(by_type) do
+    success_count = count_events_of_type(by_type, :action_success)
+    failure_count = count_events_of_type(by_type, :action_failure)
+    total = success_count + failure_count
+    if total > 0, do: success_count / total, else: nil
+  end
+
+  defp calculate_test_pass_rate(by_type) do
+    passed = count_events_of_type(by_type, :test_passed)
+    failed = count_events_of_type(by_type, :test_failed)
+    total = passed + failed
+    if total > 0, do: passed / total, else: nil
+  end
+
+  defp count_events_of_type(by_type, type) do
+    length(by_type[type] || [])
+  end
+
+  defp count_negative_events(events) do
+    Enum.count(events, fn e ->
+      e.event_type in [:action_failure, :test_failed, :rollback_executed, :security_violation]
+    end)
+  end
+
+  defp earliest_event_timestamp(events) do
+    events
+    |> Enum.sort_by(& &1.timestamp, DateTime)
+    |> List.last()
+    |> case do
+      nil -> nil
+      event -> event.timestamp
+    end
+  end
+
+  defp latest_event_timestamp(events) do
+    events
+    |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
+    |> List.first()
+    |> case do
+      nil -> nil
+      event -> event.timestamp
+    end
   end
 
   defp get_system_stats_impl(state) do

@@ -76,19 +76,27 @@ defmodule Arbor.Common.Pagination.Cursor do
 
     case String.split(cursor, ":", parts: 2) do
       [timestamp_str, id] ->
-        case Integer.parse(timestamp_str) do
-          {timestamp_int, ""} ->
-            case DateTime.from_unix(timestamp_int, precision) do
-              {:ok, datetime} -> {:ok, {datetime, id}}
-              _ -> :error
-            end
-
-          _ ->
-            :error
-        end
+        parse_datetime_parts(timestamp_str, id, precision)
 
       _ ->
         :error
+    end
+  end
+
+  defp parse_datetime_parts(timestamp_str, id, precision) do
+    case Integer.parse(timestamp_str) do
+      {timestamp_int, ""} ->
+        convert_unix_to_datetime(timestamp_int, id, precision)
+
+      _ ->
+        :error
+    end
+  end
+
+  defp convert_unix_to_datetime(timestamp_int, id, precision) do
+    case DateTime.from_unix(timestamp_int, precision) do
+      {:ok, datetime} -> {:ok, {datetime, id}}
+      _ -> :error
     end
   end
 
@@ -171,17 +179,7 @@ defmodule Arbor.Common.Pagination.Cursor do
       {:ok, {cursor_timestamp_ms, cursor_id}} ->
         Enum.filter(records, fn record ->
           record_ts_ms = DateTime.to_unix(timestamp_fn.(record), :millisecond)
-
-          cond do
-            record_ts_ms == cursor_timestamp_ms ->
-              if order == :desc, do: id_fn.(record) < cursor_id, else: id_fn.(record) > cursor_id
-
-            record_ts_ms < cursor_timestamp_ms ->
-              order == :desc
-
-            true ->
-              order == :asc
-          end
+          passes_filter?(record_ts_ms, id_fn.(record), cursor_timestamp_ms, cursor_id, order)
         end)
 
       :error ->
@@ -222,21 +220,24 @@ defmodule Arbor.Common.Pagination.Cursor do
         Enum.filter(records, fn record ->
           record_timestamp = timestamp_fn.(record)
           record_id = id_fn.(record)
-
-          case DateTime.compare(record_timestamp, cursor_timestamp) do
-            :eq ->
-              if order == :desc, do: record_id < cursor_id, else: record_id > cursor_id
-
-            :lt ->
-              order == :desc
-
-            :gt ->
-              order == :asc
-          end
+          passes_datetime_filter?(record_timestamp, record_id, cursor_timestamp, cursor_id, order)
         end)
 
       :error ->
         records
+    end
+  end
+
+  defp passes_datetime_filter?(record_timestamp, record_id, cursor_timestamp, cursor_id, order) do
+    case DateTime.compare(record_timestamp, cursor_timestamp) do
+      :eq ->
+        if order == :desc, do: record_id < cursor_id, else: record_id > cursor_id
+
+      :lt ->
+        order == :desc
+
+      :gt ->
+        order == :asc
     end
   end
 end

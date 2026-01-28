@@ -88,16 +88,7 @@ defmodule Arbor.Actions.File do
 
       case File.read(path) do
         {:ok, content} ->
-          content =
-            if encoding == :binary do
-              content
-            else
-              case :unicode.characters_to_binary(content, :utf8) do
-                {:error, _, _} -> content
-                {:incomplete, _, _} -> content
-                binary -> binary
-              end
-            end
+          content = maybe_decode_content(content, encoding)
 
           result = %{
             path: path,
@@ -111,6 +102,16 @@ defmodule Arbor.Actions.File do
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Failed to read file '#{path}': #{format_posix_error(reason)}"}
+      end
+    end
+
+    defp maybe_decode_content(content, :binary), do: content
+
+    defp maybe_decode_content(content, _encoding) do
+      case :unicode.characters_to_binary(content, :utf8) do
+        {:error, _, _} -> content
+        {:incomplete, _, _} -> content
+        binary -> binary
       end
     end
 

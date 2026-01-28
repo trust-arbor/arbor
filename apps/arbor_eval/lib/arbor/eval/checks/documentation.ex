@@ -68,51 +68,49 @@ defmodule Arbor.Eval.Checks.Documentation do
       {:defmodule, meta, [{:__aliases__, _, parts}, [do: body]]} ->
         module_name = Enum.map_join(parts, ".", &to_string/1)
         moduledoc = find_moduledoc(body)
-
-        case moduledoc do
-          nil ->
-            [
-              %{
-                type: :missing_moduledoc,
-                message: "Module '#{module_name}' is missing @moduledoc",
-                line: meta[:line],
-                column: nil,
-                severity: :warning,
-                suggestion: "Add @moduledoc describing the module's purpose"
-              }
-              | violations
-            ]
-
-          false ->
-            # @moduledoc false is intentional
-            violations
-
-          doc when is_binary(doc) ->
-            if String.length(doc) < min_length do
-              [
-                %{
-                  type: :short_moduledoc,
-                  message:
-                    "Module '#{module_name}' has very short @moduledoc (#{String.length(doc)} chars)",
-                  line: meta[:line],
-                  column: nil,
-                  severity: :suggestion,
-                  suggestion: "Expand @moduledoc to better describe the module"
-                }
-                | violations
-              ]
-            else
-              violations
-            end
-
-          _ ->
-            violations
-        end
+        validate_moduledoc(violations, moduledoc, module_name, meta, min_length)
 
       _ ->
         violations
     end
   end
+
+  defp validate_moduledoc(violations, nil, module_name, meta, _min_length) do
+    [
+      %{
+        type: :missing_moduledoc,
+        message: "Module '#{module_name}' is missing @moduledoc",
+        line: meta[:line],
+        column: nil,
+        severity: :warning,
+        suggestion: "Add @moduledoc describing the module's purpose"
+      }
+      | violations
+    ]
+  end
+
+  defp validate_moduledoc(violations, false, _module_name, _meta, _min_length), do: violations
+
+  defp validate_moduledoc(violations, doc, module_name, meta, min_length) when is_binary(doc) do
+    if String.length(doc) < min_length do
+      [
+        %{
+          type: :short_moduledoc,
+          message:
+            "Module '#{module_name}' has very short @moduledoc (#{String.length(doc)} chars)",
+          line: meta[:line],
+          column: nil,
+          severity: :suggestion,
+          suggestion: "Expand @moduledoc to better describe the module"
+        }
+        | violations
+      ]
+    else
+      violations
+    end
+  end
+
+  defp validate_moduledoc(violations, _doc, _module_name, _meta, _min_length), do: violations
 
   # ============================================================================
   # Function Doc Checks
@@ -137,70 +135,17 @@ defmodule Arbor.Eval.Checks.Documentation do
     {documented_functions, function_first_occurrence} =
       collect_function_docs(statements)
 
+    check_context = %{
+      documented: documented_functions,
+      first_occurrence: function_first_occurrence,
+      allow_doc_false: allow_doc_false,
+      min_length: min_length
+    }
+
     # Second pass: check only the first occurrence of each function
     {_, violations} =
       Enum.reduce(statements, {nil, violations}, fn statement, {last_doc, acc} ->
-        case statement do
-          # @doc "..."
-          {:@, _, [{:doc, _, [doc]}]} ->
-            {doc, acc}
-
-          # @doc false
-          {:@, _, [{:doc, _, [false]}]} ->
-            {false, acc}
-
-          # def function
-          {:def, meta, [{name, _, args}, _]} when is_atom(name) ->
-            arity = if is_list(args), do: length(args), else: 0
-            fun_key = {name, arity}
-
-            # Only check the first occurrence of this function
-            acc =
-              if Map.get(function_first_occurrence, fun_key) == meta[:line] do
-                # This is the first clause - check if it has docs
-                check_function_doc(
-                  acc,
-                  name,
-                  arity,
-                  meta,
-                  last_doc,
-                  allow_doc_false,
-                  min_length,
-                  MapSet.member?(documented_functions, fun_key)
-                )
-              else
-                # Not the first clause, skip (docs should be on first clause only)
-                acc
-              end
-
-            {nil, acc}
-
-          {:def, meta, [{:when, _, [{name, _, args} | _]}, _]} when is_atom(name) ->
-            arity = if is_list(args), do: length(args), else: 0
-            fun_key = {name, arity}
-
-            # Only check the first occurrence of this function
-            acc =
-              if Map.get(function_first_occurrence, fun_key) == meta[:line] do
-                check_function_doc(
-                  acc,
-                  name,
-                  arity,
-                  meta,
-                  last_doc,
-                  allow_doc_false,
-                  min_length,
-                  MapSet.member?(documented_functions, fun_key)
-                )
-              else
-                acc
-              end
-
-            {nil, acc}
-
-          _ ->
-            {last_doc, acc}
-        end
+        reduce_doc_statement(statement, last_doc, acc, check_context)
       end)
 
     violations
@@ -208,161 +153,194 @@ defmodule Arbor.Eval.Checks.Documentation do
 
   defp check_body_for_docs(violations, _body, _allow_doc_false, _min_length), do: violations
 
+  defp reduce_doc_statement({:@, _, [{:doc, _, [doc]}]}, _last_doc, acc, _check_context) do
+    {doc, acc}
+  end
+
+  defp reduce_doc_statement({:@, _, [{:doc, _, [false]}]}, _last_doc, acc, _check_context) do
+    {false, acc}
+  end
+
+  defp reduce_doc_statement({:def, meta, [{name, _, args}, _]}, last_doc, acc, check_context)
+       when is_atom(name) do
+    arity = if is_list(args), do: length(args), else: 0
+    acc = maybe_check_first_clause({name, arity}, meta, last_doc, acc, check_context)
+    {nil, acc}
+  end
+
+  defp reduce_doc_statement(
+         {:def, meta, [{:when, _, [{name, _, args} | _]}, _]},
+         last_doc,
+         acc,
+         check_context
+       )
+       when is_atom(name) do
+    arity = if is_list(args), do: length(args), else: 0
+    acc = maybe_check_first_clause({name, arity}, meta, last_doc, acc, check_context)
+    {nil, acc}
+  end
+
+  defp reduce_doc_statement(_statement, last_doc, acc, _check_context) do
+    {last_doc, acc}
+  end
+
+  defp maybe_check_first_clause(fun_key, meta, last_doc, acc, check_context) do
+    if Map.get(check_context.first_occurrence, fun_key) == meta[:line] do
+      {name, arity} = fun_key
+
+      check_function_doc(
+        acc,
+        name,
+        arity,
+        meta,
+        last_doc,
+        check_context.allow_doc_false,
+        check_context.min_length,
+        MapSet.member?(check_context.documented, fun_key)
+      )
+    else
+      acc
+    end
+  end
+
   # Collect which functions are documented and where their first clause appears
   defp collect_function_docs(statements) do
     {documented, first_occurrence, _} =
-      Enum.reduce(statements, {MapSet.new(), %{}, nil}, fn statement,
-                                                           {documented, first_occ, last_doc} ->
-        case statement do
-          {:@, _, [{:doc, _, [doc]}]} when is_binary(doc) ->
-            {documented, first_occ, doc}
-
-          {:@, _, [{:doc, _, [false]}]} ->
-            {documented, first_occ, false}
-
-          {:def, meta, [{name, _, args}, _]} when is_atom(name) ->
-            arity = if is_list(args), do: length(args), else: 0
-            fun_key = {name, arity}
-
-            # Record first occurrence
-            first_occ =
-              if Map.has_key?(first_occ, fun_key) do
-                first_occ
-              else
-                Map.put(first_occ, fun_key, meta[:line])
-              end
-
-            # Mark as documented if this is the first clause and has docs
-            documented =
-              if not Map.has_key?(first_occ, fun_key) or
-                   Map.get(first_occ, fun_key) == meta[:line] do
-                if is_binary(last_doc) or last_doc == false do
-                  MapSet.put(documented, fun_key)
-                else
-                  documented
-                end
-              else
-                documented
-              end
-
-            {documented, first_occ, nil}
-
-          {:def, meta, [{:when, _, [{name, _, args} | _]}, _]} when is_atom(name) ->
-            arity = if is_list(args), do: length(args), else: 0
-            fun_key = {name, arity}
-
-            first_occ =
-              if Map.has_key?(first_occ, fun_key) do
-                first_occ
-              else
-                Map.put(first_occ, fun_key, meta[:line])
-              end
-
-            documented =
-              if not Map.has_key?(first_occ, fun_key) or
-                   Map.get(first_occ, fun_key) == meta[:line] do
-                if is_binary(last_doc) or last_doc == false do
-                  MapSet.put(documented, fun_key)
-                else
-                  documented
-                end
-              else
-                documented
-              end
-
-            {documented, first_occ, nil}
-
-          _ ->
-            {documented, first_occ, last_doc}
-        end
+      Enum.reduce(statements, {MapSet.new(), %{}, nil}, fn statement, acc ->
+        reduce_collect_statement(statement, acc)
       end)
 
     {documented, first_occurrence}
   end
 
-  defp check_function_doc(
-         violations,
-         name,
-         arity,
-         meta,
-         doc,
-         allow_doc_false,
-         min_length,
-         already_documented
-       ) do
-    cond do
-      # Already documented from previous analysis (handles multi-clause edge cases)
-      already_documented ->
-        violations
+  defp reduce_collect_statement({:@, _, [{:doc, _, [doc]}]}, {documented, first_occ, _last_doc})
+       when is_binary(doc) do
+    {documented, first_occ, doc}
+  end
 
-      # Has doc
-      is_binary(doc) and String.length(doc) >= min_length ->
-        violations
+  defp reduce_collect_statement({:@, _, [{:doc, _, [false]}]}, {documented, first_occ, _last_doc}) do
+    {documented, first_occ, false}
+  end
 
-      # Short doc
-      is_binary(doc) ->
-        [
-          %{
-            type: :short_doc,
-            message:
-              "Function '#{name}/#{arity}' has very short @doc (#{String.length(doc)} chars)",
-            line: meta[:line],
-            column: nil,
-            severity: :suggestion,
-            suggestion: "Expand @doc to better describe the function"
-          }
-          | violations
-        ]
+  defp reduce_collect_statement(
+         {:def, meta, [{name, _, args}, _]},
+         {documented, first_occ, last_doc}
+       )
+       when is_atom(name) do
+    arity = if is_list(args), do: length(args), else: 0
+    record_function_doc({name, arity}, meta, documented, first_occ, last_doc)
+  end
 
-      # @doc false and allowed
-      doc == false and allow_doc_false ->
-        violations
+  defp reduce_collect_statement(
+         {:def, meta, [{:when, _, [{name, _, args} | _]}, _]},
+         {documented, first_occ, last_doc}
+       )
+       when is_atom(name) do
+    arity = if is_list(args), do: length(args), else: 0
+    record_function_doc({name, arity}, meta, documented, first_occ, last_doc)
+  end
 
-      # @doc false but not allowed
-      doc == false ->
-        [
-          %{
-            type: :doc_false,
-            message: "Function '#{name}/#{arity}' has @doc false",
-            line: meta[:line],
-            column: nil,
-            severity: :warning,
-            suggestion: "Add documentation or make the function private"
-          }
-          | violations
-        ]
+  defp reduce_collect_statement(_statement, acc), do: acc
 
-      # No doc at all - skip callbacks and common overrides
-      name in [
-        :init,
-        :handle_call,
-        :handle_cast,
-        :handle_info,
-        :terminate,
-        :code_change,
-        :mount,
-        :render,
-        :update,
-        :handle_event,
-        :handle_params,
-        :child_spec,
-        :start_link
-      ] ->
-        violations
+  defp record_function_doc(fun_key, meta, documented, first_occ, last_doc) do
+    first_occ = Map.put_new(first_occ, fun_key, meta[:line])
+    documented = maybe_mark_documented(fun_key, meta, documented, first_occ, last_doc)
+    {documented, first_occ, nil}
+  end
 
-      # No doc
-      true ->
-        [
-          %{
-            type: :missing_doc,
-            message: "Public function '#{name}/#{arity}' is missing @doc",
-            line: meta[:line],
-            column: nil,
-            severity: :warning,
-            suggestion: "Add @doc describing what the function does"
-          }
-          | violations
-        ]
+  defp maybe_mark_documented(fun_key, meta, documented, first_occ, last_doc) do
+    is_first_clause = Map.get(first_occ, fun_key) == meta[:line]
+    has_doc = is_binary(last_doc) or last_doc == false
+
+    if is_first_clause and has_doc do
+      MapSet.put(documented, fun_key)
+    else
+      documented
+    end
+  end
+
+  # OTP callbacks and common overrides that don't require docs
+  @otp_callbacks [
+    :init,
+    :handle_call,
+    :handle_cast,
+    :handle_info,
+    :terminate,
+    :code_change,
+    :mount,
+    :render,
+    :update,
+    :handle_event,
+    :handle_params,
+    :child_spec,
+    :start_link
+  ]
+
+  # Already documented from previous analysis (handles multi-clause edge cases)
+  defp check_function_doc(violations, _name, _arity, _meta, _doc, _allow, _min, true),
+    do: violations
+
+  # Has doc string - evaluate its length
+  defp check_function_doc(violations, name, arity, meta, doc, _allow, min_length, _already)
+       when is_binary(doc) do
+    evaluate_doc_length(violations, name, arity, meta, doc, min_length)
+  end
+
+  # @doc false and allowed
+  defp check_function_doc(violations, _name, _arity, _meta, false, true, _min, _already),
+    do: violations
+
+  # @doc false but not allowed
+  defp check_function_doc(violations, name, arity, meta, false, _allow, _min, _already) do
+    [
+      %{
+        type: :doc_false,
+        message: "Function '#{name}/#{arity}' has @doc false",
+        line: meta[:line],
+        column: nil,
+        severity: :warning,
+        suggestion: "Add documentation or make the function private"
+      }
+      | violations
+    ]
+  end
+
+  # No doc at all - skip OTP callbacks and common overrides
+  defp check_function_doc(violations, name, _arity, _meta, _doc, _allow, _min, _already)
+       when name in @otp_callbacks,
+       do: violations
+
+  # No doc
+  defp check_function_doc(violations, name, arity, meta, _doc, _allow, _min, _already) do
+    [
+      %{
+        type: :missing_doc,
+        message: "Public function '#{name}/#{arity}' is missing @doc",
+        line: meta[:line],
+        column: nil,
+        severity: :warning,
+        suggestion: "Add @doc describing what the function does"
+      }
+      | violations
+    ]
+  end
+
+  defp evaluate_doc_length(violations, name, arity, meta, doc, min_length) do
+    if String.length(doc) >= min_length do
+      violations
+    else
+      [
+        %{
+          type: :short_doc,
+          message:
+            "Function '#{name}/#{arity}' has very short @doc (#{String.length(doc)} chars)",
+          line: meta[:line],
+          column: nil,
+          severity: :suggestion,
+          suggestion: "Expand @doc to better describe the function"
+        }
+        | violations
+      ]
     end
   end
 
