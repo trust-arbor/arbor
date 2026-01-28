@@ -21,7 +21,8 @@ defmodule Arbor.Persistence.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {Arbor.Persistence.Application, []}
     ]
   end
 
@@ -30,6 +31,8 @@ defmodule Arbor.Persistence.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
+      {:ecto_sql, "~> 3.10"},
+      {:postgrex, "~> 0.18"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
