@@ -2,6 +2,9 @@ defmodule Arbor.AI.Response do
   @moduledoc """
   Unified response struct for all LLM backends.
 
+  Uses `Arbor.Common.SafeAtom` for safe provider name conversion to prevent
+  atom exhaustion attacks from untrusted input.
+
   This struct provides a consistent interface regardless of whether the response
   came from an API (via ReqLLM) or a CLI agent (claude, codex, gemini, etc.).
 
@@ -33,6 +36,8 @@ defmodule Arbor.AI.Response do
       #=> %{input_tokens: 5, output_tokens: 10, total_tokens: 15}
   """
 
+  alias Arbor.Common.SafeAtom
+
   @type provider ::
           :anthropic
           | :openai
@@ -40,6 +45,8 @@ defmodule Arbor.AI.Response do
           | :lmstudio
           | :qwen
           | :opencode
+
+  @known_providers [:anthropic, :openai, :gemini, :lmstudio, :qwen, :opencode]
 
   @type finish_reason :: :stop | :max_tokens | :tool_use | :error | nil
 
@@ -124,14 +131,16 @@ defmodule Arbor.AI.Response do
     }
   end
 
-  # Normalize provider to atom
+  # Normalize provider to atom using SafeAtom with known providers list
   defp normalize_provider(nil), do: nil
   defp normalize_provider(p) when is_atom(p), do: p
 
   defp normalize_provider(p) when is_binary(p) do
-    String.to_existing_atom(p)
-  rescue
-    ArgumentError -> String.to_atom(p)
+    case SafeAtom.to_allowed(p, @known_providers) do
+      {:ok, atom} -> atom
+      # If unknown provider, return nil rather than creating arbitrary atoms
+      {:error, _} -> nil
+    end
   end
 
   # Normalize usage map

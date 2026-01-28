@@ -87,10 +87,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
 
+    # Safe: name is module atom from internal start_link opts, not user input
     stream_table =
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       :ets.new(:"#{name}_streams", [:ordered_set, :protected, read_concurrency: true])
 
+    # Safe: name is module atom from internal start_link opts, not user input
     global_table =
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       :ets.new(:"#{name}_global", [:ordered_set, :protected, read_concurrency: true])
 
     {:ok,

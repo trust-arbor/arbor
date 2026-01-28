@@ -5,6 +5,9 @@ defmodule Arbor.Historian.EventConverter do
   Used at the domain boundary when the Historian persists events to the
   unified EventLog and when reading them back.
 
+  Uses `Arbor.Common.SafeAtom` for safe string-to-atom conversion to prevent
+  atom exhaustion attacks from untrusted input.
+
   ## Stream ID Convention
 
   Historian events already carry a `stream_id`. This is preserved as-is.
@@ -14,6 +17,7 @@ defmodule Arbor.Historian.EventConverter do
   Event types are stored as `"arbor.historian.{type}"`.
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Historian.Event, as: HistorianEvent
   alias Arbor.Persistence.Event, as: PersistenceEvent
 
@@ -53,7 +57,7 @@ defmodule Arbor.Historian.EventConverter do
       id: event.id,
       type: type,
       subject_id: meta[:subject_id] || meta["subject_id"] || event.stream_id,
-      subject_type: atomize(meta[:subject_type] || meta["subject_type"]),
+      subject_type: atomize_subject_type(meta[:subject_type] || meta["subject_type"]),
       data: event.data,
       timestamp: event.timestamp,
       causation_id: event.causation_id,
@@ -67,19 +71,27 @@ defmodule Arbor.Historian.EventConverter do
   end
 
   defp extract_type("arbor.historian." <> rest) do
-    atomize(rest)
+    safe_atomize(rest)
   end
 
   defp extract_type(type) when is_binary(type) do
-    atomize(type)
+    safe_atomize(type)
   end
 
-  defp atomize(nil), do: nil
-  defp atomize(value) when is_atom(value), do: value
+  # Safe atom conversion - only converts to existing atoms
+  defp safe_atomize(nil), do: nil
+  defp safe_atomize(value) when is_atom(value), do: value
 
-  defp atomize(value) when is_binary(value) do
-    String.to_existing_atom(value)
-  rescue
-    ArgumentError -> String.to_atom(value)
+  defp safe_atomize(value) when is_binary(value) do
+    case SafeAtom.to_existing(value) do
+      {:ok, atom} -> atom
+      # If the string doesn't exist as an atom, return :unknown
+      {:error, _} -> :unknown
+    end
   end
+
+  # Subject type uses SafeAtom.to_subject_type which has known allowed values
+  defp atomize_subject_type(nil), do: nil
+  defp atomize_subject_type(value) when is_atom(value), do: value
+  defp atomize_subject_type(value) when is_binary(value), do: SafeAtom.to_subject_type(value)
 end

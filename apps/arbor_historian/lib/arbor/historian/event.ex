@@ -2,6 +2,9 @@ defmodule Arbor.Historian.Event do
   @moduledoc """
   Domain event structure for the Arbor historian.
 
+  Uses `Arbor.Common.SafeAtom` for safe string-to-atom conversion to prevent
+  atom exhaustion attacks from untrusted input.
+
   Events are immutable facts that represent state changes in the system.
   They are the historian's primary data type — signals are transformed into
   events for durable storage, and events are enriched into history entries
@@ -46,6 +49,8 @@ defmodule Arbor.Historian.Event do
   """
 
   use TypedStruct
+
+  alias Arbor.Common.SafeAtom
 
   @derive Jason.Encoder
   typedstruct enforce: true do
@@ -206,10 +211,7 @@ defmodule Arbor.Historian.Event do
   end
 
   defp infer_subject_type(subject_id) when is_binary(subject_id) do
-    case String.split(subject_id, "_", parts: 2) do
-      [prefix, _] -> String.to_atom(prefix)
-      _ -> :unknown
-    end
+    SafeAtom.infer_subject_type(subject_id)
   end
 
   defp infer_subject_type(_), do: :unknown
@@ -255,9 +257,11 @@ defmodule Arbor.Historian.Event do
   defp atomize_safely(atom) when is_atom(atom), do: atom
 
   defp atomize_safely(string) when is_binary(string) do
-    String.to_existing_atom(string)
-  rescue
-    ArgumentError -> String.to_atom(string)
+    case SafeAtom.to_existing(string) do
+      {:ok, atom} -> atom
+      # If the string doesn't exist as an atom, return :unknown to prevent DoS
+      {:error, _} -> :unknown
+    end
   end
 
   defp parse_timestamp(%DateTime{} = dt), do: dt

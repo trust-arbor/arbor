@@ -14,8 +14,39 @@ defmodule Arbor.Consensus.EventConverter do
   Event types are stored as `"arbor.consensus.{event_type}"`.
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Consensus.ConsensusEvent
   alias Arbor.Persistence.Event, as: PersistenceEvent
+
+  # Known allowed values for safe atom conversion
+  @allowed_event_types [
+    :proposal_submitted,
+    :evaluation_submitted,
+    :council_complete,
+    :decision_reached,
+    :execution_started,
+    :execution_succeeded,
+    :execution_failed,
+    :proposal_cancelled,
+    :proposal_timeout
+  ]
+
+  @allowed_votes [:approve, :reject, :abstain]
+
+  @allowed_perspectives [
+    :security,
+    :stability,
+    :capability,
+    :adversarial,
+    :resource,
+    :emergence,
+    :random,
+    :test_runner,
+    :code_review,
+    :human
+  ]
+
+  @allowed_decisions [:approved, :rejected, :deadlock]
 
   @doc """
   Convert a ConsensusEvent to a Persistence.Event for durable storage.
@@ -61,15 +92,15 @@ defmodule Arbor.Consensus.EventConverter do
 
     ConsensusEvent.new(%{
       id: event.id,
-      event_type: atomize(field(data, :event_type)),
+      event_type: atomize_event_type(field(data, :event_type)),
       proposal_id: field(data, :proposal_id),
       agent_id: field(data, :agent_id),
       evaluator_id: field(data, :evaluator_id),
       decision_id: field(data, :decision_id),
-      vote: atomize(field(data, :vote)),
-      perspective: atomize(field(data, :perspective)),
+      vote: atomize_vote(field(data, :vote)),
+      perspective: atomize_perspective(field(data, :perspective)),
       confidence: field(data, :confidence),
-      decision: atomize(field(data, :decision)),
+      decision: atomize_decision(field(data, :decision)),
       approve_count: field(data, :approve_count),
       reject_count: field(data, :reject_count),
       abstain_count: field(data, :abstain_count),
@@ -89,12 +120,44 @@ defmodule Arbor.Consensus.EventConverter do
     data[key] || data[Atom.to_string(key)]
   end
 
-  defp atomize(nil), do: nil
-  defp atomize(value) when is_atom(value), do: value
+  # Safe atom conversion for each field type using explicit allowlists
+  defp atomize_event_type(nil), do: nil
+  defp atomize_event_type(value) when is_atom(value), do: value
 
-  defp atomize(value) when is_binary(value) do
-    String.to_existing_atom(value)
-  rescue
-    ArgumentError -> String.to_atom(value)
+  defp atomize_event_type(value) when is_binary(value) do
+    case SafeAtom.to_allowed(value, @allowed_event_types) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
+  end
+
+  defp atomize_vote(nil), do: nil
+  defp atomize_vote(value) when is_atom(value), do: value
+
+  defp atomize_vote(value) when is_binary(value) do
+    case SafeAtom.to_allowed(value, @allowed_votes) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
+  end
+
+  defp atomize_perspective(nil), do: nil
+  defp atomize_perspective(value) when is_atom(value), do: value
+
+  defp atomize_perspective(value) when is_binary(value) do
+    case SafeAtom.to_allowed(value, @allowed_perspectives) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
+  end
+
+  defp atomize_decision(nil), do: nil
+  defp atomize_decision(value) when is_atom(value), do: value
+
+  defp atomize_decision(value) when is_binary(value) do
+    case SafeAtom.to_allowed(value, @allowed_decisions) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
   end
 end
