@@ -3,7 +3,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBasedTest do
 
   alias Arbor.Consensus.EvaluatorBackend.RuleBased
   alias Arbor.Consensus.TestHelpers
-  alias Arbor.Contracts.Autonomous.Evaluation
+  alias Arbor.Contracts.Consensus.Evaluation
 
   describe "evaluate/3 - common behavior" do
     test "returns a sealed evaluation" do

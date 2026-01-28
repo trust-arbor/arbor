@@ -45,13 +45,13 @@ defmodule Arbor.Trust.Supervisor do
   use Supervisor
 
   alias Arbor.Trust.{
-    Store,
-    Manager,
-    EventHandler,
+    CapabilitySync,
     CircuitBreaker,
     Decay,
-    CapabilitySync,
-    EventStore
+    EventHandler,
+    EventStore,
+    Manager,
+    Store
   }
 
   require Logger

@@ -4,6 +4,8 @@ defmodule Arbor.Trust.CircuitBreakerTest do
   @moduletag :fast
 
   alias Arbor.Trust.CircuitBreaker
+  alias Arbor.Trust.Manager
+  alias Arbor.Trust.Store
 
   # Use short windows so tests run quickly
   @test_config %{
@@ -268,15 +270,15 @@ defmodule Arbor.Trust.CircuitBreakerTest do
   # Helpers
 
   defp ensure_manager_started do
-    case Process.whereis(Arbor.Trust.Store) do
-      nil -> start_supervised!(Arbor.Trust.Store)
+    case Process.whereis(Store) do
+      nil -> start_supervised!(Store)
       _pid -> :ok
     end
 
-    case Process.whereis(Arbor.Trust.Manager) do
+    case Process.whereis(Manager) do
       nil ->
         start_supervised!(
-          {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
+          {Manager, circuit_breaker: false, decay: false, event_store: false}
         )
 
       _pid ->
@@ -285,9 +287,9 @@ defmodule Arbor.Trust.CircuitBreakerTest do
   end
 
   defp ensure_profile_exists(agent_id) do
-    case Arbor.Trust.Manager.get_trust_profile(agent_id) do
+    case Manager.get_trust_profile(agent_id) do
       {:ok, _profile} -> :ok
-      {:error, :not_found} -> Arbor.Trust.Manager.create_trust_profile(agent_id)
+      {:error, :not_found} -> Manager.create_trust_profile(agent_id)
     end
   end
 end

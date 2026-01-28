@@ -3,7 +3,7 @@ defmodule Arbor.Consensus.CouncilTest do
 
   alias Arbor.Consensus.{Config, Council}
   alias Arbor.Consensus.TestHelpers
-  alias Arbor.Contracts.Autonomous.Evaluation
+  alias Arbor.Contracts.Consensus.Evaluation
 
   describe "evaluate/4" do
     test "returns evaluations for all perspectives" do
@@ -94,7 +94,7 @@ defmodule Arbor.Consensus.CouncilTest do
       {:ok, evaluations} = Council.evaluate(proposal, perspectives, backend, timeout: 10_000)
 
       # Should have evaluations (some may fail gracefully)
-      assert length(evaluations) > 0
+      assert evaluations != []
 
       # Each should have a unique perspective
       perspectives_returned = Enum.map(evaluations, & &1.perspective)

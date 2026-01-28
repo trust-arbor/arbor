@@ -2,9 +2,9 @@ defmodule Arbor.Historian.CollectorTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Historian.Collector
-  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
   alias Arbor.Historian.StreamRegistry
   alias Arbor.Historian.TestHelpers
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   setup do
     ctx = TestHelpers.start_test_historian(:"collector_#{System.unique_integer([:positive])}")

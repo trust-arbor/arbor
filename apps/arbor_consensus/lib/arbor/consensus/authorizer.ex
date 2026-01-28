@@ -30,7 +30,7 @@ defmodule Arbor.Consensus.Authorizer do
       end
   """
 
-  alias Arbor.Contracts.Autonomous.{CouncilDecision, Proposal}
+  alias Arbor.Contracts.Consensus.{CouncilDecision, Proposal}
 
   @doc """
   Check if a proposal is authorized to be submitted.

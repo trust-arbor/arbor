@@ -1,9 +1,9 @@
 defmodule Arbor.Historian.TimelineTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Historian.TestHelpers
   alias Arbor.Historian.Timeline
   alias Arbor.Historian.Timeline.Span
-  alias Arbor.Historian.TestHelpers
 
   setup do
     ctx = TestHelpers.start_test_historian(:"timeline_#{System.unique_integer([:positive])}")

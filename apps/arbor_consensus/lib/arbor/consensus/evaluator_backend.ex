@@ -25,7 +25,7 @@ defmodule Arbor.Consensus.EvaluatorBackend do
       )
   """
 
-  alias Arbor.Contracts.Autonomous.{Evaluation, Proposal}
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   @doc """
   Evaluate a proposal from a given perspective.

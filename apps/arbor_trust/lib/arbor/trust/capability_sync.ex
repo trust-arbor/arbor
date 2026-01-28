@@ -21,7 +21,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   use GenServer
 
-  alias Arbor.Trust.{Manager, CapabilityTemplates}
+  alias Arbor.Trust.{CapabilityTemplates, Config, Manager}
 
   require Logger
 
@@ -425,7 +425,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   # Attempt to subscribe to PubSub using configured module
   defp attempt_subscribe do
-    pubsub = Arbor.Trust.Config.pubsub()
+    pubsub = Config.pubsub()
 
     try do
       case Process.whereis(pubsub) do

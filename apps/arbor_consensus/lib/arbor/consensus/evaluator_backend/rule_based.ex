@@ -21,7 +21,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
 
   @behaviour Arbor.Consensus.EvaluatorBackend
 
-  alias Arbor.Contracts.Autonomous.{Evaluation, Proposal}
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   require Logger
 

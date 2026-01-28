@@ -2,7 +2,7 @@ defmodule Arbor.Trust do
   @moduledoc """
   Public API facade for the Arbor Trust system.
 
-  This module implements the `Arbor.Contracts.Libraries.Trust` behaviour,
+  This module implements the `Arbor.Contracts.API.Trust` behaviour,
   providing a unified entry point for all trust operations:
 
   - **Trust Profiles** - Create and manage agent trust profiles
@@ -53,7 +53,7 @@ defmodule Arbor.Trust do
   - `Arbor.Trust.Config` - Centralized configuration
   """
 
-  @behaviour Arbor.Contracts.Libraries.Trust
+  @behaviour Arbor.Contracts.API.Trust
 
   alias Arbor.Trust.Manager
 
@@ -134,7 +134,7 @@ defmodule Arbor.Trust do
       {:ok, 67} = Arbor.Trust.calculate_trust_score("agent_001")
   """
   @spec calculate_trust_score(String.t()) ::
-          {:ok, Arbor.Contracts.Trust.trust_score()} | {:error, term()}
+          {:ok, Arbor.Trust.Behaviour.trust_score()} | {:error, term()}
   def calculate_trust_score(agent_id), do: calculate_trust_score_for_principal(agent_id)
 
   @doc """

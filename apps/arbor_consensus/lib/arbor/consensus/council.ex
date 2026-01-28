@@ -14,8 +14,8 @@ defmodule Arbor.Consensus.Council do
   5. Kill remaining evaluator tasks on quorum
   """
 
-  alias Arbor.Contracts.Autonomous.{Evaluation, Proposal}
   alias Arbor.Consensus.Config
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   require Logger
 

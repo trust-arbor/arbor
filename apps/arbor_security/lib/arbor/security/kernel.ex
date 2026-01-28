@@ -7,7 +7,7 @@ defmodule Arbor.Security.Kernel do
   and the Security facade for higher-level operations.
   """
 
-  alias Arbor.Contracts.Core.Capability
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
 
   @doc """

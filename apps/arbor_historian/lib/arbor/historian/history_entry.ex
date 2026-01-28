@@ -8,7 +8,7 @@ defmodule Arbor.Historian.HistoryEntry do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Events.Event
+  alias Arbor.Historian.Event
 
   @derive Jason.Encoder
   typedstruct do

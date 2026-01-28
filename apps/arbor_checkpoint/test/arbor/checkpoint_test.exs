@@ -3,7 +3,7 @@ defmodule Arbor.CheckpointTest do
 
   alias Arbor.Checkpoint
   alias Arbor.Checkpoint.Store.Agent, as: AgentStorage
-  alias Arbor.Checkpoint.Test.{StatefulModule, NoCheckpointModule, FailingRestoreModule}
+  alias Arbor.Checkpoint.Test.{FailingRestoreModule, NoCheckpointModule, StatefulModule}
 
   @moduletag :fast
 

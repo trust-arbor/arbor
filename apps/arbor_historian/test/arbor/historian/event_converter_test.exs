@@ -1,8 +1,8 @@
 defmodule Arbor.Historian.EventConverterTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Historian.EventConverter
   alias Arbor.Historian.Event, as: HistorianEvent
+  alias Arbor.Historian.EventConverter
   alias Arbor.Persistence.Event, as: PersistenceEvent
 
   defp build_historian_event(overrides \\ []) do

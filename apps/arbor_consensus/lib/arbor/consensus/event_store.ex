@@ -13,8 +13,8 @@ defmodule Arbor.Consensus.EventStore do
 
   use GenServer
 
-  alias Arbor.Contracts.Consensus.ConsensusEvent
   alias Arbor.Consensus.EventConverter
+  alias Arbor.Contracts.Consensus.ConsensusEvent
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   require Logger

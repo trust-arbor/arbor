@@ -1,7 +1,7 @@
 defmodule Arbor.Historian.HistoryEntryTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Events.Event
+  alias Arbor.Historian.Event
   alias Arbor.Historian.HistoryEntry
 
   describe "from_event/1" do
@@ -9,7 +9,7 @@ defmodule Arbor.Historian.HistoryEntryTest do
       {:ok, event} =
         Event.new(
           type: :"activity:agent_started",
-          aggregate_id: "global",
+          subject_id: "global",
           data: %{agent_id: "a1"},
           stream_id: "global",
           stream_version: 0,
@@ -38,7 +38,7 @@ defmodule Arbor.Historian.HistoryEntryTest do
       {:ok, event} =
         Event.new(
           type: :"security:authorization",
-          aggregate_id: "agent:a1",
+          subject_id: "agent:a1",
           data: %{},
           metadata: %{}
         )
@@ -54,7 +54,7 @@ defmodule Arbor.Historian.HistoryEntryTest do
       {:ok, event} =
         Event.new(
           type: :unknown_type,
-          aggregate_id: "test",
+          subject_id: "test",
           data: %{},
           metadata: %{}
         )
@@ -71,7 +71,7 @@ defmodule Arbor.Historian.HistoryEntryTest do
       {:ok, event} =
         Event.new(
           type: :"activity:agent_started",
-          aggregate_id: "global",
+          subject_id: "global",
           data: %{agent_id: "a1"},
           stream_id: "global",
           stream_version: 0,

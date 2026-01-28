@@ -1,8 +1,8 @@
 defmodule Arbor.Persistence.EventLog.ETSTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Persistence.EventLog.ETS
   alias Arbor.Persistence.Event
+  alias Arbor.Persistence.EventLog.ETS
 
   setup do
     name = :"el_ets_#{:erlang.unique_integer([:positive])}"

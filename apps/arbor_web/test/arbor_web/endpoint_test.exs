@@ -1,13 +1,15 @@
 defmodule Arbor.Web.EndpointTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Web.Endpoint
+
   describe "Arbor.Web.Endpoint" do
     test "module is defined" do
-      assert Code.ensure_loaded?(Arbor.Web.Endpoint)
+      assert Code.ensure_loaded?(Endpoint)
     end
 
     test "defines __using__ macro" do
-      macros = Arbor.Web.Endpoint.__info__(:macros)
+      macros = Endpoint.__info__(:macros)
       assert {:__using__, 1} in macros
     end
 

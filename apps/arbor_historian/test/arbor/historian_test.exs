@@ -8,7 +8,12 @@ defmodule Arbor.HistorianTest do
   test historian stack (no Bus subscription).
   """
 
+  alias Arbor.Historian.QueryEngine
+  alias Arbor.Historian.StreamRegistry
   alias Arbor.Historian.TestHelpers
+  alias Arbor.Historian.Timeline
+  alias QueryEngine.Aggregator
+  alias Timeline.Span
 
   # These tests use the globally-started Historian application processes,
   # so we use the manual collect API for determinism.
@@ -50,13 +55,13 @@ defmodule Arbor.HistorianTest do
 
   describe "query API" do
     test "recent/1 returns all entries", %{ctx: ctx} do
-      {:ok, entries} = Arbor.Historian.QueryEngine.read_global(event_log: ctx.event_log)
+      {:ok, entries} = QueryEngine.read_global(event_log: ctx.event_log)
       assert length(entries) == 3
     end
 
     test "for_agent/2 returns agent entries", %{ctx: ctx} do
       {:ok, entries} =
-        Arbor.Historian.QueryEngine.read_agent("agent_01", event_log: ctx.event_log)
+        QueryEngine.read_agent("agent_01", event_log: ctx.event_log)
 
       assert length(entries) == 1
       assert hd(entries).type == :agent_started
@@ -64,28 +69,28 @@ defmodule Arbor.HistorianTest do
 
     test "for_category/2 returns category entries", %{ctx: ctx} do
       {:ok, entries} =
-        Arbor.Historian.QueryEngine.read_category(:security, event_log: ctx.event_log)
+        QueryEngine.read_category(:security, event_log: ctx.event_log)
 
       assert length(entries) == 1
     end
 
     test "for_session/2 returns session entries", %{ctx: ctx} do
       {:ok, entries} =
-        Arbor.Historian.QueryEngine.read_session("sess_99", event_log: ctx.event_log)
+        QueryEngine.read_session("sess_99", event_log: ctx.event_log)
 
       assert length(entries) == 1
     end
 
     test "for_correlation/2 returns correlation entries", %{ctx: ctx} do
       {:ok, entries} =
-        Arbor.Historian.QueryEngine.read_correlation("corr_x", event_log: ctx.event_log)
+        QueryEngine.read_correlation("corr_x", event_log: ctx.event_log)
 
       assert length(entries) == 1
     end
 
     test "query/1 with filters", %{ctx: ctx} do
       {:ok, entries} =
-        Arbor.Historian.QueryEngine.query(event_log: ctx.event_log, category: :logs)
+        QueryEngine.query(event_log: ctx.event_log, category: :logs)
 
       assert length(entries) == 1
       assert hd(entries).category == :logs
@@ -93,7 +98,7 @@ defmodule Arbor.HistorianTest do
 
     test "find_by_signal_id/2", %{ctx: ctx} do
       {:ok, entry} =
-        Arbor.Historian.QueryEngine.find_by_signal_id("sig_facade_2", event_log: ctx.event_log)
+        QueryEngine.find_by_signal_id("sig_facade_2", event_log: ctx.event_log)
 
       assert entry.category == :security
     end
@@ -102,7 +107,7 @@ defmodule Arbor.HistorianTest do
   describe "aggregation API" do
     test "count_by_category/2", %{ctx: ctx} do
       count =
-        Arbor.Historian.QueryEngine.Aggregator.count_by_category(:activity,
+        Aggregator.count_by_category(:activity,
           event_log: ctx.event_log
         )
 
@@ -110,13 +115,13 @@ defmodule Arbor.HistorianTest do
     end
 
     test "error_count/1", %{ctx: ctx} do
-      count = Arbor.Historian.QueryEngine.Aggregator.error_count(event_log: ctx.event_log)
+      count = Aggregator.error_count(event_log: ctx.event_log)
       assert count == 1
     end
 
     test "category_distribution/1", %{ctx: ctx} do
       dist =
-        Arbor.Historian.QueryEngine.Aggregator.category_distribution(event_log: ctx.event_log)
+        Aggregator.category_distribution(event_log: ctx.event_log)
 
       assert dist[:activity] == 1
       assert dist[:security] == 1
@@ -127,18 +132,18 @@ defmodule Arbor.HistorianTest do
   describe "timeline API" do
     test "reconstruct/2 with span", %{ctx: ctx, t1: t1, now: now} do
       from = DateTime.add(t1, -60, :second)
-      span = Arbor.Historian.Timeline.Span.new(from: from, to: now)
+      span = Span.new(from: from, to: now)
 
-      {:ok, entries} = Arbor.Historian.Timeline.reconstruct(span, event_log: ctx.event_log)
+      {:ok, entries} = Timeline.reconstruct(span, event_log: ctx.event_log)
 
       assert length(entries) == 3
     end
 
     test "timeline_summary/2", %{ctx: ctx, t1: t1, now: now} do
       from = DateTime.add(t1, -60, :second)
-      span = Arbor.Historian.Timeline.Span.new(from: from, to: now)
+      span = Span.new(from: from, to: now)
 
-      summary = Arbor.Historian.Timeline.summary(span, event_log: ctx.event_log)
+      summary = Timeline.summary(span, event_log: ctx.event_log)
 
       assert summary.total == 3
       assert is_map(summary.categories)
@@ -147,7 +152,7 @@ defmodule Arbor.HistorianTest do
 
   describe "stream registry via collector" do
     test "streams are tracked", %{ctx: ctx} do
-      streams = Arbor.Historian.StreamRegistry.list_streams(ctx.registry)
+      streams = StreamRegistry.list_streams(ctx.registry)
       assert "global" in streams
     end
   end

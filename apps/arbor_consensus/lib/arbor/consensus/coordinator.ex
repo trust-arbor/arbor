@@ -20,7 +20,7 @@ defmodule Arbor.Consensus.Coordinator do
   use GenServer
 
   alias Arbor.Consensus.{Config, Council, EventStore}
-  alias Arbor.Contracts.Autonomous.{ConsensusEvent, CouncilDecision, Proposal}
+  alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
 
   require Logger
 

@@ -4,6 +4,7 @@ defmodule Arbor.Persistence.TestBackends do
   """
 
   defmodule FailingStore do
+    @moduledoc false
     @behaviour Arbor.Persistence.Store
 
     @impl true
@@ -23,6 +24,7 @@ defmodule Arbor.Persistence.TestBackends do
   end
 
   defmodule FailingEventLog do
+    @moduledoc false
     @behaviour Arbor.Persistence.EventLog
 
     @impl true

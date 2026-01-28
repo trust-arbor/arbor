@@ -1,8 +1,8 @@
 defmodule Arbor.Historian.QueryEngine.AggregatorTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.HistoryEntry
+  alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.TestHelpers
 
   setup do

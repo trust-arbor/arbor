@@ -1,8 +1,8 @@
 defmodule Arbor.Persistence.QueryableStore.AgentTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Persistence.{Filter, Record}
   alias Arbor.Persistence.QueryableStore.Agent, as: QSAgent
-  alias Arbor.Persistence.{Record, Filter}
 
   setup do
     name = :"qs_agent_#{:erlang.unique_integer([:positive])}"

@@ -3,8 +3,8 @@ defmodule Arbor.Trust.PointsTest do
 
   @moduletag :fast
 
-  alias Arbor.Trust.Points
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Points
 
   describe "award/2 - proposal approved" do
     test "awards 5 points for proposal_approved" do

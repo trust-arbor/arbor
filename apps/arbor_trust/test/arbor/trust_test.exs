@@ -4,9 +4,9 @@ defmodule Arbor.TrustTest do
   @moduletag :fast
 
   alias Arbor.Trust
+  alias Arbor.Trust.EventStore
   alias Arbor.Trust.Manager
   alias Arbor.Trust.Store
-  alias Arbor.Trust.EventStore
 
   setup do
     # Start EventStore
@@ -313,7 +313,7 @@ defmodule Arbor.TrustTest do
 
       {:ok, events} = Trust.get_events("facade_get_events")
       assert is_list(events)
-      assert length(events) >= 1
+      assert events != []
     end
 
     test "supports limit option" do

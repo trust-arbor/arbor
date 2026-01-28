@@ -80,7 +80,7 @@ defmodule Arbor.EvalTest do
 
       {:ok, results} = Arbor.Eval.check_code(code)
       assert is_list(results)
-      assert length(results) > 0
+      assert results != []
     end
 
     test "allows specifying evals" do

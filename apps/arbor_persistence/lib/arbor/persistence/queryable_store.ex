@@ -20,7 +20,7 @@ defmodule Arbor.Persistence.QueryableStore do
       end
   """
 
-  alias Arbor.Persistence.{Record, Filter}
+  alias Arbor.Persistence.{Filter, Record}
 
   @type key :: String.t()
   @type opts :: keyword()

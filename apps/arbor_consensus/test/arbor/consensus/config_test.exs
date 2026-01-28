@@ -103,7 +103,7 @@ defmodule Arbor.Consensus.ConfigTest do
       config = Config.new()
       perspectives = Config.perspectives_for(config, :unknown_type)
       assert is_list(perspectives)
-      assert length(perspectives) > 0
+      assert perspectives != []
     end
   end
 
