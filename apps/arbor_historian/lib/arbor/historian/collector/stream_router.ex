@@ -10,6 +10,8 @@ defmodule Arbor.Historian.Collector.StreamRouter do
   - `"correlation:{id}"` - if signal has a correlation_id
   """
 
+  alias Arbor.Common.SafeAtom
+
   @doc """
   Route a signal to all applicable stream IDs.
 
@@ -91,10 +93,10 @@ defmodule Arbor.Historian.Collector.StreamRouter do
       is_binary(signal.type) ->
         case signal.type do
           "arbor." <> rest ->
-            rest |> String.split(".", parts: 2) |> List.first() |> String.to_atom()
+            rest |> String.split(".", parts: 2) |> List.first() |> SafeAtom.to_category()
 
           type ->
-            type |> String.split(".", parts: 2) |> List.first() |> String.to_atom()
+            type |> String.split(".", parts: 2) |> List.first() |> SafeAtom.to_category()
         end
 
       true ->
