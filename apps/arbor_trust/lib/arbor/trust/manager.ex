@@ -32,11 +32,11 @@ defmodule Arbor.Trust.Manager do
 
   use GenServer
 
-  @behaviour Arbor.Contracts.Trust
+  @behaviour Arbor.Trust.Behaviour
 
-  alias Arbor.Contracts.Trust
-  alias Arbor.Contracts.Trust.{Profile, Event}
-  alias Arbor.Trust.{Store, Calculator, TierResolver, EventStore}
+  alias Arbor.Contracts.Trust.{Event, Profile}
+  alias Arbor.Trust.Behaviour, as: Trust
+  alias Arbor.Trust.{Calculator, Config, EventStore, Store, TierResolver}
 
   require Logger
 
@@ -70,7 +70,7 @@ defmodule Arbor.Trust.Manager do
   Calculate the current trust score for an agent.
   """
   @impl Trust
-  @spec calculate_trust_score(String.t()) :: {:ok, Arbor.Contracts.Trust.trust_score()} | {:error, term()}
+  @spec calculate_trust_score(String.t()) :: {:ok, Trust.trust_score()} | {:error, term()}
   def calculate_trust_score(agent_id) do
     GenServer.call(__MODULE__, {:calculate_trust_score, agent_id})
   end
@@ -79,7 +79,7 @@ defmodule Arbor.Trust.Manager do
   Get the capability tier for a trust score.
   """
   @impl Trust
-  @spec get_capability_tier(Arbor.Contracts.Trust.trust_score()) :: Arbor.Contracts.Trust.trust_tier()
+  @spec get_capability_tier(Trust.trust_score()) :: Trust.trust_tier()
   def get_capability_tier(trust_score) do
     TierResolver.resolve(trust_score)
   end
@@ -88,7 +88,7 @@ defmodule Arbor.Trust.Manager do
   Check if an agent has sufficient trust for an operation.
   """
   @impl Trust
-  @spec check_trust_authorization(String.t(), Arbor.Contracts.Trust.trust_tier()) ::
+  @spec check_trust_authorization(String.t(), Trust.trust_tier()) ::
           {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
   def check_trust_authorization(agent_id, required_tier) do
     GenServer.call(__MODULE__, {:check_trust_authorization, agent_id, required_tier})
@@ -98,7 +98,7 @@ defmodule Arbor.Trust.Manager do
   Record a trust-affecting event.
   """
   @impl Trust
-  @spec record_trust_event(String.t(), Arbor.Contracts.Trust.trust_event_type(), map()) :: :ok
+  @spec record_trust_event(String.t(), Trust.trust_event_type(), map()) :: :ok
   def record_trust_event(agent_id, event_type, metadata \\ %{}) do
     GenServer.cast(__MODULE__, {:record_trust_event, agent_id, event_type, metadata})
   end
@@ -576,23 +576,21 @@ defmodule Arbor.Trust.Manager do
   end
 
   defp broadcast_trust_event(agent_id, event_type, metadata) do
-    try do
-      pubsub = Arbor.Trust.Config.pubsub()
+    pubsub = Config.pubsub()
 
-      Phoenix.PubSub.broadcast(
-        pubsub,
-        "trust:events",
-        {:trust_event, agent_id, event_type, metadata}
-      )
+    Phoenix.PubSub.broadcast(
+      pubsub,
+      "trust:events",
+      {:trust_event, agent_id, event_type, metadata}
+    )
 
-      Phoenix.PubSub.broadcast(
-        pubsub,
-        "trust:#{agent_id}",
-        {:trust_event, agent_id, event_type, metadata}
-      )
-    rescue
-      _ -> :ok
-    end
+    Phoenix.PubSub.broadcast(
+      pubsub,
+      "trust:#{agent_id}",
+      {:trust_event, agent_id, event_type, metadata}
+    )
+  rescue
+    _ -> :ok
   end
 
   defp persist_to_event_store(event, state) do

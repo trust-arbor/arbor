@@ -48,7 +48,7 @@ defmodule Arbor.Signals do
       end
   """
 
-  @behaviour Arbor.Contracts.Libraries.Signals
+  @behaviour Arbor.Contracts.API.Signals
 
   alias Arbor.Signals.{Bus, Signal, Store}
 

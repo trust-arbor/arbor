@@ -127,11 +127,9 @@ defmodule Arbor.Historian.Collector do
 
   @impl GenServer
   def terminate(_reason, %{subscription_id: sub_id}) when is_binary(sub_id) do
-    try do
-      Arbor.Signals.unsubscribe(sub_id)
-    rescue
-      _ -> :ok
-    end
+    Arbor.Signals.unsubscribe(sub_id)
+  rescue
+    _ -> :ok
   end
 
   def terminate(_reason, _state), do: :ok

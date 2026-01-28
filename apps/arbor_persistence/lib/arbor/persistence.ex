@@ -22,7 +22,7 @@ defmodule Arbor.Persistence do
       Arbor.Persistence.Store.ETS.put("key", "value", name: :my_store)
   """
 
-  alias Arbor.Persistence.{Filter, Record, Event}
+  alias Arbor.Persistence.{Event, Filter, Record}
 
   # ---------------------------------------------------------------
   # Store operations

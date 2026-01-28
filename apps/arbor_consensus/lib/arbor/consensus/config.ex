@@ -8,7 +8,7 @@ defmodule Arbor.Consensus.Config do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Autonomous.Consensus
+  alias Arbor.Contracts.Consensus.Protocol
 
   @default_council_size 7
   @default_evaluation_timeout_ms 90_000
@@ -147,7 +147,7 @@ defmodule Arbor.Consensus.Config do
   """
   @spec quorum_for(t(), atom()) :: pos_integer()
   def quorum_for(%__MODULE__{quorum_rules: rules}, change_type) do
-    Map.get(rules, change_type, Consensus.standard_quorum())
+    Map.get(rules, change_type, Protocol.standard_quorum())
   end
 
   @doc """
@@ -155,7 +155,7 @@ defmodule Arbor.Consensus.Config do
   """
   @spec perspectives_for(t(), atom()) :: [atom()]
   def perspectives_for(%__MODULE__{perspectives_for_change_type: perspectives}, change_type) do
-    Map.get(perspectives, change_type, Consensus.perspectives() -- [:human])
+    Map.get(perspectives, change_type, Protocol.perspectives() -- [:human])
   end
 
   @doc """
@@ -163,6 +163,6 @@ defmodule Arbor.Consensus.Config do
   """
   @spec requires_supermajority?(t(), atom()) :: boolean()
   def requires_supermajority?(%__MODULE__{} = config, change_type) do
-    quorum_for(config, change_type) >= Consensus.meta_quorum()
+    quorum_for(config, change_type) >= Protocol.meta_quorum()
   end
 end

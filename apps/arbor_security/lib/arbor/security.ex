@@ -50,9 +50,9 @@ defmodule Arbor.Security do
   - `{:security, :trust_tier_changed, %{...}}`
   """
 
-  @behaviour Arbor.Contracts.Libraries.Security
+  @behaviour Arbor.Contracts.API.Security
 
-  alias Arbor.Contracts.Core.Capability
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Trust.Profile, as: TrustProfile
   alias Arbor.Security.{CapabilityStore, TrustStore}
   alias Arbor.Signals

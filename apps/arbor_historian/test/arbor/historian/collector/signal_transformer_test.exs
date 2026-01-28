@@ -18,8 +18,8 @@ defmodule Arbor.Historian.Collector.SignalTransformerTest do
 
       assert event.type == :"activity:agent_started"
       assert event.data == %{agent_id: "a1"}
-      assert event.aggregate_id == "global"
-      assert event.aggregate_type == :historian
+      assert event.subject_id == "global"
+      assert event.subject_type == :historian
       assert event.metadata[:signal_id] == "sig_123"
       assert event.metadata[:source] == "arbor://test/agent"
     end

@@ -1,9 +1,9 @@
 defmodule Arbor.Trust.EventConverterTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Trust.EventConverter
   alias Arbor.Contracts.Trust.Event, as: TrustEvent
   alias Arbor.Persistence.Event, as: PersistenceEvent
+  alias Arbor.Trust.EventConverter
 
   defp build_trust_event(overrides \\ []) do
     {:ok, event} =

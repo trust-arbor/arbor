@@ -43,7 +43,7 @@ defmodule Arbor.Shell do
   - `{:shell, :command_failed, %{execution_id: ..., reason: ...}}`
   """
 
-  @behaviour Arbor.Contracts.Libraries.Shell
+  @behaviour Arbor.Contracts.API.Shell
 
   alias Arbor.Shell.{ExecutionRegistry, Executor, Sandbox}
   alias Arbor.Signals

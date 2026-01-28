@@ -1,8 +1,8 @@
 defmodule Arbor.Persistence.EventLog.AgentTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Persistence.EventLog.Agent, as: ELAgent
   alias Arbor.Persistence.Event
+  alias Arbor.Persistence.EventLog.Agent, as: ELAgent
 
   setup do
     name = :"el_agent_#{:erlang.unique_integer([:positive])}"

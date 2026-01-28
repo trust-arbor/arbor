@@ -42,6 +42,8 @@ defmodule Arbor.Trust.CapabilityTemplates do
       lost_caps = CapabilityTemplates.capabilities_lost(:trusted, :probationary)
   """
 
+  alias Arbor.Trust.Config
+
   @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
   @type capability_template :: %{
           resource_uri: String.t(),
@@ -357,7 +359,7 @@ defmodule Arbor.Trust.CapabilityTemplates do
   # Merges default tier capabilities with config overrides.
   # Config entries take precedence over defaults for the same tier.
   defp tier_capabilities do
-    config_templates = Arbor.Trust.Config.capability_templates()
+    config_templates = Config.capability_templates()
     Map.merge(@default_tier_capabilities, config_templates)
   end
 

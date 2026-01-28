@@ -19,7 +19,7 @@ defmodule Arbor.Consensus.EventSink do
       end
   """
 
-  alias Arbor.Contracts.Autonomous.ConsensusEvent
+  alias Arbor.Contracts.Consensus.ConsensusEvent
 
   @doc """
   Record a consensus event to external storage.

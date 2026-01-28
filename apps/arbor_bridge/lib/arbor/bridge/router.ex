@@ -7,6 +7,8 @@ defmodule Arbor.Bridge.Router do
 
   use Plug.Router
 
+  alias Arbor.Bridge.ClaudeSession
+
   require Logger
 
   plug(Plug.Logger)
@@ -27,9 +29,9 @@ defmodule Arbor.Bridge.Router do
   # Response: {decision: allow|deny|ask|passthrough, reason?, updated_input?, system_message?}
   post "/api/bridge/authorize_tool" do
     with {:ok, session_id} <- get_required(conn.body_params, "session_id"),
-         {:ok, tool_name} <- get_required(conn.body_params, "tool_name"),
-         tool_input = Map.get(conn.body_params, "tool_input", %{}),
-         cwd = Map.get(conn.body_params, "cwd", ".") do
+         {:ok, tool_name} <- get_required(conn.body_params, "tool_name") do
+      tool_input = Map.get(conn.body_params, "tool_input", %{})
+      cwd = Map.get(conn.body_params, "cwd", ".")
       result = authorize_tool_call(session_id, tool_name, tool_input, cwd)
 
       # Emit signal for observability
@@ -60,8 +62,6 @@ defmodule Arbor.Bridge.Router do
   end
 
   defp authorize_tool_call(session_id, tool_name, tool_input, cwd) do
-    alias Arbor.Bridge.ClaudeSession
-
     case ClaudeSession.authorize_tool(session_id, tool_name, tool_input, cwd) do
       {:ok, :authorized} ->
         Logger.debug("Bridge authorized", tool: tool_name, session: session_id)
@@ -93,20 +93,18 @@ defmodule Arbor.Bridge.Router do
   end
 
   defp emit_bridge_signal(session_id, tool_name, result) do
-    try do
-      agent_id = Arbor.Bridge.ClaudeSession.to_agent_id(session_id)
+    agent_id = ClaudeSession.to_agent_id(session_id)
 
-      Arbor.Signals.emit(
-        :tool_authorization,
-        %{
-          tool_name: tool_name,
-          decision: result[:decision],
-          reason: result[:reason]
-        },
-        agent_id: agent_id
-      )
-    rescue
-      _ -> :ok
-    end
+    Arbor.Signals.emit(
+      :tool_authorization,
+      %{
+        tool_name: tool_name,
+        decision: result[:decision],
+        reason: result[:reason]
+      },
+      agent_id: agent_id
+    )
+  rescue
+    _ -> :ok
   end
 end

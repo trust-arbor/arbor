@@ -3,8 +3,8 @@ defmodule Arbor.Trust.CalculatorTest do
 
   @moduletag :fast
 
-  alias Arbor.Trust.Calculator
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Calculator
 
   # Helper to build a profile with given component scores
   defp build_profile(attrs \\ %{}) do

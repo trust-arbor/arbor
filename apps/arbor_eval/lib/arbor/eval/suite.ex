@@ -96,15 +96,15 @@ defmodule Arbor.Eval.Suite do
 
       # Convenience functions
       def check_file(path, opts \\ []) do
-        Arbor.Eval.Suite.check_file(__MODULE__, path, opts)
+        unquote(__MODULE__).check_file(__MODULE__, path, opts)
       end
 
       def check_files(paths, opts \\ []) do
-        Arbor.Eval.Suite.check_files(__MODULE__, paths, opts)
+        unquote(__MODULE__).check_files(__MODULE__, paths, opts)
       end
 
       def check_directory(path, opts \\ []) do
-        Arbor.Eval.Suite.check_directory(__MODULE__, path, opts)
+        unquote(__MODULE__).check_directory(__MODULE__, path, opts)
       end
     end
   end

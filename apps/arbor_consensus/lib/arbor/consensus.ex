@@ -58,7 +58,7 @@ defmodule Arbor.Consensus do
     * `:server` - Coordinator server (default: `Coordinator`)
     * `:evaluator_backend` - Override the evaluator backend for this proposal
   """
-  @spec submit(map() | Arbor.Contracts.Autonomous.Proposal.t(), keyword()) ::
+  @spec submit(map() | Arbor.Contracts.Consensus.Proposal.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   defdelegate submit(proposal_or_attrs, opts \\ []), to: Coordinator
 
@@ -73,14 +73,14 @@ defmodule Arbor.Consensus do
   Get the decision for a proposal.
   """
   @spec get_decision(String.t(), GenServer.server()) ::
-          {:ok, Arbor.Contracts.Autonomous.CouncilDecision.t()} | {:error, term()}
+          {:ok, Arbor.Contracts.Consensus.CouncilDecision.t()} | {:error, term()}
   defdelegate get_decision(proposal_id, server \\ Coordinator), to: Coordinator
 
   @doc """
   Get a proposal by ID.
   """
   @spec get_proposal(String.t(), GenServer.server()) ::
-          {:ok, Arbor.Contracts.Autonomous.Proposal.t()} | {:error, :not_found}
+          {:ok, Arbor.Contracts.Consensus.Proposal.t()} | {:error, :not_found}
   defdelegate get_proposal(proposal_id, server \\ Coordinator), to: Coordinator
 
   # ============================================================================
@@ -90,26 +90,26 @@ defmodule Arbor.Consensus do
   @doc """
   List all pending proposals.
   """
-  @spec list_pending(GenServer.server()) :: [Arbor.Contracts.Autonomous.Proposal.t()]
+  @spec list_pending(GenServer.server()) :: [Arbor.Contracts.Consensus.Proposal.t()]
   defdelegate list_pending(server \\ Coordinator), to: Coordinator
 
   @doc """
   List all proposals.
   """
-  @spec list_proposals(GenServer.server()) :: [Arbor.Contracts.Autonomous.Proposal.t()]
+  @spec list_proposals(GenServer.server()) :: [Arbor.Contracts.Consensus.Proposal.t()]
   defdelegate list_proposals(server \\ Coordinator), to: Coordinator
 
   @doc """
   List all decisions.
   """
-  @spec list_decisions(GenServer.server()) :: [Arbor.Contracts.Autonomous.CouncilDecision.t()]
+  @spec list_decisions(GenServer.server()) :: [Arbor.Contracts.Consensus.CouncilDecision.t()]
   defdelegate list_decisions(server \\ Coordinator), to: Coordinator
 
   @doc """
   Get recent decisions (most recent first).
   """
   @spec recent_decisions(pos_integer(), GenServer.server()) ::
-          [Arbor.Contracts.Autonomous.CouncilDecision.t()]
+          [Arbor.Contracts.Consensus.CouncilDecision.t()]
   defdelegate recent_decisions(limit \\ 10, server \\ Coordinator), to: Coordinator
 
   # ============================================================================
@@ -156,20 +156,20 @@ defmodule Arbor.Consensus do
     * `:limit` - Max results (default: 100)
   """
   @spec query_events(keyword(), GenServer.server()) ::
-          [Arbor.Contracts.Autonomous.ConsensusEvent.t()]
+          [Arbor.Contracts.Consensus.ConsensusEvent.t()]
   defdelegate query_events(filters \\ [], server \\ EventStore), to: EventStore, as: :query
 
   @doc """
   Get all events for a proposal.
   """
   @spec events_for(String.t(), GenServer.server()) ::
-          [Arbor.Contracts.Autonomous.ConsensusEvent.t()]
+          [Arbor.Contracts.Consensus.ConsensusEvent.t()]
   defdelegate events_for(proposal_id, server \\ EventStore), to: EventStore, as: :get_by_proposal
 
   @doc """
   Get a chronological timeline of events for a proposal.
   """
   @spec timeline(String.t(), GenServer.server()) ::
-          [{non_neg_integer(), Arbor.Contracts.Autonomous.ConsensusEvent.t()}]
+          [{non_neg_integer(), Arbor.Contracts.Consensus.ConsensusEvent.t()}]
   defdelegate timeline(proposal_id, server \\ EventStore), to: EventStore, as: :get_timeline
 end

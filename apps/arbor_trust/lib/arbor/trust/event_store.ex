@@ -43,10 +43,10 @@ defmodule Arbor.Trust.EventStore do
 
   use GenServer
 
-  alias Arbor.Contracts.Trust.Event
   alias Arbor.Common.Pagination.Cursor
-  alias Arbor.Trust.EventConverter
+  alias Arbor.Contracts.Trust.Event
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
+  alias Arbor.Trust.EventConverter
 
   require Logger
 

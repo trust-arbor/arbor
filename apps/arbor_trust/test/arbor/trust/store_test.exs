@@ -3,9 +3,9 @@ defmodule Arbor.Trust.StoreTest do
 
   @moduletag :fast
 
-  alias Arbor.Trust.Store
-  alias Arbor.Contracts.Trust.Profile
   alias Arbor.Contracts.Trust.Event
+  alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Store
 
   setup do
     # Stop the Store if it was already running from a previous test

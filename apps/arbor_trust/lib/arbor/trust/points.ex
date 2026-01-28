@@ -49,6 +49,7 @@ defmodule Arbor.Trust.Points do
   """
 
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Config
 
   @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
   @type award_event ::
@@ -74,7 +75,7 @@ defmodule Arbor.Trust.Points do
   """
   @spec award(Profile.t(), award_event(), map()) :: {:ok, Profile.t()}
   def award(%Profile{} = profile, event, metadata \\ %{}) do
-    points = Map.get(Arbor.Trust.Config.points_earned(), event, 0)
+    points = Map.get(Config.points_earned(), event, 0)
     new_points = profile.trust_points + points
 
     updated_profile =
@@ -98,7 +99,7 @@ defmodule Arbor.Trust.Points do
   """
   @spec deduct(Profile.t(), deduction_event(), map()) :: {:ok, Profile.t()}
   def deduct(%Profile{} = profile, event, metadata \\ %{}) do
-    points = Map.get(Arbor.Trust.Config.points_lost(), event, 0)
+    points = Map.get(Config.points_lost(), event, 0)
     new_points = max(0, profile.trust_points - points)
 
     updated_profile =
@@ -132,7 +133,7 @@ defmodule Arbor.Trust.Points do
   """
   @spec tier_for_points(non_neg_integer()) :: trust_tier()
   def tier_for_points(points) do
-    thresholds = Arbor.Trust.Config.points_thresholds()
+    thresholds = Config.points_thresholds()
 
     cond do
       points >= Map.get(thresholds, :autonomous, 2000) -> :autonomous
@@ -153,7 +154,7 @@ defmodule Arbor.Trust.Points do
   """
   @spec min_points_for_tier(trust_tier()) :: non_neg_integer()
   def min_points_for_tier(tier) do
-    Map.fetch!(Arbor.Trust.Config.points_thresholds(), tier)
+    Map.fetch!(Config.points_thresholds(), tier)
   end
 
   @doc """
@@ -204,8 +205,8 @@ defmodule Arbor.Trust.Points do
   @spec points_for_event(award_event() | deduction_event()) ::
           {:earn, non_neg_integer()} | {:lose, non_neg_integer()} | :unknown
   def points_for_event(event) do
-    earned = Arbor.Trust.Config.points_earned()
-    lost = Arbor.Trust.Config.points_lost()
+    earned = Config.points_earned()
+    lost = Config.points_lost()
 
     cond do
       Map.has_key?(earned, event) ->
@@ -236,19 +237,19 @@ defmodule Arbor.Trust.Points do
   Get tier thresholds map.
   """
   @spec thresholds() :: %{trust_tier() => non_neg_integer()}
-  def thresholds, do: Arbor.Trust.Config.points_thresholds()
+  def thresholds, do: Config.points_thresholds()
 
   @doc """
   Get points earned configuration.
   """
   @spec points_earned_config() :: %{award_event() => non_neg_integer()}
-  def points_earned_config, do: Arbor.Trust.Config.points_earned()
+  def points_earned_config, do: Config.points_earned()
 
   @doc """
   Get points lost configuration.
   """
   @spec points_lost_config() :: %{deduction_event() => non_neg_integer()}
-  def points_lost_config, do: Arbor.Trust.Config.points_lost()
+  def points_lost_config, do: Config.points_lost()
 
   # Private functions
 

@@ -3,6 +3,9 @@ defmodule Arbor.Historian.TestHelpers do
   Test helpers and signal factory for historian tests.
   """
 
+  alias Arbor.Historian.Collector
+  alias Arbor.Historian.StreamRegistry
+  alias Arbor.Persistence.EventLog.ETS, as: ETSEventLog
   alias Arbor.Signals.Signal
 
   @doc "Build a fake signal struct for testing."
@@ -40,13 +43,13 @@ defmodule Arbor.Historian.TestHelpers do
     collector_name = :"collector_#{test_name}"
 
     {:ok, event_log} =
-      Arbor.Persistence.EventLog.ETS.start_link(name: event_log_name)
+      ETSEventLog.start_link(name: event_log_name)
 
     {:ok, registry} =
-      Arbor.Historian.StreamRegistry.start_link(name: registry_name)
+      StreamRegistry.start_link(name: registry_name)
 
     {:ok, collector} =
-      Arbor.Historian.Collector.start_link(
+      Collector.start_link(
         name: collector_name,
         event_log: event_log_name,
         registry: registry_name,
@@ -63,7 +66,7 @@ defmodule Arbor.Historian.TestHelpers do
 
   @doc "Collect a signal through the test stack."
   def collect_signal(ctx, signal) do
-    Arbor.Historian.Collector.collect(ctx.collector, signal)
+    Collector.collect(ctx.collector, signal)
   end
 
   defp random_hex(bytes) do
