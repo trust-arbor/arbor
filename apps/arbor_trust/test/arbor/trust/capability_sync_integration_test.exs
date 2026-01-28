@@ -11,6 +11,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Security
+  alias Arbor.Security.SystemAuthority
   alias Arbor.Trust
   alias Arbor.Trust.CapabilitySync
   alias Arbor.Trust.EventStore
@@ -73,7 +74,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
       {:ok, caps} = Security.list_capabilities(agent_id)
 
-      system_authority_id = Arbor.Security.SystemAuthority.agent_id()
+      system_authority_id = SystemAuthority.agent_id()
 
       for cap <- caps do
         assert cap.issuer_id == system_authority_id,
@@ -89,7 +90,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, caps} = Security.list_capabilities(agent_id)
 
       # At least one capability should authorize successfully
-      if length(caps) > 0 do
+      if caps != [] do
         cap = hd(caps)
         assert {:ok, :authorized} = Security.authorize(agent_id, cap.resource_uri)
       end
@@ -100,7 +101,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
       {:ok, caps} = Security.list_capabilities(agent_id)
 
-      if length(caps) > 0 do
+      if caps != [] do
         cap = hd(caps)
         assert Security.can?(agent_id, cap.resource_uri)
       end
@@ -115,7 +116,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       for cap <- caps do
         # Verify signature is valid via system authority
-        assert :ok = Arbor.Security.SystemAuthority.verify_capability_signature(cap)
+        assert :ok = SystemAuthority.verify_capability_signature(cap)
       end
     end
 
@@ -124,12 +125,12 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, _result} = CapabilitySync.sync_capabilities(agent_id)
       {:ok, caps} = Security.list_capabilities(agent_id)
 
-      if length(caps) > 0 do
+      if caps != [] do
         cap = hd(caps)
         tampered = %{cap | principal_id: "agent_evil"}
 
         assert {:error, :invalid_capability_signature} =
-                 Arbor.Security.SystemAuthority.verify_capability_signature(tampered)
+                 SystemAuthority.verify_capability_signature(tampered)
       end
     end
   end

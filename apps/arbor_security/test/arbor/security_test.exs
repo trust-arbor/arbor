@@ -1,8 +1,11 @@
 defmodule Arbor.SecurityTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security
+  alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.SystemAuthority
 
   setup do
     # Create a unique agent ID for each test
@@ -235,7 +238,7 @@ defmodule Arbor.SecurityTest do
         )
 
       assert :ok =
-               Arbor.Security.SystemAuthority.verify_capability_signature(cap)
+               SystemAuthority.verify_capability_signature(cap)
     end
   end
 
@@ -264,7 +267,7 @@ defmodule Arbor.SecurityTest do
       :ok = Security.revoke(cap.id)
 
       tampered = %{cap | resource_uri: "arbor://fs/write/evil"}
-      :ok = Arbor.Security.CapabilityStore.put(tampered)
+      :ok = CapabilityStore.put(tampered)
 
       # The tampered capability should fail signature verification
       assert {:error, :unauthorized} =
@@ -299,12 +302,12 @@ defmodule Arbor.SecurityTest do
          %{agent_id: agent_id} do
       # Directly store an unsigned capability (simulating pre-Phase 2 data)
       {:ok, unsigned_cap} =
-        Arbor.Contracts.Security.Capability.new(
+        Capability.new(
           resource_uri: "arbor://fs/read/legacy_unsigned",
           principal_id: agent_id
         )
 
-      :ok = Arbor.Security.CapabilityStore.put(unsigned_cap)
+      :ok = CapabilityStore.put(unsigned_cap)
 
       # Default config has capability_signing_required: false
       assert {:ok, :authorized} =
