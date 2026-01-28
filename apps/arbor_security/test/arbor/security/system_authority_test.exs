@@ -2,8 +2,8 @@ defmodule Arbor.Security.SystemAuthorityTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.SystemAuthority
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.SystemAuthority
 
   describe "lifecycle" do
     test "system authority starts and has an agent_id" do

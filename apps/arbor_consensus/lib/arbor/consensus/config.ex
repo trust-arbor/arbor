@@ -165,4 +165,36 @@ defmodule Arbor.Consensus.Config do
   def requires_supermajority?(%__MODULE__{} = config, change_type) do
     quorum_for(config, change_type) >= Protocol.meta_quorum()
   end
+
+  # ===========================================================================
+  # Application-level config (read from Application env)
+  # ===========================================================================
+
+  @app :arbor_consensus
+
+  @doc """
+  Timeout for deterministic evaluator commands (default: 60_000ms).
+  """
+  @spec deterministic_evaluator_timeout() :: pos_integer()
+  def deterministic_evaluator_timeout do
+    Application.get_env(@app, :deterministic_evaluator_timeout, 60_000)
+  end
+
+  @doc """
+  Sandbox mode for deterministic evaluator shell commands (default: :strict).
+  """
+  @spec deterministic_evaluator_sandbox() :: atom()
+  def deterministic_evaluator_sandbox do
+    Application.get_env(@app, :deterministic_evaluator_sandbox, :strict)
+  end
+
+  @doc """
+  Default working directory for deterministic evaluator (default: nil).
+
+  If nil, requires project_path in proposal metadata.
+  """
+  @spec deterministic_evaluator_default_cwd() :: String.t() | nil
+  def deterministic_evaluator_default_cwd do
+    Application.get_env(@app, :deterministic_evaluator_default_cwd, nil)
+  end
 end
