@@ -3,6 +3,8 @@ defmodule Arbor.Trust.EventHandlerTest do
 
   alias Arbor.Trust.EventHandler
 
+  import Arbor.Trust.TestHelpers, only: [safe_stop: 1]
+
   @moduletag :fast
 
   # We test the EventHandler GenServer callbacks directly where possible,
@@ -361,7 +363,7 @@ defmodule Arbor.Trust.EventHandlerTest do
       # but it uses __MODULE__ as name. We start with enabled: false
       # to avoid PubSub dependency.
       {:ok, pid} = EventHandler.start_link(enabled: false)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      on_exit(fn -> safe_stop(pid) end)
       %{pid: pid}
     end
 

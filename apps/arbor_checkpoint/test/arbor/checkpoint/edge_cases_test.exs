@@ -4,11 +4,13 @@ defmodule Arbor.Checkpoint.EdgeCasesTest do
   alias Arbor.Checkpoint
   alias Arbor.Checkpoint.Store.Agent, as: AgentStorage
 
+  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+
   @moduletag :fast
 
   setup do
     {:ok, pid} = AgentStorage.start_link()
-    on_exit(fn -> if Process.alive?(pid), do: AgentStorage.stop() end)
+    on_exit(fn -> safe_stop(pid) end)
     :ok
   end
 
