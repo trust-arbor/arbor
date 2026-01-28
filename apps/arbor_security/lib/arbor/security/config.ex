@@ -7,9 +7,10 @@ defmodule Arbor.Security.Config do
   ## Configuration
 
       config :arbor_security,
-        identity_verification: true,   # require signed requests for authorization
-        nonce_ttl_seconds: 300,         # nonces expire after 5 minutes
-        timestamp_max_drift_seconds: 60 # accept timestamps within ±60s of now
+        identity_verification: true,           # require signed requests for authorization
+        nonce_ttl_seconds: 300,                 # nonces expire after 5 minutes
+        timestamp_max_drift_seconds: 60,        # accept timestamps within ±60s of now
+        capability_signing_required: false       # require signed capabilities (false for migration)
   """
 
   @app :arbor_security
@@ -39,5 +40,16 @@ defmodule Arbor.Security.Config do
   @spec timestamp_max_drift_seconds() :: pos_integer()
   def timestamp_max_drift_seconds do
     Application.get_env(@app, :timestamp_max_drift_seconds, 60)
+  end
+
+  @doc """
+  Whether capability signing is required for authorization.
+
+  When `false` (default), unsigned capabilities from before Phase 2 are accepted.
+  When `true`, all capabilities must have a valid issuer signature to authorize.
+  """
+  @spec capability_signing_required?() :: boolean()
+  def capability_signing_required? do
+    Application.get_env(@app, :capability_signing_required, false)
   end
 end

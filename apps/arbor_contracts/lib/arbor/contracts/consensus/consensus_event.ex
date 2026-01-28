@@ -3,8 +3,8 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
   Data structure for consensus system events.
 
   ConsensusEvents provide a complete audit trail of all activities
-  in the autonomous consensus system, enabling historical analysis
-  and debugging of past decisions.
+  in the consensus system, enabling historical analysis and debugging
+  of past decisions.
 
   ## Event Types
 
@@ -26,8 +26,8 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
         data: %{change_type: :code_modification}
       })
 
-      # Query events
-      events = ConsensusEventStore.get_events(proposal_id: "prop_123")
+      # Query events via the consensus facade
+      events = Arbor.Consensus.get_events("prop_123")
   """
 
   use TypedStruct

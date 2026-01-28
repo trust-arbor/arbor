@@ -68,6 +68,55 @@ defmodule Arbor.Security.Identity.RegistryTest do
     end
   end
 
+  describe "lookup_by_name/1" do
+    test "finds agents by name" do
+      {:ok, identity} = Identity.generate(name: "code-reviewer")
+      :ok = Registry.register(identity)
+
+      assert {:ok, [agent_id]} = Registry.lookup_by_name("code-reviewer")
+      assert agent_id == identity.agent_id
+    end
+
+    test "returns multiple agents with the same name" do
+      {:ok, id1} = Identity.generate(name: "worker")
+      {:ok, id2} = Identity.generate(name: "worker")
+      :ok = Registry.register(id1)
+      :ok = Registry.register(id2)
+
+      assert {:ok, agent_ids} = Registry.lookup_by_name("worker")
+      assert length(agent_ids) == 2
+      assert id1.agent_id in agent_ids
+      assert id2.agent_id in agent_ids
+    end
+
+    test "returns not_found for unknown name" do
+      assert {:error, :not_found} = Registry.lookup_by_name("nonexistent")
+    end
+
+    test "unnamed agents are not indexed" do
+      {:ok, identity} = Identity.generate()
+      :ok = Registry.register(identity)
+
+      # nil name should not be indexed
+      assert {:error, :not_found} = Registry.lookup_by_name("nil")
+    end
+  end
+
+  describe "deregister removes name index" do
+    test "name lookup fails after deregister" do
+      {:ok, identity} = Identity.generate(name: "temp-agent")
+      :ok = Registry.register(identity)
+
+      assert {:ok, _} = Registry.lookup_by_name("temp-agent")
+
+      :ok = Registry.deregister(identity.agent_id)
+
+      # Name index should have empty list, returning not_found
+      result = Registry.lookup_by_name("temp-agent")
+      assert result == {:error, :not_found} or match?({:ok, []}, result)
+    end
+  end
+
   describe "stats/0" do
     test "tracks registration counts", %{identity: identity} do
       stats_before = Registry.stats()

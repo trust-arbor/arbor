@@ -85,7 +85,7 @@ defmodule Arbor.Bridge.ClaudeSession do
   def ensure_registered(session_id, cwd) do
     agent_id = to_agent_id(session_id)
 
-    case Arbor.Security.get_trust_profile(agent_id) do
+    case Arbor.Trust.get_trust_profile(agent_id) do
       {:ok, _profile} ->
         # Already registered
         Logger.debug("Claude session already registered", agent_id: agent_id)
@@ -155,7 +155,7 @@ defmodule Arbor.Bridge.ClaudeSession do
     )
 
     # Create trust profile
-    case Arbor.Security.create_trust_profile(agent_id) do
+    case Arbor.Trust.create_trust_profile(agent_id) do
       {:ok, _profile} ->
         # Grant default capabilities
         grant_default_capabilities(agent_id, cwd)

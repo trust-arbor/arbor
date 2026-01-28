@@ -98,6 +98,8 @@ defmodule Arbor.SecurityTest do
       assert Map.has_key?(stats, :capabilities)
       assert Map.has_key?(stats, :identities)
       assert Map.has_key?(stats, :healthy)
+      assert Map.has_key?(stats, :system_authority_id)
+      assert is_binary(stats.system_authority_id)
     end
   end
 
@@ -204,6 +206,109 @@ defmodule Arbor.SecurityTest do
       # No signed_request, identity verification not forced
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://fs/read/legacy")
+    end
+  end
+
+  # ===========================================================================
+  # Phase 2: Capability signing integration tests
+  # ===========================================================================
+
+  describe "grant/1 signs capabilities" do
+    test "granted capabilities have issuer_id and issuer_signature", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/signed"
+        )
+
+      assert is_binary(cap.issuer_id)
+      assert String.starts_with?(cap.issuer_id, "agent_")
+      assert is_binary(cap.issuer_signature)
+      assert byte_size(cap.issuer_signature) > 0
+    end
+
+    test "granted capability signature is valid", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/verified"
+        )
+
+      assert :ok =
+               Arbor.Security.SystemAuthority.verify_capability_signature(cap)
+    end
+  end
+
+  describe "find_authorizing returns signed capabilities" do
+    test "authorized capability is signed", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/found"
+        )
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read/found")
+    end
+  end
+
+  describe "tampered capability signature" do
+    test "authorization fails for tampered capability", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/tamper"
+        )
+
+      # Tamper with the stored capability by revoking and putting a modified version
+      :ok = Security.revoke(cap.id)
+
+      tampered = %{cap | resource_uri: "arbor://fs/write/evil"}
+      :ok = Arbor.Security.CapabilityStore.put(tampered)
+
+      # The tampered capability should fail signature verification
+      assert {:error, :unauthorized} =
+               Security.authorize(agent_id, "arbor://fs/write/evil")
+    end
+  end
+
+  describe "delegation through facade" do
+    test "produces signed delegation chain", %{agent_id: agent_id} do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+
+      {:ok, parent_cap} =
+        Security.grant(
+          principal: identity.agent_id,
+          resource: "arbor://fs/read/delegated"
+        )
+
+      {:ok, delegated} =
+        Security.delegate(parent_cap.id, agent_id, delegator_private_key: identity.private_key)
+
+      assert delegated.principal_id == agent_id
+      assert delegated.parent_capability_id == parent_cap.id
+      assert is_binary(delegated.issuer_signature)
+      assert length(delegated.delegation_chain) == 1
+      assert hd(delegated.delegation_chain).delegator_id == identity.agent_id
+    end
+  end
+
+  describe "backward compatibility" do
+    test "unsigned capabilities work when capability_signing_required? is false",
+         %{agent_id: agent_id} do
+      # Directly store an unsigned capability (simulating pre-Phase 2 data)
+      {:ok, unsigned_cap} =
+        Arbor.Contracts.Security.Capability.new(
+          resource_uri: "arbor://fs/read/legacy_unsigned",
+          principal_id: agent_id
+        )
+
+      :ok = Arbor.Security.CapabilityStore.put(unsigned_cap)
+
+      # Default config has capability_signing_required: false
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read/legacy_unsigned")
     end
   end
 end

@@ -1,10 +1,10 @@
 defmodule Arbor.Contracts.Consensus.Protocol do
   @moduledoc """
-  Contract for the autonomous consensus protocol.
+  Contract for the consensus protocol.
 
-  The consensus system enables multi-agent agreement on system changes
-  without human oversight. It uses Byzantine fault-tolerant voting
-  with independent evaluators spawned fresh for each proposal.
+  The consensus system enables multi-agent agreement on system changes.
+  It uses Byzantine fault-tolerant voting with independent evaluators
+  spawned fresh for each proposal.
 
   ## Council Structure
 
@@ -46,8 +46,8 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   # - dependency_change: External dependency updates (5/7 quorum, extra scrutiny)
   # - configuration_change: Runtime config changes (5/7 quorum)
   # - layer_modification: Architecture layer changes (5/7 quorum)
-  # - test_change: Test file modifications (3/7 quorum)
-  # - documentation_change: Docs/README changes (3/7 quorum)
+  # - test_change: Test file modifications (4/7 quorum)
+  # - documentation_change: Docs/README changes (4/7 quorum)
   @type change_type ::
           :code_modification
           | :capability_change
@@ -146,12 +146,12 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   @layer_patterns [
     {"Consensus", 1},
     {"Trust.Manager", 1},
-    {"CapabilityKernel", 1},
+    {"Security.Kernel", 1},
     {"Supervisor", 2},
     {"Registry", 2},
     {"Gateway", 2},
-    {"Arbor.Core", 3},
-    {"Arbor.Security", 3}
+    {"Arbor.Security", 3},
+    {"Arbor.Signals", 3}
   ]
 
   @doc """
@@ -206,7 +206,7 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   Returns the number of approvals needed:
   - 6/7 for governance changes (meta-changes)
   - 5/7 for standard changes (code, capabilities, config, dependencies)
-  - 3/7 for low-risk changes (documentation, tests)
+  - 4/7 for low-risk changes (documentation, tests)
   """
   @spec quorum_for_change_type(change_type()) :: non_neg_integer()
   def quorum_for_change_type(change_type) do

@@ -11,18 +11,23 @@ defmodule Arbor.Contracts.Security.Identity do
   - **Deterministic**: Agent IDs are `"agent_" <> hex(SHA-256(public_key))`
   - **Keypair-based**: Ed25519 for signing and verification
   - **Private-key-safe**: Private keys (32-byte Ed25519 seeds) are never serialized to JSON or stored in registries
+  - **Named**: Optional human-readable name for display/logging (not an identifier)
 
   ## Usage
 
       # Generate a new identity
-      {:ok, identity} = Identity.generate()
+      {:ok, identity} = Identity.generate(name: "code-reviewer")
 
       # Create from existing public key
-      {:ok, identity} = Identity.new(public_key: public_key)
+      {:ok, identity} = Identity.new(public_key: public_key, name: "auditor")
 
       # Agent ID is derived automatically
       identity.agent_id
       #=> "agent_a1b2c3..."
+
+      # Human-readable display
+      Identity.display_name(identity)
+      #=> "code-reviewer (agent_a1b2c3..)"
   """
 
   use TypedStruct
@@ -36,6 +41,7 @@ defmodule Arbor.Contracts.Security.Identity do
     @typedoc "A cryptographic agent identity"
 
     field(:agent_id, Types.agent_id())
+    field(:name, String.t(), enforce: false)
     field(:public_key, Types.public_key())
     field(:private_key, Types.private_key(), enforce: false)
     field(:created_at, DateTime.t())
@@ -52,12 +58,13 @@ defmodule Arbor.Contracts.Security.Identity do
 
   - `:public_key` (required) - 32-byte Ed25519 public key
   - `:private_key` - 32-byte Ed25519 private key seed (optional, never stored in registries)
+  - `:name` - Optional human-readable name (not an identifier, does not need to be unique)
   - `:key_version` - Key version number (default: 1)
   - `:metadata` - Additional metadata map
 
   ## Examples
 
-      {:ok, identity} = Identity.new(public_key: public_key_bytes)
+      {:ok, identity} = Identity.new(public_key: public_key_bytes, name: "auditor")
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
@@ -65,6 +72,7 @@ defmodule Arbor.Contracts.Security.Identity do
 
     identity = %__MODULE__{
       agent_id: derive_agent_id(public_key),
+      name: attrs[:name],
       public_key: public_key,
       private_key: attrs[:private_key],
       created_at: attrs[:created_at] || DateTime.utc_now(),
@@ -83,12 +91,13 @@ defmodule Arbor.Contracts.Security.Identity do
 
   ## Options
 
+  - `:name` - Optional human-readable name
   - `:key_version` - Key version number (default: 1)
   - `:metadata` - Additional metadata map
 
   ## Examples
 
-      {:ok, identity} = Identity.generate()
+      {:ok, identity} = Identity.generate(name: "code-reviewer")
       identity.agent_id
       #=> "agent_a1b2c3d4..."
   """
@@ -99,6 +108,7 @@ defmodule Arbor.Contracts.Security.Identity do
     new(
       public_key: public_key,
       private_key: private_key,
+      name: opts[:name],
       key_version: opts[:key_version] || 1,
       metadata: opts[:metadata] || %{}
     )
@@ -124,6 +134,31 @@ defmodule Arbor.Contracts.Security.Identity do
     %{identity | private_key: nil}
   end
 
+  @doc """
+  Return a human-readable display string for the identity.
+
+  If the identity has a name, returns `"name (agent_xxxx..)"`.
+  Otherwise returns the truncated agent_id: `"agent_xxxx.."`.
+
+  ## Examples
+
+      Identity.display_name(named_identity)
+      #=> "code-reviewer (agent_a1b2c3d4..)"
+
+      Identity.display_name(unnamed_identity)
+      #=> "agent_a1b2c3d4.."
+  """
+  @spec display_name(t()) :: String.t()
+  def display_name(%__MODULE__{name: name, agent_id: agent_id}) do
+    short_id = String.slice(agent_id, 0, 16) <> ".."
+
+    case name do
+      nil -> short_id
+      "" -> short_id
+      name -> "#{name} (#{short_id})"
+    end
+  end
+
   # Validation
 
   defp validate(%__MODULE__{} = identity) do
@@ -131,7 +166,8 @@ defmodule Arbor.Contracts.Security.Identity do
       &validate_public_key/1,
       &validate_private_key/1,
       &validate_agent_id_matches/1,
-      &validate_key_version/1
+      &validate_key_version/1,
+      &validate_name/1
     ]
 
     Enum.reduce_while(validators, :ok, fn validator, :ok ->
@@ -176,6 +212,11 @@ defmodule Arbor.Contracts.Security.Identity do
 
   defp validate_key_version(%{key_version: v}) when is_integer(v) and v >= 1, do: :ok
   defp validate_key_version(%{key_version: v}), do: {:error, {:invalid_key_version, v}}
+
+  defp validate_name(%{name: nil}), do: :ok
+  defp validate_name(%{name: name}) when is_binary(name) and byte_size(name) > 0, do: :ok
+  defp validate_name(%{name: ""}), do: {:error, :empty_name}
+  defp validate_name(%{name: name}), do: {:error, {:invalid_name, name}}
 
   defp byte_size_or_type(val) when is_binary(val), do: byte_size(val)
   defp byte_size_or_type(val), do: {:not_binary, val}

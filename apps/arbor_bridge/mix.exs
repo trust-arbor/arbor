@@ -27,6 +27,7 @@ defmodule ArborBridge.MixProject do
     [
       {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
       {:plug, "~> 1.14"},
       {:plug_cowboy, "~> 2.6"},
       {:jason, "~> 1.4"},

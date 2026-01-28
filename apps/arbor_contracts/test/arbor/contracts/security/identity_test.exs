@@ -109,6 +109,49 @@ defmodule Arbor.Contracts.Security.IdentityTest do
     end
   end
 
+  describe "name field" do
+    test "name is nil by default" do
+      {:ok, identity} = Identity.generate()
+      assert identity.name == nil
+    end
+
+    test "accepts a name" do
+      {:ok, identity} = Identity.generate(name: "code-reviewer")
+      assert identity.name == "code-reviewer"
+    end
+
+    test "rejects empty string name" do
+      {pk, sk} = :crypto.generate_key(:eddsa, :ed25519)
+      assert {:error, :empty_name} = Identity.new(public_key: pk, private_key: sk, name: "")
+    end
+
+    test "rejects non-string name" do
+      {pk, sk} = :crypto.generate_key(:eddsa, :ed25519)
+
+      assert {:error, {:invalid_name, 42}} =
+               Identity.new(public_key: pk, private_key: sk, name: 42)
+    end
+  end
+
+  describe "display_name/1" do
+    test "shows truncated agent_id when no name" do
+      {:ok, identity} = Identity.generate()
+      display = Identity.display_name(identity)
+
+      assert String.ends_with?(display, "..")
+      assert String.starts_with?(display, "agent_")
+      assert String.length(display) == 18
+    end
+
+    test "shows name with short agent_id when named" do
+      {:ok, identity} = Identity.generate(name: "auditor")
+      display = Identity.display_name(identity)
+
+      assert String.starts_with?(display, "auditor (agent_")
+      assert String.ends_with?(display, "..)")
+    end
+  end
+
   describe "Jason encoding" do
     test "excludes private_key from JSON" do
       {:ok, identity} = Identity.generate()
