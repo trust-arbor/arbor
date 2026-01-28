@@ -111,10 +111,18 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   defp build_command(:mix_test, proposal, opts) do
     test_paths = get_test_paths(proposal, opts)
 
-    if test_paths != [] do
-      "mix test #{Enum.join(test_paths, " ")}"
-    else
-      "mix test"
+    case sanitize_test_paths(test_paths) do
+      {:ok, []} ->
+        "mix test"
+
+      {:ok, safe_paths} ->
+        escaped = Enum.map(safe_paths, &escape_shell_arg/1)
+        "mix test #{Enum.join(escaped, " ")}"
+
+      {:error, invalid_path} ->
+        # Return a command that will fail safely with a clear message
+        Logger.warning("Invalid test path rejected: #{inspect(invalid_path)}")
+        "echo 'Invalid test path in proposal' && exit 1"
     end
   end
 
@@ -364,5 +372,44 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
 
   defp generate_evaluator_id(perspective) do
     "eval_det_#{perspective}_" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+  end
+
+  # ============================================================================
+  # Security: Test Path Sanitization
+  # ============================================================================
+
+  # Only allow safe characters in test paths to prevent command injection.
+  # Valid test paths should match patterns like:
+  # - test/my_test.exs
+  # - test/subdir/my_test.exs
+  # - apps/my_app/test/my_test.exs
+  @safe_path_pattern ~r/^[a-zA-Z0-9_\-\.\/]+$/
+
+  defp sanitize_test_paths(paths) when is_list(paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
+      if valid_test_path?(path) do
+        {:cont, {:ok, acc ++ [path]}}
+      else
+        {:halt, {:error, path}}
+      end
+    end)
+  end
+
+  defp sanitize_test_paths(_), do: {:ok, []}
+
+  defp valid_test_path?(path) when is_binary(path) do
+    # Must match safe pattern and not contain traversal sequences
+    Regex.match?(@safe_path_pattern, path) and
+      not String.contains?(path, "..") and
+      not String.contains?(path, "//") and
+      String.length(path) < 500
+  end
+
+  defp valid_test_path?(_), do: false
+
+  # Shell escape: wrap in single quotes, escape embedded single quotes
+  defp escape_shell_arg(arg) do
+    escaped = String.replace(arg, "'", "'\\''")
+    "'#{escaped}'"
   end
 end
