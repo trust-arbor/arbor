@@ -409,59 +409,56 @@ defmodule Arbor.Trust.Manager do
     end
   end
 
-  defp update_profile_for_event(agent_id, event_type, metadata) do
-    case event_type do
-      :action_success ->
-        Store.record_action_success(agent_id)
+  defp update_profile_for_event(agent_id, :action_success, _metadata),
+    do: Store.record_action_success(agent_id)
 
-      :action_failure ->
-        Store.record_action_failure(agent_id)
+  defp update_profile_for_event(agent_id, :action_failure, _metadata),
+    do: Store.record_action_failure(agent_id)
 
-      :test_passed ->
-        Store.record_test_result(agent_id, :passed)
+  defp update_profile_for_event(agent_id, :test_passed, _metadata),
+    do: Store.record_test_result(agent_id, :passed)
 
-      :test_failed ->
-        Store.record_test_result(agent_id, :failed)
+  defp update_profile_for_event(agent_id, :test_failed, _metadata),
+    do: Store.record_test_result(agent_id, :failed)
 
-      :rollback_executed ->
-        Store.record_rollback(agent_id)
+  defp update_profile_for_event(agent_id, :rollback_executed, _metadata),
+    do: Store.record_rollback(agent_id)
 
-      :security_violation ->
-        Store.record_security_violation(agent_id)
+  defp update_profile_for_event(agent_id, :security_violation, _metadata),
+    do: Store.record_security_violation(agent_id)
 
-      :improvement_applied ->
-        Store.record_improvement(agent_id)
+  defp update_profile_for_event(agent_id, :improvement_applied, _metadata),
+    do: Store.record_improvement(agent_id)
 
-      # Council-based trust earning events
-      :proposal_submitted ->
-        Store.record_proposal_submitted(agent_id)
+  # Council-based trust earning events
+  defp update_profile_for_event(agent_id, :proposal_submitted, _metadata),
+    do: Store.record_proposal_submitted(agent_id)
 
-      :proposal_approved ->
-        Store.record_proposal_approved(agent_id, Map.get(metadata, :impact, :medium))
+  defp update_profile_for_event(agent_id, :proposal_approved, metadata),
+    do: Store.record_proposal_approved(agent_id, Map.get(metadata, :impact, :medium))
 
-      :proposal_rejected ->
-        Store.get_profile(agent_id)
+  defp update_profile_for_event(agent_id, :proposal_rejected, _metadata),
+    do: Store.get_profile(agent_id)
 
-      :installation_success ->
-        Store.record_installation_success(agent_id, Map.get(metadata, :impact, :medium))
+  defp update_profile_for_event(agent_id, :installation_success, metadata),
+    do: Store.record_installation_success(agent_id, Map.get(metadata, :impact, :medium))
 
-      :installation_rollback ->
-        Store.record_installation_rollback(agent_id)
+  defp update_profile_for_event(agent_id, :installation_rollback, _metadata),
+    do: Store.record_installation_rollback(agent_id)
 
-      :trust_points_awarded ->
-        Store.award_trust_points(agent_id, Map.get(metadata, :points, 0))
+  defp update_profile_for_event(agent_id, :trust_points_awarded, metadata),
+    do: Store.award_trust_points(agent_id, Map.get(metadata, :points, 0))
 
-      :trust_points_deducted ->
-        Store.deduct_trust_points(
-          agent_id,
-          Map.get(metadata, :points, 0),
-          Map.get(metadata, :reason, :unknown)
-        )
-
-      _ ->
-        Store.get_profile(agent_id)
-    end
+  defp update_profile_for_event(agent_id, :trust_points_deducted, metadata) do
+    Store.deduct_trust_points(
+      agent_id,
+      Map.get(metadata, :points, 0),
+      Map.get(metadata, :reason, :unknown)
+    )
   end
+
+  defp update_profile_for_event(agent_id, _event_type, _metadata),
+    do: Store.get_profile(agent_id)
 
   defp check_circuit_breaker(agent_id) do
     # Get recent events to check for patterns
@@ -510,28 +507,31 @@ defmodule Arbor.Trust.Manager do
   defp demote_tier(agent_id) do
     case Store.get_profile(agent_id) do
       {:ok, profile} ->
-        case TierResolver.previous_tier(profile.tier) do
-          nil ->
-            :ok
-
-          lower_tier ->
-            # Set score to max of lower tier
-            new_score = TierResolver.max_score(lower_tier)
-
-            Store.update_profile(agent_id, fn p ->
-              %{p | trust_score: new_score, tier: lower_tier}
-            end)
-
-            Logger.warning(
-              "Trust demoted for agent #{agent_id}: #{profile.tier} -> #{lower_tier}",
-              agent_id: agent_id,
-              old_tier: profile.tier,
-              new_tier: lower_tier
-            )
-        end
+        apply_tier_demotion(agent_id, profile)
 
       _ ->
         :ok
+    end
+  end
+
+  defp apply_tier_demotion(agent_id, profile) do
+    case TierResolver.previous_tier(profile.tier) do
+      nil ->
+        :ok
+
+      lower_tier ->
+        new_score = TierResolver.max_score(lower_tier)
+
+        Store.update_profile(agent_id, fn p ->
+          %{p | trust_score: new_score, tier: lower_tier}
+        end)
+
+        Logger.warning(
+          "Trust demoted for agent #{agent_id}: #{profile.tier} -> #{lower_tier}",
+          agent_id: agent_id,
+          old_tier: profile.tier,
+          new_tier: lower_tier
+        )
     end
   end
 
@@ -541,38 +541,48 @@ defmodule Arbor.Trust.Manager do
     {:ok, profiles} = Store.list_profiles([])
 
     Enum.each(profiles, fn profile ->
-      days_inactive =
-        case profile.last_activity_at do
-          nil -> DateTime.diff(now, profile.created_at, :day)
-          last -> DateTime.diff(now, last, :day)
-        end
-
-      if days_inactive > 7 do
-        decayed = Profile.apply_decay(profile, days_inactive)
-
-        if decayed.trust_score != profile.trust_score do
-          Store.store_profile(decayed)
-
-          {:ok, event} =
-            Event.new(
-              agent_id: profile.agent_id,
-              event_type: :trust_decayed,
-              previous_score: profile.trust_score,
-              new_score: decayed.trust_score,
-              metadata: %{days_inactive: days_inactive}
-            )
-
-          Store.store_event(event)
-
-          Logger.debug("Trust decayed for inactive agent #{profile.agent_id}",
-            agent_id: profile.agent_id,
-            days_inactive: days_inactive,
-            old_score: profile.trust_score,
-            new_score: decayed.trust_score
-          )
-        end
-      end
+      days_inactive = calculate_days_inactive(profile, now)
+      maybe_apply_decay(profile, days_inactive)
     end)
+  end
+
+  defp calculate_days_inactive(profile, now) do
+    case profile.last_activity_at do
+      nil -> DateTime.diff(now, profile.created_at, :day)
+      last -> DateTime.diff(now, last, :day)
+    end
+  end
+
+  defp maybe_apply_decay(profile, days_inactive) when days_inactive > 7 do
+    decayed = Profile.apply_decay(profile, days_inactive)
+
+    if decayed.trust_score != profile.trust_score do
+      persist_decay(profile, decayed, days_inactive)
+    end
+  end
+
+  defp maybe_apply_decay(_profile, _days_inactive), do: :ok
+
+  defp persist_decay(profile, decayed, days_inactive) do
+    Store.store_profile(decayed)
+
+    {:ok, event} =
+      Event.new(
+        agent_id: profile.agent_id,
+        event_type: :trust_decayed,
+        previous_score: profile.trust_score,
+        new_score: decayed.trust_score,
+        metadata: %{days_inactive: days_inactive}
+      )
+
+    Store.store_event(event)
+
+    Logger.debug("Trust decayed for inactive agent #{profile.agent_id}",
+      agent_id: profile.agent_id,
+      days_inactive: days_inactive,
+      old_score: profile.trust_score,
+      new_score: decayed.trust_score
+    )
   end
 
   defp broadcast_trust_event(agent_id, event_type, metadata) do

@@ -161,19 +161,26 @@ defmodule Arbor.Historian.Timeline do
     if MapSet.member?(seen, signal_id) do
       []
     else
-      case Map.get(by_signal_id, signal_id) do
-        nil ->
-          []
+      do_trace_backward(signal_id, by_signal_id, seen)
+    end
+  end
 
-        entry ->
-          seen = MapSet.put(seen, signal_id)
+  defp do_trace_backward(signal_id, by_signal_id, seen) do
+    case Map.get(by_signal_id, signal_id) do
+      nil ->
+        []
 
-          if entry.cause_id && entry.cause_id != signal_id do
-            trace_backward(entry.cause_id, by_signal_id, seen) ++ [entry]
-          else
-            [entry]
-          end
-      end
+      entry ->
+        seen = MapSet.put(seen, signal_id)
+        trace_backward_from_entry(entry, signal_id, by_signal_id, seen)
+    end
+  end
+
+  defp trace_backward_from_entry(entry, signal_id, by_signal_id, seen) do
+    if entry.cause_id && entry.cause_id != signal_id do
+      trace_backward(entry.cause_id, by_signal_id, seen) ++ [entry]
+    else
+      [entry]
     end
   end
 

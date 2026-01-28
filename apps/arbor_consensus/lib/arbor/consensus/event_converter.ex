@@ -61,19 +61,19 @@ defmodule Arbor.Consensus.EventConverter do
 
     ConsensusEvent.new(%{
       id: event.id,
-      event_type: atomize(data[:event_type] || data["event_type"]),
-      proposal_id: data[:proposal_id] || data["proposal_id"],
-      agent_id: data[:agent_id] || data["agent_id"],
-      evaluator_id: data[:evaluator_id] || data["evaluator_id"],
-      decision_id: data[:decision_id] || data["decision_id"],
-      vote: atomize(data[:vote] || data["vote"]),
-      perspective: atomize(data[:perspective] || data["perspective"]),
-      confidence: data[:confidence] || data["confidence"],
-      decision: atomize(data[:decision] || data["decision"]),
-      approve_count: data[:approve_count] || data["approve_count"],
-      reject_count: data[:reject_count] || data["reject_count"],
-      abstain_count: data[:abstain_count] || data["abstain_count"],
-      data: data[:data] || data["data"] || %{},
+      event_type: atomize(field(data, :event_type)),
+      proposal_id: field(data, :proposal_id),
+      agent_id: field(data, :agent_id),
+      evaluator_id: field(data, :evaluator_id),
+      decision_id: field(data, :decision_id),
+      vote: atomize(field(data, :vote)),
+      perspective: atomize(field(data, :perspective)),
+      confidence: field(data, :confidence),
+      decision: atomize(field(data, :decision)),
+      approve_count: field(data, :approve_count),
+      reject_count: field(data, :reject_count),
+      abstain_count: field(data, :abstain_count),
+      data: field(data, :data) || %{},
       correlation_id: event.correlation_id,
       timestamp: event.timestamp
     })
@@ -84,6 +84,10 @@ defmodule Arbor.Consensus.EventConverter do
   """
   @spec stream_id(ConsensusEvent.t()) :: String.t()
   def stream_id(%ConsensusEvent{proposal_id: proposal_id}), do: "consensus:#{proposal_id}"
+
+  defp field(data, key) do
+    data[key] || data[Atom.to_string(key)]
+  end
 
   defp atomize(nil), do: nil
   defp atomize(value) when is_atom(value), do: value

@@ -88,32 +88,34 @@ defmodule Arbor.Consensus.Council do
     now = System.monotonic_time(:millisecond)
     remaining_ms = max(deadline - now, 0)
 
-    if remaining_ms <= 0 do
-      # Timeout reached — kill remaining tasks
-      kill_tasks(remaining_tasks)
-      {evaluations, remaining_tasks}
-    else
-      # Check if we can already determine the outcome
-      if quorum && quorum_determinable?(evaluations, remaining_tasks, quorum) do
+    cond do
+      remaining_ms <= 0 ->
         kill_tasks(remaining_tasks)
         {evaluations, remaining_tasks}
-      else
-        # Wait for the next task to complete
-        task_refs = Enum.map(remaining_tasks, fn {_perspective, task} -> task end)
 
-        case Task.yield_many(task_refs, min(remaining_ms, 5_000)) do
-          results when is_list(results) ->
-            {new_evals, still_pending} =
-              process_yield_results(remaining_tasks, results)
+      quorum && quorum_determinable?(evaluations, remaining_tasks, quorum) ->
+        kill_tasks(remaining_tasks)
+        {evaluations, remaining_tasks}
 
-            do_collect(
-              still_pending,
-              evaluations ++ new_evals,
-              quorum,
-              deadline
-            )
-        end
-      end
+      true ->
+        yield_and_continue(remaining_tasks, evaluations, quorum, deadline, remaining_ms)
+    end
+  end
+
+  defp yield_and_continue(remaining_tasks, evaluations, quorum, deadline, remaining_ms) do
+    task_refs = Enum.map(remaining_tasks, fn {_perspective, task} -> task end)
+
+    case Task.yield_many(task_refs, min(remaining_ms, 5_000)) do
+      results when is_list(results) ->
+        {new_evals, still_pending} =
+          process_yield_results(remaining_tasks, results)
+
+        do_collect(
+          still_pending,
+          evaluations ++ new_evals,
+          quorum,
+          deadline
+        )
     end
   end
 

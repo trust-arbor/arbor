@@ -254,32 +254,7 @@ defmodule Arbor.Trust.CapabilitySync do
     results =
       Enum.map(templates, fn template ->
         resource_uri = expand_resource_uri(template.resource_uri, agent_id)
-
-        # Check if capability already exists
-        case find_existing_capability(principal_id, resource_uri) do
-          {:ok, _cap} ->
-            {:already_exists, resource_uri}
-
-          {:error, :not_found} ->
-            # Grant new capability via Security facade
-            case Arbor.Security.grant(
-                   principal: principal_id,
-                   resource: resource_uri,
-                   constraints: template.constraints,
-                   metadata: %{
-                     source: :trust_tier,
-                     tier: tier,
-                     granter_id: "trust_system",
-                     synced_at: DateTime.utc_now()
-                   }
-                 ) do
-              {:ok, cap} ->
-                {:granted, cap.id}
-
-              {:error, reason} ->
-                {:error, resource_uri, reason}
-            end
-        end
+        grant_or_skip_capability(principal_id, resource_uri, template, tier)
       end)
 
     granted = Enum.count(results, fn r -> match?({:granted, _}, r) end)
@@ -295,6 +270,36 @@ defmodule Arbor.Trust.CapabilitySync do
     )
 
     {:ok, %{granted: granted, existing: existing, errors: errors}}
+  end
+
+  defp grant_or_skip_capability(principal_id, resource_uri, template, tier) do
+    case find_existing_capability(principal_id, resource_uri) do
+      {:ok, _cap} ->
+        {:already_exists, resource_uri}
+
+      {:error, :not_found} ->
+        do_grant_capability(principal_id, resource_uri, template, tier)
+    end
+  end
+
+  defp do_grant_capability(principal_id, resource_uri, template, tier) do
+    case Arbor.Security.grant(
+           principal: principal_id,
+           resource: resource_uri,
+           constraints: template.constraints,
+           metadata: %{
+             source: :trust_tier,
+             tier: tier,
+             granter_id: "trust_system",
+             synced_at: DateTime.utc_now()
+           }
+         ) do
+      {:ok, cap} ->
+        {:granted, cap.id}
+
+      {:error, reason} ->
+        {:error, resource_uri, reason}
+    end
   end
 
   defp grant_tier_upgrade_capabilities(agent_id, old_tier, new_tier) do
@@ -343,27 +348,35 @@ defmodule Arbor.Trust.CapabilitySync do
     case Arbor.Security.list_capabilities(principal_id) do
       {:ok, capabilities} ->
         Enum.each(capabilities, fn cap ->
-          if Enum.any?(lost_uris, fn uri -> capability_matches_uri?(cap.resource_uri, uri) end) do
-            case Arbor.Security.revoke(cap.id) do
-              :ok ->
-                Logger.debug("Revoked capability on demotion",
-                  agent_id: agent_id,
-                  capability_id: cap.id
-                )
-
-              {:error, reason} ->
-                Logger.warning("Failed to revoke capability on demotion",
-                  agent_id: agent_id,
-                  capability_id: cap.id,
-                  reason: reason
-                )
-            end
-          end
+          maybe_revoke_lost_capability(cap, lost_uris, agent_id)
         end)
 
       {:error, reason} ->
         Logger.error("Failed to list capabilities for demotion sync",
           agent_id: agent_id,
+          reason: reason
+        )
+    end
+  end
+
+  defp maybe_revoke_lost_capability(cap, lost_uris, agent_id) do
+    if Enum.any?(lost_uris, fn uri -> capability_matches_uri?(cap.resource_uri, uri) end) do
+      revoke_capability_with_logging(cap, agent_id)
+    end
+  end
+
+  defp revoke_capability_with_logging(cap, agent_id) do
+    case Arbor.Security.revoke(cap.id) do
+      :ok ->
+        Logger.debug("Revoked capability on demotion",
+          agent_id: agent_id,
+          capability_id: cap.id
+        )
+
+      {:error, reason} ->
+        Logger.warning("Failed to revoke capability on demotion",
+          agent_id: agent_id,
+          capability_id: cap.id,
           reason: reason
         )
     end
@@ -380,12 +393,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
     case Arbor.Security.list_capabilities(principal_id) do
       {:ok, capabilities} ->
-        Enum.each(capabilities, fn cap ->
-          # Revoke if not in the read-only set
-          unless MapSet.member?(read_only_uris, cap.resource_uri) do
-            Arbor.Security.revoke(cap.id)
-          end
-        end)
+        revoke_non_readonly_capabilities(capabilities, read_only_uris)
 
       {:error, reason} ->
         Logger.error("Failed to list capabilities for freeze",
@@ -395,18 +403,30 @@ defmodule Arbor.Trust.CapabilitySync do
     end
   end
 
+  defp revoke_non_readonly_capabilities(capabilities, read_only_uris) do
+    Enum.each(capabilities, fn cap ->
+      unless MapSet.member?(read_only_uris, cap.resource_uri) do
+        Arbor.Security.revoke(cap.id)
+      end
+    end)
+  end
+
   defp find_existing_capability(principal_id, resource_uri) do
     case Arbor.Security.list_capabilities(principal_id) do
       {:ok, capabilities} ->
-        case Enum.find(capabilities, fn cap ->
-               capability_matches_uri?(cap.resource_uri, resource_uri)
-             end) do
-          nil -> {:error, :not_found}
-          cap -> {:ok, cap}
-        end
+        find_matching_capability(capabilities, resource_uri)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp find_matching_capability(capabilities, resource_uri) do
+    case Enum.find(capabilities, fn cap ->
+           capability_matches_uri?(cap.resource_uri, resource_uri)
+         end) do
+      nil -> {:error, :not_found}
+      cap -> {:ok, cap}
     end
   end
 

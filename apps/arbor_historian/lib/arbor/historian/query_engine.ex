@@ -33,12 +33,7 @@ defmodule Arbor.Historian.QueryEngine do
       {:ok, persistence_events} ->
         entries =
           persistence_events
-          |> Enum.map(fn pe ->
-            case EventConverter.from_persistence_event(pe) do
-              {:ok, historian_event} -> SignalTransformer.event_to_history_entry(historian_event)
-              {:error, _} -> nil
-            end
-          end)
+          |> Enum.map(&convert_to_history_entry/1)
           |> Enum.reject(&is_nil/1)
 
         {:ok, entries}
@@ -146,6 +141,13 @@ defmodule Arbor.Historian.QueryEngine do
     case Keyword.get(opts, :limit) do
       nil -> entries
       limit -> Enum.take(entries, limit)
+    end
+  end
+
+  defp convert_to_history_entry(persistence_event) do
+    case EventConverter.from_persistence_event(persistence_event) do
+      {:ok, historian_event} -> SignalTransformer.event_to_history_entry(historian_event)
+      {:error, _} -> nil
     end
   end
 end
