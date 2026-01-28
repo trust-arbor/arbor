@@ -1,8 +1,8 @@
 defmodule Arbor.Persistence.QueryableStore.ETSTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Persistence.{Filter, Record}
   alias Arbor.Persistence.QueryableStore.ETS
-  alias Arbor.Persistence.{Record, Filter}
 
   setup do
     name = :"qs_ets_#{:erlang.unique_integer([:positive])}"

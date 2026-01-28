@@ -226,7 +226,7 @@ defmodule Arbor.Actions.GitTest do
       assert {:ok, result} = Git.Log.run(%{path: repo_path}, %{})
 
       assert result.path == repo_path
-      assert length(result.commits) >= 1
+      assert result.commits != []
       assert result.count >= 1
 
       first_commit = hd(result.commits)

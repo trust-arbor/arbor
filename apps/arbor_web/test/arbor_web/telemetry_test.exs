@@ -1,19 +1,21 @@
 defmodule Arbor.Web.TelemetryTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Web.Telemetry, as: WebTelemetry
+
   describe "setup/0" do
     test "attaches telemetry handlers without error" do
       # Detach first in case already attached
       :telemetry.detach("arbor-web-telemetry")
-      assert Arbor.Web.Telemetry.setup() == :ok
+      assert WebTelemetry.setup() == :ok
     end
   end
 
   describe "metrics/0" do
     test "returns a list of telemetry metrics" do
-      metrics = Arbor.Web.Telemetry.metrics()
+      metrics = WebTelemetry.metrics()
       assert is_list(metrics)
-      assert length(metrics) > 0
+      assert metrics != []
 
       # All should be Telemetry.Metrics structs
       for metric <- metrics do
@@ -26,7 +28,7 @@ defmodule Arbor.Web.TelemetryTest do
     end
 
     test "includes endpoint metrics" do
-      metrics = Arbor.Web.Telemetry.metrics()
+      metrics = WebTelemetry.metrics()
 
       event_names =
         Enum.map(metrics, fn m -> m.event_name end)
@@ -36,7 +38,7 @@ defmodule Arbor.Web.TelemetryTest do
     end
 
     test "includes LiveView mount metrics" do
-      metrics = Arbor.Web.Telemetry.metrics()
+      metrics = WebTelemetry.metrics()
 
       event_names =
         Enum.map(metrics, fn m -> m.event_name end)
@@ -46,7 +48,7 @@ defmodule Arbor.Web.TelemetryTest do
     end
 
     test "includes LiveView event metrics" do
-      metrics = Arbor.Web.Telemetry.metrics()
+      metrics = WebTelemetry.metrics()
 
       event_names =
         Enum.map(metrics, fn m -> m.event_name end)
@@ -65,7 +67,7 @@ defmodule Arbor.Web.TelemetryTest do
       }
 
       assert :ok ==
-               Arbor.Web.Telemetry.handle_event(
+               WebTelemetry.handle_event(
                  [:arbor, :web, :endpoint, :stop],
                  measurements,
                  metadata,

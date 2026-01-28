@@ -85,6 +85,7 @@ defmodule Arbor.Actions.Git do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Git
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -110,8 +111,8 @@ defmodule Arbor.Actions.Git do
 
       case Shell.execute(command,
              cwd: path,
-             timeout: Arbor.Actions.Git.git_timeout(),
-             sandbox: Arbor.Actions.Git.git_sandbox()
+             timeout: Git.git_timeout(),
+             sandbox: Git.git_sandbox()
            ) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
@@ -243,6 +244,7 @@ defmodule Arbor.Actions.Git do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Git
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -288,8 +290,8 @@ defmodule Arbor.Actions.Git do
 
       case Shell.execute(command,
              cwd: path,
-             timeout: Arbor.Actions.Git.git_timeout(),
-             sandbox: Arbor.Actions.Git.git_sandbox()
+             timeout: Git.git_timeout(),
+             sandbox: Git.git_sandbox()
            ) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
@@ -394,6 +396,7 @@ defmodule Arbor.Actions.Git do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Git
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -459,8 +462,8 @@ defmodule Arbor.Actions.Git do
 
       case Shell.execute(command,
              cwd: path,
-             timeout: Arbor.Actions.Git.git_timeout(),
-             sandbox: Arbor.Actions.Git.git_sandbox()
+             timeout: Git.git_timeout(),
+             sandbox: Git.git_sandbox()
            ) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
@@ -538,6 +541,7 @@ defmodule Arbor.Actions.Git do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Git
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -590,8 +594,8 @@ defmodule Arbor.Actions.Git do
 
       case Shell.execute(command,
              cwd: path,
-             timeout: Arbor.Actions.Git.git_timeout(),
-             sandbox: Arbor.Actions.Git.git_sandbox()
+             timeout: Git.git_timeout(),
+             sandbox: Git.git_sandbox()
            ) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}

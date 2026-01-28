@@ -22,7 +22,7 @@ defmodule Arbor.ActionsTest do
       actions = Actions.all_actions()
 
       assert is_list(actions)
-      assert length(actions) > 0
+      assert actions != []
       assert Arbor.Actions.Shell.Execute in actions
       assert Arbor.Actions.File.Read in actions
       assert Arbor.Actions.Git.Status in actions
@@ -34,7 +34,7 @@ defmodule Arbor.ActionsTest do
       tools = Actions.all_tools()
 
       assert is_list(tools)
-      assert length(tools) > 0
+      assert tools != []
 
       # Each tool should be a map with name and parameters_schema (atom keys)
       Enum.each(tools, fn tool ->

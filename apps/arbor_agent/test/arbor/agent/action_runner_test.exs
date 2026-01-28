@@ -2,7 +2,7 @@ defmodule Arbor.Agent.ActionRunnerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.ActionRunner
-  alias Arbor.Agent.Test.{TestAgent, IncrementAction, FailingAction}
+  alias Arbor.Agent.Test.{FailingAction, IncrementAction, TestAgent}
 
   @moduletag :fast
 

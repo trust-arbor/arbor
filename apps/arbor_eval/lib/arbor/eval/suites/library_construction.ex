@@ -43,10 +43,10 @@ defmodule Arbor.Eval.Suites.LibraryConstruction do
     description: "Quality checks for Arbor library construction"
 
   alias Arbor.Eval.Checks.{
+    Documentation,
     ElixirIdioms,
-    PIIDetection,
     NamingConventions,
-    Documentation
+    PIIDetection
   }
 
   @impl Arbor.Eval.Suite

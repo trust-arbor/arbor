@@ -8,7 +8,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   use GenServer
 
-  alias Arbor.Contracts.Core.Capability
+  alias Arbor.Contracts.Security.Capability
 
   @cleanup_interval_ms 60_000
 

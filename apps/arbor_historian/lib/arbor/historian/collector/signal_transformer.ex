@@ -2,11 +2,11 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
   @moduledoc """
   Pure transformation functions between Signals, Events, and HistoryEntries.
 
-  Converts Arbor.Signals.Signal structs into Arbor.Contracts.Events.Event
+  Converts Arbor.Signals.Signal structs into Arbor.Historian.Event
   structs for storage, and back into HistoryEntry structs for querying.
   """
 
-  alias Arbor.Contracts.Events.Event
+  alias Arbor.Historian.Event
   alias Arbor.Historian.HistoryEntry
 
   @doc """
@@ -28,8 +28,8 @@ defmodule Arbor.Historian.Collector.SignalTransformer do
 
     Event.new(
       type: event_type,
-      aggregate_id: stream_id,
-      aggregate_type: :historian,
+      subject_id: stream_id,
+      subject_type: :historian,
       data: signal.data || %{},
       stream_id: stream_id,
       causation_id: get_in_safe(signal, :cause_id) || get_in_safe(signal, :jido_causation_id),

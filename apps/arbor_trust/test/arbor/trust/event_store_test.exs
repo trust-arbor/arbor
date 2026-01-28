@@ -3,8 +3,8 @@ defmodule Arbor.Trust.EventStoreTest do
 
   @moduletag :fast
 
-  alias Arbor.Trust.EventStore
   alias Arbor.Contracts.Trust.Event
+  alias Arbor.Trust.EventStore
 
   setup do
     # Stop existing processes if running

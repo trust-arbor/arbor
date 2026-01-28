@@ -3,8 +3,9 @@ defmodule Arbor.Trust.DecayTest do
 
   @moduletag :fast
 
-  alias Arbor.Trust.Decay
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Decay
+  alias Arbor.Trust.Store
 
   setup do
     # Ensure Store and Manager are running for decay operations
@@ -231,14 +232,14 @@ defmodule Arbor.Trust.DecayTest do
         created_at: twenty_days_ago
       }
 
-      Arbor.Trust.Store.store_profile(profile)
+      Store.store_profile(profile)
 
       # Run decay check
       Decay.run_decay_check()
       Process.sleep(200)
 
       # Check the profile was decayed
-      {:ok, updated_profile} = Arbor.Trust.Store.get_profile(agent_id)
+      {:ok, updated_profile} = Store.get_profile(agent_id)
 
       # 20 days inactive - 7 grace = 13 days decay = 13 points
       # 50 - 13 = 37
@@ -261,12 +262,12 @@ defmodule Arbor.Trust.DecayTest do
         created_at: three_days_ago
       }
 
-      Arbor.Trust.Store.store_profile(profile)
+      Store.store_profile(profile)
 
       Decay.run_decay_check()
       Process.sleep(200)
 
-      {:ok, updated_profile} = Arbor.Trust.Store.get_profile(agent_id)
+      {:ok, updated_profile} = Store.get_profile(agent_id)
 
       # Should not have decayed (within grace period)
       assert updated_profile.trust_score == 50
@@ -285,8 +286,8 @@ defmodule Arbor.Trust.DecayTest do
   # Helpers
 
   defp ensure_store_started do
-    case Process.whereis(Arbor.Trust.Store) do
-      nil -> start_supervised!(Arbor.Trust.Store)
+    case Process.whereis(Store) do
+      nil -> start_supervised!(Store)
       _pid -> :ok
     end
   end

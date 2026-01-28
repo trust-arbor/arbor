@@ -35,7 +35,7 @@ defmodule Arbor.Trust.CircuitBreaker do
 
   use GenServer
 
-  alias Arbor.Trust.Manager
+  alias Arbor.Trust.{Config, Manager}
 
   require Logger
 
@@ -101,7 +101,7 @@ defmodule Arbor.Trust.CircuitBreaker do
 
   @impl true
   def init(opts) do
-    default_config = Arbor.Trust.Config.circuit_breaker_config()
+    default_config = Config.circuit_breaker_config()
     config = Map.merge(default_config, Keyword.get(opts, :config, %{}))
 
     # Schedule periodic cleanup of old events

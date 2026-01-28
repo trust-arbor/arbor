@@ -139,7 +139,7 @@ defmodule Arbor.Trust.CapabilityTemplatesTest do
       gained = CapabilityTemplates.capabilities_gained(:untrusted, :probationary)
 
       assert is_list(gained)
-      assert length(gained) > 0
+      assert gained != []
 
       gained_uris = Enum.map(gained, & &1.resource_uri)
 
@@ -195,7 +195,7 @@ defmodule Arbor.Trust.CapabilityTemplatesTest do
     test "returns capabilities lost on demotion from autonomous to untrusted" do
       lost = CapabilityTemplates.capabilities_lost(:autonomous, :untrusted)
 
-      assert length(lost) > 0
+      assert lost != []
 
       lost_uris = Enum.map(lost, & &1.resource_uri)
 

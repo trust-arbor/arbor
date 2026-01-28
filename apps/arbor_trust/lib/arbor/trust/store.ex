@@ -27,8 +27,8 @@ defmodule Arbor.Trust.Store do
 
   use GenServer
 
-  alias Arbor.Contracts.Trust.{Profile, Event}
-  alias Arbor.Trust.Calculator
+  alias Arbor.Contracts.Trust.{Event, Profile}
+  alias Arbor.Trust.{Calculator, Config}
 
   require Logger
 
@@ -269,7 +269,7 @@ defmodule Arbor.Trust.Store do
   end
 
   defp higher_tier(tier1, tier2) do
-    tier_order = Arbor.Trust.Config.tiers()
+    tier_order = Config.tiers()
     idx1 = Enum.find_index(tier_order, &(&1 == tier1)) || 0
     idx2 = Enum.find_index(tier_order, &(&1 == tier2)) || 0
     Enum.at(tier_order, max(idx1, idx2))
@@ -605,7 +605,7 @@ defmodule Arbor.Trust.Store do
     # Broadcast via PubSub if available
     try do
       Phoenix.PubSub.broadcast(
-        Arbor.Trust.Config.pubsub(),
+        Config.pubsub(),
         "trust:#{new_profile.agent_id}",
         {:tier_changed, new_profile.agent_id, old_profile.tier, new_profile.tier}
       )

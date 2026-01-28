@@ -6,7 +6,9 @@ defmodule Arbor.Consensus.TestHelpers do
   and utility functions for setting up consensus tests.
   """
 
-  alias Arbor.Contracts.Autonomous.{Evaluation, Proposal}
+  alias Arbor.Consensus.Coordinator
+  alias Arbor.Consensus.EventStore
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   # ============================================================================
   # Proposal Factories
@@ -214,8 +216,8 @@ defmodule Arbor.Consensus.TestHelpers do
   # Test Evaluator Backend
   # ============================================================================
 
-  # A test evaluator backend that always approves.
   defmodule AlwaysApproveBackend do
+    @moduledoc false
     @behaviour Arbor.Consensus.EvaluatorBackend
 
     @impl true
@@ -238,8 +240,8 @@ defmodule Arbor.Consensus.TestHelpers do
     end
   end
 
-  # A test evaluator backend that always rejects.
   defmodule AlwaysRejectBackend do
+    @moduledoc false
     @behaviour Arbor.Consensus.EvaluatorBackend
 
     @impl true
@@ -263,8 +265,8 @@ defmodule Arbor.Consensus.TestHelpers do
     end
   end
 
-  # A test evaluator backend that fails.
   defmodule FailingBackend do
+    @moduledoc false
     @behaviour Arbor.Consensus.EvaluatorBackend
 
     @impl true
@@ -273,8 +275,8 @@ defmodule Arbor.Consensus.TestHelpers do
     end
   end
 
-  # A test evaluator backend that takes a long time (for timeout testing).
   defmodule SlowBackend do
+    @moduledoc false
     @behaviour Arbor.Consensus.EvaluatorBackend
 
     @impl true
@@ -289,6 +291,7 @@ defmodule Arbor.Consensus.TestHelpers do
   # ============================================================================
 
   defmodule TestEventSink do
+    @moduledoc false
     @behaviour Arbor.Consensus.EventSink
 
     @impl true
@@ -303,6 +306,7 @@ defmodule Arbor.Consensus.TestHelpers do
   # ============================================================================
 
   defmodule AllowAllAuthorizer do
+    @moduledoc false
     @behaviour Arbor.Consensus.Authorizer
 
     @impl true
@@ -313,6 +317,7 @@ defmodule Arbor.Consensus.TestHelpers do
   end
 
   defmodule DenyAllAuthorizer do
+    @moduledoc false
     @behaviour Arbor.Consensus.Authorizer
 
     @impl true
@@ -327,6 +332,7 @@ defmodule Arbor.Consensus.TestHelpers do
   # ============================================================================
 
   defmodule TestExecutor do
+    @moduledoc false
     @behaviour Arbor.Consensus.Executor
 
     @impl true
@@ -355,7 +361,7 @@ defmodule Arbor.Consensus.TestHelpers do
     ]
 
     merged = Keyword.merge(default_opts, opts)
-    {:ok, pid} = Arbor.Consensus.Coordinator.start_link(merged)
+    {:ok, pid} = Coordinator.start_link(merged)
     {pid, name}
   end
 
@@ -368,7 +374,7 @@ defmodule Arbor.Consensus.TestHelpers do
     name = Keyword.get(opts, :name, :"test_event_store_#{:rand.uniform(100_000)}")
 
     {:ok, pid} =
-      Arbor.Consensus.EventStore.start_link(
+      EventStore.start_link(
         Keyword.merge(opts, name: name, table_name: table_name)
       )
 
@@ -387,7 +393,7 @@ defmodule Arbor.Consensus.TestHelpers do
     if System.monotonic_time(:millisecond) > deadline do
       {:error, :timeout}
     else
-      case Arbor.Consensus.Coordinator.get_status(proposal_id, coordinator) do
+      case Coordinator.get_status(proposal_id, coordinator) do
         {:ok, status} when status in [:approved, :rejected, :deadlock, :vetoed] ->
           {:ok, status}
 

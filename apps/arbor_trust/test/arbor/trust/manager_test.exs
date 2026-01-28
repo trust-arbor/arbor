@@ -3,9 +3,9 @@ defmodule Arbor.Trust.ManagerTest do
 
   @moduletag :fast
 
+  alias Arbor.Trust.EventStore
   alias Arbor.Trust.Manager
   alias Arbor.Trust.Store
-  alias Arbor.Trust.EventStore
 
   setup do
     # Start EventStore
@@ -485,7 +485,7 @@ defmodule Arbor.Trust.ManagerTest do
       {:ok, events} = Manager.get_events("agent_events")
       assert is_list(events)
       # Should have at least the profile_created event and the action_success event
-      assert length(events) >= 1
+      assert events != []
     end
 
     test "returns empty list for agent with no events" do

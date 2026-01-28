@@ -25,7 +25,7 @@ defmodule Arbor.Consensus.Executor do
       end
   """
 
-  alias Arbor.Contracts.Autonomous.{CouncilDecision, Proposal}
+  alias Arbor.Contracts.Consensus.{CouncilDecision, Proposal}
 
   @doc """
   Execute an approved proposal.

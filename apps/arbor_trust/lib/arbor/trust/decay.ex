@@ -31,8 +31,8 @@ defmodule Arbor.Trust.Decay do
 
   use GenServer
 
-  alias Arbor.Contracts.Trust.{Profile, Event}
-  alias Arbor.Trust.{Store, TierResolver}
+  alias Arbor.Contracts.Trust.{Event, Profile}
+  alias Arbor.Trust.{Config, Store, TierResolver}
 
   require Logger
 
@@ -69,7 +69,7 @@ defmodule Arbor.Trust.Decay do
   """
   @spec apply_decay(Profile.t(), non_neg_integer()) :: Profile.t()
   def apply_decay(%Profile{} = profile, days_inactive) do
-    decay_config = Arbor.Trust.Config.decay_config()
+    decay_config = Config.decay_config()
 
     apply_decay(profile, days_inactive, %{
       grace_period: Map.get(decay_config, :grace_period_days, 7),
@@ -131,7 +131,7 @@ defmodule Arbor.Trust.Decay do
 
   @impl true
   def init(opts) do
-    decay_config = Arbor.Trust.Config.decay_config()
+    decay_config = Config.decay_config()
 
     state = %__MODULE__{
       run_time: Keyword.get(opts, :run_time, Map.get(decay_config, :run_time, ~T[03:00:00])),

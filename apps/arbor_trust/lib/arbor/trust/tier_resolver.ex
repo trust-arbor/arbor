@@ -28,6 +28,8 @@ defmodule Arbor.Trust.TierResolver do
       #=> false
   """
 
+  alias Arbor.Trust.Config
+
   @type trust_score :: 0..100
   @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
 
@@ -55,8 +57,8 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec resolve(trust_score()) :: trust_tier()
   def resolve(score) when is_integer(score) do
-    thresholds = Arbor.Trust.Config.tier_thresholds()
-    tiers = Arbor.Trust.Config.tiers()
+    thresholds = Config.tier_thresholds()
+    tiers = Config.tiers()
 
     # Sort tiers by threshold descending and find the first one the score qualifies for
     tiers
@@ -103,7 +105,7 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec min_score(trust_tier()) :: non_neg_integer()
   def min_score(tier) do
-    thresholds = Arbor.Trust.Config.tier_thresholds()
+    thresholds = Config.tier_thresholds()
     Map.fetch!(thresholds, tier)
   end
 
@@ -120,8 +122,8 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec max_score(trust_tier()) :: non_neg_integer()
   def max_score(tier) do
-    tiers = Arbor.Trust.Config.tiers()
-    thresholds = Arbor.Trust.Config.tier_thresholds()
+    tiers = Config.tiers()
+    thresholds = Config.tier_thresholds()
     idx = Enum.find_index(tiers, &(&1 == tier))
 
     if idx == length(tiers) - 1 do
@@ -137,7 +139,7 @@ defmodule Arbor.Trust.TierResolver do
   Get all tiers in order from lowest to highest.
   """
   @spec all_tiers() :: [trust_tier()]
-  def all_tiers, do: Arbor.Trust.Config.tiers()
+  def all_tiers, do: Config.tiers()
 
   @doc """
   Get the next tier above the given tier.
@@ -154,7 +156,7 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec next_tier(trust_tier()) :: trust_tier() | nil
   def next_tier(tier) do
-    tiers = Arbor.Trust.Config.tiers()
+    tiers = Config.tiers()
     idx = Enum.find_index(tiers, &(&1 == tier))
 
     if idx && idx < length(tiers) - 1 do
@@ -179,7 +181,7 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec previous_tier(trust_tier()) :: trust_tier() | nil
   def previous_tier(tier) do
-    tiers = Arbor.Trust.Config.tiers()
+    tiers = Config.tiers()
     idx = Enum.find_index(tiers, &(&1 == tier))
 
     if idx && idx > 0 do
@@ -228,7 +230,7 @@ defmodule Arbor.Trust.TierResolver do
   """
   @spec tier_index(trust_tier()) :: non_neg_integer()
   def tier_index(tier) do
-    tiers = Arbor.Trust.Config.tiers()
+    tiers = Config.tiers()
     idx = Enum.find_index(tiers, &(&1 == tier))
     idx || raise ArgumentError, "unknown tier: #{inspect(tier)}"
   end
@@ -237,7 +239,7 @@ defmodule Arbor.Trust.TierResolver do
   Get the tier thresholds map.
   """
   @spec thresholds() :: map()
-  def thresholds, do: Arbor.Trust.Config.tier_thresholds()
+  def thresholds, do: Config.tier_thresholds()
 
   @doc """
   Get the score needed to promote from current tier.

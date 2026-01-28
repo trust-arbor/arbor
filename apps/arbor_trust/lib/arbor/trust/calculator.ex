@@ -40,6 +40,7 @@ defmodule Arbor.Trust.Calculator do
   """
 
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.{Config, TierResolver}
 
   @weights %{
     success_rate: 0.30,
@@ -63,7 +64,7 @@ defmodule Arbor.Trust.Calculator do
   """
   @spec calculate(Profile.t()) :: 0..100
   def calculate(%Profile{} = profile) do
-    calculate(profile, Arbor.Trust.Config.score_weights())
+    calculate(profile, Config.score_weights())
   end
 
   @doc """
@@ -257,7 +258,7 @@ defmodule Arbor.Trust.Calculator do
   """
   @spec recalculate_profile(Profile.t(), DateTime.t()) :: Profile.t()
   def recalculate_profile(%Profile{} = profile, %DateTime{} = now) do
-    recalculate_profile(profile, now, Arbor.Trust.Config.score_weights())
+    recalculate_profile(profile, now, Config.score_weights())
   end
 
   @doc """
@@ -306,6 +307,6 @@ defmodule Arbor.Trust.Calculator do
   end
 
   defp update_tier(%Profile{trust_score: score} = profile) do
-    %{profile | tier: Arbor.Trust.TierResolver.resolve(score)}
+    %{profile | tier: TierResolver.resolve(score)}
   end
 end

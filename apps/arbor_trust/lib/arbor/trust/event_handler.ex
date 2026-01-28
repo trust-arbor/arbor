@@ -37,7 +37,7 @@ defmodule Arbor.Trust.EventHandler do
 
   use GenServer
 
-  alias Arbor.Trust.Manager
+  alias Arbor.Trust.{Config, Manager}
 
   require Logger
 
@@ -267,9 +267,9 @@ defmodule Arbor.Trust.EventHandler do
 
     Enum.each(topics, fn topic ->
       try do
-        Phoenix.PubSub.subscribe(Arbor.Trust.Config.pubsub(), topic)
+        Phoenix.PubSub.subscribe(Config.pubsub(), topic)
       rescue
-        _ -> Logger.debug("Failed to subscribe to #{topic} on #{inspect(Arbor.Trust.Config.pubsub())}")
+        _ -> Logger.debug("Failed to subscribe to #{topic} on #{inspect(Config.pubsub())}")
       end
     end)
   end

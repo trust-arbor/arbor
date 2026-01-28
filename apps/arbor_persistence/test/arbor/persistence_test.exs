@@ -2,10 +2,10 @@ defmodule Arbor.PersistenceTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Persistence
-  alias Arbor.Persistence.{Record, Event, Filter}
-  alias Arbor.Persistence.Store
-  alias Arbor.Persistence.QueryableStore
+  alias Arbor.Persistence.{Event, Filter, Record}
   alias Arbor.Persistence.EventLog
+  alias Arbor.Persistence.QueryableStore
+  alias Arbor.Persistence.Store
 
   describe "Store facade" do
     setup do
@@ -85,8 +85,8 @@ defmodule Arbor.PersistenceTest do
   end
 
   describe "error paths with failing backends" do
-    alias Arbor.Persistence.TestBackends.FailingStore
     alias Arbor.Persistence.TestBackends.FailingEventLog
+    alias Arbor.Persistence.TestBackends.FailingStore
 
     test "failing store returns errors" do
       assert {:error, :write_failed} = Persistence.put(:x, FailingStore, "k", "v")
