@@ -19,12 +19,13 @@ defmodule Arbor.Consensus.Coordinator do
 
   use GenServer
 
-  alias Arbor.Consensus.{Config, Council, EventStore}
+  alias Arbor.Consensus.{Config, Council, EventEmitter, EventStore, StateRecovery}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
 
   require Logger
 
   defstruct [
+    :coordinator_id,
     :config,
     :evaluator_backend,
     :authorizer,
@@ -34,10 +35,12 @@ defmodule Arbor.Consensus.Coordinator do
     decisions: %{},
     active_councils: %{},
     pending_fingerprints: %{},
-    proposals_by_agent: %{}
+    proposals_by_agent: %{},
+    last_event_position: 0
   ]
 
   @type t :: %__MODULE__{
+          coordinator_id: String.t(),
           config: Config.t(),
           evaluator_backend: module(),
           authorizer: module() | nil,
@@ -47,7 +50,8 @@ defmodule Arbor.Consensus.Coordinator do
           decisions: map(),
           active_councils: map(),
           pending_fingerprints: map(),
-          proposals_by_agent: %{String.t() => [String.t()]}
+          proposals_by_agent: %{String.t() => [String.t()]},
+          last_event_position: non_neg_integer()
         }
 
   # ============================================================================
@@ -185,7 +189,10 @@ defmodule Arbor.Consensus.Coordinator do
         nil -> Config.new()
       end
 
+    coordinator_id = generate_coordinator_id()
+
     state = %__MODULE__{
+      coordinator_id: coordinator_id,
       config: config,
       evaluator_backend:
         Keyword.get(
@@ -197,6 +204,12 @@ defmodule Arbor.Consensus.Coordinator do
       executor: Keyword.get(opts, :executor),
       event_sink: Keyword.get(opts, :event_sink)
     }
+
+    # Attempt recovery from persisted events
+    state = recover_from_events(state)
+
+    # Emit startup event
+    emit_coordinator_started(state)
 
     {:ok, state}
   end
@@ -220,7 +233,10 @@ defmodule Arbor.Consensus.Coordinator do
           proposals_by_agent: add_proposal_to_agent(state.proposals_by_agent, proposal)
       }
 
-      # Record submission event
+      # Emit proposal submitted event (durable event log)
+      EventEmitter.proposal_submitted(proposal)
+
+      # Record submission event (in-memory event store)
       record_event(state, :proposal_submitted, %{
         proposal_id: proposal.id,
         agent_id: proposal.proposer,
@@ -232,6 +248,17 @@ defmodule Arbor.Consensus.Coordinator do
 
       # Spawn council asynchronously
       evaluator_backend = Keyword.get(opts, :evaluator_backend, state.evaluator_backend)
+      perspectives = Council.required_perspectives(proposal, state.config)
+      quorum = Config.quorum_for(state.config, proposal.change_type)
+
+      # Emit evaluation started event
+      EventEmitter.evaluation_started(
+        proposal.id,
+        perspectives,
+        length(perspectives),
+        quorum
+      )
+
       state = spawn_council(state, proposal, evaluator_backend)
 
       {:reply, {:ok, proposal.id}, state}
@@ -433,6 +460,9 @@ defmodule Arbor.Consensus.Coordinator do
 
         state = update_proposal_status(state, proposal_id, :deadlock)
 
+        # Emit to durable event log
+        EventEmitter.proposal_deadlocked(proposal_id, :council_failed, inspect(reason))
+
         record_event(state, :proposal_timeout, %{
           proposal_id: proposal_id,
           data: %{reason: inspect(reason)}
@@ -539,6 +569,10 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp record_evaluation_events(state, proposal_id, evaluations) do
     Enum.each(evaluations, fn eval ->
+      # Emit to durable event log
+      EventEmitter.evaluation_completed(eval)
+
+      # Record to in-memory event store
       record_event(state, :evaluation_submitted, %{
         proposal_id: proposal_id,
         evaluator_id: eval.evaluator_id,
@@ -575,6 +609,10 @@ defmodule Arbor.Consensus.Coordinator do
         proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
     }
 
+    # Emit to durable event log
+    EventEmitter.decision_rendered(decision)
+
+    # Record to in-memory event store
     record_event(state, :decision_reached, %{
       proposal_id: proposal_id,
       decision_id: decision.id,
@@ -622,7 +660,10 @@ defmodule Arbor.Consensus.Coordinator do
     })
 
     case state.executor.execute(proposal, decision) do
-      {:ok, _result} ->
+      {:ok, result} ->
+        # Emit to durable event log
+        EventEmitter.proposal_executed(proposal.id, :success, result)
+
         record_event(state, :execution_succeeded, %{
           proposal_id: proposal.id
         })
@@ -631,6 +672,9 @@ defmodule Arbor.Consensus.Coordinator do
 
       {:error, reason} ->
         Logger.error("Execution failed for #{proposal.id}: #{inspect(reason)}")
+
+        # Emit to durable event log
+        EventEmitter.proposal_executed(proposal.id, :failed, inspect(reason))
 
         record_event(state, :execution_failed, %{
           proposal_id: proposal.id,
@@ -740,5 +784,221 @@ defmodule Arbor.Consensus.Coordinator do
           Map.put(proposals_by_agent, proposal.proposer, new_ids)
         end
     end
+  end
+
+  # ===========================================================================
+  # Event Sourcing & Recovery
+  # ===========================================================================
+
+  defp generate_coordinator_id do
+    "coord_#{System.unique_integer([:positive, :monotonic])}_#{System.os_time(:millisecond)}"
+  end
+
+  defp recover_from_events(state) do
+    case Config.event_log() do
+      nil ->
+        Logger.debug("Coordinator: no event_log configured, starting fresh")
+        state
+
+      event_log_config ->
+        do_recover_from_events(state, event_log_config)
+    end
+  end
+
+  defp do_recover_from_events(state, event_log_config) do
+    case StateRecovery.rebuild_from_events(event_log_config) do
+      {:ok, recovered} ->
+        Logger.info(
+          "Coordinator: recovered #{map_size(recovered.proposals)} proposals, " <>
+            "#{map_size(recovered.decisions)} decisions, " <>
+            "#{length(recovered.interrupted)} interrupted from #{recovered.events_replayed} events"
+        )
+
+        # Emit recovery events
+        if Config.emit_recovery_events?() do
+          emit_recovery_started(state, recovered.last_position)
+        end
+
+        # Convert recovered state to Coordinator state
+        state = apply_recovered_state(state, recovered)
+
+        # Handle interrupted evaluations
+        state = handle_interrupted_evaluations(state, recovered.interrupted)
+
+        if Config.emit_recovery_events?() do
+          emit_recovery_completed(state, recovered)
+        end
+
+        state
+
+      {:error, reason} ->
+        Logger.error("Coordinator: recovery failed: #{inspect(reason)}, starting fresh")
+        state
+    end
+  end
+
+  defp apply_recovered_state(state, recovered) do
+    # Rebuild proposals map with Proposal structs
+    proposals =
+      Map.new(recovered.proposals, fn {id, info} ->
+        proposal = %Proposal{
+          id: id,
+          proposer: info.proposer,
+          change_type: info.change_type,
+          description: info.description,
+          target_layer: info.target_layer,
+          target_module: info.target_module,
+          metadata: info.metadata || %{},
+          status: info.status,
+          created_at: info.submitted_at,
+          updated_at: info.submitted_at
+        }
+
+        {id, proposal}
+      end)
+
+    # Rebuild decisions map
+    decisions =
+      Map.new(recovered.decisions, fn {proposal_id, dec} ->
+        decision = %CouncilDecision{
+          id: dec.id,
+          proposal_id: proposal_id,
+          decision: dec.decision,
+          approve_count: dec.approve_count,
+          reject_count: dec.reject_count,
+          abstain_count: dec.abstain_count,
+          required_quorum: dec.required_quorum,
+          quorum_met: dec.quorum_met,
+          primary_concerns: dec.primary_concerns || [],
+          average_confidence: dec.average_confidence || 0.0,
+          created_at: dec.timestamp,
+          decided_at: dec.timestamp
+        }
+
+        {proposal_id, decision}
+      end)
+
+    # Rebuild proposals_by_agent for quota tracking
+    proposals_by_agent =
+      proposals
+      |> Map.values()
+      |> Enum.filter(&(&1.status in [:pending, :evaluating]))
+      |> Enum.group_by(& &1.proposer)
+      |> Map.new(fn {agent, props} -> {agent, Enum.map(props, & &1.id)} end)
+
+    %{
+      state
+      | proposals: proposals,
+        decisions: decisions,
+        proposals_by_agent: proposals_by_agent,
+        last_event_position: recovered.last_position
+    }
+  end
+
+  defp handle_interrupted_evaluations(state, []), do: state
+
+  defp handle_interrupted_evaluations(state, interrupted) do
+    strategy = Config.recovery_strategy()
+    Logger.info("Coordinator: handling #{length(interrupted)} interrupted evaluations with strategy: #{strategy}")
+
+    Enum.reduce(interrupted, state, fn info, acc_state ->
+      handle_single_interrupted(acc_state, info, strategy)
+    end)
+  end
+
+  defp handle_single_interrupted(state, info, :deadlock) do
+    # Mark as deadlocked - safest option
+    Logger.info("Coordinator: marking proposal #{info.proposal_id} as deadlocked (interrupted)")
+
+    state = update_proposal_status(state, info.proposal_id, :deadlock)
+
+    EventEmitter.proposal_deadlocked(
+      info.proposal_id,
+      :interrupted,
+      "Evaluation interrupted by crash. Missing perspectives: #{inspect(info.missing_perspectives)}"
+    )
+
+    state
+  end
+
+  defp handle_single_interrupted(state, info, :resume) do
+    # Re-spawn only missing evaluations
+    case Map.get(state.proposals, info.proposal_id) do
+      nil ->
+        state
+
+      proposal ->
+        Logger.info(
+          "Coordinator: resuming evaluation for #{info.proposal_id}, " <>
+            "#{length(info.missing_perspectives)} perspectives remaining"
+        )
+
+        # Spawn council for only the missing perspectives
+        spawn_council_for_perspectives(state, proposal, info.missing_perspectives)
+    end
+  end
+
+  defp handle_single_interrupted(state, info, :restart) do
+    # Re-spawn entire council
+    case Map.get(state.proposals, info.proposal_id) do
+      nil ->
+        state
+
+      proposal ->
+        Logger.info("Coordinator: restarting full evaluation for #{info.proposal_id}")
+        spawn_council(state, proposal, state.evaluator_backend)
+    end
+  end
+
+  defp spawn_council_for_perspectives(state, proposal, perspectives) do
+    # Similar to spawn_council but with specific perspectives
+    config = state.config
+    quorum = Config.quorum_for(config, proposal.change_type)
+
+    task =
+      Task.async(fn ->
+        result =
+          Council.evaluate(proposal, perspectives, state.evaluator_backend,
+            timeout: config.evaluation_timeout_ms,
+            quorum: quorum
+          )
+
+        {:council_result, proposal.id, result}
+      end)
+
+    %{state | active_councils: Map.put(state.active_councils, proposal.id, task)}
+  end
+
+  defp emit_coordinator_started(state) do
+    config_map = %{
+      council_size: state.config.council_size,
+      evaluation_timeout_ms: state.config.evaluation_timeout_ms,
+      max_concurrent_proposals: state.config.max_concurrent_proposals,
+      auto_execute_approved: state.config.auto_execute_approved
+    }
+
+    recovered_from =
+      if state.last_event_position > 0 do
+        state.last_event_position
+      else
+        nil
+      end
+
+    EventEmitter.coordinator_started(state.coordinator_id, config_map, recovered_from: recovered_from)
+  end
+
+  defp emit_recovery_started(state, from_position) do
+    EventEmitter.recovery_started(state.coordinator_id, from_position)
+  end
+
+  defp emit_recovery_completed(state, recovered) do
+    stats = %{
+      proposals_recovered: map_size(recovered.proposals),
+      decisions_recovered: map_size(recovered.decisions),
+      interrupted_count: length(recovered.interrupted),
+      events_replayed: recovered.events_replayed
+    }
+
+    EventEmitter.recovery_completed(state.coordinator_id, stats)
   end
 end

@@ -267,4 +267,67 @@ defmodule Arbor.Consensus.Config do
   def llm_perspectives do
     [:security_llm, :architecture_llm, :code_quality_llm, :performance_llm]
   end
+
+  # ===========================================================================
+  # Event Sourcing Configuration
+  # ===========================================================================
+
+  @doc """
+  Event log backend configuration for crash recovery.
+
+  Returns `{module, opts}` tuple for the configured event log, or `nil` if
+  event logging is disabled.
+
+  ## Configuration
+
+      config :arbor_consensus,
+        event_log: {Arbor.Persistence.EventLog.ETS, name: :consensus_events}
+
+  Or for production with Postgres:
+
+      config :arbor_consensus,
+        event_log: {Arbor.Persistence.Ecto.EventLog, []}
+  """
+  @spec event_log() :: {module(), keyword()} | nil
+  def event_log do
+    Application.get_env(@app, :event_log, nil)
+  end
+
+  @doc """
+  Stream name for consensus events.
+
+  All consensus events are written to this single stream for simple
+  replay and subscription patterns.
+
+  Default: "arbor:consensus"
+  """
+  @spec event_stream() :: String.t()
+  def event_stream do
+    Application.get_env(@app, :event_stream, "arbor:consensus")
+  end
+
+  @doc """
+  Recovery strategy for interrupted evaluations.
+
+  When the Coordinator restarts and finds evaluations that were in progress:
+  - `:deadlock` - Mark as deadlocked, require re-submission (default, safest)
+  - `:resume` - Re-spawn only the missing evaluations
+  - `:restart` - Re-spawn the entire council
+
+  Default: :deadlock
+  """
+  @spec recovery_strategy() :: :deadlock | :resume | :restart
+  def recovery_strategy do
+    Application.get_env(@app, :recovery_strategy, :deadlock)
+  end
+
+  @doc """
+  Whether to emit events on startup/recovery.
+
+  Default: true. Set to false for testing without event persistence.
+  """
+  @spec emit_recovery_events?() :: boolean()
+  def emit_recovery_events? do
+    Application.get_env(@app, :emit_recovery_events, true)
+  end
 end

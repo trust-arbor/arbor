@@ -34,7 +34,7 @@ defmodule Arbor.AITest do
     test "cli_fallback_chain/0 returns list of providers" do
       chain = Config.cli_fallback_chain()
       assert is_list(chain)
-      assert length(chain) > 0
+      assert chain != []
       assert Enum.all?(chain, &is_atom/1)
     end
 
@@ -80,7 +80,7 @@ defmodule Arbor.AITest do
     test "fallback_chain/0 returns configured chain" do
       chain = CliImpl.fallback_chain()
       assert is_list(chain)
-      assert length(chain) > 0
+      assert chain != []
     end
 
     test "available_providers/0 returns list of providers" do
