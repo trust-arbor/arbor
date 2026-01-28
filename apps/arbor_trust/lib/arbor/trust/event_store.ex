@@ -8,9 +8,9 @@ defmodule Arbor.Trust.EventStore do
 
   ## Storage Architecture
 
-  - ETS cache for fast reads and recent events
-  - PostgreSQL for durable persistence
-  - Write-through caching (write to DB first, then cache)
+  - `Persistence.EventLog.ETS` for durable event storage (unified event log)
+  - ETS cache for fast indexed reads and recent events
+  - Signals for event notification to other subsystems
 
   ## Query Capabilities
 
@@ -44,7 +44,9 @@ defmodule Arbor.Trust.EventStore do
   use GenServer
 
   alias Arbor.Contracts.Trust.Event
-  alias Arbor.Pagination.Cursor
+  alias Arbor.Common.Pagination.Cursor
+  alias Arbor.Trust.EventConverter
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   require Logger
 
@@ -55,7 +57,7 @@ defmodule Arbor.Trust.EventStore do
   defstruct [
     :events_table,
     :index_table,
-    :db_module,
+    :event_log,
     :stats
   ]
 
@@ -208,12 +210,12 @@ defmodule Arbor.Trust.EventStore do
         {:read_concurrency, true}
       ])
 
-    db_module = opts[:db_module] || __MODULE__.PostgresDB
+    event_log = opts[:event_log]
 
     state = %__MODULE__{
       events_table: events_table,
       index_table: index_table,
-      db_module: db_module,
+      event_log: event_log,
       stats: %{
         total_events: 0,
         events_by_type: %{},
@@ -230,29 +232,16 @@ defmodule Arbor.Trust.EventStore do
 
   @impl true
   def handle_call({:record_event, event}, _from, state) do
-    case record_event_impl(event, state) do
-      :ok ->
-        new_stats = update_stats(state.stats, event)
-        {:reply, :ok, %{state | stats: new_stats}}
-
-      {:error, reason} = error ->
-        Logger.error("Failed to record trust event: #{inspect(reason)}")
-        {:reply, error, state}
-    end
+    :ok = record_event_impl(event, state)
+    new_stats = update_stats(state.stats, event)
+    {:reply, :ok, %{state | stats: new_stats}}
   end
 
   @impl true
-  # credo:disable-for-next-line Credo.Check.Design.DuplicatedCode
   def handle_call({:record_events, events}, _from, state) do
-    results = Enum.map(events, &record_event_impl(&1, state))
-    errors = Enum.filter(results, &match?({:error, _}, &1))
-
-    if Enum.empty?(errors) do
-      new_stats = Enum.reduce(events, state.stats, &update_stats(&2, &1))
-      {:reply, :ok, %{state | stats: new_stats}}
-    else
-      {:reply, {:error, {:partial_failure, length(errors)}}, state}
-    end
+    Enum.each(events, &record_event_impl(&1, state))
+    new_stats = Enum.reduce(events, state.stats, &update_stats(&2, &1))
+    {:reply, :ok, %{state | stats: new_stats}}
   end
 
   @impl true
@@ -325,16 +314,38 @@ defmodule Arbor.Trust.EventStore do
   # Private Implementation
 
   defp record_event_impl(%Event{} = event, state) do
-    # Write to database first
-    case state.db_module.insert_event(event) do
-      :ok ->
-        # Then cache
-        cache_event(event, state)
-        :ok
+    # Persist to unified EventLog (durable write path)
+    persist_to_event_log(event, state)
+    # Cache in domain ETS (read model)
+    cache_event(event, state)
+    # Emit signal (notification)
+    emit_trust_signal(event)
+    :ok
+  end
 
+  defp persist_to_event_log(_event, %{event_log: nil}), do: :ok
+
+  defp persist_to_event_log(%Event{} = event, %{event_log: event_log}) do
+    persistence_event = EventConverter.to_persistence_event(event)
+    stream_id = EventConverter.stream_id(event)
+
+    case PersistenceETS.append(stream_id, persistence_event, name: event_log) do
+      {:ok, _persisted} -> :ok
       {:error, reason} ->
-        {:error, reason}
+        Logger.warning("Trust.EventStore: failed to persist to EventLog: #{inspect(reason)}")
+        :ok
     end
+  end
+
+  defp emit_trust_signal(%Event{} = event) do
+    Arbor.Signals.emit(
+      :trust,
+      event.event_type,
+      Event.to_map(event),
+      source: "arbor.trust"
+    )
+  rescue
+    _ -> :ok
   end
 
   defp cache_event(%Event{} = event, state) do
@@ -378,66 +389,40 @@ defmodule Arbor.Trust.EventStore do
 
   # credo:disable-for-next-line Credo.Check.Design.DuplicatedCode
   defp get_event_impl(event_id, state) do
-    # Try cache first
     case :ets.lookup(state.events_table, event_id) do
       [{^event_id, event}] ->
         {:ok, event}
 
       [] ->
-        # Fall back to database
-        case state.db_module.get_event(event_id) do
-          {:ok, event} ->
-            cache_event(event, state)
-            {:ok, event}
-
-          {:error, _} = error ->
-            error
-        end
+        {:error, :not_found}
     end
   end
 
   defp get_events_impl(filters, state) do
     use_cursor = Keyword.has_key?(filters, :cursor)
 
-    # For simple queries, try cache first
+    # Query from ETS cache using indexes when available
     events =
       cond do
-        filters[:agent_id] && Enum.count(filters) == 1 ->
-          get_from_cache_by_index({:agent, filters[:agent_id]}, state)
+        filters[:agent_id] ->
+          get_from_cache_by_index({:agent, filters[:agent_id]}, state) || []
 
         filters[:event_type] && Enum.count(filters) == 1 ->
-          get_from_cache_by_index({:type, filters[:event_type]}, state)
+          get_from_cache_by_index({:type, filters[:event_type]}, state) || []
 
         true ->
-          # Complex queries go to database
-          nil
+          # Full scan of ETS table
+          state.events_table
+          |> :ets.tab2list()
+          |> Enum.map(fn {_id, event} -> event end)
       end
 
-    # credo:disable-for-lines:24 Credo.Check.Design.DuplicatedCode
-    if events do
-      filtered_events = apply_filters_and_sort(events, filters)
+    filtered_events = apply_filters_and_sort(events, filters)
 
-      if use_cursor do
-        build_paginated_result(filtered_events, filters)
-      else
-        {:ok, filtered_events}
-      end
+    if use_cursor do
+      build_paginated_result(filtered_events, filters)
     else
-      # Query database
-      case state.db_module.query_events(filters) do
-        {:ok, events} ->
-          # Cache retrieved events
-          Enum.each(events, &cache_event(&1, state))
-
-          if use_cursor do
-            build_paginated_result(events, filters)
-          else
-            {:ok, events}
-          end
-
-        {:error, _} = error ->
-          error
-      end
+      {:ok, filtered_events}
     end
   end
 
@@ -575,15 +560,8 @@ defmodule Arbor.Trust.EventStore do
 
   defp get_agent_timeline_impl(agent_id, opts, state) do
     limit = Keyword.get(opts, :limit, 100)
-
-    case get_events_impl([agent_id: agent_id, order: :asc, limit: limit], state) do
-      {:ok, events} ->
-        timeline = build_timeline(agent_id, events)
-        {:ok, timeline}
-
-      {:error, _} = error ->
-        error
-    end
+    {:ok, events} = get_events_impl([agent_id: agent_id, order: :asc, limit: limit], state)
+    {:ok, build_timeline(agent_id, events)}
   end
 
   defp build_timeline(agent_id, events) do
@@ -634,71 +612,63 @@ defmodule Arbor.Trust.EventStore do
 
   defp get_trust_progression_impl(agent_id, opts, state) do
     limit = Keyword.get(opts, :limit, 100)
+    {:ok, events} = get_events_impl([agent_id: agent_id, order: :asc, limit: limit], state)
 
-    case get_events_impl([agent_id: agent_id, order: :asc, limit: limit], state) do
-      {:ok, events} ->
-        # Extract score changes
-        score_changes =
-          events
-          |> Enum.filter(&(&1.new_score != nil))
-          |> Enum.map(fn event ->
-            %{
-              timestamp: event.timestamp,
-              score: event.new_score,
-              delta: event.delta,
-              event_type: event.event_type
-            }
-          end)
-
-        # Calculate statistics
-        scores = Enum.map(score_changes, & &1.score)
-
-        progression = %{
-          agent_id: agent_id,
-          score_history: score_changes,
-          current_score: List.last(scores),
-          min_score: if(Enum.empty?(scores), do: nil, else: Enum.min(scores)),
-          max_score: if(Enum.empty?(scores), do: nil, else: Enum.max(scores)),
-          total_positive_delta:
-            events
-            |> Enum.filter(&(&1.delta && &1.delta > 0))
-            |> Enum.map(& &1.delta)
-            |> Enum.sum(),
-          total_negative_delta:
-            events
-            |> Enum.filter(&(&1.delta && &1.delta < 0))
-            |> Enum.map(& &1.delta)
-            |> Enum.sum(),
-          data_points: length(score_changes)
+    # Extract score changes
+    score_changes =
+      events
+      |> Enum.filter(&(&1.new_score != nil))
+      |> Enum.map(fn event ->
+        %{
+          timestamp: event.timestamp,
+          score: event.new_score,
+          delta: event.delta,
+          event_type: event.event_type
         }
+      end)
 
-        {:ok, progression}
+    # Calculate statistics
+    scores = Enum.map(score_changes, & &1.score)
 
-      {:error, _} = error ->
-        error
-    end
+    progression = %{
+      agent_id: agent_id,
+      score_history: score_changes,
+      current_score: List.last(scores),
+      min_score: if(Enum.empty?(scores), do: nil, else: Enum.min(scores)),
+      max_score: if(Enum.empty?(scores), do: nil, else: Enum.max(scores)),
+      total_positive_delta:
+        events
+        |> Enum.filter(&(&1.delta && &1.delta > 0))
+        |> Enum.map(& &1.delta)
+        |> Enum.sum(),
+      total_negative_delta:
+        events
+        |> Enum.filter(&(&1.delta && &1.delta < 0))
+        |> Enum.map(& &1.delta)
+        |> Enum.sum(),
+      data_points: length(score_changes)
+    }
+
+    {:ok, progression}
   end
 
   defp get_tier_history_impl(agent_id, state) do
-    case get_events_impl([agent_id: agent_id, event_type: :tier_changed, order: :asc], state) do
-      {:ok, events} ->
-        tier_changes =
-          Enum.map(events, fn event ->
-            %{
-              timestamp: event.timestamp,
-              from_tier: event.previous_tier,
-              to_tier: event.new_tier,
-              from_score: event.previous_score,
-              to_score: event.new_score,
-              direction: tier_direction(event.previous_tier, event.new_tier)
-            }
-          end)
+    {:ok, events} =
+      get_events_impl([agent_id: agent_id, event_type: :tier_changed, order: :asc], state)
 
-        {:ok, tier_changes}
+    tier_changes =
+      Enum.map(events, fn event ->
+        %{
+          timestamp: event.timestamp,
+          from_tier: event.previous_tier,
+          to_tier: event.new_tier,
+          from_score: event.previous_score,
+          to_score: event.new_score,
+          direction: tier_direction(event.previous_tier, event.new_tier)
+        }
+      end)
 
-      {:error, _} = error ->
-        error
-    end
+    {:ok, tier_changes}
   end
 
   defp tier_direction(from, to) do
@@ -714,14 +684,8 @@ defmodule Arbor.Trust.EventStore do
   end
 
   defp get_agent_stats_impl(agent_id, state) do
-    case get_events_impl([agent_id: agent_id], state) do
-      {:ok, events} ->
-        stats = calculate_agent_stats(agent_id, events)
-        {:ok, stats}
-
-      {:error, _} = error ->
-        error
-    end
+    {:ok, events} = get_events_impl([agent_id: agent_id], state)
+    {:ok, calculate_agent_stats(agent_id, events)}
   end
 
   defp calculate_agent_stats(agent_id, events) do
@@ -802,10 +766,8 @@ defmodule Arbor.Trust.EventStore do
     events =
       negative_types
       |> Enum.flat_map(fn type ->
-        case get_events_impl([event_type: type, start_time: start_time], state) do
-          {:ok, events} -> events
-          {:error, _} -> []
-        end
+        {:ok, events} = get_events_impl([event_type: type, start_time: start_time], state)
+        events
       end)
       |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
       |> Enum.take(limit)
@@ -828,136 +790,4 @@ defmodule Arbor.Trust.EventStore do
     }
   end
 
-  # Mock PostgreSQL module for development/testing
-  defmodule PostgresDB do
-    @moduledoc """
-    Mock PostgreSQL database module for testing.
-
-    In production, replace with actual Ecto-based implementation.
-    """
-
-    use Agent
-
-    def start_link(_opts \\ []) do
-      Agent.start_link(fn -> %{events: %{}} end, name: __MODULE__)
-    end
-
-    def insert_event(%Event{} = event) do
-      Agent.update(__MODULE__, fn state ->
-        %{state | events: Map.put(state.events, event.id, event)}
-      end)
-
-      :ok
-    rescue
-      _ -> {:error, :db_not_started}
-    end
-
-    def get_event(event_id) do
-      case Agent.get(__MODULE__, fn state -> Map.get(state.events, event_id) end) do
-        nil -> {:error, :not_found}
-        event -> {:ok, event}
-      end
-    rescue
-      _ -> {:error, :db_not_started}
-    end
-
-    def query_events(filters) do
-      events =
-        Agent.get(__MODULE__, fn state ->
-          state.events
-          |> Map.values()
-          |> filter_events(filters)
-        end)
-
-      {:ok, events}
-    rescue
-      _ -> {:ok, []}
-    end
-
-    defp filter_events(events, filters) do
-      order = filters[:order] || :desc
-      use_cursor = Keyword.has_key?(filters, :cursor)
-
-      # When using cursor-based pagination, fetch limit + 1 to determine has_more
-      effective_limit =
-        if use_cursor && filters[:limit] do
-          filters[:limit] + 1
-        else
-          filters[:limit]
-        end
-
-      events
-      |> maybe_filter_by(:agent_id, filters[:agent_id])
-      |> maybe_filter_by(:event_type, filters[:event_type])
-      |> maybe_filter_time(:start_time, filters[:start_time])
-      |> maybe_filter_time(:end_time, filters[:end_time])
-      |> sort_by_timestamp(order)
-      |> maybe_filter_by_cursor(filters[:cursor], order)
-      |> maybe_take(effective_limit)
-    end
-
-    defp maybe_filter_by(events, _field, nil), do: events
-
-    defp maybe_filter_by(events, field, value) do
-      Enum.filter(events, &(Map.get(&1, field) == value))
-    end
-
-    defp maybe_filter_time(events, :start_time, nil), do: events
-
-    defp maybe_filter_time(events, :start_time, start_time) do
-      Enum.filter(events, &(DateTime.compare(&1.timestamp, start_time) != :lt))
-    end
-
-    defp maybe_filter_time(events, :end_time, nil), do: events
-
-    defp maybe_filter_time(events, :end_time, end_time) do
-      Enum.filter(events, &(DateTime.compare(&1.timestamp, end_time) != :gt))
-    end
-
-    defp sort_by_timestamp(events, :asc) do
-      # Sort by timestamp (milliseconds), then by ID as tiebreaker for same-timestamp events
-      # Use milliseconds for consistent comparison with cursor-based pagination
-      Enum.sort(events, fn a, b ->
-        a_ts = DateTime.to_unix(a.timestamp, :millisecond)
-        b_ts = DateTime.to_unix(b.timestamp, :millisecond)
-
-        cond do
-          a_ts < b_ts -> true
-          a_ts > b_ts -> false
-          true -> a.id < b.id
-        end
-      end)
-    end
-
-    defp sort_by_timestamp(events, :desc) do
-      # Sort by timestamp descending (milliseconds), then by ID descending as tiebreaker
-      Enum.sort(events, fn a, b ->
-        a_ts = DateTime.to_unix(a.timestamp, :millisecond)
-        b_ts = DateTime.to_unix(b.timestamp, :millisecond)
-
-        cond do
-          a_ts > b_ts -> true
-          a_ts < b_ts -> false
-          true -> a.id > b.id
-        end
-      end)
-    end
-
-    defp maybe_filter_by_cursor(events, cursor, order) do
-      Arbor.Pagination.Cursor.filter_records(events, cursor, order,
-        timestamp_fn: & &1.timestamp,
-        id_fn: & &1.id
-      )
-    end
-
-    defp maybe_take(events, nil), do: events
-    defp maybe_take(events, limit), do: Enum.take(events, limit)
-
-    def clear_all do
-      Agent.update(__MODULE__, fn _state -> %{events: %{}} end)
-      :ok
-    rescue
-      _ -> :ok
-    end
-  end
 end

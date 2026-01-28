@@ -72,5 +72,14 @@ defmodule Arbor.Persistence.EventLog do
   @callback subscribe(stream_id() | :all, pid(), opts()) ::
               {:ok, reference()} | {:error, term()}
 
-  @optional_callbacks [subscribe: 3]
+  @doc "List all known stream IDs."
+  @callback list_streams(opts()) :: {:ok, [stream_id()]}
+
+  @doc "Get the number of distinct streams."
+  @callback stream_count(opts()) :: {:ok, non_neg_integer()}
+
+  @doc "Get the total number of events across all streams."
+  @callback event_count(opts()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks [subscribe: 3, list_streams: 1, stream_count: 1, event_count: 1]
 end

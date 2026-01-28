@@ -13,7 +13,9 @@ defmodule Arbor.Consensus.EventStore do
 
   use GenServer
 
-  alias Arbor.Contracts.Autonomous.ConsensusEvent
+  alias Arbor.Contracts.Consensus.ConsensusEvent
+  alias Arbor.Consensus.EventConverter
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   require Logger
 
@@ -104,12 +106,14 @@ defmodule Arbor.Consensus.EventStore do
     table_name = Keyword.get(opts, :table_name, @table_name)
     event_sink = Keyword.get(opts, :event_sink)
     max_events = Keyword.get(opts, :max_events, @max_events)
+    event_log = Keyword.get(opts, :event_log)
 
     table = :ets.new(table_name, [:ordered_set, :protected, :named_table])
 
     state = %{
       table: table,
       event_sink: event_sink,
+      event_log: event_log,
       max_events: max_events,
       counter: 0
     }
@@ -131,7 +135,13 @@ defmodule Arbor.Consensus.EventStore do
         state
       end
 
-    # Forward to event sink if configured
+    # Persist to unified EventLog (durable write)
+    persist_to_event_log(event, state)
+
+    # Emit signal (notification)
+    emit_consensus_signal(event)
+
+    # Forward to event sink if configured (deprecated path)
     if state.event_sink do
       forward_to_sink(state.event_sink, event)
     end
@@ -223,5 +233,30 @@ defmodule Arbor.Consensus.EventStore do
           )
       end
     end)
+  end
+
+  defp persist_to_event_log(_event, %{event_log: nil}), do: :ok
+
+  defp persist_to_event_log(%ConsensusEvent{} = event, %{event_log: event_log}) do
+    persistence_event = EventConverter.to_persistence_event(event)
+    stream_id = EventConverter.stream_id(event)
+
+    case PersistenceETS.append(stream_id, persistence_event, name: event_log) do
+      {:ok, _persisted} -> :ok
+      {:error, reason} ->
+        Logger.warning("Consensus.EventStore: failed to persist to EventLog: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp emit_consensus_signal(%ConsensusEvent{} = event) do
+    Arbor.Signals.emit(
+      :consensus,
+      event.event_type,
+      ConsensusEvent.to_map(event),
+      source: "arbor.consensus"
+    )
+  rescue
+    _ -> :ok
   end
 end

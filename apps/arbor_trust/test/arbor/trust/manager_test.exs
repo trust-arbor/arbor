@@ -8,11 +8,8 @@ defmodule Arbor.Trust.ManagerTest do
   alias Arbor.Trust.EventStore
 
   setup do
-    # Start the PostgresDB Agent first (EventStore depends on it)
-    start_supervised!({EventStore.PostgresDB, []})
-
-    # Start EventStore (depends on PostgresDB)
-    start_supervised!({EventStore, [db_module: EventStore.PostgresDB]})
+    # Start EventStore
+    start_supervised!({EventStore, []})
 
     # Start Store (ETS-based, no dependencies)
     start_supervised!({Store, []})

@@ -2,7 +2,7 @@ defmodule Arbor.Historian.CollectorTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Historian.Collector
-  alias Arbor.Historian.EventLog.ETS, as: EventLogETS
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
   alias Arbor.Historian.StreamRegistry
   alias Arbor.Historian.TestHelpers
 
@@ -22,18 +22,18 @@ defmodule Arbor.Historian.CollectorTest do
       signal = TestHelpers.build_signal(category: :activity, type: :agent_started)
       Collector.collect(ctx.collector, signal)
 
-      {:ok, events} = EventLogETS.read_stream(ctx.event_log, "global")
+      {:ok, events} = PersistenceETS.read_stream("global", name: ctx.event_log)
       assert length(events) == 1
-      assert hd(events).type == :"activity:agent_started"
+      assert hd(events).type == "arbor.historian.activity:agent_started"
     end
 
     test "routes to multiple streams", %{ctx: ctx} do
       signal = TestHelpers.build_agent_signal("a1", category: :security, type: :auth)
       Collector.collect(ctx.collector, signal)
 
-      {:ok, global} = EventLogETS.read_stream(ctx.event_log, "global")
-      {:ok, agent} = EventLogETS.read_stream(ctx.event_log, "agent:a1")
-      {:ok, category} = EventLogETS.read_stream(ctx.event_log, "category:security")
+      {:ok, global} = PersistenceETS.read_stream("global", name: ctx.event_log)
+      {:ok, agent} = PersistenceETS.read_stream("agent:a1", name: ctx.event_log)
+      {:ok, category} = PersistenceETS.read_stream("category:security", name: ctx.event_log)
 
       assert length(global) == 1
       assert length(agent) == 1
@@ -67,7 +67,7 @@ defmodule Arbor.Historian.CollectorTest do
       event_log_name = :"el_#{name}"
       registry_name = :"reg_#{name}"
 
-      {:ok, _} = EventLogETS.start_link(name: event_log_name)
+      {:ok, _} = PersistenceETS.start_link(name: event_log_name)
       {:ok, _} = StreamRegistry.start_link(name: registry_name)
 
       filter = fn signal -> signal.type != :skip_me end
