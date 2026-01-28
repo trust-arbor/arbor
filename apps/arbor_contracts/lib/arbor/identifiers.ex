@@ -198,34 +198,67 @@ defmodule Arbor.Identifiers do
   end
 
   @doc """
-  Check if an ID has the correct format for its type.
+  Derive an agent ID from an Ed25519 public key.
+
+  The agent ID is `"agent_" <> hex(SHA-256(public_key))` in lowercase.
+  This creates a deterministic, unforgeable binding between identity and key.
 
   ## Examples
 
-      iex> Arbor.Identifiers.valid_id?("agent_abc123def456", :agent)
+      iex> public_key = :crypto.strong_rand_bytes(32)
+      iex> id = Arbor.Identifiers.derive_agent_id_from_public_key(public_key)
+      iex> String.starts_with?(id, "agent_")
+      true
+      iex> String.length(id)
+      71
+  """
+  @spec derive_agent_id_from_public_key(binary()) :: Types.agent_id()
+  def derive_agent_id_from_public_key(public_key) when is_binary(public_key) do
+    @agent_id_prefix <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
+  end
+
+  @doc """
+  Check if an ID has the correct format for its type.
+
+  For agent IDs, accepts both legacy 32-char hex (random) and 64-char hex
+  (SHA-256 derived from public key) formats.
+
+  ## Examples
+
+      iex> Arbor.Identifiers.valid_id?("agent_abc123def456abc123def456abc1", :agent)
       true
 
       iex> Arbor.Identifiers.valid_id?("invalid", :agent)
       false
   """
   @spec valid_id?(String.t(), atom()) :: boolean()
-  def valid_id?(id, type) when is_binary(id) do
-    prefix =
-      case type do
-        :agent -> @agent_id_prefix
-        :session -> @session_id_prefix
-        :capability -> @capability_id_prefix
-        :trace -> @trace_id_prefix
-        :execution -> @execution_id_prefix
-        _ -> nil
-      end
+  def valid_id?(id, :agent) when is_binary(id) do
+    # Accept both legacy (32-char hex) and crypto-derived (64-char hex) agent IDs
+    String.starts_with?(id, @agent_id_prefix) and
+      id
+      |> String.trim_leading(@agent_id_prefix)
+      |> valid_hex_suffix?([32, 64])
+  end
 
-    if prefix do
-      String.starts_with?(id, prefix) and String.length(id) == String.length(prefix) + 32
-    else
-      false
+  def valid_id?(id, type) when is_binary(id) do
+    case prefix_for_type(type) do
+      nil ->
+        false
+
+      prefix ->
+        String.starts_with?(id, prefix) and String.length(id) == String.length(prefix) + 32
     end
   end
 
   def valid_id?(_, _), do: false
+
+  defp prefix_for_type(:session), do: @session_id_prefix
+  defp prefix_for_type(:capability), do: @capability_id_prefix
+  defp prefix_for_type(:trace), do: @trace_id_prefix
+  defp prefix_for_type(:execution), do: @execution_id_prefix
+  defp prefix_for_type(_), do: nil
+
+  defp valid_hex_suffix?(hex, allowed_lengths) when is_binary(hex) do
+    String.length(hex) in allowed_lengths and String.match?(hex, ~r/^[0-9a-f]+$/)
+  end
 end

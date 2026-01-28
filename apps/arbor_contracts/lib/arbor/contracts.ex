@@ -25,6 +25,8 @@ defmodule Arbor.Contracts do
 
   ### Core Types
   - `Arbor.Contracts.Security.Capability` - Permission tokens
+  - `Arbor.Contracts.Security.Identity` - Cryptographic agent identity
+  - `Arbor.Contracts.Security.SignedRequest` - Signed request envelope
 
   ### Consensus
   - `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
@@ -41,6 +43,7 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.API.Shell` - Command execution interface
   - `Arbor.Contracts.API.Signals` - Event emission interface
   - `Arbor.Contracts.API.Security` - Security facade interface
+  - `Arbor.Contracts.API.Identity` - Identity management interface
   - `Arbor.Contracts.API.Trust` - Trust facade interface
   - `Arbor.Contracts.API.Consensus` - Consensus engine interface
   - `Arbor.Contracts.API.Historian` - Activity stream and audit log interface
@@ -80,6 +83,8 @@ defmodule Arbor.Contracts do
     [
       # Core types
       Arbor.Contracts.Security.Capability,
+      Arbor.Contracts.Security.Identity,
+      Arbor.Contracts.Security.SignedRequest,
       # Consensus
       Arbor.Contracts.Consensus.Protocol,
       Arbor.Contracts.Consensus.Proposal,
@@ -93,6 +98,7 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.API.Shell,
       Arbor.Contracts.API.Signals,
       Arbor.Contracts.API.Security,
+      Arbor.Contracts.API.Identity,
       Arbor.Contracts.API.Trust,
       Arbor.Contracts.API.Consensus,
       Arbor.Contracts.API.Historian,
