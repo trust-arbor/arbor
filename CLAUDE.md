@@ -39,6 +39,15 @@ mix quality    # format --check-formatted + credo --strict
 mix test.fast  # unit tests only (--only fast)
 ```
 
+## Test Tagging
+
+Use consistent tags for test categorization. See [TEST_TAGGING.md](docs/arbor/TEST_TAGGING.md) for full guidelines.
+
+Quick reference:
+- `:fast` / `:slow` — speed
+- `:integration` — crosses boundaries
+- `:database`, `:external`, `:llm` — external dependencies
+
 ## Edit Tool Pitfalls
 
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
