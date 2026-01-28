@@ -91,7 +91,8 @@ defmodule Arbor.Contracts.API.Consensus do
   @callback submit_proposal_for_consensus_evaluation(
               proposal_or_attrs :: Proposal.t() | proposal_attrs(),
               opts :: submit_opts()
-            ) :: {:ok, proposal_id()} | {:error, :invalid_proposal | :authorization_denied | term()}
+            ) ::
+              {:ok, proposal_id()} | {:error, :invalid_proposal | :authorization_denied | term()}
 
   @doc """
   Get the current status of a proposal by its ID.

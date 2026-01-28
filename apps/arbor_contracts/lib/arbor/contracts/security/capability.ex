@@ -36,7 +36,7 @@ defmodule Arbor.Contracts.Security.Capability do
 
   alias Arbor.Types
 
-  @derive {Jason.Encoder, except: [:signature]}
+  @derive {Jason.Encoder, except: [:signature, :issuer_signature]}
   typedstruct enforce: true do
     @typedoc "A capability granting access to a specific resource"
 
@@ -49,6 +49,9 @@ defmodule Arbor.Contracts.Security.Capability do
     field(:delegation_depth, non_neg_integer(), default: 3)
     field(:constraints, map(), default: %{})
     field(:signature, binary(), enforce: false)
+    field(:issuer_id, Types.agent_id(), enforce: false)
+    field(:issuer_signature, Types.signature(), enforce: false)
+    field(:delegation_chain, [Types.delegation_record()], default: [])
     field(:metadata, map(), default: %{})
   end
 
@@ -92,6 +95,9 @@ defmodule Arbor.Contracts.Security.Capability do
       parent_capability_id: attrs[:parent_capability_id],
       delegation_depth: attrs[:delegation_depth] || 3,
       constraints: attrs[:constraints] || %{},
+      issuer_id: attrs[:issuer_id],
+      issuer_signature: attrs[:issuer_signature],
+      delegation_chain: attrs[:delegation_chain] || [],
       metadata: attrs[:metadata] || %{}
     }
 
@@ -139,6 +145,13 @@ defmodule Arbor.Contracts.Security.Capability do
       new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
       new_expires_at = min_datetime(parent.expires_at, opts[:expires_at])
 
+      # Build delegation chain: inherit parent's chain + new entry if delegator info provided
+      delegation_chain =
+        case opts[:delegation_record] do
+          nil -> parent.delegation_chain
+          record -> parent.delegation_chain ++ [record]
+        end
+
       new(
         resource_uri: parent.resource_uri,
         principal_id: new_principal_id,
@@ -146,10 +159,43 @@ defmodule Arbor.Contracts.Security.Capability do
         parent_capability_id: parent.id,
         delegation_depth: parent.delegation_depth - 1,
         constraints: new_constraints,
+        delegation_chain: delegation_chain,
         metadata: opts[:metadata] || %{}
       )
     end
   end
+
+  @doc """
+  Compute the canonical signing payload for a capability.
+
+  This is the deterministic binary that gets signed by the issuer.
+  Excludes `issuer_signature`, `delegation_chain` signatures, and `signature` fields.
+
+  Format: `id <> resource_uri <> principal_id <> issuer_id <> iso8601(granted_at) <> delegation_depth <> sorted_constraints_json`
+  """
+  @spec signing_payload(t()) :: binary()
+  def signing_payload(%__MODULE__{} = cap) do
+    constraints_json =
+      cap.constraints
+      |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
+      |> Jason.encode!()
+
+    cap.id <>
+      cap.resource_uri <>
+      cap.principal_id <>
+      (cap.issuer_id || "") <>
+      DateTime.to_iso8601(cap.granted_at) <>
+      Integer.to_string(cap.delegation_depth) <>
+      constraints_json
+  end
+
+  @doc """
+  Returns true if the capability has been signed (has a non-nil, non-empty issuer_signature).
+  """
+  @spec signed?(t()) :: boolean()
+  def signed?(%__MODULE__{issuer_signature: nil}), do: false
+  def signed?(%__MODULE__{issuer_signature: sig}) when byte_size(sig) == 0, do: false
+  def signed?(%__MODULE__{}), do: true
 
   # Private functions
 
@@ -162,7 +208,8 @@ defmodule Arbor.Contracts.Security.Capability do
       &validate_resource_uri/1,
       &validate_principal_id/1,
       &validate_expiration/1,
-      &validate_delegation_depth/1
+      &validate_delegation_depth/1,
+      &validate_issuer_id/1
     ]
 
     Enum.reduce_while(validators, :ok, fn validator, :ok ->
@@ -205,6 +252,16 @@ defmodule Arbor.Contracts.Security.Capability do
 
   defp validate_delegation_depth(%{delegation_depth: depth}) do
     {:error, {:invalid_delegation_depth, depth}}
+  end
+
+  defp validate_issuer_id(%{issuer_id: nil}), do: :ok
+
+  defp validate_issuer_id(%{issuer_id: id}) do
+    if String.starts_with?(id, "agent_") or id == "system_authority" do
+      :ok
+    else
+      {:error, {:invalid_issuer_id, id}}
+    end
   end
 
   defp valid_resource_uri?(uri) when is_binary(uri) do

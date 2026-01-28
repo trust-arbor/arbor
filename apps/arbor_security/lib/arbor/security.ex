@@ -51,10 +51,12 @@ defmodule Arbor.Security do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.SystemAuthority
   alias Arbor.Signals
 
   # ===========================================================================
@@ -107,6 +109,21 @@ defmodule Arbor.Security do
   @doc "Revoke a capability."
   @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
   def revoke(capability_id, opts \\ []), do: revoke_capability_by_id(capability_id, opts)
+
+  @doc """
+  Delegate a capability to another agent.
+
+  Creates a new signed capability derived from an existing one.
+
+  ## Options
+
+  - `:constraints` - Additional constraints to apply
+  - `:expires_at` - Override expiration (cannot exceed parent)
+  - `:delegator_private_key` - Private key for signing the delegation record
+  """
+  @spec delegate(String.t(), String.t(), keyword()) :: {:ok, Capability.t()} | {:error, term()}
+  def delegate(capability_id, new_principal_id, opts \\ []),
+    do: delegate_capability_from_principal_to_principal(capability_id, new_principal_id, opts)
 
   @doc "List capabilities for an agent."
   @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
@@ -206,9 +223,10 @@ defmodule Arbor.Security do
            metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
-        :ok = CapabilityStore.put(cap)
-        emit_capability_granted(cap)
-        {:ok, cap}
+        {:ok, signed_cap} = SystemAuthority.sign_capability(cap)
+        :ok = CapabilityStore.put(signed_cap)
+        emit_capability_granted(signed_cap)
+        {:ok, signed_cap}
 
       error ->
         error
@@ -230,6 +248,34 @@ defmodule Arbor.Security do
   @impl Arbor.Contracts.API.Security
   def list_capabilities_for_principal(principal_id, opts) do
     CapabilityStore.list_for_principal(principal_id, opts)
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def delegate_capability_from_principal_to_principal(capability_id, new_principal_id, opts) do
+    with {:ok, parent_cap} <- CapabilityStore.get(capability_id),
+         delegator_private_key = Keyword.fetch!(opts, :delegator_private_key),
+         # Create the delegated capability (without delegation record yet)
+         {:ok, new_cap} <-
+           Capability.delegate(parent_cap, new_principal_id,
+             constraints: Keyword.get(opts, :constraints, %{}),
+             expires_at: Keyword.get(opts, :expires_at)
+           ),
+         # Sign a delegation record with the delegator's private key
+         delegation_record =
+           Signer.sign_delegation(parent_cap, new_cap, delegator_private_key),
+         # Recreate with the delegation chain
+         {:ok, new_cap_with_chain} <-
+           Capability.delegate(parent_cap, new_principal_id,
+             constraints: Keyword.get(opts, :constraints, %{}),
+             expires_at: Keyword.get(opts, :expires_at),
+             delegation_record: delegation_record
+           ),
+         # Sign the new capability with system authority
+         {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain) do
+      :ok = CapabilityStore.put(signed_cap)
+      emit_capability_granted(signed_cap)
+      {:ok, signed_cap}
+    end
   end
 
   # ===========================================================================
@@ -294,7 +340,8 @@ defmodule Arbor.Security do
   def healthy? do
     Process.whereis(CapabilityStore) != nil and
       Process.whereis(Registry) != nil and
-      Process.whereis(Arbor.Security.Identity.NonceCache) != nil
+      Process.whereis(Arbor.Security.Identity.NonceCache) != nil and
+      Process.whereis(SystemAuthority) != nil
   end
 
   @doc """
@@ -302,9 +349,15 @@ defmodule Arbor.Security do
   """
   @spec stats() :: map()
   def stats do
+    system_authority_id =
+      if Process.whereis(SystemAuthority),
+        do: SystemAuthority.agent_id(),
+        else: nil
+
     %{
       capabilities: CapabilityStore.stats(),
       identities: Registry.stats(),
+      system_authority_id: system_authority_id,
       healthy: healthy?()
     }
   end

@@ -35,6 +35,8 @@ defmodule Arbor.Contracts.API.Security do
           | :trust_frozen
           | :unknown_agent
           | :invalid_signature
+          | :invalid_capability_signature
+          | :broken_delegation_chain
           | :expired_timestamp
           | :replayed_nonce
           | term()
@@ -55,7 +57,8 @@ defmodule Arbor.Contracts.API.Security do
           constraints: map(),
           expires_at: DateTime.t() | nil,
           delegation_depth: non_neg_integer(),
-          metadata: map()
+          metadata: map(),
+          issuer_id: String.t()
         ]
 
   # ===========================================================================
@@ -83,6 +86,17 @@ defmodule Arbor.Contracts.API.Security do
   """
   @callback grant_capability_to_principal_for_resource(grant_opts()) ::
               {:ok, capability()} | {:error, term()}
+
+  @doc """
+  Delegate a capability from one principal to another.
+
+  Creates a new capability derived from an existing one, with a signed delegation chain.
+  """
+  @callback delegate_capability_from_principal_to_principal(
+              capability_id :: String.t(),
+              new_principal_id :: String.t(),
+              opts :: keyword()
+            ) :: {:ok, capability()} | {:error, term()}
 
   @doc """
   Revoke a previously granted capability by its ID.
@@ -126,6 +140,7 @@ defmodule Arbor.Contracts.API.Security do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    check_if_principal_can_perform_operation_on_resource: 3
+    check_if_principal_can_perform_operation_on_resource: 3,
+    delegate_capability_from_principal_to_principal: 3
   ]
 end

@@ -29,11 +29,11 @@ defmodule Arbor.Contracts.API.Trust do
 
   | Tier | Score | Capabilities |
   |------|-------|--------------|
-  | `:untrusted` | 0-19 | Read own code only |
-  | `:probationary` | 20-49 | Git, limited FS read |
-  | `:trusted` | 50-74 | Full read, workspace write |
-  | `:veteran` | 75-89 | Extensive access |
-  | `:autonomous` | 90-100 | Self-modification |
+  | `:untrusted` | 0-19 | Read own code |
+  | `:probationary` | 20-49 | Sandbox modifications |
+  | `:trusted` | 50-74 | Self-modify with approval |
+  | `:veteran` | 75-89 | Self-modify auto-approved |
+  | `:autonomous` | 90-100 | Modify own capabilities |
 
   @version "1.0.0"
   """

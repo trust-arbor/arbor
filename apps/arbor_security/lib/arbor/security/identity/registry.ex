@@ -61,6 +61,16 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @doc """
+  Look up agent IDs by human-readable name.
+
+  Names are not unique — returns all agent IDs registered with the given name.
+  """
+  @spec lookup_by_name(String.t()) :: {:ok, [String.t()]} | {:error, :not_found}
+  def lookup_by_name(name) when is_binary(name) do
+    GenServer.call(__MODULE__, {:lookup_by_name, name})
+  end
+
+  @doc """
   Get registry statistics.
   """
   @spec stats() :: map()
@@ -76,6 +86,7 @@ defmodule Arbor.Security.Identity.Registry do
      %{
        by_agent_id: %{},
        by_public_key_hash: %{},
+       by_name: %{},
        stats: %{total_registered: 0, total_deregistered: 0}
      }}
   end
@@ -96,6 +107,7 @@ defmodule Arbor.Security.Identity.Registry do
 
         entry = %{
           public_key: identity.public_key,
+          name: identity.name,
           key_version: identity.key_version,
           created_at: identity.created_at,
           metadata: identity.metadata
@@ -105,6 +117,7 @@ defmodule Arbor.Security.Identity.Registry do
           state
           |> put_in([:by_agent_id, identity.agent_id], entry)
           |> put_in([:by_public_key_hash, pk_hash], identity.agent_id)
+          |> index_by_name(identity.name, identity.agent_id)
           |> update_in([:stats, :total_registered], &(&1 + 1))
 
         {:reply, :ok, state}
@@ -133,13 +146,14 @@ defmodule Arbor.Security.Identity.Registry do
       nil ->
         {:reply, {:error, :not_found}, state}
 
-      %{public_key: pk} ->
+      %{public_key: pk, name: name} ->
         pk_hash = Crypto.hash(pk)
 
         state =
           state
           |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
           |> update_in([:by_public_key_hash], &Map.delete(&1, pk_hash))
+          |> deindex_by_name(name, agent_id)
           |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
         {:reply, :ok, state}
@@ -147,12 +161,42 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @impl true
+  def handle_call({:lookup_by_name, name}, _from, state) do
+    case Map.get(state.by_name, name) do
+      nil -> {:reply, {:error, :not_found}, state}
+      [] -> {:reply, {:error, :not_found}, state}
+      agent_ids -> {:reply, {:ok, agent_ids}, state}
+    end
+  end
+
+  @impl true
   def handle_call(:stats, _from, state) do
     stats =
       Map.merge(state.stats, %{
-        active_identities: map_size(state.by_agent_id)
+        active_identities: map_size(state.by_agent_id),
+        named_identities: map_size(state.by_name)
       })
 
     {:reply, stats, state}
+  end
+
+  # Private helpers
+
+  defp index_by_name(state, nil, _agent_id), do: state
+
+  defp index_by_name(state, name, agent_id) do
+    update_in(state, [:by_name, name], fn
+      nil -> [agent_id]
+      ids -> [agent_id | ids]
+    end)
+  end
+
+  defp deindex_by_name(state, nil, _agent_id), do: state
+
+  defp deindex_by_name(state, name, agent_id) do
+    update_in(state, [:by_name, name], fn
+      nil -> nil
+      ids -> List.delete(ids, agent_id)
+    end)
   end
 end

@@ -9,6 +9,8 @@ defmodule Arbor.Security.CapabilityStore do
   use GenServer
 
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.Config
+  alias Arbor.Security.SystemAuthority
 
   @cleanup_interval_ms 60_000
 
@@ -91,6 +93,7 @@ defmodule Arbor.Security.CapabilityStore do
      %{
        by_id: %{},
        by_principal: %{},
+       by_issuer: %{},
        stats: %{
          total_granted: 0,
          total_revoked: 0,
@@ -108,6 +111,7 @@ defmodule Arbor.Security.CapabilityStore do
         nil -> [cap.id]
         ids -> [cap.id | ids]
       end)
+      |> index_by_issuer(cap)
       |> update_in([:stats, :total_granted], &(&1 + 1))
 
     {:reply, :ok, state}
@@ -148,7 +152,8 @@ defmodule Arbor.Security.CapabilityStore do
       |> Enum.map(&Map.get(state.by_id, &1))
       |> Enum.reject(&is_nil/1)
       |> Enum.find(fn cap ->
-        not expired?(cap) and authorizes_resource?(cap, resource_uri)
+        not expired?(cap) and authorizes_resource?(cap, resource_uri) and
+          signature_acceptable?(cap)
       end)
       |> case do
         nil -> {:error, :not_found}
@@ -229,6 +234,34 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp maybe_filter_expired(caps, true), do: caps
   defp maybe_filter_expired(caps, false), do: Enum.reject(caps, &expired?/1)
+
+  defp index_by_issuer(state, %{issuer_id: nil}), do: state
+
+  defp index_by_issuer(state, cap) do
+    update_in(state, [:by_issuer, cap.issuer_id], fn
+      nil -> [cap.id]
+      ids -> [cap.id | ids]
+    end)
+  end
+
+  defp signature_acceptable?(cap) do
+    cond do
+      # Signature present — verify it
+      Capability.signed?(cap) ->
+        case SystemAuthority.verify_capability_signature(cap) do
+          :ok -> true
+          {:error, _} -> false
+        end
+
+      # No signature, but signing is required — reject
+      Config.capability_signing_required?() ->
+        false
+
+      # No signature, signing not required — backward compat accept
+      true ->
+        true
+    end
+  end
 
   defp authorizes_resource?(cap, resource_uri) do
     # Check if capability's resource pattern matches the requested resource

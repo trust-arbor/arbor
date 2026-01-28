@@ -44,6 +44,13 @@ defmodule Arbor.Types do
   @type nonce :: binary()
   @type key_version :: non_neg_integer()
 
+  # Capability types
+  @type delegation_record :: %{
+          delegator_id: agent_id(),
+          delegator_signature: signature(),
+          constraints: map()
+        }
+
   # Classification types
   @type resource_type :: :fs | :api | :db | :tool | :agent | :network
   @type operation :: :read | :write | :execute | :delete | :list | :call
