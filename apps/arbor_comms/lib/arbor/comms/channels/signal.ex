@@ -92,7 +92,7 @@ defmodule Arbor.Comms.Channels.Signal do
 
   defp run_signal_cli(args) do
     signal_cli = config(:signal_cli_path) || find_signal_cli()
-    command = Enum.join([signal_cli | args], " ")
+    command = [signal_cli | args] |> Enum.map(&shell_escape/1) |> Enum.join(" ")
 
     case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none) do
       {:ok, %{exit_code: 0, stdout: output}} ->
@@ -158,6 +158,14 @@ defmodule Arbor.Comms.Channels.Signal do
   end
 
   defp parse_timestamp(_), do: DateTime.utc_now()
+
+  defp shell_escape(arg) do
+    if String.contains?(arg, [" ", "'", "\"", "!", "\\", "(", ")"]) do
+      "'" <> String.replace(arg, "'", "'\\''") <> "'"
+    else
+      arg
+    end
+  end
 
   defp config(key) do
     Application.get_env(:arbor_comms, :signal, [])
