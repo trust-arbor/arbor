@@ -10,7 +10,9 @@ defmodule Arbor.Comms.Dispatcher do
   alias Arbor.Contracts.Comms.Message
 
   @channel_modules %{
-    signal: Arbor.Comms.Channels.Signal
+    signal: Arbor.Comms.Channels.Signal,
+    limitless: Arbor.Comms.Channels.Limitless,
+    email: Arbor.Comms.Channels.Email
   }
 
   @doc """

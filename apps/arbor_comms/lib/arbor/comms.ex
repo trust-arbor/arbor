@@ -26,6 +26,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
+  alias Arbor.Comms.Limitless
 
   # -- Sending --
 
@@ -46,6 +47,12 @@ defmodule Arbor.Comms do
   @spec send_signal(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def send_signal(to, content, opts \\ []) do
     Dispatcher.send(:signal, to, content, opts)
+  end
+
+  @doc "Send an email via the Email channel."
+  @spec send_email(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def send_email(to, subject, body, opts \\ []) do
+    Dispatcher.send(:email, to, body, Keyword.put(opts, :subject, subject))
   end
 
   # -- Receiving --
@@ -93,6 +100,12 @@ defmodule Arbor.Comms do
       nil -> {:error, :unknown_channel}
       module -> module.channel_info()
     end
+  end
+
+  @doc "Check Limitless API connectivity."
+  @spec limitless_status() :: {:ok, :connected} | {:error, term()}
+  def limitless_status do
+    Limitless.Client.test_connection()
   end
 
   @doc "Returns whether the comms system is healthy."
