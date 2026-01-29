@@ -27,12 +27,20 @@ defmodule Arbor.Comms.Config do
     |> Keyword.get(:poll_interval_ms, 60_000)
   end
 
-  @doc "Returns the log path for a channel."
-  @spec log_path(atom()) :: String.t()
-  def log_path(channel) do
+  @doc "Returns the log directory for a channel's chat logs."
+  @spec log_dir(atom()) :: String.t()
+  def log_dir(channel) do
     channel
     |> channel_config()
-    |> Keyword.get(:log_path, "/tmp/arbor/#{channel}_chat.log")
+    |> Keyword.get(:log_dir, "/tmp/arbor/#{channel}_chat")
+  end
+
+  @doc "Returns the log retention period in days."
+  @spec log_retention_days(atom()) :: pos_integer()
+  def log_retention_days(channel) do
+    channel
+    |> channel_config()
+    |> Keyword.get(:log_retention_days, 30)
   end
 
   @doc "Returns list of configured channel atoms."
@@ -40,5 +48,40 @@ defmodule Arbor.Comms.Config do
   def configured_channels do
     [:signal, :limitless, :email, :voice]
     |> Enum.filter(&channel_enabled?/1)
+  end
+
+  # ============================================================================
+  # Handler Configuration
+  # ============================================================================
+
+  @doc "Returns a handler config value with a default."
+  @spec handler_config(atom(), term()) :: term()
+  def handler_config(key, default \\ nil) do
+    Application.get_env(:arbor_comms, :handler, [])
+    |> Keyword.get(key, default)
+  end
+
+  @doc "Returns whether the message handler is enabled."
+  @spec handler_enabled?() :: boolean()
+  def handler_enabled? do
+    handler_config(:enabled, false)
+  end
+
+  @doc "Returns the list of authorized sender identifiers."
+  @spec authorized_senders() :: [String.t()]
+  def authorized_senders do
+    handler_config(:authorized_senders, [])
+  end
+
+  @doc "Returns the configured ResponseGenerator module."
+  @spec response_generator() :: module() | nil
+  def response_generator do
+    handler_config(:response_generator)
+  end
+
+  @doc "Returns the path to the comms context file."
+  @spec context_file() :: String.t() | nil
+  def context_file do
+    handler_config(:context_file)
   end
 end
