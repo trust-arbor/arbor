@@ -100,35 +100,45 @@ defmodule Arbor.Common.SafePathTest do
   describe "resolve_within/2" do
     test "returns resolved path for valid paths" do
       assert {:ok, "/workspace/file.txt"} = SafePath.resolve_within("file.txt", "/workspace")
-      assert {:ok, "/workspace/subdir/file.txt"} = SafePath.resolve_within("subdir/file.txt", "/workspace")
+
+      assert {:ok, "/workspace/subdir/file.txt"} =
+               SafePath.resolve_within("subdir/file.txt", "/workspace")
     end
 
     test "resolves . and .. within bounds" do
       assert {:ok, "/workspace/file.txt"} = SafePath.resolve_within("./file.txt", "/workspace")
-      assert {:ok, "/workspace/file.txt"} = SafePath.resolve_within("subdir/../file.txt", "/workspace")
+
+      assert {:ok, "/workspace/file.txt"} =
+               SafePath.resolve_within("subdir/../file.txt", "/workspace")
     end
 
     test "returns error for escaping paths" do
       assert {:error, :path_traversal} = SafePath.resolve_within("../etc/passwd", "/workspace")
       # This one escapes: a/b/c + 4 levels up goes above /workspace
-      assert {:error, :path_traversal} = SafePath.resolve_within("a/b/c/../../../../etc/passwd", "/workspace")
+      assert {:error, :path_traversal} =
+               SafePath.resolve_within("a/b/c/../../../../etc/passwd", "/workspace")
     end
 
     test "allows .. that stays within bounds" do
       # a/b/c + 3 levels up = /workspace, then /etc/passwd = /workspace/etc/passwd (within bounds)
-      assert {:ok, "/workspace/etc/passwd"} = SafePath.resolve_within("a/b/c/../../../etc/passwd", "/workspace")
+      assert {:ok, "/workspace/etc/passwd"} =
+               SafePath.resolve_within("a/b/c/../../../etc/passwd", "/workspace")
     end
   end
 
   describe "safe_join/2" do
     test "joins paths safely" do
       assert {:ok, "/workspace/file.txt"} = SafePath.safe_join("/workspace", "file.txt")
-      assert {:ok, "/workspace/subdir/file.txt"} = SafePath.safe_join("/workspace", "subdir/file.txt")
+
+      assert {:ok, "/workspace/subdir/file.txt"} =
+               SafePath.safe_join("/workspace", "subdir/file.txt")
     end
 
     test "rejects traversal attempts" do
       assert {:error, :path_traversal} = SafePath.safe_join("/workspace", "../etc/passwd")
-      assert {:error, :path_traversal} = SafePath.safe_join("/workspace", "subdir/../../etc/passwd")
+
+      assert {:error, :path_traversal} =
+               SafePath.safe_join("/workspace", "subdir/../../etc/passwd")
     end
 
     test "rejects absolute user paths" do

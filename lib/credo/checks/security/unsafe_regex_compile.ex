@@ -89,7 +89,8 @@ defmodule Credo.Check.Security.UnsafeRegexCompile do
   defp issue_for(issue_meta, line_no, function) do
     format_issue(
       issue_meta,
-      message: "#{function} with dynamic pattern risks ReDoS attacks. Validate pattern complexity or use literal regex.",
+      message:
+        "#{function} with dynamic pattern risks ReDoS attacks. Validate pattern complexity or use literal regex.",
       trigger: function,
       line_no: line_no
     )

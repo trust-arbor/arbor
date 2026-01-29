@@ -40,7 +40,8 @@ defmodule Arbor.Checkpoint.Store do
 
           case Redix.command(:redix, ["GET", key]) do
             {:ok, nil} -> {:error, :not_found}
-            {:ok, value} -> {:ok, :erlang.binary_to_term(value)}
+            # Use :safe to prevent atom table exhaustion from untrusted data
+            {:ok, value} -> {:ok, :erlang.binary_to_term(value, [:safe])}
             {:error, reason} -> {:error, reason}
           end
         end

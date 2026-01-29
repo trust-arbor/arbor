@@ -92,7 +92,8 @@ defmodule Credo.Check.Security.UnsafeAtomConversion do
   defp issue_for(issue_meta, line_no, function) do
     format_issue(
       issue_meta,
-      message: "#{function} with non-literal argument is vulnerable to atom exhaustion DoS. Use Arbor.Common.SafeAtom instead.",
+      message:
+        "#{function} with non-literal argument is vulnerable to atom exhaustion DoS. Use Arbor.Common.SafeAtom instead.",
       trigger: function,
       line_no: line_no
     )

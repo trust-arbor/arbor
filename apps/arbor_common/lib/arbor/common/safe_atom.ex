@@ -257,7 +257,17 @@ defmodule Arbor.Common.SafeAtom do
   Entity IDs follow the pattern "prefix_id" (e.g., "agent_001", "session_abc").
   This list defines known prefixes for safe atom conversion.
   """
-  @subject_types [:agent, :session, :task, :action, :event, :signal, :capability, :identity, :unknown]
+  @subject_types [
+    :agent,
+    :session,
+    :task,
+    :action,
+    :event,
+    :signal,
+    :capability,
+    :identity,
+    :unknown
+  ]
 
   @spec subject_types() :: [atom()]
   def subject_types, do: @subject_types
