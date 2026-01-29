@@ -9,6 +9,8 @@ defmodule Arbor.AI.CommsResponder do
 
   @behaviour Arbor.Contracts.Comms.ResponseGenerator
 
+  alias Arbor.Contracts.Comms.ResponseEnvelope
+
   require Logger
 
   @impl true
@@ -23,7 +25,7 @@ defmodule Arbor.AI.CommsResponder do
 
     case Arbor.AI.generate_text(prompt, opts) do
       {:ok, %{text: text}} when is_binary(text) and text != "" ->
-        {:ok, text}
+        {:ok, ResponseEnvelope.new(body: text)}
 
       {:ok, _} ->
         {:error, :empty_response}
