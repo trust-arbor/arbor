@@ -51,14 +51,27 @@ defmodule Arbor.Comms.ConfigTest do
     end
   end
 
-  describe "log_path/1" do
-    test "returns default path for unconfigured channel" do
-      assert Config.log_path(:test) == "/tmp/arbor/test_chat.log"
+  describe "log_dir/1" do
+    test "returns default dir for unconfigured channel" do
+      assert Config.log_dir(:test) == "/tmp/arbor/test_chat"
     end
 
-    test "returns configured path" do
-      Application.put_env(:arbor_comms, :test_channel, log_path: "/custom/path.log")
-      assert Config.log_path(:test_channel) == "/custom/path.log"
+    test "returns configured dir" do
+      Application.put_env(:arbor_comms, :test_channel, log_dir: "/custom/logs")
+      assert Config.log_dir(:test_channel) == "/custom/logs"
+    after
+      Application.delete_env(:arbor_comms, :test_channel)
+    end
+  end
+
+  describe "log_retention_days/1" do
+    test "returns default retention for unconfigured channel" do
+      assert Config.log_retention_days(:nonexistent) == 30
+    end
+
+    test "returns configured retention" do
+      Application.put_env(:arbor_comms, :test_channel, log_retention_days: 7)
+      assert Config.log_retention_days(:test_channel) == 7
     after
       Application.delete_env(:arbor_comms, :test_channel)
     end

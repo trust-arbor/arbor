@@ -14,7 +14,16 @@ config :arbor_comms, :signal,
   account: System.get_env("SIGNAL_ACCOUNT"),
   signal_cli_path: System.get_env("SIGNAL_CLI_PATH"),
   poll_interval_ms: 60_000,
-  log_path: "/tmp/arbor/signal_chat.log"
+  log_dir: "/tmp/arbor/signal_chat"
+
+# Comms message handler
+config :arbor_comms, :handler,
+  enabled: true,
+  authorized_senders: ["+15551234567"],
+  context_file: ".arbor/context/comms_context.md",
+  response_generator: Arbor.AI.CommsResponder,
+  conversation_window: 20,
+  dedup_window_seconds: 300
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"

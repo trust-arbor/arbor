@@ -12,7 +12,8 @@ defmodule Arbor.Comms.Channels.Signal do
         account: "+18089098869",
         signal_cli_path: "/usr/local/bin/signal-cli",
         poll_interval_ms: 60_000,
-        log_path: "/tmp/arbor/signal_chat.log"
+        log_dir: "/tmp/arbor/signal_chat",
+        log_retention_days: 30
   """
 
   @behaviour Arbor.Contracts.Comms.Channel
@@ -57,20 +58,25 @@ defmodule Arbor.Comms.Channels.Signal do
 
   @impl true
   def send_message(recipient, message, opts \\ []) do
-    account = config(:account)
-    formatted = format_response(message)
-    attachments = Keyword.get(opts, :attachments, [])
+    case config(:account) do
+      nil ->
+        {:error, :no_account_configured}
 
-    args = ["-u", account, "send", "-m", formatted, recipient]
+      account ->
+        formatted = format_response(message)
+        attachments = Keyword.get(opts, :attachments, [])
 
-    args =
-      Enum.reduce(attachments, args, fn path, acc ->
-        acc ++ ["--attachment", path]
-      end)
+        args = ["-u", account, "send", "-m", formatted, recipient]
 
-    case run_signal_cli(args) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
+        args =
+          Enum.reduce(attachments, args, fn path, acc ->
+            acc ++ ["--attachment", path]
+          end)
+
+        case run_signal_cli(args) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
@@ -158,6 +164,8 @@ defmodule Arbor.Comms.Channels.Signal do
   end
 
   defp parse_timestamp(_), do: DateTime.utc_now()
+
+  defp shell_escape(nil), do: "''"
 
   defp shell_escape(arg) do
     if String.contains?(arg, [" ", "'", "\"", "!", "\\", "(", ")"]) do

@@ -1,20 +1,22 @@
 defmodule Arbor.Comms.ChatLogger do
   @moduledoc """
-  Logs messages to channel-specific chat log files.
+  Logs messages to channel-specific, date-rotated chat log files.
 
-  Each channel gets its own log file at the configured path
-  (default: `/tmp/arbor/<channel>_chat.log`).
+  Each channel gets its own log directory with daily log files:
+  `<log_dir>/<date>.log` (e.g., `/tmp/arbor/signal_chat/2026-01-29.log`).
+
+  Old log files are cleaned up based on the configured retention period.
   """
 
   alias Arbor.Comms.Config
   alias Arbor.Contracts.Comms.Message
 
   @doc """
-  Log a message to the appropriate channel's chat log.
+  Log a message to the appropriate channel's dated chat log.
   """
   @spec log_message(Message.t()) :: :ok
   def log_message(%Message{} = msg) do
-    path = Config.log_path(msg.channel)
+    path = log_path_for_date(msg.channel, msg.received_at)
     ensure_log_dir(path)
 
     line = format_log_line(msg)
@@ -28,11 +30,11 @@ defmodule Arbor.Comms.ChatLogger do
   end
 
   @doc """
-  Read recent lines from a channel's chat log.
+  Read recent lines from a channel's chat log (today's file by default).
   """
   @spec recent(atom(), pos_integer()) :: {:ok, [String.t()]} | {:error, term()}
   def recent(channel, count \\ 50) do
-    path = Config.log_path(channel)
+    path = log_path_for_date(channel)
 
     case File.read(path) do
       {:ok, content} ->
@@ -51,6 +53,53 @@ defmodule Arbor.Comms.ChatLogger do
     end
   end
 
+  @doc """
+  Remove log files older than the configured retention period.
+
+  Returns the number of files removed.
+  """
+  @spec cleanup(atom()) :: {:ok, non_neg_integer()}
+  def cleanup(channel) do
+    dir = Config.log_dir(channel)
+    retention = Config.log_retention_days(channel)
+    cutoff = Date.utc_today() |> Date.add(-retention)
+
+    case File.ls(dir) do
+      {:ok, files} ->
+        removed =
+          files
+          |> Enum.filter(&log_file?/1)
+          |> Enum.filter(fn file -> file_before_date?(file, cutoff) end)
+          |> Enum.count(fn file ->
+            path = Path.join(dir, file)
+
+            case File.rm(path) do
+              :ok -> true
+              _ -> false
+            end
+          end)
+
+        {:ok, removed}
+
+      {:error, :enoent} ->
+        {:ok, 0}
+    end
+  end
+
+  @doc """
+  Returns the log file path for a given channel and date.
+  """
+  @spec log_path_for_date(atom(), DateTime.t() | Date.t() | nil) :: String.t()
+  def log_path_for_date(channel, datetime \\ nil) do
+    dir = Config.log_dir(channel)
+    date_str = date_string(datetime)
+    Path.join(dir, "#{date_str}.log")
+  end
+
+  # ============================================================================
+  # Private Functions
+  # ============================================================================
+
   defp format_log_line(%Message{} = msg) do
     timestamp = format_timestamp(msg.received_at)
     direction = if msg.direction == :inbound, do: "<<<", else: ">>>"
@@ -65,7 +114,22 @@ defmodule Arbor.Comms.ChatLogger do
     Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
   end
 
+  defp date_string(nil), do: date_string(DateTime.utc_now())
+  defp date_string(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d")
+  defp date_string(%Date{} = d), do: Calendar.strftime(d, "%Y-%m-%d")
+
   defp ensure_log_dir(path) do
     path |> Path.dirname() |> File.mkdir_p()
+  end
+
+  defp log_file?(filename) do
+    String.match?(filename, ~r/^\d{4}-\d{2}-\d{2}\.log$/)
+  end
+
+  defp file_before_date?(filename, %Date{} = cutoff) do
+    case Date.from_iso8601(String.trim_trailing(filename, ".log")) do
+      {:ok, file_date} -> Date.compare(file_date, cutoff) == :lt
+      _ -> false
+    end
   end
 end
