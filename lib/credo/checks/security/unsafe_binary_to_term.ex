@@ -81,7 +81,8 @@ defmodule Credo.Check.Security.UnsafeBinaryToTerm do
   defp issue_for(issue_meta, line_no, detail) do
     format_issue(
       issue_meta,
-      message: ":erlang.binary_to_term/1,2 without :safe option is vulnerable to atom exhaustion and code execution (#{detail}).",
+      message:
+        ":erlang.binary_to_term/1,2 without :safe option is vulnerable to atom exhaustion and code execution (#{detail}).",
       trigger: ":erlang.binary_to_term",
       line_no: line_no
     )

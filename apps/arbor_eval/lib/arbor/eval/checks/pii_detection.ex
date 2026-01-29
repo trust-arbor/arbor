@@ -2,6 +2,8 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   @moduledoc """
   Detects potential personally identifiable information (PII) in code.
 
+  Uses SafeRegex for timeout-protected pattern matching to prevent ReDoS attacks.
+
   Based on patterns from Microsoft Presidio and industry best practices.
 
   ## References & Attribution
@@ -73,6 +75,8 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     name: "pii_detection",
     category: :security,
     description: "Detects potential PII in source code"
+
+  alias Arbor.Common.SafeRegex
 
   # Common username patterns in paths
   @path_patterns [
@@ -397,8 +401,9 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp check_secrets_line(line, idx) do
+    # Use SafeRegex with timeout protection against ReDoS attacks
     @secret_patterns
-    |> Enum.filter(&Regex.match?(&1, line))
+    |> Enum.filter(&safe_match?(&1, line))
     |> Enum.take(1)
     |> Enum.map(fn _pattern ->
       %{
@@ -410,6 +415,14 @@ defmodule Arbor.Eval.Checks.PIIDetection do
         suggestion: "Use environment variables or secure configuration for secrets"
       }
     end)
+  end
+
+  # Timeout-protected regex matching for security-sensitive patterns
+  defp safe_match?(pattern, string) do
+    case SafeRegex.match?(pattern, string, timeout: 500) do
+      {:ok, result} -> result
+      {:error, :timeout} -> false
+    end
   end
 
   defp check_ips(violations, lines, allowlisted) do

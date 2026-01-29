@@ -226,20 +226,10 @@ defmodule Arbor.Security.FileGuard do
     # Look for capabilities that cover parent directories
     case CapabilityStore.list_for_principal(agent_id) do
       {:ok, caps} ->
-        # Filter to fs capabilities for the right operation
+        # Filter to fs capabilities for the right operation that cover this path
         matching =
-          caps
-          |> Enum.filter(&fs_capability?/1)
-          |> Enum.filter(fn cap ->
-            case parse_resource_uri(cap.resource_uri) do
-              {:ok, ^operation, cap_path} ->
-                # Check if requested path is under the capability's path
-                String.starts_with?(requested_path, cap_path) or
-                  String.starts_with?(requested_path, cap_path <> "/")
-
-              _ ->
-                false
-            end
+          Enum.filter(caps, fn cap ->
+            fs_capability?(cap) and path_covered_by_capability?(cap, operation, requested_path)
           end)
 
         case matching do
@@ -287,7 +277,7 @@ defmodule Arbor.Security.FileGuard do
   defp check_pattern_constraints(resolved_path, constraints) do
     patterns = constraints[:patterns] || constraints["patterns"]
 
-    if patterns && is_list(patterns) && length(patterns) > 0 do
+    if is_list(patterns) && patterns != [] do
       filename = Path.basename(resolved_path)
 
       if Enum.any?(patterns, &pattern_matches?(filename, &1)) do
@@ -303,7 +293,7 @@ defmodule Arbor.Security.FileGuard do
   defp check_exclude_constraints(resolved_path, constraints) do
     excludes = constraints[:exclude] || constraints["exclude"]
 
-    if excludes && is_list(excludes) && length(excludes) > 0 do
+    if is_list(excludes) && excludes != [] do
       filename = Path.basename(resolved_path)
 
       if Enum.any?(excludes, &pattern_matches?(filename, &1)) do
@@ -347,6 +337,18 @@ defmodule Arbor.Security.FileGuard do
 
   defp fs_capability?(%Capability{resource_uri: "arbor://fs/" <> _}), do: true
   defp fs_capability?(_), do: false
+
+  defp path_covered_by_capability?(cap, operation, requested_path) do
+    case parse_resource_uri(cap.resource_uri) do
+      {:ok, ^operation, cap_path} ->
+        # Check if requested path is under the capability's path
+        String.starts_with?(requested_path, cap_path) or
+          String.starts_with?(requested_path, cap_path <> "/")
+
+      _ ->
+        false
+    end
+  end
 
   defp parse_operation("read"), do: {:ok, :read}
   defp parse_operation("write"), do: {:ok, :write}

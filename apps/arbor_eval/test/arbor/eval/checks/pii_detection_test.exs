@@ -258,4 +258,21 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
       assert Enum.any?(result.violations, &(&1.type == :hardcoded_secret))
     end
   end
+
+  describe "ReDoS protection" do
+    @tag :slow
+    test "handles pathological input without hanging" do
+      # Input designed to potentially trigger exponential backtracking
+      # in patterns like: api_key\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']
+      evil_input = ~s|api_key: "| <> String.duplicate("a", 10_000)
+
+      # Should complete quickly (timeout or no match), not hang
+      result = PIIDetection.run(%{code: evil_input})
+
+      # The important thing is it completes without hanging
+      # It may or may not detect a violation depending on timeout
+      assert is_map(result)
+      assert is_list(result.violations)
+    end
+  end
 end

@@ -84,7 +84,8 @@ defmodule Credo.Check.Security.UnsafeSystemCmd do
   defp issue_for(issue_meta, line_no, function) do
     format_issue(
       issue_meta,
-      message: "#{function} with dynamic input risks command injection. Use Arbor.Shell or ensure input is trusted.",
+      message:
+        "#{function} with dynamic input risks command injection. Use Arbor.Shell or ensure input is trusted.",
       trigger: function,
       line_no: line_no
     )

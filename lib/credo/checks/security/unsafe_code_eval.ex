@@ -71,7 +71,8 @@ defmodule Credo.Check.Security.UnsafeCodeEval do
   defp issue_for(issue_meta, line_no, function) do
     format_issue(
       issue_meta,
-      message: "#{function} can execute arbitrary code. Ensure input is trusted or disable with explanation.",
+      message:
+        "#{function} can execute arbitrary code. Ensure input is trusted or disable with explanation.",
       trigger: function,
       line_no: line_no
     )
