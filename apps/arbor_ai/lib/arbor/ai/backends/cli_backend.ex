@@ -392,4 +392,93 @@ defmodule Arbor.AI.Backends.CliBackend do
       raw_response: data[:raw] || data["raw"]
     )
   end
+
+  # ============================================================================
+  # NDJSON Parsing Helpers
+  # ============================================================================
+
+  @doc """
+  Decode newline-delimited JSON output into a list of parsed event maps.
+
+  Skips lines that aren't valid JSON.
+  """
+  @spec decode_ndjson(String.t()) :: [map()]
+  def decode_ndjson(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.map(fn line ->
+      case Jason.decode(String.trim(line)) do
+        {:ok, json} -> json
+        {:error, _} -> nil
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  @doc """
+  Find the first event matching `type` and extract a value by `key`.
+
+  ## Examples
+
+      find_event_value(events, "thread.started", "thread_id")
+      find_event_value(events, "step_start", "sessionID")
+  """
+  @spec find_event_value([map()], String.t(), String.t()) :: term() | nil
+  def find_event_value(events, type, key) do
+    Enum.find_value(events, fn
+      %{"type" => ^type} = event -> event[key]
+      _ -> nil
+    end)
+  end
+
+  @doc """
+  Collect and concatenate text from matching events.
+
+  Takes a filter function to select events, and a path function
+  to extract text from each matched event.
+
+  ## Examples
+
+      # Codex: agent_message items
+      collect_event_text(events,
+        fn %{"type" => "item.completed", "item" => %{"type" => "agent_message"}} -> true; _ -> false end,
+        fn %{"item" => %{"text" => t}} -> t end,
+        "\\n"
+      )
+
+      # Opencode: text events
+      collect_event_text(events,
+        fn %{"type" => "text"} -> true; _ -> false end,
+        fn %{"part" => %{"text" => t}} -> t end
+      )
+  """
+  @spec collect_event_text([map()], (map() -> boolean()), (map() -> String.t()), String.t()) ::
+          String.t()
+  def collect_event_text(events, filter_fn, extract_fn, joiner \\ "") do
+    events
+    |> Enum.filter(filter_fn)
+    |> Enum.map_join(joiner, extract_fn)
+  end
+
+  @doc """
+  Find the first event matching `type` and apply an extractor function.
+
+  Useful for extracting usage/cost data from finish events.
+
+  ## Examples
+
+      extract_from_event(events, "turn.completed", fn event ->
+        %{input_tokens: event["usage"]["input_tokens"]}
+      end)
+  """
+  @spec extract_from_event([map()], String.t(), (map() -> term())) :: term() | nil
+  def extract_from_event(events, type, extract_fn) do
+    Enum.find_value(events, fn
+      %{"type" => ^type} = event ->
+        extract_fn.(event)
+
+      _ ->
+        nil
+    end)
+  end
 end

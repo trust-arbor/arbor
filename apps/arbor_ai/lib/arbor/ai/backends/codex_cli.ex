@@ -2,90 +2,150 @@ defmodule Arbor.AI.Backends.CodexCli do
   @moduledoc """
   Codex CLI backend for LLM text generation (OpenAI).
 
-  Uses the `codex` command-line tool for GPT models.
-  This is OpenAI's CLI agent, similar to Claude Code.
+  Uses the `codex` command-line tool (GPT-5.2) with subscription-based pricing.
+  Strong for complex multi-file changes, debugging, and algorithms.
+
+  ## Session Management
+
+  - Resume last session: `resume --last`
+  - Specific session: Requires TUI picker (not programmatic)
+
+  ## Models
+
+  - Default: GPT-5.2 (via subscription)
+  - OSS option: `gpt-oss-120b-heretic-v2-hi-mlx` (local, slower)
 
   ## Usage
 
       # Basic generation
-      {:ok, response} = CodexCli.generate_text("Hello")
+      {:ok, response} = CodexCli.generate_text("Debug this function")
 
-      # Execute a task
-      {:ok, response} = CodexCli.generate_text("Explain this code")
+      # Resume last session
+      {:ok, response} = CodexCli.generate_text("Continue", new_session: false)
+
+      # Force new session
+      {:ok, response} = CodexCli.generate_text("New project", new_session: true)
   """
 
-  use Arbor.AI.Backends.CliBackend, provider: :openai
+  use Arbor.AI.Backends.CliBackend, provider: :codex_cli
 
-  @default_model "gpt-4o"
+  @default_model :gpt5
+  @oss_model "gpt-oss-120b-heretic-v2-hi-mlx"
 
   # ============================================================================
   # Callback Implementations
   # ============================================================================
 
   @impl true
-  def build_command(prompt, _opts) do
-    # codex uses: codex e "message" --skip-git-repo-check
-    args = ["e", prompt, "--skip-git-repo-check"]
+  def build_command(prompt, opts) do
+    model = Keyword.get(opts, :model, @default_model)
+    session_mode = CliBackend.session_mode(nil, opts)
+
+    use_oss = model == :oss || model == @oss_model
+
+    # Base command structure depends on session mode
+    args =
+      case session_mode do
+        :resume ->
+          ["e", "resume", "--last"]
+
+        :new ->
+          ["e"]
+      end
+
+    args = args ++ ["--skip-git-repo-check"]
+
+    # OSS model requires special flags
+    args =
+      if use_oss do
+        args ++ ["--oss", "--model", @oss_model]
+      else
+        args
+      end
+
+    # JSON output for better parsing
+    args = args ++ ["--json"]
+
+    # Add the prompt
+    args = args ++ [prompt]
+
     {"codex", args}
   end
 
   @impl true
   def parse_output(output) do
-    # Codex outputs a header block with metadata before the response
-    # Example:
-    # model: gpt-5.2-codex
-    # ...
-    # tokens used
-    # 875
-    # Hello there friend
     trimmed = String.trim(output)
 
-    # Extract model from header
-    model =
-      case Regex.run(~r/^model:\s*(.+)$/m, trimmed) do
-        [_, model_name] -> model_name
-        _ -> nil
-      end
-
-    # Extract token count if available
-    usage =
-      case Regex.run(~r/tokens used\n(\d+)\n/, trimmed) do
-        [_, tokens] ->
-          total = String.to_integer(tokens)
-          %{input_tokens: 0, output_tokens: total, total_tokens: total}
-
-        _ ->
-          nil
-      end
-
-    # Extract just the final response after the tokens line
-    text =
-      case String.split(trimmed, ~r/tokens used\n\d+\n/, parts: :infinity) do
-        [_header | [response | _]] -> String.trim(response)
-        _ -> trimmed
-      end
-
-    response =
-      Response.new(
-        text: text,
-        provider: @provider,
-        model: model,
-        usage: usage,
-        raw_response: output
-      )
-
-    {:ok, response}
+    # Codex with --json outputs NDJSON (newline-delimited JSON)
+    # Each line is a separate JSON object with different event types:
+    # {"type":"thread.started","thread_id":"..."}
+    # {"type":"turn.started"}
+    # {"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"..."}}
+    # {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Hello"}}
+    # {"type":"turn.completed","usage":{input_tokens, cached_input_tokens, output_tokens}}
+    parse_ndjson_response(trimmed)
   end
 
   @impl true
   def default_model, do: @default_model
 
   @impl true
-  def available_models, do: ["gpt-4o", "gpt-4-turbo", "gpt-4"]
+  def available_models, do: [:gpt5, :oss]
 
   @impl true
-  def supports_json_output?, do: false
+  def supports_json_output?, do: true
 
   @impl true
-  def session_dir, do: nil
+  def supports_sessions?, do: true
+
+  @impl true
+  def session_dir do
+    home = System.get_env("HOME") || "~"
+    Path.join([home, ".codex"])
+  end
+
+  # ============================================================================
+  # Private Functions
+  # ============================================================================
+
+  defp parse_ndjson_response(output) do
+    events = CliBackend.decode_ndjson(output)
+
+    thread_id = CliBackend.find_event_value(events, "thread.started", "thread_id")
+
+    text =
+      CliBackend.collect_event_text(
+        events,
+        fn
+          %{"type" => "item.completed", "item" => %{"type" => "agent_message"}} -> true
+          _ -> false
+        end,
+        fn %{"item" => %{"text" => t}} -> t end,
+        "\n"
+      )
+
+    usage =
+      CliBackend.extract_from_event(events, "turn.completed", fn event ->
+        u = event["usage"] || %{}
+
+        %{
+          input_tokens: u["input_tokens"] || 0,
+          output_tokens: u["output_tokens"] || 0,
+          cached_input_tokens: u["cached_input_tokens"] || 0,
+          total_tokens: (u["input_tokens"] || 0) + (u["output_tokens"] || 0)
+        }
+      end)
+
+    response =
+      Response.new(
+        text: text,
+        provider: @provider,
+        model: @default_model,
+        session_id: thread_id,
+        usage: usage,
+        raw_response: events
+      )
+
+    {:ok, response}
+  end
 end
