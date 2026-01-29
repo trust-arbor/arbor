@@ -30,6 +30,9 @@ defmodule ArborComms.MixProject do
       {:arbor_signals, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:jason, "~> 1.4"},
+      {:req, "~> 0.5"},
+      {:swoosh, "~> 1.17"},
+      {:gen_smtp, "~> 1.2"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

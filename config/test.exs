@@ -11,6 +11,8 @@ config :arbor_bridge, start_server: false
 # Then: mix test --include postgres
 # Don't start Signal poller or message handler in tests
 config :arbor_comms, :signal, enabled: false
+config :arbor_comms, :limitless, enabled: false
+config :arbor_comms, :email, enabled: false
 config :arbor_comms, :handler, enabled: false
 
 config :arbor_persistence, Arbor.Persistence.Repo,
