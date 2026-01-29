@@ -3,6 +3,7 @@ defmodule Arbor.Comms.DispatcherTest do
 
   alias Arbor.Comms.Dispatcher
   alias Arbor.Contracts.Comms.Message
+  alias Arbor.Contracts.Comms.ResponseEnvelope
 
   describe "channel_module/1" do
     test "returns Signal module for :signal" do
@@ -32,6 +33,22 @@ defmodule Arbor.Comms.DispatcherTest do
 
       assert {:error, {:unknown_channel, :nonexistent}} =
                Dispatcher.reply(msg, "response")
+    end
+  end
+
+  describe "deliver_envelope/3" do
+    test "returns error for unknown channel" do
+      msg =
+        Message.new(
+          channel: :signal,
+          from: "+1234567890",
+          content: "Hello"
+        )
+
+      envelope = ResponseEnvelope.new(body: "Reply text")
+
+      assert {:error, {:unknown_channel, :nonexistent}} =
+               Dispatcher.deliver_envelope(msg, :nonexistent, envelope)
     end
   end
 end

@@ -156,12 +156,12 @@ defmodule Arbor.Comms.MessageHandler do
           system_prompt: system_prompt
         }
 
-        case generator_module.generate_response(msg, context) do
-          {:ok, response_text} ->
-            send_response(msg, response_text)
-
+        with {:ok, envelope} <- generator_module.generate_response(msg, context),
+             {:ok, channel, routed} <- Config.response_router().route(msg, envelope) do
+          Dispatcher.deliver_envelope(msg, channel, routed)
+        else
           {:error, reason} ->
-            Logger.warning("Response generation failed: #{inspect(reason)}")
+            Logger.warning("Response pipeline failed: #{inspect(reason)}")
             {:error, reason}
         end
     end
