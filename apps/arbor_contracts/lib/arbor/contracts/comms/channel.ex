@@ -14,6 +14,7 @@ defmodule Arbor.Contracts.Comms.Channel do
           max_message_length: pos_integer() | :unlimited,
           supports_media: boolean(),
           supports_threads: boolean(),
+          supports_outbound: boolean(),
           latency: :realtime | :polling
         }
 
