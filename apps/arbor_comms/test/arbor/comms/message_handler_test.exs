@@ -10,7 +10,7 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
     @impl true
     def generate_response(_message, _context) do
-      {:ok, "Mock response"}
+      {:ok, Arbor.Contracts.Comms.ResponseEnvelope.new(body: "Mock response")}
     end
   end
 
