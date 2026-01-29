@@ -25,6 +25,7 @@ defmodule ArborAi.MixProject do
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
+      {:arbor_common, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
