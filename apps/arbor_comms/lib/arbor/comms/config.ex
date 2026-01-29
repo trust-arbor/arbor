@@ -79,6 +79,12 @@ defmodule Arbor.Comms.Config do
     handler_config(:response_generator)
   end
 
+  @doc "Returns the default channel for routing responses when the origin channel can't send."
+  @spec default_response_channel() :: atom()
+  def default_response_channel do
+    handler_config(:default_response_channel, :signal)
+  end
+
   @doc "Returns the configured ResponseRouter module."
   @spec response_router() :: module()
   def response_router do

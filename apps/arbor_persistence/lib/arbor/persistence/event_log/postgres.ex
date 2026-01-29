@@ -87,7 +87,7 @@ defmodule Arbor.Persistence.EventLog.Postgres do
       {persisted, _} =
         events
         |> Enum.with_index(current_version + 1)
-        |> Enum.map_reduce(global_pos, fn {event, event_num}, gpos ->
+        |> Enum.map_reduce(global_pos, fn {%Event{} = event, event_num}, gpos ->
           new_gpos = gpos + 1
 
           event_with_positions = %Event{

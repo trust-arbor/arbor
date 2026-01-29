@@ -32,6 +32,7 @@ defmodule Arbor.Comms.Channels.Limitless do
       max_message_length: :unlimited,
       supports_media: false,
       supports_threads: false,
+      supports_outbound: false,
       latency: :polling
     }
   end
@@ -61,7 +62,8 @@ defmodule Arbor.Comms.Channels.Limitless do
               metadata: %{
                 lifelog_id: log.id,
                 title: log.title,
-                response_recipient: config(:response_recipient)
+                response_recipient: config(:response_recipient),
+                response_channel: :signal
               }
             )
           end)

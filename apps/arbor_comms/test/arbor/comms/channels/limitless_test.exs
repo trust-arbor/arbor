@@ -11,6 +11,7 @@ defmodule Arbor.Comms.Channels.LimitlessTest do
       assert info.max_message_length == :unlimited
       assert info.supports_media == false
       assert info.supports_threads == false
+      assert info.supports_outbound == false
       assert info.latency == :polling
     end
   end

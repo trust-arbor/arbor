@@ -51,6 +51,7 @@ defmodule Arbor.Comms.Channels.Email do
       max_message_length: @max_message_length,
       supports_media: true,
       supports_threads: true,
+      supports_outbound: true,
       latency: :polling
     }
   end

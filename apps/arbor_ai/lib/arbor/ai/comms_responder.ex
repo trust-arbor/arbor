@@ -5,6 +5,13 @@ defmodule Arbor.AI.CommsResponder do
   Builds a prompt from the system context file, conversation history,
   and the new inbound message, then calls `Arbor.AI.generate_text/2`
   using the CLI backend (free via subscriptions).
+
+  ## Channel Intent Detection
+
+  The system prompt instructs the AI to prefix responses with
+  `[CHANNEL:email]` or `[CHANNEL:signal]` when the user explicitly
+  requests a delivery method (e.g. "email me the report"). The prefix
+  is parsed, stripped from the body, and set on the response envelope.
   """
 
   @behaviour Arbor.Contracts.Comms.ResponseGenerator
@@ -13,10 +20,14 @@ defmodule Arbor.AI.CommsResponder do
 
   require Logger
 
+  @channel_prefix_regex ~r/^\[CHANNEL:(\w+)\]\s*/i
+
+  @allowed_channels ~w(signal email)
+
   @impl true
   def generate_response(message, context) do
     prompt = build_prompt(message, context)
-    system_prompt = context[:system_prompt]
+    system_prompt = build_system_prompt(context[:system_prompt])
 
     opts = [
       backend: :cli,
@@ -25,7 +36,8 @@ defmodule Arbor.AI.CommsResponder do
 
     case Arbor.AI.generate_text(prompt, opts) do
       {:ok, %{text: text}} when is_binary(text) and text != "" ->
-        {:ok, ResponseEnvelope.new(body: text)}
+        {channel, body} = extract_channel_hint(text)
+        {:ok, ResponseEnvelope.new(body: body, channel: channel)}
 
       {:ok, _} ->
         {:error, :empty_response}
@@ -33,6 +45,30 @@ defmodule Arbor.AI.CommsResponder do
       {:error, reason} ->
         Logger.warning("CommsResponder generation failed: #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Extract a `[CHANNEL:xxx]` prefix from AI output.
+
+  Returns `{channel_atom, stripped_body}`. If no valid prefix is found,
+  returns `{:auto, original_body}`.
+  """
+  @spec extract_channel_hint(String.t()) :: {atom(), String.t()}
+  def extract_channel_hint(text) do
+    case Regex.run(@channel_prefix_regex, text) do
+      [full_match, channel_name] ->
+        normalized = String.downcase(channel_name)
+
+        if normalized in @allowed_channels do
+          body = String.replace_prefix(text, full_match, "")
+          {String.to_existing_atom(normalized), body}
+        else
+          {:auto, text}
+        end
+
+      _ ->
+        {:auto, text}
     end
   end
 
@@ -53,5 +89,21 @@ defmodule Arbor.AI.CommsResponder do
       end
 
     "#{history_text}User: #{message.content}"
+  end
+
+  defp build_system_prompt(nil), do: routing_instruction()
+  defp build_system_prompt(""), do: routing_instruction()
+
+  defp build_system_prompt(base) do
+    base <> "\n\n" <> routing_instruction()
+  end
+
+  defp routing_instruction do
+    """
+    If the user explicitly requests a specific delivery method \
+    (e.g. "email me", "send me a text", "message me on Signal"), \
+    prefix your response with [CHANNEL:email] or [CHANNEL:signal] accordingly. \
+    Do not include the prefix unless the user explicitly asks for a specific channel.\
+    """
   end
 end
