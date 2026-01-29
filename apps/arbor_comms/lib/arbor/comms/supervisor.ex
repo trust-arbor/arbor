@@ -1,12 +1,13 @@
 defmodule Arbor.Comms.Supervisor do
   @moduledoc """
-  Supervises comms channel workers and polling processes.
+  Supervises comms channel workers, polling processes, and message handler.
   """
 
   use Supervisor
 
   alias Arbor.Comms.Channels.Signal
   alias Arbor.Comms.Config
+  alias Arbor.Comms.MessageHandler
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -19,9 +20,18 @@ defmodule Arbor.Comms.Supervisor do
   end
 
   defp build_children do
-    # Only start enabled channels
     []
+    |> maybe_add_handler()
     |> maybe_add_signal()
+  end
+
+  # Start handler before pollers so it's ready to receive messages
+  defp maybe_add_handler(children) do
+    if Config.handler_enabled?() do
+      children ++ [{MessageHandler, []}]
+    else
+      children
+    end
   end
 
   defp maybe_add_signal(children) do
