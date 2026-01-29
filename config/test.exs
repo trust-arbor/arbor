@@ -9,6 +9,9 @@ config :arbor_bridge, start_server: false
 # Run: mix ecto.create -r Arbor.Persistence.Repo
 # Run: mix ecto.migrate -r Arbor.Persistence.Repo
 # Then: mix test --include postgres
+# Don't start Signal poller in tests
+config :arbor_comms, :signal, enabled: false
+
 config :arbor_persistence, Arbor.Persistence.Repo,
   database: "arbor_test",
   username: "postgres",
