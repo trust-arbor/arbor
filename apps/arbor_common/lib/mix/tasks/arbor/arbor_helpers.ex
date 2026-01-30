@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
   """
 
   @node_name :arbor_dev
-  @full_node_name :"arbor_dev@localhost"
+  @full_node_name :arbor_dev@localhost
   @cookie :arbor_dev
   @pid_file "/tmp/arbor-dev.pid"
   @log_file "/tmp/arbor-dev.log"
