@@ -76,8 +76,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     category: :security,
     description: "Detects potential PII in source code"
 
-  alias Arbor.Common.SafeRegex
-
   # Common username patterns in paths
   @path_patterns [
     ~r{/Users/[a-zA-Z][a-zA-Z0-9_-]+/},
@@ -417,11 +415,15 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     end)
   end
 
-  # Timeout-protected regex matching for security-sensitive patterns
+  # Timeout-protected regex matching to prevent ReDoS attacks.
+  # Inlined rather than using Arbor.Common.SafeRegex since arbor_eval
+  # is a standalone library with zero in-umbrella dependencies.
   defp safe_match?(pattern, string) do
-    case SafeRegex.match?(pattern, string, timeout: 500) do
+    task = Task.async(fn -> Regex.match?(pattern, string) end)
+
+    case Task.yield(task, 500) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
-      {:error, :timeout} -> false
+      nil -> false
     end
   end
 
