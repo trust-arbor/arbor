@@ -253,4 +253,64 @@ defmodule Arbor.Consensus.EventStoreTest do
       Process.unregister(:test_event_sink_receiver)
     end
   end
+
+  describe "query with until filter" do
+    test "filters events before a given time", %{store: store} do
+      EventStore.append(build_event(), store)
+
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      # All events are before the future time
+      events = EventStore.query([until: future], store)
+      assert length(events) == 1
+
+      # No events before the past time
+      events = EventStore.query([until: past], store)
+      assert events == []
+    end
+  end
+
+  describe "event_log persistence" do
+    test "persists events to configured event_log" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      table_name = :"elog_test_#{:rand.uniform(1_000_000)}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"elog_es_#{:rand.uniform(1_000_000)}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      elog_name = :"elog_persist_#{:rand.uniform(1_000_000)}"
+
+      # Start an ETS event log for persistence
+      {:ok, _} = Arbor.Persistence.EventLog.ETS.start_link(name: elog_name)
+
+      {:ok, _} =
+        EventStore.start_link(
+          name: name,
+          table_name: table_name,
+          event_log: elog_name
+        )
+
+      event = build_event(%{proposal_id: "persist_prop"})
+      EventStore.append(event, name)
+
+      # Verify event was persisted to the EventLog
+      {:ok, events} =
+        Arbor.Persistence.EventLog.ETS.read_stream(
+          "consensus:persist_prop",
+          name: elog_name
+        )
+
+      assert length(events) >= 1
+    end
+  end
+
+  describe "query with unknown filters" do
+    test "ignores unknown filter keys", %{store: store} do
+      EventStore.append(build_event(), store)
+
+      # Unknown filter should be ignored
+      events = EventStore.query([unknown_key: "value"], store)
+      assert length(events) == 1
+    end
+  end
 end

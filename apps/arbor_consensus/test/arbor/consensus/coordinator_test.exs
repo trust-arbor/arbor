@@ -600,6 +600,584 @@ defmodule Arbor.Consensus.CoordinatorTest do
     end
   end
 
+  describe "list_decisions/1" do
+    test "returns decisions after evaluation", %{coordinator: coord} do
+      proposal = TestHelpers.build_proposal()
+      {:ok, id} = Coordinator.submit(proposal, server: coord)
+      {:ok, _} = TestHelpers.wait_for_decision(coord, id)
+
+      decisions = Coordinator.list_decisions(coord)
+      assert length(decisions) >= 1
+      assert Enum.any?(decisions, &(&1.proposal_id == id))
+    end
+
+    test "returns empty when no decisions", %{coordinator: coord} do
+      decisions = Coordinator.list_decisions(coord)
+      assert decisions == []
+    end
+  end
+
+  describe "recent_decisions/2" do
+    test "returns decisions ordered by most recent first", %{coordinator: coord} do
+      _ids =
+        for i <- 1..3 do
+          {:ok, id} =
+            Coordinator.submit(
+              %{proposer: "recent_a#{i}", change_type: :code_modification, description: "p#{i}"},
+              server: coord
+            )
+
+          {:ok, _} = TestHelpers.wait_for_decision(coord, id)
+          id
+        end
+
+      recent = Coordinator.recent_decisions(2, coord)
+      assert length(recent) == 2
+
+      # Most recent first
+      [first, second] = recent
+      assert DateTime.compare(first.decided_at, second.decided_at) in [:gt, :eq]
+    end
+  end
+
+  describe "cancel/2 edge cases" do
+    test "returns already_decided error for approved proposal", %{coordinator: coord} do
+      proposal = TestHelpers.build_proposal()
+      {:ok, id} = Coordinator.submit(proposal, server: coord)
+      {:ok, :approved} = TestHelpers.wait_for_decision(coord, id)
+
+      assert {:error, :already_decided} = Coordinator.cancel(id, coord)
+    end
+
+    test "returns already_decided error for rejected proposal" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysRejectBackend
+        )
+
+      proposal = TestHelpers.build_proposal()
+      {:ok, id} = Coordinator.submit(proposal, server: coord)
+      {:ok, :rejected} = TestHelpers.wait_for_decision(coord, id)
+
+      assert {:error, :already_decided} = Coordinator.cancel(id, coord)
+    end
+  end
+
+  describe "handle_info with failing council" do
+    test "marks proposal as deadlocked on council failure" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.FailingBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "fail_agent", change_type: :code_modification, description: "fail test"},
+          server: coord
+        )
+
+      {:ok, status} = TestHelpers.wait_for_decision(coord, id)
+      assert status == :deadlock
+    end
+  end
+
+  describe "event_sink integration" do
+    test "forwards events to configured event sink" do
+      Process.register(self(), :test_event_sink_receiver)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          event_sink: TestHelpers.TestEventSink
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "sink_agent", change_type: :code_modification, description: "sink test"},
+          server: coord
+        )
+
+      {:ok, _} = TestHelpers.wait_for_decision(coord, id)
+
+      # Should receive at least one event via the sink
+      assert_receive {:event_sink, _event}, 5_000
+
+      Process.unregister(:test_event_sink_receiver)
+    end
+  end
+
+  describe "authorizer integration" do
+    test "authorizer allows submission and execution" do
+      Process.register(self(), :test_executor_receiver)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          authorizer: TestHelpers.AllowAllAuthorizer,
+          executor: TestHelpers.TestExecutor,
+          config: [auto_execute_approved: true, evaluation_timeout_ms: 5_000]
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "auth_agent", change_type: :code_modification, description: "auth test"},
+          server: coord
+        )
+
+      {:ok, :approved} = TestHelpers.wait_for_decision(coord, id)
+      assert_receive :executed, 5_000
+
+      Process.unregister(:test_executor_receiver)
+    end
+  end
+
+  # ===========================================================================
+  # Execution failure handling
+  # ===========================================================================
+
+  describe "execution failure handling" do
+    test "handles executor failure gracefully" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          executor: TestHelpers.FailingExecutor,
+          config: [auto_execute_approved: true, evaluation_timeout_ms: 5_000]
+        )
+
+      proposal = TestHelpers.build_proposal()
+      {:ok, id} = Coordinator.submit(proposal, server: coord)
+
+      {:ok, :approved} = TestHelpers.wait_for_decision(coord, id)
+
+      # Proposal should still be approved even though execution failed
+      {:ok, status} = Coordinator.get_status(id, coord)
+      assert status == :approved
+
+      # Give time for execution attempt
+      Process.sleep(200)
+
+      # Stats should still be accessible (coordinator didn't crash)
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals >= 1
+    end
+  end
+
+  # ===========================================================================
+  # force_approve execution paths
+  # ===========================================================================
+
+  describe "force_approve execution" do
+    test "force_approve triggers auto-execution when configured" do
+      Process.register(self(), :test_executor_receiver)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          executor: TestHelpers.TestExecutor,
+          config: [auto_execute_approved: true, evaluation_timeout_ms: 60_000]
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "exec_agent", change_type: :code_modification, description: "exec test"},
+          server: coord
+        )
+
+      # Force approve should trigger execution
+      :ok = Coordinator.force_approve(id, "admin", coord)
+
+      # Should receive execution message (covers maybe_authorize_execution(nil, _, nil) path)
+      assert_receive :executed, 5_000
+
+      Process.unregister(:test_executor_receiver)
+    end
+
+    test "force_approve with failing executor doesn't crash" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          executor: TestHelpers.FailingExecutor,
+          config: [auto_execute_approved: true, evaluation_timeout_ms: 60_000]
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "fail_exec", change_type: :code_modification, description: "fail exec"},
+          server: coord
+        )
+
+      # Force approve triggers execution which fails
+      :ok = Coordinator.force_approve(id, "admin", coord)
+
+      # Give time for execution attempt
+      Process.sleep(200)
+
+      # Coordinator should still be alive
+      {:ok, status} = Coordinator.get_status(id, coord)
+      assert status == :approved
+    end
+  end
+
+  # ===========================================================================
+  # Event sourcing recovery
+  # ===========================================================================
+
+  describe "event sourcing recovery" do
+    setup do
+      original_event_log = Application.get_env(:arbor_consensus, :event_log)
+      original_recovery_strategy = Application.get_env(:arbor_consensus, :recovery_strategy)
+      original_emit_recovery = Application.get_env(:arbor_consensus, :emit_recovery_events)
+
+      on_exit(fn ->
+        restore_config(:event_log, original_event_log)
+        restore_config(:recovery_strategy, original_recovery_strategy)
+        restore_config(:emit_recovery_events, original_emit_recovery)
+      end)
+
+      :ok
+    end
+
+    test "recovers proposals and decisions from event log" do
+      now = DateTime.utc_now()
+      proposal_id = "prop_recovery_#{:erlang.unique_integer([:positive])}"
+
+      events = [
+        %{
+          type: "proposal.submitted",
+          data: %{
+            proposal_id: proposal_id,
+            proposer: "agent_recovery",
+            change_type: "code_modification",
+            description: "recovered proposal",
+            target_layer: 4,
+            metadata: %{}
+          },
+          timestamp: now,
+          global_position: 1
+        },
+        %{
+          type: "evaluation.started",
+          data: %{
+            proposal_id: proposal_id,
+            perspectives: [:security, :stability, :capability, :adversarial, :resource],
+            council_size: 5,
+            required_quorum: 3
+          },
+          timestamp: now,
+          global_position: 2
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_security_1",
+            perspective: "security",
+            vote: "approve",
+            confidence: 0.8
+          },
+          timestamp: now,
+          global_position: 3
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_stability_1",
+            perspective: "stability",
+            vote: "approve",
+            confidence: 0.85
+          },
+          timestamp: now,
+          global_position: 4
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_capability_1",
+            perspective: "capability",
+            vote: "approve",
+            confidence: 0.9
+          },
+          timestamp: now,
+          global_position: 5
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_adversarial_1",
+            perspective: "adversarial",
+            vote: "approve",
+            confidence: 0.75
+          },
+          timestamp: now,
+          global_position: 6
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_resource_1",
+            perspective: "resource",
+            vote: "approve",
+            confidence: 0.7
+          },
+          timestamp: now,
+          global_position: 7
+        },
+        %{
+          type: "decision.rendered",
+          data: %{
+            proposal_id: proposal_id,
+            decision_id: "dec_#{proposal_id}",
+            decision: "approved",
+            approve_count: 5,
+            reject_count: 0,
+            abstain_count: 0,
+            required_quorum: 3,
+            quorum_met: true,
+            primary_concerns: [],
+            average_confidence: 0.8
+          },
+          timestamp: now,
+          global_position: 8
+        }
+      ]
+
+      table = TestHelpers.TestEventLog.start(events)
+      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      # Verify recovered proposal
+      {:ok, proposal} = Coordinator.get_proposal(proposal_id, coord)
+      assert proposal.proposer == "agent_recovery"
+      assert proposal.status == :decided
+
+      # Verify recovered decision
+      {:ok, decision} = Coordinator.get_decision(proposal_id, coord)
+      assert decision.decision == :approved
+      assert decision.approve_count == 5
+
+      # Verify stats reflect recovered state
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals == 1
+      assert stats.total_decisions == 1
+    end
+
+    test "handles interrupted evaluations with deadlock strategy" do
+      now = DateTime.utc_now()
+      proposal_id = "prop_interrupted_#{:erlang.unique_integer([:positive])}"
+
+      # Proposal submitted and evaluation started but NO decision rendered.
+      # Only one evaluation completed - two are missing.
+      events = [
+        %{
+          type: "proposal.submitted",
+          data: %{
+            proposal_id: proposal_id,
+            proposer: "agent_interrupted",
+            change_type: "code_modification",
+            description: "interrupted proposal",
+            target_layer: 4,
+            metadata: %{}
+          },
+          timestamp: now,
+          global_position: 1
+        },
+        %{
+          type: "evaluation.started",
+          data: %{
+            proposal_id: proposal_id,
+            perspectives: [:security, :stability, :capability],
+            council_size: 3,
+            required_quorum: 2
+          },
+          timestamp: now,
+          global_position: 2
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_security_1",
+            perspective: "security",
+            vote: "approve",
+            confidence: 0.8
+          },
+          timestamp: now,
+          global_position: 3
+        }
+      ]
+
+      table = TestHelpers.TestEventLog.start(events)
+      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+      Application.put_env(:arbor_consensus, :recovery_strategy, :deadlock)
+      Application.put_env(:arbor_consensus, :emit_recovery_events, false)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      # Interrupted proposal should be marked as deadlock
+      {:ok, status} = Coordinator.get_status(proposal_id, coord)
+      assert status == :deadlock
+    end
+
+    test "handles interrupted evaluations with resume strategy" do
+      now = DateTime.utc_now()
+      proposal_id = "prop_resume_#{:erlang.unique_integer([:positive])}"
+
+      events = [
+        %{
+          type: "proposal.submitted",
+          data: %{
+            proposal_id: proposal_id,
+            proposer: "agent_resume",
+            change_type: "code_modification",
+            description: "resume proposal",
+            target_layer: 4,
+            metadata: %{}
+          },
+          timestamp: now,
+          global_position: 1
+        },
+        %{
+          type: "evaluation.started",
+          data: %{
+            proposal_id: proposal_id,
+            perspectives: [:security, :stability, :capability],
+            council_size: 3,
+            required_quorum: 2
+          },
+          timestamp: now,
+          global_position: 2
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_security_1",
+            perspective: "security",
+            vote: "approve",
+            confidence: 0.8
+          },
+          timestamp: now,
+          global_position: 3
+        }
+      ]
+
+      table = TestHelpers.TestEventLog.start(events)
+      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+      Application.put_env(:arbor_consensus, :recovery_strategy, :resume)
+      Application.put_env(:arbor_consensus, :emit_recovery_events, false)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      # With resume strategy, missing perspectives should be re-evaluated.
+      # Wait for the resumed evaluation to complete.
+      {:ok, status} = TestHelpers.wait_for_decision(coord, proposal_id)
+      assert status in [:approved, :rejected, :deadlock]
+
+      # Stats should show the recovered proposal
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals >= 1
+    end
+
+    test "handles interrupted evaluations with restart strategy" do
+      now = DateTime.utc_now()
+      proposal_id = "prop_restart_#{:erlang.unique_integer([:positive])}"
+
+      events = [
+        %{
+          type: "proposal.submitted",
+          data: %{
+            proposal_id: proposal_id,
+            proposer: "agent_restart",
+            change_type: "code_modification",
+            description: "restart proposal",
+            target_layer: 4,
+            metadata: %{}
+          },
+          timestamp: now,
+          global_position: 1
+        },
+        %{
+          type: "evaluation.started",
+          data: %{
+            proposal_id: proposal_id,
+            perspectives: [:security, :stability, :capability],
+            council_size: 3,
+            required_quorum: 2
+          },
+          timestamp: now,
+          global_position: 2
+        },
+        %{
+          type: "evaluation.completed",
+          data: %{
+            proposal_id: proposal_id,
+            evaluation_id: "eval_security_1",
+            perspective: "security",
+            vote: "approve",
+            confidence: 0.8
+          },
+          timestamp: now,
+          global_position: 3
+        }
+      ]
+
+      table = TestHelpers.TestEventLog.start(events)
+      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+      Application.put_env(:arbor_consensus, :recovery_strategy, :restart)
+      Application.put_env(:arbor_consensus, :emit_recovery_events, false)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      # With restart strategy, the full council is re-spawned
+      {:ok, status} = TestHelpers.wait_for_decision(coord, proposal_id)
+      assert status in [:approved, :rejected, :deadlock]
+    end
+
+    test "handles recovery error gracefully" do
+      # Create an empty ETS table - read_stream will return {:error, :stream_not_found}
+      table = :ets.new(:empty_event_log, [:set, :public])
+
+      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+      Application.put_env(:arbor_consensus, :emit_recovery_events, false)
+
+      {_pid, coord} = TestHelpers.start_test_coordinator()
+
+      # Coordinator should start fresh despite recovery finding no stream
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals == 0
+    end
+
+    test "starts fresh when no event_log configured" do
+      Application.delete_env(:arbor_consensus, :event_log)
+      Application.put_env(:arbor_consensus, :emit_recovery_events, false)
+
+      {_pid, coord} = TestHelpers.start_test_coordinator()
+
+      stats = Coordinator.stats(coord)
+      assert stats.total_proposals == 0
+    end
+  end
+
   defp restore_config(key, nil), do: Application.delete_env(:arbor_consensus, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_consensus, key, value)
 end
