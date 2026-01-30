@@ -29,27 +29,27 @@ defmodule Arbor.Checkpoint.Store.ETS do
   # ============================================================================
 
   @impl Arbor.Checkpoint.Store
-  def put(id, checkpoint, _opts \\ []) do
+  def put(id, checkpoint, _opts) do
     GenServer.call(@default_name, {:put, id, checkpoint})
   end
 
   @impl Arbor.Checkpoint.Store
-  def get(id, _opts \\ []) do
+  def get(id, _opts) do
     GenServer.call(@default_name, {:get, id})
   end
 
   @impl Arbor.Checkpoint.Store
-  def delete(id, _opts \\ []) do
+  def delete(id, _opts) do
     GenServer.call(@default_name, {:delete, id})
   end
 
   @impl Arbor.Checkpoint.Store
-  def list(_opts \\ []) do
+  def list(_opts) do
     GenServer.call(@default_name, :list)
   end
 
   @impl Arbor.Checkpoint.Store
-  def exists?(id, _opts \\ []) do
+  def exists?(id, _opts) do
     GenServer.call(@default_name, {:exists?, id})
   end
 

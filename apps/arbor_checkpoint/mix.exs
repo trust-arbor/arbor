@@ -17,7 +17,18 @@ defmodule Arbor.Checkpoint.MixProject do
       docs: docs(),
       # Testing
       elixirc_paths: elixirc_paths(Mix.env()),
-      test_coverage: [threshold: 90]
+      test_coverage: [
+        threshold: 90,
+        ignore_modules: [
+          # Test support modules
+          Arbor.Checkpoint.TestHelpers,
+          Arbor.Checkpoint.Test.NoCheckpointModule,
+          Arbor.Checkpoint.Test.FailingRestoreModule,
+          Arbor.Checkpoint.Test.FailingStorage,
+          Arbor.Checkpoint.Test.DelayedStorage,
+          Arbor.Checkpoint.Test.StatefulModule
+        ]
+      ]
     ]
   end
 
