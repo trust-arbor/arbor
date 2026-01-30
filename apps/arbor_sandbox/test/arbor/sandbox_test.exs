@@ -3,11 +3,15 @@ defmodule Arbor.SandboxTest do
 
   alias Arbor.Sandbox
 
-  @base_path "/tmp/arbor_sandbox_facade_test"
-
   setup do
-    # Clean up test directory
-    File.rm_rf(@base_path)
+    base_path =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_sandbox_facade_test_#{System.unique_integer([:positive])}"
+      )
+
+    File.rm_rf!(base_path)
+    File.mkdir_p!(base_path)
 
     # Start the registry if not running
     case Process.whereis(Arbor.Sandbox.Registry) do
@@ -15,59 +19,63 @@ defmodule Arbor.SandboxTest do
       _pid -> :ok
     end
 
-    :ok
+    on_exit(fn ->
+      File.rm_rf(base_path)
+    end)
+
+    {:ok, base_path: base_path}
   end
 
   describe "create/2" do
-    test "creates a sandbox with default level" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_1", base_path: @base_path)
+    test "creates a sandbox with default level", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_1", base_path: base_path)
       assert sandbox.level == :limited
       assert sandbox.agent_id == "agent_facade_1"
       assert String.starts_with?(sandbox.id, "sbx_")
     end
 
-    test "creates sandbox with specified level" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_2", level: :pure, base_path: @base_path)
+    test "creates sandbox with specified level", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_2", level: :pure, base_path: base_path)
       assert sandbox.level == :pure
     end
 
-    test "derives level from trust tier" do
+    test "derives level from trust tier", %{base_path: base_path} do
       {:ok, sandbox} =
-        Sandbox.create("agent_facade_3", trust_tier: :veteran, base_path: @base_path)
+        Sandbox.create("agent_facade_3", trust_tier: :veteran, base_path: base_path)
 
       assert sandbox.level == :full
     end
   end
 
   describe "get/1" do
-    test "retrieves sandbox by id" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_4", base_path: @base_path)
+    test "retrieves sandbox by id", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_4", base_path: base_path)
       assert {:ok, ^sandbox} = Sandbox.get(sandbox.id)
     end
 
-    test "retrieves sandbox by agent_id" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_5", base_path: @base_path)
+    test "retrieves sandbox by agent_id", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_5", base_path: base_path)
       assert {:ok, ^sandbox} = Sandbox.get("agent_facade_5")
     end
   end
 
   describe "destroy/1" do
-    test "destroys a sandbox" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_6", base_path: @base_path)
+    test "destroys a sandbox", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_6", base_path: base_path)
       assert :ok = Sandbox.destroy(sandbox.id)
       assert {:error, :not_found} = Sandbox.get(sandbox.id)
     end
   end
 
   describe "check_path/3" do
-    test "validates path operations" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_7", level: :limited, base_path: @base_path)
+    test "validates path operations", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_7", level: :limited, base_path: base_path)
       assert :ok = Sandbox.check_path(sandbox, "/file.txt", :read)
       assert :ok = Sandbox.check_path(sandbox, "/file.txt", :write)
     end
 
-    test "blocks writes in pure mode" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_8", level: :pure, base_path: @base_path)
+    test "blocks writes in pure mode", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_8", level: :pure, base_path: base_path)
       assert :ok = Sandbox.check_path(sandbox, "/file.txt", :read)
 
       assert {:error, :write_not_allowed_in_pure_mode} =
@@ -76,30 +84,30 @@ defmodule Arbor.SandboxTest do
   end
 
   describe "sandboxed_path/2" do
-    test "resolves paths within sandbox" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_9", base_path: @base_path)
+    test "resolves paths within sandbox", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_9", base_path: base_path)
       assert {:ok, path} = Sandbox.sandboxed_path(sandbox, "/subdir/file.txt")
       assert String.contains?(path, "agent_facade_9")
     end
   end
 
   describe "check_code/2" do
-    test "validates safe code" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_10", level: :pure, base_path: @base_path)
+    test "validates safe code", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_10", level: :pure, base_path: base_path)
       ast = quote do: Enum.map([1, 2, 3], &(&1 * 2))
       assert :ok = Sandbox.check_code(sandbox, ast)
     end
 
-    test "blocks dangerous code" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_11", level: :full, base_path: @base_path)
+    test "blocks dangerous code", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_11", level: :full, base_path: base_path)
       ast = quote do: System.cmd("ls", [])
       assert {:error, {:code_violations, _}} = Sandbox.check_code(sandbox, ast)
     end
   end
 
   describe "check_module/2" do
-    test "validates modules" do
-      {:ok, sandbox} = Sandbox.create("agent_facade_12", level: :pure, base_path: @base_path)
+    test "validates modules", %{base_path: base_path} do
+      {:ok, sandbox} = Sandbox.create("agent_facade_12", level: :pure, base_path: base_path)
       assert :ok = Sandbox.check_module(sandbox, Enum)
       assert {:error, :module_not_allowed} = Sandbox.check_module(sandbox, File)
     end
@@ -142,9 +150,9 @@ defmodule Arbor.SandboxTest do
   end
 
   describe "list/1" do
-    test "lists sandboxes" do
-      {:ok, _} = Sandbox.create("agent_facade_list_1", base_path: @base_path)
-      {:ok, _} = Sandbox.create("agent_facade_list_2", base_path: @base_path)
+    test "lists sandboxes", %{base_path: base_path} do
+      {:ok, _} = Sandbox.create("agent_facade_list_1", base_path: base_path)
+      {:ok, _} = Sandbox.create("agent_facade_list_2", base_path: base_path)
 
       assert {:ok, sandboxes} = Sandbox.list()
       assert length(sandboxes) >= 2
