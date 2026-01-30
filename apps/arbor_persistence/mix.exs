@@ -15,7 +15,23 @@ defmodule Arbor.Persistence.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      docs: docs()
+      docs: docs(),
+      test_coverage: [
+        threshold: 90,
+        ignore_modules: [
+          # Ecto schemas - only testable with PostgreSQL integration tests
+          Arbor.Persistence.Schemas.Event,
+          Arbor.Persistence.Schemas.Record,
+          # PostgreSQL backends - require database for testing
+          Arbor.Persistence.EventLog.Postgres,
+          Arbor.Persistence.QueryableStore.Postgres,
+          Arbor.Persistence.Repo,
+          # Test support modules
+          Arbor.Persistence.TestBackends,
+          Arbor.Persistence.TestBackends.FailingStore,
+          Arbor.Persistence.TestBackends.FailingEventLog
+        ]
+      ]
     ]
   end
 

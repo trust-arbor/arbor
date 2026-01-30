@@ -14,14 +14,14 @@ defmodule Arbor.Persistence.Store.Agent do
   # --- Client API (Store behaviour) ---
 
   @impl Arbor.Persistence.Store
-  def put(key, value, opts \\ []) do
+  def put(key, value, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.put(&1, key, value))
     :ok
   end
 
   @impl Arbor.Persistence.Store
-  def get(key, opts \\ []) do
+  def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
 
     case Agent.get(name, &Map.get(&1, key, :__not_found__)) do
@@ -31,20 +31,20 @@ defmodule Arbor.Persistence.Store.Agent do
   end
 
   @impl Arbor.Persistence.Store
-  def delete(key, opts \\ []) do
+  def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.delete(&1, key))
     :ok
   end
 
   @impl Arbor.Persistence.Store
-  def list(opts \\ []) do
+  def list(opts) do
     name = Keyword.fetch!(opts, :name)
     {:ok, Agent.get(name, &Map.keys/1)}
   end
 
   @impl Arbor.Persistence.Store
-  def exists?(key, opts \\ []) do
+  def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.get(name, &Map.has_key?(&1, key))
   end

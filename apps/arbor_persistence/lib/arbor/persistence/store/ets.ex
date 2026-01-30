@@ -32,13 +32,13 @@ defmodule Arbor.Persistence.Store.ETS do
   # --- Client API (Store behaviour) ---
 
   @impl Arbor.Persistence.Store
-  def put(key, value, opts \\ []) do
+  def put(key, value, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:put, key, value})
   end
 
   @impl Arbor.Persistence.Store
-  def get(key, opts \\ []) do
+  def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
 
@@ -49,13 +49,13 @@ defmodule Arbor.Persistence.Store.ETS do
   end
 
   @impl Arbor.Persistence.Store
-  def delete(key, opts \\ []) do
+  def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:delete, key})
   end
 
   @impl Arbor.Persistence.Store
-  def list(opts \\ []) do
+  def list(opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
     keys = :ets.foldl(fn {k, _v}, acc -> [k | acc] end, [], table)
@@ -63,7 +63,7 @@ defmodule Arbor.Persistence.Store.ETS do
   end
 
   @impl Arbor.Persistence.Store
-  def exists?(key, opts \\ []) do
+  def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
     :ets.member(table, key)

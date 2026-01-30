@@ -20,13 +20,13 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   # --- Client API ---
 
   @impl Arbor.Persistence.QueryableStore
-  def put(key, record, opts \\ []) do
+  def put(key, record, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:put, key, record})
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def get(key, opts \\ []) do
+  def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
 
@@ -37,13 +37,13 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def delete(key, opts \\ []) do
+  def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:delete, key})
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def list(opts \\ []) do
+  def list(opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
     keys = :ets.foldl(fn {k, _v}, acc -> [k | acc] end, [], table)
@@ -51,14 +51,14 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def exists?(key, opts \\ []) do
+  def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
     :ets.member(table, key)
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def query(%Filter{} = filter, opts \\ []) do
+  def query(%Filter{} = filter, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
 
@@ -70,13 +70,13 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def count(%Filter{} = filter, opts \\ []) do
+  def count(%Filter{} = filter, opts) do
     {:ok, records} = query(filter, opts)
     {:ok, length(records)}
   end
 
   @impl Arbor.Persistence.QueryableStore
-  def aggregate(%Filter{} = filter, field, operation, opts \\ [])
+  def aggregate(%Filter{} = filter, field, operation, opts)
       when operation in [:sum, :avg, :min, :max] do
     {:ok, records} = query(filter, opts)
 
