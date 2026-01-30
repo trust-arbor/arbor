@@ -7,6 +7,7 @@ defmodule Arbor.Historian.CollectorTest do
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"collector_#{System.unique_integer([:positive])}")
     %{ctx: ctx}
   end
@@ -53,6 +54,7 @@ defmodule Arbor.Historian.CollectorTest do
 
     test "collects multiple signals", %{ctx: ctx} do
       for i <- 1..5 do
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         signal = TestHelpers.build_signal(type: :"event_#{i}")
         Collector.collect(ctx.collector, signal)
       end
@@ -63,8 +65,11 @@ defmodule Arbor.Historian.CollectorTest do
 
   describe "filter option" do
     test "skips signals that don't pass filter" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"filter_test_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       event_log_name = :"el_#{name}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       registry_name = :"reg_#{name}"
 
       {:ok, _} = PersistenceETS.start_link(name: event_log_name)
@@ -74,6 +79,7 @@ defmodule Arbor.Historian.CollectorTest do
 
       {:ok, collector} =
         Collector.start_link(
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
           name: :"coll_#{name}",
           event_log: event_log_name,
           registry: registry_name,

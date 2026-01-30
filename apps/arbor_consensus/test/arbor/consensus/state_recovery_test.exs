@@ -7,6 +7,7 @@ defmodule Arbor.Consensus.StateRecoveryTest do
 
   setup do
     # Create a unique ETS table for this test
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     table_name = :"test_recovery_#{System.unique_integer([:positive])}"
     {:ok, _pid} = ETS.start_link(name: table_name)
 

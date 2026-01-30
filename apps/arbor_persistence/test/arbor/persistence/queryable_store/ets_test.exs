@@ -5,6 +5,7 @@ defmodule Arbor.Persistence.QueryableStore.ETSTest do
   alias Arbor.Persistence.QueryableStore.ETS
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"qs_ets_#{:erlang.unique_integer([:positive])}"
     start_supervised!({ETS, name: name})
     {:ok, name: name}

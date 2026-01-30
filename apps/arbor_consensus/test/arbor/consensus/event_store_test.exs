@@ -5,7 +5,9 @@ defmodule Arbor.Consensus.EventStoreTest do
   alias Arbor.Contracts.Consensus.ConsensusEvent
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     table_name = :"test_events_#{:rand.uniform(1_000_000)}"
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"test_es_#{:rand.uniform(1_000_000)}"
     {:ok, pid} = EventStore.start_link(name: name, table_name: table_name)
     %{store: name, pid: pid}
@@ -202,7 +204,9 @@ defmodule Arbor.Consensus.EventStoreTest do
 
   describe "pruning" do
     test "prunes oldest events when over capacity" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       table_name = :"prune_test_#{:rand.uniform(1_000_000)}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"prune_es_#{:rand.uniform(1_000_000)}"
       {:ok, _} = EventStore.start_link(name: name, table_name: table_name, max_events: 20)
 
@@ -225,7 +229,9 @@ defmodule Arbor.Consensus.EventStoreTest do
 
   describe "event_sink forwarding" do
     test "forwards events to event sink" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       table_name = :"sink_test_#{:rand.uniform(1_000_000)}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"sink_es_#{:rand.uniform(1_000_000)}"
 
       # Register ourselves to receive sink events

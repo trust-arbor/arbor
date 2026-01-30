@@ -9,6 +9,7 @@ defmodule Arbor.PersistenceTest do
 
   describe "Store facade" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"facade_store_#{:erlang.unique_integer([:positive])}"
       start_supervised!({Store.ETS, name: name})
       {:ok, name: name, backend: Store.ETS}
@@ -26,6 +27,7 @@ defmodule Arbor.PersistenceTest do
 
   describe "QueryableStore facade" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"facade_qs_#{:erlang.unique_integer([:positive])}"
       start_supervised!({QueryableStore.ETS, name: name})
       {:ok, name: name, backend: QueryableStore.ETS}
@@ -59,6 +61,7 @@ defmodule Arbor.PersistenceTest do
 
   describe "EventLog facade" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"facade_el_#{:erlang.unique_integer([:positive])}"
       start_supervised!({EventLog.ETS, name: name})
       {:ok, name: name, backend: EventLog.ETS}

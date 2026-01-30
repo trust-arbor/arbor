@@ -8,6 +8,7 @@ defmodule Arbor.Consensus.EventEmitterTest do
 
   setup do
     # Create a unique ETS table for this test
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     table_name = :"test_events_#{System.unique_integer([:positive])}"
     {:ok, _pid} = ETS.start_link(name: table_name)
 

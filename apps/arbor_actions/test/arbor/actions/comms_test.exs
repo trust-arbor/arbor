@@ -1,10 +1,10 @@
 defmodule Arbor.Actions.CommsTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Actions.Comms.SendMessage
   alias Arbor.Actions.Comms.PollMessages
-  alias Arbor.Actions.Support.MockChannelSender
+  alias Arbor.Actions.Comms.SendMessage
   alias Arbor.Actions.Support.MockChannelReceiver
+  alias Arbor.Actions.Support.MockChannelSender
   alias Arbor.Contracts.Comms.Message
 
   setup do

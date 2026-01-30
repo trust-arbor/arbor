@@ -5,6 +5,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
   alias Arbor.Persistence.EventLog.Agent, as: ELAgent
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"el_agent_#{:erlang.unique_integer([:positive])}"
     start_supervised!({ELAgent, name: name})
     {:ok, name: name}

@@ -38,6 +38,7 @@ defmodule Arbor.Historian.TestHelpers do
 
   @doc "Start an isolated historian stack for testing."
   def start_test_historian(test_name) do
+    # credo:disable-for-lines:3 Credo.Check.Security.UnsafeAtomConversion
     event_log_name = :"event_log_#{test_name}"
     registry_name = :"registry_#{test_name}"
     collector_name = :"collector_#{test_name}"

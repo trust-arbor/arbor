@@ -97,7 +97,7 @@ defmodule Arbor.Comms.Channels.Signal do
 
   defp run_signal_cli(args) do
     signal_cli = config(:signal_cli_path) || find_signal_cli()
-    command = [signal_cli | args] |> Enum.map(&shell_escape/1) |> Enum.join(" ")
+    command = Enum.map_join([signal_cli | args], " ", &shell_escape/1)
 
     case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none) do
       {:ok, %{exit_code: 0, stdout: output}} ->
