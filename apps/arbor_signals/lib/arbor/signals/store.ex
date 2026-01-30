@@ -13,11 +13,14 @@ defmodule Arbor.Signals.Store do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Signals.Signal
 
   @default_max_signals 10_000
   @default_ttl_seconds 3600
   @cleanup_interval_ms 60_000
+  @checkpoint_interval_ms 300_000
 
   # Client API
 
@@ -93,6 +96,29 @@ defmodule Arbor.Signals.Store do
     GenServer.call(__MODULE__, :clear)
   end
 
+  @doc """
+  Extract checkpoint-safe snapshot of store state.
+
+  Returns a map containing signals, order (as list), and stats.
+  Config values (max_signals, ttl_seconds) are excluded as they
+  should come from application config on restore.
+  """
+  @spec snapshot(GenServer.server()) :: {:ok, map()}
+  def snapshot(server \\ __MODULE__) do
+    GenServer.call(server, :snapshot)
+  end
+
+  @doc """
+  Restore store state from a checkpoint snapshot.
+
+  Merges the snapshot data into the current state, preserving
+  config values and merging stats.
+  """
+  @spec restore(GenServer.server(), map()) :: :ok
+  def restore(server \\ __MODULE__, snapshot_data) do
+    GenServer.call(server, {:restore, snapshot_data})
+  end
+
   # Server callbacks
 
   @impl true
@@ -100,20 +126,23 @@ defmodule Arbor.Signals.Store do
     max_signals = Keyword.get(opts, :max_signals, @default_max_signals)
     ttl_seconds = Keyword.get(opts, :ttl_seconds, @default_ttl_seconds)
 
-    schedule_cleanup()
+    state = %{
+      signals: %{},
+      order: :queue.new(),
+      max_signals: max_signals,
+      ttl_seconds: ttl_seconds,
+      stats: %{
+        total_stored: 0,
+        total_expired: 0,
+        total_evicted: 0
+      }
+    }
 
-    {:ok,
-     %{
-       signals: %{},
-       order: :queue.new(),
-       max_signals: max_signals,
-       ttl_seconds: ttl_seconds,
-       stats: %{
-         total_stored: 0,
-         total_expired: 0,
-         total_evicted: 0
-       }
-     }}
+    state = maybe_restore_checkpoint(state)
+    schedule_cleanup()
+    schedule_checkpoint_save()
+
+    {:ok, state}
   end
 
   @impl true
@@ -188,10 +217,46 @@ defmodule Arbor.Signals.Store do
   end
 
   @impl true
+  def handle_call(:snapshot, _from, state) do
+    snapshot_data = %{
+      signals: state.signals,
+      order: :queue.to_list(state.order),
+      stats: state.stats
+    }
+
+    {:reply, {:ok, snapshot_data}, state}
+  end
+
+  @impl true
+  def handle_call({:restore, snapshot_data}, _from, state) do
+    restored = %{
+      state
+      | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
+        order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
+        stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
+    }
+
+    {:reply, :ok, restored}
+  end
+
+  @impl true
   def handle_info(:cleanup, state) do
     state = cleanup_expired(state)
     schedule_cleanup()
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:save_checkpoint, state) do
+    save_checkpoint(state)
+    schedule_checkpoint_save()
+    {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    save_checkpoint(state)
+    :ok
   end
 
   # Private functions
@@ -261,5 +326,67 @@ defmodule Arbor.Signals.Store do
 
   defp schedule_cleanup do
     Process.send_after(self(), :cleanup, @cleanup_interval_ms)
+  end
+
+  defp schedule_checkpoint_save do
+    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
+
+    if checkpoint_mod && checkpoint_available?(checkpoint_mod) do
+      Process.send_after(self(), :save_checkpoint, @checkpoint_interval_ms)
+    end
+  end
+
+  defp maybe_restore_checkpoint(state) do
+    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
+    checkpoint_store = Application.get_env(:arbor_signals, :checkpoint_store)
+
+    if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
+      case checkpoint_mod.load("signal_store", checkpoint_store) do
+        {:ok, snapshot_data} ->
+          Logger.info("Signal Store: restored from checkpoint")
+
+          %{
+            state
+            | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
+              order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
+              stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
+          }
+
+        {:error, :not_found} ->
+          Logger.debug("Signal Store: no checkpoint found, starting fresh")
+          state
+
+        {:error, reason} ->
+          Logger.warning("Signal Store: checkpoint restore failed: #{inspect(reason)}")
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp checkpoint_available?(checkpoint_mod) do
+    Code.ensure_loaded?(checkpoint_mod) and function_exported?(checkpoint_mod, :load, 2)
+  end
+
+  defp save_checkpoint(state) do
+    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
+    checkpoint_store = Application.get_env(:arbor_signals, :checkpoint_store)
+
+    if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
+      snapshot_data = %{
+        signals: state.signals,
+        order: :queue.to_list(state.order),
+        stats: state.stats
+      }
+
+      case checkpoint_mod.save("signal_store", snapshot_data, checkpoint_store) do
+        :ok ->
+          Logger.debug("Signal Store: checkpoint saved")
+
+        {:error, reason} ->
+          Logger.warning("Signal Store: checkpoint save failed: #{inspect(reason)}")
+      end
+    end
   end
 end

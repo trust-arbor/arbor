@@ -70,5 +70,12 @@ config :arbor_persistence, :backup,
   schedule: {3, 0},
   retention: [daily: 7, weekly: 4, monthly: 3]
 
+# Signal store checkpoint integration
+# Uses runtime configuration to avoid compile-time dependency cycle.
+# The checkpoint_store must implement Arbor.Checkpoint.Store behaviour.
+config :arbor_signals,
+  checkpoint_module: Arbor.Checkpoint,
+  checkpoint_store: Arbor.Checkpoint.Store.ETS
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"
