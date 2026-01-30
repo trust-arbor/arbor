@@ -31,7 +31,8 @@ defmodule Arbor.AI.CommsResponder do
 
     opts = [
       backend: :cli,
-      system_prompt: system_prompt
+      system_prompt: system_prompt,
+      new_session: true
     ]
 
     case Arbor.AI.generate_text(prompt, opts) do

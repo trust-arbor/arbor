@@ -40,7 +40,10 @@ config :arbor_comms, :handler,
   context_file: ".arbor/context/comms_context.md",
   response_generator: Arbor.AI.CommsResponder,
   conversation_window: 20,
-  dedup_window_seconds: 300
+  dedup_window_seconds: 300,
+  contact_aliases: %{
+    "+15551234567" => ["pendant"]
+  }
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"
