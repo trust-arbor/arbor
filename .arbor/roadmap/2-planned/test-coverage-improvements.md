@@ -14,10 +14,12 @@ Improve test coverage across libraries, especially for edge cases and error path
 |---------|--------|-------|--------|
 | arbor_security | 77% | 91% | ✓ Above threshold (found 2 bugs) |
 | arbor_persistence | ~52% | ~63% | Partial improvement |
-| arbor_signals | ~60% | ~85% | ✓ Significant improvement |
+| arbor_signals | ~60% | 93% | ✓ Above threshold |
 | arbor_shell | 69% | 86% | Below threshold (kill feature incomplete) |
 | arbor_actions | 86% | 90% | ✓ Above threshold |
 | arbor_common | 50% | 95% | ✓ Above threshold (Mix tasks excluded) |
+| arbor_consensus | 66% | 91% | ✓ Above threshold (11 test helpers excluded) |
+| arbor_trust | 81% | 91% | ✓ Above threshold (TestHelpers excluded) |
 
 ### Bugs Found During Coverage Work
 
@@ -39,9 +41,9 @@ MIX_ENV=test mix test apps/<app>/test --cover
 
 ## Remaining Priority Order
 
-1. **arbor_consensus** - Blocked: ExCoveralls configured but not installed
-2. **arbor_trust** - Blocked: ExCoveralls configured but not installed
-3. **arbor_historian** - Blocked: ExCoveralls configured but not installed
+1. ~~**arbor_consensus**~~ - ✓ Done (66% → 91%)
+2. ~~**arbor_trust**~~ - ✓ Done (81% → 91%)
+3. **arbor_historian** - 65%, needs significant work
 4. **arbor_shell** - 86%, needs kill feature fix for port tracking
 5. **arbor_persistence** - ~63%, needs QueryableStore improvements
 
@@ -50,6 +52,16 @@ MIX_ENV=test mix test apps/<app>/test --cover
 6 libraries have `test_coverage: [tool: ExCoveralls]` in mix.exs but ExCoveralls isn't a dependency. This prevents standard `--cover` from working. Options:
 - Add ExCoveralls as a dep (adds hackney dependency chain)
 - Remove ExCoveralls config and use built-in cover (simpler)
+
+## Test Isolation Issues (from 2026-01-30 audit)
+
+Priority fixes:
+1. **arbor_comms** (HIGH): `chat_logger_test.exs` and `message_handler_test.exs` use hardcoded `/tmp/arbor/` paths, forcing `async: false`. Use ActionCase pattern with unique dirs.
+2. **arbor_sandbox** (HIGH): `filesystem_test.exs` and `sandbox_test.exs` share `/tmp/arbor_sandbox_test` path. Use unique paths.
+3. **arbor_comms** (MEDIUM): `config_test.exs` calls `Application.put_env` without cleanup in `on_exit`.
+4. **consensus/historian** (LOW): 4 files use `start_link` instead of `start_supervised!` for named processes.
+
+Model pattern: `apps/arbor_actions/test/support/action_case.ex` (unique temp dirs + on_exit cleanup).
 
 ## Test Patterns to Add
 
