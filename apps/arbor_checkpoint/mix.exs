@@ -17,7 +17,7 @@ defmodule Arbor.Checkpoint.MixProject do
       docs: docs(),
       # Testing
       elixirc_paths: elixirc_paths(Mix.env()),
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [threshold: 90]
     ]
   end
 
