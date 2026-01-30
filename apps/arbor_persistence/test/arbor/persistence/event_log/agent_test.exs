@@ -98,6 +98,31 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
     end
   end
 
+  describe "child_spec/1" do
+    test "returns valid child spec" do
+      spec = ELAgent.child_spec(name: :test_el)
+      assert spec.id == :test_el
+      assert spec.type == :worker
+      assert {ELAgent, :start_link, [_opts]} = spec.start
+    end
+
+    test "uses module as default id" do
+      spec = ELAgent.child_spec([])
+      assert spec.id == ELAgent
+    end
+  end
+
+  describe "read_all/1 with limit" do
+    test "limits global read results", %{name: name} do
+      for i <- 1..5 do
+        ELAgent.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
+      end
+
+      {:ok, all} = ELAgent.read_all(name: name, limit: 2)
+      assert length(all) == 2
+    end
+  end
+
   describe "stream_exists?/2 and stream_version/2" do
     test "stream_exists? returns true for existing stream", %{name: name} do
       ELAgent.append("s1", Event.new("s1", "t", %{}), name: name)

@@ -102,6 +102,94 @@ defmodule Arbor.PersistenceTest do
     end
   end
 
+  describe "exists? fallback" do
+    defmodule NoExistsBackend do
+      @moduledoc false
+      # Minimal backend that does NOT implement exists?/2
+      def put(_key, _value, _opts), do: :ok
+      def get("found", _opts), do: {:ok, "value"}
+      def get(_key, _opts), do: {:error, :not_found}
+      def delete(_key, _opts), do: :ok
+      def list(_opts), do: {:ok, []}
+    end
+
+    test "falls back to get when backend doesn't export exists?/2" do
+      assert Persistence.exists?(:x, NoExistsBackend, "found")
+      refute Persistence.exists?(:x, NoExistsBackend, "missing")
+    end
+  end
+
+  describe "facade contract callbacks" do
+    setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      store_name = :"cb_store_#{:erlang.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      el_name = :"cb_el_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!({Store.ETS, name: store_name})
+      start_supervised!({EventLog.ETS, name: el_name})
+
+      {:ok, store: store_name, el: el_name}
+    end
+
+    test "store callbacks", %{store: name} do
+      backend = Store.ETS
+      assert :ok = Persistence.store_value_by_key_using_backend(name, backend, "k", "v", [])
+      assert {:ok, "v"} = Persistence.retrieve_value_by_key_using_backend(name, backend, "k", [])
+      assert {:ok, ["k"]} = Persistence.list_all_keys_using_backend(name, backend, [])
+      assert true == Persistence.check_key_exists_using_backend(name, backend, "k", [])
+      assert :ok = Persistence.delete_value_by_key_using_backend(name, backend, "k", [])
+    end
+
+    test "event log callbacks", %{el: name} do
+      backend = EventLog.ETS
+      event = Event.new("s1", "t", %{})
+
+      assert {:ok, [_]} =
+               Persistence.append_events_to_stream_using_backend(name, backend, "s1", event, [])
+
+      assert {:ok, [_]} =
+               Persistence.read_events_from_stream_using_backend(name, backend, "s1", [])
+
+      assert {:ok, [_]} = Persistence.read_all_events_using_backend(name, backend, [])
+
+      assert Persistence.check_stream_exists_using_backend(name, backend, "s1", [])
+
+      assert {:ok, 1} =
+               Persistence.get_stream_version_using_backend(name, backend, "s1", [])
+
+      assert {:ok, streams} = Persistence.list_all_streams_using_backend(name, backend, [])
+      assert "s1" in streams
+
+      assert {:ok, 1} = Persistence.get_stream_count_using_backend(name, backend, [])
+      assert {:ok, 1} = Persistence.get_event_count_using_backend(name, backend, [])
+    end
+
+    test "queryable store callbacks" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"cb_qs_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({QueryableStore.ETS, name: name})
+      backend = QueryableStore.ETS
+
+      r = Record.new("a", %{}) |> Map.put(:score, 10)
+      Persistence.put(name, backend, "a", r)
+
+      filter = Filter.new()
+      assert {:ok, [_]} = Persistence.query_records_by_filter_using_backend(name, backend, filter, [])
+      assert {:ok, 1} = Persistence.count_records_by_filter_using_backend(name, backend, filter, [])
+
+      assert {:ok, 10} =
+               Persistence.aggregate_field_by_filter_using_backend(
+                 name,
+                 backend,
+                 filter,
+                 :score,
+                 :sum,
+                 []
+               )
+    end
+  end
+
   describe "error paths with failing backends" do
     alias Arbor.Persistence.TestBackends.FailingEventLog
     alias Arbor.Persistence.TestBackends.FailingStore

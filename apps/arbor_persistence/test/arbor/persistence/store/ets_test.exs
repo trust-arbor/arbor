@@ -71,6 +71,44 @@ defmodule Arbor.Persistence.Store.ETSTest do
     end
   end
 
+  describe "capacity warning" do
+    test "logs warning when approaching capacity" do
+      import ExUnit.CaptureLog
+
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"store_warn_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_entries: 10}, id: name)
+
+      log =
+        capture_log(fn ->
+          # Insert 8 entries to trigger 80% warning
+          for i <- 1..8 do
+            ETS.put("key_#{i}", i, name: name)
+          end
+        end)
+
+      assert log =~ "approaching capacity"
+    end
+
+    test "only warns once" do
+      import ExUnit.CaptureLog
+
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"store_warn_once_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_entries: 5}, id: name)
+
+      log =
+        capture_log(fn ->
+          for i <- 1..5 do
+            ETS.put("key_#{i}", i, name: name)
+          end
+        end)
+
+      # Warning should appear exactly once
+      assert length(String.split(log, "approaching capacity")) == 2
+    end
+  end
+
   describe "resource limits" do
     test "rejects new keys when store is full" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion

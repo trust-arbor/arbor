@@ -17,7 +17,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
   # --- Client API ---
 
   @impl Arbor.Persistence.EventLog
-  def append(stream_id, events, opts \\ []) do
+  def append(stream_id, events, opts) do
     name = Keyword.fetch!(opts, :name)
     events = List.wrap(events)
 
@@ -28,7 +28,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
-  def read_stream(stream_id, opts \\ []) do
+  def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     from_num = Keyword.get(opts, :from, 0)
     limit = Keyword.get(opts, :limit)
@@ -47,7 +47,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
-  def read_all(opts \\ []) do
+  def read_all(opts) do
     name = Keyword.fetch!(opts, :name)
     from_pos = Keyword.get(opts, :from, 0)
     limit = Keyword.get(opts, :limit)
@@ -63,13 +63,13 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
-  def stream_exists?(stream_id, opts \\ []) do
+  def stream_exists?(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.get(name, &Map.has_key?(&1.streams, stream_id))
   end
 
   @impl Arbor.Persistence.EventLog
-  def stream_version(stream_id, opts \\ []) do
+  def stream_version(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     version = Agent.get(name, &Map.get(&1.versions, stream_id, 0))
     {:ok, version}

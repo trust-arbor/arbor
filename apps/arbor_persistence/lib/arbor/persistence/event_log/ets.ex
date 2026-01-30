@@ -28,56 +28,56 @@ defmodule Arbor.Persistence.EventLog.ETS do
   # --- Client API (EventLog behaviour) ---
 
   @impl Arbor.Persistence.EventLog
-  def append(stream_id, events, opts \\ []) do
+  def append(stream_id, events, opts) do
     name = Keyword.fetch!(opts, :name)
     events = List.wrap(events)
     GenServer.call(name, {:append, stream_id, events})
   end
 
   @impl Arbor.Persistence.EventLog
-  def read_stream(stream_id, opts \\ []) do
+  def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:read_stream, stream_id, opts})
   end
 
   @impl Arbor.Persistence.EventLog
-  def read_all(opts \\ []) do
+  def read_all(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:read_all, opts})
   end
 
   @impl Arbor.Persistence.EventLog
-  def stream_exists?(stream_id, opts \\ []) do
+  def stream_exists?(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:stream_exists?, stream_id})
   end
 
   @impl Arbor.Persistence.EventLog
-  def stream_version(stream_id, opts \\ []) do
+  def stream_version(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:stream_version, stream_id})
   end
 
   @impl Arbor.Persistence.EventLog
-  def subscribe(stream_id_or_all, pid, opts \\ []) do
+  def subscribe(stream_id_or_all, pid, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:subscribe, stream_id_or_all, pid})
   end
 
   @impl Arbor.Persistence.EventLog
-  def list_streams(opts \\ []) do
+  def list_streams(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, :list_streams)
   end
 
   @impl Arbor.Persistence.EventLog
-  def stream_count(opts \\ []) do
+  def stream_count(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, :stream_count)
   end
 
   @impl Arbor.Persistence.EventLog
-  def event_count(opts \\ []) do
+  def event_count(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, :event_count)
   end

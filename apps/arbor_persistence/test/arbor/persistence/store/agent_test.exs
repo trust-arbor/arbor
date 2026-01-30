@@ -58,6 +58,20 @@ defmodule Arbor.Persistence.Store.AgentTest do
     end
   end
 
+  describe "child_spec/1" do
+    test "returns valid child spec" do
+      spec = StoreAgent.child_spec(name: :test_store)
+      assert spec.id == :test_store
+      assert spec.type == :worker
+      assert {StoreAgent, :start_link, [_opts]} = spec.start
+    end
+
+    test "uses module as default id" do
+      spec = StoreAgent.child_spec([])
+      assert spec.id == StoreAgent
+    end
+  end
+
   describe "exists?/2" do
     test "returns true for existing key", %{name: name} do
       StoreAgent.put("key1", "value1", name: name)
