@@ -343,6 +343,48 @@ defmodule Arbor.Consensus.TestHelpers do
   end
 
   # ============================================================================
+  # Test Event Log (for recovery testing)
+  # ============================================================================
+
+  defmodule TestEventLog do
+    @moduledoc false
+
+    def start(events \\ []) do
+      table = :ets.new(:test_event_log, [:set, :public])
+      :ets.insert(table, {"arbor:consensus", events})
+      table
+    end
+
+    def read_stream(stream_id, opts) do
+      table = Keyword.fetch!(opts, :table)
+
+      case :ets.lookup(table, stream_id) do
+        [{^stream_id, events}] -> {:ok, events}
+        [] -> {:error, :stream_not_found}
+      end
+    end
+
+    def append(_stream_id, event_or_events, _opts) do
+      events = List.wrap(event_or_events)
+      {:ok, events}
+    end
+  end
+
+  # ============================================================================
+  # Failing Executor (for execution failure testing)
+  # ============================================================================
+
+  defmodule FailingExecutor do
+    @moduledoc false
+    @behaviour Arbor.Consensus.Executor
+
+    @impl true
+    def execute(_proposal, _decision) do
+      {:error, :execution_failed}
+    end
+  end
+
+  # ============================================================================
   # Utilities
   # ============================================================================
 

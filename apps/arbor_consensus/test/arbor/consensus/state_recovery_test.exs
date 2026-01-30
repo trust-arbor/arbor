@@ -251,6 +251,167 @@ defmodule Arbor.Consensus.StateRecoveryTest do
     end
   end
 
+  describe "recovery with ProposalExecuted event" do
+    test "marks proposal as executed", %{table: table} do
+      events = [
+        create_persistence_event("proposal.submitted", %{
+          proposal_id: "prop_exec",
+          proposer: "agent_1",
+          change_type: "code_modification",
+          description: "Executed proposal"
+        }),
+        create_persistence_event("decision.rendered", %{
+          proposal_id: "prop_exec",
+          decision_id: "dec_1",
+          decision: "approved",
+          approve_count: 5,
+          reject_count: 1,
+          abstain_count: 0,
+          required_quorum: 5,
+          quorum_met: true,
+          primary_concerns: [],
+          average_confidence: 0.9
+        }),
+        create_persistence_event("proposal.executed", %{
+          proposal_id: "prop_exec",
+          result: "success",
+          details: "Applied changes"
+        })
+      ]
+
+      for event <- events do
+        {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      end
+
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+      assert state.proposals["prop_exec"].status == :executed
+    end
+  end
+
+  describe "recovery with EvaluationFailed event" do
+    test "tracks failed evaluation as completed with error", %{table: table} do
+      events = [
+        create_persistence_event("proposal.submitted", %{
+          proposal_id: "prop_fail",
+          proposer: "agent_1",
+          change_type: "code_modification",
+          description: "Failed evaluation"
+        }),
+        create_persistence_event("evaluation.started", %{
+          proposal_id: "prop_fail",
+          perspectives: ["security", "stability"],
+          council_size: 2,
+          required_quorum: 2
+        }),
+        create_persistence_event("evaluation.failed", %{
+          proposal_id: "prop_fail",
+          perspective: "security",
+          reason: "timeout"
+        })
+      ]
+
+      for event <- events do
+        {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      end
+
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+
+      proposal = state.proposals["prop_fail"]
+      assert map_size(proposal.completed_evaluations) == 1
+      failed = proposal.completed_evaluations[:security]
+      assert failed.vote == :error
+      assert failed.reason == :timeout
+    end
+  end
+
+  describe "recovery with coordinator lifecycle events" do
+    test "handles CoordinatorStarted event", %{table: table} do
+      events = [
+        create_persistence_event("coordinator.started", %{
+          coordinator_id: "coord_1",
+          config: %{council_size: 7}
+        }),
+        create_persistence_event("proposal.submitted", %{
+          proposal_id: "prop_after_start",
+          proposer: "agent_1",
+          change_type: "code_modification",
+          description: "After coordinator start"
+        })
+      ]
+
+      for event <- events do
+        {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      end
+
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+      assert state.events_replayed == 2
+      assert Map.has_key?(state.proposals, "prop_after_start")
+    end
+
+    test "handles RecoveryStarted event", %{table: table} do
+      event = create_persistence_event("recovery.started", %{
+        coordinator_id: "coord_1",
+        from_position: 0
+      })
+
+      {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+      assert state.events_replayed == 1
+    end
+
+    test "handles RecoveryCompleted event", %{table: table} do
+      event = create_persistence_event("recovery.completed", %{
+        coordinator_id: "coord_1",
+        proposals_recovered: 3,
+        decisions_recovered: 1,
+        interrupted_count: 1,
+        events_replayed: 5
+      })
+
+      {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+      assert state.events_replayed == 1
+    end
+  end
+
+  describe "apply_event/2 with unknown event type" do
+    test "skips unknown event types gracefully" do
+      state = %{
+        proposals: %{},
+        decisions: %{},
+        interrupted: [],
+        last_position: 0,
+        events_replayed: 0
+      }
+
+      # Event with completely unknown type
+      event = create_persistence_event("unknown.event.type", %{some: "data"})
+      result = StateRecovery.apply_event(event, state)
+
+      # State should be unchanged
+      assert result.proposals == %{}
+      assert result.decisions == %{}
+    end
+  end
+
+  describe "event for unknown proposal" do
+    test "handles evaluation.started for non-existent proposal", %{table: table} do
+      # No ProposalSubmitted, just EvaluationStarted
+      event = create_persistence_event("evaluation.started", %{
+        proposal_id: "nonexistent_prop",
+        perspectives: ["security"],
+        council_size: 1,
+        required_quorum: 1
+      })
+
+      {:ok, _} = ETS.append("arbor:consensus", event, name: table)
+      {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+
+      # Proposal shouldn't exist since we never submitted it
+      refute Map.has_key?(state.proposals, "nonexistent_prop")
+    end
+  end
+
   # Helper to create persistence events
   defp create_persistence_event(type, data) do
     Event.new("arbor:consensus", type, data,

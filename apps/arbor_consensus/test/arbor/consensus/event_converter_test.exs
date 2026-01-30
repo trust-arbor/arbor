@@ -111,4 +111,137 @@ defmodule Arbor.Consensus.EventConverterTest do
       assert EventConverter.stream_id(event) == "consensus:prop_xyz"
     end
   end
+
+  describe "from_persistence_event with string keys" do
+    test "handles data with string keys" do
+      # Create a persistence event with string keys in data
+      persistence_event = %PersistenceEvent{
+        id: "evt_str_1",
+        stream_id: "consensus:prop_str",
+        type: "arbor.consensus.evaluation_submitted",
+        event_number: 1,
+        data: %{
+          "event_type" => "evaluation_submitted",
+          "proposal_id" => "prop_str",
+          "agent_id" => "agent_str",
+          "evaluator_id" => "eval_str",
+          "vote" => "approve",
+          "perspective" => "security",
+          "confidence" => 0.9,
+          "decision" => nil,
+          "approve_count" => nil,
+          "reject_count" => nil,
+          "abstain_count" => nil,
+          "data" => %{}
+        },
+        metadata: %{},
+        correlation_id: nil,
+        causation_id: nil,
+        timestamp: DateTime.utc_now()
+      }
+
+      assert {:ok, event} = EventConverter.from_persistence_event(persistence_event)
+      assert event.event_type == :evaluation_submitted
+      assert event.proposal_id == "prop_str"
+      assert event.vote == :approve
+      assert event.perspective == :security
+    end
+  end
+
+  describe "from_persistence_event with unknown atom values" do
+    test "returns error for unknown event_type" do
+      persistence_event = %PersistenceEvent{
+        id: "evt_unk_1",
+        stream_id: "consensus:prop_unk",
+        type: "arbor.consensus.unknown_type",
+        event_number: 1,
+        data: %{
+          event_type: "completely_unknown_type",
+          proposal_id: "prop_unk",
+          agent_id: nil,
+          evaluator_id: nil,
+          vote: nil,
+          perspective: nil,
+          confidence: nil,
+          decision: nil,
+          approve_count: nil,
+          reject_count: nil,
+          abstain_count: nil,
+          data: %{}
+        },
+        metadata: %{},
+        correlation_id: nil,
+        causation_id: nil,
+        timestamp: DateTime.utc_now()
+      }
+
+      assert {:error, {:invalid_event, _reason}} =
+               EventConverter.from_persistence_event(persistence_event)
+    end
+
+    test "returns nil for unknown vote value" do
+      persistence_event = %PersistenceEvent{
+        id: "evt_unk_vote",
+        stream_id: "consensus:prop_unk",
+        type: "arbor.consensus.evaluation_submitted",
+        event_number: 1,
+        data: %{
+          event_type: :evaluation_submitted,
+          proposal_id: "prop_unk",
+          agent_id: nil,
+          evaluator_id: nil,
+          vote: "invalid_vote",
+          perspective: "invalid_perspective",
+          confidence: nil,
+          decision: "invalid_decision",
+          approve_count: nil,
+          reject_count: nil,
+          abstain_count: nil,
+          data: %{}
+        },
+        metadata: %{},
+        correlation_id: nil,
+        causation_id: nil,
+        timestamp: DateTime.utc_now()
+      }
+
+      assert {:ok, event} = EventConverter.from_persistence_event(persistence_event)
+      assert event.vote == nil
+      assert event.perspective == nil
+      assert event.decision == nil
+    end
+
+    test "handles atom values passed through directly" do
+      persistence_event = %PersistenceEvent{
+        id: "evt_atom",
+        stream_id: "consensus:prop_atom",
+        type: "arbor.consensus.decision_reached",
+        event_number: 1,
+        data: %{
+          event_type: :decision_reached,
+          proposal_id: "prop_atom",
+          agent_id: nil,
+          evaluator_id: nil,
+          vote: :approve,
+          perspective: :security,
+          confidence: nil,
+          decision: :approved,
+          approve_count: 5,
+          reject_count: 1,
+          abstain_count: 0,
+          data: %{}
+        },
+        metadata: %{},
+        correlation_id: "corr_123",
+        causation_id: nil,
+        timestamp: DateTime.utc_now()
+      }
+
+      assert {:ok, event} = EventConverter.from_persistence_event(persistence_event)
+      assert event.event_type == :decision_reached
+      assert event.vote == :approve
+      assert event.perspective == :security
+      assert event.decision == :approved
+    end
+  end
 end

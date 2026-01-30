@@ -19,7 +19,22 @@ defmodule Arbor.Consensus.MixProject do
       package: package(),
       docs: docs(),
       elixirc_paths: elixirc_paths(Mix.env()),
-      test_coverage: [threshold: 90]
+      test_coverage: [
+        threshold: 90,
+        ignore_modules: [
+          Arbor.Consensus.TestHelpers,
+          Arbor.Consensus.TestHelpers.AlwaysApproveBackend,
+          Arbor.Consensus.TestHelpers.AlwaysRejectBackend,
+          Arbor.Consensus.TestHelpers.FailingBackend,
+          Arbor.Consensus.TestHelpers.SlowBackend,
+          Arbor.Consensus.TestHelpers.TestEventSink,
+          Arbor.Consensus.TestHelpers.TestExecutor,
+          Arbor.Consensus.TestHelpers.AllowAllAuthorizer,
+          Arbor.Consensus.TestHelpers.DenyAllAuthorizer,
+          Arbor.Consensus.TestHelpers.TestEventLog,
+          Arbor.Consensus.TestHelpers.FailingExecutor
+        ]
+      ]
     ]
   end
 
