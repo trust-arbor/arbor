@@ -37,6 +37,25 @@ defmodule Arbor.Actions.CommsTest do
   end
 
   # ============================================================================
+  # Mock channel_info
+  # ============================================================================
+
+  describe "mock channel_info" do
+    test "MockChannelSender provides channel info" do
+      info = MockChannelSender.channel_info()
+      assert info.name == :mock
+      assert info.max_message_length == 100
+      assert info.supports_outbound == true
+    end
+
+    test "MockChannelReceiver provides channel info" do
+      info = MockChannelReceiver.channel_info()
+      assert info.name == :mock_receiver
+      assert info.supports_outbound == false
+    end
+  end
+
+  # ============================================================================
   # SendMessage
   # ============================================================================
 

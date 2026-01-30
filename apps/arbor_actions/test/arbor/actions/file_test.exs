@@ -31,6 +31,40 @@ defmodule Arbor.Actions.FileTest do
       assert result.content == <<0, 1, 2, 255>>
     end
 
+    test "reads utf8 file with encoding option", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "utf8.txt", "Hello, UTF-8!")
+
+      assert {:ok, result} = FileActions.Read.run(%{path: path, encoding: :utf8}, %{})
+      assert result.content == "Hello, UTF-8!"
+    end
+
+    test "reads latin1 file", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "latin.txt", "ASCII content")
+
+      assert {:ok, result} = FileActions.Read.run(%{path: path, encoding: :latin1}, %{})
+      assert result.content == "ASCII content"
+    end
+
+    test "handles invalid UTF-8 bytes gracefully", %{tmp_dir: tmp_dir} do
+      # Write invalid UTF-8 sequence
+      path = Path.join(tmp_dir, "invalid_utf8.txt")
+      File.write!(path, <<0xFF, 0xFE, 0x80, 0x81>>)
+
+      # Should still succeed without crashing
+      assert {:ok, result} = FileActions.Read.run(%{path: path}, %{})
+      assert is_binary(result.content)
+    end
+
+    test "returns permission error", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "noperm.txt", "secret")
+      File.chmod!(path, 0o000)
+
+      on_exit(fn -> File.chmod(path, 0o644) end)
+
+      assert {:error, message} = FileActions.Read.run(%{path: path}, %{})
+      assert message =~ "permission denied"
+    end
+
     test "validates action metadata" do
       assert FileActions.Read.name() == "file_read"
       assert FileActions.Read.category() == "file"
@@ -88,6 +122,41 @@ defmodule Arbor.Actions.FileTest do
                )
 
       assert File.read!(path) == "Hello World"
+    end
+
+    test "overwrites existing file in write mode", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "overwrite.txt", "old content")
+
+      assert {:ok, result} =
+               FileActions.Write.run(
+                 %{path: path, content: "new content", mode: :write},
+                 %{}
+               )
+
+      assert result.bytes_written == 11
+      assert File.read!(path) == "new content"
+    end
+
+    test "returns permission error for unwritable path", %{tmp_dir: tmp_dir} do
+      # Create a directory with no write permission
+      no_write_dir = Path.join(tmp_dir, "no_write")
+      File.mkdir_p!(no_write_dir)
+      File.chmod!(no_write_dir, 0o444)
+
+      on_exit(fn -> File.chmod(no_write_dir, 0o755) end)
+
+      path = Path.join(no_write_dir, "file.txt")
+
+      assert {:error, message} =
+               FileActions.Write.run(%{path: path, content: "test"}, %{})
+
+      assert message =~ "permission denied" or message =~ "Failed to write"
+    end
+
+    test "generates tool schema" do
+      tool = FileActions.Write.to_tool()
+      assert is_map(tool)
+      assert tool[:name] == "file_write"
     end
 
     test "validates action metadata" do
@@ -157,6 +226,50 @@ defmodule Arbor.Actions.FileTest do
                FileActions.List.run(%{path: "/nonexistent_dir_12345"}, %{})
 
       assert message =~ "directory not found" or message =~ "not found"
+    end
+
+    test "returns error when listing a file instead of directory", %{tmp_dir: tmp_dir} do
+      file_path = create_file(tmp_dir, "notadir.txt", "content")
+
+      assert {:error, message} = FileActions.List.run(%{path: file_path}, %{})
+      assert message =~ "not a directory" or message =~ "Failed to list"
+    end
+
+    test "lists empty directory", %{tmp_dir: tmp_dir} do
+      empty_dir = Path.join(tmp_dir, "empty")
+      File.mkdir_p!(empty_dir)
+
+      assert {:ok, result} = FileActions.List.run(%{path: empty_dir}, %{})
+      assert result.entries == []
+      assert result.count == 0
+    end
+
+    test "combines include_hidden and include_dirs options", %{tmp_dir: tmp_dir} do
+      create_file(tmp_dir, "visible.txt")
+      create_file(tmp_dir, ".hidden_file")
+      File.mkdir_p!(Path.join(tmp_dir, "subdir"))
+      File.mkdir_p!(Path.join(tmp_dir, ".hidden_dir"))
+
+      # include_hidden=true, include_dirs=false
+      assert {:ok, result} =
+               FileActions.List.run(
+                 %{path: tmp_dir, include_hidden: true, include_dirs: false},
+                 %{}
+               )
+
+      assert "visible.txt" in result.entries
+      assert ".hidden_file" in result.entries
+      refute "subdir" in result.entries
+      refute ".hidden_dir" in result.entries
+    end
+
+    test "entries are sorted", %{tmp_dir: tmp_dir} do
+      create_file(tmp_dir, "charlie.txt")
+      create_file(tmp_dir, "alpha.txt")
+      create_file(tmp_dir, "bravo.txt")
+
+      assert {:ok, result} = FileActions.List.run(%{path: tmp_dir}, %{})
+      assert result.entries == Enum.sort(result.entries)
     end
 
     test "validates action metadata" do
@@ -254,6 +367,17 @@ defmodule Arbor.Actions.FileTest do
 
       assert result.exists == false
       assert result.type == nil
+    end
+
+    test "detects symlink as other type", %{tmp_dir: tmp_dir} do
+      target = create_file(tmp_dir, "target.txt", "content")
+      link_path = Path.join(tmp_dir, "link")
+      File.ln_s!(target, link_path)
+
+      assert {:ok, result} = FileActions.Exists.run(%{path: link_path}, %{})
+      assert result.exists == true
+      # Symlinks resolve to their target type via File.stat
+      assert result.type in [:file, :other]
     end
 
     test "validates action metadata" do
