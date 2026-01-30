@@ -35,6 +35,7 @@ defmodule Arbor.Agent.Server do
   use GenServer
 
   alias Arbor.Agent.{ActionRunner, Registry}
+  alias Arbor.Signals
 
   require Logger
 
@@ -183,6 +184,9 @@ defmodule Arbor.Agent.Server do
     # Schedule auto-checkpoint if configured
     state = maybe_schedule_checkpoint(state)
 
+    # Emit agent started signal
+    emit_started(state)
+
     {:noreply, state}
   end
 
@@ -197,10 +201,12 @@ defmodule Arbor.Agent.Server do
            agent_module: state.agent_module
          ) do
       {:ok, updated_agent, result} ->
+        emit_action_executed(state, action_module)
         new_state = %{state | jido_agent: updated_agent}
         {:reply, {:ok, result}, new_state}
 
       {:error, reason} ->
+        emit_action_failed(state, action_module, reason)
         {:reply, {:error, reason}, state}
     end
   end
@@ -236,6 +242,9 @@ defmodule Arbor.Agent.Server do
   @impl GenServer
   def terminate(reason, state) do
     Logger.debug("Agent.Server terminating: #{state.agent_id}, reason: #{inspect(reason)}")
+
+    # Emit agent stopped signal
+    emit_stopped(state, reason)
 
     # Save final checkpoint before dying
     do_save_checkpoint(state)
@@ -350,4 +359,42 @@ defmodule Arbor.Agent.Server do
   end
 
   defp maybe_schedule_checkpoint(state), do: state
+
+  # ============================================================================
+  # Signal Emissions
+  # ============================================================================
+
+  defp emit_started(state) do
+    Signals.emit(:agent, :started, %{
+      agent_id: state.agent_id,
+      agent_module: inspect(state.agent_module)
+    })
+  end
+
+  defp emit_stopped(state, reason) do
+    Signals.emit(:agent, :stopped, %{
+      agent_id: state.agent_id,
+      reason: normalize_reason(reason)
+    })
+  end
+
+  defp emit_action_executed(state, action_module) do
+    Signals.emit(:agent, :action_executed, %{
+      agent_id: state.agent_id,
+      action: inspect(action_module)
+    })
+  end
+
+  defp emit_action_failed(state, action_module, reason) do
+    Signals.emit(:agent, :action_failed, %{
+      agent_id: state.agent_id,
+      action: inspect(action_module),
+      reason: normalize_reason(reason)
+    })
+  end
+
+  defp normalize_reason(:normal), do: "normal"
+  defp normalize_reason(:shutdown), do: "shutdown"
+  defp normalize_reason({:shutdown, _}), do: "shutdown"
+  defp normalize_reason(reason), do: inspect(reason, limit: 200)
 end

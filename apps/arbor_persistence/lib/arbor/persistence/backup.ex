@@ -32,6 +32,8 @@ defmodule Arbor.Persistence.Backup do
       {:ok, deleted} = Arbor.Persistence.Backup.cleanup()
   """
 
+  alias Arbor.Signals
+
   require Logger
 
   @backup_prefix "arbor-"
@@ -55,21 +57,34 @@ defmodule Arbor.Persistence.Backup do
   """
   @spec backup(keyword()) :: {:ok, String.t()} | {:error, term()}
   def backup(opts \\ []) do
-    with :ok <- check_prerequisites(),
-         {:ok, config} <- get_config(opts),
-         {:ok, db_config} <- get_db_config(),
-         {:ok, temp_path} <- run_pg_dump(db_config, config.backup_dir),
-         {:ok, backup_path} <- encrypt_backup(temp_path, config) do
-      # Clean up temp file
-      File.rm(temp_path)
+    emit_backup_started()
 
-      # Run retention cleanup unless skipped
-      unless Keyword.get(opts, :skip_cleanup, false) do
-        cleanup(opts)
+    result =
+      with :ok <- check_prerequisites(),
+           {:ok, config} <- get_config(opts),
+           {:ok, db_config} <- get_db_config(),
+           {:ok, temp_path} <- run_pg_dump(db_config, config.backup_dir),
+           {:ok, backup_path} <- encrypt_backup(temp_path, config) do
+        # Clean up temp file
+        File.rm(temp_path)
+
+        # Run retention cleanup unless skipped
+        unless Keyword.get(opts, :skip_cleanup, false) do
+          cleanup(opts)
+        end
+
+        Logger.info("Backup created: #{backup_path}")
+        {:ok, backup_path}
       end
 
-      Logger.info("Backup created: #{backup_path}")
-      {:ok, backup_path}
+    case result do
+      {:ok, path} ->
+        emit_backup_completed(path)
+        result
+
+      {:error, reason} ->
+        emit_backup_failed(reason)
+        result
     end
   end
 
@@ -471,5 +486,26 @@ defmodule Arbor.Persistence.Backup do
         # Fallback for malformed filenames
         DateTime.utc_now()
     end
+  end
+
+  # ============================================================================
+  # Signal Emissions
+  # ============================================================================
+
+  defp emit_backup_started do
+    Signals.emit(:persistence, :backup_started, %{})
+  end
+
+  defp emit_backup_completed(path) do
+    Signals.emit(:persistence, :backup_completed, %{
+      backup_path: path,
+      backup_filename: Path.basename(path)
+    })
+  end
+
+  defp emit_backup_failed(reason) do
+    Signals.emit(:persistence, :backup_failed, %{
+      reason: inspect(reason, limit: 200)
+    })
   end
 end
