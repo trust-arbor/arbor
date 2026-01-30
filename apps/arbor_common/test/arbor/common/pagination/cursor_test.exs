@@ -7,11 +7,12 @@ defmodule Arbor.Common.Pagination.CursorTest do
 
   describe "parse/1" do
     test "parses valid cursor string" do
-      assert {:ok, {1705123456789, "evt_123"}} = Cursor.parse("1705123456789:evt_123")
+      assert {:ok, {1_705_123_456_789, "evt_123"}} = Cursor.parse("1705123456789:evt_123")
     end
 
     test "handles id with colons" do
-      assert {:ok, {1705123456789, "id:with:colons"}} = Cursor.parse("1705123456789:id:with:colons")
+      assert {:ok, {1_705_123_456_789, "id:with:colons"}} =
+               Cursor.parse("1705123456789:id:with:colons")
     end
 
     test "returns error for non-numeric timestamp" do
@@ -37,7 +38,7 @@ defmodule Arbor.Common.Pagination.CursorTest do
 
       assert id == "evt_123"
       assert %DateTime{} = datetime
-      assert DateTime.to_unix(datetime, :millisecond) == 1705123456789
+      assert DateTime.to_unix(datetime, :millisecond) == 1_705_123_456_789
     end
 
     test "parses with microsecond precision" do
@@ -67,7 +68,7 @@ defmodule Arbor.Common.Pagination.CursorTest do
     end
 
     test "generates cursor from integer timestamp" do
-      assert Cursor.generate(1705147200000, "evt_456") == "1705147200000:evt_456"
+      assert Cursor.generate(1_705_147_200_000, "evt_456") == "1705147200000:evt_456"
     end
 
     test "roundtrips correctly" do

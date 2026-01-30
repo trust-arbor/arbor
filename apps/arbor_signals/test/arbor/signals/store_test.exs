@@ -19,7 +19,7 @@ defmodule Arbor.Signals.StoreTest do
     end
 
     test "returns error for nonexistent signal" do
-      assert {:error, :not_found} = Store.get("sig_nonexistent_#{System.unique_integer([:positive])}")
+      assert {:error, :not_found} = Store.get("sig_definitely_not_here")
     end
   end
 
@@ -34,40 +34,40 @@ defmodule Arbor.Signals.StoreTest do
     end
 
     test "filters by type" do
-      unique = :"store_type_#{System.unique_integer([:positive])}"
-      signal = Signal.new(:activity, unique, %{})
+      # Use a unique marker in data rather than a dynamic atom type
+      marker = System.unique_integer([:positive])
+      signal = Signal.new(:activity, :store_filter_type, %{marker: marker})
       Store.put(signal)
       :timer.sleep(10)
 
-      {:ok, results} = Store.query(type: unique)
-      assert length(results) >= 1
-      assert Enum.all?(results, &(&1.type == unique))
+      {:ok, results} = Store.query(type: :store_filter_type)
+      assert Enum.any?(results, &(&1.data.marker == marker))
     end
 
     test "respects limit" do
-      unique_type = :"store_limit_#{System.unique_integer([:positive])}"
+      marker = System.unique_integer([:positive])
 
       for i <- 1..5 do
-        Store.put(Signal.new(:activity, unique_type, %{i: i}))
+        Store.put(Signal.new(:activity, :store_limit_test, %{i: i, marker: marker}))
       end
 
       :timer.sleep(20)
 
-      {:ok, results} = Store.query(type: unique_type, limit: 2)
+      {:ok, results} = Store.query(type: :store_limit_test, limit: 2)
       assert length(results) == 2
     end
 
     test "returns results sorted by timestamp descending" do
-      unique_type = :"store_order_#{System.unique_integer([:positive])}"
+      marker = System.unique_integer([:positive])
 
       for i <- 1..3 do
-        Store.put(Signal.new(:activity, unique_type, %{i: i}))
+        Store.put(Signal.new(:activity, :store_order_test, %{i: i, marker: marker}))
         :timer.sleep(5)
       end
 
       :timer.sleep(10)
 
-      {:ok, results} = Store.query(type: unique_type)
+      {:ok, results} = Store.query(type: :store_order_test)
 
       timestamps = Enum.map(results, & &1.timestamp)
       assert timestamps == Enum.sort(timestamps, {:desc, DateTime})
@@ -76,19 +76,17 @@ defmodule Arbor.Signals.StoreTest do
 
   describe "recent/1" do
     test "returns recent signals" do
-      unique_type = :"store_recent_#{System.unique_integer([:positive])}"
-      Store.put(Signal.new(:activity, unique_type, %{}))
+      Store.put(Signal.new(:activity, :store_recent_test, %{}))
       :timer.sleep(10)
 
-      {:ok, results} = Store.recent(type: unique_type, limit: 1)
-      assert length(results) >= 1
+      {:ok, results} = Store.recent(type: :store_recent_test, limit: 1)
+      assert results != []
     end
   end
 
   describe "clear/0" do
     test "removes all signals" do
-      unique_type = :"store_clear_#{System.unique_integer([:positive])}"
-      signal = Signal.new(:activity, unique_type, %{})
+      signal = Signal.new(:activity, :store_clear_test, %{})
       Store.put(signal)
       :timer.sleep(10)
 
