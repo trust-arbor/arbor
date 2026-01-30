@@ -81,6 +81,48 @@ defmodule Arbor.Actions.GitTest do
       assert "status" in Git.Status.tags()
     end
 
+    test "detects deleted unstaged file", %{repo_path: repo_path} do
+      File.rm!(Path.join(repo_path, "README.md"))
+
+      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert result.is_clean == false
+      assert "README.md" in result.modified
+    end
+
+    test "detects staged deletion", %{repo_path: repo_path} do
+      System.cmd("git", ["rm", "README.md"], cd: repo_path)
+
+      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert result.is_clean == false
+      assert "README.md" in result.staged
+    end
+
+    test "detects renamed file", %{repo_path: repo_path} do
+      # Create a new file and commit to get enough history
+      create_file(repo_path, "original.txt", "some content")
+      System.cmd("git", ["add", "original.txt"], cd: repo_path)
+      System.cmd("git", ["commit", "-m", "add original"], cd: repo_path)
+
+      # Rename via git
+      System.cmd("git", ["mv", "original.txt", "renamed.txt"], cd: repo_path)
+
+      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert result.is_clean == false
+    end
+
+    test "detects file that is both staged and modified", %{repo_path: repo_path} do
+      # Create, stage, then modify again
+      readme_path = Path.join(repo_path, "README.md")
+      File.write!(readme_path, "Staged content")
+      System.cmd("git", ["add", "README.md"], cd: repo_path)
+      File.write!(readme_path, "Modified after staging")
+
+      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert result.is_clean == false
+      # File should appear in both staged and modified
+      assert "README.md" in result.staged or "README.md" in result.modified
+    end
+
     test "generates tool schema" do
       tool = Git.Status.to_tool()
       assert is_map(tool)
@@ -139,6 +181,43 @@ defmodule Arbor.Actions.GitTest do
 
       assert result.diff =~ "README modified"
       refute result.diff =~ "other content"
+    end
+
+    test "diff with ref parameter", %{repo_path: repo_path} do
+      # Get current HEAD hash
+      {hash, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      hash = String.trim(hash)
+
+      # Make a change
+      readme_path = Path.join(repo_path, "README.md")
+      File.write!(readme_path, "Changed content\n")
+      System.cmd("git", ["add", "README.md"], cd: repo_path)
+      System.cmd("git", ["commit", "-m", "Change README"], cd: repo_path)
+
+      # Diff against the previous commit
+      assert {:ok, result} = Git.Diff.run(%{path: repo_path, ref: hash}, %{})
+      assert result.diff =~ "Changed content"
+    end
+
+    test "stat_only with insertions only", %{repo_path: repo_path} do
+      # Create a new file (only insertions, no deletions)
+      create_file(repo_path, "newfile.txt", "line1\nline2\nline3\n")
+      System.cmd("git", ["add", "newfile.txt"], cd: repo_path)
+
+      assert {:ok, result} =
+               Git.Diff.run(%{path: repo_path, stat_only: true, staged: true}, %{})
+
+      assert result.files_changed >= 1
+      assert result.insertions >= 1
+    end
+
+    test "returns error for non-git directory" do
+      non_git = Path.join(System.tmp_dir!(), "non_git_diff_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(non_git)
+      on_exit(fn -> File.rm_rf!(non_git) end)
+
+      assert {:error, message} = Git.Diff.run(%{path: non_git}, %{})
+      assert message =~ "Failed to get git diff"
     end
 
     test "validates action metadata" do
@@ -299,6 +378,40 @@ defmodule Arbor.Actions.GitTest do
     test "validates action metadata" do
       assert Git.Log.name() == "git_log"
       assert "history" in Git.Log.tags()
+    end
+
+    test "log with ref parameter", %{repo_path: repo_path} do
+      # Create a second commit
+      create_file(repo_path, "file1.txt", "content")
+      System.cmd("git", ["add", "file1.txt"], cd: repo_path)
+      System.cmd("git", ["commit", "-m", "Second commit"], cd: repo_path)
+
+      # Get HEAD hash
+      {hash, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      hash = String.trim(hash)
+
+      # Log with specific ref
+      assert {:ok, result} = Git.Log.run(%{path: repo_path, ref: hash, limit: 1}, %{})
+      assert result.count == 1
+    end
+
+    test "log with multiline commit body", %{repo_path: repo_path} do
+      create_file(repo_path, "file1.txt", "content")
+      System.cmd("git", ["add", "file1.txt"], cd: repo_path)
+
+      # Create commit with multiline body
+      System.cmd(
+        "git",
+        ["commit", "-m", "Subject line\n\nBody line 1\nBody line 2\nBody line 3"],
+        cd: repo_path
+      )
+
+      assert {:ok, result} = Git.Log.run(%{path: repo_path, limit: 1}, %{})
+      assert result.count == 1
+
+      commit = hd(result.commits)
+      assert commit.subject == "Subject line"
+      assert commit.body =~ "Body line"
     end
 
     test "generates tool schema" do
