@@ -20,13 +20,13 @@ defmodule Arbor.Checkpoint.Store.Agent do
   # ============================================================================
 
   @impl Arbor.Checkpoint.Store
-  def put(id, checkpoint, _opts \\ []) do
+  def put(id, checkpoint, _opts) do
     Agent.update(@default_name, &Map.put(&1, id, checkpoint))
     :ok
   end
 
   @impl Arbor.Checkpoint.Store
-  def get(id, _opts \\ []) do
+  def get(id, _opts) do
     case Agent.get(@default_name, &Map.fetch(&1, id)) do
       {:ok, checkpoint} -> {:ok, checkpoint}
       :error -> {:error, :not_found}
@@ -34,19 +34,19 @@ defmodule Arbor.Checkpoint.Store.Agent do
   end
 
   @impl Arbor.Checkpoint.Store
-  def delete(id, _opts \\ []) do
+  def delete(id, _opts) do
     Agent.update(@default_name, &Map.delete(&1, id))
     :ok
   end
 
   @impl Arbor.Checkpoint.Store
-  def list(_opts \\ []) do
+  def list(_opts) do
     ids = Agent.get(@default_name, &Map.keys(&1))
     {:ok, ids}
   end
 
   @impl Arbor.Checkpoint.Store
-  def exists?(id, _opts \\ []) do
+  def exists?(id, _opts) do
     Agent.get(@default_name, &Map.has_key?(&1, id))
   end
 
