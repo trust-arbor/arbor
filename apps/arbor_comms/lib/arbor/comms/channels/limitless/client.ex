@@ -1,4 +1,4 @@
-defmodule Arbor.Comms.Limitless.Client do
+defmodule Arbor.Comms.Channels.Limitless.Client do
   @moduledoc """
   HTTP client for the Limitless AI pendant API.
 

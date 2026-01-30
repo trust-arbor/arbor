@@ -39,16 +39,14 @@ defmodule Arbor.Contracts.Comms.ResponseGenerator do
   alias Arbor.Contracts.Comms.Message
   alias Arbor.Contracts.Comms.ResponseEnvelope
 
-  @type context :: %{
-          conversation_history: [{:user | :assistant, String.t()}],
-          system_prompt: String.t() | nil
-        }
+  @type context :: %{optional(atom()) => term()}
 
   @doc """
   Generate a response to an inbound message.
 
-  Receives the message and a context map containing conversation
-  history and system prompt. Returns a ResponseEnvelope or an error.
+  Receives the message and a context map. Session continuity and system
+  prompts are managed by the implementation (e.g. via persistent sessions
+  in CLI backends). Returns a ResponseEnvelope or an error.
   """
   @callback generate_response(message :: Message.t(), context :: context()) ::
               {:ok, ResponseEnvelope.t()} | {:error, term()}

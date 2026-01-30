@@ -246,8 +246,15 @@ defmodule Arbor.AI.CliImpl do
       true ->
         case SessionRegistry.get_session_id(provider, session_context) do
           nil ->
-            # No existing session - will create new one
-            opts
+            # No existing session - force new to avoid resuming a random session.
+            # The returned session_id will be stored by store_session_id/4
+            # and used for subsequent calls via this context.
+            Logger.debug("Creating new session for context",
+              provider: provider,
+              context: session_context
+            )
+
+            Keyword.put(opts, :new_session, true)
 
           session_id ->
             Logger.debug("Resuming session",
