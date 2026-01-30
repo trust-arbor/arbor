@@ -147,7 +147,7 @@ defmodule Arbor.Comms.MessageHandler do
         {:error, :no_generator}
 
       generator_module ->
-        history = ConversationBuffer.recent_turns(msg.channel, msg.from)
+        history = ConversationBuffer.recent_turns_cross_channel(msg.from)
 
         system_prompt = load_context_file()
 
