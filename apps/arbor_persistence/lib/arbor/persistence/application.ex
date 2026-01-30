@@ -33,7 +33,16 @@ defmodule Arbor.Persistence.Application do
   defp build_children do
     stores = default_stores()
     repo = if Application.get_env(:arbor_persistence, :start_repo, false), do: [Arbor.Persistence.Repo], else: []
-    stores ++ repo
+    scheduler = if backup_scheduler_enabled?(), do: [Arbor.Persistence.Backup.Scheduler], else: []
+    stores ++ repo ++ scheduler
+  end
+
+  defp backup_scheduler_enabled? do
+    # Only start scheduler when repo is started and backup is enabled
+    start_repo = Application.get_env(:arbor_persistence, :start_repo, false)
+    backup_config = Application.get_env(:arbor_persistence, :backup, [])
+    backup_enabled = Keyword.get(backup_config, :enabled, false)
+    start_repo and backup_enabled
   end
 
   defp default_stores do
