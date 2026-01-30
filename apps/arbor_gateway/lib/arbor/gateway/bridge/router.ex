@@ -1,33 +1,25 @@
-defmodule Arbor.Bridge.Router do
+defmodule Arbor.Gateway.Bridge.Router do
   @moduledoc """
   HTTP router for Claude Code bridge requests.
 
-  Handles authorization requests from Claude Code hooks.
+  Handles authorization requests from Claude Code PreToolUse hooks.
+  Mounted at `/api/bridge` by the main Gateway router.
   """
 
   use Plug.Router
 
-  alias Arbor.Bridge.ClaudeSession
+  alias Arbor.Gateway.Bridge.ClaudeSession
 
   require Logger
 
-  plug(Plug.Logger)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
   plug(:dispatch)
-
-  # GET /health - Health check endpoint
-  get "/health" do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{status: "ok", service: "arbor_bridge"}))
-  end
 
   # POST /api/bridge/authorize_tool - Authorize a tool call from Claude Code
   #
   # Request body: {session_id, tool_name, tool_use_id, tool_input, cwd}
   # Response: {decision: allow|deny|ask|passthrough, reason?, updated_input?, system_message?}
-  post "/api/bridge/authorize_tool" do
+  post "/authorize_tool" do
     with {:ok, session_id} <- get_required(conn.body_params, "session_id"),
          {:ok, tool_name} <- get_required(conn.body_params, "tool_name") do
       tool_input = Map.get(conn.body_params, "tool_input", %{})
@@ -66,11 +58,6 @@ defmodule Arbor.Bridge.Router do
       {:ok, :authorized} ->
         Logger.debug("Bridge authorized", tool: tool_name, session: session_id)
         %{decision: "allow"}
-
-      # Future: support input modification
-      # {:ok, :authorized, updated_input} ->
-      #   Logger.debug("Bridge authorized with modifications", tool: tool_name, session: session_id)
-      #   %{decision: "allow", updated_input: updated_input}
 
       {:error, :unauthorized, reason} ->
         Logger.info("Bridge denied tool",
