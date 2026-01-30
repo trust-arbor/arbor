@@ -11,7 +11,23 @@ defmodule ArborCommon.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      test_coverage: [
+        threshold: 90,
+        ignore_modules: [
+          Mix.Tasks.Arbor.Apps,
+          Mix.Tasks.Arbor.Attach,
+          Mix.Tasks.Arbor.Config,
+          Mix.Tasks.Arbor.Eval,
+          Mix.Tasks.Arbor.Helpers,
+          Mix.Tasks.Arbor.Logs,
+          Mix.Tasks.Arbor.Recompile,
+          Mix.Tasks.Arbor.Restart,
+          Mix.Tasks.Arbor.Start,
+          Mix.Tasks.Arbor.Status,
+          Mix.Tasks.Arbor.Stop
+        ]
+      ]
     ]
   end
 
