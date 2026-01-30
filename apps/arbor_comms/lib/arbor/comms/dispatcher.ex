@@ -24,6 +24,10 @@ defmodule Arbor.Comms.Dispatcher do
 
   @doc """
   Send a message through the specified channel.
+
+  Supports friendly contact names that resolve to channel-specific identifiers.
+  For example, "kim" can resolve to "kim@example.com" for email or a phone number for Signal.
+  Literal identifiers (containing "@" for email, starting with "+" for Signal) pass through unchanged.
   """
   @spec send(atom(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def send(channel, to, content, opts \\ []) do
@@ -32,10 +36,13 @@ defmodule Arbor.Comms.Dispatcher do
         {:error, {:unknown_channel, channel}}
 
       module ->
-        outbound = Message.outbound(channel, to, content, opts)
+        # Resolve friendly name → channel-specific identifier
+        resolved_to = Config.resolve_contact(to, channel) || to
+
+        outbound = Message.outbound(channel, resolved_to, content, opts)
         ChatLogger.log_message(outbound)
 
-        case module.send_message(to, content, opts) do
+        case module.send_message(resolved_to, content, opts) do
           :ok ->
             emit_sent_signal(outbound)
             :ok

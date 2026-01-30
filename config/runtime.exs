@@ -92,3 +92,62 @@ if smtp_user do
 
   config :arbor_comms, :email, email_config
 end
+
+# ============================================================================
+# Contacts - bidirectional contact resolution for friendly name → identifier
+# ============================================================================
+#
+# Build contacts map from environment. Each contact can have:
+#   - email: their email address
+#   - signal: their phone number (Signal)
+#   - aliases: list of alternative names that resolve to this contact
+#
+# Environment format: CONTACT_<NAME>_<CHANNEL>=value, CONTACT_<NAME>_ALIASES=alias1,alias2
+# Example:
+#   CONTACT_OWNER_EMAIL=hysun@example.com
+#   CONTACT_OWNER_SIGNAL=+15551234567
+#   CONTACT_OWNER_ALIASES=me,pendant,hysun
+#
+contacts =
+  System.get_env()
+  |> Enum.filter(fn {k, _v} -> String.starts_with?(k, "CONTACT_") end)
+  |> Enum.reduce(%{}, fn {key, value}, acc ->
+    case String.split(key, "_", parts: 3) do
+      ["CONTACT", name, channel] ->
+        name = String.downcase(name)
+        channel_key = String.downcase(channel)
+
+        contact = Map.get(acc, name, %{})
+
+        updated =
+          case channel_key do
+            "email" -> Map.put(contact, :email, value)
+            "signal" -> Map.put(contact, :signal, value)
+            "aliases" -> Map.put(contact, :aliases, String.split(value, ",", trim: true))
+            _ -> contact
+          end
+
+        Map.put(acc, name, updated)
+
+      _ ->
+        acc
+    end
+  end)
+
+# Fallback: if no contacts defined via CONTACT_* vars, create owner from existing vars
+contacts =
+  if map_size(contacts) == 0 and (signal_to || email_to) do
+    owner =
+      %{}
+      |> then(fn c -> if signal_to, do: Map.put(c, :signal, signal_to), else: c end)
+      |> then(fn c -> if email_to, do: Map.put(c, :email, email_to), else: c end)
+      |> Map.put(:aliases, ["me", "pendant"])
+
+    %{"owner" => owner}
+  else
+    contacts
+  end
+
+if map_size(contacts) > 0 do
+  config :arbor_comms, :contacts, contacts
+end

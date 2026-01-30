@@ -90,4 +90,75 @@ defmodule Arbor.Comms.Config do
   def response_router do
     handler_config(:response_router, Arbor.Comms.ResponseRouter)
   end
+
+  # ============================================================================
+  # Contact Resolution
+  # ============================================================================
+
+  @doc """
+  Resolve a friendly name or alias to a channel-specific identifier.
+
+  Takes a name (e.g., "kim", "me", "owner") and a channel (e.g., :email, :signal)
+  and returns the channel-specific identifier if found.
+
+  ## Examples
+
+      iex> Config.resolve_contact("kim", :email)
+      "kim@example.com"
+
+      iex> Config.resolve_contact("me", :signal)
+      "+1XXXXXXXXXX"
+
+      iex> Config.resolve_contact("unknown", :email)
+      nil
+
+  If the name looks like a literal identifier (contains "@" for email, starts with "+"
+  for signal), returns nil to signal pass-through behavior.
+  """
+  @spec resolve_contact(String.t(), atom()) :: String.t() | nil
+  def resolve_contact(name, channel) when is_binary(name) and is_atom(channel) do
+    # If it looks like a literal identifier, don't try to resolve
+    if looks_like_identifier?(name, channel) do
+      nil
+    else
+      contacts = Application.get_env(:arbor_comms, :contacts, %{})
+      normalized = String.downcase(name)
+
+      # First try direct name match
+      case Map.get(contacts, normalized) do
+        nil ->
+          # Try alias lookup
+          find_contact_by_alias(contacts, normalized, channel)
+
+        contact ->
+          Map.get(contact, channel)
+      end
+    end
+  end
+
+  def resolve_contact(_, _), do: nil
+
+  @doc """
+  Returns the full contacts map.
+  """
+  @spec contacts() :: map()
+  def contacts do
+    Application.get_env(:arbor_comms, :contacts, %{})
+  end
+
+  # Private helpers for contact resolution
+
+  defp looks_like_identifier?(value, :email), do: String.contains?(value, "@")
+  defp looks_like_identifier?(value, :signal), do: String.starts_with?(value, "+")
+  defp looks_like_identifier?(_, _), do: false
+
+  defp find_contact_by_alias(contacts, alias_name, channel) do
+    Enum.find_value(contacts, fn {_name, contact} ->
+      aliases = Map.get(contact, :aliases, [])
+
+      if alias_name in Enum.map(aliases, &String.downcase/1) do
+        Map.get(contact, channel)
+      end
+    end)
+  end
 end
