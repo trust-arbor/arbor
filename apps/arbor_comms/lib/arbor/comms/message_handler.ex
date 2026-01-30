@@ -11,7 +11,6 @@ defmodule Arbor.Comms.MessageHandler do
 
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
-  alias Arbor.Comms.ConversationBuffer
   alias Arbor.Comms.Dispatcher
   alias Arbor.Contracts.Comms.Message
 
@@ -87,8 +86,13 @@ defmodule Arbor.Comms.MessageHandler do
 
   defp check_authorized(%Message{from: from}) do
     allowed = Config.authorized_senders()
+    aliases = Config.handler_config(:contact_aliases, %{})
 
-    if allowed == [] or from in allowed do
+    # Expand allowed list with aliases (e.g. %{"+1..." => ["pendant"]})
+    all_allowed =
+      Enum.flat_map(aliases, fn {_sender, names} -> names end) ++ allowed
+
+    if all_allowed == [] or from in all_allowed do
       :ok
     else
       {:error, :unauthorized}
@@ -147,14 +151,7 @@ defmodule Arbor.Comms.MessageHandler do
         {:error, :no_generator}
 
       generator_module ->
-        history = ConversationBuffer.recent_turns_cross_channel(msg.from)
-
-        system_prompt = load_context_file()
-
-        context = %{
-          conversation_history: history,
-          system_prompt: system_prompt
-        }
+        context = %{}
 
         with {:ok, envelope} <- generator_module.generate_response(msg, context),
              {:ok, channel, routed} <- Config.response_router().route(msg, envelope) do
@@ -182,21 +179,6 @@ defmodule Arbor.Comms.MessageHandler do
       {:error, reason} ->
         Logger.warning("Failed to send response on #{msg.channel}: #{inspect(reason)}")
         {:error, reason}
-    end
-  end
-
-  defp load_context_file do
-    case Config.context_file() do
-      nil ->
-        nil
-
-      path ->
-        expanded = Path.expand(path)
-
-        case File.read(expanded) do
-          {:ok, content} -> content
-          {:error, _} -> nil
-        end
     end
   end
 
