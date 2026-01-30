@@ -6,6 +6,17 @@ defmodule Arbor.Signals.StoreTest do
   alias Arbor.Signals.Signal
   alias Arbor.Signals.Store
 
+  # Helper to restart the Store GenServer with custom opts under the app supervisor
+  defp restart_store_with(opts) do
+    supervisor = Arbor.Signals.Supervisor
+
+    Supervisor.terminate_child(supervisor, Store)
+    Supervisor.delete_child(supervisor, Store)
+    Supervisor.start_child(supervisor, {Store, opts})
+    # Give the new process time to initialize
+    Process.sleep(20)
+  end
+
   describe "put/1 and get/1" do
     test "stores and retrieves a signal" do
       signal = Signal.new(:activity, :store_test_put, %{val: 1})
@@ -108,6 +119,166 @@ defmodule Arbor.Signals.StoreTest do
       assert is_integer(stats.total_stored)
       assert is_integer(stats.total_expired)
       assert is_integer(stats.total_evicted)
+    end
+  end
+
+  describe "eviction" do
+    test "evicts oldest signal when max_signals exceeded" do
+      # Restart store with a tiny max via the application supervisor
+      restart_store_with(max_signals: 3)
+
+      signals =
+        for i <- 1..4 do
+          signal = Signal.new(:test, :"evict_event_#{i}", %{index: i})
+          Store.put(signal)
+          Process.sleep(10)
+          signal
+        end
+
+      Process.sleep(50)
+
+      # First signal should have been evicted
+      assert {:error, :not_found} = Store.get(hd(signals).id)
+
+      # Last 3 should still be present
+      for signal <- Enum.drop(signals, 1) do
+        assert {:ok, _} = Store.get(signal.id)
+      end
+
+      stats = Store.stats()
+      assert stats.total_evicted >= 1
+      assert stats.current_count == 3
+    after
+      restart_store_with([])
+    end
+
+    test "evicts multiple when many signals added rapidly" do
+      restart_store_with(max_signals: 2)
+
+      signals =
+        for i <- 1..5 do
+          signal = Signal.new(:test, :rapid_evict, %{index: i})
+          Store.put(signal)
+          Process.sleep(10)
+          signal
+        end
+
+      Process.sleep(50)
+
+      # Only last 2 should remain
+      stats = Store.stats()
+      assert stats.current_count == 2
+      assert stats.total_evicted >= 3
+
+      # First 3 should be gone
+      for signal <- Enum.take(signals, 3) do
+        assert {:error, :not_found} = Store.get(signal.id)
+      end
+
+      # Last 2 should exist
+      for signal <- Enum.drop(signals, 3) do
+        assert {:ok, _} = Store.get(signal.id)
+      end
+    after
+      restart_store_with([])
+    end
+  end
+
+  describe "cleanup_expired" do
+    test "removes expired signals on cleanup timer" do
+      restart_store_with(ttl_seconds: 1)
+
+      signal = Signal.new(:test, :expiring_signal, %{})
+      Store.put(signal)
+      Process.sleep(50)
+
+      # Signal should exist initially
+      assert {:ok, _} = Store.get(signal.id)
+
+      # Wait for expiry and trigger cleanup manually
+      Process.sleep(1100)
+      send(Process.whereis(Store), :cleanup)
+      Process.sleep(100)
+
+      # Signal should be cleaned up
+      assert {:error, :not_found} = Store.get(signal.id)
+
+      stats = Store.stats()
+      assert stats.total_expired >= 1
+    after
+      restart_store_with([])
+    end
+
+    test "keeps non-expired signals during cleanup" do
+      # Default TTL is 3600s, no need to restart; just trigger cleanup
+      signal = Signal.new(:test, :not_expiring, %{})
+      Store.put(signal)
+      Process.sleep(50)
+
+      # Trigger cleanup manually
+      send(Process.whereis(Store), :cleanup)
+      Process.sleep(100)
+
+      # Signal should still be present (TTL is default 3600 seconds)
+      assert {:ok, _} = Store.get(signal.id)
+    end
+  end
+
+  describe "recent/1 with filters" do
+    test "filters by category" do
+      marker = System.unique_integer([:positive])
+      Store.put(Signal.new(:alpha, :recent_cat, %{marker: marker}))
+      Store.put(Signal.new(:beta, :recent_cat, %{marker: marker}))
+      Process.sleep(50)
+
+      {:ok, recent} = Store.recent(category: :alpha)
+      alpha_with_marker = Enum.filter(recent, &(&1.data[:marker] == marker))
+      assert length(alpha_with_marker) >= 1
+      assert Enum.all?(alpha_with_marker, fn s -> s.category == :alpha end)
+    end
+
+    test "filters by type" do
+      marker = System.unique_integer([:positive])
+      Store.put(Signal.new(:test, :recent_type_a, %{marker: marker}))
+      Store.put(Signal.new(:test, :recent_type_b, %{marker: marker}))
+      Process.sleep(50)
+
+      {:ok, recent} = Store.recent(type: :recent_type_a)
+      matched = Enum.filter(recent, &(&1.data[:marker] == marker))
+      assert length(matched) >= 1
+      assert Enum.all?(matched, fn s -> s.type == :recent_type_a end)
+    end
+
+    test "returns signals in reverse chronological order with limit" do
+      marker = System.unique_integer([:positive])
+
+      for i <- 1..5 do
+        Store.put(Signal.new(:test, :recent_order, %{index: i, marker: marker}))
+        Process.sleep(10)
+      end
+
+      Process.sleep(50)
+
+      {:ok, recent} = Store.recent(limit: 3, type: :recent_order)
+      matched = Enum.filter(recent, &(&1.data[:marker] == marker))
+      assert length(matched) >= 1
+      # Most recent should be first
+      indices = Enum.map(matched, & &1.data.index)
+      assert indices == Enum.sort(indices, :desc)
+    end
+  end
+
+  describe "query/1 with source filter" do
+    test "queries by source" do
+      marker = System.unique_integer([:positive])
+      Store.put(Signal.new(:test, :sourced_q, %{marker: marker}, source: "agent_1"))
+      Store.put(Signal.new(:test, :sourced_q, %{marker: marker}, source: "agent_2"))
+      Process.sleep(50)
+
+      {:ok, results} = Store.query(source: "agent_1", type: :sourced_q)
+      matched = Enum.filter(results, &(&1.data[:marker] == marker))
+      assert length(matched) >= 1
+      assert Enum.all?(matched, fn s -> s.source == "agent_1" end)
     end
   end
 end
