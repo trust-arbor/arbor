@@ -1,15 +1,15 @@
-defmodule Mix.Tasks.Arbor.Server.Status do
+defmodule Mix.Tasks.Arbor.Status do
   @shortdoc "Show Arbor server status"
   @moduledoc """
   Displays the status of the running Arbor server.
 
-      $ mix arbor.server.status
+      $ mix arbor.status
 
   When running, shows uptime, memory, process count, and loaded Arbor apps.
   """
   use Mix.Task
 
-  alias Mix.Tasks.Arbor.Server, as: Config
+  alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @impl Mix.Task
   def run(_args) do
@@ -26,8 +26,8 @@ defmodule Mix.Tasks.Arbor.Server.Status do
     node = Config.full_node_name()
 
     uptime = fetch_uptime(node)
-    procs = rpc(node, :erlang, :system_info, [:process_count])
-    memory_bytes = rpc(node, :erlang, :memory, [:total])
+    procs = Config.rpc(node, :erlang, :system_info, [:process_count])
+    memory_bytes = Config.rpc(node, :erlang, :memory, [:total])
     apps = fetch_arbor_apps(node)
     pid = Config.read_pid()
 
@@ -66,14 +66,14 @@ defmodule Mix.Tasks.Arbor.Server.Status do
   end
 
   defp fetch_uptime(node) do
-    case rpc(node, :erlang, :statistics, [:wall_clock]) do
+    case Config.rpc(node, :erlang, :statistics, [:wall_clock]) do
       {ms, _} when is_integer(ms) -> format_duration(ms)
       _ -> "unknown"
     end
   end
 
   defp fetch_arbor_apps(node) do
-    case rpc(node, :application, :which_applications, []) do
+    case Config.rpc(node, :application, :which_applications, []) do
       apps when is_list(apps) ->
         apps
         |> Enum.map(fn {name, _, _} -> name end)
@@ -82,13 +82,6 @@ defmodule Mix.Tasks.Arbor.Server.Status do
 
       _ ->
         []
-    end
-  end
-
-  defp rpc(node, mod, fun, args) do
-    case :rpc.call(node, mod, fun, args) do
-      {:badrpc, _reason} -> nil
-      result -> result
     end
   end
 

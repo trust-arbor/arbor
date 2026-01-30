@@ -1,23 +1,23 @@
-defmodule Mix.Tasks.Arbor.Server.Attach do
+defmodule Mix.Tasks.Arbor.Attach do
   @shortdoc "Attach an IEx session to the running Arbor server"
   @moduledoc """
   Prints the command to attach an IEx remote shell to the running Arbor server.
 
-      $ mix arbor.server.attach
+      $ mix arbor.attach
 
   Since interactive sessions require a TTY, this task prints the `iex --remsh`
   command for you to run directly in your terminal.
   """
   use Mix.Task
 
-  alias Mix.Tasks.Arbor.Server, as: Config
+  alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @impl Mix.Task
   def run(_args) do
     Config.ensure_distribution()
 
     unless Config.server_running?() do
-      Mix.shell().error("Arbor is not running. Start it with: mix arbor.server.start")
+      Mix.shell().error("Arbor is not running. Start it with: mix arbor.start")
       exit({:shutdown, 1})
     end
 

@@ -1,8 +1,8 @@
-defmodule Mix.Tasks.Arbor.Server do
+defmodule Mix.Tasks.Arbor.Helpers do
   @moduledoc """
-  Shared configuration and helpers for Arbor server lifecycle tasks.
+  Shared configuration and helpers for Arbor lifecycle mix tasks.
 
-  All `mix arbor.server.*` tasks use these constants and helpers to manage
+  All `mix arbor.*` tasks use these shared constants and helpers to manage
   the Arbor development server as a background daemon.
   """
 
@@ -53,5 +53,25 @@ defmodule Mix.Tasks.Arbor.Server do
     end
 
     :ok
+  end
+
+  @doc "Makes an RPC call, returning nil on badrpc."
+  def rpc(node, mod, fun, args) do
+    case :rpc.call(node, mod, fun, args) do
+      {:badrpc, _reason} -> nil
+      result -> result
+    end
+  end
+
+  @doc "Makes an RPC call, raising on failure."
+  def rpc!(node, mod, fun, args) do
+    case :rpc.call(node, mod, fun, args) do
+      {:badrpc, reason} ->
+        Mix.shell().error("RPC failed: #{inspect(reason)}")
+        exit({:shutdown, 1})
+
+      result ->
+        result
+    end
   end
 end
