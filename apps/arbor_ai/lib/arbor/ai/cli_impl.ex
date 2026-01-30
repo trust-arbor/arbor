@@ -44,6 +44,7 @@ defmodule Arbor.AI.CliImpl do
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
   alias Arbor.AI.SessionRegistry
+  alias Arbor.Signals
 
   alias Arbor.AI.Backends.{
     ClaudeCli,
@@ -107,18 +108,35 @@ defmodule Arbor.AI.CliImpl do
       provider: opts[:provider]
     )
 
-    case opts[:provider] do
-      nil ->
-        # No provider specified - use fallback chain
-        chain = Keyword.get(opts, :fallback_chain, Config.cli_fallback_chain())
-        generate_with_fallback(prompt, opts, chain)
+    provider = opts[:provider]
+    emit_request_started(provider, String.length(prompt))
+    start_time = System.monotonic_time(:millisecond)
 
-      provider when is_atom(provider) ->
-        # Specific provider requested
-        call_provider(provider, prompt, opts)
+    result =
+      case provider do
+        nil ->
+          # No provider specified - use fallback chain
+          chain = Keyword.get(opts, :fallback_chain, Config.cli_fallback_chain())
+          generate_with_fallback(prompt, opts, chain)
 
-      provider when is_binary(provider) ->
-        call_provider(String.to_existing_atom(provider), prompt, opts)
+        provider when is_atom(provider) ->
+          # Specific provider requested
+          call_provider(provider, prompt, opts)
+
+        provider when is_binary(provider) ->
+          call_provider(String.to_existing_atom(provider), prompt, opts)
+      end
+
+    duration_ms = System.monotonic_time(:millisecond) - start_time
+
+    case result do
+      {:ok, response} ->
+        emit_request_completed(provider, duration_ms, response)
+        result
+
+      {:error, reason} ->
+        emit_request_failed(provider, reason)
+        result
     end
   end
 
@@ -186,10 +204,15 @@ defmodule Arbor.AI.CliImpl do
             remaining: rest
           )
 
+          if rest != [] do
+            emit_provider_fallback(provider, hd(rest), reason)
+          end
+
           generate_with_fallback(prompt, opts, rest)
       end
     else
       Logger.info("Skipping quota-exhausted provider", provider: provider)
+      emit_quota_exhausted(provider)
       generate_with_fallback(prompt, opts, rest)
     end
   end
@@ -292,4 +315,50 @@ defmodule Arbor.AI.CliImpl do
         SessionRegistry.store(provider, session_context, session_id)
     end
   end
+
+  # ============================================================================
+  # Signal Emissions
+  # ============================================================================
+
+  defp emit_request_started(provider, prompt_length) do
+    Signals.emit(:ai, :request_started, %{
+      provider: provider_string(provider),
+      prompt_length: prompt_length
+    })
+  end
+
+  defp emit_request_completed(provider, duration_ms, response) do
+    Signals.emit(:ai, :request_completed, %{
+      provider: provider_string(provider),
+      duration_ms: duration_ms,
+      response_length: response_length(response)
+    })
+  end
+
+  defp emit_request_failed(provider, reason) do
+    Signals.emit(:ai, :request_failed, %{
+      provider: provider_string(provider),
+      reason: inspect(reason, limit: 200)
+    })
+  end
+
+  defp emit_provider_fallback(from_provider, to_provider, reason) do
+    Signals.emit(:ai, :provider_fallback, %{
+      from_provider: to_string(from_provider),
+      to_provider: to_string(to_provider),
+      reason: inspect(reason, limit: 200)
+    })
+  end
+
+  defp emit_quota_exhausted(provider) do
+    Signals.emit(:ai, :quota_exhausted, %{
+      provider: to_string(provider)
+    })
+  end
+
+  defp provider_string(nil), do: "auto"
+  defp provider_string(provider), do: to_string(provider)
+
+  defp response_length(%{text: text}) when is_binary(text), do: String.length(text)
+  defp response_length(_), do: 0
 end

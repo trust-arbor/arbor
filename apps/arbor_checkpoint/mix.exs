@@ -43,6 +43,7 @@ defmodule Arbor.Checkpoint.MixProject do
 
   defp deps do
     [
+      {:arbor_signals, in_umbrella: true},
       # Dev/test
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
