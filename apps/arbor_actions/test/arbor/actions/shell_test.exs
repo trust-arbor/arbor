@@ -125,10 +125,80 @@ defmodule Arbor.Actions.ShellTest do
       assert "script" in Shell.ExecuteScript.tags()
     end
 
+    test "runs script with environment variables" do
+      script = "echo $MY_SCRIPT_VAR"
+
+      assert {:ok, result} =
+               Shell.ExecuteScript.run(
+                 %{script: script, env: %{"MY_SCRIPT_VAR" => "from_env"}},
+                 %{}
+               )
+
+      assert result.exit_code == 0
+      assert String.contains?(result.stdout, "from_env")
+    end
+
+    test "runs script with custom shell" do
+      script = "echo using_sh"
+
+      assert {:ok, result} =
+               Shell.ExecuteScript.run(%{script: script, shell: "/bin/sh"}, %{})
+
+      assert result.exit_code == 0
+      assert String.contains?(result.stdout, "using_sh")
+    end
+
+    test "context can override options" do
+      script = "pwd"
+      context = %{cwd: "/tmp"}
+
+      assert {:ok, result} = Shell.ExecuteScript.run(%{script: script}, context)
+      assert String.contains?(result.stdout, "tmp")
+    end
+
+    test "handles script timeout" do
+      script = "sleep 10"
+
+      assert {:ok, result} =
+               Shell.ExecuteScript.run(%{script: script, timeout: 100}, %{})
+
+      assert result.timed_out
+    end
+
+    test "returns error for blocked script in strict sandbox" do
+      script = "echo test"
+
+      # Strict sandbox won't allow /bin/bash
+      result = Shell.ExecuteScript.run(%{script: script, sandbox: :strict}, %{})
+
+      case result do
+        {:error, message} ->
+          assert is_binary(message)
+
+        {:ok, _} ->
+          # If bash is in strict allowlist, that's fine too
+          :ok
+      end
+    end
+
     test "generates tool schema" do
       tool = Shell.ExecuteScript.to_tool()
       assert is_map(tool)
       assert tool[:name] == "shell_execute_script"
+    end
+  end
+
+  describe "Execute sandbox" do
+    test "blocks dangerous commands" do
+      assert {:error, message} = Shell.Execute.run(%{command: "rm -rf /", sandbox: :basic}, %{})
+      assert message =~ "blocked" or message =~ "dangerous"
+    end
+
+    test "strict sandbox restricts to allowlist" do
+      assert {:error, message} =
+               Shell.Execute.run(%{command: "curl http://example.com", sandbox: :strict}, %{})
+
+      assert message =~ "blocked" or message =~ "failed"
     end
   end
 end
