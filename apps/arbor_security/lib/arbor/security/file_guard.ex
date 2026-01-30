@@ -268,12 +268,6 @@ defmodule Arbor.Security.FileGuard do
     end
   end
 
-  defp check_pattern_constraints(_path, %{patterns: patterns}) when is_list(patterns) do
-    # Pattern constraints not yet checked - would need the resolved filename
-    # This is a placeholder for pattern matching logic
-    :ok
-  end
-
   defp check_pattern_constraints(resolved_path, constraints) do
     patterns = constraints[:patterns] || constraints["patterns"]
 
