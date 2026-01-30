@@ -265,7 +265,7 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       filter2 = Filter.new() |> Filter.since(future)
       {:ok, results2} = Postgres.query(filter2, name: name, repo: Repo)
 
-      assert length(results2) == 0
+      assert results2 == []
     end
 
     test "filters by JSONB contains text", %{name: name} do

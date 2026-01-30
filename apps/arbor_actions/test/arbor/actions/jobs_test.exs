@@ -1,9 +1,9 @@
 defmodule Arbor.Actions.JobsTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Actions.Jobs.{CreateJob, ListJobs, GetJob, UpdateJob}
-  alias Arbor.Persistence.QueryableStore.ETS, as: QStore
+  alias Arbor.Actions.Jobs.{CreateJob, GetJob, ListJobs, UpdateJob}
   alias Arbor.Persistence.EventLog.ETS, as: ELog
+  alias Arbor.Persistence.QueryableStore.ETS, as: QStore
 
   setup do
     # Start ETS backends for testing

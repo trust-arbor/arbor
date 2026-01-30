@@ -235,18 +235,7 @@ defmodule Arbor.Actions.Jobs do
             "updated_at" => record.updated_at && DateTime.to_iso8601(record.updated_at)
           })
 
-          history =
-            if params[:include_history] do
-              case jobs.event_log_backend().read_stream(
-                     jobs.job_stream(job_id),
-                     jobs.event_log_opts()
-                   ) do
-                {:ok, events} -> Enum.map(events, &event_to_map/1)
-                _ -> []
-              end
-            else
-              nil
-            end
+          history = fetch_history(params[:include_history], job_id, jobs)
 
           result = %{job: job, history: history}
           Actions.emit_completed(__MODULE__, %{job_id: job_id})
@@ -261,6 +250,18 @@ defmodule Arbor.Actions.Jobs do
           {:error, "Failed to get job: #{inspect(reason)}"}
       end
     end
+
+    defp fetch_history(true, job_id, jobs) do
+      case jobs.event_log_backend().read_stream(
+             jobs.job_stream(job_id),
+             jobs.event_log_opts()
+           ) do
+        {:ok, events} -> Enum.map(events, &event_to_map/1)
+        _ -> []
+      end
+    end
+
+    defp fetch_history(_, _job_id, _jobs), do: nil
 
     defp event_to_map(%Arbor.Persistence.Event{} = event) do
       %{
