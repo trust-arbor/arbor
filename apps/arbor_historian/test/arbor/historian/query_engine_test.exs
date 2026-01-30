@@ -1,6 +1,8 @@
 defmodule Arbor.Historian.QueryEngineTest do
   use ExUnit.Case, async: true
 
+  @moduletag :fast
+
   alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.TestHelpers
 
@@ -112,6 +114,76 @@ defmodule Arbor.Historian.QueryEngineTest do
 
     test "returns empty when no matches", %{ctx: ctx} do
       {:ok, entries} = QueryEngine.query(event_log: ctx.event_log, category: :nonexistent)
+      assert entries == []
+    end
+  end
+
+  describe "query edge cases" do
+    test "query with no filters returns all entries", %{ctx: ctx} do
+      {:ok, entries} = QueryEngine.query(event_log: ctx.event_log)
+      assert length(entries) == 4
+    end
+
+    test "query with limit larger than result set returns all entries", %{ctx: ctx} do
+      {:ok, entries} = QueryEngine.query(event_log: ctx.event_log, limit: 100)
+      assert length(entries) == 4
+    end
+
+    test "query with limit of 1 returns exactly one entry", %{ctx: ctx} do
+      {:ok, entries} = QueryEngine.query(event_log: ctx.event_log, limit: 1)
+      assert length(entries) == 1
+    end
+
+    test "query with multiple filter types combined", %{ctx: ctx} do
+      {:ok, entries} =
+        QueryEngine.query(
+          event_log: ctx.event_log,
+          category: :activity,
+          type: :agent_started,
+          correlation_id: "corr_1"
+        )
+
+      assert length(entries) == 1
+      entry = hd(entries)
+      assert entry.category == :activity
+      assert entry.type == :agent_started
+      assert entry.correlation_id == "corr_1"
+    end
+
+    test "query with time range filters", %{ctx: ctx} do
+      now = DateTime.utc_now()
+      past = DateTime.add(now, -3600, :second)
+      future = DateTime.add(now, 3600, :second)
+
+      {:ok, entries} = QueryEngine.query(event_log: ctx.event_log, from: past, to: future)
+      assert length(entries) == 4
+
+      # With a very narrow window in the past, should get nothing
+      very_old = DateTime.add(now, -7200, :second)
+      old = DateTime.add(now, -3600, :second)
+      {:ok, entries} = QueryEngine.query(event_log: ctx.event_log, from: very_old, to: old)
+      assert entries == []
+    end
+
+    test "query with source filter", %{ctx: ctx} do
+      {:ok, entries} =
+        QueryEngine.query(event_log: ctx.event_log, source: "arbor://test/historian")
+
+      assert length(entries) == 4
+      assert Enum.all?(entries, &(&1.source == "arbor://test/historian"))
+    end
+
+    test "query with source filter no match", %{ctx: ctx} do
+      {:ok, entries} =
+        QueryEngine.query(event_log: ctx.event_log, source: "arbor://nonexistent")
+
+      assert entries == []
+    end
+  end
+
+  describe "read_stream/2" do
+    test "returns empty list for non-existent stream", %{ctx: ctx} do
+      {:ok, entries} = QueryEngine.read_stream("nonexistent_stream", event_log: ctx.event_log)
       assert entries == []
     end
   end

@@ -64,4 +64,110 @@ defmodule Arbor.Historian.EventConverterTest do
       assert restored.data == event.data
     end
   end
+
+  describe "edge cases for safe_atomize and atomize_subject_type" do
+    test "from_persistence_event handles nil subject_type in metadata" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Set subject_type to nil in metadata to exercise atomize_subject_type(nil) -> nil
+      modified =
+        %{persistence_event | metadata: Map.put(persistence_event.metadata, :subject_type, nil)}
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      # When subject_type is nil, Event.new infer_subject_type fills it from subject_id
+      assert is_atom(restored.subject_type)
+    end
+
+    test "from_persistence_event handles atom subject_type passthrough" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Set subject_type to an atom to exercise atomize_subject_type(atom) -> atom
+      modified =
+        %{persistence_event | metadata: Map.put(persistence_event.metadata, :subject_type, :session)}
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      assert restored.subject_type == :session
+    end
+
+    test "safe_atomize returns :unknown for string that is not an existing atom" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Use a type string that definitely does not exist as an atom
+      modified =
+        %{persistence_event | type: "arbor.historian.zzz_nonexistent_atom_xyz_99999"}
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      assert restored.type == :unknown
+    end
+
+    test "extract_type strips arbor.historian. prefix and atomizes" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # The default type is "arbor.historian.agent_started"
+      assert persistence_event.type == "arbor.historian.agent_started"
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(persistence_event)
+      assert restored.type == :agent_started
+    end
+
+    test "extract_type handles plain binary type without prefix" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Set type to a plain binary (no arbor.historian. prefix)
+      modified = %{persistence_event | type: "agent_started"}
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      assert restored.type == :agent_started
+    end
+
+    test "from_persistence_event with string subject_type in metadata" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Use string keys in metadata to exercise string subject_type path via atomize_subject_type
+      modified =
+        %{
+          persistence_event
+          | metadata: %{
+              "subject_type" => "agent",
+              "subject_id" => "agent_123",
+              "version" => "1.0.0"
+            }
+        }
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      assert restored.subject_type == :agent
+    end
+
+    test "from_persistence_event with missing metadata uses stream_id as subject_id" do
+      historian_event = build_historian_event()
+
+      persistence_event =
+        EventConverter.to_persistence_event(historian_event, "activity:agent_123")
+
+      # Clear all metadata so subject_id falls back to stream_id
+      modified = %{persistence_event | metadata: %{}}
+
+      assert {:ok, restored} = EventConverter.from_persistence_event(modified)
+      # Falls back to stream_id from persistence event
+      assert restored.subject_id == "activity:agent_123"
+    end
+  end
 end
