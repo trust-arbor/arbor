@@ -247,4 +247,4 @@ The philosophy wasn't designed top-down. It grew organically from asking the rig
 ---
 
 *Last updated: 2026-01-23*
-*Contributors: the primary collaborator, Claude*
+*Contributors: Hysun, Claude*
