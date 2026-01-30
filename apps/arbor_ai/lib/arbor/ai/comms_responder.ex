@@ -2,9 +2,10 @@ defmodule Arbor.AI.CommsResponder do
   @moduledoc """
   ResponseGenerator implementation that uses Arbor.AI for response generation.
 
-  Builds a prompt from the system context file, conversation history,
-  and the new inbound message, then calls `Arbor.AI.generate_text/2`
-  using the CLI backend (free via subscriptions).
+  Uses a persistent Claude session (via `session_context: "comms"`) so all
+  channels (Signal, Limitless, Email) share the same conversation. Claude's
+  own session history replaces the need for a conversation buffer — each
+  message becomes a new turn in the same session regardless of channel.
 
   ## Channel Intent Detection
 
@@ -25,19 +26,18 @@ defmodule Arbor.AI.CommsResponder do
   @allowed_channels ~w(signal email)
 
   @impl true
-  def generate_response(message, context) do
-    prompt = build_prompt(message, context)
-    system_prompt = build_system_prompt(context[:system_prompt])
+  def generate_response(message, _context) do
+    prompt = build_prompt(message)
 
     opts = [
       backend: :cli,
-      system_prompt: system_prompt,
-      new_session: true
+      session_context: "comms"
     ]
 
     case Arbor.AI.generate_text(prompt, opts) do
       {:ok, %{text: text}} when is_binary(text) and text != "" ->
-        {channel, body} = extract_channel_hint(text)
+        cleaned = strip_predicted_turns(text)
+        {channel, body} = extract_channel_hint(cleaned)
         {:ok, ResponseEnvelope.new(body: body, channel: channel)}
 
       {:ok, _} ->
@@ -73,38 +73,17 @@ defmodule Arbor.AI.CommsResponder do
     end
   end
 
-  defp build_prompt(message, context) do
-    history = context[:conversation_history] || []
+  # Claude sometimes generates past its response, predicting what the user
+  # will say next (especially when conversation history uses "User:" prefixes).
+  # Strip any trailing "User:" or "Assistant:" turns from the response.
+  @turn_suffix_regex ~r/\n\n(?:User|Assistant):.*\z/s
 
-    history_text =
-      if history == [] do
-        ""
-      else
-        formatted =
-          Enum.map_join(history, "\n", fn
-            {:user, content} -> "User: #{content}"
-            {:assistant, content} -> "Assistant: #{content}"
-          end)
-
-        "Previous conversation:\n#{formatted}\n\n"
-      end
-
-    "#{history_text}User: #{message.content}"
+  defp strip_predicted_turns(text) do
+    Regex.replace(@turn_suffix_regex, text, "")
   end
 
-  defp build_system_prompt(nil), do: routing_instruction()
-  defp build_system_prompt(""), do: routing_instruction()
-
-  defp build_system_prompt(base) do
-    base <> "\n\n" <> routing_instruction()
-  end
-
-  defp routing_instruction do
-    """
-    If the user explicitly requests a specific delivery method \
-    (e.g. "email me", "send me a text", "message me on Signal"), \
-    prefix your response with [CHANNEL:email] or [CHANNEL:signal] accordingly. \
-    Do not include the prefix unless the user explicitly asks for a specific channel.\
-    """
+  defp build_prompt(message) do
+    channel = message.channel || :unknown
+    "[via #{channel}] #{message.content}"
   end
 end

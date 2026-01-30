@@ -90,10 +90,4 @@ defmodule Arbor.Comms.Config do
   def response_router do
     handler_config(:response_router, Arbor.Comms.ResponseRouter)
   end
-
-  @doc "Returns the path to the comms context file."
-  @spec context_file() :: String.t() | nil
-  def context_file do
-    handler_config(:context_file)
-  end
 end

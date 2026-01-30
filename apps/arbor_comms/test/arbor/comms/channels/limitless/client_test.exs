@@ -1,7 +1,7 @@
-defmodule Arbor.Comms.Limitless.ClientTest do
+defmodule Arbor.Comms.Channels.Limitless.ClientTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Comms.Limitless.Client
+  alias Arbor.Comms.Channels.Limitless.Client
 
   describe "extract_content/2" do
     test "prefers markdown when long enough" do
