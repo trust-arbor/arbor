@@ -80,8 +80,13 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
     test "tokens refill over time", %{principal: p, resource: r} do
       # Use a very short refill period for testing
       prev_refill = Application.get_env(:arbor_security, :rate_limit_refill_period_seconds)
-      # Set refill period to 1 second so tokens refill quickly
       Application.put_env(:arbor_security, :rate_limit_refill_period_seconds, 1)
+
+      on_exit(fn ->
+        if prev_refill,
+          do: Application.put_env(:arbor_security, :rate_limit_refill_period_seconds, prev_refill),
+          else: Application.delete_env(:arbor_security, :rate_limit_refill_period_seconds)
+      end)
 
       max = 2
       :ok = RateLimiter.consume(p, r, max)
@@ -92,13 +97,6 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
       :timer.sleep(1100)
 
       assert :ok = RateLimiter.consume(p, r, max)
-
-      # Restore config
-      if prev_refill do
-        Application.put_env(:arbor_security, :rate_limit_refill_period_seconds, prev_refill)
-      else
-        Application.delete_env(:arbor_security, :rate_limit_refill_period_seconds)
-      end
     end
   end
 
@@ -108,6 +106,12 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
       # Use a very short TTL
       prev_ttl = Application.get_env(:arbor_security, :rate_limit_bucket_ttl_seconds)
       Application.put_env(:arbor_security, :rate_limit_bucket_ttl_seconds, 0)
+
+      on_exit(fn ->
+        if prev_ttl,
+          do: Application.put_env(:arbor_security, :rate_limit_bucket_ttl_seconds, prev_ttl),
+          else: Application.delete_env(:arbor_security, :rate_limit_bucket_ttl_seconds)
+      end)
 
       p = "agent_cleanup_#{:erlang.unique_integer([:positive])}"
       r = "arbor://fs/read/cleanup_#{:erlang.unique_integer([:positive])}"
@@ -122,13 +126,6 @@ defmodule Arbor.Security.Constraint.RateLimiterTest do
       stats = RateLimiter.stats()
       # The bucket should have been cleaned up (TTL = 0 seconds)
       refute Map.has_key?(stats.buckets, {p, r})
-
-      # Restore config
-      if prev_ttl do
-        Application.put_env(:arbor_security, :rate_limit_bucket_ttl_seconds, prev_ttl)
-      else
-        Application.delete_env(:arbor_security, :rate_limit_bucket_ttl_seconds)
-      end
     end
   end
 end

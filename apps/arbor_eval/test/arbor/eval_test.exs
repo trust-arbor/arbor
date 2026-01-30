@@ -47,7 +47,7 @@ defmodule Arbor.EvalTest do
   describe "check_file/2" do
     test "checks a file" do
       # Create a temp file
-      path = Path.join(System.tmp_dir!(), "test_#{:rand.uniform(10000)}.ex")
+      path = Path.join(System.tmp_dir!(), "test_#{System.unique_integer([:positive])}.ex")
 
       File.write!(path, """
       defmodule TempTest do

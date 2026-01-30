@@ -1,5 +1,5 @@
 defmodule Arbor.SecurityTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.SignedRequest
@@ -428,16 +428,10 @@ defmodule Arbor.SecurityTest do
       # Disable enforcement
       prev = Application.get_env(:arbor_security, :constraint_enforcement_enabled)
       Application.put_env(:arbor_security, :constraint_enforcement_enabled, false)
+      on_exit(fn -> restore_config(:constraint_enforcement_enabled, prev) end)
 
       # Should succeed now despite exhausted rate limit
       assert {:ok, :authorized} = Security.authorize(agent_id, resource)
-
-      # Restore config
-      if prev != nil do
-        Application.put_env(:arbor_security, :constraint_enforcement_enabled, prev)
-      else
-        Application.delete_env(:arbor_security, :constraint_enforcement_enabled)
-      end
     end
   end
 

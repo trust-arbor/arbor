@@ -1,5 +1,5 @@
 defmodule Arbor.Security.CapabilityStoreTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
