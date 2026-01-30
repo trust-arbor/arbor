@@ -63,12 +63,12 @@ defmodule Arbor.Agent.ActionRunner do
       {:error, {:action_failed, Exception.message(e)}}
 
     e ->
-      Logger.warning("Unexpected error in action: #{inspect(e)}")
-      {:error, {:action_failed, inspect(e)}}
+      Logger.warning("Unexpected error in action", error: inspect(e))
+      {:error, {:action_failed, Exception.message(e)}}
   catch
     kind, reason ->
-      Logger.warning("Caught #{kind} in action: #{inspect(reason)}")
-      {:error, {:action_failed, "Caught #{kind}: #{inspect(reason)}"}}
+      Logger.warning("Caught #{kind} in action", reason: inspect(reason))
+      {:error, {:action_failed, "Action execution interrupted (#{kind})"}}
   end
 
   # Check directives list for error directives
