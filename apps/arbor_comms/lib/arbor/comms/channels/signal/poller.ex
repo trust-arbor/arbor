@@ -14,6 +14,7 @@ defmodule Arbor.Comms.Channels.Signal.Poller do
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Router
+  alias Arbor.Signals
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -24,6 +25,7 @@ defmodule Arbor.Comms.Channels.Signal.Poller do
     interval = Config.poll_interval(:signal)
     schedule_poll(interval)
     Logger.info("Signal poller started, polling every #{interval}ms")
+    emit_poller_started(:signal)
     {:ok, %{interval: interval, last_poll: nil, message_count: 0}}
   end
 
@@ -48,6 +50,8 @@ defmodule Arbor.Comms.Channels.Signal.Poller do
           Router.handle_inbound(msg)
         end)
 
+        emit_poll_cycle_completed(:signal, length(messages))
+
         %{
           state
           | last_poll: DateTime.utc_now(),
@@ -56,11 +60,42 @@ defmodule Arbor.Comms.Channels.Signal.Poller do
 
       {:error, reason} ->
         Logger.warning("Signal poll failed: #{inspect(reason)}")
+        emit_poller_error(:signal, reason)
         %{state | last_poll: DateTime.utc_now()}
     end
   end
 
   defp schedule_poll(interval) do
     Process.send_after(self(), :poll, interval)
+  end
+
+  # Signal emission helpers
+
+  defp emit_poller_started(channel) do
+    Signals.emit(:comms, :poller_started, %{channel: channel})
+  end
+
+  defp emit_poll_cycle_completed(channel, message_count) do
+    Signals.emit(:comms, :poll_cycle_completed, %{
+      channel: channel,
+      message_count: message_count
+    })
+  end
+
+  defp emit_poller_error(channel, reason) do
+    Signals.emit(:comms, :poller_error, %{
+      channel: channel,
+      reason: truncate_reason(reason)
+    })
+  end
+
+  defp truncate_reason(reason) do
+    inspected = inspect(reason)
+
+    if String.length(inspected) > 200 do
+      String.slice(inspected, 0, 197) <> "..."
+    else
+      inspected
+    end
   end
 end

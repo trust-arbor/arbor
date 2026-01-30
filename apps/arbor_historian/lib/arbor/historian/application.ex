@@ -9,6 +9,8 @@ defmodule Arbor.Historian.Application do
 
   use Application
 
+  alias Arbor.Signals
+
   @impl true
   def start(_type, _args) do
     children = [
@@ -17,6 +19,18 @@ defmodule Arbor.Historian.Application do
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Historian.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, pid} ->
+        emit_started()
+        {:ok, pid}
+
+      error ->
+        error
+    end
+  end
+
+  defp emit_started do
+    Signals.emit(:historian, :started, %{})
   end
 end

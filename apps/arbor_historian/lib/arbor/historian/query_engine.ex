@@ -10,6 +10,7 @@ defmodule Arbor.Historian.QueryEngine do
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.StreamIds
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
+  alias Arbor.Signals
 
   @type query_opts :: [
           event_log: GenServer.server(),
@@ -38,7 +39,8 @@ defmodule Arbor.Historian.QueryEngine do
 
         {:ok, entries}
 
-      error ->
+      {:error, reason} = error ->
+        emit_query_failed(:read_stream, stream_id, reason)
         error
     end
   end
@@ -148,6 +150,36 @@ defmodule Arbor.Historian.QueryEngine do
     case EventConverter.from_persistence_event(persistence_event) do
       {:ok, historian_event} -> HistoryEntry.from_event(historian_event)
       {:error, _} -> nil
+    end
+  end
+
+  # Signal emission helper
+
+  defp emit_query_failed(query_type, query_details, reason) do
+    Signals.emit(:historian, :query_failed, %{
+      query_type: query_type,
+      query_details: truncate_details(query_details),
+      reason: truncate_reason(reason)
+    })
+  end
+
+  defp truncate_details(details) when is_binary(details) do
+    if String.length(details) > 100 do
+      String.slice(details, 0, 97) <> "..."
+    else
+      details
+    end
+  end
+
+  defp truncate_details(details), do: inspect(details)
+
+  defp truncate_reason(reason) do
+    inspected = inspect(reason)
+
+    if String.length(inspected) > 200 do
+      String.slice(inspected, 0, 197) <> "..."
+    else
+      inspected
     end
   end
 end
