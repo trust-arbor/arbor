@@ -323,20 +323,23 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     end
   end
 
-  defp apply_timestamp_condition(query, field, op, value) do
-    case {field, op} do
-      {:inserted_at, :gt} -> where(query, [r], r.inserted_at > ^value)
-      {:inserted_at, :gte} -> where(query, [r], r.inserted_at >= ^value)
-      {:inserted_at, :lt} -> where(query, [r], r.inserted_at < ^value)
-      {:inserted_at, :lte} -> where(query, [r], r.inserted_at <= ^value)
-      {:inserted_at, :eq} -> where(query, [r], r.inserted_at == ^value)
-      {:updated_at, :gt} -> where(query, [r], r.updated_at > ^value)
-      {:updated_at, :gte} -> where(query, [r], r.updated_at >= ^value)
-      {:updated_at, :lt} -> where(query, [r], r.updated_at < ^value)
-      {:updated_at, :lte} -> where(query, [r], r.updated_at <= ^value)
-      {:updated_at, :eq} -> where(query, [r], r.updated_at == ^value)
-    end
-  end
+  defp apply_timestamp_condition(query, :inserted_at, op, value),
+    do: apply_inserted_at(query, op, value)
+
+  defp apply_timestamp_condition(query, :updated_at, op, value),
+    do: apply_updated_at(query, op, value)
+
+  defp apply_inserted_at(query, :gt, value), do: where(query, [r], r.inserted_at > ^value)
+  defp apply_inserted_at(query, :gte, value), do: where(query, [r], r.inserted_at >= ^value)
+  defp apply_inserted_at(query, :lt, value), do: where(query, [r], r.inserted_at < ^value)
+  defp apply_inserted_at(query, :lte, value), do: where(query, [r], r.inserted_at <= ^value)
+  defp apply_inserted_at(query, :eq, value), do: where(query, [r], r.inserted_at == ^value)
+
+  defp apply_updated_at(query, :gt, value), do: where(query, [r], r.updated_at > ^value)
+  defp apply_updated_at(query, :gte, value), do: where(query, [r], r.updated_at >= ^value)
+  defp apply_updated_at(query, :lt, value), do: where(query, [r], r.updated_at < ^value)
+  defp apply_updated_at(query, :lte, value), do: where(query, [r], r.updated_at <= ^value)
+  defp apply_updated_at(query, :eq, value), do: where(query, [r], r.updated_at == ^value)
 
   # ---------------------------------------------------------------------------
   # Time Range
