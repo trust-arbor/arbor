@@ -5,6 +5,11 @@ config :logger, level: :warning
 # Don't start HTTP server in tests
 config :arbor_gateway, start_server: false
 
+# Disable checkpoint integration in tests (module may not be available)
+config :arbor_signals,
+  checkpoint_module: nil,
+  checkpoint_store: nil
+
 # Postgres tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo
 # Run: mix ecto.migrate -r Arbor.Persistence.Repo
