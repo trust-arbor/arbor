@@ -8,10 +8,10 @@ defmodule Arbor.Historian.Timeline do
 
   require Logger
 
-  alias Arbor.Historian.Collector.StreamRouter
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.QueryEngine.Aggregator
+  alias Arbor.Historian.StreamIds
   alias Arbor.Historian.Timeline.Span
 
   @default_max_results 10_000
@@ -108,15 +108,15 @@ defmodule Arbor.Historian.Timeline do
   end
 
   defp determine_streams(%Span{agent_id: agent_id}) when is_binary(agent_id) do
-    [StreamRouter.stream_id_for_agent(agent_id)]
+    [StreamIds.for_agent(agent_id)]
   end
 
   defp determine_streams(%Span{correlation_id: cid}) when is_binary(cid) do
-    [StreamRouter.stream_id_for_correlation(cid)]
+    [StreamIds.for_correlation(cid)]
   end
 
   defp determine_streams(%Span{categories: categories}) when categories != [] do
-    Enum.map(categories, &StreamRouter.stream_id_for_category/1)
+    Enum.map(categories, &StreamIds.for_category/1)
   end
 
   defp determine_streams(_span) do

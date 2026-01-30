@@ -1,23 +1,22 @@
 defmodule Arbor.Historian do
   @moduledoc """
-  Durable activity stream and audit log for the Arbor system.
+  Pure query layer over persistent event storage for the Arbor system.
 
-  Bridges transient signals (arbor_signals) with permanent event storage,
-  providing rich querying, timeline reconstruction, and causality tracing.
+  Provides rich querying, timeline reconstruction, and causality tracing
+  over events stored in the EventLog.
 
   ## Architecture
 
   ```
-  Signals.Bus  ──►  Collector  ──►  EventLog (ETS)
-                        │                 │
-                    StreamRouter      QueryEngine
-                    routes to:        reads from:
-                    - "global"        - by stream
-                    - "agent:{id}"    - by filter
-                    - "category:{c}"  - aggregations
-                    - "session:{id}"
-                    - "correlation:{id}"   Timeline
-                                          merges + deduplicates
+  EventLog (ETS)  ◄──  QueryEngine
+       │                    │
+  StreamRegistry         reads from:
+  tracks:                - by stream
+  - "global"             - by filter
+  - "agent:{id}"         - aggregations
+  - "category:{c}"
+  - "session:{id}"       Timeline
+  - "correlation:{id}"   merges + deduplicates
   ```
 
   ## Quick Start
@@ -41,19 +40,9 @@ defmodule Arbor.Historian do
 
   @behaviour Arbor.Contracts.API.Historian
 
-  alias Arbor.Historian.{Collector, QueryEngine, StreamRegistry, Timeline}
+  alias Arbor.Historian.{QueryEngine, StreamRegistry, Timeline}
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
-
-  # ── Collection ──
-
-  @doc "Manually collect a signal into the historian."
-  @spec collect(struct()) :: :ok | {:error, term()}
-  defdelegate collect(signal), to: Collector
-
-  @doc "Get the number of events collected."
-  @spec event_count() :: non_neg_integer()
-  defdelegate event_count(), to: Collector
 
   # ── Querying ──
 
@@ -150,27 +139,18 @@ defmodule Arbor.Historian do
   @doc "Get overall historian statistics."
   @spec stats() :: map()
   def stats do
-    collector_stats = Collector.stats()
     stream_count = length(StreamRegistry.list_streams())
     total_events = StreamRegistry.total_events()
 
-    Map.merge(collector_stats, %{
+    %{
       stream_count: stream_count,
       total_events: total_events
-    })
+    }
   end
 
   # ============================================================================
   # Contract Callbacks (Arbor.Contracts.API.Historian)
   # ============================================================================
-
-  # -- Collection --
-
-  @impl Arbor.Contracts.API.Historian
-  def collect_signal_into_event_log(signal), do: Collector.collect(signal)
-
-  @impl Arbor.Contracts.API.Historian
-  def read_collected_event_count, do: Collector.event_count()
 
   # -- Querying --
 
@@ -203,11 +183,10 @@ defmodule Arbor.Historian do
   # -- Lifecycle --
 
   @impl Arbor.Contracts.API.Historian
-  def start_link(opts) do
+  def start_link(_opts) do
     children = [
       {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
-      {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry},
-      {Arbor.Historian.Collector, opts}
+      {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Historian.Supervisor)

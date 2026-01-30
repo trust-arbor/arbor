@@ -71,24 +71,39 @@ defmodule Arbor.Historian.EventConverter do
   end
 
   defp extract_type("arbor.historian." <> rest) do
-    safe_atomize(rest)
+    encode_event_type_from_string(rest)
   end
 
   defp extract_type(type) when is_binary(type) do
-    safe_atomize(type)
+    encode_event_type_from_string(type)
   end
 
-  # Safe atom conversion - only converts to existing atoms
-  defp safe_atomize(nil), do: nil
-  defp safe_atomize(value) when is_atom(value), do: value
+  # Convert a "category:type" string into a safely-encoded event type atom.
+  # Uses SafeAtom.encode_event_type to create the combined atom safely.
+  defp encode_event_type_from_string(value) when is_binary(value) do
+    case String.split(value, ":", parts: 2) do
+      [category_str, type_str] ->
+        category = SafeAtom.to_category(category_str)
+        # For type, use to_existing to only allow known types
+        type =
+          case SafeAtom.to_existing(type_str) do
+            {:ok, atom} -> atom
+            {:error, _} -> :unknown
+          end
 
-  defp safe_atomize(value) when is_binary(value) do
-    case SafeAtom.to_existing(value) do
-      {:ok, atom} -> atom
-      # If the string doesn't exist as an atom, return :unknown
-      {:error, _} -> :unknown
+        SafeAtom.encode_event_type(category, type)
+
+      [_single] ->
+        # Single value without colon - try to atomize it safely
+        case SafeAtom.to_existing(value) do
+          {:ok, atom} -> atom
+          {:error, _} -> :unknown
+        end
     end
   end
+
+  defp encode_event_type_from_string(nil), do: nil
+  defp encode_event_type_from_string(value) when is_atom(value), do: value
 
   # Subject type uses SafeAtom.to_subject_type which has known allowed values
   defp atomize_subject_type(nil), do: nil
