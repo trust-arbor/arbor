@@ -27,6 +27,7 @@ defmodule ArborAi.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
+      {:arbor_signals, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       # jido_ai and req_llm come from root mix.exs path deps

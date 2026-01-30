@@ -67,6 +67,8 @@ defmodule Arbor.Checkpoint do
   - `version` - Schema version for migration support
   """
 
+  alias Arbor.Signals
+
   require Logger
 
   @type checkpoint_id :: String.t() | atom()
@@ -164,10 +166,12 @@ defmodule Arbor.Checkpoint do
     case store.put(id, checkpoint, opts) do
       :ok ->
         Logger.debug("Checkpoint saved for #{inspect(id)}")
+        emit_saved(id)
         :ok
 
       {:error, reason} = error ->
         Logger.warning("Failed to save checkpoint for #{inspect(id)}: #{inspect(reason)}")
+        emit_save_failed(id, reason)
         error
     end
   end
@@ -339,6 +343,7 @@ defmodule Arbor.Checkpoint do
             restored_state = module.restore_from_checkpoint(checkpoint_data, initial_state)
 
             Logger.info("Successfully restored state from checkpoint for #{inspect(id)}")
+            emit_restored(id, module)
             {:ok, restored_state}
           rescue
             error ->
@@ -382,6 +387,7 @@ defmodule Arbor.Checkpoint do
     case store.get(id, opts) do
       {:ok, checkpoint} ->
         result = if include_metadata, do: checkpoint, else: checkpoint.data
+        emit_loaded(id)
         {:ok, result}
 
       {:error, :not_found} when retries > 0 ->
@@ -389,7 +395,8 @@ defmodule Arbor.Checkpoint do
         next_delay = calculate_next_delay(delay, backoff)
         load_with_retry(id, store, retries - 1, next_delay, backoff, include_metadata, opts)
 
-      {:error, _reason} = error ->
+      {:error, reason} = error ->
+        emit_load_failed(id, reason)
         error
     end
   end
@@ -415,5 +422,42 @@ defmodule Arbor.Checkpoint do
       args: initial_args,
       recovered: false
     }
+  end
+
+  # ============================================================================
+  # Signal Emissions
+  # ============================================================================
+
+  defp emit_saved(id) do
+    Signals.emit(:checkpoint, :saved, %{
+      checkpoint_id: to_string(id)
+    })
+  end
+
+  defp emit_save_failed(id, reason) do
+    Signals.emit(:checkpoint, :save_failed, %{
+      checkpoint_id: to_string(id),
+      reason: inspect(reason, limit: 200)
+    })
+  end
+
+  defp emit_loaded(id) do
+    Signals.emit(:checkpoint, :loaded, %{
+      checkpoint_id: to_string(id)
+    })
+  end
+
+  defp emit_load_failed(id, reason) do
+    Signals.emit(:checkpoint, :load_failed, %{
+      checkpoint_id: to_string(id),
+      reason: inspect(reason, limit: 200)
+    })
+  end
+
+  defp emit_restored(id, module) do
+    Signals.emit(:checkpoint, :restored, %{
+      checkpoint_id: to_string(id),
+      module: inspect(module)
+    })
   end
 end
