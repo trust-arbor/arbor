@@ -99,10 +99,7 @@ defmodule Arbor.Comms.ResponseRouter do
   """
   @spec can_send?(atom()) :: boolean()
   def can_send?(channel) do
-    case Dispatcher.channel_module(channel) do
-      nil -> false
-      module -> module.channel_info()[:supports_outbound] == true
-    end
+    Dispatcher.sender_module(channel) != nil
   end
 
   @doc """

@@ -9,21 +9,22 @@ defmodule Arbor.Comms.Channels.Signal do
 
       config :arbor_comms, :signal,
         enabled: true,
-        account: "+18089098869",
+        account: "+1XXXXXXXXXX",
         signal_cli_path: "/usr/local/bin/signal-cli",
         poll_interval_ms: 60_000,
         log_dir: "/tmp/arbor/signal_chat",
         log_retention_days: 30
   """
 
-  @behaviour Arbor.Contracts.Comms.Channel
+  @behaviour Arbor.Contracts.Comms.ChannelSender
+  @behaviour Arbor.Contracts.Comms.ChannelReceiver
 
   alias Arbor.Contracts.Comms.Message
 
   # Signal has a ~2000 character limit
   @max_message_length 2000
 
-  @impl true
+  @doc "Returns channel capabilities and metadata."
   def channel_info do
     %{
       name: :signal,
@@ -35,7 +36,7 @@ defmodule Arbor.Comms.Channels.Signal do
     }
   end
 
-  @impl true
+  @impl Arbor.Contracts.Comms.ChannelReceiver
   def poll do
     account = config(:account)
 
@@ -57,14 +58,14 @@ defmodule Arbor.Comms.Channels.Signal do
     end
   end
 
-  @impl true
+  @impl Arbor.Contracts.Comms.ChannelSender
   def send_message(recipient, message, opts \\ []) do
     case config(:account) do
       nil ->
         {:error, :no_account_configured}
 
       account ->
-        formatted = format_response(message)
+        formatted = do_format(message)
         attachments = Keyword.get(opts, :attachments, [])
 
         args = ["-u", account, "send", "-m", formatted, recipient]
@@ -81,13 +82,10 @@ defmodule Arbor.Comms.Channels.Signal do
     end
   end
 
-  @impl true
-  def send_response(%Message{} = message, response) do
-    send_message(message.from, response, [])
-  end
+  @impl Arbor.Contracts.Comms.ChannelSender
+  def format_for_channel(message), do: do_format(message)
 
-  @impl true
-  def format_response(response) do
+  defp do_format(response) do
     response = String.trim(response)
 
     if String.length(response) > @max_message_length do

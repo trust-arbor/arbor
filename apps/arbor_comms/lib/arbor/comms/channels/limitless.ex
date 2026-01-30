@@ -3,8 +3,8 @@ defmodule Arbor.Comms.Channels.Limitless do
   Limitless pendant channel — inbound only.
 
   Polls the Limitless API for new pendant transcripts and routes them
-  through the message handler. Responses go to Signal since the
-  pendant is receive-only.
+  through the message handler. Responses are routed by the Dispatcher's
+  `reply/2` which resolves the reply channel from message metadata.
 
   ## Configuration
 
@@ -18,16 +18,14 @@ defmodule Arbor.Comms.Channels.Limitless do
         response_recipient: "..."    # from SIGNAL_TO env var
   """
 
-  @behaviour Arbor.Contracts.Comms.Channel
+  @behaviour Arbor.Contracts.Comms.ChannelReceiver
 
   require Logger
 
-  alias Arbor.Comms.Channels.Signal
-  alias Arbor.Comms.Dispatcher
-  alias Arbor.Comms.Limitless.Client
+  alias Arbor.Comms.Channels.Limitless.Client
   alias Arbor.Contracts.Comms.Message
 
-  @impl true
+  @doc "Returns channel capabilities and metadata."
   def channel_info do
     %{
       name: :limitless,
@@ -39,7 +37,7 @@ defmodule Arbor.Comms.Channels.Limitless do
     }
   end
 
-  @impl true
+  @impl Arbor.Contracts.Comms.ChannelReceiver
   def poll do
     since = read_checkpoint()
 
@@ -78,30 +76,6 @@ defmodule Arbor.Comms.Channels.Limitless do
       {:error, reason} ->
         {:error, reason}
     end
-  end
-
-  @impl true
-  def send_message(_recipient, _message, _opts \\ []) do
-    {:error, :not_supported}
-  end
-
-  @impl true
-  def send_response(%Message{} = message, response) do
-    # Route responses to Signal — the pendant is receive-only
-    recipient = message.metadata[:response_recipient] || config(:response_recipient)
-
-    if recipient do
-      Dispatcher.send(:signal, recipient, response)
-    else
-      Logger.warning("No response_recipient configured for Limitless channel")
-      {:error, :no_response_recipient}
-    end
-  end
-
-  @impl true
-  def format_response(response) do
-    # Delegate to Signal's format since responses go there
-    Signal.format_response(response)
   end
 
   # ============================================================================
