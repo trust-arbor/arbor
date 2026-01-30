@@ -15,7 +15,7 @@ defmodule Arbor.Historian.StreamRegistry do
 
   @doc "Start the registry."
   @spec start_link(keyword()) :: Agent.on_start()
-  def start_link(opts \\ []) do
+  def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     Agent.start_link(fn -> %{} end, name: name)
   end

@@ -24,7 +24,7 @@ defmodule Arbor.Historian.Timeline do
   returns entries in chronological order.
   """
   @spec reconstruct(Span.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def reconstruct(%Span{} = span, opts \\ []) do
+  def reconstruct(%Span{} = span, opts) do
     max_results = Keyword.get(opts, :max_results, @default_max_results)
     streams = determine_streams(span)
 
@@ -44,7 +44,7 @@ defmodule Arbor.Historian.Timeline do
   """
   @spec for_agent(String.t(), DateTime.t(), DateTime.t(), keyword()) ::
           {:ok, [HistoryEntry.t()]}
-  def for_agent(agent_id, from, to, opts \\ []) do
+  def for_agent(agent_id, from, to, opts) do
     span = Span.new(from: from, to: to, agent_id: agent_id)
     reconstruct(span, opts)
   end
@@ -53,7 +53,7 @@ defmodule Arbor.Historian.Timeline do
   Get a timeline for a correlation chain.
   """
   @spec for_correlation(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def for_correlation(correlation_id, opts \\ []) do
+  def for_correlation(correlation_id, opts) do
     QueryEngine.read_correlation(correlation_id, opts)
   end
 
@@ -63,7 +63,7 @@ defmodule Arbor.Historian.Timeline do
   Traces forward (effects) and backward (causes) through cause_id links.
   """
   @spec for_causality_chain(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def for_causality_chain(signal_id, opts \\ []) do
+  def for_causality_chain(signal_id, opts) do
     # Enforce a read limit to prevent loading unbounded data into memory
     opts = Keyword.put_new(opts, :limit, @default_max_results)
     {:ok, all_entries} = QueryEngine.read_global(opts)
@@ -96,7 +96,7 @@ defmodule Arbor.Historian.Timeline do
   first/last timestamps, error count.
   """
   @spec summary(Span.t(), keyword()) :: map()
-  def summary(%Span{} = span, opts \\ []) do
+  def summary(%Span{} = span, opts) do
     {:ok, entries} = reconstruct(span, opts)
     Aggregator.build_summary(entries)
   end
