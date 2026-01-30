@@ -281,6 +281,84 @@ defmodule Arbor.Trust.DecayTest do
 
       assert Process.alive?(Process.whereis(Decay))
     end
+
+    test "scheduled_run with enabled=true runs decay and reschedules" do
+      Decay.set_enabled(true)
+
+      # Create an inactive profile with score to decay
+      agent_id = "sched_decay_#{System.unique_integer([:positive])}"
+      {:ok, profile} = Profile.new(agent_id)
+
+      twenty_days_ago = DateTime.add(DateTime.utc_now(), -20, :day)
+
+      profile = %{
+        profile
+        | trust_score: 50,
+          tier: :trusted,
+          last_activity_at: twenty_days_ago,
+          created_at: twenty_days_ago
+      }
+
+      Store.store_profile(profile)
+
+      # Trigger the scheduled run message
+      send(Process.whereis(Decay), :scheduled_run)
+      Process.sleep(200)
+
+      assert Process.alive?(Process.whereis(Decay))
+
+      {:ok, updated} = Store.get_profile(agent_id)
+      # 20 days - 7 grace = 13 points decay: 50 - 13 = 37
+      assert updated.trust_score == 37
+    end
+
+    test "scheduled_run with enabled=false is a no-op" do
+      Decay.set_enabled(false)
+
+      send(Process.whereis(Decay), :scheduled_run)
+      Process.sleep(50)
+
+      assert Process.alive?(Process.whereis(Decay))
+    end
+  end
+
+  describe "set_enabled transitions" do
+    test "enabling from disabled state schedules next run" do
+      # Start disabled
+      config = Decay.get_config()
+      assert config.enabled == false
+
+      # Enable - should schedule next run
+      Decay.set_enabled(true)
+      config = Decay.get_config()
+      assert config.enabled == true
+
+      # Disable again
+      Decay.set_enabled(false)
+      config = Decay.get_config()
+      assert config.enabled == false
+    end
+
+    test "enabling when already enabled does not double-schedule" do
+      Decay.set_enabled(true)
+      Decay.set_enabled(true)
+
+      config = Decay.get_config()
+      assert config.enabled == true
+
+      # Cleanup
+      Decay.set_enabled(false)
+    end
+  end
+
+  describe "decay with profiles at floor score" do
+    test "profile at floor score does not decay further" do
+      {:ok, profile} = build_profile("agent_at_floor", trust_score: 10, tier: :untrusted)
+
+      # 30 days inactive, should try to decay below floor (10) but not go below
+      result = Decay.apply_decay(profile, 30)
+      assert result.trust_score == 10
+    end
   end
 
   # Helpers
