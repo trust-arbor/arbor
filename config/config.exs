@@ -59,5 +59,16 @@ config :arbor_common, :hands,
   sandbox_image: "claude-sandbox",
   sandbox_credentials_volume: "claude-sandbox-credentials"
 
+# Database backup with age encryption
+# To enable, set enabled: true and create a key pair:
+#   age-keygen -o ~/.arbor/backup-key-private.txt
+#   age-keygen -y ~/.arbor/backup-key-private.txt > ~/.arbor/backup-key.txt
+config :arbor_persistence, :backup,
+  enabled: false,
+  backup_dir: "~/.arbor/backups",
+  age_key_file: "~/.arbor/backup-key.txt",
+  schedule: {3, 0},
+  retention: [daily: 7, weekly: 4, monthly: 3]
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"
