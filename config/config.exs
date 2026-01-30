@@ -37,10 +37,21 @@ config :arbor_comms, :email,
 # are set in runtime.exs from SIGNAL_TO env var.
 config :arbor_comms, :handler,
   enabled: true,
-  context_file: ".arbor/context/comms_context.md",
   response_generator: Arbor.AI.CommsResponder,
   conversation_window: 20,
   dedup_window_seconds: 300
+
+# Channel senders for arbor_actions (runtime resolution, no compile-time dep)
+config :arbor_actions, :channel_senders, %{
+  signal: Arbor.Comms.Channels.Signal,
+  email: Arbor.Comms.Channels.Email
+}
+
+# Channel receivers for arbor_actions (runtime resolution, no compile-time dep)
+config :arbor_actions, :channel_receivers, %{
+  signal: Arbor.Comms.Channels.Signal,
+  limitless: Arbor.Comms.Channels.Limitless
+}
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"

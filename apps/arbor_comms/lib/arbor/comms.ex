@@ -7,8 +7,8 @@ defmodule Arbor.Comms do
 
   ## Sending Messages
 
-      Arbor.Comms.send(:signal, "+1234567890", "Hello from Arbor!")
-      Arbor.Comms.send_signal("+1234567890", "Hello!")
+      Arbor.Comms.send(:signal, "+1XXXXXXXXXX", "Hello from Arbor!")
+      Arbor.Comms.send_signal("+1XXXXXXXXXX", "Hello!")
 
   ## Checking Status
 
@@ -26,7 +26,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
-  alias Arbor.Comms.Limitless
+  alias Arbor.Comms.Channels.Limitless
 
   # -- Sending --
 
@@ -64,7 +64,7 @@ defmodule Arbor.Comms do
   """
   @spec poll(atom()) :: {:ok, [Arbor.Contracts.Comms.Message.t()]} | {:error, term()}
   def poll(channel) do
-    case Dispatcher.channel_module(channel) do
+    case Dispatcher.receiver_module(channel) do
       nil -> {:error, {:unknown_channel, channel}}
       module -> module.poll()
     end

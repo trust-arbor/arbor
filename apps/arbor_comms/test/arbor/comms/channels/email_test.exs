@@ -14,31 +14,25 @@ defmodule Arbor.Comms.Channels.EmailTest do
     end
   end
 
-  describe "poll/0" do
-    test "returns empty list (outbound only)" do
-      assert {:ok, []} = Email.poll()
-    end
-  end
-
-  describe "format_response/1" do
+  describe "format_for_channel/1" do
     test "trims whitespace" do
-      assert Email.format_response("  hello  ") == "hello"
+      assert Email.format_for_channel("  hello  ") == "hello"
     end
 
     test "truncates long messages" do
       long = String.duplicate("a", 60_000)
-      result = Email.format_response(long)
+      result = Email.format_for_channel(long)
       assert String.length(result) < 50_001
       assert result =~ "[Message truncated]"
     end
 
     test "preserves messages within limit" do
       msg = String.duplicate("a", 1000)
-      assert Email.format_response(msg) == msg
+      assert Email.format_for_channel(msg) == msg
     end
 
     test "handles empty string" do
-      assert Email.format_response("") == ""
+      assert Email.format_for_channel("") == ""
     end
   end
 

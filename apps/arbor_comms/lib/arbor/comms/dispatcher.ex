@@ -3,7 +3,8 @@ defmodule Arbor.Comms.Dispatcher do
   Dispatches outbound messages to the appropriate channel implementation.
 
   Handles message formatting, logging, and signal emission for
-  all outbound communications.
+  all outbound communications. Maintains separate sender and receiver
+  module registries.
   """
 
   alias Arbor.Comms.ChatLogger
@@ -11,10 +12,14 @@ defmodule Arbor.Comms.Dispatcher do
   alias Arbor.Contracts.Comms.Message
   alias Arbor.Contracts.Comms.ResponseEnvelope
 
-  @channel_modules %{
+  @sender_modules %{
     signal: Arbor.Comms.Channels.Signal,
-    limitless: Arbor.Comms.Channels.Limitless,
     email: Arbor.Comms.Channels.Email
+  }
+
+  @receiver_modules %{
+    signal: Arbor.Comms.Channels.Signal,
+    limitless: Arbor.Comms.Channels.Limitless
   }
 
   @doc """
@@ -22,7 +27,7 @@ defmodule Arbor.Comms.Dispatcher do
   """
   @spec send(atom(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def send(channel, to, content, opts \\ []) do
-    case Map.get(@channel_modules, channel) do
+    case Map.get(@sender_modules, channel) do
       nil ->
         {:error, {:unknown_channel, channel}}
 
@@ -44,23 +49,32 @@ defmodule Arbor.Comms.Dispatcher do
 
   @doc """
   Reply to an inbound message.
+
+  Resolves the reply channel: if the origin channel can send, replies
+  there. Otherwise checks `metadata[:response_channel]`, then falls
+  back to `Config.default_response_channel/0`.
   """
   @spec reply(Message.t(), String.t()) :: :ok | {:error, term()}
   def reply(%Message{} = original, response) do
-    case Map.get(@channel_modules, original.channel) do
+    reply_channel = resolve_reply_channel(original)
+
+    case Map.get(@sender_modules, reply_channel) do
       nil ->
-        {:error, {:unknown_channel, original.channel}}
+        {:error, {:no_sendable_channel, original.channel}}
 
       module ->
+        to = original.metadata[:response_recipient] || original.from
+        opts = reply_opts(original, reply_channel)
+
         outbound =
-          Message.outbound(original.channel, original.from, response,
+          Message.outbound(reply_channel, to, response,
             reply_to: original.id,
             conversation_id: original.conversation_id
           )
 
         ChatLogger.log_message(outbound)
 
-        case module.send_response(original, response) do
+        case module.send_message(to, response, opts) do
           :ok ->
             emit_sent_signal(outbound)
             :ok
@@ -80,13 +94,13 @@ defmodule Arbor.Comms.Dispatcher do
   """
   @spec deliver_envelope(Message.t(), atom(), ResponseEnvelope.t()) :: :ok | {:error, term()}
   def deliver_envelope(%Message{} = original, channel, %ResponseEnvelope{} = envelope) do
-    case Map.get(@channel_modules, channel) do
+    case Map.get(@sender_modules, channel) do
       nil ->
         {:error, {:unknown_channel, channel}}
 
       module ->
         to = resolve_recipient(original, channel)
-        formatted = module.format_response(envelope.body)
+        formatted = module.format_for_channel(envelope.body)
 
         opts =
           []
@@ -114,12 +128,49 @@ defmodule Arbor.Comms.Dispatcher do
   end
 
   @doc """
-  Returns the module for a given channel, if registered.
+  Returns the sender module for a given channel, if registered.
+  """
+  @spec sender_module(atom()) :: module() | nil
+  def sender_module(channel) do
+    Map.get(@sender_modules, channel)
+  end
+
+  @doc """
+  Returns the receiver module for a given channel, if registered.
+  """
+  @spec receiver_module(atom()) :: module() | nil
+  def receiver_module(channel) do
+    Map.get(@receiver_modules, channel)
+  end
+
+  @doc """
+  Returns the module for a given channel from either registry.
+
+  Checks senders first, then receivers.
   """
   @spec channel_module(atom()) :: module() | nil
   def channel_module(channel) do
-    Map.get(@channel_modules, channel)
+    Map.get(@sender_modules, channel) || Map.get(@receiver_modules, channel)
   end
+
+  # ============================================================================
+  # Reply Channel Resolution
+  # ============================================================================
+
+  defp resolve_reply_channel(%Message{channel: ch} = msg) do
+    if Map.has_key?(@sender_modules, ch) do
+      ch
+    else
+      msg.metadata[:response_channel] || Config.default_response_channel()
+    end
+  end
+
+  defp reply_opts(%Message{} = msg, :email) do
+    subject = msg.metadata["subject"] || "Arbor Message"
+    [subject: "Re: #{subject}"]
+  end
+
+  defp reply_opts(_msg, _channel), do: []
 
   defp resolve_recipient(%Message{channel: channel, from: from}, channel), do: from
 

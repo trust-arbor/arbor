@@ -13,6 +13,7 @@ defmodule Arbor.Actions do
   | Shell | `Arbor.Actions.Shell` | Shell command execution |
   | File | `Arbor.Actions.File` | File system operations |
   | Git | `Arbor.Actions.Git` | Git repository operations |
+  | Comms | `Arbor.Actions.Comms` | Channel messaging |
 
   ## Quick Start
 
@@ -76,6 +77,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.Git.Diff,
         Arbor.Actions.Git.Commit,
         Arbor.Actions.Git.Log
+      ],
+      comms: [
+        Arbor.Actions.Comms.SendMessage,
+        Arbor.Actions.Comms.PollMessages
       ]
     }
   end

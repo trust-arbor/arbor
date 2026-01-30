@@ -33,7 +33,7 @@ defmodule Arbor.Contracts.Comms.QuestionRegistry do
         correlation_id: "roadmap/item.md",
         questions: ["JWT or sessions?"],
         send_via: :signal,
-        send_to: "+15551234567"
+        send_to: "+1XXXXXXXXXX"
       )
 
       # Human answers via /answer command (prefix match)
