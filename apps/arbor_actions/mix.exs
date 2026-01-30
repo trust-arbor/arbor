@@ -31,6 +31,7 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
+      {:arbor_persistence, in_umbrella: true},
       {:jido_action, path: "../../../jido_action", override: true}
     ]
   end
