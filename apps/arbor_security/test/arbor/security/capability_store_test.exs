@@ -11,6 +11,144 @@ defmodule Arbor.Security.CapabilityStoreTest do
   end
 
   # ===========================================================================
+  # Basic CRUD operations
+  # ===========================================================================
+
+  describe "put/1 and get/1" do
+    test "stores and retrieves a capability", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/basic")
+      assert {:ok, :stored} = CapabilityStore.put(cap)
+      assert {:ok, retrieved} = CapabilityStore.get(cap.id)
+      assert retrieved.id == cap.id
+      assert retrieved.principal_id == agent_id
+    end
+
+    test "returns not_found for unknown capability" do
+      assert {:error, :not_found} =
+               CapabilityStore.get("cap_nonexistent_#{:erlang.unique_integer([:positive])}")
+    end
+
+    test "returns capability_expired for expired capability", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/expiring",
+          principal_id: agent_id,
+          expires_at: DateTime.add(DateTime.utc_now(), 1)
+        )
+
+      # Store with future expiry, then manually override
+      expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
+      {:ok, :stored} = CapabilityStore.put(expired)
+
+      assert {:error, :capability_expired} = CapabilityStore.get(expired.id)
+    end
+  end
+
+  describe "list_for_principal/2" do
+    test "lists capabilities for a principal", %{agent_id: agent_id} do
+      {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/list/1")
+      {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/list/2")
+      {:ok, :stored} = CapabilityStore.put(cap1)
+      {:ok, :stored} = CapabilityStore.put(cap2)
+
+      {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
+      ids = Enum.map(caps, & &1.id)
+      assert cap1.id in ids
+      assert cap2.id in ids
+    end
+
+    test "returns empty list for unknown principal" do
+      assert {:ok, []} =
+               CapabilityStore.list_for_principal("agent_unknown_#{:erlang.unique_integer([:positive])}")
+    end
+
+    test "filters expired by default", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/expired_list",
+          principal_id: agent_id,
+          expires_at: DateTime.add(DateTime.utc_now(), 1)
+        )
+
+      expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
+      {:ok, :stored} = CapabilityStore.put(expired)
+
+      {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
+      refute Enum.any?(caps, &(&1.id == expired.id))
+    end
+
+    test "includes expired when include_expired: true", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/include_expired",
+          principal_id: agent_id,
+          expires_at: DateTime.add(DateTime.utc_now(), 1)
+        )
+
+      expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
+      {:ok, :stored} = CapabilityStore.put(expired)
+
+      {:ok, caps} = CapabilityStore.list_for_principal(agent_id, include_expired: true)
+      assert Enum.any?(caps, &(&1.id == expired.id))
+    end
+  end
+
+  describe "find_authorizing/2" do
+    test "finds capability matching resource URI", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/findable")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      assert {:ok, found} = CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/findable")
+      assert found.id == cap.id
+    end
+
+    test "finds capability by prefix matching", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/prefix")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/prefix/subpath/file.ex")
+    end
+
+    test "returns not_found for unmatched resource", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/specific")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      assert {:error, :not_found} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/write/specific")
+    end
+  end
+
+  describe "revoke/1" do
+    test "revokes an existing capability", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/revoke_test")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      assert :ok = CapabilityStore.revoke(cap.id)
+      assert {:error, :not_found} = CapabilityStore.get(cap.id)
+    end
+
+    test "returns error for non-existent capability" do
+      assert {:error, :not_found} =
+               CapabilityStore.revoke("cap_gone_#{:erlang.unique_integer([:positive])}")
+    end
+  end
+
+  describe "revoke_all/1" do
+    test "revokes all capabilities for a principal", %{agent_id: agent_id} do
+      {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/revoke_all/1")
+      {:ok, cap2} = build_capability(agent_id, "arbor://fs/read/revoke_all/2")
+      {:ok, :stored} = CapabilityStore.put(cap1)
+      {:ok, :stored} = CapabilityStore.put(cap2)
+
+      assert :ok = CapabilityStore.revoke_all(agent_id)
+
+      {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
+      assert caps == []
+    end
+  end
+
+  # ===========================================================================
   # Phase 7: Quota enforcement tests
   # ===========================================================================
 

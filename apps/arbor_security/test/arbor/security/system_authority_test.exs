@@ -100,5 +100,43 @@ defmodule Arbor.Security.SystemAuthorityTest do
       assert {:error, :invalid_capability_signature} =
                SystemAuthority.verify_capability_signature(cap)
     end
+
+    test "verifies capability signed by a different registered entity" do
+      # Generate a separate identity and register it
+      alias Arbor.Contracts.Security.Identity
+      alias Arbor.Security.Capability.Signer
+
+      {:ok, other_identity} = Identity.generate()
+      :ok = Registry.register(Identity.public_only(other_identity))
+
+      # Create and sign a capability with the other identity's key
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/other_signed",
+          principal_id: "agent_test001"
+        )
+
+      signed =
+        cap
+        |> Map.put(:issuer_id, other_identity.agent_id)
+        |> Signer.sign(other_identity.private_key)
+
+      # SystemAuthority should verify via Registry lookup
+      assert :ok = SystemAuthority.verify_capability_signature(signed)
+    end
+
+    test "rejects capability with unknown issuer_id" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/unknown_issuer",
+          principal_id: "agent_test001"
+        )
+
+      # Set issuer to an unregistered agent
+      cap = %{cap | issuer_id: "agent_not_registered", issuer_signature: :crypto.strong_rand_bytes(64)}
+
+      assert {:error, :invalid_capability_signature} =
+               SystemAuthority.verify_capability_signature(cap)
+    end
   end
 end
