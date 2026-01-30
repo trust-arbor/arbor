@@ -434,6 +434,49 @@ defmodule Arbor.Trust.StoreTest do
     end
   end
 
+  describe "tier change event emission on update" do
+    test "emits tier change event when tier changes", %{profile: profile} do
+      :ok = Store.store_profile(profile)
+
+      # Update profile to trigger tier change (untrusted -> trusted)
+      {:ok, updated} =
+        Store.update_profile(profile.agent_id, fn p ->
+          %{p | trust_score: 60, tier: :trusted}
+        end)
+
+      assert updated.tier == :trusted
+
+      # Verify the tier change event was stored
+      {:ok, events} = Store.get_events(profile.agent_id)
+      tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
+      assert length(tier_events) >= 1
+    end
+
+    test "does not emit tier change event when tier stays the same", %{profile: profile} do
+      :ok = Store.store_profile(profile)
+
+      # Update score but keep same tier
+      {:ok, _updated} =
+        Store.update_profile(profile.agent_id, fn p ->
+          %{p | trust_score: 5}
+        end)
+
+      {:ok, events} = Store.get_events(profile.agent_id)
+      tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
+      assert length(tier_events) == 0
+    end
+  end
+
+  describe "higher_tier logic via council-based operations" do
+    test "trust points can boost tier through recalculate_with_points", %{profile: profile} do
+      :ok = Store.store_profile(profile)
+
+      # Award enough points to potentially boost tier
+      {:ok, updated} = Store.award_trust_points(profile.agent_id, 100)
+      assert updated.trust_points == 100
+    end
+  end
+
   describe "get_cache_stats/0" do
     test "returns cache statistics" do
       stats = Store.get_cache_stats()

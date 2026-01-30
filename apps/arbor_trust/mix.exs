@@ -21,7 +21,12 @@ defmodule Arbor.Trust.MixProject do
       docs: docs(),
       # Testing
       elixirc_paths: elixirc_paths(Mix.env()),
-      test_coverage: [threshold: 90]
+      test_coverage: [
+        threshold: 90,
+        ignore_modules: [
+          Arbor.Trust.TestHelpers
+        ]
+      ]
     ]
   end
 

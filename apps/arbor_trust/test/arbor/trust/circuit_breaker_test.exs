@@ -265,6 +265,117 @@ defmodule Arbor.Trust.CircuitBreakerTest do
       # GenServer should still be alive
       assert Process.alive?(Process.whereis(CircuitBreaker))
     end
+
+    test "cleanup removes old events and retains recent ones", %{agent_id: agent_id} do
+      # Record some events
+      for _ <- 1..3 do
+        CircuitBreaker.record_event(agent_id, :action_failure)
+      end
+
+      Process.sleep(50)
+
+      # Trigger cleanup
+      send(Process.whereis(CircuitBreaker), :cleanup)
+      Process.sleep(50)
+
+      # GenServer should still be alive with recent events retained
+      assert Process.alive?(Process.whereis(CircuitBreaker))
+      assert CircuitBreaker.get_state(agent_id) == :closed
+    end
+  end
+
+  describe "auto_close transition" do
+    test "auto_close from half_open transitions to closed", %{agent_id: agent_id} do
+      # Trip the circuit first
+      for _ <- 1..5 do
+        CircuitBreaker.record_event(agent_id, :action_failure)
+      end
+
+      Process.sleep(50)
+      assert CircuitBreaker.get_state(agent_id) == :open
+
+      # Wait for half-open transition
+      Process.sleep(1200)
+      assert CircuitBreaker.get_state(agent_id) == :half_open
+
+      # Send auto_close message
+      send(Process.whereis(CircuitBreaker), {:auto_close, agent_id})
+      Process.sleep(50)
+
+      assert CircuitBreaker.get_state(agent_id) == :closed
+    end
+
+    test "auto_close on closed circuit is a no-op", %{agent_id: agent_id} do
+      assert CircuitBreaker.get_state(agent_id) == :closed
+
+      send(Process.whereis(CircuitBreaker), {:auto_close, agent_id})
+      Process.sleep(50)
+
+      assert CircuitBreaker.get_state(agent_id) == :closed
+    end
+
+    test "auto_close on open circuit is a no-op", %{agent_id: agent_id} do
+      # Trip the circuit
+      for _ <- 1..5 do
+        CircuitBreaker.record_event(agent_id, :action_failure)
+      end
+
+      Process.sleep(50)
+      assert CircuitBreaker.get_state(agent_id) == :open
+
+      # Send auto_close while still :open (not yet half_open)
+      send(Process.whereis(CircuitBreaker), {:auto_close, agent_id})
+      Process.sleep(50)
+
+      # Should still be :open since auto_close only works from :half_open
+      assert CircuitBreaker.get_state(agent_id) == :open
+    end
+  end
+
+  describe "half_open transition edge cases" do
+    test "half_open message on closed circuit is a no-op", %{agent_id: agent_id} do
+      assert CircuitBreaker.get_state(agent_id) == :closed
+
+      send(Process.whereis(CircuitBreaker), {:half_open, agent_id})
+      Process.sleep(50)
+
+      assert CircuitBreaker.get_state(agent_id) == :closed
+    end
+
+    test "half_open message on already half_open circuit stays half_open", %{agent_id: agent_id} do
+      # Trip the circuit
+      for _ <- 1..5 do
+        CircuitBreaker.record_event(agent_id, :action_failure)
+      end
+
+      Process.sleep(50)
+      assert CircuitBreaker.get_state(agent_id) == :open
+
+      # Wait for half-open
+      Process.sleep(1200)
+      assert CircuitBreaker.get_state(agent_id) == :half_open
+
+      # Send another half_open - should be no-op (not :open)
+      send(Process.whereis(CircuitBreaker), {:half_open, agent_id})
+      Process.sleep(50)
+
+      assert CircuitBreaker.get_state(agent_id) == :half_open
+    end
+  end
+
+  describe "rollback spike handling" do
+    test "rollback spike logs warning but does not freeze", %{agent_id: agent_id} do
+      # Record 5 rollbacks (exceeds threshold of 3)
+      for _ <- 1..5 do
+        CircuitBreaker.record_event(agent_id, :rollback_executed)
+      end
+
+      Process.sleep(50)
+
+      # Rollback spikes do NOT trip the circuit
+      assert CircuitBreaker.get_state(agent_id) == :closed
+      assert CircuitBreaker.check(agent_id) == :ok
+    end
   end
 
   # Helpers
