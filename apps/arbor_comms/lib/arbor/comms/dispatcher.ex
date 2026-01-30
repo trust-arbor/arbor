@@ -174,8 +174,10 @@ defmodule Arbor.Comms.Dispatcher do
 
   defp resolve_recipient(%Message{channel: channel, from: from}, channel), do: from
 
-  defp resolve_recipient(%Message{}, target_channel) do
-    Config.channel_config(target_channel)[:to] || "unknown"
+  defp resolve_recipient(%Message{metadata: metadata}, target_channel) do
+    metadata[:response_recipient] ||
+      Config.channel_config(target_channel)[:to] ||
+      "unknown"
   end
 
   defp maybe_add(opts, _key, nil), do: opts
