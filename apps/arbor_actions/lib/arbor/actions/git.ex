@@ -397,6 +397,7 @@ defmodule Arbor.Actions.Git do
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
+    alias Arbor.Common.ShellEscape
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
@@ -456,7 +457,7 @@ defmodule Arbor.Actions.Git do
       # For commit messages with special characters, we need careful escaping
       command =
         args
-        |> Enum.map(&escape_shell_arg/1)
+        |> Enum.map(&ShellEscape.escape_arg/1)
         |> then(&["git" | &1])
         |> Enum.join(" ")
 
@@ -474,16 +475,6 @@ defmodule Arbor.Actions.Git do
 
         {:error, reason} ->
           {:error, inspect(reason)}
-      end
-    end
-
-    defp escape_shell_arg(arg) do
-      if String.contains?(arg, [" ", "'", "\"", "\n", "$", "`", "\\"]) do
-        # Use single quotes and escape any existing single quotes
-        escaped = String.replace(arg, "'", "'\\''")
-        "'#{escaped}'"
-      else
-        arg
       end
     end
   end

@@ -33,6 +33,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
 
   @behaviour Arbor.Consensus.EvaluatorBackend
 
+  alias Arbor.Common.ShellEscape
   alias Arbor.Consensus.Config
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
@@ -116,7 +117,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
         "mix test"
 
       {:ok, safe_paths} ->
-        escaped = Enum.map(safe_paths, &escape_shell_arg/1)
+        escaped = Enum.map(safe_paths, &ShellEscape.escape_arg!/1)
         "mix test #{Enum.join(escaped, " ")}"
 
       {:error, invalid_path} ->
@@ -407,9 +408,4 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
 
   defp valid_test_path?(_), do: false
 
-  # Shell escape: wrap in single quotes, escape embedded single quotes
-  defp escape_shell_arg(arg) do
-    escaped = String.replace(arg, "'", "'\\''")
-    "'#{escaped}'"
-  end
 end

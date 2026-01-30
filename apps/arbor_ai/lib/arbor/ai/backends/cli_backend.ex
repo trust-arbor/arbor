@@ -55,6 +55,7 @@ defmodule Arbor.AI.Backends.CliBackend do
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
   alias Arbor.AI.ShellAdapter
+  alias Arbor.Common.ShellEscape
 
   require Logger
 
@@ -260,7 +261,7 @@ defmodule Arbor.AI.Backends.CliBackend do
           # waiting for interactive input. This applies to all CLI tools
           # (claude, opencode, gemini, etc.) as they may wait for stdin
           # when using session continuation flags like --continue or --resume
-          quoted_args = Enum.map(args, &shell_escape/1)
+          quoted_args = Enum.map(args, &ShellEscape.escape_arg!/1)
           shell_cmd = "#{cmd} #{Enum.join(quoted_args, " ")} < /dev/null"
           ShellAdapter.cmd("sh", ["-c", shell_cmd], cmd_opts)
         rescue
@@ -345,11 +346,6 @@ defmodule Arbor.AI.Backends.CliBackend do
   # Generate a hash of the working directory for session lookup
   defp working_dir_hash(dir) do
     :crypto.hash(:md5, dir) |> Base.encode16(case: :lower) |> String.slice(0, 8)
-  end
-
-  # Shell escape a string for safe command execution
-  defp shell_escape(arg) do
-    "'" <> String.replace(arg, "'", "'\\''") <> "'"
   end
 
   @doc """
