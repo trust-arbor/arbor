@@ -18,6 +18,8 @@ defmodule Arbor.AI.ShellAdapter do
   alias Arbor.Common.ShellEscape
   alias Arbor.Shell
 
+  require Logger
+
   @doc """
   Execute a command with arguments, returning `{output, exit_code}`.
 
@@ -55,7 +57,8 @@ defmodule Arbor.AI.ShellAdapter do
         {"Command blocked by sandbox", 126}
 
       {:error, reason} ->
-        {"Error: #{inspect(reason)}", 1}
+        Logger.warning("Shell execution failed", reason: inspect(reason))
+        {"Error: command execution failed", 1}
     end
   end
 

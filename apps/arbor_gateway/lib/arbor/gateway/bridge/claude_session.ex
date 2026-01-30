@@ -126,7 +126,12 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
         do_authorize(agent_id, tool_name, tool_input, cwd)
 
       {:error, reason} ->
-        {:error, :unauthorized, "Failed to register session: #{inspect(reason)}"}
+        Logger.warning("Failed to register Claude session",
+          session_id: session_id,
+          reason: inspect(reason)
+        )
+
+        {:error, :unauthorized, "Session registration failed"}
     end
   end
 
