@@ -104,6 +104,64 @@ defmodule Arbor.SignalsTest do
       assert Map.has_key?(stats, :store)
       assert Map.has_key?(stats, :bus)
       assert Map.has_key?(stats, :healthy)
+      assert stats.healthy == true
+    end
+  end
+
+  describe "emit_signal/1" do
+    test "emits a pre-constructed signal" do
+      signal = Signal.new(:test, :prebuilt, %{value: 42})
+      assert :ok = Signals.emit_signal(signal)
+
+      Process.sleep(50)
+      {:ok, fetched} = Signals.get_signal(signal.id)
+      assert fetched.data.value == 42
+    end
+  end
+
+  describe "contract callbacks" do
+    test "emit_signal_for_category_and_type/4" do
+      assert :ok = Signals.emit_signal_for_category_and_type(:contract, :test_cb, %{}, [])
+    end
+
+    test "subscribe_to_signals_matching_pattern/3 and unsubscribe" do
+      {:ok, sub_id} =
+        Signals.subscribe_to_signals_matching_pattern(
+          "contract.*",
+          fn _signal -> :ok end,
+          []
+        )
+
+      assert is_binary(sub_id)
+      assert :ok = Signals.unsubscribe_from_signals_by_subscription_id(sub_id)
+    end
+
+    test "get_signal_by_id/1" do
+      signal = Signal.new(:contract, :fetch_cb, %{})
+      Signals.emit_signal(signal)
+      Process.sleep(50)
+
+      assert {:ok, fetched} = Signals.get_signal_by_id(signal.id)
+      assert fetched.id == signal.id
+    end
+
+    test "query_signals_with_filters/1" do
+      assert {:ok, signals} = Signals.query_signals_with_filters([])
+      assert is_list(signals)
+    end
+
+    test "get_recent_signals_from_buffer/1" do
+      assert {:ok, signals} = Signals.get_recent_signals_from_buffer([])
+      assert is_list(signals)
+    end
+
+    test "emit_preconstructed_signal/1" do
+      signal = Signal.new(:contract, :precon_cb, %{x: 99})
+      assert :ok = Signals.emit_preconstructed_signal(signal)
+
+      Process.sleep(50)
+      assert {:ok, fetched} = Signals.get_signal(signal.id)
+      assert fetched.data.x == 99
     end
   end
 end
