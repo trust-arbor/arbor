@@ -157,8 +157,24 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
   describe "conversation dispatch" do
     test "dispatches non-command messages to response generator" do
-      # Use a test log dir so we don't pollute real logs
-      Application.put_env(:arbor_comms, :signal, log_dir: "/tmp/arbor/test_handler_chat")
+      # Use a unique test log dir so we don't pollute real logs
+      test_log_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_handler_test_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(test_log_dir)
+      original_signal = Application.get_env(:arbor_comms, :signal)
+      Application.put_env(:arbor_comms, :signal, log_dir: test_log_dir)
+
+      on_exit(fn ->
+        File.rm_rf(test_log_dir)
+
+        if original_signal,
+          do: Application.put_env(:arbor_comms, :signal, original_signal),
+          else: Application.delete_env(:arbor_comms, :signal)
+      end)
 
       msg =
         Message.new(
@@ -170,11 +186,6 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
       assert :ok = MessageHandler.process(msg)
       Process.sleep(100)
-
-      # Clean up
-      File.rm_rf("/tmp/arbor/test_handler_chat")
-    after
-      Application.put_env(:arbor_comms, :signal, enabled: false)
     end
   end
 end
