@@ -1,16 +1,16 @@
-defmodule Mix.Tasks.Arbor.Server.Stop do
+defmodule Mix.Tasks.Arbor.Stop do
   @shortdoc "Stop the running Arbor server"
   @moduledoc """
   Gracefully stops the Arbor background server.
 
-      $ mix arbor.server.stop
+      $ mix arbor.stop
 
   Sends `:init.stop/1` to the server node for a clean OTP shutdown.
   Falls back to SIGTERM via the PID file if the node doesn't stop in time.
   """
   use Mix.Task
 
-  alias Mix.Tasks.Arbor.Server, as: Config
+  alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shutdown_timeout_ms 10_000
   @poll_interval_ms 500
