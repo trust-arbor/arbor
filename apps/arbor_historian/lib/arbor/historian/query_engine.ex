@@ -26,7 +26,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read all entries from a specific stream.
   """
   @spec read_stream(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_stream(stream_id, opts \\ []) do
+  def read_stream(stream_id, opts) do
     event_log = Keyword.get(opts, :event_log, Arbor.Historian.EventLog.ETS)
 
     case PersistenceETS.read_stream(stream_id, name: event_log) do
@@ -47,7 +47,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read entries for a specific agent.
   """
   @spec read_agent(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_agent(agent_id, opts \\ []) do
+  def read_agent(agent_id, opts) do
     read_stream(StreamRouter.stream_id_for_agent(agent_id), opts)
   end
 
@@ -55,7 +55,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read entries for a specific category.
   """
   @spec read_category(atom(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_category(category, opts \\ []) do
+  def read_category(category, opts) do
     read_stream(StreamRouter.stream_id_for_category(category), opts)
   end
 
@@ -63,7 +63,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read entries for a specific session.
   """
   @spec read_session(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_session(session_id, opts \\ []) do
+  def read_session(session_id, opts) do
     read_stream(StreamRouter.stream_id_for_session(session_id), opts)
   end
 
@@ -71,7 +71,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read entries for a specific correlation chain.
   """
   @spec read_correlation(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_correlation(correlation_id, opts \\ []) do
+  def read_correlation(correlation_id, opts) do
     read_stream(StreamRouter.stream_id_for_correlation(correlation_id), opts)
   end
 
@@ -79,7 +79,7 @@ defmodule Arbor.Historian.QueryEngine do
   Read the global stream (all entries).
   """
   @spec read_global(keyword()) :: {:ok, [HistoryEntry.t()]}
-  def read_global(opts \\ []) do
+  def read_global(opts) do
     read_stream("global", opts)
   end
 
@@ -96,7 +96,7 @@ defmodule Arbor.Historian.QueryEngine do
   - `:limit` - Maximum number of entries to return
   """
   @spec query(query_opts()) :: {:ok, [HistoryEntry.t()]}
-  def query(opts \\ []) do
+  def query(opts) do
     {:ok, entries} = read_global(opts)
 
     filtered =
@@ -113,7 +113,7 @@ defmodule Arbor.Historian.QueryEngine do
   Scans the global stream for a matching signal_id.
   """
   @spec find_by_signal_id(String.t(), keyword()) :: {:ok, HistoryEntry.t()} | {:error, :not_found}
-  def find_by_signal_id(signal_id, opts \\ []) do
+  def find_by_signal_id(signal_id, opts) do
     {:ok, entries} = read_global(opts)
 
     case Enum.find(entries, &(&1.signal_id == signal_id)) do

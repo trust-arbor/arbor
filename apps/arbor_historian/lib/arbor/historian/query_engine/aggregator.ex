@@ -13,7 +13,7 @@ defmodule Arbor.Historian.QueryEngine.Aggregator do
   Count entries matching a category in the global stream.
   """
   @spec count_by_category(atom(), keyword()) :: non_neg_integer()
-  def count_by_category(category, opts \\ []) do
+  def count_by_category(category, opts) do
     {:ok, entries} = QueryEngine.read_global(opts)
     Enum.count(entries, &(&1.category == category))
   end
@@ -22,7 +22,7 @@ defmodule Arbor.Historian.QueryEngine.Aggregator do
   Count error entries (category :logs, type :error or :warn).
   """
   @spec error_count(keyword()) :: non_neg_integer()
-  def error_count(opts \\ []) do
+  def error_count(opts) do
     {:ok, entries} = QueryEngine.read_global(opts)
     Enum.count(entries, &(&1.category == :logs and &1.type in [:error, :warn]))
   end
@@ -33,7 +33,7 @@ defmodule Arbor.Historian.QueryEngine.Aggregator do
   Returns a map of `%{category_atom => count}`.
   """
   @spec category_distribution(keyword()) :: %{atom() => non_neg_integer()}
-  def category_distribution(opts \\ []) do
+  def category_distribution(opts) do
     {:ok, entries} = QueryEngine.read_global(opts)
     Enum.frequencies_by(entries, & &1.category)
   end
@@ -44,7 +44,7 @@ defmodule Arbor.Historian.QueryEngine.Aggregator do
   Returns a map of `%{type_atom => count}`.
   """
   @spec type_distribution(keyword()) :: %{atom() => non_neg_integer()}
-  def type_distribution(opts \\ []) do
+  def type_distribution(opts) do
     {:ok, entries} = QueryEngine.read_global(opts)
     Enum.frequencies_by(entries, & &1.type)
   end
@@ -55,7 +55,7 @@ defmodule Arbor.Historian.QueryEngine.Aggregator do
   Returns a map with event count, categories, first/last timestamps.
   """
   @spec agent_activity(String.t(), keyword()) :: map()
-  def agent_activity(agent_id, opts \\ []) do
+  def agent_activity(agent_id, opts) do
     {:ok, entries} = QueryEngine.read_agent(agent_id, opts)
     build_summary(entries)
   end

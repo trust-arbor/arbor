@@ -52,7 +52,7 @@ defmodule Arbor.Historian.Timeline.Span do
   Create a span covering the last N minutes from now.
   """
   @spec last_minutes(pos_integer(), keyword()) :: t()
-  def last_minutes(minutes, opts \\ []) do
+  def last_minutes(minutes, opts) do
     now = DateTime.utc_now()
     from = DateTime.add(now, -minutes * 60, :second)
     new(Keyword.merge(opts, from: from, to: now))
@@ -62,7 +62,7 @@ defmodule Arbor.Historian.Timeline.Span do
   Create a span covering the last N hours from now.
   """
   @spec last_hours(pos_integer(), keyword()) :: t()
-  def last_hours(hours, opts \\ []) do
+  def last_hours(hours, opts) do
     last_minutes(hours * 60, opts)
   end
 

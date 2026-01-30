@@ -46,7 +46,7 @@ defmodule Arbor.Historian.Timeline.SpanTest do
 
   describe "last_minutes/2" do
     test "creates a span covering recent minutes" do
-      span = Span.last_minutes(30)
+      span = Span.last_minutes(30, [])
 
       assert DateTime.diff(span.to, span.from, :second) == 30 * 60
       assert DateTime.diff(DateTime.utc_now(), span.to, :second) < 2
@@ -62,7 +62,7 @@ defmodule Arbor.Historian.Timeline.SpanTest do
 
   describe "last_hours/2" do
     test "creates a span covering recent hours" do
-      span = Span.last_hours(2)
+      span = Span.last_hours(2, [])
 
       assert DateTime.diff(span.to, span.from, :second) == 2 * 60 * 60
     end
