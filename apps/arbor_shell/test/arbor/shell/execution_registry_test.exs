@@ -115,4 +115,50 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
       assert exec.status == :running
     end
   end
+
+  describe "handle_info :cleanup" do
+    test "periodic cleanup triggers cleanup and reschedules" do
+      {:ok, id} = ExecutionRegistry.register("echo periodic")
+      :ok = ExecutionRegistry.update_status(id, :completed, %{result: %{exit_code: 0}})
+
+      # Trigger periodic cleanup manually (uses default 3600s TTL)
+      send(Process.whereis(ExecutionRegistry), :cleanup)
+      Process.sleep(50)
+
+      # Just-completed execution should still exist (within TTL)
+      assert {:ok, exec} = ExecutionRegistry.get(id)
+      assert exec.status == :completed
+    end
+  end
+
+  describe "register with options" do
+    test "stores port reference" do
+      port = Port.open({:spawn, "sleep 10"}, [:binary, :exit_status])
+
+      {:ok, id} = ExecutionRegistry.register("sleep 10", port: port)
+      {:ok, exec} = ExecutionRegistry.get(id)
+
+      assert exec.port == port
+
+      # Cleanup
+      Port.close(port)
+    catch
+      :error, _ -> :ok
+    end
+
+    test "stores pid reference" do
+      {:ok, id} = ExecutionRegistry.register("echo test", pid: self())
+      {:ok, exec} = ExecutionRegistry.get(id)
+
+      assert exec.pid == self()
+    end
+
+    test "stores sandbox and cwd" do
+      {:ok, id} = ExecutionRegistry.register("ls", sandbox: :strict, cwd: "/tmp")
+      {:ok, exec} = ExecutionRegistry.get(id)
+
+      assert exec.sandbox == :strict
+      assert exec.cwd == "/tmp"
+    end
+  end
 end

@@ -178,6 +178,44 @@ defmodule Arbor.ShellTest do
     end
   end
 
+  describe "get_result/2 immediate retrieval" do
+    test "returns result immediately for completed sync execution" do
+      {:ok, _result} = Shell.execute("echo immediate", sandbox: :none)
+
+      # List executions to find the one we just created
+      {:ok, executions} = Shell.list_executions(status: :completed)
+
+      completed =
+        Enum.find(executions, fn e ->
+          e.command == "echo immediate" and e.status == :completed
+        end)
+
+      assert completed != nil
+
+      # get_result without wait should return immediately
+      {:ok, result} = Shell.get_result(completed.id)
+      assert result.exit_code == 0
+    end
+
+    test "returns result for failed execution without wait" do
+      {:ok, executions_before} = Shell.list_executions()
+      before_ids = MapSet.new(Enum.map(executions_before, & &1.id))
+
+      {:ok, _result} = Shell.execute("sh -c 'exit 1'", sandbox: :none)
+
+      {:ok, executions_after} = Shell.list_executions()
+
+      new_exec =
+        Enum.find(executions_after, fn e ->
+          not MapSet.member?(before_ids, e.id) and e.command == "sh -c 'exit 1'"
+        end)
+
+      assert new_exec != nil
+      {:ok, result} = Shell.get_result(new_exec.id)
+      assert result.exit_code == 1
+    end
+  end
+
   describe "executor edge cases" do
     test "handles command with environment variables" do
       {:ok, result} =
