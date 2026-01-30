@@ -52,6 +52,96 @@ defmodule Arbor.Agent do
 
   require Logger
 
+  # ===========================================================================
+  # Public API — Authorized versions (for callers that need capability checks)
+  # ===========================================================================
+
+  @doc """
+  Start a supervised agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/spawn` capability before
+  creating the agent. Use this when spawning agents on behalf of another
+  agent or external request.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting agent spawn
+  - `agent_id` - Unique identifier for the new agent
+  - `agent_module` - The Jido agent module to run
+  - `initial_state` - Initial state map (default: %{})
+  - `opts` - Additional options (same as `start/4`)
+
+  ## Returns
+
+  - `{:ok, pid}` on success
+  - `{:error, :unauthorized}` if caller lacks capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other failure
+  """
+  @spec authorize_spawn(String.t(), String.t(), module(), map(), keyword()) ::
+          {:ok, pid()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | term()}
+  def authorize_spawn(caller_id, agent_id, agent_module, initial_state \\ %{}, opts \\ []) do
+    resource = "arbor://agent/spawn"
+
+    case Arbor.Security.authorize(caller_id, resource, :spawn) do
+      {:ok, :authorized} ->
+        start(agent_id, agent_module, initial_state, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Execute an action on a running agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/action/{action_name}` capability
+  before executing. Use this when an agent is executing actions on behalf of
+  another agent or external request.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting action execution
+  - `agent_id` - The target agent's ID
+  - `action` - Action module or `{action_module, params}` tuple
+  - `timeout` - Call timeout in ms (default: 5000)
+
+  ## Returns
+
+  - `{:ok, result}` on success
+  - `{:error, :unauthorized}` if caller lacks capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other failure
+  """
+  @spec authorize_action(String.t(), String.t(), module() | {module(), map()}, timeout()) ::
+          {:ok, any()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | :not_found | any()}
+  def authorize_action(caller_id, agent_id, action, timeout \\ 5000) do
+    action_name = extract_action_name(action)
+    resource = "arbor://agent/action/#{action_name}"
+
+    case Arbor.Security.authorize(caller_id, resource, :execute) do
+      {:ok, :authorized} ->
+        run_action(agent_id, action, timeout)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  # ===========================================================================
+  # Public API — Unchecked versions (for system-level callers)
+  # ===========================================================================
+
   @doc """
   Start a supervised agent.
 
@@ -226,5 +316,25 @@ defmodule Arbor.Agent do
       {:ok, _pid} -> true
       {:error, :not_found} -> false
     end
+  end
+
+  # ===========================================================================
+  # Private helpers
+  # ===========================================================================
+
+  # Extract the action name from an action spec (module or {module, params} tuple)
+  defp extract_action_name({action_module, _params}) when is_atom(action_module) do
+    action_module_to_name(action_module)
+  end
+
+  defp extract_action_name(action_module) when is_atom(action_module) do
+    action_module_to_name(action_module)
+  end
+
+  defp action_module_to_name(module) do
+    module
+    |> Module.split()
+    |> List.last()
+    |> Macro.underscore()
   end
 end

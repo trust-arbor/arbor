@@ -51,7 +51,81 @@ defmodule Arbor.Shell do
   @default_sandbox :basic
 
   # ===========================================================================
-  # Public API — short, human-friendly names
+  # Public API — Authorized versions (for agent callers)
+  # ===========================================================================
+
+  @doc """
+  Execute a shell command with authorization check.
+
+  Verifies the agent has the `arbor://shell/exec/{command_name}` capability
+  before delegating to `execute/2`. Use this for agent-initiated commands
+  where authorization should be enforced.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `command` - The shell command to execute
+  - `opts` - Options passed to `execute/2`
+
+  ## Returns
+
+  - `{:ok, result}` - Command executed successfully
+  - `{:error, :unauthorized}` - Agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` - Requires escalation approval
+  - `{:error, reason}` - Other execution errors
+
+  ## Examples
+
+      {:ok, result} = Arbor.Shell.authorize_and_execute("agent_001", "ls -la")
+      {:error, :unauthorized} = Arbor.Shell.authorize_and_execute("agent_002", "rm -rf /")
+  """
+  @spec authorize_and_execute(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | :timeout | term()}
+  def authorize_and_execute(agent_id, command, opts \\ []) do
+    command_name = extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+
+    case Arbor.Security.authorize(agent_id, resource, :execute) do
+      {:ok, :authorized} ->
+        execute(command, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Execute an async shell command with authorization check.
+
+  Same as `authorize_and_execute/3` but for async execution.
+  """
+  @spec authorize_and_execute_async(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | term()}
+  def authorize_and_execute_async(agent_id, command, opts \\ []) do
+    command_name = extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+
+    case Arbor.Security.authorize(agent_id, resource, :execute) do
+      {:ok, :authorized} ->
+        execute_async(command, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  # ===========================================================================
+  # Public API — short, human-friendly names (unchecked, for system callers)
   # ===========================================================================
 
   @doc """
@@ -325,5 +399,14 @@ defmodule Arbor.Shell do
     else
       command
     end
+  end
+
+  # Extract the command name (first word) from a shell command string
+  defp extract_command_name(command) when is_binary(command) do
+    command
+    |> String.trim_leading()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> String.replace(~r/^.*\//, "")  # Strip path prefix (e.g., /bin/ls -> ls)
   end
 end
