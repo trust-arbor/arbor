@@ -58,6 +58,8 @@ defmodule Mix.Tasks.Arbor.Hands.Stop do
     if Hands.summary_exists?(name) do
       Mix.shell().info("Summary available: .arbor/hands/#{name}/summary.md")
     end
+
+    report_worktree_status(name)
   end
 
   defp stop_sandbox(name, container, force) do
@@ -85,6 +87,29 @@ defmodule Mix.Tasks.Arbor.Hands.Stop do
 
     if Hands.summary_exists?(name) do
       Mix.shell().info("Summary available: .arbor/hands/#{name}/summary.md")
+    end
+
+    report_worktree_status(name)
+  end
+
+  defp report_worktree_status(name) do
+    if Hands.has_worktree?(name) do
+      branch = Hands.worktree_branch(name)
+      wt_path = Hands.worktree_path(name)
+
+      ahead_msg =
+        case Hands.worktree_ahead_count(name) do
+          {:ok, count} -> "#{count} commits ahead of main"
+          _ -> "unknown status"
+        end
+
+      Mix.shell().info("")
+      Mix.shell().info("Worktree:")
+      Mix.shell().info("  Branch:   #{branch} (#{ahead_msg})")
+      Mix.shell().info("  Path:     #{wt_path}")
+      Mix.shell().info("  Review:   git log main..#{branch}")
+      Mix.shell().info("  Merge:    git merge #{branch}")
+      Mix.shell().info("  Cleanup:  mix arbor.hands.cleanup #{name}")
     end
   end
 end
