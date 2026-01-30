@@ -70,4 +70,42 @@ defmodule Arbor.Persistence.Store.ETSTest do
       refute ETS.exists?("missing", name: name)
     end
   end
+
+  describe "resource limits" do
+    test "rejects new keys when store is full" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"store_limits_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_entries: 3}, id: name)
+
+      assert :ok = ETS.put("a", 1, name: name)
+      assert :ok = ETS.put("b", 2, name: name)
+      assert :ok = ETS.put("c", 3, name: name)
+      assert {:error, :store_full} = ETS.put("d", 4, name: name)
+    end
+
+    test "allows overwriting existing keys when full" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"store_overwrite_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_entries: 2}, id: name)
+
+      assert :ok = ETS.put("a", 1, name: name)
+      assert :ok = ETS.put("b", 2, name: name)
+      # Overwrite existing key should succeed even when full
+      assert :ok = ETS.put("a", 99, name: name)
+      assert {:ok, 99} = ETS.get("a", name: name)
+    end
+
+    test "accepts new keys after deleting from full store" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"store_delete_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_entries: 2}, id: name)
+
+      ETS.put("a", 1, name: name)
+      ETS.put("b", 2, name: name)
+      assert {:error, :store_full} = ETS.put("c", 3, name: name)
+
+      ETS.delete("a", name: name)
+      assert :ok = ETS.put("c", 3, name: name)
+    end
+  end
 end

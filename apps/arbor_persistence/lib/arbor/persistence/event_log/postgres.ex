@@ -14,8 +14,8 @@ defmodule Arbor.Persistence.EventLog.Postgres do
 
       config :arbor_persistence, Arbor.Persistence.Repo,
         database: "arbor_dev",
-        username: "postgres",
-        password: "postgres",
+        username: System.get_env("DB_USER", "postgres"),
+        password: System.get_env("DB_PASS", "postgres"),
         hostname: "localhost"
 
   ## Usage
