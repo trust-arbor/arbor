@@ -85,6 +85,21 @@ defmodule Arbor.PersistenceTest do
       assert Persistence.stream_exists?(name, backend, "s1")
       assert {:ok, 1} = Persistence.stream_version(name, backend, "s1")
     end
+
+    test "list_streams/stream_count/event_count", %{name: name, backend: backend} do
+      Persistence.append(name, backend, "s1", Event.new("s1", "t", %{}))
+      Persistence.append(name, backend, "s2", Event.new("s2", "t", %{}))
+
+      {:ok, streams} = Persistence.list_streams(name, backend)
+      assert "s1" in streams
+      assert "s2" in streams
+
+      {:ok, count} = Persistence.stream_count(name, backend)
+      assert count == 2
+
+      {:ok, events} = Persistence.event_count(name, backend)
+      assert events == 2
+    end
   end
 
   describe "error paths with failing backends" do

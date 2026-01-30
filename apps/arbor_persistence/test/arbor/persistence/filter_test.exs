@@ -144,6 +144,43 @@ defmodule Arbor.Persistence.FilterTest do
       filter = Filter.new() |> Filter.where(:nested_field, :eq, "found")
       assert Filter.matches?(filter, record)
     end
+
+    test "looks up string keys in plain maps" do
+      record = %{"status" => "active"}
+      filter = Filter.new() |> Filter.where(:status, :eq, "active")
+      assert Filter.matches?(filter, record)
+    end
+
+    test "contains with map checks key existence" do
+      filter = Filter.new() |> Filter.where(:config, :contains, :debug)
+      assert Filter.matches?(filter, %{config: %{debug: true}})
+      refute Filter.matches?(filter, %{config: %{release: true}})
+    end
+
+    test "contains returns false for non-container types" do
+      filter = Filter.new() |> Filter.where(:val, :contains, "x")
+      refute Filter.matches?(filter, %{val: 42})
+    end
+
+    test "in returns false when value is not a list" do
+      filter = Filter.new() |> Filter.where(:status, :in, "not_a_list")
+      refute Filter.matches?(filter, %{status: "active"})
+    end
+
+    test "since/until match when record has no timestamp" do
+      now = DateTime.utc_now()
+      filter = Filter.new() |> Filter.since(now) |> Filter.until(now)
+      assert Filter.matches?(filter, %{no_timestamp: true})
+    end
+
+    test "uses :timestamp field when :inserted_at is absent" do
+      now = DateTime.utc_now()
+      past = DateTime.add(now, -3600)
+
+      filter = Filter.new() |> Filter.since(now)
+      refute Filter.matches?(filter, %{timestamp: past})
+      assert Filter.matches?(filter, %{timestamp: now})
+    end
   end
 
   describe "apply/2" do
