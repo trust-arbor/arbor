@@ -15,9 +15,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   use GenServer
 
+  require Logger
+
   @behaviour Arbor.Persistence.EventLog
 
   alias Arbor.Persistence.Event
+
+  @default_max_events 1_000_000
+  @default_max_read 10_000
+  @warning_threshold 0.8
 
   # --- Client API (EventLog behaviour) ---
 
@@ -86,6 +92,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   @impl GenServer
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
+    max_events = Keyword.get(opts, :max_events, @default_max_events)
 
     # Safe: name is module atom from internal start_link opts, not user input
     stream_table =
@@ -102,6 +109,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
        stream_table: stream_table,
        global_table: global_table,
        global_position: 0,
+       max_events: max_events,
+       warning_logged: false,
        stream_versions: %{},
        subscribers: %{},
        monitors: %{}
@@ -110,9 +119,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @impl GenServer
   def handle_call({:append, stream_id, events}, _from, state) do
-    {persisted, state} = do_append(stream_id, events, state)
-    notify_subscribers(stream_id, persisted, state)
-    {:reply, {:ok, persisted}, state}
+    if state.global_position + length(events) > state.max_events do
+      {:reply, {:error, :event_log_full}, state}
+    else
+      {persisted, state} = do_append(stream_id, events, state)
+      notify_subscribers(stream_id, persisted, state)
+      state = maybe_warn_event_capacity(state)
+      {:reply, {:ok, persisted}, state}
+    end
   end
 
   def handle_call({:read_stream, stream_id, opts}, _from, state) do
@@ -126,7 +140,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   def handle_call({:read_all, opts}, _from, state) do
     from_pos = Keyword.get(opts, :from, 0)
-    limit = Keyword.get(opts, :limit)
+    limit = Keyword.get(opts, :limit, @default_max_read)
 
     events = do_read_all(state.global_table, from_pos, limit)
     {:reply, {:ok, events}, state}
@@ -298,6 +312,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
     for event <- events do
       for {pid, _ref} <- stream_subs, do: send(pid, {:event, event})
       for {pid, _ref} <- all_subs, do: send(pid, {:event, event})
+    end
+  end
+
+  defp maybe_warn_event_capacity(%{warning_logged: true} = state), do: state
+
+  defp maybe_warn_event_capacity(%{global_position: pos, max_events: max} = state) do
+    threshold = trunc(max * @warning_threshold)
+
+    if pos >= threshold do
+      Logger.warning("EventLog approaching capacity",
+        event_count: pos,
+        max_events: max,
+        utilization: "#{round(pos / max * 100)}%"
+      )
+
+      %{state | warning_logged: true}
+    else
+      state
     end
   end
 end
