@@ -195,4 +195,110 @@ defmodule Arbor.Consensus.EventEmitterTest do
       assert EventEmitter.stream_id() == "arbor:consensus"
     end
   end
+
+  describe "emit_all/2" do
+    test "emits multiple events atomically", %{table: table} do
+      events = [
+        Events.ProposalSubmitted.new(%{
+          proposal_id: "prop_batch_1",
+          proposer: "agent_1",
+          change_type: :code_modification,
+          description: "Batch 1"
+        }),
+        Events.ProposalSubmitted.new(%{
+          proposal_id: "prop_batch_2",
+          proposer: "agent_2",
+          change_type: :test_change,
+          description: "Batch 2"
+        })
+      ]
+
+      assert :ok = EventEmitter.emit_all(events)
+
+      {:ok, stored} = ETS.read_stream("arbor:consensus", name: table)
+      assert length(stored) >= 2
+    end
+
+    test "returns :ok when no event_log configured" do
+      Application.delete_env(:arbor_consensus, :event_log)
+
+      events = [
+        Events.CoordinatorStarted.new(%{
+          coordinator_id: "coord_1",
+          config: %{}
+        })
+      ]
+
+      assert :ok = EventEmitter.emit_all(events)
+    end
+
+    test "passes metadata and correlation options", %{table: table} do
+      events = [
+        Events.ProposalSubmitted.new(%{
+          proposal_id: "prop_meta",
+          proposer: "agent_meta",
+          change_type: :code_modification,
+          description: "With meta"
+        })
+      ]
+
+      assert :ok =
+               EventEmitter.emit_all(events,
+                 correlation_id: "corr_batch",
+                 metadata: %{batch: true}
+               )
+
+      {:ok, stored} = ETS.read_stream("arbor:consensus", name: table)
+      assert length(stored) >= 1
+    end
+  end
+
+  describe "evaluation_failed/4" do
+    test "emits evaluation failed event", %{table: table} do
+      assert :ok =
+               EventEmitter.evaluation_failed(
+                 "prop_fail",
+                 :security,
+                 :timeout
+               )
+
+      {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
+      assert Enum.any?(events, &(&1.type == "evaluation.failed"))
+    end
+  end
+
+  describe "recovery events" do
+    test "recovery_started/3 emits event", %{table: table} do
+      assert :ok = EventEmitter.recovery_started("coord_recovery", 42)
+
+      {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
+      assert Enum.any?(events, &(&1.type == "recovery.started"))
+    end
+
+    test "recovery_completed/3 emits event", %{table: table} do
+      stats = %{
+        proposals_recovered: 5,
+        decisions_recovered: 3,
+        interrupted_count: 1,
+        events_replayed: 42
+      }
+
+      assert :ok = EventEmitter.recovery_completed("coord_recovery", stats)
+
+      {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
+      assert Enum.any?(events, &(&1.type == "recovery.completed"))
+    end
+  end
+
+  describe "coordinator_started/3 with recovered_from" do
+    test "emits event with recovered_from position", %{table: table} do
+      assert :ok =
+               EventEmitter.coordinator_started("coord_2", %{size: 7},
+                 recovered_from: 100
+               )
+
+      {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
+      assert length(events) >= 1
+    end
+  end
 end
