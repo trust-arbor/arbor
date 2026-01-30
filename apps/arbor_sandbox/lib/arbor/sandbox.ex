@@ -58,6 +58,88 @@ defmodule Arbor.Sandbox do
     autonomous: :full
   }
 
+  # ── Authorized API (for agent callers) ──
+
+  @doc """
+  Create a sandbox with authorization check.
+
+  Verifies the agent has the `arbor://sandbox/create` capability before
+  creating a sandbox. Use this for agent-initiated sandbox creation where
+  authorization should be enforced.
+
+  ## Parameters
+
+  - `caller_id` - The calling agent's ID for capability lookup
+  - `target_agent_id` - The agent ID the sandbox is being created for
+  - `opts` - Options passed to `create/2`, plus optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, sandbox}` on success
+  - `{:error, {:unauthorized, reason}}` if caller lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_create(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_create(caller_id, target_agent_id, opts \\ []) do
+    resource = "arbor://sandbox/create"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(caller_id, resource, :create, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        create(target_agent_id, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Destroy a sandbox with authorization check.
+
+  Verifies the agent has the `arbor://sandbox/destroy` capability before
+  destroying the sandbox. Use this for agent-initiated sandbox destruction
+  where authorization should be enforced.
+
+  ## Parameters
+
+  - `caller_id` - The calling agent's ID for capability lookup
+  - `sandbox_id` - The ID of the sandbox to destroy
+  - `opts` - Additional options, including optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `:ok` on success
+  - `{:error, {:unauthorized, reason}}` if caller lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_destroy(String.t(), sandbox_id(), keyword()) ::
+          :ok
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_destroy(caller_id, sandbox_id, opts \\ []) do
+    resource = "arbor://sandbox/destroy"
+    {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(caller_id, resource, :destroy, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        destroy(sandbox_id)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
   # Sandbox Lifecycle
 
   @doc """
