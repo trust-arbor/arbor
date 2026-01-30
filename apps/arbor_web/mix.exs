@@ -19,7 +19,7 @@ defmodule Arbor.Web.MixProject do
       package: package(),
       docs: docs(),
       elixirc_paths: elixirc_paths(Mix.env()),
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [threshold: 90]
     ]
   end
 
