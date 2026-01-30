@@ -111,24 +111,7 @@ defmodule Arbor.AI.Backends.OpencodeCli do
       )
 
     usage =
-      CliBackend.extract_from_event(events, "step_finish", fn event ->
-        tokens = get_in(event, ["part", "tokens"]) || %{}
-        cache = tokens["cache"] || %{}
-
-        base = %{
-          input_tokens: tokens["input"] || 0,
-          output_tokens: tokens["output"] || 0,
-          reasoning_tokens: tokens["reasoning"] || 0,
-          cache_read_tokens: cache["read"] || 0,
-          cache_write_tokens: cache["write"] || 0,
-          total_tokens: (tokens["input"] || 0) + (tokens["output"] || 0)
-        }
-
-        case get_in(event, ["part", "cost"]) do
-          nil -> base
-          cost -> Map.put(base, :cost_usd, cost)
-        end
-      end)
+      CliBackend.extract_from_event(events, "step_finish", &extract_usage/1)
 
     response =
       Response.new(
@@ -141,5 +124,30 @@ defmodule Arbor.AI.Backends.OpencodeCli do
       )
 
     {:ok, response}
+  end
+
+  defp extract_usage(event) do
+    tokens = get_in(event, ["part", "tokens"]) || %{}
+    base = build_token_usage(tokens)
+
+    case get_in(event, ["part", "cost"]) do
+      nil -> base
+      cost -> Map.put(base, :cost_usd, cost)
+    end
+  end
+
+  defp build_token_usage(tokens) do
+    cache = tokens["cache"] || %{}
+    input = tokens["input"] || 0
+    output = tokens["output"] || 0
+
+    %{
+      input_tokens: input,
+      output_tokens: output,
+      reasoning_tokens: tokens["reasoning"] || 0,
+      cache_read_tokens: cache["read"] || 0,
+      cache_write_tokens: cache["write"] || 0,
+      total_tokens: input + output
+    }
   end
 end

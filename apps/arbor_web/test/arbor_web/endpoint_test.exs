@@ -15,6 +15,7 @@ defmodule Arbor.Web.EndpointTest do
 
     test "endpoint macro requires otp_app option" do
       assert_raise KeyError, ~r/key :otp_app not found/, fn ->
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
         Code.eval_string("""
         defmodule TestEndpointNoOtp do
           use Arbor.Web.Endpoint, []

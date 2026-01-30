@@ -6,6 +6,7 @@ defmodule Arbor.Historian.TimelineTest do
   alias Arbor.Historian.Timeline.Span
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"timeline_#{System.unique_integer([:positive])}")
 
     now = DateTime.utc_now()

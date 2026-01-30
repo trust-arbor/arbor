@@ -352,6 +352,7 @@ defmodule Arbor.Consensus.TestHelpers do
   """
   def start_test_coordinator(opts \\ []) do
     # Use a unique name to avoid conflicts
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = Keyword.get(opts, :name, :"test_coordinator_#{:rand.uniform(100_000)}")
 
     default_opts = [
@@ -370,7 +371,9 @@ defmodule Arbor.Consensus.TestHelpers do
   Returns the event store pid.
   """
   def start_test_event_store(opts \\ []) do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     table_name = Keyword.get(opts, :table_name, :"test_events_#{:rand.uniform(100_000)}")
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = Keyword.get(opts, :name, :"test_event_store_#{:rand.uniform(100_000)}")
 
     {:ok, pid} =

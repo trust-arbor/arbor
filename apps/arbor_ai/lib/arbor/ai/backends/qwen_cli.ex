@@ -110,39 +110,7 @@ defmodule Arbor.AI.Backends.QwenCli do
 
     case result_obj do
       %{"result" => text} = obj ->
-        session_id = obj["session_id"]
-
-        usage =
-          case obj["usage"] do
-            u when is_map(u) ->
-              %{
-                input_tokens: u["input_tokens"] || 0,
-                output_tokens: u["output_tokens"] || 0,
-                total_tokens: u["total_tokens"] || 0,
-                cache_read_tokens: u["cache_read_input_tokens"] || 0
-              }
-
-            _ ->
-              extract_usage_from_stats(obj["stats"])
-          end
-
-        model = extract_model_from_stats(obj["stats"])
-
-        response =
-          Response.new(
-            text: text || "",
-            provider: @provider,
-            model: model,
-            session_id: session_id,
-            usage: usage,
-            timing: %{
-              duration_ms: obj["duration_ms"],
-              duration_api_ms: obj["duration_api_ms"]
-            },
-            raw_response: json
-          )
-
-        {:ok, response}
+        build_result_response(text, obj, json)
 
       _ ->
         {:ok, CliBackend.build_response(%{text: ""}, @provider)}
@@ -163,43 +131,70 @@ defmodule Arbor.AI.Backends.QwenCli do
     {:ok, response}
   end
 
-  defp extract_model_from_stats(nil), do: nil
+  defp build_result_response(text, obj, json) do
+    usage = extract_usage(obj["usage"], obj["stats"])
+    model = extract_model_from_stats(obj["stats"])
 
-  defp extract_model_from_stats(stats) when is_map(stats) do
-    case stats["models"] do
-      models when is_map(models) ->
-        case Map.keys(models) do
-          [model_name | _] -> model_name
-          [] -> nil
-        end
+    response =
+      Response.new(
+        text: text || "",
+        provider: @provider,
+        model: model,
+        session_id: obj["session_id"],
+        usage: usage,
+        timing: %{
+          duration_ms: obj["duration_ms"],
+          duration_api_ms: obj["duration_api_ms"]
+        },
+        raw_response: json
+      )
 
-      _ ->
+    {:ok, response}
+  end
+
+  defp extract_usage(u, _stats) when is_map(u) do
+    %{
+      input_tokens: u["input_tokens"] || 0,
+      output_tokens: u["output_tokens"] || 0,
+      total_tokens: u["total_tokens"] || 0,
+      cache_read_tokens: u["cache_read_input_tokens"] || 0
+    }
+  end
+
+  defp extract_usage(_, stats), do: extract_usage_from_stats(stats)
+
+  defp extract_model_from_stats(stats) do
+    case first_model_entry(stats) do
+      {name, _stats} -> name
+      nil -> nil
+    end
+  end
+
+  defp extract_usage_from_stats(stats) do
+    case first_model_entry(stats) do
+      {_name, model_stats} ->
+        tokens = model_stats["tokens"] || %{}
+
+        %{
+          input_tokens: tokens["prompt"] || 0,
+          output_tokens: tokens["candidates"] || 0,
+          total_tokens: tokens["total"] || 0,
+          cached_tokens: tokens["cached"] || 0
+        }
+
+      nil ->
         nil
     end
   end
 
-  defp extract_usage_from_stats(nil), do: nil
+  defp first_model_entry(nil), do: nil
 
-  defp extract_usage_from_stats(stats) when is_map(stats) do
-    case stats["models"] do
-      models when is_map(models) ->
-        case Map.to_list(models) do
-          [{_model_name, model_stats} | _] ->
-            tokens = model_stats["tokens"] || %{}
-
-            %{
-              input_tokens: tokens["prompt"] || 0,
-              output_tokens: tokens["candidates"] || 0,
-              total_tokens: tokens["total"] || 0,
-              cached_tokens: tokens["cached"] || 0
-            }
-
-          [] ->
-            nil
-        end
-
-      _ ->
-        nil
+  defp first_model_entry(%{"models" => models}) when is_map(models) do
+    case Map.to_list(models) do
+      [entry | _] -> entry
+      [] -> nil
     end
   end
+
+  defp first_model_entry(_), do: nil
 end

@@ -5,6 +5,7 @@ defmodule Arbor.Historian.QueryEngineTest do
   alias Arbor.Historian.TestHelpers
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"qe_#{System.unique_integer([:positive])}")
 
     # Seed some signals

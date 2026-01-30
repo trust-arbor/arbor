@@ -5,6 +5,7 @@ defmodule Arbor.Persistence.QueryableStore.AgentTest do
   alias Arbor.Persistence.QueryableStore.Agent, as: QSAgent
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"qs_agent_#{:erlang.unique_integer([:positive])}"
     start_supervised!({QSAgent, name: name})
     {:ok, name: name}

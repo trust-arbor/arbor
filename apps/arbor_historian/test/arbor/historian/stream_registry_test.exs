@@ -6,6 +6,7 @@ defmodule Arbor.Historian.StreamRegistryTest do
   setup do
     {:ok, pid} =
       StreamRegistry.start_link(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"registry_#{System.unique_integer([:positive])}"
       )
 

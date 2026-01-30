@@ -68,16 +68,8 @@ defmodule Arbor.Comms.ChatLogger do
       {:ok, files} ->
         removed =
           files
-          |> Enum.filter(&log_file?/1)
-          |> Enum.filter(fn file -> file_before_date?(file, cutoff) end)
-          |> Enum.count(fn file ->
-            path = Path.join(dir, file)
-
-            case File.rm(path) do
-              :ok -> true
-              _ -> false
-            end
-          end)
+          |> Enum.filter(fn file -> log_file?(file) and file_before_date?(file, cutoff) end)
+          |> Enum.count(fn file -> File.rm(Path.join(dir, file)) == :ok end)
 
         {:ok, removed}
 

@@ -23,10 +23,10 @@ defmodule Arbor.Comms do
       Arbor.Comms.recent_messages(:signal)
   """
 
+  alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
-  alias Arbor.Comms.Channels.Limitless
 
   # -- Sending --
 
