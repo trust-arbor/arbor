@@ -2,7 +2,7 @@
 # Send a Signal message to the primary collaborator
 # Usage: ./signal_send.sh "message"
 
-PRIMARY_NUMBER="+15551234567"
+PRIMARY_NUMBER="${SIGNAL_TO:-}"
 MESSAGE="$1"
 
 if [ -z "$MESSAGE" ]; then

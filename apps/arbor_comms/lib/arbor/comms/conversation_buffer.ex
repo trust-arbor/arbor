@@ -9,7 +9,7 @@ defmodule Arbor.Comms.ConversationBuffer do
 
   Conversations span multiple channels (Signal, Limitless, Email).
   `recent_turns_cross_channel/2` reads from all configured channels,
-  matches on contact aliases (e.g. `+15551234567` and `"pendant"`
+  matches on contact aliases (e.g. a phone number and `"pendant"`
   are the same person), and merges by timestamp into a single
   unified conversation.
   """

@@ -27,6 +27,7 @@ end
 
 signal_account = System.get_env("SIGNAL_FROM") || System.get_env("SIGNAL_ACCOUNT")
 signal_cli_path = System.get_env("SIGNAL_CLI_PATH")
+signal_to = System.get_env("SIGNAL_TO")
 
 if signal_account do
   signal_config =
@@ -37,6 +38,22 @@ if signal_account do
     end)
 
   config :arbor_comms, :signal, signal_config
+end
+
+# Owner phone number — used for authorized_senders, response routing, and contact aliases
+if signal_to do
+  handler_config =
+    Application.get_env(:arbor_comms, :handler, [])
+    |> Keyword.put(:authorized_senders, [signal_to])
+    |> Keyword.put(:contact_aliases, %{signal_to => ["pendant"]})
+
+  config :arbor_comms, :handler, handler_config
+
+  limitless_config =
+    Application.get_env(:arbor_comms, :limitless, [])
+    |> Keyword.put(:response_recipient, signal_to)
+
+  config :arbor_comms, :limitless, limitless_config
 end
 
 # ============================================================================

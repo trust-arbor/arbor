@@ -18,11 +18,10 @@ config :arbor_comms, :signal,
 config :arbor_comms, :limitless,
   enabled: true,
   base_url: "https://api.limitless.ai/v1",
-  poll_interval_ms: 300_000,
+  poll_interval_ms: 60_000,
   log_dir: "/tmp/arbor/limitless_chat",
   log_retention_days: 30,
-  checkpoint_file: "/tmp/arbor/limitless_checkpoint",
-  response_recipient: "+15551234567"
+  checkpoint_file: "/tmp/arbor/limitless_checkpoint"
 
 # Swoosh: we use SMTP adapter directly, disable the API client
 config :swoosh, :api_client, false
@@ -34,16 +33,14 @@ config :arbor_comms, :email,
   log_retention_days: 30
 
 # Comms message handler
+# Note: authorized_senders, contact_aliases, and response_recipient
+# are set in runtime.exs from SIGNAL_TO env var.
 config :arbor_comms, :handler,
   enabled: true,
-  authorized_senders: ["+15551234567"],
   context_file: ".arbor/context/comms_context.md",
   response_generator: Arbor.AI.CommsResponder,
   conversation_window: 20,
-  dedup_window_seconds: 300,
-  contact_aliases: %{
-    "+15551234567" => ["pendant"]
-  }
+  dedup_window_seconds: 300
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"

@@ -8,12 +8,14 @@ defmodule Arbor.Comms.Channels.Limitless do
 
   ## Configuration
 
+  Set in `config/config.exs` and `config/runtime.exs`:
+
       config :arbor_comms, :limitless,
         enabled: true,
-        api_key: System.get_env("LIMITLESS_API_KEY"),
-        poll_interval_ms: 300_000,
+        api_key: "...",              # from LIMITLESS_API_KEY env var
+        poll_interval_ms: 60_000,
         checkpoint_file: "/tmp/arbor/limitless_checkpoint",
-        response_recipient: "+15551234567"
+        response_recipient: "..."    # from SIGNAL_TO env var
   """
 
   @behaviour Arbor.Contracts.Comms.Channel
