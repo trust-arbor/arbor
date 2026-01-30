@@ -2,10 +2,10 @@ defmodule Arbor.AI.CommsResponder do
   @moduledoc """
   ResponseGenerator implementation that uses Arbor.AI for response generation.
 
-  Uses a persistent Claude session (via `session_context: "comms"`) so all
-  channels (Signal, Limitless, Email) share the same conversation. Claude's
-  own session history replaces the need for a conversation buffer — each
-  message becomes a new turn in the same session regardless of channel.
+  Maintains a persistent Claude session across app restarts by saving the
+  session_id to disk (`.arbor/comms-session-id`). All channels (Signal,
+  Limitless, Email) share the same conversation — each message becomes a
+  new turn in the same session regardless of channel.
 
   ## Channel Intent Detection
 
@@ -25,19 +25,27 @@ defmodule Arbor.AI.CommsResponder do
 
   @allowed_channels ~w(signal email)
 
+  @session_file "comms-session-id"
+
   @impl true
   def generate_response(message, _context) do
     prompt = build_prompt(message)
 
-    opts = [
-      backend: :cli,
-      session_context: "comms"
-    ]
+    opts =
+      case load_session_id() do
+        nil ->
+          Logger.info("CommsResponder: starting new session")
+          [backend: :cli, session_context: "comms"]
+
+        session_id ->
+          Logger.info("CommsResponder: resuming session #{String.slice(session_id, 0, 12)}...")
+          [backend: :cli, session_id: session_id, session_context: "comms"]
+      end
 
     case Arbor.AI.generate_text(prompt, opts) do
-      {:ok, %{text: text}} when is_binary(text) and text != "" ->
-        cleaned = strip_predicted_turns(text)
-        {channel, body} = extract_channel_hint(cleaned)
+      {:ok, %{text: text} = response} when is_binary(text) and text != "" ->
+        save_session_id(Map.get(response, :session_id))
+        {channel, body} = extract_channel_hint(text)
         {:ok, ResponseEnvelope.new(body: body, channel: channel)}
 
       {:ok, _} ->
@@ -73,13 +81,55 @@ defmodule Arbor.AI.CommsResponder do
     end
   end
 
-  # Claude sometimes generates past its response, predicting what the user
-  # will say next (especially when conversation history uses "User:" prefixes).
-  # Strip any trailing "User:" or "Assistant:" turns from the response.
-  @turn_suffix_regex ~r/\n\n(?:User|Assistant):.*\z/s
+  @doc """
+  Reset the persisted session, forcing a new one on next message.
+  """
+  @spec reset_session() :: :ok
+  def reset_session do
+    path = session_file_path()
 
-  defp strip_predicted_turns(text) do
-    Regex.replace(@turn_suffix_regex, text, "")
+    case File.rm(path) do
+      :ok -> Logger.info("CommsResponder: session reset")
+      {:error, :enoent} -> :ok
+      {:error, reason} -> Logger.warning("CommsResponder: failed to reset session: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  # ============================================================================
+  # Session Persistence
+  # ============================================================================
+
+  defp session_file_path do
+    Path.join(Path.expand("~/.arbor"), @session_file)
+  end
+
+  defp load_session_id do
+    case File.read(session_file_path()) do
+      {:ok, content} ->
+        id = String.trim(content)
+        if id != "", do: id, else: nil
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  defp save_session_id(nil), do: :ok
+
+  defp save_session_id(session_id) when is_binary(session_id) do
+    path = session_file_path()
+    dir = Path.dirname(path)
+    File.mkdir_p!(dir)
+
+    case File.write(path, session_id) do
+      :ok ->
+        Logger.debug("CommsResponder: saved session #{String.slice(session_id, 0, 12)}...")
+
+      {:error, reason} ->
+        Logger.warning("CommsResponder: failed to save session: #{inspect(reason)}")
+    end
   end
 
   defp build_prompt(message) do
