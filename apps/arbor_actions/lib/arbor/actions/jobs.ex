@@ -30,16 +30,14 @@ defmodule Arbor.Actions.Jobs do
   def queryable_backend do
     config = Application.get_env(:arbor_actions, :persistence, [])
 
-    Keyword.get(config, :queryable_store_backend,
-      Arbor.Persistence.QueryableStore.ETS)
+    Keyword.get(config, :queryable_store_backend, Arbor.Persistence.QueryableStore.ETS)
   end
 
   @doc false
   def event_log_backend do
     config = Application.get_env(:arbor_actions, :persistence, [])
 
-    Keyword.get(config, :event_log_backend,
-      Arbor.Persistence.EventLog.ETS)
+    Keyword.get(config, :event_log_backend, Arbor.Persistence.EventLog.ETS)
   end
 
   @doc false
@@ -106,12 +104,13 @@ defmodule Arbor.Actions.Jobs do
       case jobs.queryable_backend().put(job_id, record, jobs.persistence_opts()) do
         :ok ->
           # Append creation event
-          event = Event.new(jobs.job_stream(job_id), "job.created", %{
-            job_id: job_id,
-            title: params.title,
-            priority: params[:priority] || "normal",
-            tags: params[:tags] || []
-          })
+          event =
+            Event.new(jobs.job_stream(job_id), "job.created", %{
+              job_id: job_id,
+              title: params.title,
+              priority: params[:priority] || "normal",
+              tags: params[:tags] || []
+            })
 
           jobs.event_log_backend().append(
             jobs.job_stream(job_id),
@@ -150,7 +149,11 @@ defmodule Arbor.Actions.Jobs do
       category: "jobs",
       tags: ["jobs", "tasks", "list"],
       schema: [
-        status: [type: :string, default: "all", doc: "Filter: all, created, active, completed, failed, cancelled"],
+        status: [
+          type: :string,
+          default: "all",
+          doc: "Filter: all, created, active, completed, failed, cancelled"
+        ],
         tag: [type: :string, doc: "Filter by tag"],
         limit: [type: :integer, default: 20, doc: "Maximum results"]
       ]
@@ -229,11 +232,12 @@ defmodule Arbor.Actions.Jobs do
 
       case jobs.queryable_backend().get(job_id, jobs.persistence_opts()) do
         {:ok, record} ->
-          job = Map.merge(record.data, %{
-            "job_id" => record.key,
-            "created_at" => record.inserted_at && DateTime.to_iso8601(record.inserted_at),
-            "updated_at" => record.updated_at && DateTime.to_iso8601(record.updated_at)
-          })
+          job =
+            Map.merge(record.data, %{
+              "job_id" => record.key,
+              "created_at" => record.inserted_at && DateTime.to_iso8601(record.inserted_at),
+              "updated_at" => record.updated_at && DateTime.to_iso8601(record.updated_at)
+            })
 
           history = fetch_history(params[:include_history], job_id, jobs)
 
@@ -328,11 +332,12 @@ defmodule Arbor.Actions.Jobs do
             # Determine event type
             event_type = determine_event_type(params)
 
-            event = Event.new(jobs.job_stream(job_id), event_type, %{
-              job_id: job_id,
-              status: updated_data["status"],
-              notes: params[:notes]
-            })
+            event =
+              Event.new(jobs.job_stream(job_id), event_type, %{
+                job_id: job_id,
+                status: updated_data["status"],
+                notes: params[:notes]
+              })
 
             jobs.event_log_backend().append(
               jobs.job_stream(job_id),
@@ -380,7 +385,8 @@ defmodule Arbor.Actions.Jobs do
       if new in allowed do
         :ok
       else
-        {:error, "Invalid transition from '#{current}' to '#{new}'. Allowed: #{Enum.join(allowed, ", ")}"}
+        {:error,
+         "Invalid transition from '#{current}' to '#{new}'. Allowed: #{Enum.join(allowed, ", ")}"}
       end
     end
 
