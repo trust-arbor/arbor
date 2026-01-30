@@ -103,4 +103,105 @@ defmodule Arbor.Comms.ConfigTest do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     :"test_config_#{System.unique_integer([:positive])}"
   end
+
+  describe "resolve_contact/2" do
+    setup do
+      original = Application.get_env(:arbor_comms, :contacts)
+
+      test_contacts = %{
+        "kim" => %{
+          email: "kim@example.com",
+          signal: "+15559876543",
+          aliases: ["kimberly"]
+        },
+        "owner" => %{
+          email: "owner@example.com",
+          signal: "+15551234567",
+          aliases: ["me", "pendant", "hysun"]
+        }
+      }
+
+      Application.put_env(:arbor_comms, :contacts, test_contacts)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_comms, :contacts, original),
+          else: Application.delete_env(:arbor_comms, :contacts)
+      end)
+
+      :ok
+    end
+
+    test "resolves contact by name for email channel" do
+      assert Config.resolve_contact("kim", :email) == "kim@example.com"
+    end
+
+    test "resolves contact by name for signal channel" do
+      assert Config.resolve_contact("kim", :signal) == "+15559876543"
+    end
+
+    test "resolves contact by alias" do
+      assert Config.resolve_contact("kimberly", :email) == "kim@example.com"
+      assert Config.resolve_contact("me", :signal) == "+15551234567"
+      assert Config.resolve_contact("pendant", :email) == "owner@example.com"
+    end
+
+    test "resolution is case-insensitive" do
+      assert Config.resolve_contact("KIM", :email) == "kim@example.com"
+      assert Config.resolve_contact("Pendant", :signal) == "+15551234567"
+      assert Config.resolve_contact("HYSUN", :email) == "owner@example.com"
+    end
+
+    test "returns nil for unknown contact" do
+      assert Config.resolve_contact("unknown", :email) == nil
+      assert Config.resolve_contact("stranger", :signal) == nil
+    end
+
+    test "returns nil for contact without requested channel" do
+      # Add a contact with only email
+      contacts = Application.get_env(:arbor_comms, :contacts)
+      updated = Map.put(contacts, "emailonly", %{email: "only@example.com"})
+      Application.put_env(:arbor_comms, :contacts, updated)
+
+      assert Config.resolve_contact("emailonly", :email) == "only@example.com"
+      assert Config.resolve_contact("emailonly", :signal) == nil
+    end
+
+    test "returns nil for email-like identifier (pass-through)" do
+      assert Config.resolve_contact("someone@example.com", :email) == nil
+    end
+
+    test "returns nil for phone-like identifier (pass-through)" do
+      assert Config.resolve_contact("+15551112222", :signal) == nil
+    end
+
+    test "returns nil for non-binary input" do
+      assert Config.resolve_contact(nil, :email) == nil
+      assert Config.resolve_contact(123, :signal) == nil
+    end
+  end
+
+  describe "contacts/0" do
+    test "returns empty map when no contacts configured" do
+      original = Application.get_env(:arbor_comms, :contacts)
+      Application.delete_env(:arbor_comms, :contacts)
+      on_exit(fn -> if original, do: Application.put_env(:arbor_comms, :contacts, original) end)
+
+      assert Config.contacts() == %{}
+    end
+
+    test "returns configured contacts" do
+      original = Application.get_env(:arbor_comms, :contacts)
+      test_contacts = %{"test" => %{email: "test@example.com"}}
+      Application.put_env(:arbor_comms, :contacts, test_contacts)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_comms, :contacts, original),
+          else: Application.delete_env(:arbor_comms, :contacts)
+      end)
+
+      assert Config.contacts() == test_contacts
+    end
+  end
 end
