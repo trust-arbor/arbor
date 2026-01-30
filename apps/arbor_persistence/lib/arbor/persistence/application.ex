@@ -31,10 +31,15 @@ defmodule Arbor.Persistence.Application do
   end
 
   defp build_children do
-    if Application.get_env(:arbor_persistence, :start_repo, false) do
-      [Arbor.Persistence.Repo]
-    else
-      []
-    end
+    stores = default_stores()
+    repo = if Application.get_env(:arbor_persistence, :start_repo, false), do: [Arbor.Persistence.Repo], else: []
+    stores ++ repo
+  end
+
+  defp default_stores do
+    Application.get_env(:arbor_persistence, :stores, [
+      {Arbor.Persistence.QueryableStore.ETS, name: :jobs},
+      {Arbor.Persistence.EventLog.ETS, name: :event_log}
+    ])
   end
 end

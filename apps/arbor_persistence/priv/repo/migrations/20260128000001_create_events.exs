@@ -18,10 +18,8 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateEvents do
     end
 
     # Unique constraint on stream + event_number for optimistic concurrency
+    # Also serves as the index for reading events by stream
     create unique_index(:events, [:stream_id, :event_number])
-
-    # Index for reading events by stream
-    create index(:events, [:stream_id, :event_number])
 
     # Index for global ordering
     create index(:events, [:global_position])
