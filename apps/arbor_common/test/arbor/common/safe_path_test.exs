@@ -289,12 +289,27 @@ defmodule Arbor.Common.SafePathTest do
   end
 
   describe "TraversalError" do
-    test "has meaningful messages" do
-      error = %SafePath.TraversalError{reason: :path_traversal}
-      assert Exception.message(error) =~ "traversal"
+    test "has meaningful messages for all reason types" do
+      assert Exception.message(%SafePath.TraversalError{reason: :path_traversal}) =~
+               "traversal"
 
-      error = %SafePath.TraversalError{reason: :null_byte}
-      assert Exception.message(error) =~ "null"
+      assert Exception.message(%SafePath.TraversalError{reason: :traversal_sequence}) =~
+               "traversal sequence"
+
+      assert Exception.message(%SafePath.TraversalError{reason: :null_byte}) =~
+               "null"
+
+      assert Exception.message(%SafePath.TraversalError{reason: :empty_path}) =~
+               "empty"
+
+      assert Exception.message(%SafePath.TraversalError{reason: :invalid_encoding}) =~
+               "invalid encoding"
+
+      assert Exception.message(%SafePath.TraversalError{reason: :absolute_in_relative_context}) =~
+               "Absolute path"
+
+      assert Exception.message(%SafePath.TraversalError{reason: :custom_reason}) =~
+               "custom_reason"
     end
   end
 end
