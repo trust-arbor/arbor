@@ -7,7 +7,7 @@ defmodule Arbor.Eval.SuiteTest do
 
   describe "check_file/2" do
     test "checks a single file" do
-      path = Path.join(System.tmp_dir!(), "suite_test_#{:rand.uniform(10000)}.ex")
+      path = Path.join(System.tmp_dir!(), "suite_test_#{System.unique_integer([:positive])}.ex")
 
       File.write!(path, """
       defmodule SuiteTestModule do
@@ -31,7 +31,7 @@ defmodule Arbor.Eval.SuiteTest do
 
   describe "check_directory/2" do
     test "checks multiple files in directory" do
-      dir = Path.join(System.tmp_dir!(), "suite_test_dir_#{:rand.uniform(10000)}")
+      dir = Path.join(System.tmp_dir!(), "suite_test_dir_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
       # Create two test files
@@ -61,7 +61,7 @@ defmodule Arbor.Eval.SuiteTest do
     end
 
     test "returns error for empty directory" do
-      dir = Path.join(System.tmp_dir!(), "empty_suite_test_#{:rand.uniform(10000)}")
+      dir = Path.join(System.tmp_dir!(), "empty_suite_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
       try do
@@ -72,7 +72,7 @@ defmodule Arbor.Eval.SuiteTest do
     end
 
     test "excludes files matching exclude patterns" do
-      dir = Path.join(System.tmp_dir!(), "exclude_test_#{:rand.uniform(10000)}")
+      dir = Path.join(System.tmp_dir!(), "exclude_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(Path.join(dir, "test"))
 
       # Create main file
@@ -106,7 +106,7 @@ defmodule Arbor.Eval.SuiteTest do
 
   describe "summary" do
     test "provides comprehensive summary" do
-      dir = Path.join(System.tmp_dir!(), "summary_test_#{:rand.uniform(10000)}")
+      dir = Path.join(System.tmp_dir!(), "summary_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
       # Create file with violations
@@ -134,7 +134,7 @@ defmodule Arbor.Eval.SuiteTest do
 
   describe "fail_on option" do
     test "fail_on :error only fails on errors" do
-      dir = Path.join(System.tmp_dir!(), "failon_error_test_#{:rand.uniform(10000)}")
+      dir = Path.join(System.tmp_dir!(), "failon_error_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
       # Create file with only warnings (missing moduledoc is a warning)
