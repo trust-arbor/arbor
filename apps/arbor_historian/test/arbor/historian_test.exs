@@ -19,6 +19,7 @@ defmodule Arbor.HistorianTest do
   # so we use the manual collect API for determinism.
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"facade_#{System.unique_integer([:positive])}")
 
     now = DateTime.utc_now()

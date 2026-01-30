@@ -5,6 +5,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
   alias Arbor.Persistence.EventLog.ETS
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"el_ets_#{:erlang.unique_integer([:positive])}"
     start_supervised!({ETS, name: name})
     {:ok, name: name}

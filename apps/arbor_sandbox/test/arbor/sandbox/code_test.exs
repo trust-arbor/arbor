@@ -30,13 +30,14 @@ defmodule Arbor.Sandbox.CodeTest do
     end
 
     test "blocks :os module calls" do
-      # credo:disable-for-next-line Credo.Check.Warning.UnsafeExec
+      # credo:disable-for-next-line
       ast = quote do: :os.cmd(~c"whoami")
       assert {:error, {:code_violations, violations}} = Code.validate(ast, :full)
       assert {:forbidden_module, :os} in violations
     end
 
     test "blocks Code.eval_string" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
       ast = quote do: Code.eval_string("IO.puts(:hacked)")
       assert {:error, {:code_violations, violations}} = Code.validate(ast, :full)
       assert {:forbidden_function, {@elixir_code, :eval_string}} in violations

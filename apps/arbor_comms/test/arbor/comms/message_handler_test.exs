@@ -3,6 +3,7 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
   alias Arbor.Comms.MessageHandler
   alias Arbor.Contracts.Comms.Message
+  alias Arbor.Contracts.Comms.ResponseEnvelope
 
   # A simple mock responder for testing
   defmodule MockResponder do
@@ -10,7 +11,7 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
     @impl true
     def generate_response(_message, _context) do
-      {:ok, Arbor.Contracts.Comms.ResponseEnvelope.new(body: "Mock response")}
+      {:ok, ResponseEnvelope.new(body: "Mock response")}
     end
   end
 

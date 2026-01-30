@@ -4,6 +4,7 @@ defmodule Arbor.Persistence.Store.AgentTest do
   alias Arbor.Persistence.Store.Agent, as: StoreAgent
 
   setup do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"store_agent_#{:erlang.unique_integer([:positive])}"
     start_supervised!({StoreAgent, name: name})
     {:ok, name: name}

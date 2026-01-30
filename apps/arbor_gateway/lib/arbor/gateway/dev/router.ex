@@ -138,6 +138,7 @@ defmodule Arbor.Gateway.Dev.Router do
 
   # credo:disable-for-next-line Credo.Check.Warning.UnsafeExec
   defp safe_eval(code) when is_binary(code) and byte_size(code) > 0 do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
     {result, _bindings} = Code.eval_string(code)
     {:ok, result}
   rescue
