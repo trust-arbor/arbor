@@ -72,3 +72,6 @@ venv/
 .aider*
 
 .arbor/
+
+# Claude session data (may contain PII)
+.claude/HANDOFF.md
