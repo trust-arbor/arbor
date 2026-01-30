@@ -26,6 +26,7 @@ defmodule ArborAi.MixProject do
     [
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:jason, "~> 1.4"},

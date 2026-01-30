@@ -27,6 +27,179 @@ defmodule Arbor.Persistence do
   alias Arbor.Persistence.{Event, Filter, Record}
 
   # ---------------------------------------------------------------
+  # Authorized API (for agent callers)
+  # ---------------------------------------------------------------
+
+  @doc """
+  Store a value with authorization check.
+
+  Verifies the agent has the `arbor://persistence/write/{store}` capability
+  before storing. Use this for agent-initiated writes where authorization
+  should be enforced.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `name` - The store name
+  - `backend` - The backend module
+  - `key` - The key to store under
+  - `value` - The value to store
+  - `opts` - Options passed to `put/5`, plus optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `:ok` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_write(String.t(), atom(), module(), String.t(), term(), keyword()) ::
+          :ok
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_write(agent_id, name, backend, key, value, opts \\ []) do
+    resource = "arbor://persistence/write/#{name}"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        put(name, backend, key, value, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Retrieve a value with authorization check.
+
+  Verifies the agent has the `arbor://persistence/read/{store}` capability
+  before reading. Use this for agent-initiated reads where authorization
+  should be enforced.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `name` - The store name
+  - `backend` - The backend module
+  - `key` - The key to read
+  - `opts` - Options passed to `get/4`, plus optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, value}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, :not_found}` if key doesn't exist
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_read(String.t(), atom(), module(), String.t(), keyword()) ::
+          {:ok, term()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | :not_found | term()}
+  def authorize_read(agent_id, name, backend, key, opts \\ []) do
+    resource = "arbor://persistence/read/#{name}"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        get(name, backend, key, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Append events to a stream with authorization check.
+
+  Verifies the agent has the `arbor://persistence/write/{store}` capability
+  before appending. Use this for agent-initiated event writes.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `name` - The store name
+  - `backend` - The backend module
+  - `stream_id` - The stream to append to
+  - `events` - Event(s) to append
+  - `opts` - Options passed to `append/5`, plus optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, events}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_append(String.t(), atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::
+          {:ok, [Event.t()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_append(agent_id, name, backend, stream_id, events, opts \\ []) do
+    resource = "arbor://persistence/write/#{name}"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        append(name, backend, stream_id, events, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Read events from a stream with authorization check.
+
+  Verifies the agent has the `arbor://persistence/read/{store}` capability
+  before reading. Use this for agent-initiated stream reads.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `name` - The store name
+  - `backend` - The backend module
+  - `stream_id` - The stream to read from
+  - `opts` - Options passed to `read_stream/4`, plus optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, events}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_read_stream(String.t(), atom(), module(), String.t(), keyword()) ::
+          {:ok, [Event.t()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_read_stream(agent_id, name, backend, stream_id, opts \\ []) do
+    resource = "arbor://persistence/read/#{name}"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        read_stream(name, backend, stream_id, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  # ---------------------------------------------------------------
   # Store operations
   # ---------------------------------------------------------------
 

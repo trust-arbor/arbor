@@ -44,6 +44,180 @@ defmodule Arbor.Historian do
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
 
+  # ── Authorized API (for agent callers) ──
+
+  @doc """
+  Query history entries with authorization check.
+
+  Verifies the agent has the `arbor://historian/query/{stream}` capability
+  before querying. Use this for agent-initiated queries where authorization
+  should be enforced.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `query_opts` - Query options including `:category`, `:type`, `:source`, etc.
+    The `:category` option determines the stream for authorization (default: "general")
+  - `opts` - Additional options, including optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, entries}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  """
+  @spec authorize_query(String.t(), keyword(), keyword()) ::
+          {:ok, [map()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()}}
+  def authorize_query(agent_id, query_opts \\ [], opts \\ []) do
+    stream = extract_stream_from_query(query_opts)
+    resource = "arbor://historian/query/#{stream}"
+    {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        query(query_opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Query entries for a specific category with authorization check.
+
+  Verifies the agent has the `arbor://historian/query/{category}` capability.
+  Sensitive categories like `:security` and `:identity` require explicit capabilities.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `category` - The category to query (e.g., `:security`, `:agent`, `:shell`)
+  - `query_opts` - Additional query options
+  - `opts` - Additional options, including optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, entries}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  """
+  @spec authorize_for_category(String.t(), atom(), keyword(), keyword()) ::
+          {:ok, [map()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()}}
+  def authorize_for_category(agent_id, category, query_opts \\ [], opts \\ []) do
+    resource = "arbor://historian/query/#{category}"
+    {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        for_category(category, query_opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Query entries for a specific agent with authorization check.
+
+  Verifies the agent has the `arbor://historian/query/agent` capability
+  before querying. Agents may be allowed to query their own history with
+  a more limited capability.
+
+  ## Parameters
+
+  - `caller_id` - The calling agent's ID for capability lookup
+  - `target_agent_id` - The agent ID to query history for
+  - `query_opts` - Additional query options
+  - `opts` - Additional options, including optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, entries}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  """
+  @spec authorize_for_agent(String.t(), String.t(), keyword(), keyword()) ::
+          {:ok, [map()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()}}
+  def authorize_for_agent(caller_id, target_agent_id, query_opts \\ [], opts \\ []) do
+    resource = "arbor://historian/query/agent"
+    {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(caller_id, resource, :query, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        for_agent(target_agent_id, query_opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Query recent entries with authorization check.
+
+  Verifies the agent has the `arbor://historian/query/global` capability
+  before reading the global stream.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `query_opts` - Query options for pagination, etc.
+  - `opts` - Additional options, including optional `:trace_id` for correlation
+
+  ## Returns
+
+  - `{:ok, entries}` on success
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  """
+  @spec authorize_recent(String.t(), keyword(), keyword()) ::
+          {:ok, [map()]}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()}}
+  def authorize_recent(agent_id, query_opts \\ [], opts \\ []) do
+    resource = "arbor://historian/query/global"
+    {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        recent(query_opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  # Extract stream name from query options for authorization
+  defp extract_stream_from_query(query_opts) do
+    cond do
+      Keyword.has_key?(query_opts, :category) ->
+        query_opts[:category] |> to_string()
+
+      Keyword.has_key?(query_opts, :stream) ->
+        query_opts[:stream] |> to_string()
+
+      true ->
+        "general"
+    end
+  end
+
   # ── Querying ──
 
   @doc "Read the global stream (all entries, newest last)."

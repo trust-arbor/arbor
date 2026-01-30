@@ -62,6 +62,65 @@ defmodule Arbor.AI do
 
   require Logger
 
+  # ── Authorized API (for agent callers) ──
+
+  @doc """
+  Generate text with authorization check.
+
+  Verifies the agent has the `arbor://ai/request/{provider}` capability before
+  making the LLM request. Use this for agent-initiated AI requests where
+  authorization should be enforced.
+
+  This protects against unauthorized data exfiltration (prompts sent to external APIs)
+  and cost overruns (paid API calls).
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `prompt` - The prompt to send to the LLM
+  - `opts` - Options passed to `generate_text/2`, plus:
+    - `:trace_id` - Optional trace ID for correlation
+    - `:provider` - Provider to use (determines capability URI), default: "auto"
+
+  ## Returns
+
+  - `{:ok, result}` on success (same as `generate_text/2`)
+  - `{:error, {:unauthorized, reason}}` if agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_generate(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_generate(agent_id, prompt, opts \\ []) do
+    provider = extract_provider(opts)
+    resource = "arbor://ai/request/#{provider}"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(agent_id, resource, :request, trace_id: trace_id) do
+      {:ok, :authorized} ->
+        generate_text(prompt, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
+  # Extract provider from opts for capability URI
+  defp extract_provider(opts) do
+    case Keyword.get(opts, :provider) do
+      nil -> "auto"
+      provider when is_atom(provider) -> Atom.to_string(provider)
+      provider when is_binary(provider) -> provider
+    end
+  end
+
+  # ── Unchecked API (for system callers) ──
+
   @impl true
   @spec generate_text(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.AI.result()} | {:error, term()}

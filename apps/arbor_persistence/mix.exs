@@ -45,6 +45,7 @@ defmodule Arbor.Persistence.MixProject do
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
