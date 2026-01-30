@@ -21,6 +21,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   alias Arbor.Consensus.{Config, Council, EventEmitter, EventStore, StateRecovery}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
+  alias Arbor.Signals
 
   require Logger
 
@@ -463,6 +464,9 @@ defmodule Arbor.Consensus.Coordinator do
         # Emit to durable event log
         EventEmitter.proposal_deadlocked(proposal_id, :council_failed, inspect(reason))
 
+        # Emit signal for real-time observability
+        emit_coordinator_error(proposal_id, reason)
+
         record_event(state, :proposal_timeout, %{
           proposal_id: proposal_id,
           data: %{reason: inspect(reason)}
@@ -676,6 +680,9 @@ defmodule Arbor.Consensus.Coordinator do
         # Emit to durable event log
         EventEmitter.proposal_executed(proposal.id, :failed, inspect(reason))
 
+        # Emit signal for real-time observability
+        emit_coordinator_error(proposal.id, reason)
+
         record_event(state, :execution_failed, %{
           proposal_id: proposal.id,
           data: %{error: inspect(reason)}
@@ -833,6 +840,7 @@ defmodule Arbor.Consensus.Coordinator do
 
       {:error, reason} ->
         Logger.error("Coordinator: recovery failed: #{inspect(reason)}, starting fresh")
+        emit_coordinator_error(nil, {:recovery_failed, reason})
         state
     end
   end
@@ -918,6 +926,9 @@ defmodule Arbor.Consensus.Coordinator do
       "Evaluation interrupted by crash. Missing perspectives: #{inspect(info.missing_perspectives)}"
     )
 
+    # Emit signal for real-time observability
+    emit_proposal_timeout(info.proposal_id, :interrupted)
+
     state
   end
 
@@ -1000,5 +1011,31 @@ defmodule Arbor.Consensus.Coordinator do
     }
 
     EventEmitter.recovery_completed(state.coordinator_id, stats)
+  end
+
+  # Signal emission helpers for real-time observability
+
+  defp emit_coordinator_error(proposal_id, reason) do
+    Signals.emit(:consensus, :coordinator_error, %{
+      proposal_id: proposal_id,
+      reason: truncate_reason(reason)
+    })
+  end
+
+  defp emit_proposal_timeout(proposal_id, reason) do
+    Signals.emit(:consensus, :proposal_timeout, %{
+      proposal_id: proposal_id,
+      reason: reason
+    })
+  end
+
+  defp truncate_reason(reason) do
+    inspected = inspect(reason)
+
+    if String.length(inspected) > 200 do
+      String.slice(inspected, 0, 197) <> "..."
+    else
+      inspected
+    end
   end
 end

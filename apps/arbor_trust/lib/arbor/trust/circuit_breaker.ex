@@ -35,6 +35,7 @@ defmodule Arbor.Trust.CircuitBreaker do
 
   use GenServer
 
+  alias Arbor.Signals
   alias Arbor.Trust.{Config, Manager}
 
   require Logger
@@ -297,6 +298,9 @@ defmodule Arbor.Trust.CircuitBreaker do
     # Freeze trust
     Manager.freeze_trust(agent_id, reason)
 
+    # Emit signal for real-time observability
+    emit_circuit_breaker_triggered(agent_id, reason)
+
     # Schedule half-open transition
     Process.send_after(
       self(),
@@ -330,5 +334,14 @@ defmodule Arbor.Trust.CircuitBreaker do
   defp schedule_cleanup do
     # Clean up every 5 minutes
     Process.send_after(self(), :cleanup, 5 * 60 * 1000)
+  end
+
+  # Signal emission helper
+
+  defp emit_circuit_breaker_triggered(agent_id, reason) do
+    Signals.emit(:trust, :circuit_breaker_triggered, %{
+      agent_id: agent_id,
+      reason: reason
+    })
   end
 end

@@ -32,6 +32,7 @@ defmodule Arbor.Trust.Decay do
   use GenServer
 
   alias Arbor.Contracts.Trust.{Event, Profile}
+  alias Arbor.Signals
   alias Arbor.Trust.{Config, Store, TierResolver}
 
   require Logger
@@ -221,6 +222,7 @@ defmodule Arbor.Trust.Decay do
       |> Enum.map(fn {old_profile, days, decayed_profile} ->
         Store.store_profile(decayed_profile)
         emit_decay_event(old_profile, decayed_profile, days)
+        emit_decay_applied(decayed_profile.agent_id, old_profile.trust_score, decayed_profile.trust_score)
         1
       end)
       |> Enum.sum()
@@ -268,5 +270,15 @@ defmodule Arbor.Trust.Decay do
     Process.send_after(self(), :scheduled_run, delay_ms)
 
     Logger.debug("Next decay check scheduled for #{next_run}")
+  end
+
+  # Signal emission helper
+
+  defp emit_decay_applied(agent_id, old_score, new_score) do
+    Signals.emit(:trust, :decay_applied, %{
+      agent_id: agent_id,
+      old_score: old_score,
+      new_score: new_score
+    })
   end
 end
