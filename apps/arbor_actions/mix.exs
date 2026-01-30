@@ -28,6 +28,7 @@ defmodule Arbor.Actions.MixProject do
 
   defp deps do
     [
+      {:arbor_common, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},

@@ -15,6 +15,7 @@ defmodule Arbor.AI.ShellAdapter do
       #=> {"total 0\\n...", 0}
   """
 
+  alias Arbor.Common.ShellEscape
   alias Arbor.Shell
 
   @doc """
@@ -64,21 +65,8 @@ defmodule Arbor.AI.ShellAdapter do
   end
 
   defp build_command(command, args) do
-    escaped_args = Enum.map(args, &shell_escape/1)
+    escaped_args = Enum.map(args, &ShellEscape.escape_arg/1)
     "#{command} #{Enum.join(escaped_args, " ")}"
-  end
-
-  # Escape argument for shell execution
-  defp shell_escape(arg) do
-    if needs_escaping?(arg) do
-      "'" <> String.replace(arg, "'", "'\\''") <> "'"
-    else
-      arg
-    end
-  end
-
-  defp needs_escaping?(arg) do
-    String.contains?(arg, [" ", "'", "\"", "\\", "$", "`", "\n", "\t", ";", "&", "|", "<", ">"])
   end
 
   # Translate System.cmd options to Arbor.Shell options

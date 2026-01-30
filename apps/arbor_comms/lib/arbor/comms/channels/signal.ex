@@ -19,6 +19,7 @@ defmodule Arbor.Comms.Channels.Signal do
   @behaviour Arbor.Contracts.Comms.ChannelSender
   @behaviour Arbor.Contracts.Comms.ChannelReceiver
 
+  alias Arbor.Common.ShellEscape
   alias Arbor.Contracts.Comms.Message
 
   # Signal has a ~2000 character limit
@@ -97,7 +98,7 @@ defmodule Arbor.Comms.Channels.Signal do
 
   defp run_signal_cli(args) do
     signal_cli = config(:signal_cli_path) || find_signal_cli()
-    command = Enum.map_join([signal_cli | args], " ", &shell_escape/1)
+    command = Enum.map_join([signal_cli | args], " ", &ShellEscape.escape_arg/1)
 
     case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none) do
       {:ok, %{exit_code: 0, stdout: output}} ->
@@ -163,16 +164,6 @@ defmodule Arbor.Comms.Channels.Signal do
   end
 
   defp parse_timestamp(_), do: DateTime.utc_now()
-
-  defp shell_escape(nil), do: "''"
-
-  defp shell_escape(arg) do
-    if String.contains?(arg, [" ", "'", "\"", "!", "\\", "(", ")"]) do
-      "'" <> String.replace(arg, "'", "'\\''") <> "'"
-    else
-      arg
-    end
-  end
 
   defp config(key) do
     Application.get_env(:arbor_comms, :signal, [])
