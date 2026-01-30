@@ -12,7 +12,8 @@ defmodule ArborShell.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      docs: docs()
+      docs: docs(),
+      test_coverage: [threshold: 90]
     ]
   end
 
