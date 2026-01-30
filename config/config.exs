@@ -53,5 +53,11 @@ config :arbor_actions, :channel_receivers, %{
   limitless: Arbor.Comms.Channels.Limitless
 }
 
+# Hands — independent Claude Code sessions for delegated work
+config :arbor_common, :hands,
+  config_dir: "~/.claude-hands",
+  sandbox_image: "claude-sandbox",
+  sandbox_credentials_volume: "claude-sandbox-credentials"
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"
