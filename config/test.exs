@@ -3,7 +3,7 @@ import Config
 config :logger, level: :warning
 
 # Don't start HTTP server in tests
-config :arbor_bridge, start_server: false
+config :arbor_gateway, start_server: false
 
 # Postgres tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo

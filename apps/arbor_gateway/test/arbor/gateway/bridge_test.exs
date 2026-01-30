@@ -1,11 +1,11 @@
-defmodule Arbor.BridgeTest do
+defmodule Arbor.Gateway.BridgeTest do
   use ExUnit.Case
 
-  alias Arbor.Bridge.ClaudeSession
+  alias Arbor.Gateway.Bridge.ClaudeSession
 
-  describe "agent_id/1" do
+  describe "Arbor.Gateway.agent_id/1" do
     test "formats session ID as agent ID" do
-      assert Arbor.Bridge.agent_id("test-session") == "agent_claude_test-session"
+      assert Arbor.Gateway.agent_id("test-session") == "agent_claude_test-session"
     end
   end
 

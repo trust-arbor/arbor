@@ -37,6 +37,7 @@ defmodule Arbor.Comms.Channels.Signal.Poller do
   defp do_poll(state) do
     case Signal.poll() do
       {:ok, []} ->
+        Logger.debug("Signal poll: no new messages")
         %{state | last_poll: DateTime.utc_now()}
 
       {:ok, messages} ->
