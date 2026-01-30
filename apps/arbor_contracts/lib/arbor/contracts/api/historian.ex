@@ -2,7 +2,7 @@ defmodule Arbor.Contracts.API.Historian do
   @moduledoc """
   Public API contract for the Arbor.Historian library.
 
-  Defines the facade interface for the durable activity stream and audit log.
+  Defines the facade interface for querying the persistent event log.
 
   ## Quick Start
 
@@ -20,7 +20,6 @@ defmodule Arbor.Contracts.API.Historian do
 
   | Group | Purpose |
   |-------|---------|
-  | Collection | Ingest signals into permanent event storage |
   | Querying | Read history entries by agent, category, session, etc. |
   | Aggregation | Compute counts, distributions, and activity summaries |
   | Timeline | Reconstruct ordered timelines and causality chains |
@@ -40,24 +39,6 @@ defmodule Arbor.Contracts.API.Historian do
   @type category :: atom()
   @type span :: struct()
   @type query_opts :: keyword()
-
-  # ===========================================================================
-  # Collection
-  # ===========================================================================
-
-  @doc """
-  Collect a signal into the historian event log.
-
-  Transforms the signal into a history entry and persists it to the
-  appropriate streams.
-  """
-  @callback collect_signal_into_event_log(signal :: struct()) ::
-              :ok | {:error, term()}
-
-  @doc """
-  Read the total number of events collected by the historian.
-  """
-  @callback read_collected_event_count() :: non_neg_integer()
 
   # ===========================================================================
   # Querying

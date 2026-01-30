@@ -6,9 +6,9 @@ defmodule Arbor.Historian.QueryEngine do
   Provides convenience functions for common access patterns.
   """
 
-  alias Arbor.Historian.Collector.{SignalTransformer, StreamRouter}
   alias Arbor.Historian.EventConverter
   alias Arbor.Historian.HistoryEntry
+  alias Arbor.Historian.StreamIds
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   @type query_opts :: [
@@ -48,7 +48,7 @@ defmodule Arbor.Historian.QueryEngine do
   """
   @spec read_agent(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def read_agent(agent_id, opts) do
-    read_stream(StreamRouter.stream_id_for_agent(agent_id), opts)
+    read_stream(StreamIds.for_agent(agent_id), opts)
   end
 
   @doc """
@@ -56,7 +56,7 @@ defmodule Arbor.Historian.QueryEngine do
   """
   @spec read_category(atom(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def read_category(category, opts) do
-    read_stream(StreamRouter.stream_id_for_category(category), opts)
+    read_stream(StreamIds.for_category(category), opts)
   end
 
   @doc """
@@ -64,7 +64,7 @@ defmodule Arbor.Historian.QueryEngine do
   """
   @spec read_session(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def read_session(session_id, opts) do
-    read_stream(StreamRouter.stream_id_for_session(session_id), opts)
+    read_stream(StreamIds.for_session(session_id), opts)
   end
 
   @doc """
@@ -72,7 +72,7 @@ defmodule Arbor.Historian.QueryEngine do
   """
   @spec read_correlation(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def read_correlation(correlation_id, opts) do
-    read_stream(StreamRouter.stream_id_for_correlation(correlation_id), opts)
+    read_stream(StreamIds.for_correlation(correlation_id), opts)
   end
 
   @doc """
@@ -146,7 +146,7 @@ defmodule Arbor.Historian.QueryEngine do
 
   defp convert_to_history_entry(persistence_event) do
     case EventConverter.from_persistence_event(persistence_event) do
-      {:ok, historian_event} -> SignalTransformer.event_to_history_entry(historian_event)
+      {:ok, historian_event} -> HistoryEntry.from_event(historian_event)
       {:error, _} -> nil
     end
   end

@@ -177,7 +177,6 @@ defmodule Arbor.HistorianTest do
     test "stats/0 returns combined statistics" do
       stats = Arbor.Historian.stats()
       assert is_map(stats)
-      assert Map.has_key?(stats, :event_count)
       assert Map.has_key?(stats, :stream_count)
       assert Map.has_key?(stats, :total_events)
     end
@@ -185,15 +184,6 @@ defmodule Arbor.HistorianTest do
     test "healthy?/0 returns boolean" do
       result = Arbor.Historian.healthy?()
       assert is_boolean(result)
-    end
-
-    test "collect/1 collects a signal" do
-      signal = TestHelpers.build_signal(category: :activity, type: :facade_test)
-      assert :ok = Arbor.Historian.collect(signal)
-    end
-
-    test "event_count/0 returns integer" do
-      assert is_integer(Arbor.Historian.event_count())
     end
 
     test "recent/0 returns entries" do
@@ -278,16 +268,6 @@ defmodule Arbor.HistorianTest do
   end
 
   describe "facade contract callbacks" do
-    test "collect_signal_into_event_log/1" do
-      signal = TestHelpers.build_signal(type: :contract_facade)
-      assert :ok = Arbor.Historian.collect_signal_into_event_log(signal)
-    end
-
-    test "read_collected_event_count/0" do
-      count = Arbor.Historian.read_collected_event_count()
-      assert is_integer(count)
-    end
-
     test "read_recent_history_entries/1" do
       {:ok, entries} = Arbor.Historian.read_recent_history_entries([])
       assert is_list(entries)
