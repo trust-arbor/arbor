@@ -19,6 +19,7 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     * `--sandbox` - Use Docker sandbox instead of local tmux
     * `--cwd` - Working directory relative to project root (default: project root)
     * `--interactive` - Start in interactive mode (accepts guidance via `send`)
+    * `--no-worktree` - Skip git worktree creation (autonomous mode uses worktrees by default)
   """
   use Mix.Task
 
@@ -31,7 +32,13 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
   def run(args) do
     {opts, positional, _} =
       OptionParser.parse(args,
-        strict: [name: :string, sandbox: :boolean, cwd: :string, interactive: :boolean]
+        strict: [
+          name: :string,
+          sandbox: :boolean,
+          cwd: :string,
+          interactive: :boolean,
+          no_worktree: :boolean
+        ]
       )
 
     task = Enum.join(positional, " ")
@@ -64,10 +71,14 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
         exit({:shutdown, 1})
     end
 
+    # Determine if we should use a worktree
+    # Default: autonomous hands get worktrees, interactive hands don't
+    use_worktree = !opts[:interactive] && !opts[:no_worktree]
+
     # Resolve working directory
     project_root = File.cwd!()
 
-    cwd =
+    base_cwd =
       if opts[:cwd] do
         resolved = Path.join(project_root, opts[:cwd])
 
@@ -81,16 +92,38 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
         project_root
       end
 
-    # Prepare hand directory and prompt
+    # Prepare hand directory
     hand_dir = Hands.ensure_hand_dir(name)
-    prompt = Hands.build_prompt(name, task)
+
+    # Create worktree if needed
+    cwd =
+      if use_worktree do
+        if opts[:cwd] do
+          Mix.shell().info("Note: --cwd ignored when using git worktree (worktree is the working directory)")
+        end
+
+        case Hands.create_worktree(name) do
+          {:ok, wt_path} ->
+            Mix.shell().info("Created worktree on branch #{Hands.worktree_branch(name)}")
+            wt_path
+
+          {:error, reason} ->
+            Mix.shell().error(reason)
+            exit({:shutdown, 1})
+        end
+      else
+        base_cwd
+      end
+
+    # Build prompt (with worktree context if applicable)
+    prompt = Hands.build_prompt(name, task, worktree: use_worktree)
     prompt_file = Path.join(hand_dir, "prompt.md")
     File.write!(prompt_file, prompt)
 
     if opts[:sandbox] do
       spawn_sandbox(name, hand_dir, cwd, opts)
     else
-      spawn_local(name, hand_dir, prompt_file, cwd, opts)
+      spawn_local(name, hand_dir, prompt_file, cwd, opts ++ [worktree: use_worktree])
     end
   end
 
@@ -108,20 +141,32 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     # Write run script
     run_script = Path.join(hand_dir, "run.sh")
 
+    bootstrap =
+      if opts[:worktree] do
+        """
+        echo "Bootstrapping worktree dependencies..."
+        mix deps.get --only dev test 2>&1
+        mix compile 2>&1
+        echo "Bootstrap complete. Launching Claude..."
+        """
+      else
+        ""
+      end
+
     script_content =
       if opts[:interactive] do
         """
         #!/bin/bash
         export CLAUDE_CONFIG_DIR=#{config_dir}
         cd #{cwd}
-        exec claude --dangerously-skip-permissions
+        #{bootstrap}exec claude --dangerously-skip-permissions
         """
       else
         """
         #!/bin/bash
         export CLAUDE_CONFIG_DIR=#{config_dir}
         cd #{cwd}
-        exec claude -p "$(cat #{prompt_file})" --dangerously-skip-permissions
+        #{bootstrap}exec claude -p "$(cat #{prompt_file})" --dangerously-skip-permissions
         """
       end
 

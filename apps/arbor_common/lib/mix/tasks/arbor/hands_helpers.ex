@@ -133,8 +133,115 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
     end
   end
 
+  # --- Worktree helpers ---
+
+  @doc "Path to the worktree directory for a hand"
+  def worktree_path(name), do: Path.join(hand_dir(name), "worktree")
+
+  @doc "Branch name for a hand's worktree"
+  def worktree_branch(name), do: "hand/#{name}"
+
+  @doc "Check if a worktree exists for a hand"
+  def has_worktree?(name), do: File.dir?(worktree_path(name))
+
+  @doc "Create a git worktree for a hand. Returns {:ok, path} | {:error, reason}"
+  def create_worktree(name) do
+    wt_path = worktree_path(name)
+    branch = worktree_branch(name)
+
+    # Check if branch already exists
+    case System.cmd("git", ["rev-parse", "--verify", branch], stderr_to_stdout: true) do
+      {_, 0} ->
+        {:error, "Branch '#{branch}' already exists. Run `mix arbor.hands.cleanup #{name}` first or use a different name."}
+
+      _ ->
+        # Check if worktree path already exists
+        if File.dir?(wt_path) do
+          {:error, "Worktree path already exists: #{wt_path}. Run `mix arbor.hands.cleanup #{name}` first."}
+        else
+          case System.cmd("git", ["worktree", "add", wt_path, "-b", branch],
+                 stderr_to_stdout: true
+               ) do
+            {_, 0} ->
+              {:ok, wt_path}
+
+            {output, _} ->
+              {:error, "Failed to create worktree: #{String.trim(output)}"}
+          end
+        end
+    end
+  end
+
+  @doc "Remove a git worktree for a hand. Returns :ok | {:error, reason}"
+  def remove_worktree(name) do
+    wt_path = worktree_path(name)
+
+    if File.dir?(wt_path) do
+      case System.cmd("git", ["worktree", "remove", wt_path, "--force"],
+             stderr_to_stdout: true
+           ) do
+        {_, 0} -> :ok
+        {output, _} -> {:error, "Failed to remove worktree: #{String.trim(output)}"}
+      end
+    else
+      :ok
+    end
+  end
+
+  @doc "Get the commit count ahead of main for a hand's branch"
+  def worktree_ahead_count(name) do
+    branch = worktree_branch(name)
+
+    case System.cmd("git", ["rev-list", "--count", "main..#{branch}"], stderr_to_stdout: true) do
+      {count, 0} -> {:ok, String.trim(count) |> String.to_integer()}
+      _ -> {:error, :unknown}
+    end
+  end
+
+  @doc "Check if a hand's branch has been merged to main"
+  def worktree_branch_merged?(name) do
+    branch = worktree_branch(name)
+
+    case System.cmd("git", ["branch", "--merged", "main"], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.any?(fn line -> String.trim(line) == branch end)
+
+      _ ->
+        false
+    end
+  end
+
+  @doc "Delete a hand's branch. Returns :ok | {:error, reason}"
+  def delete_worktree_branch(name, opts \\ []) do
+    branch = worktree_branch(name)
+    flag = if opts[:force], do: "-D", else: "-d"
+
+    case System.cmd("git", ["branch", flag, branch], stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {output, _} -> {:error, "Failed to delete branch: #{String.trim(output)}"}
+    end
+  end
+
   @doc "Build the full prompt with Hand instructions prepended"
-  def build_prompt(name, task) do
+  def build_prompt(name, task, opts \\ []) do
+    worktree_section =
+      if opts[:worktree] do
+        branch = worktree_branch(name)
+
+        """
+
+        ## Git Worktree
+
+        You are working in a git worktree on branch `#{branch}`.
+        Commit your changes to this branch when you're done.
+        The Mind will review and merge your work into main.
+        """
+      else
+        ""
+      end
+
     """
     You are a Hand — a focused coding agent spawned to do independent work.
 
@@ -157,6 +264,7 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
     - Stay focused on your task
     - Run tests relevant to your changes
     - If you get stuck, write your current status to the summary file
+    #{worktree_section}\
     """
   end
 
