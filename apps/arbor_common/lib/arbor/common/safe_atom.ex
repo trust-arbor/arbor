@@ -361,8 +361,14 @@ defmodule Arbor.Common.SafeAtom do
         {category, signal_type}
 
       [single] ->
-        # Single value without colon - try as category
-        {:unknown, to_category(single)}
+        # Single value without colon - preserve as type if atom exists
+        signal_type =
+          case to_existing(single) do
+            {:ok, atom} -> atom
+            {:error, _} -> :unknown
+          end
+
+        {:unknown, signal_type}
     end
   end
 
