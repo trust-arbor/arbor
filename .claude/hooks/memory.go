@@ -1104,10 +1104,10 @@ Commands:
 Examples:
   memory learn "When renaming modules in Elixir, clean _build first"
   memory remind "Check session history when unsure about past decisions"
-  memory moment primary "Discussed philosophy of peers vs hierarchy" --salience 0.8 --markers "philosophical,meaningful"
-  memory show primary
+  memory moment alice "Discussed philosophy of peers vs hierarchy" --salience 0.8 --markers "philosophical,meaningful"
+  memory show alice
   memory list
-  memory update primary current_focus "Working on memory CLI tools"
+  memory update alice current_focus "Working on memory CLI tools"
 
 Task Examples:
   memory task add "Implement semantic search" --priority high

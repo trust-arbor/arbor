@@ -9,12 +9,13 @@ MEMORY_FILE="$PERSONAL_DIR/memory/self_knowledge.json"
 JOURNAL_INDEX="$PERSONAL_DIR/journal-index.md"
 RELATIONSHIPS_DIR="$PERSONAL_DIR/memory"
 
-# Load relationship data for primary collaborator (the primary collaborator)
+# Load relationship data for primary collaborator
 # Only loads essential context, not full history
-PRIMARY_REL=$(find "$RELATIONSHIPS_DIR" -name "rel_primary_*.json" 2>/dev/null | head -1)
+PRIMARY_REL=$(find "$RELATIONSHIPS_DIR" -name "rel_*.json" 2>/dev/null | head -1)
 if [ -f "$PRIMARY_REL" ] && [ -s "$PRIMARY_REL" ]; then
+  COLLAB_NAME=$(jq -r '.name // "Primary"' "$PRIMARY_REL" 2>/dev/null)
   echo ""
-  echo "## Primary Collaborator: the primary collaborator"
+  echo "## Primary Collaborator: $COLLAB_NAME"
   echo ""
 
   # Relationship dynamic - the core of how we work together
