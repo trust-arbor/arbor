@@ -54,6 +54,84 @@ defmodule Arbor.Actions do
 
   alias Arbor.Signals
 
+  # ===========================================================================
+  # Public API — Authorized execution (for agent callers)
+  # ===========================================================================
+
+  @doc """
+  Execute an action with authorization check.
+
+  Verifies the agent has the `arbor://actions/execute/{action_name}` capability
+  before running the action. Use this for agent-initiated action execution
+  where authorization should be enforced.
+
+  ## Parameters
+
+  - `agent_id` - The agent's ID for capability lookup
+  - `action_module` - The action module to execute
+  - `params` - Parameters to pass to the action
+  - `context` - Execution context (default: %{})
+
+  ## Returns
+
+  - `{:ok, result}` - Action executed successfully
+  - `{:error, :unauthorized}` - Agent lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` - Requires escalation approval
+  - `{:error, reason}` - Other execution errors
+
+  ## Examples
+
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_001",
+        Arbor.Actions.File.Read,
+        %{path: "/tmp/file.txt"}
+      )
+  """
+  @spec authorize_and_execute(String.t(), module(), map(), map()) ::
+          {:ok, any()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | term()}
+  def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
+    action_name = action_module_to_name(action_module)
+    resource = "arbor://actions/execute/#{action_name}"
+
+    case Arbor.Security.authorize(agent_id, resource, :execute) do
+      {:ok, :authorized} ->
+        execute_action(action_module, params, context)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Execute an action directly (unchecked).
+
+  Use for system-level callers that don't require authorization.
+  Emits started/completed/failed signals for observability.
+  """
+  @spec execute_action(module(), map(), map()) :: {:ok, any()} | {:error, term()}
+  def execute_action(action_module, params, context \\ %{}) do
+    emit_started(action_module, params)
+
+    case action_module.run(params, context) do
+      {:ok, result} ->
+        emit_completed(action_module, result)
+        {:ok, result}
+
+      {:error, reason} = error ->
+        emit_failed(action_module, reason)
+        error
+    end
+  end
+
+  # ===========================================================================
+  # Public API — Action discovery
+  # ===========================================================================
+
   @doc """
   List all available action modules.
 
@@ -178,4 +256,15 @@ defmodule Arbor.Actions do
   end
 
   defp truncate_value(value), do: value
+
+  # Convert an action module to its snake_case name for capability URIs
+  defp action_module_to_name(module) do
+    module
+    |> Module.split()
+    |> Enum.drop_while(&(&1 != "Actions"))
+    |> Enum.drop(1)
+    |> Enum.join(".")
+    |> Macro.underscore()
+    |> String.replace("/", ".")
+  end
 end
