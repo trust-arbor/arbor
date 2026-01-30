@@ -223,4 +223,45 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:ok, _} = ETS.append("s1", Event.new("s1", "t", %{}), name: name)
     end
   end
+
+  describe "resource limits" do
+    test "rejects appends when event log is full" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_limits_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_events: 3}, id: name)
+
+      ETS.append("s1", Event.new("s1", "t1", %{}), name: name)
+      ETS.append("s1", Event.new("s1", "t2", %{}), name: name)
+      ETS.append("s1", Event.new("s1", "t3", %{}), name: name)
+
+      assert {:error, :event_log_full} =
+               ETS.append("s1", Event.new("s1", "t4", %{}), name: name)
+    end
+
+    test "read_all uses default limit when none specified" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_read_limit_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name}, id: name)
+
+      for i <- 1..5 do
+        ETS.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
+      end
+
+      {:ok, events} = ETS.read_all(name: name)
+      assert length(events) == 5
+    end
+
+    test "read_all respects explicit limit" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_explicit_limit_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name}, id: name)
+
+      for i <- 1..10 do
+        ETS.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
+      end
+
+      {:ok, events} = ETS.read_all(name: name, limit: 3)
+      assert length(events) == 3
+    end
+  end
 end

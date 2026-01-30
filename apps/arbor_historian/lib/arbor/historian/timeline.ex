@@ -6,11 +6,15 @@ defmodule Arbor.Historian.Timeline do
   timeline, deduplicating by signal_id. Supports causality chain following.
   """
 
+  require Logger
+
   alias Arbor.Historian.Collector.StreamRouter
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
+
+  @default_max_results 10_000
 
   @doc """
   Reconstruct a timeline from a Span specification.
@@ -21,6 +25,7 @@ defmodule Arbor.Historian.Timeline do
   """
   @spec reconstruct(Span.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def reconstruct(%Span{} = span, opts \\ []) do
+    max_results = Keyword.get(opts, :max_results, @default_max_results)
     streams = determine_streams(span)
 
     entries =
@@ -29,6 +34,7 @@ defmodule Arbor.Historian.Timeline do
       |> deduplicate()
       |> filter_by_span(span)
       |> Enum.sort_by(& &1.timestamp, DateTime)
+      |> enforce_limit(max_results)
 
     {:ok, entries}
   end
@@ -58,6 +64,8 @@ defmodule Arbor.Historian.Timeline do
   """
   @spec for_causality_chain(String.t(), keyword()) :: {:ok, [HistoryEntry.t()]}
   def for_causality_chain(signal_id, opts \\ []) do
+    # Enforce a read limit to prevent loading unbounded data into memory
+    opts = Keyword.put_new(opts, :limit, @default_max_results)
     {:ok, all_entries} = QueryEngine.read_global(opts)
 
     # Build a lookup by signal_id and by cause_id
@@ -196,4 +204,15 @@ defmodule Arbor.Historian.Timeline do
       end)
     end
   end
+
+  defp enforce_limit(entries, max) when length(entries) > max do
+    Logger.warning("Timeline query results truncated",
+      total: length(entries),
+      limit: max
+    )
+
+    Enum.take(entries, max)
+  end
+
+  defp enforce_limit(entries, _max), do: entries
 end
