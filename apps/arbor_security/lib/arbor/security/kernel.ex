@@ -43,7 +43,7 @@ defmodule Arbor.Security.Kernel do
            metadata: metadata
          ) do
       {:ok, cap} ->
-        :ok = CapabilityStore.put(cap)
+        {:ok, :stored} = CapabilityStore.put(cap)
         {:ok, cap}
 
       error ->

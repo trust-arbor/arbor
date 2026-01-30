@@ -1,45 +1,81 @@
 defmodule Arbor.Security.FileGuardTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.FileGuard
+  alias Arbor.Security.SystemAuthority
 
   @moduletag :fast
 
-  # Most tests don't need the capability store - they test URI parsing,
-  # pattern matching, and SafePath integration. Tests that need capabilities
-  # use the application-supervised store.
+  setup do
+    agent_id = "agent_fg_#{:erlang.unique_integer([:positive])}"
+    {:ok, agent_id: agent_id}
+  end
+
+  defp grant_fs_capability(agent_id, operation, path, opts \\ []) do
+    uri = FileGuard.resource_uri(operation, path)
+
+    {:ok, cap} =
+      Capability.new(
+        resource_uri: uri,
+        principal_id: agent_id,
+        constraints: Keyword.get(opts, :constraints, %{}),
+        expires_at: Keyword.get(opts, :expires_at)
+      )
+
+    {:ok, signed} = SystemAuthority.sign_capability(cap)
+    {:ok, :stored} = CapabilityStore.put(signed)
+    {:ok, signed}
+  end
+
+  # ===========================================================================
+  # URI building and parsing
+  # ===========================================================================
 
   describe "resource_uri/2" do
-    test "builds correct URI for read operation" do
-      assert "arbor://fs/read/workspace/project" = FileGuard.resource_uri(:read, "/workspace/project")
-    end
-
-    test "builds correct URI for write operation" do
+    test "builds correct URI for all operations" do
+      assert "arbor://fs/read/workspace" = FileGuard.resource_uri(:read, "/workspace")
       assert "arbor://fs/write/data" = FileGuard.resource_uri(:write, "/data")
+      assert "arbor://fs/execute/scripts" = FileGuard.resource_uri(:execute, "/scripts")
+      assert "arbor://fs/delete/tmp" = FileGuard.resource_uri(:delete, "/tmp")
+      assert "arbor://fs/list/docs" = FileGuard.resource_uri(:list, "/docs")
     end
 
     test "handles paths without leading slash" do
       assert "arbor://fs/read/workspace" = FileGuard.resource_uri(:read, "workspace")
     end
+
+    test "handles nested paths" do
+      assert "arbor://fs/read/workspace/project/src" =
+               FileGuard.resource_uri(:read, "/workspace/project/src")
+    end
   end
 
   describe "parse_resource_uri/1" do
-    test "parses valid fs URI" do
+    test "parses valid fs URI with path" do
       assert {:ok, :read, "/workspace/project"} =
                FileGuard.parse_resource_uri("arbor://fs/read/workspace/project")
     end
 
-    test "parses all operations" do
-      assert {:ok, :read, "/path"} = FileGuard.parse_resource_uri("arbor://fs/read/path")
-      assert {:ok, :write, "/path"} = FileGuard.parse_resource_uri("arbor://fs/write/path")
-      assert {:ok, :execute, "/path"} = FileGuard.parse_resource_uri("arbor://fs/execute/path")
-      assert {:ok, :delete, "/path"} = FileGuard.parse_resource_uri("arbor://fs/delete/path")
-      assert {:ok, :list, "/path"} = FileGuard.parse_resource_uri("arbor://fs/list/path")
+    test "parses all operation types" do
+      assert {:ok, :read, "/p"} = FileGuard.parse_resource_uri("arbor://fs/read/p")
+      assert {:ok, :write, "/p"} = FileGuard.parse_resource_uri("arbor://fs/write/p")
+      assert {:ok, :execute, "/p"} = FileGuard.parse_resource_uri("arbor://fs/execute/p")
+      assert {:ok, :delete, "/p"} = FileGuard.parse_resource_uri("arbor://fs/delete/p")
+      assert {:ok, :list, "/p"} = FileGuard.parse_resource_uri("arbor://fs/list/p")
+    end
+
+    test "parses URI with operation only (no path)" do
+      assert {:ok, :read, "/"} = FileGuard.parse_resource_uri("arbor://fs/read")
     end
 
     test "returns error for non-fs URI" do
       assert {:error, :not_fs_resource} = FileGuard.parse_resource_uri("arbor://api/call/service")
+    end
+
+    test "returns error for completely different URI" do
+      assert {:error, :not_fs_resource} = FileGuard.parse_resource_uri("https://example.com")
     end
 
     test "returns error for invalid operation" do
@@ -48,152 +84,204 @@ defmodule Arbor.Security.FileGuardTest do
     end
   end
 
-  describe "authorize/3 with mocked capabilities" do
-    # These tests mock the capability store behavior
+  # ===========================================================================
+  # Authorization (integration with CapabilityStore)
+  # ===========================================================================
 
-    test "returns error when no capability exists" do
-      # No capabilities granted, should fail
-      assert {:error, :no_capability} = FileGuard.authorize("agent_001", "/workspace/file.ex", :read)
-    end
-  end
-
-  describe "pattern matching" do
-    test "pattern_matches? handles glob patterns" do
-      # Test the private function behavior through constraints
-      constraints = %{patterns: ["*.ex", "*.exs"]}
-
-      # We can't directly test private functions, but we verify through integration
-      # These would be tested through authorize/3 with proper setup
-      assert is_map(constraints)
-    end
-  end
-
-  describe "SafePath integration" do
-    test "validates paths stay within root" do
-      # Direct SafePath validation - FileGuard uses this internally
-      alias Arbor.Common.SafePath
-
-      assert SafePath.within?("/workspace/file.ex", "/workspace")
-      refute SafePath.within?("/workspace/../etc/passwd", "/workspace")
-      refute SafePath.within?("/etc/passwd", "/workspace")
+  describe "authorize/3" do
+    test "authorizes when capability matches exactly", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace/file.ex")
+      assert {:ok, "/workspace/file.ex"} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
 
-    test "resolves relative paths against root" do
-      alias Arbor.Common.SafePath
-
-      assert {:ok, "/workspace/file.ex"} = SafePath.resolve_within("file.ex", "/workspace")
-      assert {:ok, "/workspace/subdir/file.ex"} = SafePath.resolve_within("subdir/file.ex", "/workspace")
+    test "authorizes via parent capability", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      assert {:ok, "/workspace/subdir/file.ex"} = FileGuard.authorize(agent_id, "/workspace/subdir/file.ex", :read)
     end
 
-    test "detects traversal attempts" do
-      alias Arbor.Common.SafePath
-
-      assert {:error, :path_traversal} = SafePath.resolve_within("../etc/passwd", "/workspace")
-      assert {:error, :path_traversal} = SafePath.resolve_within("a/b/c/../../../../etc/passwd", "/workspace")
-    end
-  end
-
-  describe "constraint checking" do
-    test "max_depth constraint calculation" do
-      # Verify depth calculation logic
-      path = "/workspace/a/b/c/file.ex"
-      root = "/workspace"
-
-      relative = String.trim_leading(path, root)
-      depth = relative |> String.split("/") |> Enum.reject(&(&1 == "")) |> length()
-
-      # /a/b/c/file.ex = 4 components
-      assert depth == 4
+    test "denies without any capability", %{agent_id: agent_id} do
+      assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
 
-    test "pattern constraint matching" do
-      # Test glob-to-regex conversion
-      # *.ex should match file.ex
-      pattern = "*.ex"
-
-      regex_pattern =
-        pattern
-        |> Regex.escape()
-        |> String.replace("\\*", ".*")
-        |> String.replace("\\?", ".")
-
-      assert Regex.match?(~r/^#{regex_pattern}$/, "file.ex")
-      assert Regex.match?(~r/^#{regex_pattern}$/, "my_module.ex")
-      refute Regex.match?(~r/^#{regex_pattern}$/, "file.exs")
-      refute Regex.match?(~r/^#{regex_pattern}$/, "file.txt")
+    test "denies path traversal", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      assert {:error, :path_traversal} = FileGuard.authorize(agent_id, "/workspace/../etc/passwd", :read)
     end
 
-    test "exclude pattern matching" do
-      # .env files should be excludable
-      pattern = ".env"
-
-      regex_pattern =
-        pattern
-        |> Regex.escape()
-        |> String.replace("\\*", ".*")
-        |> String.replace("\\?", ".")
-
-      assert Regex.match?(~r/^#{regex_pattern}$/, ".env")
-      refute Regex.match?(~r/^#{regex_pattern}$/, "config.env")
+    test "denies for wrong operation", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :write)
     end
 
-    test "wildcard exclude patterns" do
-      # *.secret should exclude all .secret files
-      pattern = "*.secret"
-
-      regex_pattern =
-        pattern
-        |> Regex.escape()
-        |> String.replace("\\*", ".*")
-        |> String.replace("\\?", ".")
-
-      assert Regex.match?(~r/^#{regex_pattern}$/, "api.secret")
-      assert Regex.match?(~r/^#{regex_pattern}$/, "database.secret")
-      refute Regex.match?(~r/^#{regex_pattern}$/, "secret.txt")
-    end
-  end
-
-  describe "capability expiration" do
-    test "non-expired capability is valid" do
-      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+    test "denies for expired capability", %{agent_id: agent_id} do
+      # Create a capability that's already expired.
+      # CapabilityStore filters expired capabilities during lookup,
+      # so this surfaces as :no_capability rather than :expired.
+      past = DateTime.add(DateTime.utc_now(), -3600)
+      uri = FileGuard.resource_uri(:read, "/workspace")
 
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://fs/read/workspace",
-          principal_id: "agent_test",
-          expires_at: future
+          resource_uri: uri,
+          principal_id: agent_id,
+          expires_at: DateTime.add(DateTime.utc_now(), 1)
         )
 
-      assert Capability.valid?(cap)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      expired = %{signed | expires_at: past}
+      {:ok, :stored} = CapabilityStore.put(expired)
+
+      assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
 
-    test "expired capability is invalid" do
-      past = DateTime.utc_now() |> DateTime.add(-3600, :second)
-
-      # Can't create an expired capability directly (validation prevents it)
-      # But we can test the expiration check logic
-      now = DateTime.utc_now()
-      assert DateTime.compare(past, now) == :lt
+    test "authorizes across all operation types", %{agent_id: agent_id} do
+      for op <- [:read, :write, :execute, :delete, :list] do
+        path = "/workspace_#{op}"
+        {:ok, _cap} = grant_fs_capability(agent_id, op, path)
+        assert {:ok, _} = FileGuard.authorize(agent_id, "#{path}/file.ex", op)
+      end
     end
   end
 
-  describe "fs_capability? helper" do
-    test "identifies fs capabilities" do
-      {:ok, fs_cap} =
-        Capability.new(
-          resource_uri: "arbor://fs/read/workspace",
-          principal_id: "agent_test"
+  describe "authorize/3 with constraints" do
+    test "allows file matching pattern constraint", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/workspace",
+          constraints: %{patterns: ["*.ex", "*.exs"]}
         )
 
+      assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
+    end
+
+    test "denies file not matching pattern constraint", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/workspace",
+          constraints: %{patterns: ["*.ex", "*.exs"]}
+        )
+
+      assert {:error, :pattern_mismatch} = FileGuard.authorize(agent_id, "/workspace/file.txt", :read)
+    end
+
+    test "denies file matching exclude constraint", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/workspace",
+          constraints: %{exclude: [".env", "*.secret"]}
+        )
+
+      assert {:error, :excluded_pattern} = FileGuard.authorize(agent_id, "/workspace/.env", :read)
+      assert {:error, :excluded_pattern} = FileGuard.authorize(agent_id, "/workspace/api.secret", :read)
+    end
+
+    test "allows file not matching exclude constraint", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/workspace",
+          constraints: %{exclude: [".env"]}
+        )
+
+      assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/config.exs", :read)
+    end
+
+    test "enforces max_depth constraint", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        grant_fs_capability(agent_id, :read, "/workspace",
+          constraints: %{max_depth: 2}
+        )
+
+      # Depth 1: allowed
+      assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
+      # Depth 2: allowed
+      assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/src/file.ex", :read)
+      # Depth 3: denied
+      assert {:error, :max_depth_exceeded} =
+               FileGuard.authorize(agent_id, "/workspace/src/deep/file.ex", :read)
+    end
+
+    test "no constraints allows everything", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/any/deep/path/file.txt", :read)
+    end
+  end
+
+  # ===========================================================================
+  # Boolean check
+  # ===========================================================================
+
+  describe "can?/3" do
+    test "returns true with valid capability", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      assert FileGuard.can?(agent_id, "/workspace/file.ex", :read)
+    end
+
+    test "returns false without capability", %{agent_id: agent_id} do
+      refute FileGuard.can?(agent_id, "/workspace/file.ex", :read)
+    end
+
+    test "returns false for path traversal", %{agent_id: agent_id} do
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
+      refute FileGuard.can?(agent_id, "/workspace/../etc/passwd", :read)
+    end
+  end
+
+  # ===========================================================================
+  # Authorize with capability return
+  # ===========================================================================
+
+  describe "authorize_with_capability/3" do
+    test "returns capability alongside resolved path", %{agent_id: agent_id} do
+      {:ok, granted} = grant_fs_capability(agent_id, :read, "/workspace")
+
+      assert {:ok, resolved, cap} =
+               FileGuard.authorize_with_capability(agent_id, "/workspace/file.ex", :read)
+
+      assert resolved == "/workspace/file.ex"
+      assert cap.id == granted.id
+      assert cap.principal_id == agent_id
+    end
+
+    test "returns error when not authorized", %{agent_id: agent_id} do
+      assert {:error, :no_capability} =
+               FileGuard.authorize_with_capability(agent_id, "/workspace/file.ex", :read)
+    end
+  end
+
+  # ===========================================================================
+  # List FS capabilities
+  # ===========================================================================
+
+  describe "list_fs_capabilities/1" do
+    test "returns only fs capabilities", %{agent_id: agent_id} do
+      # Grant an fs capability
+      {:ok, _fs_cap} = grant_fs_capability(agent_id, :read, "/workspace")
+
+      # Grant a non-fs capability directly
       {:ok, api_cap} =
         Capability.new(
           resource_uri: "arbor://api/call/service",
-          principal_id: "agent_test"
+          principal_id: agent_id
         )
 
-      # Test through the module's behavior
-      assert String.starts_with?(fs_cap.resource_uri, "arbor://fs/")
-      refute String.starts_with?(api_cap.resource_uri, "arbor://fs/")
+      {:ok, signed_api} = SystemAuthority.sign_capability(api_cap)
+      {:ok, :stored} = CapabilityStore.put(signed_api)
+
+      {:ok, fs_caps} = FileGuard.list_fs_capabilities(agent_id)
+
+      assert fs_caps != []
+      assert Enum.all?(fs_caps, &String.starts_with?(&1.resource_uri, "arbor://fs/"))
+    end
+
+    test "returns empty list when no fs capabilities", %{agent_id: agent_id} do
+      # Grant only a non-fs capability
+      {:ok, api_cap} =
+        Capability.new(
+          resource_uri: "arbor://api/call/service",
+          principal_id: agent_id
+        )
+
+      {:ok, signed} = SystemAuthority.sign_capability(api_cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      {:ok, fs_caps} = FileGuard.list_fs_capabilities(agent_id)
+      assert fs_caps == []
     end
   end
 end
