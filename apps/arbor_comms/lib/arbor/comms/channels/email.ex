@@ -17,13 +17,12 @@ defmodule Arbor.Comms.Channels.Email do
         smtp_pass: System.get_env("SMTP_PASS")
   """
 
-  @behaviour Arbor.Contracts.Comms.Channel
+  @behaviour Arbor.Contracts.Comms.ChannelSender
 
   require Logger
 
   import Swoosh.Email
 
-  alias Arbor.Contracts.Comms.Message
   alias Swoosh.Adapters.SMTP
 
   @max_message_length 50_000
@@ -44,7 +43,7 @@ defmodule Arbor.Comms.Channels.Email do
     ".exs" => "text/x-elixir"
   }
 
-  @impl true
+  @doc "Returns channel capabilities and metadata."
   def channel_info do
     %{
       name: :email,
@@ -56,17 +55,12 @@ defmodule Arbor.Comms.Channels.Email do
     }
   end
 
-  @impl true
-  def poll do
-    {:ok, []}
-  end
-
-  @impl true
+  @impl Arbor.Contracts.Comms.ChannelSender
   def send_message(recipient, message, opts \\ []) do
     subject = Keyword.get(opts, :subject, "Arbor Notification")
     from = Keyword.get(opts, :from, config(:from))
     attachments = Keyword.get(opts, :attachments, [])
-    formatted = format_response(message)
+    formatted = do_format(message)
 
     email =
       new()
@@ -101,17 +95,10 @@ defmodule Arbor.Comms.Channels.Email do
     end
   end
 
-  @impl true
-  def send_response(%Message{} = message, response) do
-    recipient = message.from
-    original_subject = message.metadata["subject"] || "Arbor Message"
-    subject = "Re: #{original_subject}"
+  @impl Arbor.Contracts.Comms.ChannelSender
+  def format_for_channel(message), do: do_format(message)
 
-    send_message(recipient, response, subject: subject)
-  end
-
-  @impl true
-  def format_response(response) do
+  defp do_format(response) do
     response = String.trim(response)
 
     if String.length(response) > @max_message_length do
