@@ -1,4 +1,4 @@
-defmodule Arbor.Bridge.ClaudeSession do
+defmodule Arbor.Gateway.Bridge.ClaudeSession do
   @moduledoc """
   Manages Claude Code sessions as Arbor agents.
 

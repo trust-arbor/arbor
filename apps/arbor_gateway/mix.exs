@@ -1,9 +1,9 @@
-defmodule ArborBridge.MixProject do
+defmodule ArborGateway.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :arbor_bridge,
+      app: :arbor_gateway,
       version: "0.1.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
@@ -19,7 +19,7 @@ defmodule ArborBridge.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Arbor.Bridge.Application, []}
+      mod: {Arbor.Gateway.Application, []}
     ]
   end
 
@@ -37,7 +37,7 @@ defmodule ArborBridge.MixProject do
 
   defp docs do
     [
-      main: "Arbor.Bridge",
+      main: "Arbor.Gateway",
       extras: ["README.md"]
     ]
   end
