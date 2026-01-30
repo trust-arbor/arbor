@@ -30,6 +30,7 @@ defmodule Arbor.Actions.MixProject do
     [
       {:arbor_common, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},

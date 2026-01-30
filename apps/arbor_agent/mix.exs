@@ -29,6 +29,7 @@ defmodule ArborAgent.MixProject do
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_checkpoint, in_umbrella: true},
       {:jido, override: true},
