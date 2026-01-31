@@ -167,12 +167,59 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
                  stderr_to_stdout: true
                ) do
             {_, 0} ->
+              symlink_path_deps(name)
               {:ok, wt_path}
 
             {output, _} ->
               {:error, "Failed to create worktree: #{String.trim(output)}"}
           end
         end
+    end
+  end
+
+  @doc """
+  Symlink path dependencies so the worktree can resolve them.
+
+  Umbrella projects may have path deps like `{:jido, path: "../jido"}`.
+  From the worktree at `.arbor/hands/<name>/worktree/`, `../jido` resolves
+  to `.arbor/hands/<name>/jido` — which doesn't exist. This function creates
+  symlinks so those paths resolve to the actual dependency directories.
+  """
+  def symlink_path_deps(name) do
+    project_root = File.cwd!()
+    wt_path = worktree_path(name)
+
+    for {_dep, rel_path} <- extract_path_deps(project_root) do
+      # Where the dep actually lives (resolved from project root)
+      actual_path = Path.expand(rel_path, project_root)
+
+      # Where the worktree's mix.exs will look for it (resolved from worktree)
+      expected_path = Path.expand(rel_path, wt_path)
+
+      # Only create symlink if:
+      # - the actual dep exists
+      # - the expected path doesn't already exist (not inside the worktree)
+      if File.dir?(actual_path) and not File.exists?(expected_path) do
+        # Ensure the parent directory exists (for nested paths like ../../foo/bar)
+        expected_path |> Path.dirname() |> File.mkdir_p!()
+        File.ln_s!(actual_path, expected_path)
+      end
+    end
+
+    :ok
+  end
+
+  defp extract_path_deps(project_root) do
+    mix_exs = Path.join(project_root, "mix.exs")
+
+    case File.read(mix_exs) do
+      {:ok, content} ->
+        Regex.scan(~r/\{:\w+,\s*path:\s*"([^"]+)"/, content)
+        |> Enum.map(fn [_full, path] -> {Path.basename(path), path} end)
+        |> Enum.uniq_by(fn {dep_name, _} -> dep_name end)
+
+      _ ->
+        []
     end
   end
 
@@ -239,6 +286,11 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
         You are working in a git worktree on branch `#{branch}`.
         Commit your changes to this branch when you're done.
         The Mind will review and merge your work into main.
+
+        IMPORTANT: All file operations and commands (compile, test, format) MUST
+        happen within this worktree directory. NEVER copy files to or run commands
+        in the main working tree. The worktree has symlinked path dependencies so
+        compilation should work directly here.
         """
       else
         ""
