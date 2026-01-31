@@ -40,6 +40,7 @@ defmodule Arbor.AI.CliImpl do
       {:ok, result} = CliImpl.generate_text("Hello", fallback_chain: [:lmstudio])
   """
 
+  alias Arbor.AI.BudgetTracker
   alias Arbor.AI.Config
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
@@ -231,6 +232,10 @@ defmodule Arbor.AI.CliImpl do
             {:ok, response} = success ->
               # Store session_id for future calls
               store_session_id(provider, module, opts, response)
+
+              # Record usage for budget tracking
+              record_budget_usage(provider, opts, response)
+
               success
 
             error ->
@@ -313,6 +318,20 @@ defmodule Arbor.AI.CliImpl do
       _ ->
         # New or different session - store it
         SessionRegistry.store(provider, session_context, session_id)
+    end
+  end
+
+  # Record usage for budget tracking (only if BudgetTracker is running)
+  defp record_budget_usage(provider, opts, response) do
+    if BudgetTracker.started?() do
+      model = Keyword.get(opts, :model, "unknown")
+      usage = Map.get(response, :usage, %{})
+
+      BudgetTracker.record_usage(provider, %{
+        model: to_string(model),
+        input_tokens: Map.get(usage, :input_tokens, 0),
+        output_tokens: Map.get(usage, :output_tokens, 0)
+      })
     end
   end
 

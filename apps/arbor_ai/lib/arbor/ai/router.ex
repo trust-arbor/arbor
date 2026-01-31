@@ -49,7 +49,16 @@ defmodule Arbor.AI.Router do
       backend = Router.select_backend(opts)
   """
 
-  alias Arbor.AI.{BackendRegistry, BackendTrust, QuotaTracker, RoutingConfig, TaskMeta}
+  alias Arbor.AI.{
+    BackendRegistry,
+    BackendTrust,
+    BudgetTracker,
+    QuotaTracker,
+    RoutingConfig,
+    TaskMeta
+  }
+
+  alias Arbor.Signals
 
   require Logger
 
@@ -253,39 +262,114 @@ defmodule Arbor.AI.Router do
 
     # Get candidates for this tier
     candidates = RoutingConfig.get_tier_backends(tier)
+    candidates_count = length(candidates)
 
-    # Filter and select
-    case select_candidate(candidates, min_trust, exclude) do
+    # Apply all filters including budget
+    filtered_candidates =
+      candidates
+      |> filter_by_exclusions(exclude)
+      |> filter_by_trust(min_trust)
+      |> filter_by_availability()
+      |> filter_by_quota()
+      |> filter_by_budget(tier)
+
+    # Select first available
+    case List.first(filtered_candidates) do
       nil ->
         # Try fallback chain
         fallback = RoutingConfig.get_fallback_chain(exclude: exclude)
 
-        case select_candidate(fallback, min_trust, []) do
+        fallback_candidates =
+          fallback
+          |> filter_by_trust(min_trust)
+          |> filter_by_availability()
+          |> filter_by_quota()
+          |> filter_by_budget(tier)
+
+        case List.first(fallback_candidates) do
           nil ->
+            emit_routing_decision(tier, nil, nil, :no_backends, candidates_count)
             {:error, :no_backends_available}
 
           {backend, model} ->
             resolved = RoutingConfig.resolve_model(model)
             Logger.debug("Router using fallback", backend: backend, model: resolved)
+            emit_routing_decision(tier, backend, resolved, :fallback, candidates_count)
             {:ok, {backend, resolved}}
         end
 
       {backend, model} ->
         resolved = RoutingConfig.resolve_model(model)
         Logger.debug("Router selected", backend: backend, model: resolved, tier: tier)
+        emit_routing_decision(tier, backend, resolved, :tier_match, candidates_count)
         {:ok, {backend, resolved}}
     end
   end
 
-  defp select_candidate(candidates, min_trust, exclude) do
-    candidates
-    |> Enum.reject(fn {backend, _model} -> backend in exclude end)
-    |> Enum.filter(fn {backend, _model} ->
-      BackendTrust.meets_minimum?(backend, min_trust) and
-        backend_available?(backend) and
-        QuotaTracker.available?(backend)
+  # ===========================================================================
+  # Private Functions - Filtering Pipeline
+  # ===========================================================================
+
+  defp filter_by_exclusions(candidates, exclude) do
+    Enum.reject(candidates, fn {backend, _model} -> backend in exclude end)
+  end
+
+  defp filter_by_trust(candidates, min_trust) do
+    Enum.filter(candidates, fn {backend, _model} ->
+      BackendTrust.meets_minimum?(backend, min_trust)
     end)
-    |> List.first()
+  end
+
+  defp filter_by_availability(candidates) do
+    Enum.filter(candidates, fn {backend, _model} ->
+      backend_available?(backend)
+    end)
+  end
+
+  defp filter_by_quota(candidates) do
+    Enum.filter(candidates, fn {backend, _model} ->
+      QuotaTracker.available?(backend)
+    end)
+  end
+
+  @doc false
+  # Budget-aware filtering - critical tasks bypass constraints
+  def filter_by_budget(candidates, tier) do
+    cond do
+      # Critical tasks ignore budget constraints
+      tier == :critical ->
+        candidates
+
+      # Over budget: only free backends for non-critical tasks
+      BudgetTracker.over_budget?() ->
+        free_only =
+          Enum.filter(candidates, fn {backend, _model} ->
+            BudgetTracker.free_backend?(backend)
+          end)
+
+        if free_only == [] do
+          Logger.warning("Over budget and no free backends available")
+        end
+
+        free_only
+
+      # Low budget: sort free first, allow paid as fallback
+      BudgetTracker.should_prefer_free?() ->
+        sort_free_first(candidates)
+
+      # Normal budget: no filtering
+      true ->
+        candidates
+    end
+  end
+
+  defp sort_free_first(candidates) do
+    {free, paid} =
+      Enum.split_with(candidates, fn {backend, _model} ->
+        BudgetTracker.free_backend?(backend)
+      end)
+
+    free ++ paid
   end
 
   defp backend_available?(backend) do
@@ -341,5 +425,28 @@ defmodule Arbor.AI.Router do
 
   defp routing_strategy do
     Application.get_env(:arbor_ai, :routing_strategy, :cost_optimized)
+  end
+
+  # ===========================================================================
+  # Private Functions - Signal Emissions
+  # ===========================================================================
+
+  defp emit_routing_decision(tier, backend, model, reason, alternatives_count) do
+    verbosity = signal_verbosity()
+
+    # Only emit for :normal or :debug verbosity
+    if verbosity in [:normal, :debug] do
+      Signals.emit(:ai, :routing_decision, %{
+        task_tier: tier,
+        selected_backend: backend,
+        selected_model: model,
+        reason: reason,
+        alternatives_considered: alternatives_count
+      })
+    end
+  end
+
+  defp signal_verbosity do
+    Application.get_env(:arbor_ai, :signal_verbosity, :normal)
   end
 end

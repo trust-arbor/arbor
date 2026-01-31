@@ -107,7 +107,15 @@ config :arbor_ai,
       {:openai, "text-embedding-3-small"}
     ],
     fallback_to_cloud: true
-  }
+  },
+  # Budget tracking (Phase 2)
+  enable_budget_tracking: true,
+  daily_api_budget_usd: 10.00,
+  budget_prefer_free_threshold: 0.5,
+  budget_persistence: false,
+  budget_persistence_path: "~/.arbor/budget-tracker.json",
+  cost_overrides: %{},
+  signal_verbosity: :normal
 
 # Memory system defaults
 config :arbor_memory,
