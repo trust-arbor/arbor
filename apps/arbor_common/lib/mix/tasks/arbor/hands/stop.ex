@@ -77,7 +77,9 @@ defmodule Mix.Tasks.Arbor.Hands.Stop do
           "claude",
           "/exit",
           "Enter"
-        ], stderr_to_stdout: true)
+        ],
+        stderr_to_stdout: true
+      )
 
       Process.sleep(3_000)
     end

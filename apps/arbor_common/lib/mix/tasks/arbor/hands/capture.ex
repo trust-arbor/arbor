@@ -90,7 +90,9 @@ defmodule Mix.Tasks.Arbor.Hands.Capture do
              "-p",
              "-S",
              "-#{lines}"
-           ], stderr_to_stdout: true) do
+           ],
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         Mix.shell().info("── Terminal Output ──")
         Mix.shell().info(String.trim(output))
@@ -114,7 +116,9 @@ defmodule Mix.Tasks.Arbor.Hands.Capture do
              "-p",
              "-S",
              "-#{lines}"
-           ], stderr_to_stdout: true) do
+           ],
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         Mix.shell().info("── Terminal Output ──")
         Mix.shell().info(String.trim(output))

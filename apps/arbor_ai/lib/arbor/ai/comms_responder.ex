@@ -89,9 +89,14 @@ defmodule Arbor.AI.CommsResponder do
     path = session_file_path()
 
     case File.rm(path) do
-      :ok -> Logger.info("CommsResponder: session reset")
-      {:error, :enoent} -> :ok
-      {:error, reason} -> Logger.warning("CommsResponder: failed to reset session: #{inspect(reason)}")
+      :ok ->
+        Logger.info("CommsResponder: session reset")
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("CommsResponder: failed to reset session: #{inspect(reason)}")
     end
 
     :ok

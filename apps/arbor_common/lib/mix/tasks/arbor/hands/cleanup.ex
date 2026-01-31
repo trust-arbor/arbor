@@ -48,7 +48,10 @@ defmodule Mix.Tasks.Arbor.Hands.Cleanup do
         :ok
 
       {type, _} ->
-        Mix.shell().error("Hand '#{name}' is still running (#{type}). Stop it first with: mix arbor.hands.stop #{name}")
+        Mix.shell().error(
+          "Hand '#{name}' is still running (#{type}). Stop it first with: mix arbor.hands.stop #{name}"
+        )
+
         exit({:shutdown, 1})
     end
 

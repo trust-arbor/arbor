@@ -71,7 +71,9 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
         "claude",
         message,
         "Enter"
-      ], stderr_to_stdout: true)
+      ],
+      stderr_to_stdout: true
+    )
   end
 
   defp capture_recent(name) do
