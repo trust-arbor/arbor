@@ -7,6 +7,7 @@ defmodule Arbor.Gateway.Router do
   - `/health` — liveness check
   - `/api/bridge/*` — Claude Code tool authorization
   - `/api/dev/*` — development tools (eval, recompile, info)
+  - `/api/signals/*` — signal ingestion from external sources (hooks, etc.)
   """
 
   use Plug.Router
@@ -23,6 +24,7 @@ defmodule Arbor.Gateway.Router do
   end
 
   forward("/api/bridge", to: Arbor.Gateway.Bridge.Router)
+  forward("/api/signals", to: Arbor.Gateway.Signals.Router)
   forward("/api/dev", to: Arbor.Gateway.Dev.Router)
 
   match _ do
