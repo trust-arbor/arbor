@@ -74,7 +74,9 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
              "name=^#{container_name}$",
              "--format",
              "{{.Names}}"
-           ], stderr_to_stdout: true) do
+           ],
+           stderr_to_stdout: true
+         ) do
       {output, 0} -> String.trim(output) == container_name
       _ -> false
     end
@@ -152,12 +154,14 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
     # Check if branch already exists
     case System.cmd("git", ["rev-parse", "--verify", branch], stderr_to_stdout: true) do
       {_, 0} ->
-        {:error, "Branch '#{branch}' already exists. Run `mix arbor.hands.cleanup #{name}` first or use a different name."}
+        {:error,
+         "Branch '#{branch}' already exists. Run `mix arbor.hands.cleanup #{name}` first or use a different name."}
 
       _ ->
         # Check if worktree path already exists
         if File.dir?(wt_path) do
-          {:error, "Worktree path already exists: #{wt_path}. Run `mix arbor.hands.cleanup #{name}` first."}
+          {:error,
+           "Worktree path already exists: #{wt_path}. Run `mix arbor.hands.cleanup #{name}` first."}
         else
           case System.cmd("git", ["worktree", "add", wt_path, "-b", branch],
                  stderr_to_stdout: true
@@ -177,9 +181,7 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
     wt_path = worktree_path(name)
 
     if File.dir?(wt_path) do
-      case System.cmd("git", ["worktree", "remove", wt_path, "--force"],
-             stderr_to_stdout: true
-           ) do
+      case System.cmd("git", ["worktree", "remove", wt_path, "--force"], stderr_to_stdout: true) do
         {_, 0} -> :ok
         {output, _} -> {:error, "Failed to remove worktree: #{String.trim(output)}"}
       end
