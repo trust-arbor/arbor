@@ -21,6 +21,11 @@ defmodule Arbor.Memory.Signals do
   | `:knowledge_linked` | Nodes linked in knowledge graph |
   | `:knowledge_decayed` | Decay cycle completed |
   | `:knowledge_pruned` | Nodes were pruned |
+  | `:working_memory_loaded` | Working memory loaded/created (Phase 2) |
+  | `:working_memory_saved` | Working memory saved (Phase 2) |
+  | `:thought_recorded` | Thought added to working memory (Phase 2) |
+  | `:facts_extracted` | Facts extracted from text (Phase 2) |
+  | `:context_summarized` | Context was summarized (Phase 2) |
 
   ## Examples
 
@@ -226,6 +231,80 @@ defmodule Arbor.Memory.Signals do
   def emit_memory_cleaned_up(agent_id) do
     Arbor.Signals.emit(:memory, :cleaned_up, %{
       agent_id: agent_id
+    })
+  end
+
+  # ============================================================================
+  # Phase 2 Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when working memory is loaded for an agent.
+
+  ## Status
+
+  - `:created` - New working memory was created
+  - `:existing` - Existing working memory was loaded
+  """
+  @spec emit_working_memory_loaded(String.t(), atom()) :: :ok
+  def emit_working_memory_loaded(agent_id, status) do
+    Arbor.Signals.emit(:memory, :working_memory_loaded, %{
+      agent_id: agent_id,
+      status: status,
+      loaded_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when working memory is saved for an agent.
+  """
+  @spec emit_working_memory_saved(String.t(), map()) :: :ok
+  def emit_working_memory_saved(agent_id, stats) do
+    Arbor.Signals.emit(:memory, :working_memory_saved, %{
+      agent_id: agent_id,
+      thought_count: stats[:thought_count],
+      goal_count: stats[:goal_count],
+      engagement_level: stats[:engagement_level],
+      saved_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a thought is recorded to working memory.
+  """
+  @spec emit_thought_recorded(String.t(), String.t()) :: :ok
+  def emit_thought_recorded(agent_id, thought_preview) do
+    Arbor.Signals.emit(:memory, :thought_recorded, %{
+      agent_id: agent_id,
+      thought_preview: String.slice(thought_preview, 0, 100),
+      recorded_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when facts are extracted from text.
+  """
+  @spec emit_facts_extracted(String.t(), map()) :: :ok
+  def emit_facts_extracted(agent_id, extraction_info) do
+    Arbor.Signals.emit(:memory, :facts_extracted, %{
+      agent_id: agent_id,
+      fact_count: extraction_info[:fact_count],
+      categories: extraction_info[:categories],
+      source: extraction_info[:source],
+      extracted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when context is summarized.
+  """
+  @spec emit_context_summarized(String.t(), map()) :: :ok
+  def emit_context_summarized(agent_id, summary_info) do
+    Arbor.Signals.emit(:memory, :context_summarized, %{
+      agent_id: agent_id,
+      complexity: summary_info[:complexity],
+      model_used: summary_info[:model_used],
+      summarized_at: DateTime.utc_now()
     })
   end
 end
