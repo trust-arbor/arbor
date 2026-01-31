@@ -131,7 +131,10 @@ defmodule Arbor.Memory.IndexSupervisor do
   """
   @spec has_index?(String.t()) :: boolean()
   def has_index?(agent_id) do
-    match?({:ok, _}, get_index(agent_id))
+    case get_index(agent_id) do
+      {:ok, pid} -> Process.alive?(pid)
+      {:error, :not_found} -> false
+    end
   end
 
   @doc """

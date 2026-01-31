@@ -3,7 +3,8 @@ defmodule Arbor.AI.RoutingConfigTest do
 
   alias Arbor.AI.RoutingConfig
 
-  @tag :fast
+  @moduletag :fast
+
   describe "get_tier_backends/1" do
     test "returns critical tier backends" do
       backends = RoutingConfig.get_tier_backends(:critical)
@@ -38,7 +39,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "get_fallback_chain/1" do
     test "returns fallback backends" do
       chain = RoutingConfig.get_fallback_chain()
@@ -59,7 +59,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "resolve_model/1" do
     test "resolves :sonnet to current version string" do
       model = RoutingConfig.resolve_model(:sonnet)
@@ -96,7 +95,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "get_embedding_providers/1" do
     test "returns embedding providers in preference order" do
       providers = RoutingConfig.get_embedding_providers()
@@ -129,7 +127,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "embedding_fallback_to_cloud?/0" do
     test "returns boolean" do
       result = RoutingConfig.embedding_fallback_to_cloud?()
@@ -137,7 +134,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "task_routing_enabled?/0" do
     test "returns boolean" do
       result = RoutingConfig.task_routing_enabled?()
@@ -159,7 +155,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "config overrides" do
     test "tier_routing config overrides defaults" do
       original = Application.get_env(:arbor_ai, :tier_routing)
@@ -227,7 +222,6 @@ defmodule Arbor.AI.RoutingConfigTest do
     end
   end
 
-  @tag :fast
   describe "model_versions/0" do
     test "returns map of model shorthands to version strings" do
       versions = RoutingConfig.model_versions()

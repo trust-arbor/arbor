@@ -3,7 +3,8 @@ defmodule Arbor.AI.TaskMetaTest do
 
   alias Arbor.AI.TaskMeta
 
-  @tag :fast
+  @moduletag :fast
+
   describe "classify/1" do
     test "security keywords result in critical risk and security domain" do
       meta = TaskMeta.classify("Fix the security vulnerability in authentication")
@@ -64,7 +65,6 @@ defmodule Arbor.AI.TaskMetaTest do
     end
   end
 
-  @tag :fast
   describe "classify/2 with overrides" do
     test "overrides risk_level" do
       meta = TaskMeta.classify("hello world", risk_level: :critical)
@@ -95,7 +95,6 @@ defmodule Arbor.AI.TaskMetaTest do
     end
   end
 
-  @tag :fast
   describe "tier/1" do
     test "critical risk maps to critical tier" do
       meta = %TaskMeta{risk_level: :critical}
@@ -148,7 +147,6 @@ defmodule Arbor.AI.TaskMetaTest do
     end
   end
 
-  @tag :fast
   describe "struct defaults" do
     test "has expected default values" do
       meta = %TaskMeta{}

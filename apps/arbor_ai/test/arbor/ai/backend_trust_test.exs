@@ -3,7 +3,8 @@ defmodule Arbor.AI.BackendTrustTest do
 
   alias Arbor.AI.BackendTrust
 
-  @tag :fast
+  @moduletag :fast
+
   describe "level/1" do
     test "returns :highest for lmstudio" do
       assert BackendTrust.level(:lmstudio) == :highest
@@ -42,7 +43,6 @@ defmodule Arbor.AI.BackendTrustTest do
     end
   end
 
-  @tag :fast
   describe "meets_minimum?/2" do
     test ":any matches all backends" do
       assert BackendTrust.meets_minimum?(:qwen, :any) == true
@@ -82,7 +82,6 @@ defmodule Arbor.AI.BackendTrustTest do
     end
   end
 
-  @tag :fast
   describe "sort_by_trust/1" do
     test "sorts backends by trust level (highest first)" do
       backends = [{:openai, "gpt-4"}, {:anthropic, "claude"}, {:lmstudio, "local"}]
@@ -106,7 +105,6 @@ defmodule Arbor.AI.BackendTrustTest do
     end
   end
 
-  @tag :fast
   describe "compare/2" do
     test "highest is greater than high" do
       assert BackendTrust.compare(:highest, :high) == :gt
@@ -134,7 +132,6 @@ defmodule Arbor.AI.BackendTrustTest do
     end
   end
 
-  @tag :fast
   describe "trust_levels/0" do
     test "returns map of all default trust levels" do
       levels = BackendTrust.trust_levels()
@@ -146,7 +143,6 @@ defmodule Arbor.AI.BackendTrustTest do
     end
   end
 
-  @tag :fast
   describe "trust_order/0" do
     test "returns trust levels in descending order" do
       assert BackendTrust.trust_order() == [:highest, :high, :medium, :low]
