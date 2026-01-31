@@ -132,9 +132,13 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     # Generic API key patterns
     ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
     ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
+    # Anthropic API keys (sk-ant-...)
+    # Source: Anthropic API documentation
+    ~r/sk-ant-[A-Za-z0-9\-_]{20,}/,
     # OpenAI-style keys (sk-...)
     # Source: OpenAI API documentation
-    ~r/sk-[a-zA-Z0-9]{32,}/,
+    # Note: Anthropic pattern above is matched first to avoid false overlap
+    ~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/,
     # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
     # Source: https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
     ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
