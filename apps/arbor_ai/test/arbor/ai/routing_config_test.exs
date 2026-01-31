@@ -9,7 +9,7 @@ defmodule Arbor.AI.RoutingConfigTest do
     test "returns critical tier backends" do
       backends = RoutingConfig.get_tier_backends(:critical)
       assert is_list(backends)
-      assert length(backends) > 0
+      assert backends != []
       # Critical tier should include opus
       assert {:anthropic, :opus} in backends
     end
@@ -23,7 +23,7 @@ defmodule Arbor.AI.RoutingConfigTest do
     test "returns moderate tier backends" do
       backends = RoutingConfig.get_tier_backends(:moderate)
       assert is_list(backends)
-      assert length(backends) > 0
+      assert backends != []
     end
 
     test "returns simple tier backends" do
@@ -43,7 +43,7 @@ defmodule Arbor.AI.RoutingConfigTest do
     test "returns fallback backends" do
       chain = RoutingConfig.get_fallback_chain()
       assert is_list(chain)
-      assert length(chain) > 0
+      assert chain != []
     end
 
     test "excludes specified backends" do
@@ -55,7 +55,7 @@ defmodule Arbor.AI.RoutingConfigTest do
     test "handles empty exclude list" do
       chain = RoutingConfig.get_fallback_chain(exclude: [])
       assert is_list(chain)
-      assert length(chain) > 0
+      assert chain != []
     end
   end
 
@@ -99,7 +99,7 @@ defmodule Arbor.AI.RoutingConfigTest do
     test "returns embedding providers in preference order" do
       providers = RoutingConfig.get_embedding_providers()
       assert is_list(providers)
-      assert length(providers) > 0
+      assert providers != []
 
       # Check that each entry is a {backend, model} tuple
       Enum.each(providers, fn {backend, model} ->

@@ -491,28 +491,44 @@ defmodule Arbor.AI.BudgetTracker do
     end
   end
 
+  defp model_to_tier(_backend, tier) when is_atom(tier), do: tier
+
   defp model_to_tier(backend, model) when is_binary(model) do
     model_lower = String.downcase(model)
 
+    if String.contains?(model_lower, "-cli") do
+      :cli
+    else
+      tier_for_backend(backend, model_lower)
+    end
+  end
+
+  defp tier_for_backend(:anthropic, model) do
     cond do
-      # CLI backends
-      String.contains?(model_lower, "-cli") -> :cli
-      # Anthropic models
-      backend == :anthropic and String.contains?(model_lower, "opus") -> :opus
-      backend == :anthropic and String.contains?(model_lower, "sonnet") -> :sonnet
-      backend == :anthropic and String.contains?(model_lower, "haiku") -> :haiku
-      # OpenAI models
-      backend == :openai and String.contains?(model_lower, "gpt-5") -> :gpt5
-      backend == :openai and String.contains?(model_lower, "gpt-4") -> :gpt4
-      # Gemini models
-      backend == :gemini and String.contains?(model_lower, "pro") -> :pro
-      backend == :gemini and String.contains?(model_lower, "flash") -> :flash
-      # Default to :any for unknown models
+      String.contains?(model, "opus") -> :opus
+      String.contains?(model, "sonnet") -> :sonnet
+      String.contains?(model, "haiku") -> :haiku
       true -> :any
     end
   end
 
-  defp model_to_tier(_backend, tier) when is_atom(tier), do: tier
+  defp tier_for_backend(:openai, model) do
+    cond do
+      String.contains?(model, "gpt-5") -> :gpt5
+      String.contains?(model, "gpt-4") -> :gpt4
+      true -> :any
+    end
+  end
+
+  defp tier_for_backend(:gemini, model) do
+    cond do
+      String.contains?(model, "pro") -> :pro
+      String.contains?(model, "flash") -> :flash
+      true -> :any
+    end
+  end
+
+  defp tier_for_backend(_backend, _model), do: :any
 
   defp check_date_rollover do
     today = Date.utc_today()
@@ -603,29 +619,34 @@ defmodule Arbor.AI.BudgetTracker do
 
   defp maybe_load_persistence do
     if persistence_enabled?() do
-      path = persistence_path()
+      load_persistence_file(persistence_path())
+    end
+  end
 
-      if File.exists?(path) do
-        case File.read(path) do
-          {:ok, content} ->
-            case Jason.decode(content) do
-              {:ok, data} ->
-                # Only restore if same date
-                if Map.get(data, "date") == Date.to_iso8601(Date.utc_today()) do
-                  :ets.insert(@table, {:total_spent, Map.get(data, "spent", 0.0)})
-                  :ets.insert(@table, {:total_requests, Map.get(data, "requests", 0)})
-                  :ets.insert(@table, {:total_tokens, Map.get(data, "tokens", 0)})
-                  Logger.info("Loaded budget state from persistence")
-                end
+  defp load_persistence_file(path) do
+    unless File.exists?(path), do: :ok
 
-              {:error, _} ->
-                Logger.warning("Failed to parse budget persistence file")
-            end
+    with {:ok, content} <- File.read(path),
+         {:ok, data} <- Jason.decode(content) do
+      restore_if_same_date(data)
+    else
+      {:error, %Jason.DecodeError{}} ->
+        Logger.warning("Failed to parse budget persistence file")
 
-          {:error, reason} ->
-            Logger.warning("Failed to read budget persistence file", reason: reason)
-        end
-      end
+      {:error, reason} ->
+        Logger.warning("Failed to read budget persistence file", reason: reason)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp restore_if_same_date(data) do
+    if Map.get(data, "date") == Date.to_iso8601(Date.utc_today()) do
+      :ets.insert(@table, {:total_spent, Map.get(data, "spent", 0.0)})
+      :ets.insert(@table, {:total_requests, Map.get(data, "requests", 0)})
+      :ets.insert(@table, {:total_tokens, Map.get(data, "tokens", 0)})
+      Logger.info("Loaded budget state from persistence")
     end
   end
 

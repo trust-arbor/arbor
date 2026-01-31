@@ -151,29 +151,40 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
     wt_path = worktree_path(name)
     branch = worktree_branch(name)
 
-    # Check if branch already exists
+    with :ok <- check_branch_available(name, branch),
+         :ok <- check_worktree_path_available(name, wt_path) do
+      run_worktree_add(name, wt_path, branch)
+    end
+  end
+
+  defp check_branch_available(name, branch) do
     case System.cmd("git", ["rev-parse", "--verify", branch], stderr_to_stdout: true) do
       {_, 0} ->
         {:error,
          "Branch '#{branch}' already exists. Run `mix arbor.hands.cleanup #{name}` first or use a different name."}
 
       _ ->
-        # Check if worktree path already exists
-        if File.dir?(wt_path) do
-          {:error,
-           "Worktree path already exists: #{wt_path}. Run `mix arbor.hands.cleanup #{name}` first."}
-        else
-          case System.cmd("git", ["worktree", "add", wt_path, "-b", branch],
-                 stderr_to_stdout: true
-               ) do
-            {_, 0} ->
-              symlink_path_deps(name)
-              {:ok, wt_path}
+        :ok
+    end
+  end
 
-            {output, _} ->
-              {:error, "Failed to create worktree: #{String.trim(output)}"}
-          end
-        end
+  defp check_worktree_path_available(name, wt_path) do
+    if File.dir?(wt_path) do
+      {:error,
+       "Worktree path already exists: #{wt_path}. Run `mix arbor.hands.cleanup #{name}` first."}
+    else
+      :ok
+    end
+  end
+
+  defp run_worktree_add(name, wt_path, branch) do
+    case System.cmd("git", ["worktree", "add", wt_path, "-b", branch], stderr_to_stdout: true) do
+      {_, 0} ->
+        symlink_path_deps(name)
+        {:ok, wt_path}
+
+      {output, _} ->
+        {:error, "Failed to create worktree: #{String.trim(output)}"}
     end
   end
 

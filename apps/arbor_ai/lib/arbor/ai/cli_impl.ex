@@ -193,30 +193,41 @@ defmodule Arbor.AI.CliImpl do
   end
 
   defp generate_with_fallback(prompt, opts, [provider | rest]) do
-    # Check quota before trying
     if QuotaTracker.available?(provider) do
-      case call_provider(provider, prompt, opts) do
-        {:ok, result} ->
-          {:ok, result}
-
-        {:error, reason} ->
-          Logger.warning("LLM provider failed, trying next",
-            provider: provider,
-            reason: inspect(reason, limit: 100),
-            remaining: rest
-          )
-
-          if rest != [] do
-            emit_provider_fallback(provider, hd(rest), reason)
-          end
-
-          generate_with_fallback(prompt, opts, rest)
-      end
+      try_provider(provider, prompt, opts, rest)
     else
-      Logger.info("Skipping quota-exhausted provider", provider: provider)
-      emit_quota_exhausted(provider)
-      generate_with_fallback(prompt, opts, rest)
+      skip_exhausted_provider(provider, prompt, opts, rest)
     end
+  end
+
+  defp try_provider(provider, prompt, opts, rest) do
+    case call_provider(provider, prompt, opts) do
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, reason} ->
+        handle_provider_failure(provider, reason, prompt, opts, rest)
+    end
+  end
+
+  defp handle_provider_failure(provider, reason, prompt, opts, rest) do
+    Logger.warning("LLM provider failed, trying next",
+      provider: provider,
+      reason: inspect(reason, limit: 100),
+      remaining: rest
+    )
+
+    if rest != [] do
+      emit_provider_fallback(provider, hd(rest), reason)
+    end
+
+    generate_with_fallback(prompt, opts, rest)
+  end
+
+  defp skip_exhausted_provider(provider, prompt, opts, rest) do
+    Logger.info("Skipping quota-exhausted provider", provider: provider)
+    emit_quota_exhausted(provider)
+    generate_with_fallback(prompt, opts, rest)
   end
 
   defp call_provider(provider, prompt, opts) do

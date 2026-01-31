@@ -28,8 +28,8 @@ defmodule Arbor.Common.Sessions.Reader do
 
   alias Arbor.Common.SafePath
   alias Arbor.Common.Sessions.Parser
-  alias Arbor.Common.Sessions.Record
   alias Arbor.Common.Sessions.Providers.Claude
+  alias Arbor.Common.Sessions.Record
 
   @type path :: String.t()
   @type stream_result :: {:ok, Enumerable.t()} | {:error, term()}
@@ -240,70 +240,67 @@ defmodule Arbor.Common.Sessions.Reader do
   defp resolve_from_names_json(identifier) do
     names_file = Path.expand("~/.arbor/session-names.json")
 
-    if File.exists?(names_file) do
-      case File.read(names_file) do
-        {:ok, content} ->
-          case Jason.decode(content) do
-            {:ok, names} when is_map(names) ->
-              case Map.get(names, identifier) do
-                nil -> {:error, :not_found_in_names}
-                session_id -> resolve_by_uuid_prefix(session_id)
-              end
+    with :ok <- check_file_exists(names_file, :no_names_json),
+         {:ok, content} <- read_file(names_file, :cannot_read_names_json),
+         {:ok, names} <- decode_names_json(content) do
+      lookup_name_and_resolve(names, identifier)
+    end
+  end
 
-            _ ->
-              {:error, :invalid_names_json}
-          end
+  defp check_file_exists(path, error_tag) do
+    if File.exists?(path), do: :ok, else: {:error, error_tag}
+  end
 
-        _ ->
-          {:error, :cannot_read_names_json}
-      end
-    else
-      {:error, :no_names_json}
+  defp read_file(path, error_tag) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, content}
+      _ -> {:error, error_tag}
+    end
+  end
+
+  defp decode_names_json(content) do
+    case Jason.decode(content) do
+      {:ok, names} when is_map(names) -> {:ok, names}
+      _ -> {:error, :invalid_names_json}
+    end
+  end
+
+  defp lookup_name_and_resolve(names, identifier) do
+    case Map.get(names, identifier) do
+      nil -> {:error, :not_found_in_names}
+      session_id -> resolve_by_uuid_prefix(session_id)
     end
   end
 
   defp resolve_from_session_id_file(identifier) do
     session_id_file = Path.expand("~/.arbor/#{identifier}-session-id")
 
-    if File.exists?(session_id_file) do
-      case File.read(session_id_file) do
-        {:ok, session_id} ->
-          session_id = String.trim(session_id)
-          resolve_by_uuid_prefix(session_id)
-
-        _ ->
-          {:error, :cannot_read_session_id_file}
-      end
-    else
-      {:error, :no_session_id_file}
+    with :ok <- check_file_exists(session_id_file, :no_session_id_file),
+         {:ok, session_id} <- read_file(session_id_file, :cannot_read_session_id_file) do
+      resolve_by_uuid_prefix(String.trim(session_id))
     end
   end
 
   defp resolve_by_uuid_prefix(uuid_prefix) do
-    case find_project_dirs() do
-      {:ok, dirs} ->
-        result =
-          dirs
-          |> Enum.find_value(fn dir ->
-            case find_sessions(dir) do
-              {:ok, files} ->
-                Enum.find(files, fn file ->
-                  basename = Path.basename(file, ".jsonl")
-                  String.starts_with?(basename, uuid_prefix)
-                end)
+    with {:ok, dirs} <- find_project_dirs() do
+      dirs
+      |> Enum.find_value(&find_session_by_prefix(&1, uuid_prefix))
+      |> case do
+        nil -> {:error, :uuid_not_found}
+        path -> {:ok, path}
+      end
+    end
+  end
 
-              _ ->
-                nil
-            end
-          end)
+  defp find_session_by_prefix(dir, uuid_prefix) do
+    case find_sessions(dir) do
+      {:ok, files} ->
+        Enum.find(files, fn file ->
+          file |> Path.basename(".jsonl") |> String.starts_with?(uuid_prefix)
+        end)
 
-        case result do
-          nil -> {:error, :uuid_not_found}
-          path -> {:ok, path}
-        end
-
-      error ->
-        error
+      _ ->
+        nil
     end
   end
 end

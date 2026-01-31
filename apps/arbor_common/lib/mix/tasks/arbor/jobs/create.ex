@@ -34,48 +34,54 @@ defmodule Mix.Tasks.Arbor.Jobs.Create do
         aliases: [p: :priority, t: :tag]
       )
 
-    title =
-      case positional do
-        [title | _] ->
-          title
-
-        [] ->
-          Mix.shell().error(
-            "Usage: mix arbor.jobs.create \"Job title\" [--priority PRIORITY] [--tag TAG]"
-          )
-
-          exit({:shutdown, 1})
-      end
-
+    title = extract_title(positional)
     priority = opts[:priority] || "normal"
     tags = Keyword.get_values(opts, :tag)
 
+    ensure_server_running()
+
+    params = %{title: title, priority: priority}
+    params = if tags != [], do: Map.put(params, :tags, tags), else: params
+
+    Config.full_node_name()
+    |> :rpc.call(Arbor.Actions.Jobs.CreateJob, :run, [params, %{}])
+    |> handle_create_result(title)
+  end
+
+  defp extract_title([title | _]), do: title
+
+  defp extract_title([]) do
+    Mix.shell().error(
+      "Usage: mix arbor.jobs.create \"Job title\" [--priority PRIORITY] [--tag TAG]"
+    )
+
+    exit({:shutdown, 1})
+  end
+
+  defp ensure_server_running do
     Config.ensure_distribution()
 
     unless Config.server_running?() do
       Mix.shell().error("Arbor is not running. Start it with: mix arbor.start")
       exit({:shutdown, 1})
     end
+  end
 
-    node = Config.full_node_name()
+  defp handle_create_result({:ok, %{job_id: job_id}}, title) do
+    Mix.shell().info("Created job: #{job_id} — #{title}")
+  end
 
-    params = %{title: title, priority: priority}
-    params = if tags != [], do: Map.put(params, :tags, tags), else: params
+  defp handle_create_result({:ok, %{id: job_id}}, title) do
+    Mix.shell().info("Created job: #{job_id} — #{title}")
+  end
 
-    case :rpc.call(node, Arbor.Actions.Jobs.CreateJob, :run, [params, %{}]) do
-      {:badrpc, reason} ->
-        Mix.shell().error("RPC failed: #{inspect(reason)}")
-        exit({:shutdown, 1})
+  defp handle_create_result({:badrpc, reason}, _title) do
+    Mix.shell().error("RPC failed: #{inspect(reason)}")
+    exit({:shutdown, 1})
+  end
 
-      {:ok, %{job_id: job_id}} ->
-        Mix.shell().info("Created job: #{job_id} — #{title}")
-
-      {:ok, %{id: job_id}} ->
-        Mix.shell().info("Created job: #{job_id} — #{title}")
-
-      {:error, reason} ->
-        Mix.shell().error("Failed to create job: #{inspect(reason)}")
-        exit({:shutdown, 1})
-    end
+  defp handle_create_result({:error, reason}, _title) do
+    Mix.shell().error("Failed to create job: #{inspect(reason)}")
+    exit({:shutdown, 1})
   end
 end

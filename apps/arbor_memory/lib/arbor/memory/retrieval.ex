@@ -212,17 +212,20 @@ defmodule Arbor.Memory.Retrieval do
   defp join_within_budget(items, max_tokens) do
     items
     |> Enum.reduce_while({"", 0}, fn item, {acc, tokens} ->
-      item_tokens = TokenBudget.estimate_tokens(item)
-      # +1 for newline
-      new_tokens = tokens + item_tokens + 1
-
-      if new_tokens <= max_tokens do
-        new_acc = if acc == "", do: item, else: "#{acc}\n#{item}"
-        {:cont, {new_acc, new_tokens}}
-      else
-        {:halt, {acc, tokens}}
-      end
+      accumulate_item(item, acc, tokens, max_tokens)
     end)
     |> elem(0)
+  end
+
+  defp accumulate_item(item, acc, tokens, max_tokens) do
+    item_tokens = TokenBudget.estimate_tokens(item)
+    new_tokens = tokens + item_tokens + 1
+
+    if new_tokens <= max_tokens do
+      new_acc = if acc == "", do: item, else: "#{acc}\n#{item}"
+      {:cont, {new_acc, new_tokens}}
+    else
+      {:halt, {acc, tokens}}
+    end
   end
 end

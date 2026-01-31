@@ -19,12 +19,14 @@ defmodule Mix.Tasks.Arbor.Backup.List do
   """
   use Mix.Task
 
+  alias Arbor.Persistence.Backup
+
   @impl Mix.Task
   def run(_args) do
     # Start the application to get config
     Mix.Task.run("app.config")
 
-    backups = Arbor.Persistence.Backup.list_backups()
+    backups = Backup.list_backups()
 
     if Enum.empty?(backups) do
       Mix.shell().info("No backups found.")

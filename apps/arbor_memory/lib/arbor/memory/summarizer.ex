@@ -140,30 +140,25 @@ defmodule Arbor.Memory.Summarizer do
     preference = Keyword.get(opts, :preference, :anthropic)
     cost_sensitive = Keyword.get(opts, :cost_sensitive, true)
 
-    case {complexity, preference, cost_sensitive} do
-      # Simple - use fastest/cheapest models
-      {:simple, :anthropic, _} -> "anthropic:claude-3-5-haiku-20241022"
-      {:simple, :openai, _} -> "openai:gpt-4o-mini"
-      {:simple, :google, _} -> "google:gemini-2.0-flash"
-      {:simple, _, _} -> "anthropic:claude-3-5-haiku-20241022"
-      # Moderate - use balanced models
-      {:moderate, :anthropic, true} -> "anthropic:claude-3-5-haiku-20241022"
-      {:moderate, :anthropic, false} -> "anthropic:claude-3-5-sonnet-20241022"
-      {:moderate, :openai, _} -> "openai:gpt-4o-mini"
-      {:moderate, :google, _} -> "google:gemini-1.5-flash"
-      {:moderate, _, _} -> "anthropic:claude-3-5-haiku-20241022"
-      # Complex - use capable models
-      {:complex, :anthropic, _} -> "anthropic:claude-3-5-sonnet-20241022"
-      {:complex, :openai, _} -> "openai:gpt-4o"
-      {:complex, :google, _} -> "google:gemini-1.5-pro"
-      {:complex, _, _} -> "anthropic:claude-3-5-sonnet-20241022"
-      # Highly complex - use most capable models
-      {:highly_complex, :anthropic, _} -> "anthropic:claude-opus-4-5-20251101"
-      {:highly_complex, :openai, _} -> "openai:gpt-4o"
-      {:highly_complex, :google, _} -> "google:gemini-1.5-pro"
-      {:highly_complex, _, _} -> "anthropic:claude-opus-4-5-20251101"
-    end
+    model_for_complexity(complexity, preference, cost_sensitive)
   end
+
+  defp model_for_complexity(:simple, :openai, _), do: "openai:gpt-4o-mini"
+  defp model_for_complexity(:simple, :google, _), do: "google:gemini-2.0-flash"
+  defp model_for_complexity(:simple, _, _), do: "anthropic:claude-3-5-haiku-20241022"
+
+  defp model_for_complexity(:moderate, :anthropic, false), do: "anthropic:claude-3-5-sonnet-20241022"
+  defp model_for_complexity(:moderate, :openai, _), do: "openai:gpt-4o-mini"
+  defp model_for_complexity(:moderate, :google, _), do: "google:gemini-1.5-flash"
+  defp model_for_complexity(:moderate, _, _), do: "anthropic:claude-3-5-haiku-20241022"
+
+  defp model_for_complexity(:complex, :openai, _), do: "openai:gpt-4o"
+  defp model_for_complexity(:complex, :google, _), do: "google:gemini-1.5-pro"
+  defp model_for_complexity(:complex, _, _), do: "anthropic:claude-3-5-sonnet-20241022"
+
+  defp model_for_complexity(:highly_complex, :openai, _), do: "openai:gpt-4o"
+  defp model_for_complexity(:highly_complex, :google, _), do: "google:gemini-1.5-pro"
+  defp model_for_complexity(:highly_complex, _, _), do: "anthropic:claude-opus-4-5-20251101"
 
   @doc """
   Summarize text.

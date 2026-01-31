@@ -607,7 +607,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       decisions = Coordinator.list_decisions(coord)
-      assert length(decisions) >= 1
+      assert decisions != []
       assert Enum.any?(decisions, &(&1.proposal_id == id))
     end
 

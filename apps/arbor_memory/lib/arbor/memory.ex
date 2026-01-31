@@ -228,28 +228,22 @@ defmodule Arbor.Memory do
   @spec recall(String.t(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def recall(agent_id, query, opts \\ []) do
-    case IndexSupervisor.get_index(agent_id) do
-      {:ok, pid} ->
-        result = Index.recall(pid, query, opts)
-
-        # Emit signal on success
-        case result do
-          {:ok, results} ->
-            top_similarity = if length(results) > 0, do: hd(results).similarity, else: nil
-
-            Signals.emit_recalled(agent_id, query, length(results),
-              top_similarity: top_similarity
-            )
-
-            {:ok, results}
-
-          error ->
-            error
-        end
-
-      {:error, :not_found} ->
-        {:error, :index_not_initialized}
+    with {:ok, pid} <- IndexSupervisor.get_index(agent_id),
+         {:ok, results} <- Index.recall(pid, query, opts) do
+      emit_recall_signal(agent_id, query, results)
+      {:ok, results}
+    else
+      {:error, :not_found} -> {:error, :index_not_initialized}
+      error -> error
     end
+  end
+
+  defp emit_recall_signal(agent_id, query, results) do
+    top_similarity = if results != [], do: hd(results).similarity, else: nil
+
+    Signals.emit_recalled(agent_id, query, length(results),
+      top_similarity: top_similarity
+    )
   end
 
   @doc """

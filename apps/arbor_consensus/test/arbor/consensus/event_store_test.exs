@@ -3,6 +3,7 @@ defmodule Arbor.Consensus.EventStoreTest do
 
   alias Arbor.Consensus.EventStore
   alias Arbor.Contracts.Consensus.ConsensusEvent
+  alias EventLogETS, as: EventLogETS
 
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
@@ -281,7 +282,7 @@ defmodule Arbor.Consensus.EventStoreTest do
       elog_name = :"elog_persist_#{:rand.uniform(1_000_000)}"
 
       # Start an ETS event log for persistence
-      {:ok, _} = Arbor.Persistence.EventLog.ETS.start_link(name: elog_name)
+      {:ok, _} = EventLogETS.start_link(name: elog_name)
 
       {:ok, _} =
         EventStore.start_link(
@@ -295,12 +296,12 @@ defmodule Arbor.Consensus.EventStoreTest do
 
       # Verify event was persisted to the EventLog
       {:ok, events} =
-        Arbor.Persistence.EventLog.ETS.read_stream(
+        EventLogETS.read_stream(
           "consensus:persist_prop",
           name: elog_name
         )
 
-      assert length(events) >= 1
+      assert events != []
     end
   end
 

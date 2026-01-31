@@ -20,6 +20,7 @@ defmodule Arbor.Signals.Adapters.SecurityAuthorizer do
     resource_uri = "arbor://signals/subscribe/#{topic}"
     security_module = Application.get_env(:arbor_signals, :security_module, Arbor.Security)
 
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe]) do
       {:ok, :authorized} -> {:ok, :authorized}
       {:error, _reason} -> {:error, :no_capability}

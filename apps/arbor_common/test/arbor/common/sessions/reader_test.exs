@@ -103,7 +103,7 @@ defmodule Arbor.Common.Sessions.ReaderTest do
       assert {:ok, files} = Reader.find_sessions(@fixtures_dir)
 
       assert is_list(files)
-      assert length(files) > 0
+      assert files != []
       assert Enum.all?(files, &String.ends_with?(&1, ".jsonl"))
     end
 

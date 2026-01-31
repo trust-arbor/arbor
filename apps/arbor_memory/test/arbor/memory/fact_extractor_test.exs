@@ -9,7 +9,7 @@ defmodule Arbor.Memory.FactExtractorTest do
     test "extracts name from 'my name is X'" do
       facts = FactExtractor.extract("My name is Alice")
 
-      assert length(facts) >= 1
+      assert facts != []
       name_fact = Enum.find(facts, &(&1.category == :person))
       assert name_fact.content =~ "Alice"
       assert name_fact.confidence >= 0.8
@@ -268,7 +268,7 @@ defmodule Arbor.Memory.FactExtractorTest do
       facts = FactExtractor.extract("My name is Alice and I work at Acme Corp")
 
       # Find a fact with entities
-      fact_with_entities = Enum.find(facts, &(length(&1.entities) > 0))
+      fact_with_entities = Enum.find(facts, &(&1.entities != []))
       assert fact_with_entities != nil
       assert is_list(fact_with_entities.entities)
     end

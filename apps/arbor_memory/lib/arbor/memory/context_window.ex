@@ -247,8 +247,7 @@ defmodule Arbor.Memory.ContextWindow do
   def content_to_summarize(window, opts \\ []) do
     window
     |> entries_to_summarize(opts)
-    |> Enum.map(fn {_type, content, _ts} -> content end)
-    |> Enum.join("\n\n")
+    |> Enum.map_join("\n\n", fn {_type, content, _ts} -> content end)
   end
 
   # ============================================================================
@@ -262,9 +261,7 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec to_prompt_text(t()) :: String.t()
   def to_prompt_text(window) do
-    window.entries
-    |> Enum.map(&format_entry/1)
-    |> Enum.join("\n\n")
+    Enum.map_join(window.entries, "\n\n", &format_entry/1)
   end
 
   @doc """
@@ -343,34 +340,33 @@ defmodule Arbor.Memory.ContextWindow do
   """
   @spec deserialize(map()) :: t()
   def deserialize(data) when is_map(data) do
-    get_field = fn key ->
-      Map.get(data, key) || Map.get(data, to_string(key))
-    end
-
     entries =
-      (get_field.(:entries) || [])
-      |> Enum.map(fn entry ->
-        type = parse_entry_type(entry["type"] || Map.get(entry, :type))
-        content = entry["content"] || Map.get(entry, :content)
-
-        timestamp =
-          case entry["timestamp"] || Map.get(entry, :timestamp) do
-            nil -> DateTime.utc_now()
-            ts when is_binary(ts) -> DateTime.from_iso8601(ts) |> elem(1)
-            %DateTime{} = dt -> dt
-          end
-
-        {type, content, timestamp}
-      end)
+      (flex_field(data, :entries) || [])
+      |> Enum.map(&deserialize_entry/1)
 
     %__MODULE__{
-      agent_id: get_field.(:agent_id),
+      agent_id: flex_field(data, :agent_id),
       entries: entries,
-      max_tokens: get_field.(:max_tokens) || @default_max_tokens,
-      summary_threshold: get_field.(:summary_threshold) || @default_summary_threshold,
-      model_id: get_field.(:model_id)
+      max_tokens: flex_field(data, :max_tokens) || @default_max_tokens,
+      summary_threshold: flex_field(data, :summary_threshold) || @default_summary_threshold,
+      model_id: flex_field(data, :model_id)
     }
   end
+
+  defp flex_field(data, key) do
+    Map.get(data, key) || Map.get(data, to_string(key))
+  end
+
+  defp deserialize_entry(entry) do
+    type = parse_entry_type(entry["type"] || Map.get(entry, :type))
+    content = entry["content"] || Map.get(entry, :content)
+    timestamp = parse_timestamp(entry["timestamp"] || Map.get(entry, :timestamp))
+    {type, content, timestamp}
+  end
+
+  defp parse_timestamp(nil), do: DateTime.utc_now()
+  defp parse_timestamp(%DateTime{} = dt), do: dt
+  defp parse_timestamp(ts) when is_binary(ts), do: DateTime.from_iso8601(ts) |> elem(1)
 
   # ============================================================================
   # Private Helpers

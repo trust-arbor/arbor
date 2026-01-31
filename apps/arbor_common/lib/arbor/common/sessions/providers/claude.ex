@@ -258,8 +258,7 @@ defmodule Arbor.Common.Sessions.Providers.Claude do
   defp extract_text_from_items(items) do
     items
     |> Enum.filter(fn item -> item[:type] == :text and is_binary(item[:text]) end)
-    |> Enum.map(& &1[:text])
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", & &1[:text])
   end
 
   defp extract_metadata(json, type) do

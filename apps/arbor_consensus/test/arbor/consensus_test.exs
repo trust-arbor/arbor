@@ -171,7 +171,7 @@ defmodule Arbor.ConsensusTest do
       {:ok, _status} = TestHelpers.wait_for_decision(coord, id)
 
       decisions = Consensus.list_decisions(coord)
-      assert length(decisions) >= 1
+      assert decisions != []
       assert hd(decisions).proposal_id == id
     end
 

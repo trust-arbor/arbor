@@ -118,7 +118,7 @@ defmodule Arbor.Memory.TokenBudgetTest do
       models = TokenBudget.known_models()
 
       assert is_list(models)
-      assert length(models) > 0
+      assert models != []
 
       # First should be largest
       [{_first_model, first_size} | _] = models

@@ -278,35 +278,7 @@ defmodule Arbor.Memory.Consolidation do
 
     {new_nodes, total_evicted} =
       Enum.reduce(nodes_by_type, {graph.nodes, 0}, fn {_type, nodes}, {acc_nodes, evict_count} ->
-        if length(nodes) > max_per_type do
-          # Sort by relevance (ascending), take the ones to evict
-          sorted = Enum.sort_by(nodes, & &1.relevance)
-          to_evict = Enum.take(sorted, length(nodes) - max_per_type)
-
-          # Archive if requested
-          if should_archive do
-            Enum.each(to_evict, fn node ->
-              Events.record_knowledge_archived(agent_id, %{
-                node_id: node.id,
-                type: node.type,
-                content: node.content,
-                relevance: node.relevance,
-                created_at: node.created_at,
-                last_accessed: node.last_accessed,
-                access_count: node.access_count,
-                reason: :quota_exceeded
-              })
-            end)
-          end
-
-          # Remove evicted nodes
-          evict_ids = MapSet.new(to_evict, & &1.id)
-          remaining = Map.reject(acc_nodes, fn {id, _} -> id in evict_ids end)
-
-          {remaining, evict_count + length(to_evict)}
-        else
-          {acc_nodes, evict_count}
-        end
+        evict_type_quota(nodes, max_per_type, agent_id, should_archive, acc_nodes, evict_count)
       end)
 
     # Also clean up edges to evicted nodes
@@ -326,14 +298,50 @@ defmodule Arbor.Memory.Consolidation do
     {%{graph | nodes: new_nodes, edges: new_edges}, total_evicted}
   end
 
+  defp evict_type_quota(nodes, max_per_type, _agent_id, _should_archive, acc_nodes, evict_count)
+       when length(nodes) <= max_per_type do
+    {acc_nodes, evict_count}
+  end
+
+  defp evict_type_quota(nodes, max_per_type, agent_id, should_archive, acc_nodes, evict_count) do
+    sorted = Enum.sort_by(nodes, & &1.relevance)
+    to_evict = Enum.take(sorted, length(nodes) - max_per_type)
+
+    maybe_archive_evicted(to_evict, agent_id, should_archive)
+
+    evict_ids = MapSet.new(to_evict, & &1.id)
+    remaining = Map.reject(acc_nodes, fn {id, _} -> id in evict_ids end)
+
+    {remaining, evict_count + length(to_evict)}
+  end
+
+  defp maybe_archive_evicted(_to_evict, _agent_id, false), do: :ok
+
+  defp maybe_archive_evicted(to_evict, agent_id, true) do
+    Enum.each(to_evict, fn node ->
+      Events.record_knowledge_archived(agent_id, %{
+        node_id: node.id,
+        type: node.type,
+        content: node.content,
+        relevance: node.relevance,
+        created_at: node.created_at,
+        last_accessed: node.last_accessed,
+        access_count: node.access_count,
+        reason: :quota_exceeded
+      })
+    end)
+  end
+
   defp avg_relevance(graph) do
     nodes = Map.values(graph.nodes)
 
-    if length(nodes) > 0 do
-      total = Enum.sum(Enum.map(nodes, & &1.relevance))
-      Float.round(total / length(nodes), 3)
-    else
-      0.0
+    case nodes do
+      [] ->
+        0.0
+
+      nodes ->
+        total = Enum.sum(Enum.map(nodes, & &1.relevance))
+        Float.round(total / length(nodes), 3)
     end
   end
 end

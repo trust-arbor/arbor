@@ -71,32 +71,35 @@ defmodule Arbor.Persistence.Schemas.Relationship do
   """
   @spec from_relationship(map(), String.t()) :: map()
   def from_relationship(relationship, agent_id) when is_binary(agent_id) do
-    # Handle both struct and map input
-    get_field = fn key ->
-      cond do
-        is_struct(relationship) -> Map.get(relationship, key)
-        is_map(relationship) -> Map.get(relationship, key) || Map.get(relationship, to_string(key))
-        true -> nil
-      end
-    end
+    base = from_rel_base_fields(relationship, agent_id)
+    lists = from_rel_list_fields(relationship)
 
+    Map.merge(base, lists)
+  end
+
+  defp from_rel_base_fields(relationship, agent_id) do
     %{
-      id: get_field.(:id),
+      id: get_rel_field(relationship, :id),
       agent_id: agent_id,
-      name: get_field.(:name),
-      preferred_name: get_field.(:preferred_name),
-      background: get_field.(:background) || [],
-      values: get_field.(:values) || [],
-      connections: get_field.(:connections) || [],
-      key_moments: serialize_moments(get_field.(:key_moments) || []),
-      relationship_dynamic: get_field.(:relationship_dynamic),
-      personal_details: get_field.(:personal_details) || [],
-      current_focus: get_field.(:current_focus) || [],
-      uncertainties: get_field.(:uncertainties) || [],
-      first_encountered: get_field.(:first_encountered),
-      last_interaction: get_field.(:last_interaction),
-      salience: get_field.(:salience) || 0.5,
-      access_count: get_field.(:access_count) || 0
+      name: get_rel_field(relationship, :name),
+      preferred_name: get_rel_field(relationship, :preferred_name),
+      relationship_dynamic: get_rel_field(relationship, :relationship_dynamic),
+      first_encountered: get_rel_field(relationship, :first_encountered),
+      last_interaction: get_rel_field(relationship, :last_interaction),
+      salience: get_rel_field(relationship, :salience) || 0.5,
+      access_count: get_rel_field(relationship, :access_count) || 0
+    }
+  end
+
+  defp from_rel_list_fields(relationship) do
+    %{
+      background: get_rel_field(relationship, :background) || [],
+      values: get_rel_field(relationship, :values) || [],
+      connections: get_rel_field(relationship, :connections) || [],
+      key_moments: serialize_moments(get_rel_field(relationship, :key_moments) || []),
+      personal_details: get_rel_field(relationship, :personal_details) || [],
+      current_focus: get_rel_field(relationship, :current_focus) || [],
+      uncertainties: get_rel_field(relationship, :uncertainties) || []
     }
   end
 
@@ -105,18 +108,18 @@ defmodule Arbor.Persistence.Schemas.Relationship do
   """
   @spec to_relationship(%__MODULE__{}) :: map()
   def to_relationship(%__MODULE__{} = schema) do
+    base = to_rel_base_fields(schema)
+    lists = to_rel_list_fields(schema)
+
+    Map.merge(base, lists)
+  end
+
+  defp to_rel_base_fields(schema) do
     %{
       id: schema.id,
       name: schema.name,
       preferred_name: schema.preferred_name,
-      background: schema.background || [],
-      values: schema.values || [],
-      connections: schema.connections || [],
-      key_moments: deserialize_moments(schema.key_moments || []),
       relationship_dynamic: schema.relationship_dynamic,
-      personal_details: schema.personal_details || [],
-      current_focus: schema.current_focus || [],
-      uncertainties: schema.uncertainties || [],
       first_encountered: schema.first_encountered,
       last_interaction: schema.last_interaction,
       salience: schema.salience || 0.5,
@@ -124,65 +127,76 @@ defmodule Arbor.Persistence.Schemas.Relationship do
     }
   end
 
+  defp to_rel_list_fields(schema) do
+    %{
+      background: schema.background || [],
+      values: schema.values || [],
+      connections: schema.connections || [],
+      key_moments: deserialize_moments(schema.key_moments || []),
+      personal_details: schema.personal_details || [],
+      current_focus: schema.current_focus || [],
+      uncertainties: schema.uncertainties || []
+    }
+  end
+
+  # Handle both struct and map input for field access
+  defp get_rel_field(data, key) when is_struct(data), do: Map.get(data, key)
+
+  defp get_rel_field(data, key) when is_map(data) do
+    Map.get(data, key) || Map.get(data, to_string(key))
+  end
+
+  defp get_rel_field(_data, _key), do: nil
+
+  # Get a field from a map that may have atom or string keys
+  defp get_moment_field(moment, key) when is_map(moment) do
+    Map.get(moment, key) || Map.get(moment, to_string(key))
+  end
+
+  defp get_moment_field(_moment, _key), do: nil
+
   # Convert moments to JSONB-safe format
   defp serialize_moments(moments) when is_list(moments) do
-    Enum.map(moments, fn moment ->
-      get_field = fn key ->
-        cond do
-          is_map(moment) ->
-            Map.get(moment, key) || Map.get(moment, to_string(key))
-
-          true ->
-            nil
-        end
-      end
-
-      timestamp = get_field.(:timestamp)
-
-      timestamp_str =
-        case timestamp do
-          %DateTime{} -> DateTime.to_iso8601(timestamp)
-          str when is_binary(str) -> str
-          nil -> nil
-        end
-
-      markers = get_field.(:emotional_markers) || []
-      markers_strs = Enum.map(markers, &to_string/1)
-
-      %{
-        "summary" => get_field.(:summary),
-        "timestamp" => timestamp_str,
-        "emotional_markers" => markers_strs,
-        "salience" => get_field.(:salience) || 0.5
-      }
-    end)
+    Enum.map(moments, &serialize_single_moment/1)
   end
+
+  defp serialize_single_moment(moment) do
+    timestamp_str = serialize_timestamp(get_moment_field(moment, :timestamp))
+    markers = get_moment_field(moment, :emotional_markers) || []
+
+    %{
+      "summary" => get_moment_field(moment, :summary),
+      "timestamp" => timestamp_str,
+      "emotional_markers" => Enum.map(markers, &to_string/1),
+      "salience" => get_moment_field(moment, :salience) || 0.5
+    }
+  end
+
+  defp serialize_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp serialize_timestamp(str) when is_binary(str), do: str
+  defp serialize_timestamp(_), do: nil
 
   # Convert moments from JSONB format back to struct format
   defp deserialize_moments(moments) when is_list(moments) do
-    Enum.map(moments, fn moment ->
-      get_field = fn key ->
-        Map.get(moment, key) || Map.get(moment, to_string(key))
-      end
-
-      timestamp =
-        case get_field.(:timestamp) do
-          nil -> nil
-          %DateTime{} = dt -> dt
-          str when is_binary(str) -> parse_datetime(str)
-        end
-
-      markers = get_field.(:emotional_markers) || []
-      markers_atoms = markers |> Enum.map(&safe_to_atom/1) |> Enum.reject(&is_nil/1)
-
-      %{
-        summary: get_field.(:summary),
-        timestamp: timestamp,
-        emotional_markers: markers_atoms,
-        salience: get_field.(:salience) || 0.5
-      }
-    end)
+    Enum.map(moments, &deserialize_single_moment/1)
   end
+
+  defp deserialize_single_moment(moment) do
+    timestamp = deserialize_timestamp(get_moment_field(moment, :timestamp))
+    markers = get_moment_field(moment, :emotional_markers) || []
+    markers_atoms = markers |> Enum.map(&safe_to_atom/1) |> Enum.reject(&is_nil/1)
+
+    %{
+      summary: get_moment_field(moment, :summary),
+      timestamp: timestamp,
+      emotional_markers: markers_atoms,
+      salience: get_moment_field(moment, :salience) || 0.5
+    }
+  end
+
+  defp deserialize_timestamp(nil), do: nil
+  defp deserialize_timestamp(%DateTime{} = dt), do: dt
+  defp deserialize_timestamp(str) when is_binary(str), do: parse_datetime(str)
 
   defp parse_datetime(str) do
     case DateTime.from_iso8601(str) do

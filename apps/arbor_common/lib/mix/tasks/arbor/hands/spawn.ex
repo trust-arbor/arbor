@@ -42,80 +42,20 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
       )
 
     task = Enum.join(positional, " ")
-
-    if task == "" do
-      Mix.shell().error("Usage: mix arbor.hands.spawn \"task description\" --name <name>")
-      exit({:shutdown, 1})
-    end
+    validate_task(task)
 
     name = opts[:name]
+    validate_name(name)
+    ensure_hand_available(name)
 
-    unless name do
-      Mix.shell().error("--name is required")
-      exit({:shutdown, 1})
-    end
-
-    # Validate name (alphanumeric, hyphens, underscores only)
-    unless Regex.match?(~r/^[a-zA-Z0-9_-]+$/, name) do
-      Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
-      exit({:shutdown, 1})
-    end
-
-    # Check if hand already exists
-    case Hands.find_hand(name) do
-      :not_found ->
-        :ok
-
-      {type, _} ->
-        Mix.shell().error("Hand '#{name}' already exists (#{type})")
-        exit({:shutdown, 1})
-    end
-
-    # Determine if we should use a worktree
-    # Default: autonomous hands get worktrees, interactive hands don't
     use_worktree = !opts[:interactive] && !opts[:no_worktree]
-
-    # Resolve working directory
-    project_root = File.cwd!()
-
-    base_cwd =
-      if opts[:cwd] do
-        resolved = Path.join(project_root, opts[:cwd])
-
-        unless File.dir?(resolved) do
-          Mix.shell().error("Directory not found: #{resolved}")
-          exit({:shutdown, 1})
-        end
-
-        resolved
-      else
-        project_root
-      end
+    base_cwd = resolve_base_cwd(opts)
 
     # Prepare hand directory
     hand_dir = Hands.ensure_hand_dir(name)
 
     # Create worktree if needed
-    cwd =
-      if use_worktree do
-        if opts[:cwd] do
-          Mix.shell().info(
-            "Note: --cwd ignored when using git worktree (worktree is the working directory)"
-          )
-        end
-
-        case Hands.create_worktree(name) do
-          {:ok, wt_path} ->
-            Mix.shell().info("Created worktree on branch #{Hands.worktree_branch(name)}")
-            wt_path
-
-          {:error, reason} ->
-            Mix.shell().error(reason)
-            exit({:shutdown, 1})
-        end
-      else
-        base_cwd
-      end
+    cwd = resolve_working_dir(name, use_worktree, base_cwd, opts)
 
     # Build prompt (with worktree context if applicable)
     prompt = Hands.build_prompt(name, task, worktree: use_worktree)
@@ -128,6 +68,73 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
       spawn_local(name, hand_dir, prompt_file, cwd, opts ++ [worktree: use_worktree])
     end
   end
+
+  defp validate_task("") do
+    Mix.shell().error("Usage: mix arbor.hands.spawn \"task description\" --name <name>")
+    exit({:shutdown, 1})
+  end
+
+  defp validate_task(_task), do: :ok
+
+  defp validate_name(nil) do
+    Mix.shell().error("--name is required")
+    exit({:shutdown, 1})
+  end
+
+  defp validate_name(name) do
+    unless Regex.match?(~r/^[a-zA-Z0-9_-]+$/, name) do
+      Mix.shell().error("Hand name must be alphanumeric (hyphens and underscores allowed)")
+      exit({:shutdown, 1})
+    end
+  end
+
+  defp ensure_hand_available(name) do
+    case Hands.find_hand(name) do
+      :not_found ->
+        :ok
+
+      {type, _} ->
+        Mix.shell().error("Hand '#{name}' already exists (#{type})")
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp resolve_base_cwd(opts) do
+    project_root = File.cwd!()
+
+    if opts[:cwd] do
+      resolved = Path.join(project_root, opts[:cwd])
+
+      unless File.dir?(resolved) do
+        Mix.shell().error("Directory not found: #{resolved}")
+        exit({:shutdown, 1})
+      end
+
+      resolved
+    else
+      project_root
+    end
+  end
+
+  defp resolve_working_dir(name, true = _use_worktree, _base_cwd, opts) do
+    if opts[:cwd] do
+      Mix.shell().info(
+        "Note: --cwd ignored when using git worktree (worktree is the working directory)"
+      )
+    end
+
+    case Hands.create_worktree(name) do
+      {:ok, wt_path} ->
+        Mix.shell().info("Created worktree on branch #{Hands.worktree_branch(name)}")
+        wt_path
+
+      {:error, reason} ->
+        Mix.shell().error(reason)
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp resolve_working_dir(_name, false = _use_worktree, base_cwd, _opts), do: base_cwd
 
   defp spawn_local(name, hand_dir, prompt_file, cwd, opts) do
     config_dir = Hands.config_dir()

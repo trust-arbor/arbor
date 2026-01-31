@@ -293,8 +293,8 @@ defmodule Arbor.Memory.Relationship do
 
     # Background
     sections =
-      if length(rel.background) > 0 do
-        bg_text = rel.background |> Enum.reverse() |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+      if rel.background != [] do
+        bg_text = rel.background |> Enum.reverse() |> Enum.map_join("\n", &"- #{&1}")
         ["**Background:**\n#{bg_text}" | sections]
       else
         sections
@@ -302,8 +302,8 @@ defmodule Arbor.Memory.Relationship do
 
     # Values
     sections =
-      if length(rel.values) > 0 do
-        values_text = rel.values |> Enum.reverse() |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+      if rel.values != [] do
+        values_text = rel.values |> Enum.reverse() |> Enum.map_join("\n", &"- #{&1}")
         ["**Values:**\n#{values_text}" | sections]
       else
         sections
@@ -311,8 +311,8 @@ defmodule Arbor.Memory.Relationship do
 
     # Current focus
     sections =
-      if length(rel.current_focus) > 0 do
-        focus_text = rel.current_focus |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+      if rel.current_focus != [] do
+        focus_text = Enum.map_join(rel.current_focus, "\n", &"- #{&1}")
         ["**Current Focus:**\n#{focus_text}" | sections]
       else
         sections
@@ -320,8 +320,8 @@ defmodule Arbor.Memory.Relationship do
 
     # Uncertainties
     sections =
-      if length(rel.uncertainties) > 0 do
-        unc_text = rel.uncertainties |> Enum.reverse() |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+      if rel.uncertainties != [] do
+        unc_text = rel.uncertainties |> Enum.reverse() |> Enum.map_join("\n", &"- #{&1}")
         ["**Their Uncertainties:**\n#{unc_text}" | sections]
       else
         sections
@@ -329,12 +329,11 @@ defmodule Arbor.Memory.Relationship do
 
     # Key moments (most recent 5)
     sections =
-      if length(rel.key_moments) > 0 do
+      if rel.key_moments != [] do
         moments_text =
           rel.key_moments
           |> Enum.take(5)
-          |> Enum.map(&"- #{&1.summary}")
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", &"- #{&1.summary}")
 
         ["**Recent Key Moments:**\n#{moments_text}" | sections]
       else
@@ -360,7 +359,7 @@ defmodule Arbor.Memory.Relationship do
       end
 
     parts =
-      if length(rel.current_focus) > 0 do
+      if rel.current_focus != [] do
         focus = rel.current_focus |> Enum.take(2) |> Enum.join(", ")
         ["Working on: #{focus}" | parts]
       else
@@ -405,27 +404,46 @@ defmodule Arbor.Memory.Relationship do
   """
   @spec from_map(map()) :: t()
   def from_map(data) when is_map(data) do
-    get_field = fn key ->
-      Map.get(data, key) || Map.get(data, to_string(key))
-    end
+    base = from_map_base_fields(data)
+    lists = from_map_list_fields(data)
+    temporal = from_map_temporal_fields(data)
 
-    %__MODULE__{
-      id: get_field.(:id),
-      name: get_field.(:name),
-      preferred_name: get_field.(:preferred_name),
-      background: get_field.(:background) || [],
-      values: get_field.(:values) || [],
-      connections: get_field.(:connections) || [],
-      key_moments: deserialize_moments(get_field.(:key_moments) || []),
-      relationship_dynamic: get_field.(:relationship_dynamic),
-      personal_details: get_field.(:personal_details) || [],
-      current_focus: get_field.(:current_focus) || [],
-      uncertainties: get_field.(:uncertainties) || [],
-      first_encountered: deserialize_datetime(get_field.(:first_encountered)),
-      last_interaction: deserialize_datetime(get_field.(:last_interaction)),
-      salience: get_field.(:salience) || 0.5,
-      access_count: get_field.(:access_count) || 0
+    struct!(__MODULE__, Map.merge(base, lists) |> Map.merge(temporal))
+  end
+
+  defp from_map_base_fields(data) do
+    %{
+      id: flex_get(data, :id),
+      name: flex_get(data, :name),
+      preferred_name: flex_get(data, :preferred_name),
+      relationship_dynamic: flex_get(data, :relationship_dynamic),
+      salience: flex_get(data, :salience) || 0.5,
+      access_count: flex_get(data, :access_count) || 0
     }
+  end
+
+  defp from_map_list_fields(data) do
+    %{
+      background: flex_get(data, :background) || [],
+      values: flex_get(data, :values) || [],
+      connections: flex_get(data, :connections) || [],
+      key_moments: deserialize_moments(flex_get(data, :key_moments) || []),
+      personal_details: flex_get(data, :personal_details) || [],
+      current_focus: flex_get(data, :current_focus) || [],
+      uncertainties: flex_get(data, :uncertainties) || []
+    }
+  end
+
+  defp from_map_temporal_fields(data) do
+    %{
+      first_encountered: deserialize_datetime(flex_get(data, :first_encountered)),
+      last_interaction: deserialize_datetime(flex_get(data, :last_interaction))
+    }
+  end
+
+  # Lookup a key from a map that may have atom or string keys
+  defp flex_get(data, key) do
+    Map.get(data, key) || Map.get(data, to_string(key))
   end
 
   # ============================================================================
@@ -460,6 +478,8 @@ defmodule Arbor.Memory.Relationship do
     end)
   end
 
+  alias Arbor.Common.SafeAtom
+
   @allowed_markers [
     :connection,
     :insight,
@@ -489,7 +509,7 @@ defmodule Arbor.Memory.Relationship do
         marker
 
       marker when is_binary(marker) ->
-        case Arbor.Common.SafeAtom.to_allowed(marker, @allowed_markers) do
+        case SafeAtom.to_allowed(marker, @allowed_markers) do
           {:ok, atom} -> atom
           {:error, _} -> String.to_existing_atom(marker)
         end

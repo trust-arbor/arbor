@@ -31,6 +31,8 @@ defmodule Mix.Tasks.Arbor.Backup.Restore do
   """
   use Mix.Task
 
+  alias Arbor.Persistence.Backup
+
   @impl Mix.Task
   def run(args) do
     {opts, positional, _} =
@@ -54,7 +56,17 @@ defmodule Mix.Tasks.Arbor.Backup.Restore do
     # Start the application to get config
     Mix.Task.run("app.config")
 
-    # Confirm unless --yes flag
+    confirm_restore(filename, private_key, opts)
+
+    Mix.shell().info("")
+    Mix.shell().info("Restoring database from #{filename}...")
+
+    filename
+    |> Backup.restore(private_key: private_key)
+    |> handle_restore_result(filename)
+  end
+
+  defp confirm_restore(filename, private_key, opts) do
     unless Keyword.get(opts, :yes, false) do
       Mix.shell().info("")
       Mix.shell().info("WARNING: This will overwrite all data in the current database!")
@@ -68,52 +80,55 @@ defmodule Mix.Tasks.Arbor.Backup.Restore do
         exit({:shutdown, 0})
       end
     end
+  end
 
+  defp handle_restore_result(:ok, filename) do
     Mix.shell().info("")
-    Mix.shell().info("Restoring database from #{filename}...")
+    Mix.shell().info("Database restored successfully from #{filename}")
+  end
 
-    case Arbor.Persistence.Backup.restore(filename, private_key: private_key) do
-      :ok ->
-        Mix.shell().info("")
-        Mix.shell().info("Database restored successfully from #{filename}")
+  defp handle_restore_result({:error, {:missing_command, cmd}}, _) do
+    Mix.shell().error("Error: #{cmd} not found on PATH")
+    Mix.shell().error("Please install #{cmd} to use this command.")
+    exit({:shutdown, 1})
+  end
 
-      {:error, {:missing_command, cmd}} ->
-        Mix.shell().error("Error: #{cmd} not found on PATH")
-        Mix.shell().error("Please install #{cmd} to use this command.")
-        exit({:shutdown, 1})
+  defp handle_restore_result({:error, :private_key_required}, _) do
+    Mix.shell().error("Error: Private key path is required")
+    Mix.shell().error("Use --private-key <path> to specify the age private key")
+    exit({:shutdown, 1})
+  end
 
-      {:error, :private_key_required} ->
-        Mix.shell().error("Error: Private key path is required")
-        Mix.shell().error("Use --private-key <path> to specify the age private key")
-        exit({:shutdown, 1})
+  defp handle_restore_result({:error, {:backup_not_found, path}}, _) do
+    Mix.shell().error("Error: Backup file not found: #{path}")
+    Mix.shell().error("")
+    Mix.shell().error("Use `mix arbor.backup.list` to see available backups.")
+    exit({:shutdown, 1})
+  end
 
-      {:error, {:backup_not_found, path}} ->
-        Mix.shell().error("Error: Backup file not found: #{path}")
-        Mix.shell().error("")
-        Mix.shell().error("Use `mix arbor.backup.list` to see available backups.")
-        exit({:shutdown, 1})
+  defp handle_restore_result({:error, :no_database_configured}, _) do
+    Mix.shell().error("Error: No database configured for Arbor.Persistence.Repo")
+    Mix.shell().error("Configure the database in config/config.exs or config/runtime.exs")
+    exit({:shutdown, 1})
+  end
 
-      {:error, :no_database_configured} ->
-        Mix.shell().error("Error: No database configured for Arbor.Persistence.Repo")
-        Mix.shell().error("Configure the database in config/config.exs or config/runtime.exs")
-        exit({:shutdown, 1})
+  defp handle_restore_result({:error, {:age_decrypt_failed, code, output}}, _) do
+    Mix.shell().error("Error: age decryption failed with exit code #{code}")
+    Mix.shell().error(output)
+    Mix.shell().error("")
+    Mix.shell().error("Make sure you're using the correct private key.")
+    exit({:shutdown, 1})
+  end
 
-      {:error, {:age_decrypt_failed, code, output}} ->
-        Mix.shell().error("Error: age decryption failed with exit code #{code}")
-        Mix.shell().error(output)
-        Mix.shell().error("")
-        Mix.shell().error("Make sure you're using the correct private key.")
-        exit({:shutdown, 1})
+  defp handle_restore_result({:error, {:pg_restore_failed, code, output}}, _) do
+    Mix.shell().error("Error: pg_restore failed with exit code #{code}")
+    Mix.shell().error(output)
+    exit({:shutdown, 1})
+  end
 
-      {:error, {:pg_restore_failed, code, output}} ->
-        Mix.shell().error("Error: pg_restore failed with exit code #{code}")
-        Mix.shell().error(output)
-        exit({:shutdown, 1})
-
-      {:error, reason} ->
-        Mix.shell().error("Error: #{inspect(reason)}")
-        exit({:shutdown, 1})
-    end
+  defp handle_restore_result({:error, reason}, _) do
+    Mix.shell().error("Error: #{inspect(reason)}")
+    exit({:shutdown, 1})
   end
 
   defp usage_error(message) do

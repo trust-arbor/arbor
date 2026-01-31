@@ -658,28 +658,30 @@ defmodule Arbor.AI.UsageStats do
 
   defp maybe_load_persistence do
     if persistence_enabled?() do
-      path = persistence_path()
-
-      if File.exists?(path) do
-        case File.read(path) do
-          {:ok, content} ->
-            case Jason.decode(content) do
-              {:ok, data} ->
-                load_persisted_data(data)
-                Logger.info("Loaded usage stats from persistence")
-
-              {:error, _} ->
-                Logger.warning("Failed to parse usage stats persistence file")
-            end
-
-          {:error, reason} ->
-            Logger.warning("Failed to read usage stats persistence file", reason: reason)
-        end
-      end
+      load_stats_persistence_file(persistence_path())
     end
 
     # Schedule daily summary after loading
     schedule_daily_summary()
+  end
+
+  defp load_stats_persistence_file(path) do
+    unless File.exists?(path), do: :ok
+
+    with {:ok, content} <- File.read(path),
+         {:ok, data} <- Jason.decode(content) do
+      load_persisted_data(data)
+      Logger.info("Loaded usage stats from persistence")
+    else
+      {:error, %Jason.DecodeError{}} ->
+        Logger.warning("Failed to parse usage stats persistence file")
+
+      {:error, reason} ->
+        Logger.warning("Failed to read usage stats persistence file", reason: reason)
+
+      _ ->
+        :ok
+    end
   end
 
   defp load_persisted_data(data) when is_map(data) do

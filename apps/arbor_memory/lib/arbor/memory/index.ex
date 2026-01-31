@@ -318,53 +318,54 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_recall(query, opts, state) do
-    # Compute embedding for query
-    case get_or_compute_embedding(query, opts) do
-      {:ok, query_embedding} ->
-        threshold = Keyword.get(opts, :threshold, state.default_threshold)
-        limit = Keyword.get(opts, :limit, @default_limit)
-        type_filter = get_type_filter(opts)
+    with {:ok, query_embedding} <- get_or_compute_embedding(query, opts) do
+      threshold = Keyword.get(opts, :threshold, state.default_threshold)
+      limit = Keyword.get(opts, :limit, @default_limit)
+      type_filter = get_type_filter(opts)
 
-        # Scan all entries and compute similarity
-        results =
-          :ets.foldl(
-            fn {_id, entry}, acc ->
-              # Apply type filter
-              if matches_type_filter?(entry, type_filter) do
-                similarity = cosine_similarity(query_embedding, entry.embedding)
+      results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
 
-                if similarity >= threshold do
-                  result = %{
-                    id: entry.id,
-                    content: entry.content,
-                    similarity: similarity,
-                    metadata: entry.metadata,
-                    indexed_at: entry.indexed_at
-                  }
+      sorted =
+        results
+        |> Enum.sort_by(& &1.similarity, :desc)
+        |> Enum.take(limit)
 
-                  [result | acc]
-                else
-                  acc
-                end
-              else
-                acc
-              end
-            end,
-            [],
-            state.table
-          )
-
-        # Sort by similarity and limit
-        sorted =
-          results
-          |> Enum.sort_by(& &1.similarity, :desc)
-          |> Enum.take(limit)
-
-        {:ok, sorted}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, sorted}
     end
+  end
+
+  defp find_matching_entries(table, query_embedding, type_filter, threshold) do
+    :ets.foldl(
+      fn {_id, entry}, acc ->
+        score_entry(entry, query_embedding, type_filter, threshold, acc)
+      end,
+      [],
+      table
+    )
+  end
+
+  defp score_entry(entry, query_embedding, type_filter, threshold, acc) do
+    if matches_type_filter?(entry, type_filter) do
+      similarity = cosine_similarity(query_embedding, entry.embedding)
+
+      if similarity >= threshold do
+        [entry_to_result(entry, similarity) | acc]
+      else
+        acc
+      end
+    else
+      acc
+    end
+  end
+
+  defp entry_to_result(entry, similarity) do
+    %{
+      id: entry.id,
+      content: entry.content,
+      similarity: similarity,
+      metadata: entry.metadata,
+      indexed_at: entry.indexed_at
+    }
   end
 
   defp do_batch_index(items, opts, state) do
@@ -404,6 +405,7 @@ defmodule Arbor.Memory.Index do
 
   defp compute_embedding(content) do
     # For now, use a simple hash-based embedding as fallback
+    # credo:disable-for-next-line Credo.Check.Design.TagTODO
     # TODO: Integrate with arbor_ai for real embeddings
     # This function can return {:error, reason} in production when
     # the embedding service fails

@@ -35,61 +35,76 @@ defmodule Mix.Tasks.Arbor.Jobs.Update do
         aliases: [s: :status, n: :note]
       )
 
-    job_id =
-      case positional do
-        [id | _] ->
-          id
-
-        [] ->
-          Mix.shell().error(
-            "Usage: mix arbor.jobs.update JOB_ID [--status STATUS] [--note \"Note text\"]"
-          )
-
-          exit({:shutdown, 1})
-      end
-
+    job_id = extract_job_id(positional)
     status = opts[:status]
     note = opts[:note]
+    validate_update_opts(status, note)
+    ensure_server_running()
 
-    unless status || note do
-      Mix.shell().error("At least one of --status or --note must be provided.")
+    params = build_update_params(job_id, status, note)
 
-      Mix.shell().error(
-        "Usage: mix arbor.jobs.update JOB_ID [--status STATUS] [--note \"Note text\"]"
-      )
+    Config.full_node_name()
+    |> :rpc.call(Arbor.Actions.Jobs.UpdateJob, :run, [params, %{}])
+    |> handle_update_result(job_id, status, note)
+  end
 
-      exit({:shutdown, 1})
-    end
+  defp extract_job_id([id | _]), do: id
 
+  defp extract_job_id([]) do
+    Mix.shell().error(
+      "Usage: mix arbor.jobs.update JOB_ID [--status STATUS] [--note \"Note text\"]"
+    )
+
+    exit({:shutdown, 1})
+  end
+
+  defp validate_update_opts(nil, nil) do
+    Mix.shell().error("At least one of --status or --note must be provided.")
+
+    Mix.shell().error(
+      "Usage: mix arbor.jobs.update JOB_ID [--status STATUS] [--note \"Note text\"]"
+    )
+
+    exit({:shutdown, 1})
+  end
+
+  defp validate_update_opts(_status, _note), do: :ok
+
+  defp ensure_server_running do
     Config.ensure_distribution()
 
     unless Config.server_running?() do
       Mix.shell().error("Arbor is not running. Start it with: mix arbor.start")
       exit({:shutdown, 1})
     end
+  end
 
-    node = Config.full_node_name()
+  defp build_update_params(job_id, status, note) do
+    %{job_id: job_id}
+    |> maybe_put(:status, status)
+    |> maybe_put(:note, note)
+  end
 
-    params = %{job_id: job_id}
-    params = if status, do: Map.put(params, :status, status), else: params
-    params = if note, do: Map.put(params, :note, note), else: params
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-    case :rpc.call(node, Arbor.Actions.Jobs.UpdateJob, :run, [params, %{}]) do
-      {:badrpc, reason} ->
-        Mix.shell().error("RPC failed: #{inspect(reason)}")
-        exit({:shutdown, 1})
+  defp handle_update_result({:ok, _result}, job_id, status, note) do
+    print_success(job_id, status, note)
+  end
 
-      {:ok, _result} ->
-        print_success(job_id, status, note)
+  defp handle_update_result({:badrpc, reason}, _job_id, _status, _note) do
+    Mix.shell().error("RPC failed: #{inspect(reason)}")
+    exit({:shutdown, 1})
+  end
 
-      {:error, :not_found} ->
-        Mix.shell().error("Job not found: #{job_id}")
-        exit({:shutdown, 1})
+  defp handle_update_result({:error, :not_found}, job_id, _status, _note) do
+    Mix.shell().error("Job not found: #{job_id}")
+    exit({:shutdown, 1})
+  end
 
-      {:error, reason} ->
-        Mix.shell().error("Failed to update job: #{inspect(reason)}")
-        exit({:shutdown, 1})
-    end
+  defp handle_update_result({:error, reason}, _job_id, _status, _note) do
+    Mix.shell().error("Failed to update job: #{inspect(reason)}")
+    exit({:shutdown, 1})
   end
 
   defp print_success(job_id, status, note) do

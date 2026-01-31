@@ -3,6 +3,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
   alias Arbor.Trust.CapabilitySync
   alias Arbor.Trust.CapabilityTemplates
+  alias Manager
 
   @moduletag :fast
 
@@ -496,7 +497,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       send(pid, :some_random_message)
       send(pid, {:random, :tuple})
       send(pid, "string_message")
-      send(pid, 12345)
+      send(pid, 12_345)
       send(pid, %{key: "value"})
 
       # Give the GenServer time to process the messages
@@ -594,7 +595,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "sync_capabilities for existing agent with prefix" do
-      {:ok, _} = Arbor.Trust.Manager.create_trust_profile("agent_sync_prefix")
+      {:ok, _} = Manager.create_trust_profile("agent_sync_prefix")
 
       # CapabilitySync calls Manager.get_trust_profile and then grants capabilities
       # The grant call will try Arbor.Security which may not be running, but
@@ -609,7 +610,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "sync_capabilities for existing agent without prefix" do
-      {:ok, _} = Arbor.Trust.Manager.create_trust_profile("no_prefix_sync")
+      {:ok, _} = Manager.create_trust_profile("no_prefix_sync")
 
       result = CapabilitySync.sync_capabilities("no_prefix_sync")
 
@@ -620,8 +621,8 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "sync_capabilities for frozen agent" do
-      {:ok, _} = Arbor.Trust.Manager.create_trust_profile("agent_frozen_sync")
-      :ok = Arbor.Trust.Manager.freeze_trust("agent_frozen_sync", :test_freeze)
+      {:ok, _} = Manager.create_trust_profile("agent_frozen_sync")
+      :ok = Manager.freeze_trust("agent_frozen_sync", :test_freeze)
 
       result = CapabilitySync.sync_capabilities("agent_frozen_sync")
 
@@ -642,7 +643,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "expected_capabilities for existing agent" do
-      {:ok, _} = Arbor.Trust.Manager.create_trust_profile("agent_expected_caps")
+      {:ok, _} = Manager.create_trust_profile("agent_expected_caps")
 
       {:ok, caps} = CapabilitySync.expected_capabilities("agent_expected_caps")
       assert is_list(caps)
@@ -664,7 +665,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "trust_unfrozen event with Manager running calls do_sync_capabilities" do
-      {:ok, _} = Arbor.Trust.Manager.create_trust_profile("agent_unfreeze_full")
+      {:ok, _} = Manager.create_trust_profile("agent_unfreeze_full")
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       # This will call do_sync_capabilities -> Manager.get_trust_profile (succeeds)
@@ -705,10 +706,10 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   end
 
   defp ensure_manager_started do
-    case Process.whereis(Arbor.Trust.Manager) do
+    case Process.whereis(Manager) do
       nil ->
         start_supervised!(
-          {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: true}
+          {Manager, circuit_breaker: false, decay: false, event_store: true}
         )
 
       _pid ->

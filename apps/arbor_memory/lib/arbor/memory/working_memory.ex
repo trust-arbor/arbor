@@ -235,53 +235,40 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec to_prompt_text(t(), keyword()) :: String.t()
   def to_prompt_text(wm, opts \\ []) do
-    sections = []
+    max_thoughts = Keyword.get(opts, :max_thoughts, 5)
 
-    # Relationship context (first, as it sets the frame)
-    sections =
-      if Keyword.get(opts, :include_relationship, true) && wm.relationship_context do
-        [format_relationship(wm.relationship_context) | sections]
-      else
-        sections
-      end
-
-    # Active goals
-    sections =
-      if Keyword.get(opts, :include_goals, true) && length(wm.active_goals) > 0 do
-        [format_goals(wm.active_goals) | sections]
-      else
-        sections
-      end
-
-    # Recent thoughts
-    sections =
-      if Keyword.get(opts, :include_thoughts, true) && length(wm.recent_thoughts) > 0 do
-        max_thoughts = Keyword.get(opts, :max_thoughts, 5)
-        thoughts = Enum.take(wm.recent_thoughts, max_thoughts)
-        [format_thoughts(thoughts) | sections]
-      else
-        sections
-      end
-
-    # Concerns
-    sections =
-      if Keyword.get(opts, :include_concerns, true) && length(wm.concerns) > 0 do
-        [format_concerns(wm.concerns) | sections]
-      else
-        sections
-      end
-
-    # Curiosity
-    sections =
-      if Keyword.get(opts, :include_curiosity, true) && length(wm.curiosity) > 0 do
-        [format_curiosity(wm.curiosity) | sections]
-      else
-        sections
-      end
-
-    sections
+    []
+    |> maybe_add_section(opts, :include_relationship, wm.relationship_context, &format_relationship/1)
+    |> maybe_add_section(opts, :include_goals, wm.active_goals, &format_goals/1)
+    |> maybe_add_thoughts(opts, wm.recent_thoughts, max_thoughts)
+    |> maybe_add_section(opts, :include_concerns, wm.concerns, &format_concerns/1)
+    |> maybe_add_section(opts, :include_curiosity, wm.curiosity, &format_curiosity/1)
     |> Enum.reverse()
     |> Enum.join("\n\n")
+  end
+
+  defp maybe_add_section(sections, opts, key, nil, _formatter) do
+    _ = Keyword.get(opts, key, true)
+    sections
+  end
+
+  defp maybe_add_section(sections, opts, key, data, formatter) do
+    enabled = Keyword.get(opts, key, true)
+    has_data = (is_list(data) and data != []) or (not is_list(data) and data != nil)
+
+    if enabled and has_data do
+      [formatter.(data) | sections]
+    else
+      sections
+    end
+  end
+
+  defp maybe_add_thoughts(sections, opts, thoughts, max_thoughts) do
+    if Keyword.get(opts, :include_thoughts, true) and thoughts != [] do
+      [format_thoughts(Enum.take(thoughts, max_thoughts)) | sections]
+    else
+      sections
+    end
   end
 
   @doc """
@@ -427,7 +414,7 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp format_goals(goals) do
-    goal_list = goals |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+    goal_list = Enum.map_join(goals, "\n", &"- #{&1}")
 
     """
     ## Active Goals
@@ -438,7 +425,7 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp format_thoughts(thoughts) do
-    thought_list = thoughts |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+    thought_list = Enum.map_join(thoughts, "\n", &"- #{&1}")
 
     """
     ## Recent Thoughts
@@ -449,7 +436,7 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp format_concerns(concerns) do
-    concern_list = concerns |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+    concern_list = Enum.map_join(concerns, "\n", &"- #{&1}")
 
     """
     ## Current Concerns
@@ -460,7 +447,7 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp format_curiosity(items) do
-    curiosity_list = items |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+    curiosity_list = Enum.map_join(items, "\n", &"- #{&1}")
 
     """
     ## Things I'm Curious About

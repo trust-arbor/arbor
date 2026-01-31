@@ -19,8 +19,8 @@ defmodule Arbor.Common.Sessions.Parser do
   - Future: `:codex`, `:gemini`, etc.
   """
 
-  alias Arbor.Common.Sessions.Record
   alias Arbor.Common.Sessions.Providers.Claude
+  alias Arbor.Common.Sessions.Record
 
   @type json_map :: map()
   @type provider :: :claude | :auto
@@ -94,10 +94,7 @@ defmodule Arbor.Common.Sessions.Parser do
   """
   @spec detect_provider(json_map()) :: provider() | :unknown
   def detect_provider(json) when is_map(json) do
-    cond do
-      Claude.matches?(json) -> :claude
-      true -> :unknown
-    end
+    if Claude.matches?(json), do: :claude, else: :unknown
   end
 
   # Private functions
