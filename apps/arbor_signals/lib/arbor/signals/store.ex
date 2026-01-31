@@ -9,6 +9,12 @@ defmodule Arbor.Signals.Store do
 
   - `:max_signals` - Maximum signals to retain (default: 10_000)
   - `:ttl_seconds` - Time-to-live in seconds (default: 3600)
+
+  ## Checkpoint Configuration (application env)
+
+  - `:checkpoint_module` - Module implementing save/load (e.g., `Arbor.Checkpoint`)
+  - `:checkpoint_store` - Storage backend for checkpoints
+  - `:checkpoint_interval_ms` - Save interval in milliseconds (default: 60_000)
   """
 
   use GenServer
@@ -20,7 +26,7 @@ defmodule Arbor.Signals.Store do
   @default_max_signals 10_000
   @default_ttl_seconds 3600
   @cleanup_interval_ms 60_000
-  @checkpoint_interval_ms 300_000
+  @default_checkpoint_interval_ms 60_000
 
   # Client API
 
@@ -332,7 +338,10 @@ defmodule Arbor.Signals.Store do
     checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
 
     if checkpoint_mod && checkpoint_available?(checkpoint_mod) do
-      Process.send_after(self(), :save_checkpoint, @checkpoint_interval_ms)
+      interval =
+        Application.get_env(:arbor_signals, :checkpoint_interval_ms, @default_checkpoint_interval_ms)
+
+      Process.send_after(self(), :save_checkpoint, interval)
     end
   end
 
