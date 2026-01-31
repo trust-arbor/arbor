@@ -99,7 +99,9 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
     cwd =
       if use_worktree do
         if opts[:cwd] do
-          Mix.shell().info("Note: --cwd ignored when using git worktree (worktree is the working directory)")
+          Mix.shell().info(
+            "Note: --cwd ignored when using git worktree (worktree is the working directory)"
+          )
         end
 
         case Hands.create_worktree(name) do
