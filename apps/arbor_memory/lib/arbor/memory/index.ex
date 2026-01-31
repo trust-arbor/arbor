@@ -400,6 +400,8 @@ defmodule Arbor.Memory.Index do
   end
 
   @spec compute_embedding(String.t()) :: {:ok, [float()]} | {:error, term()}
+  defp compute_embedding(""), do: {:error, :empty_content}
+
   defp compute_embedding(content) do
     # For now, use a simple hash-based embedding as fallback
     # TODO: Integrate with arbor_ai for real embeddings

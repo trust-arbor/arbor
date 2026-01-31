@@ -143,7 +143,9 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
   describe "reinforce/2" do
     test "increases relevance and access count" do
       graph = KnowledgeGraph.new("agent_001")
-      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Test"})
+
+      {:ok, graph, node_id} =
+        KnowledgeGraph.add_node(graph, %{type: :fact, content: "Test", relevance: 0.5})
 
       {:ok, node} = KnowledgeGraph.get_node(graph, node_id)
       original_relevance = node.relevance
@@ -153,7 +155,7 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
       assert reinforced_node.relevance > original_relevance
       assert reinforced_node.access_count == 1
 
-      {:ok, new_graph, reinforced_again} = KnowledgeGraph.reinforce(new_graph, node_id)
+      {:ok, _graph, reinforced_again} = KnowledgeGraph.reinforce(new_graph, node_id)
       assert reinforced_again.access_count == 2
     end
 
@@ -222,9 +224,11 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
     test "respects limit" do
       graph = KnowledgeGraph.new("agent_001")
 
-      for i <- 1..10 do
-        {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Fact #{i}"})
-      end
+      graph =
+        Enum.reduce(1..10, graph, fn i, acc ->
+          {:ok, new_graph, _} = KnowledgeGraph.add_node(acc, %{type: :fact, content: "Fact #{i}"})
+          new_graph
+        end)
 
       {:ok, results} = KnowledgeGraph.recall(graph, "fact", limit: 3)
       assert length(results) == 3

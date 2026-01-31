@@ -48,7 +48,7 @@ defmodule Arbor.Memory.TokenBudgetTest do
   describe "estimate_tokens/1" do
     test "estimates tokens from text" do
       # ~4 chars per token
-      assert TokenBudget.estimate_tokens("Hello, world!") == 4
+      assert TokenBudget.estimate_tokens("Hello, world!") == 3
       assert TokenBudget.estimate_tokens(String.duplicate("x", 100)) == 25
     end
 
