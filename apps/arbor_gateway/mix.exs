@@ -25,6 +25,7 @@ defmodule ArborGateway.MixProject do
 
   defp deps do
     [
+      {:arbor_memory, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},
