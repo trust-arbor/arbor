@@ -89,12 +89,10 @@ defmodule Arbor.Memory.SummarizerTest do
 
     test "respects cost_sensitive option for moderate" do
       cheap = Summarizer.recommend_model(:moderate, cost_sensitive: true)
-      expensive = Summarizer.recommend_model(:moderate, cost_sensitive: false)
+      _expensive = Summarizer.recommend_model(:moderate, cost_sensitive: false)
 
       # Cheap should use faster/cheaper models
       assert cheap =~ "haiku" or cheap =~ "mini" or cheap =~ "flash"
-      # Expensive can use more capable
-      # (depends on provider, so just check they're different or same is ok)
     end
   end
 

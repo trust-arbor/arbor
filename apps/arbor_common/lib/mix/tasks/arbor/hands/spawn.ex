@@ -147,8 +147,8 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
       if opts[:worktree] do
         """
         echo "Bootstrapping worktree dependencies..."
-        mix deps.get --only dev test 2>&1
-        mix compile 2>&1
+        mix deps.get --only dev test 2>&1 || echo "Warning: some deps unavailable (path deps may not resolve in worktrees)"
+        mix compile 2>&1 || echo "Warning: compilation had errors (Hand can compile individual apps)"
         echo "Bootstrap complete. Launching Claude..."
         """
       else

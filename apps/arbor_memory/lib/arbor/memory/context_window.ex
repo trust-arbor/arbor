@@ -83,13 +83,17 @@ defmodule Arbor.Memory.ContextWindow do
   @spec new(String.t(), keyword()) :: t()
   def new(agent_id, opts \\ []) do
     max_tokens =
-      case Keyword.get(opts, :model_id) do
-        nil ->
-          Keyword.get(opts, :max_tokens, @default_max_tokens)
+      if Keyword.has_key?(opts, :max_tokens) do
+        Keyword.get(opts, :max_tokens)
+      else
+        case Keyword.get(opts, :model_id) do
+          nil ->
+            @default_max_tokens
 
-        model_id ->
-          budget = Keyword.get(opts, :budget, {:percentage, 0.10})
-          TokenBudget.resolve_for_model(budget, model_id)
+          model_id ->
+            budget = Keyword.get(opts, :budget, {:percentage, 0.10})
+            TokenBudget.resolve_for_model(budget, model_id)
+        end
       end
 
     %__MODULE__{

@@ -122,16 +122,20 @@ defmodule Arbor.Signals do
 
   @impl true
   def emit_preconstructed_signal(%Signal{} = signal) do
-    Store.put(signal)
-    Bus.publish(signal)
+    if healthy?() do
+      Store.put(signal)
+      Bus.publish(signal)
 
-    :telemetry.execute(
-      [:arbor, :signals, :emitted],
-      %{count: 1},
-      %{category: signal.category, type: signal.type}
-    )
+      :telemetry.execute(
+        [:arbor, :signals, :emitted],
+        %{count: 1},
+        %{category: signal.category, type: signal.type}
+      )
 
-    :ok
+      :ok
+    else
+      {:error, :signal_system_not_ready}
+    end
   end
 
   @impl true
