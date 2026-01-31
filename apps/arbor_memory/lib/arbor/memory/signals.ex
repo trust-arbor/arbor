@@ -329,4 +329,64 @@ defmodule Arbor.Memory.Signals do
       timestamp: DateTime.utc_now()
     })
   end
+
+  # ============================================================================
+  # Phase 3 Signals (Relationships)
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a relationship is created.
+  """
+  @spec emit_relationship_created(String.t(), String.t(), String.t()) :: :ok
+  def emit_relationship_created(agent_id, relationship_id, name) do
+    Arbor.Signals.emit(:memory, :relationship_created, %{
+      agent_id: agent_id,
+      relationship_id: relationship_id,
+      name: name,
+      created_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a relationship is updated.
+
+  ## Changes
+
+  A map describing what changed, e.g.:
+  - `%{field: :salience, old_value: 0.5, new_value: 0.8}`
+  """
+  @spec emit_relationship_updated(String.t(), String.t(), map()) :: :ok
+  def emit_relationship_updated(agent_id, relationship_id, changes) do
+    Arbor.Signals.emit(:memory, :relationship_updated, %{
+      agent_id: agent_id,
+      relationship_id: relationship_id,
+      changes: changes,
+      updated_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a key moment is added to a relationship.
+  """
+  @spec emit_moment_added(String.t(), String.t(), String.t()) :: :ok
+  def emit_moment_added(agent_id, relationship_id, moment_summary) do
+    Arbor.Signals.emit(:memory, :moment_added, %{
+      agent_id: agent_id,
+      relationship_id: relationship_id,
+      moment_preview: String.slice(moment_summary, 0, 100),
+      added_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a relationship is accessed/touched.
+  """
+  @spec emit_relationship_accessed(String.t(), String.t()) :: :ok
+  def emit_relationship_accessed(agent_id, relationship_id) do
+    Arbor.Signals.emit(:memory, :relationship_accessed, %{
+      agent_id: agent_id,
+      relationship_id: relationship_id,
+      accessed_at: DateTime.utc_now()
+    })
+  end
 end
