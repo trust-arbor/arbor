@@ -307,4 +307,26 @@ defmodule Arbor.Memory.Signals do
       summarized_at: DateTime.utc_now()
     })
   end
+
+  @doc """
+  Emit a signal when an agent stops (lifecycle event).
+  """
+  @spec emit_agent_stopped(String.t()) :: :ok
+  def emit_agent_stopped(agent_id) do
+    Arbor.Signals.emit(:memory, :agent_stopped, %{
+      agent_id: agent_id,
+      stopped_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a heartbeat signal for an agent (lifecycle event).
+  """
+  @spec emit_heartbeat(String.t()) :: :ok
+  def emit_heartbeat(agent_id) do
+    Arbor.Signals.emit(:memory, :heartbeat, %{
+      agent_id: agent_id,
+      timestamp: DateTime.utc_now()
+    })
+  end
 end
