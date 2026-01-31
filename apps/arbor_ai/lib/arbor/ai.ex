@@ -58,7 +58,7 @@ defmodule Arbor.AI do
 
   @behaviour Arbor.Contracts.API.AI
 
-  alias Arbor.AI.{BackendRegistry, CliImpl, Config, Response, Router}
+  alias Arbor.AI.{BackendRegistry, BudgetTracker, CliImpl, Config, Response, Router, UsageStats}
 
   require Logger
 
@@ -266,6 +266,78 @@ defmodule Arbor.AI do
   @spec classify_task(String.t(), keyword()) :: Arbor.AI.TaskMeta.t()
   def classify_task(prompt, opts \\ []) do
     Arbor.AI.TaskMeta.classify(prompt, opts)
+  end
+
+  # ── Stats & Observability ──
+
+  @doc """
+  Get all routing stats as a map keyed by {backend, model}.
+
+  Delegates to `UsageStats.all_stats/0`.
+
+  ## Examples
+
+      stats = Arbor.AI.routing_stats()
+      #=> %{
+      #=>   {:anthropic, "claude-opus-4"} => %{requests: 47, successes: 46, ...},
+      #=>   {:gemini, "gemini-pro"} => %{requests: 23, successes: 21, ...}
+      #=> }
+  """
+  @spec routing_stats() :: map()
+  def routing_stats do
+    UsageStats.all_stats()
+  end
+
+  @doc """
+  Get stats for a specific backend (aggregated across all models).
+
+  Delegates to `UsageStats.get_stats/1`.
+
+  ## Examples
+
+      stats = Arbor.AI.backend_stats(:anthropic)
+      stats.requests    #=> 47
+      stats.successes   #=> 46
+      stats.avg_latency_ms #=> 2340.5
+  """
+  @spec backend_stats(atom()) :: map()
+  def backend_stats(backend) when is_atom(backend) do
+    UsageStats.get_stats(backend)
+  end
+
+  @doc """
+  Get all backends sorted by success rate (descending).
+
+  Returns a list of `{backend, success_rate}` tuples.
+
+  Delegates to `UsageStats.reliability_ranking/0`.
+
+  ## Examples
+
+      Arbor.AI.reliability_ranking()
+      #=> [{:ollama, 0.991}, {:anthropic, 0.979}, {:gemini, 0.913}]
+  """
+  @spec reliability_ranking() :: [{atom(), float()}]
+  def reliability_ranking do
+    UsageStats.reliability_ranking()
+  end
+
+  @doc """
+  Get current budget status.
+
+  Delegates to `BudgetTracker.get_status/0`.
+
+  ## Examples
+
+      {:ok, status} = Arbor.AI.budget_status()
+      status.daily_budget      #=> 10.0
+      status.spent_today       #=> 2.35
+      status.remaining         #=> 7.65
+      status.percent_remaining #=> 0.765
+  """
+  @spec budget_status() :: {:ok, map()} | {:ok, map()}
+  def budget_status do
+    BudgetTracker.get_status()
   end
 
   # ===========================================================================

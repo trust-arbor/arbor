@@ -115,7 +115,15 @@ config :arbor_ai,
   budget_persistence: false,
   budget_persistence_path: "~/.arbor/budget-tracker.json",
   cost_overrides: %{},
-  signal_verbosity: :normal
+  signal_verbosity: :normal,
+
+  # Usage stats tracking (Phase 3)
+  enable_stats_tracking: true,
+  stats_retention_days: 7,
+  stats_persistence: false,
+  stats_persistence_path: "~/.arbor/usage-stats.json",
+  enable_reliability_routing: false,
+  reliability_alert_threshold: 0.8
 
 # Memory system defaults
 config :arbor_memory,

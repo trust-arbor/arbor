@@ -1,7 +1,7 @@
 defmodule Arbor.AI.RouterTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.AI.{BudgetTracker, Router, TaskMeta}
+  alias Arbor.AI.{BudgetTracker, Router, TaskMeta, UsageStats}
 
   # Note: These tests use mocked availability where needed
   # The router depends on BackendRegistry, QuotaTracker, and BudgetTracker which need real processes
@@ -302,6 +302,141 @@ defmodule Arbor.AI.RouterTest do
 
         if BudgetTracker.started?() do
           BudgetTracker.reset()
+        end
+      end
+    end
+  end
+
+  # Reliability-aware routing tests (Phase 3)
+  describe "maybe_sort_by_reliability/1" do
+    @tag :fast
+    test "preserves order when reliability routing is disabled" do
+      original_setting = Application.get_env(:arbor_ai, :enable_reliability_routing)
+
+      try do
+        Application.put_env(:arbor_ai, :enable_reliability_routing, false)
+
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}, {:gemini, :pro}]
+        result = Router.maybe_sort_by_reliability(candidates)
+
+        # Should be unchanged
+        assert result == candidates
+      after
+        if original_setting != nil do
+          Application.put_env(:arbor_ai, :enable_reliability_routing, original_setting)
+        else
+          Application.delete_env(:arbor_ai, :enable_reliability_routing)
+        end
+      end
+    end
+
+    @tag :fast
+    test "sorts by success rate when enabled and stats available" do
+      original_setting = Application.get_env(:arbor_ai, :enable_reliability_routing)
+
+      try do
+        unless UsageStats.started?() do
+          {:ok, _} = UsageStats.start_link()
+        end
+
+        UsageStats.reset()
+        Application.put_env(:arbor_ai, :enable_reliability_routing, true)
+
+        # Set up different success rates using RESOLVED model names
+        # (the router resolves :opus -> "claude-opus-4-20250514", etc.)
+
+        # gemini: 100% (1/1 success) - :auto resolves to "auto"
+        UsageStats.record_success(:gemini, %{
+          model: "auto",
+          latency_ms: 1000,
+          input_tokens: 100,
+          output_tokens: 50,
+          cost: 0.01
+        })
+
+        # anthropic: 50% (1/2) - :opus resolves to "claude-opus-4-20250514"
+        UsageStats.record_success(:anthropic, %{
+          model: "claude-opus-4-20250514",
+          latency_ms: 2000,
+          input_tokens: 100,
+          output_tokens: 50,
+          cost: 0.02
+        })
+
+        UsageStats.record_failure(:anthropic, %{
+          model: "claude-opus-4-20250514",
+          latency_ms: 5000,
+          error: "timeout"
+        })
+
+        # ollama: 0% (0/1) - :llama resolves to "llama"
+        UsageStats.record_failure(:ollama, %{
+          model: "llama",
+          latency_ms: 3000,
+          error: "connection failed"
+        })
+
+        :timer.sleep(20)
+
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}, {:gemini, :auto}]
+        result = Router.maybe_sort_by_reliability(candidates)
+
+        # Should be sorted by success rate descending: gemini (1.0), anthropic (0.5), ollama (0.0)
+        [{first, _}, {second, _}, {third, _}] = result
+        assert first == :gemini
+        assert second == :anthropic
+        assert third == :ollama
+      after
+        if original_setting != nil do
+          Application.put_env(:arbor_ai, :enable_reliability_routing, original_setting)
+        else
+          Application.delete_env(:arbor_ai, :enable_reliability_routing)
+        end
+
+        if UsageStats.started?() do
+          UsageStats.reset()
+        end
+      end
+    end
+
+    @tag :fast
+    test "handles backends with no stats (defaults to 1.0 success rate)" do
+      original_setting = Application.get_env(:arbor_ai, :enable_reliability_routing)
+
+      try do
+        unless UsageStats.started?() do
+          {:ok, _} = UsageStats.start_link()
+        end
+
+        UsageStats.reset()
+        Application.put_env(:arbor_ai, :enable_reliability_routing, true)
+
+        # Only record failure for one backend
+        UsageStats.record_failure(:anthropic, %{
+          model: "claude-opus-4-20250514",
+          latency_ms: 5000,
+          error: "timeout"
+        })
+
+        :timer.sleep(10)
+
+        # ollama has no stats (default 1.0), anthropic has 0% success
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}]
+        result = Router.maybe_sort_by_reliability(candidates)
+
+        # ollama (1.0) should come before anthropic (0.0)
+        [{first, _}, {second, _}] = result
+        assert first == :ollama
+        assert second == :anthropic
+      after
+        if original_setting != nil do
+          Application.put_env(:arbor_ai, :enable_reliability_routing, original_setting)
+        else
+          Application.delete_env(:arbor_ai, :enable_reliability_routing)
+        end
+
+        if UsageStats.started?() do
+          UsageStats.reset()
         end
       end
     end
