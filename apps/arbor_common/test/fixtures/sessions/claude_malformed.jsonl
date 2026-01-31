@@ -1,0 +1,6 @@
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/Users/test/project","sessionId":"test-session-004","version":"2.1.20","gitBranch":"main","type":"user","message":{"role":"user","content":"This is a valid line."},"uuid":"mal-msg-001","timestamp":"2026-01-28T13:00:00.000Z"}
+{invalid json here}
+{"parentUuid":"mal-msg-001","isSidechain":false,"cwd":"/Users/test/project","sessionId":"test-session-004","version":"2.1.20","gitBranch":"main","message":{"model":"claude-opus-4-5-20251101","id":"msg_mal_001","type":"message","role":"assistant","content":[{"type":"text","text":"Valid response after invalid line."}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"type":"assistant","uuid":"mal-msg-002","timestamp":"2026-01-28T13:00:05.000Z"}
+{"truncated": true
+another broken line without closing brace
+{"parentUuid":"mal-msg-002","isSidechain":false,"userType":"external","cwd":"/Users/test/project","sessionId":"test-session-004","version":"2.1.20","gitBranch":"main","type":"user","message":{"role":"user","content":"Another valid line."},"uuid":"mal-msg-003","timestamp":"2026-01-28T13:00:10.000Z"}
