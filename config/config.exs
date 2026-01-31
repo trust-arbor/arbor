@@ -77,5 +77,13 @@ config :arbor_signals,
   checkpoint_module: Arbor.Checkpoint,
   checkpoint_store: Arbor.Checkpoint.Store.ETS
 
+# Memory system defaults
+config :arbor_memory,
+  index_max_entries: 10_000,
+  index_default_threshold: 0.3,
+  kg_default_decay_rate: 0.10,
+  kg_max_nodes_per_type: 500,
+  default_model: "anthropic:claude-sonnet-4-5-20250514"
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"
