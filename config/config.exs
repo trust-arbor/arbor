@@ -59,6 +59,10 @@ config :arbor_common, :hands,
   sandbox_image: "claude-sandbox",
   sandbox_credentials_volume: "claude-sandbox-credentials"
 
+# Persistence — Ecto repos for mix tasks (create, migrate, rollback)
+config :arbor_persistence,
+  ecto_repos: [Arbor.Persistence.Repo]
+
 # Database backup with age encryption
 # To enable, set enabled: true and create a key pair:
 #   age-keygen -o ~/.arbor/backup-key-private.txt
