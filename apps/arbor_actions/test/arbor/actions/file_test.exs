@@ -391,4 +391,260 @@ defmodule Arbor.Actions.FileTest do
       assert tool[:name] == "file_exists"
     end
   end
+
+  describe "Edit" do
+    test "replaces string in file", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "edit_test.txt", "Hello, World!")
+
+      assert {:ok, result} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "World", new_string: "Elixir"},
+                 %{}
+               )
+
+      assert result.path == path
+      assert result.replacements_made == 1
+      assert File.read!(path) == "Hello, Elixir!"
+    end
+
+    test "replaces first occurrence only by default", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "multi.txt", "foo bar foo baz foo")
+
+      assert {:ok, result} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "foo", new_string: "qux"},
+                 %{}
+               )
+
+      assert result.replacements_made == 1
+      assert File.read!(path) == "qux bar foo baz foo"
+    end
+
+    test "replaces all occurrences when replace_all is true", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "multi.txt", "foo bar foo baz foo")
+
+      assert {:ok, result} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "foo", new_string: "qux", replace_all: true},
+                 %{}
+               )
+
+      assert result.replacements_made == 3
+      assert File.read!(path) == "qux bar qux baz qux"
+    end
+
+    test "returns error when old_string not found", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "no_match.txt", "Hello, World!")
+
+      assert {:error, message} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "NotHere", new_string: "Replacement"},
+                 %{}
+               )
+
+      assert message =~ "String not found"
+    end
+
+    test "returns error for non-existent file" do
+      assert {:error, message} =
+               FileActions.Edit.run(
+                 %{path: "/nonexistent_edit_12345.txt", old_string: "a", new_string: "b"},
+                 %{}
+               )
+
+      assert message =~ "File not found"
+    end
+
+    test "returns error for empty old_string", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "empty_old.txt", "content")
+
+      assert {:error, message} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "", new_string: "something"},
+                 %{}
+               )
+
+      assert message =~ "non-empty string"
+    end
+
+    test "handles multiline replacements", %{tmp_dir: tmp_dir} do
+      content = """
+      defmodule Foo do
+        def bar, do: :old
+      end
+      """
+
+      path = create_file(tmp_dir, "code.ex", content)
+
+      assert {:ok, result} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: ":old", new_string: ":new"},
+                 %{}
+               )
+
+      assert result.replacements_made == 1
+      assert File.read!(path) =~ ":new"
+      refute File.read!(path) =~ ":old"
+    end
+
+    test "returns preview of changed content", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "preview.txt", "The quick brown fox")
+
+      assert {:ok, result} =
+               FileActions.Edit.run(
+                 %{path: path, old_string: "quick", new_string: "lazy"},
+                 %{}
+               )
+
+      assert is_binary(result.preview)
+      assert result.preview =~ "lazy"
+    end
+
+    test "validates action metadata" do
+      assert FileActions.Edit.name() == "file_edit"
+      assert FileActions.Edit.category() == "file"
+      assert "edit" in FileActions.Edit.tags()
+    end
+
+    test "generates tool schema" do
+      tool = FileActions.Edit.to_tool()
+      assert is_map(tool)
+      assert tool[:name] == "file_edit"
+    end
+  end
+
+  describe "Search" do
+    test "searches file for literal string", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "search_test.txt", "Hello, World!\nGoodbye, World!")
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "World", path: path},
+                 %{}
+               )
+
+      assert result.count == 2
+      assert length(result.matches) == 2
+      assert Enum.all?(result.matches, fn m -> m.file == path end)
+    end
+
+    test "searches directory recursively", %{tmp_dir: tmp_dir} do
+      create_file(tmp_dir, "file1.txt", "target string here")
+      create_file(tmp_dir, "subdir/file2.txt", "also has target")
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "target", path: tmp_dir},
+                 %{}
+               )
+
+      assert result.count == 2
+    end
+
+    test "filters by glob pattern", %{tmp_dir: tmp_dir} do
+      create_file(tmp_dir, "file.txt", "target")
+      create_file(tmp_dir, "file.log", "target")
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "target", path: tmp_dir, glob: "*.txt"},
+                 %{}
+               )
+
+      assert result.count == 1
+      assert hd(result.matches).file =~ ".txt"
+    end
+
+    test "limits results with max_results", %{tmp_dir: tmp_dir} do
+      # Create multiple matches
+      content = Enum.map_join(1..100, "\n", fn i -> "line #{i} has target" end)
+      create_file(tmp_dir, "many.txt", content)
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "target", path: tmp_dir, max_results: 10},
+                 %{}
+               )
+
+      assert result.count == 10
+    end
+
+    test "includes context lines", %{tmp_dir: tmp_dir} do
+      content = "line 1\nline 2\ntarget line\nline 4\nline 5"
+      path = create_file(tmp_dir, "context.txt", content)
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "target", path: path, context_lines: 1},
+                 %{}
+               )
+
+      assert result.count == 1
+      match = hd(result.matches)
+      # Context should include surrounding lines
+      assert match.content =~ "line 2"
+      assert match.content =~ "target line"
+      assert match.content =~ "line 4"
+    end
+
+    test "supports regex patterns", %{tmp_dir: tmp_dir} do
+      content = "foo123bar\nfoo456bar\nnotmatching"
+      path = create_file(tmp_dir, "regex.txt", content)
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "foo\\d+bar", path: path, regex: true},
+                 %{}
+               )
+
+      assert result.count == 2
+    end
+
+    test "returns error for invalid regex", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "test.txt", "content")
+
+      assert {:error, message} =
+               FileActions.Search.run(
+                 %{pattern: "[invalid", path: path, regex: true},
+                 %{}
+               )
+
+      assert message =~ "Invalid regex"
+    end
+
+    test "returns empty results for no matches", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "empty.txt", "no match here")
+
+      assert {:ok, result} =
+               FileActions.Search.run(
+                 %{pattern: "zzz", path: path},
+                 %{}
+               )
+
+      assert result.count == 0
+      assert result.matches == []
+    end
+
+    test "returns error for non-existent path" do
+      assert {:error, message} =
+               FileActions.Search.run(
+                 %{pattern: "test", path: "/nonexistent_dir_12345"},
+                 %{}
+               )
+
+      assert message =~ "does not exist"
+    end
+
+    test "validates action metadata" do
+      assert FileActions.Search.name() == "file_search"
+      assert FileActions.Search.category() == "file"
+      assert "search" in FileActions.Search.tags()
+    end
+
+    test "generates tool schema" do
+      tool = FileActions.Search.to_tool()
+      assert is_map(tool)
+      assert tool[:name] == "file_search"
+    end
+  end
 end

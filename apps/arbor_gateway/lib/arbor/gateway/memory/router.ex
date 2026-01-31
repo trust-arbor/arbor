@@ -267,7 +267,10 @@ defmodule Arbor.Gateway.Memory.Router do
 
   defp atomize_metadata(metadata) when is_map(metadata) do
     SafeAtom.atomize_keys(Map.take(metadata, ["type", "source"]), [:type, :source])
-    |> Map.new(fn {k, v} when is_binary(v) -> {k, safe_to_atom(v)}; kv -> kv end)
+    |> Map.new(fn
+      {k, v} when is_binary(v) -> {k, safe_to_atom(v)}
+      kv -> kv
+    end)
   end
 
   defp atomize_metadata(_), do: %{}
