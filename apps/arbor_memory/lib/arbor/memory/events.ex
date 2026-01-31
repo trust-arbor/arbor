@@ -226,11 +226,13 @@ defmodule Arbor.Memory.Events do
   """
   @spec get_by_type(String.t(), atom(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_by_type(agent_id, event_type, opts \\ []) do
+    type_string = to_string(event_type)
+
     case get_history(agent_id, opts) do
       {:ok, events} ->
         filtered =
           Enum.filter(events, fn event ->
-            Map.get(event.data, :event_type) == event_type
+            to_string(event.type) == type_string
           end)
 
         {:ok, filtered}
@@ -275,7 +277,7 @@ defmodule Arbor.Memory.Events do
     event =
       Event.new(
         stream_id,
-        event_type,
+        to_string(event_type),
         Map.merge(data, %{
           agent_id: agent_id
         })
