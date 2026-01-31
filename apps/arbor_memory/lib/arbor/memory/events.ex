@@ -193,6 +193,69 @@ defmodule Arbor.Memory.Events do
   end
 
   # ============================================================================
+  # Phase 3 Events (Consolidation and Relationships)
+  # ============================================================================
+
+  @doc """
+  Record a knowledge node being archived (before pruning).
+
+  This creates a permanent record so nothing is silently lost during consolidation.
+
+  ## Data
+
+  - `:node_id` - The node being archived
+  - `:type` - Node type
+  - `:content` - Node content
+  - `:relevance` - Relevance at time of archive
+  - `:created_at` - When node was created
+  - `:last_accessed` - When node was last accessed
+  - `:access_count` - Total access count
+  - `:reason` - Why it was archived (:low_relevance, :quota_exceeded)
+  """
+  @spec record_knowledge_archived(String.t(), map()) :: :ok | {:error, term()}
+  def record_knowledge_archived(agent_id, data) do
+    dual_emit(agent_id, :knowledge_archived, %{
+      node_id: data[:node_id],
+      type: data[:type],
+      content_preview: String.slice(data[:content] || "", 0, 200),
+      relevance: data[:relevance],
+      created_at: data[:created_at],
+      last_accessed: data[:last_accessed],
+      access_count: data[:access_count],
+      reason: data[:reason]
+    })
+  end
+
+  @doc """
+  Record a relationship being created.
+
+  Creates a permanent record of new relationship establishment.
+  """
+  @spec record_relationship_created(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def record_relationship_created(agent_id, relationship_id, name) do
+    dual_emit(agent_id, :relationship_created, %{
+      relationship_id: relationship_id,
+      name: name
+    })
+  end
+
+  @doc """
+  Record a significant relationship moment.
+
+  Different from relationship_milestone — this records individual moments,
+  while milestones mark aggregate achievements (100th interaction, etc.).
+  """
+  @spec record_relationship_moment(String.t(), String.t(), map()) :: :ok | {:error, term()}
+  def record_relationship_moment(agent_id, relationship_id, moment_data) do
+    dual_emit(agent_id, :relationship_moment, %{
+      relationship_id: relationship_id,
+      summary: moment_data[:summary],
+      emotional_markers: moment_data[:emotional_markers],
+      salience: moment_data[:salience]
+    })
+  end
+
+  # ============================================================================
   # Query Helpers
   # ============================================================================
 
