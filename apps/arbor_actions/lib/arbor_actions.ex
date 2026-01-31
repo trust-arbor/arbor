@@ -15,6 +15,7 @@ defmodule Arbor.Actions do
   | Git | `Arbor.Actions.Git` | Git repository operations |
   | Comms | `Arbor.Actions.Comms` | Channel messaging |
   | Jobs | `Arbor.Actions.Jobs` | Persistent task tracking |
+  | AI | `Arbor.Actions.AI` | AI/LLM text generation and code analysis |
 
   ## Quick Start
 
@@ -149,7 +150,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.File.Write,
         Arbor.Actions.File.List,
         Arbor.Actions.File.Glob,
-        Arbor.Actions.File.Exists
+        Arbor.Actions.File.Exists,
+        Arbor.Actions.File.Edit,
+        Arbor.Actions.File.Search
       ],
       git: [
         Arbor.Actions.Git.Status,
@@ -166,6 +169,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.Jobs.ListJobs,
         Arbor.Actions.Jobs.GetJob,
         Arbor.Actions.Jobs.UpdateJob
+      ],
+      ai: [
+        Arbor.Actions.AI.GenerateText,
+        Arbor.Actions.AI.AnalyzeCode
       ]
     }
   end
