@@ -45,6 +45,7 @@ defmodule Arbor.AI.CliImpl do
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
   alias Arbor.AI.SessionRegistry
+  alias Arbor.AI.UsageStats
   alias Arbor.Signals
 
   alias Arbor.AI.Backends.{
@@ -227,26 +228,44 @@ defmodule Arbor.AI.CliImpl do
         # Session management: look up existing session if context provided
         opts = inject_session_id(provider, module, opts)
 
+        # Track latency
+        start_time = System.monotonic_time(:millisecond)
+
         try do
           case module.generate_text(prompt, opts) do
             {:ok, response} = success ->
+              latency_ms = System.monotonic_time(:millisecond) - start_time
+
               # Store session_id for future calls
               store_session_id(provider, module, opts, response)
 
               # Record usage for budget tracking
               record_budget_usage(provider, opts, response)
 
+              # Record success for usage stats
+              record_usage_stats_success(provider, opts, response, latency_ms)
+
               success
 
             error ->
+              latency_ms = System.monotonic_time(:millisecond) - start_time
+
+              # Record failure for usage stats
+              record_usage_stats_failure(provider, opts, error, latency_ms)
+
               error
           end
         rescue
           e ->
+            latency_ms = System.monotonic_time(:millisecond) - start_time
+
             Logger.warning("Provider raised exception",
               provider: provider,
               error: inspect(e)
             )
+
+            # Record failure for usage stats
+            record_usage_stats_failure(provider, opts, e, latency_ms)
 
             {:error, {:provider_error, provider, e}}
         end
@@ -332,6 +351,58 @@ defmodule Arbor.AI.CliImpl do
         input_tokens: Map.get(usage, :input_tokens, 0),
         output_tokens: Map.get(usage, :output_tokens, 0)
       })
+    end
+  end
+
+  # Record success for usage stats (only if UsageStats is running)
+  defp record_usage_stats_success(provider, opts, response, latency_ms) do
+    if UsageStats.started?() do
+      model = Keyword.get(opts, :model, "unknown")
+      tier = Keyword.get(opts, :tier, :unknown)
+      usage = Map.get(response, :usage, %{})
+      input_tokens = Map.get(usage, :input_tokens, 0)
+      output_tokens = Map.get(usage, :output_tokens, 0)
+
+      # Calculate cost (approximate based on BudgetTracker's model)
+      cost = calculate_approximate_cost(provider, model, input_tokens, output_tokens)
+
+      UsageStats.record_success(provider, %{
+        model: to_string(model),
+        tier: tier,
+        latency_ms: latency_ms,
+        input_tokens: input_tokens,
+        output_tokens: output_tokens,
+        cost: cost
+      })
+    end
+  end
+
+  # Record failure for usage stats (only if UsageStats is running)
+  defp record_usage_stats_failure(provider, opts, error, latency_ms) do
+    if UsageStats.started?() do
+      model = Keyword.get(opts, :model, "unknown")
+      tier = Keyword.get(opts, :tier, :unknown)
+
+      UsageStats.record_failure(provider, %{
+        model: to_string(model),
+        tier: tier,
+        latency_ms: latency_ms,
+        error: inspect(error, limit: 200)
+      })
+    end
+  end
+
+  # Approximate cost calculation (mirrors BudgetTracker logic)
+  defp calculate_approximate_cost(provider, _model, input_tokens, output_tokens) do
+    # Free backends
+    if provider in [:ollama, :lmstudio, :opencode, :qwen, :grok] do
+      0.0
+    else
+      # Rough approximation for paid backends
+      # Using average rates similar to sonnet tier
+      input_cost = input_tokens / 1_000_000 * 3.0
+      output_cost = output_tokens / 1_000_000 * 15.0
+      input_cost + output_cost
     end
   end
 

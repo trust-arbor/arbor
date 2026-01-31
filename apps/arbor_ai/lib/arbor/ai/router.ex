@@ -55,7 +55,8 @@ defmodule Arbor.AI.Router do
     BudgetTracker,
     QuotaTracker,
     RoutingConfig,
-    TaskMeta
+    TaskMeta,
+    UsageStats
   }
 
   alias Arbor.Signals
@@ -264,7 +265,7 @@ defmodule Arbor.AI.Router do
     candidates = RoutingConfig.get_tier_backends(tier)
     candidates_count = length(candidates)
 
-    # Apply all filters including budget
+    # Apply all filters including budget, then optionally sort by reliability
     filtered_candidates =
       candidates
       |> filter_by_exclusions(exclude)
@@ -272,6 +273,7 @@ defmodule Arbor.AI.Router do
       |> filter_by_availability()
       |> filter_by_quota()
       |> filter_by_budget(tier)
+      |> maybe_sort_by_reliability()
 
     # Select first available
     case List.first(filtered_candidates) do
@@ -370,6 +372,24 @@ defmodule Arbor.AI.Router do
       end)
 
     free ++ paid
+  end
+
+  @doc false
+  # Sort candidates by reliability (success rate) when enabled
+  def maybe_sort_by_reliability(candidates) do
+    if reliability_routing_enabled?() and UsageStats.started?() do
+      Enum.sort_by(candidates, fn {backend, model} ->
+        # Use negative success rate for descending order
+        -UsageStats.success_rate(backend, RoutingConfig.resolve_model(model))
+      end)
+    else
+      # Preserve config order when disabled
+      candidates
+    end
+  end
+
+  defp reliability_routing_enabled? do
+    Application.get_env(:arbor_ai, :enable_reliability_routing, false)
   end
 
   defp backend_available?(backend) do

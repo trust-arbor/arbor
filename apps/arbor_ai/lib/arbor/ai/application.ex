@@ -15,7 +15,7 @@ defmodule Arbor.AI.Application do
 
         # Session tracking for multi-turn conversations
         Arbor.AI.SessionRegistry
-      ] ++ budget_tracker_child()
+      ] ++ budget_tracker_child() ++ usage_stats_child()
 
     opts = [strategy: :one_for_one, name: Arbor.AI.Supervisor]
     Supervisor.start_link(children, opts)
@@ -25,6 +25,15 @@ defmodule Arbor.AI.Application do
   defp budget_tracker_child do
     if Application.get_env(:arbor_ai, :enable_budget_tracking, true) do
       [Arbor.AI.BudgetTracker]
+    else
+      []
+    end
+  end
+
+  # Conditionally add UsageStats based on config
+  defp usage_stats_child do
+    if Application.get_env(:arbor_ai, :enable_stats_tracking, true) do
+      [Arbor.AI.UsageStats]
     else
       []
     end
