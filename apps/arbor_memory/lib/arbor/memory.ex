@@ -47,13 +47,26 @@ defmodule Arbor.Memory do
   See the module docs for each component for details.
   """
 
-  alias Arbor.Memory.{Events, Index, IndexSupervisor, KnowledgeGraph, Signals, TokenBudget}
+  alias Arbor.Memory.{
+    Events,
+    Index,
+    IndexSupervisor,
+    KnowledgeGraph,
+    Retrieval,
+    Signals,
+    Summarizer,
+    TokenBudget,
+    WorkingMemory
+  }
 
   require Logger
 
   # State storage for knowledge graphs (agent_id => KnowledgeGraph.t())
   # In production, this would be backed by a GenServer or persistence
   @graph_ets :arbor_memory_graphs
+
+  # State storage for working memory (agent_id => WorkingMemory.t())
+  @working_memory_ets :arbor_working_memory
 
   # ============================================================================
   # Agent Lifecycle
@@ -127,6 +140,9 @@ defmodule Arbor.Memory do
 
     # Remove knowledge graph
     :ets.delete(@graph_ets, agent_id)
+
+    # Remove working memory (Phase 2)
+    delete_working_memory(agent_id)
 
     # Emit cleanup signal
     Signals.emit_memory_cleaned_up(agent_id)
@@ -493,6 +509,176 @@ defmodule Arbor.Memory do
   See `Arbor.Memory.TokenBudget.model_context_size/1` for details.
   """
   defdelegate model_context_size(model_id), to: TokenBudget
+
+  # ============================================================================
+  # Working Memory (Phase 2)
+  # ============================================================================
+
+  @doc """
+  Get working memory for an agent.
+
+  Returns the current working memory or nil if not set.
+
+  ## Examples
+
+      wm = Arbor.Memory.get_working_memory("agent_001")
+  """
+  @spec get_working_memory(String.t()) :: WorkingMemory.t() | nil
+  def get_working_memory(agent_id) do
+    case :ets.lookup(@working_memory_ets, agent_id) do
+      [{^agent_id, wm}] -> wm
+      [] -> nil
+    end
+  end
+
+  @doc """
+  Save working memory for an agent.
+
+  Stores the working memory in ETS (Phase 2) or Postgres (Phase 6+).
+
+  ## Examples
+
+      wm = WorkingMemory.new("agent_001")
+      :ok = Arbor.Memory.save_working_memory("agent_001", wm)
+  """
+  @spec save_working_memory(String.t(), WorkingMemory.t()) :: :ok
+  def save_working_memory(agent_id, working_memory) do
+    :ets.insert(@working_memory_ets, {agent_id, working_memory})
+    Signals.emit_working_memory_saved(agent_id, WorkingMemory.stats(working_memory))
+    :ok
+  end
+
+  @doc """
+  Load working memory for an agent.
+
+  Returns existing working memory or creates a new one if none exists.
+  This is the primary entry point for session startup.
+
+  ## Examples
+
+      wm = Arbor.Memory.load_working_memory("agent_001")
+  """
+  @spec load_working_memory(String.t(), keyword()) :: WorkingMemory.t()
+  def load_working_memory(agent_id, opts \\ []) do
+    case get_working_memory(agent_id) do
+      nil ->
+        wm = WorkingMemory.new(agent_id, opts)
+        save_working_memory(agent_id, wm)
+        Signals.emit_working_memory_loaded(agent_id, :created)
+        wm
+
+      wm ->
+        Signals.emit_working_memory_loaded(agent_id, :existing)
+        wm
+    end
+  end
+
+  @doc """
+  Delete working memory for an agent.
+
+  Called during cleanup.
+  """
+  @spec delete_working_memory(String.t()) :: :ok
+  def delete_working_memory(agent_id) do
+    :ets.delete(@working_memory_ets, agent_id)
+    :ok
+  end
+
+  # ============================================================================
+  # Retrieval (Phase 2)
+  # ============================================================================
+
+  @doc """
+  Semantic recall with human-readable formatting for LLM context injection.
+
+  Delegates to `Arbor.Memory.Retrieval.let_me_recall/3`.
+
+  ## Options
+
+  - `:limit` - Max results (default: 10)
+  - `:threshold` - Min similarity (default: 0.3)
+  - `:max_tokens` - Max tokens in output (default: 500)
+  - `:type` / `:types` - Type filtering
+
+  ## Examples
+
+      {:ok, text} = Arbor.Memory.let_me_recall("agent_001", "elixir patterns")
+  """
+  @spec let_me_recall(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  defdelegate let_me_recall(agent_id, query, opts \\ []), to: Retrieval
+
+  # ============================================================================
+  # Context Building (Phase 2)
+  # ============================================================================
+
+  @doc """
+  Build combined context for LLM injection.
+
+  Combines working memory and optional relationship context into
+  formatted text suitable for system prompt injection.
+
+  ## Options
+
+  - `:max_thoughts` - Max recent thoughts to include (default: 5)
+  - `:include_relationship` - Include relationship context (default: true)
+
+  ## Examples
+
+      wm = Arbor.Memory.load_working_memory("agent_001")
+      context = Arbor.Memory.build_context(wm)
+      context = Arbor.Memory.build_context(wm, relationship: "Close collaborator...")
+  """
+  @spec build_context(WorkingMemory.t(), keyword()) :: String.t()
+  def build_context(working_memory, opts \\ []) do
+    relationship = Keyword.get(opts, :relationship)
+
+    # If relationship provided in opts, set it on working memory first
+    wm =
+      if relationship do
+        WorkingMemory.set_relationship_context(working_memory, relationship)
+      else
+        working_memory
+      end
+
+    WorkingMemory.to_prompt_text(wm, opts)
+  end
+
+  # ============================================================================
+  # Summarization (Phase 2)
+  # ============================================================================
+
+  @doc """
+  Summarize text with complexity-based model routing.
+
+  Delegates to `Arbor.Memory.Summarizer.summarize/2`.
+
+  Note: Returns `{:error, :llm_not_configured}` until arbor_ai integration.
+
+  ## Examples
+
+      {:error, {:llm_not_configured, info}} = Arbor.Memory.summarize("agent_001", text)
+  """
+  @spec summarize(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def summarize(_agent_id, text, opts \\ []) do
+    # Currently always returns error until LLM integration.
+    # When arbor_ai is wired in, this will emit context_summarized signal
+    # on success via: Signals.emit_context_summarized(agent_id, info)
+    Summarizer.summarize(text, opts)
+  end
+
+  @doc """
+  Assess complexity of text.
+
+  Delegates to `Arbor.Memory.Summarizer.assess_complexity/1`.
+
+  ## Examples
+
+      :moderate = Arbor.Memory.assess_complexity("Some technical text...")
+  """
+  @spec assess_complexity(String.t()) :: Summarizer.complexity()
+  defdelegate assess_complexity(text), to: Summarizer
 
   # ============================================================================
   # Private Helpers
