@@ -8,7 +8,7 @@ defmodule Mix.Tasks.Arbor.Start do
   The server runs in the background with:
   - Node name: `arbor_dev@localhost`
   - Cookie: `arbor_dev`
-  - Logs: `/tmp/arbor-dev.log`
+  - Logs: `~/.arbor/logs/arbor-dev.log`
   - PID file: `/tmp/arbor-dev.pid`
 
   Use `mix arbor.status` to check on it and

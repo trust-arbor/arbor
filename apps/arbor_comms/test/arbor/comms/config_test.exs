@@ -57,7 +57,8 @@ defmodule Arbor.Comms.ConfigTest do
 
   describe "log_dir/1" do
     test "returns default dir for unconfigured channel" do
-      assert Config.log_dir(:test) == "/tmp/arbor/test_chat"
+      home = System.user_home!()
+      assert Config.log_dir(:test) == Path.join(home, ".arbor/logs/test_chat")
     end
 
     test "returns configured dir" do

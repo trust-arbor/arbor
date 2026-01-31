@@ -12,16 +12,16 @@ config :logger, :default_formatter, metadata: :all
 config :arbor_comms, :signal,
   enabled: true,
   poll_interval_ms: 10_000,
-  log_dir: "/tmp/arbor/signal_chat"
+  log_dir: "~/.arbor/logs/signal_chat"
 
 # Limitless pendant channel (inbound only)
 config :arbor_comms, :limitless,
   enabled: true,
   base_url: "https://api.limitless.ai/v1",
   poll_interval_ms: 60_000,
-  log_dir: "/tmp/arbor/limitless_chat",
+  log_dir: "~/.arbor/logs/limitless_chat",
   log_retention_days: 30,
-  checkpoint_file: "/tmp/arbor/limitless_checkpoint"
+  checkpoint_file: "~/.arbor/state/limitless_checkpoint"
 
 # Swoosh: we use SMTP adapter directly, disable the API client
 config :swoosh, :api_client, false
@@ -29,7 +29,7 @@ config :swoosh, :api_client, false
 # Email channel (outbound only)
 config :arbor_comms, :email,
   enabled: true,
-  log_dir: "/tmp/arbor/email_chat",
+  log_dir: "~/.arbor/logs/email_chat",
   log_retention_days: 30
 
 # Comms message handler

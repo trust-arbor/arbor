@@ -14,7 +14,7 @@ defmodule Arbor.Comms.Channels.Limitless do
         enabled: true,
         api_key: "...",              # from LIMITLESS_API_KEY env var
         poll_interval_ms: 60_000,
-        checkpoint_file: "/tmp/arbor/limitless_checkpoint",
+        checkpoint_file: "~/.arbor/state/limitless_checkpoint",
         response_recipient: "..."    # from SIGNAL_TO env var
   """
 
@@ -119,7 +119,8 @@ defmodule Arbor.Comms.Channels.Limitless do
   end
 
   defp checkpoint_file do
-    config(:checkpoint_file) || "/tmp/arbor/limitless_checkpoint"
+    (config(:checkpoint_file) || "~/.arbor/state/limitless_checkpoint")
+    |> Path.expand()
   end
 
   defp config(key) do
