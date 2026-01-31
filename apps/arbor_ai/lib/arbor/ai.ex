@@ -335,7 +335,7 @@ defmodule Arbor.AI do
       status.remaining         #=> 7.65
       status.percent_remaining #=> 0.765
   """
-  @spec budget_status() :: {:ok, map()} | {:ok, map()}
+  @spec budget_status() :: {:ok, map()}
   def budget_status do
     BudgetTracker.get_status()
   end

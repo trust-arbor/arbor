@@ -621,12 +621,18 @@ defmodule Arbor.AI.UsageStats do
     retention = retention_days()
     cutoff = DateTime.add(DateTime.utc_now(), -retention * 24 * 60 * 60, :second)
 
-    # Delete entries older than retention period
-    :ets.select_delete(@table, [
-      {{:_, %{first_recorded: :"$1"}}, [{:<, :"$1", cutoff}], [true]}
-    ])
+    # ETS select_delete cannot pattern-match into map values, so iterate and filter
+    pruned =
+      :ets.tab2list(@table)
+      |> Enum.filter(fn {_key, stats} ->
+        case stats[:first_recorded] do
+          %DateTime{} = ts -> DateTime.compare(ts, cutoff) == :lt
+          _ -> false
+        end
+      end)
+      |> Enum.each(fn {key, _stats} -> :ets.delete(@table, key) end)
 
-    Logger.debug("Pruned old usage stats", retention_days: retention)
+    Logger.debug("Pruned old usage stats", retention_days: retention, pruned: pruned)
   end
 
   defp schedule_prune do
