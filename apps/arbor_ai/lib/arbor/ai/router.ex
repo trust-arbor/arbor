@@ -301,7 +301,7 @@ defmodule Arbor.AI.Router do
   defp backend_to_registry_name(:qwen), do: :qwen_cli
   defp backend_to_registry_name(:opencode), do: :opencode_cli
   defp backend_to_registry_name(:lmstudio), do: :lmstudio
-  defp backend_to_registry_name(:ollama), do: :lmstudio
+  defp backend_to_registry_name(:ollama), do: :ollama
   defp backend_to_registry_name(other), do: other
 
   # ===========================================================================

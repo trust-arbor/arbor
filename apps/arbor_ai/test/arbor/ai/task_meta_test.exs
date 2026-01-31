@@ -19,7 +19,7 @@ defmodule Arbor.AI.TaskMetaTest do
     end
 
     test "refactoring results in complex complexity and repo-wide scope" do
-      meta = TaskMeta.classify("refactor the auth system architecture")
+      meta = TaskMeta.classify("refactor the notification system architecture")
       assert meta.complexity == :complex
       assert meta.scope == :repo_wide
       assert meta.risk_level == :high
