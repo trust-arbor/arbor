@@ -460,13 +460,42 @@ defmodule Arbor.Memory.Relationship do
     end)
   end
 
+  @allowed_markers [
+    :connection,
+    :insight,
+    :joy,
+    :trust,
+    :concern,
+    :hope,
+    :accomplishment,
+    :breakthrough,
+    :challenge,
+    :support,
+    :tension,
+    :clarity,
+    :gratitude,
+    :curiosity,
+    :frustration,
+    :relief,
+    :pride,
+    :vulnerability,
+    :warmth,
+    :respect
+  ]
+
   defp deserialize_markers(markers) do
-    Enum.map(markers, fn marker ->
-      if is_atom(marker), do: marker, else: String.to_existing_atom(marker)
+    Enum.map(markers, fn
+      marker when is_atom(marker) ->
+        marker
+
+      marker when is_binary(marker) ->
+        case Arbor.Common.SafeAtom.to_allowed(marker, @allowed_markers) do
+          {:ok, atom} -> atom
+          {:error, _} -> String.to_existing_atom(marker)
+        end
     end)
   rescue
-    # If atom doesn't exist, create it (safe since these are controlled by us)
-    ArgumentError -> Enum.map(markers, &String.to_atom/1)
+    ArgumentError -> Enum.filter(markers, &is_atom/1)
   end
 
   defp serialize_datetime(nil), do: nil

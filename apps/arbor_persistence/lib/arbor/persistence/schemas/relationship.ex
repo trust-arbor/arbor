@@ -173,7 +173,7 @@ defmodule Arbor.Persistence.Schemas.Relationship do
         end
 
       markers = get_field.(:emotional_markers) || []
-      markers_atoms = Enum.map(markers, &safe_to_atom/1)
+      markers_atoms = markers |> Enum.map(&safe_to_atom/1) |> Enum.reject(&is_nil/1)
 
       %{
         summary: get_field.(:summary),
@@ -191,11 +191,19 @@ defmodule Arbor.Persistence.Schemas.Relationship do
     end
   end
 
+  # Allowlist of valid emotional markers — must match Arbor.Memory.Relationship
+  @allowed_markers ~w(
+    connection insight joy trust concern hope accomplishment breakthrough
+    challenge support tension clarity gratitude curiosity frustration
+    relief pride vulnerability warmth respect
+  )a
+
   defp safe_to_atom(value) when is_atom(value), do: value
 
   defp safe_to_atom(value) when is_binary(value) do
-    String.to_existing_atom(value)
+    atom = String.to_existing_atom(value)
+    if atom in @allowed_markers, do: atom, else: nil
   rescue
-    ArgumentError -> String.to_atom(value)
+    ArgumentError -> nil
   end
 end
