@@ -199,6 +199,75 @@ defmodule Arbor.AI do
     BackendRegistry.available_backends()
   end
 
+  # ── Task-Aware Routing ──
+
+  @doc """
+  Route a task to an appropriate backend and model.
+
+  Delegates to `Router.route_task/2`. Accepts either a prompt string
+  (which gets classified) or a TaskMeta struct.
+
+  ## Options
+
+  - `:model` - Manual override `{backend, model}` - bypasses routing entirely
+  - `:min_trust` - Override minimum trust level
+  - `:exclude` - List of backends to exclude
+
+  ## Returns
+
+  - `{:ok, {backend, model}}` - Selected backend and model
+  - `{:error, reason}` - Routing failed
+
+  ## Examples
+
+      {:ok, {:anthropic, "claude-opus-4-20250514"}} = Arbor.AI.route_task("Fix auth vulnerability")
+  """
+  @spec route_task(Arbor.AI.TaskMeta.t() | String.t(), keyword()) ::
+          {:ok, {atom(), String.t()}} | {:error, term()}
+  def route_task(task_or_prompt, opts \\ []) do
+    Router.route_task(task_or_prompt, opts)
+  end
+
+  @doc """
+  Route an embedding request to an appropriate provider.
+
+  Delegates to `Router.route_embedding/1`.
+
+  ## Options
+
+  - `:prefer` - `:local`, `:cloud`, or `:auto` (default: configured preference)
+
+  ## Returns
+
+  - `{:ok, {backend, model}}` - Selected embedding provider and model
+  - `{:error, :no_embedding_providers}` - No providers available
+
+  ## Examples
+
+      {:ok, {:ollama, "nomic-embed-text"}} = Arbor.AI.route_embedding()
+      {:ok, {:openai, "text-embedding-3-small"}} = Arbor.AI.route_embedding(prefer: :cloud)
+  """
+  @spec route_embedding(keyword()) :: {:ok, {atom(), String.t()}} | {:error, term()}
+  def route_embedding(opts \\ []) do
+    Router.route_embedding(opts)
+  end
+
+  @doc """
+  Classify a prompt into task metadata for routing decisions.
+
+  Delegates to `TaskMeta.classify/2`.
+
+  ## Examples
+
+      meta = Arbor.AI.classify_task("Fix the security vulnerability in auth.ex")
+      meta.risk_level  #=> :critical
+      meta.domain      #=> :security
+  """
+  @spec classify_task(String.t(), keyword()) :: Arbor.AI.TaskMeta.t()
+  def classify_task(prompt, opts \\ []) do
+    Arbor.AI.TaskMeta.classify(prompt, opts)
+  end
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================
