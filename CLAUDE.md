@@ -7,8 +7,8 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 ```
 Level 0: arbor_contracts, arbor_common (zero in-umbrella deps)
 Level 1: signals, shell, security, consensus, historian, persistence, web, sandbox (depend on Level 0)
-Level 2: trust, actions, agent, bridge (depend on Level 0–1)
-Standalone: checkpoint, eval (zero in-umbrella deps)
+Level 2: trust, actions, agent, gateway (depend on Level 0–1)
+Standalone: checkpoint, eval, ai, comms (zero in-umbrella deps)
 ```
 
 No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
