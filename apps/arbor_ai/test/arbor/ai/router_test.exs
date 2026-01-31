@@ -1,10 +1,10 @@
 defmodule Arbor.AI.RouterTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.AI.{Router, TaskMeta}
+  alias Arbor.AI.{BudgetTracker, Router, TaskMeta}
 
   # Note: These tests use mocked availability where needed
-  # The router depends on BackendRegistry and QuotaTracker which need real processes
+  # The router depends on BackendRegistry, QuotaTracker, and BudgetTracker which need real processes
 
   describe "route_task/2" do
     @tag :fast
@@ -163,6 +163,147 @@ defmodule Arbor.AI.RouterTest do
     @tag :fast
     test "returns false for api_only strategy" do
       assert Router.prefer_cli?(strategy: :api_only) == false
+    end
+  end
+
+  # Budget-aware routing tests (Phase 2)
+  describe "filter_by_budget/2" do
+    @tag :fast
+    test "critical tier bypasses budget constraints" do
+      candidates = [{:anthropic, :opus}, {:ollama, :llama}]
+      result = Router.filter_by_budget(candidates, :critical)
+      assert result == candidates
+    end
+
+    @tag :fast
+    test "filters to free-only when over budget" do
+      # We need to simulate over-budget state
+      # Start BudgetTracker if needed and set to over budget
+      original_budget = Application.get_env(:arbor_ai, :daily_api_budget_usd)
+
+      try do
+        unless BudgetTracker.started?() do
+          {:ok, _} = BudgetTracker.start_link()
+        end
+
+        BudgetTracker.reset()
+
+        # Set tiny budget
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, 0.001)
+
+        # Spend to exceed budget
+        BudgetTracker.record_usage(:anthropic, %{
+          model: "claude-opus-4",
+          input_tokens: 10_000,
+          output_tokens: 10_000
+        })
+
+        :timer.sleep(20)
+
+        # Verify over budget
+        assert BudgetTracker.over_budget?() == true
+
+        # Filter should only return free backends
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}, {:opencode, :grok}]
+        result = Router.filter_by_budget(candidates, :simple)
+
+        # Should only have free backends
+        assert length(result) == 2
+        assert {:ollama, :llama} in result
+        assert {:opencode, :grok} in result
+        refute {:anthropic, :opus} in result
+      after
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, original_budget || 10.0)
+
+        if BudgetTracker.started?() do
+          BudgetTracker.reset()
+        end
+      end
+    end
+
+    @tag :fast
+    test "sorts free first when should prefer free" do
+      original_budget = Application.get_env(:arbor_ai, :daily_api_budget_usd)
+      original_threshold = Application.get_env(:arbor_ai, :budget_prefer_free_threshold)
+
+      try do
+        unless BudgetTracker.started?() do
+          {:ok, _} = BudgetTracker.start_link()
+        end
+
+        # Set budget config FIRST so reset uses correct budget
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, 10.0)
+        Application.put_env(:arbor_ai, :budget_prefer_free_threshold, 0.5)
+
+        # Reset with the correct budget in place
+        BudgetTracker.reset()
+        :timer.sleep(10)
+
+        # Spend 60% of budget (6 USD out of 10)
+        # opus input: $15/M, output: $75/M
+        # 40k input = $0.60, 80k output = $6.00 = $6.60 total -> 66% spent, 34% remaining
+        BudgetTracker.record_usage(:anthropic, %{
+          model: "claude-opus-4",
+          input_tokens: 40_000,
+          output_tokens: 80_000
+        })
+
+        :timer.sleep(20)
+
+        # Verify should_prefer_free
+        assert BudgetTracker.should_prefer_free?() == true
+        assert BudgetTracker.over_budget?() == false
+
+        # Free backends should come first
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}, {:openai, :gpt4}]
+        result = Router.filter_by_budget(candidates, :simple)
+
+        # Should have all backends, but free first
+        assert length(result) == 3
+        # First should be free
+        {first_backend, _} = hd(result)
+        assert BudgetTracker.free_backend?(first_backend)
+      after
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, original_budget || 10.0)
+
+        if original_threshold do
+          Application.put_env(:arbor_ai, :budget_prefer_free_threshold, original_threshold)
+        else
+          Application.delete_env(:arbor_ai, :budget_prefer_free_threshold)
+        end
+
+        if BudgetTracker.started?() do
+          BudgetTracker.reset()
+        end
+      end
+    end
+
+    @tag :fast
+    test "no filtering when budget is healthy" do
+      original_budget = Application.get_env(:arbor_ai, :daily_api_budget_usd)
+
+      try do
+        unless BudgetTracker.started?() do
+          {:ok, _} = BudgetTracker.start_link()
+        end
+
+        BudgetTracker.reset()
+
+        # Ensure budget is healthy
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, 100.0)
+
+        candidates = [{:anthropic, :opus}, {:ollama, :llama}]
+        result = Router.filter_by_budget(candidates, :simple)
+
+        # Should return unchanged
+        assert result == candidates
+      after
+        Application.put_env(:arbor_ai, :daily_api_budget_usd, original_budget || 10.0)
+
+        if BudgetTracker.started?() do
+          BudgetTracker.reset()
+        end
+      end
     end
   end
 end
