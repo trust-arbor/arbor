@@ -5,6 +5,13 @@ defmodule Arbor.Actions.File do
   This module provides Jido-compatible actions for common file operations
   with proper error handling and observability through Arbor.Signals.
 
+  ## Path Safety
+
+  When the context includes a `:workspace` key, all paths are validated
+  using `Arbor.Common.SafePath.resolve_within/2` to prevent path traversal
+  attacks. Without a workspace, paths are used as-is — callers are
+  responsible for validation.
+
   ## Actions
 
   | Action | Description |
@@ -17,30 +24,28 @@ defmodule Arbor.Actions.File do
 
   ## Examples
 
-      # Read a file
-      {:ok, result} = Arbor.Actions.File.Read.run(%{path: "/etc/hosts"}, %{})
-      result.content  # => "127.0.0.1 localhost\\n..."
-
-      # Write a file
-      {:ok, result} = Arbor.Actions.File.Write.run(
-        %{path: "/tmp/test.txt", content: "Hello, World!"},
-        %{}
+      # Read a file within a workspace
+      {:ok, result} = Arbor.Actions.File.Read.run(
+        %{path: "lib/my_module.ex"},
+        %{workspace: "/opt/arbor/workspace"}
       )
-
-      # List directory
-      {:ok, result} = Arbor.Actions.File.List.run(%{path: "/tmp"}, %{})
-      result.entries  # => ["file1.txt", "file2.txt", ...]
-
-      # Glob pattern
-      {:ok, result} = Arbor.Actions.File.Glob.run(
-        %{pattern: "/tmp/**/*.txt"},
-        %{}
-      )
-
-      # Check existence
-      {:ok, result} = Arbor.Actions.File.Exists.run(%{path: "/etc/hosts"}, %{})
-      result.exists  # => true
   """
+
+  alias Arbor.Common.SafePath
+
+  @doc false
+  def validate_path(path, context) do
+    case Map.get(context, :workspace) do
+      nil ->
+        {:ok, path}
+
+      workspace ->
+        case SafePath.resolve_within(path, workspace) do
+          {:ok, safe_path} -> {:ok, safe_path}
+          {:error, _} -> {:error, "Path traversal denied: #{path}"}
+        end
+    end
+  end
 
   defmodule Read do
     @moduledoc """
@@ -82,26 +87,28 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
-      encoding = params[:encoding] || :utf8
+    def run(%{path: path} = params, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+        Actions.emit_started(__MODULE__, params)
+        encoding = params[:encoding] || :utf8
 
-      case File.read(path) do
-        {:ok, content} ->
-          content = maybe_decode_content(content, encoding)
+        case File.read(safe_path) do
+          {:ok, content} ->
+            content = maybe_decode_content(content, encoding)
 
-          result = %{
-            path: path,
-            content: content,
-            size: byte_size(content)
-          }
+            result = %{
+              path: safe_path,
+              content: content,
+              size: byte_size(content)
+            }
 
-          Actions.emit_completed(__MODULE__, %{path: path, size: byte_size(content)})
-          {:ok, result}
+            Actions.emit_completed(__MODULE__, %{path: safe_path, size: byte_size(content)})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to read file '#{path}': #{format_posix_error(reason)}"}
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Failed to read file '#{safe_path}': #{format_posix_error(reason)}"}
+        end
       end
     end
 
@@ -173,36 +180,38 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path, content: content} = params, _context) do
-      Actions.emit_started(__MODULE__, %{path: path, size: byte_size(content)})
+    def run(%{path: path, content: content} = params, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+        Actions.emit_started(__MODULE__, %{path: safe_path, size: byte_size(content)})
 
-      create_dirs = params[:create_dirs] || false
-      mode = params[:mode] || :write
+        create_dirs = params[:create_dirs] || false
+        mode = params[:mode] || :write
 
-      # Create parent directories if requested
-      if create_dirs do
-        File.mkdir_p(Path.dirname(path))
-      end
-
-      result =
-        case mode do
-          :write -> File.write(path, content)
-          :append -> File.write(path, content, [:append])
+        # Create parent directories if requested
+        if create_dirs do
+          File.mkdir_p(Path.dirname(safe_path))
         end
 
-      case result do
-        :ok ->
-          result = %{
-            path: path,
-            bytes_written: byte_size(content)
-          }
+        result =
+          case mode do
+            :write -> File.write(safe_path, content)
+            :append -> File.write(safe_path, content, [:append])
+          end
 
-          Actions.emit_completed(__MODULE__, result)
-          {:ok, result}
+        case result do
+          :ok ->
+            result = %{
+              path: safe_path,
+              bytes_written: byte_size(content)
+            }
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to write file '#{path}': #{format_posix_error(reason)}"}
+            Actions.emit_completed(__MODULE__, result)
+            {:ok, result}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Failed to write file '#{safe_path}': #{format_posix_error(reason)}"}
+        end
       end
     end
 
@@ -259,33 +268,34 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path} = params, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+        Actions.emit_started(__MODULE__, params)
 
-      include_hidden = params[:include_hidden] || false
-      include_dirs = Map.get(params, :include_dirs, true)
+        include_hidden = params[:include_hidden] || false
+        include_dirs = Map.get(params, :include_dirs, true)
 
-      case File.ls(path) do
-        {:ok, entries} ->
-          # Filter based on options
-          entries =
-            entries
-            |> maybe_filter_hidden(include_hidden)
-            |> maybe_filter_dirs(path, include_dirs)
-            |> Enum.sort()
+        case File.ls(safe_path) do
+          {:ok, entries} ->
+            entries =
+              entries
+              |> maybe_filter_hidden(include_hidden)
+              |> maybe_filter_dirs(safe_path, include_dirs)
+              |> Enum.sort()
 
-          result = %{
-            path: path,
-            entries: entries,
-            count: length(entries)
-          }
+            result = %{
+              path: safe_path,
+              entries: entries,
+              count: length(entries)
+            }
 
-          Actions.emit_completed(__MODULE__, %{path: path, count: length(entries)})
-          {:ok, result}
+            Actions.emit_completed(__MODULE__, %{path: safe_path, count: length(entries)})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to list directory '#{path}': #{format_posix_error(reason)}"}
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Failed to list directory '#{safe_path}': #{format_posix_error(reason)}"}
+        end
       end
     end
 
@@ -353,37 +363,41 @@ defmodule Arbor.Actions.File do
     alias Arbor.Actions
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()}
-    def run(%{pattern: pattern} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
-
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{pattern: pattern} = params, context) do
       base_path = params[:base_path]
-      match_dot = params[:match_dot] || false
 
-      # Construct full pattern if base_path provided
-      full_pattern =
-        if base_path do
-          Path.join(base_path, pattern)
-        else
-          pattern
-        end
+      # Validate base_path if provided and workspace is set
+      with {:ok, safe_base} <- validate_base_path(base_path, context) do
+        Actions.emit_started(__MODULE__, params)
+        match_dot = params[:match_dot] || false
 
-      # Build glob options
-      opts = if match_dot, do: [match_dot: true], else: []
+        full_pattern =
+          if safe_base do
+            Path.join(safe_base, pattern)
+          else
+            pattern
+          end
 
-      matches =
-        Path.wildcard(full_pattern, opts)
-        |> Enum.sort()
+        opts = if match_dot, do: [match_dot: true], else: []
 
-      result = %{
-        pattern: full_pattern,
-        matches: matches,
-        count: length(matches)
-      }
+        matches =
+          Path.wildcard(full_pattern, opts)
+          |> Enum.sort()
 
-      Actions.emit_completed(__MODULE__, %{pattern: full_pattern, count: length(matches)})
-      {:ok, result}
+        result = %{
+          pattern: full_pattern,
+          matches: matches,
+          count: length(matches)
+        }
+
+        Actions.emit_completed(__MODULE__, %{pattern: full_pattern, count: length(matches)})
+        {:ok, result}
+      end
     end
+
+    defp validate_base_path(nil, _context), do: {:ok, nil}
+    defp validate_base_path(path, context), do: Arbor.Actions.File.validate_path(path, context)
   end
 
   defmodule Exists do
@@ -420,57 +434,32 @@ defmodule Arbor.Actions.File do
     alias Arbor.Actions
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{path: path} = params, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+        Actions.emit_started(__MODULE__, params)
 
-      result =
-        case File.stat(path) do
-          {:ok, %{type: :regular, size: size}} ->
-            %{
-              path: path,
-              exists: true,
-              type: :file,
-              size: size
-            }
+        result =
+          case File.stat(safe_path) do
+            {:ok, %{type: :regular, size: size}} ->
+              %{path: safe_path, exists: true, type: :file, size: size}
 
-          {:ok, %{type: :directory}} ->
-            %{
-              path: path,
-              exists: true,
-              type: :directory,
-              size: nil
-            }
+            {:ok, %{type: :directory}} ->
+              %{path: safe_path, exists: true, type: :directory, size: nil}
 
-          {:ok, %{type: type}} ->
-            %{
-              path: path,
-              exists: true,
-              type: :other,
-              file_type: type,
-              size: nil
-            }
+            {:ok, %{type: type}} ->
+              %{path: safe_path, exists: true, type: :other, file_type: type, size: nil}
 
-          {:error, :enoent} ->
-            %{
-              path: path,
-              exists: false,
-              type: nil,
-              size: nil
-            }
+            {:error, :enoent} ->
+              %{path: safe_path, exists: false, type: nil, size: nil}
 
-          {:error, _reason} ->
-            # Other errors (permission, etc.) - path exists but we can't access it
-            %{
-              path: path,
-              exists: true,
-              type: :unknown,
-              size: nil
-            }
-        end
+            {:error, _reason} ->
+              %{path: safe_path, exists: true, type: :unknown, size: nil}
+          end
 
-      Actions.emit_completed(__MODULE__, %{path: path, exists: result.exists})
-      {:ok, result}
+        Actions.emit_completed(__MODULE__, %{path: safe_path, exists: result.exists})
+        {:ok, result}
+      end
     end
   end
 
@@ -537,21 +526,26 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path, old_string: old_string, new_string: new_string} = params, _context) do
-      Actions.emit_started(__MODULE__, %{path: path})
+    def run(%{path: path, old_string: old_string, new_string: new_string} = params, context) do
       replace_all = params[:replace_all] || false
 
-      with {:ok, content} <- read_file(path),
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           :ok <-
+             (
+               Actions.emit_started(__MODULE__, %{path: safe_path})
+               :ok
+             ),
+           {:ok, content} <- read_file(safe_path),
            {:ok, new_content, count} <-
              perform_replacement(content, old_string, new_string, replace_all),
-           :ok <- write_file(path, new_content) do
+           :ok <- write_file(safe_path, new_content) do
         result = %{
-          path: path,
+          path: safe_path,
           replacements_made: count,
           preview: generate_preview(new_content, new_string)
         }
 
-        Actions.emit_completed(__MODULE__, %{path: path, replacements_made: count})
+        Actions.emit_completed(__MODULE__, %{path: safe_path, replacements_made: count})
         {:ok, result}
       else
         {:error, reason} ->
@@ -708,17 +702,21 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{pattern: pattern, path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, %{path: path, pattern: pattern})
-
+    def run(%{pattern: pattern, path: path} = params, context) do
       max_results = params[:max_results] || 50
-      context_lines = params[:context_lines] || 2
+      ctx_lines = params[:context_lines] || 2
       glob_pattern = params[:glob]
       use_regex = params[:regex] || false
 
-      with {:ok, search_pattern} <- compile_pattern(pattern, use_regex),
-           {:ok, files} <- get_files_to_search(path, glob_pattern),
-           {:ok, matches} <- search_files(files, search_pattern, context_lines, max_results) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           :ok <-
+             (
+               Actions.emit_started(__MODULE__, %{path: safe_path, pattern: pattern})
+               :ok
+             ),
+           {:ok, search_pattern} <- compile_pattern(pattern, use_regex),
+           {:ok, files} <- get_files_to_search(safe_path, glob_pattern),
+           {:ok, matches} <- search_files(files, search_pattern, ctx_lines, max_results) do
         result = %{
           matches: matches,
           count: length(matches)
