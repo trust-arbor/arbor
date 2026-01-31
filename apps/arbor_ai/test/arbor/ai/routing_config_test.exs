@@ -1,5 +1,5 @@
 defmodule Arbor.AI.RoutingConfigTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.AI.RoutingConfig
 
@@ -154,6 +154,74 @@ defmodule Arbor.AI.RoutingConfigTest do
       after
         if original != nil do
           Application.put_env(:arbor_ai, :enable_task_routing, original)
+        end
+      end
+    end
+  end
+
+  @tag :fast
+  describe "config overrides" do
+    test "tier_routing config overrides defaults" do
+      original = Application.get_env(:arbor_ai, :tier_routing)
+
+      custom = %{
+        critical: [{:custom, :model}],
+        complex: [],
+        moderate: [],
+        simple: [],
+        trivial: []
+      }
+
+      try do
+        Application.put_env(:arbor_ai, :tier_routing, custom)
+        assert RoutingConfig.get_tier_backends(:critical) == [{:custom, :model}]
+        assert RoutingConfig.get_tier_backends(:complex) == []
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :tier_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :tier_routing)
+        end
+      end
+    end
+
+    test "embedding_routing config overrides defaults" do
+      original = Application.get_env(:arbor_ai, :embedding_routing)
+
+      custom = %{
+        preferred: :cloud,
+        providers: [{:openai, "custom-embed"}],
+        fallback_to_cloud: false
+      }
+
+      try do
+        Application.put_env(:arbor_ai, :embedding_routing, custom)
+        providers = RoutingConfig.get_embedding_providers()
+        assert providers == [{:openai, "custom-embed"}]
+        refute RoutingConfig.embedding_fallback_to_cloud?()
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :embedding_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :embedding_routing)
+        end
+      end
+    end
+
+    test "enable_task_routing config overrides default" do
+      original = Application.get_env(:arbor_ai, :enable_task_routing)
+
+      try do
+        Application.put_env(:arbor_ai, :enable_task_routing, false)
+        refute RoutingConfig.task_routing_enabled?()
+
+        Application.put_env(:arbor_ai, :enable_task_routing, true)
+        assert RoutingConfig.task_routing_enabled?()
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :enable_task_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :enable_task_routing)
         end
       end
     end
