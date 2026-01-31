@@ -12,7 +12,7 @@ defmodule Arbor.Comms.Channels.Signal do
         account: "+1XXXXXXXXXX",
         signal_cli_path: "/usr/local/bin/signal-cli",
         poll_interval_ms: 60_000,
-        log_dir: "/tmp/arbor/signal_chat",
+        log_dir: "~/.arbor/logs/signal_chat",
         log_retention_days: 30
   """
 

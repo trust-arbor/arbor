@@ -3,7 +3,7 @@ defmodule Arbor.Comms.ChatLogger do
   Logs messages to channel-specific, date-rotated chat log files.
 
   Each channel gets its own log directory with daily log files:
-  `<log_dir>/<date>.log` (e.g., `/tmp/arbor/signal_chat/2026-01-29.log`).
+  `<log_dir>/<date>.log` (e.g., `~/.arbor/logs/signal_chat/2026-01-29.log`).
 
   Old log files are cleaned up based on the configured retention period.
   """

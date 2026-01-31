@@ -32,7 +32,8 @@ defmodule Arbor.Comms.Config do
   def log_dir(channel) do
     channel
     |> channel_config()
-    |> Keyword.get(:log_dir, "/tmp/arbor/#{channel}_chat")
+    |> Keyword.get(:log_dir, "~/.arbor/logs/#{channel}_chat")
+    |> Path.expand()
   end
 
   @doc "Returns the log retention period in days."

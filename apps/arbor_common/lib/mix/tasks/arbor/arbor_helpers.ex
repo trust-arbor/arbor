@@ -10,7 +10,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
   @full_node_name :arbor_dev@localhost
   @cookie :arbor_dev
   @pid_file "/tmp/arbor-dev.pid"
-  @log_file "/tmp/arbor-dev.log"
+  @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
 
   def node_name, do: @node_name
   def full_node_name, do: @full_node_name
