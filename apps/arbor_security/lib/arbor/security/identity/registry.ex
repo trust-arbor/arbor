@@ -45,6 +45,18 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @doc """
+  Look up the encryption public key (X25519) for an agent.
+
+  Returns `{:error, :not_found}` if the agent is not registered, and
+  `{:error, :no_encryption_key}` if registered but has no encryption key.
+  """
+  @spec lookup_encryption_key(String.t()) ::
+          {:ok, binary()} | {:error, :not_found | :no_encryption_key}
+  def lookup_encryption_key(agent_id) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:lookup_encryption_key, agent_id})
+  end
+
+  @doc """
   Check if an agent is registered.
   """
   @spec registered?(String.t()) :: boolean()
@@ -107,6 +119,7 @@ defmodule Arbor.Security.Identity.Registry do
 
         entry = %{
           public_key: identity.public_key,
+          encryption_public_key: identity.encryption_public_key,
           name: identity.name,
           key_version: identity.key_version,
           created_at: identity.created_at,
@@ -130,6 +143,18 @@ defmodule Arbor.Security.Identity.Registry do
       case Map.get(state.by_agent_id, agent_id) do
         nil -> {:error, :not_found}
         %{public_key: pk} -> {:ok, pk}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:lookup_encryption_key, agent_id}, _from, state) do
+    result =
+      case Map.get(state.by_agent_id, agent_id) do
+        nil -> {:error, :not_found}
+        %{encryption_public_key: nil} -> {:error, :no_encryption_key}
+        %{encryption_public_key: key} -> {:ok, key}
       end
 
     {:reply, result, state}

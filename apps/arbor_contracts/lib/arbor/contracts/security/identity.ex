@@ -36,6 +36,7 @@ defmodule Arbor.Contracts.Security.Identity do
 
   @ed25519_public_key_size 32
   @ed25519_private_key_size 32
+  @x25519_key_size 32
 
   typedstruct enforce: true do
     @typedoc "A cryptographic agent identity"
@@ -44,6 +45,8 @@ defmodule Arbor.Contracts.Security.Identity do
     field(:name, String.t(), enforce: false)
     field(:public_key, Types.public_key())
     field(:private_key, Types.private_key(), enforce: false)
+    field(:encryption_public_key, binary(), enforce: false)
+    field(:encryption_private_key, binary(), enforce: false)
     field(:created_at, DateTime.t())
     field(:key_version, Types.key_version(), default: 1)
     field(:metadata, map(), default: %{})
@@ -58,6 +61,8 @@ defmodule Arbor.Contracts.Security.Identity do
 
   - `:public_key` (required) - 32-byte Ed25519 public key
   - `:private_key` - 32-byte Ed25519 private key seed (optional, never stored in registries)
+  - `:encryption_public_key` - 32-byte X25519 public key for encrypted comms (optional)
+  - `:encryption_private_key` - 32-byte X25519 private key (optional, never stored in registries)
   - `:name` - Optional human-readable name (not an identifier, does not need to be unique)
   - `:key_version` - Key version number (default: 1)
   - `:metadata` - Additional metadata map
@@ -75,6 +80,8 @@ defmodule Arbor.Contracts.Security.Identity do
       name: attrs[:name],
       public_key: public_key,
       private_key: attrs[:private_key],
+      encryption_public_key: attrs[:encryption_public_key],
+      encryption_private_key: attrs[:encryption_private_key],
       created_at: attrs[:created_at] || DateTime.utc_now(),
       key_version: attrs[:key_version] || 1,
       metadata: attrs[:metadata] || %{}
@@ -104,10 +111,13 @@ defmodule Arbor.Contracts.Security.Identity do
   @spec generate(keyword()) :: {:ok, t()} | {:error, term()}
   def generate(opts \\ []) do
     {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    {enc_public, enc_private} = :crypto.generate_key(:ecdh, :x25519)
 
     new(
       public_key: public_key,
       private_key: private_key,
+      encryption_public_key: enc_public,
+      encryption_private_key: enc_private,
       name: opts[:name],
       key_version: opts[:key_version] || 1,
       metadata: opts[:metadata] || %{}
@@ -125,13 +135,14 @@ defmodule Arbor.Contracts.Security.Identity do
   end
 
   @doc """
-  Return a copy of the identity without the private key.
+  Return a copy of the identity without private keys.
 
-  Use this before storing in registries or transmitting.
+  Strips both the Ed25519 signing private key and the X25519 encryption
+  private key. Use this before storing in registries or transmitting.
   """
   @spec public_only(t()) :: t()
   def public_only(%__MODULE__{} = identity) do
-    %{identity | private_key: nil}
+    %{identity | private_key: nil, encryption_private_key: nil}
   end
 
   @doc """
@@ -165,6 +176,8 @@ defmodule Arbor.Contracts.Security.Identity do
     validators = [
       &validate_public_key/1,
       &validate_private_key/1,
+      &validate_encryption_public_key/1,
+      &validate_encryption_private_key/1,
       &validate_agent_id_matches/1,
       &validate_key_version/1,
       &validate_name/1
@@ -200,6 +213,30 @@ defmodule Arbor.Contracts.Security.Identity do
      {:invalid_private_key_size, byte_size_or_type(sk), :expected, @ed25519_private_key_size}}
   end
 
+  defp validate_encryption_public_key(%{encryption_public_key: nil}), do: :ok
+
+  defp validate_encryption_public_key(%{encryption_public_key: pk})
+       when is_binary(pk) and byte_size(pk) == @x25519_key_size do
+    :ok
+  end
+
+  defp validate_encryption_public_key(%{encryption_public_key: pk}) do
+    {:error,
+     {:invalid_encryption_public_key_size, byte_size_or_type(pk), :expected, @x25519_key_size}}
+  end
+
+  defp validate_encryption_private_key(%{encryption_private_key: nil}), do: :ok
+
+  defp validate_encryption_private_key(%{encryption_private_key: sk})
+       when is_binary(sk) and byte_size(sk) == @x25519_key_size do
+    :ok
+  end
+
+  defp validate_encryption_private_key(%{encryption_private_key: sk}) do
+    {:error,
+     {:invalid_encryption_private_key_size, byte_size_or_type(sk), :expected, @x25519_key_size}}
+  end
+
   defp validate_agent_id_matches(%{agent_id: agent_id, public_key: pk}) do
     expected = derive_agent_id(pk)
 
@@ -227,7 +264,14 @@ defimpl Jason.Encoder, for: Arbor.Contracts.Security.Identity do
     identity
     |> Map.from_struct()
     |> Map.delete(:private_key)
+    |> Map.delete(:encryption_private_key)
     |> Map.update!(:public_key, &Base.encode64/1)
+    |> then(fn map ->
+      case map.encryption_public_key do
+        nil -> map
+        key -> Map.put(map, :encryption_public_key, Base.encode64(key))
+      end
+    end)
     |> Map.update!(:created_at, &DateTime.to_iso8601/1)
     |> Jason.Encode.map(opts)
   end
