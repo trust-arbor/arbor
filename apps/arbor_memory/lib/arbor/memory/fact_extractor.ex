@@ -83,17 +83,17 @@ defmodule Arbor.Memory.FactExtractor do
   # Technical patterns
   @technical_patterns [
     # Language/framework usage
-    {~r/(?:using|written in|built with|developed in|coded in)\s+([A-Z][A-Za-z0-9\+#\.]+)/i,
+    {~r/(?:uses?|using|written in|built with|developed in|coded in)\s+([A-Z][A-Za-z0-9\+#\.]+)/i,
      :technology, 0.85},
     {~r/(?:runs on|deployed on|hosted on)\s+([A-Z][A-Za-z0-9\s]+)/i, :platform, 0.8},
     {~r/depends on\s+([A-Za-z][A-Za-z0-9\-_]+)/i, :dependency, 0.85},
     {~r/(?:we use|I use|using)\s+([A-Z][A-Za-z0-9]+)\s+(?:for|as)/i, :tool, 0.75},
 
     # Database patterns
-    {~r/(?:using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database, 0.9},
+    {~r/(?:uses?|using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database, 0.9},
 
     # Framework patterns
-    {~r/(?:using|with|built on)\s+(Phoenix|Rails|Django|Express|Next\.js|React|Vue|Angular)/i,
+    {~r/(?:uses?|using|with|built on)\s+(Phoenix|Rails|Django|Express|Next\.js|React|Vue|Angular)/i,
      :framework, 0.9}
   ]
 

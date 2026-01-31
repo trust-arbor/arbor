@@ -91,10 +91,14 @@ defmodule Arbor.Memory.RetrievalTest do
     end
 
     test "returns empty list when no matches" do
-      {:ok, results} =
-        Retrieval.recall(@agent_id, "completely unrelated query xyz", threshold: 0.99)
+      # Use a fresh agent with no indexed content to guarantee no matches
+      empty_agent = "retrieval_empty_recall_#{System.unique_integer([:positive])}"
+      {:ok, _} = Memory.init_for_agent(empty_agent)
+
+      {:ok, results} = Retrieval.recall(empty_agent, "any query")
 
       assert results == []
+      Memory.cleanup_for_agent(empty_agent)
     end
   end
 
@@ -141,9 +145,14 @@ defmodule Arbor.Memory.RetrievalTest do
     end
 
     test "returns empty string when no results" do
-      {:ok, text} = Retrieval.let_me_recall(@agent_id, "xyz123abc", threshold: 0.99)
+      # Use a fresh agent with no indexed content to guarantee no results
+      empty_agent = "retrieval_empty_recall2_#{System.unique_integer([:positive])}"
+      {:ok, _} = Memory.init_for_agent(empty_agent)
+
+      {:ok, text} = Retrieval.let_me_recall(empty_agent, "any query")
 
       assert text == ""
+      Memory.cleanup_for_agent(empty_agent)
     end
 
     test "respects max_tokens option" do
