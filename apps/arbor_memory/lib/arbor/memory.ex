@@ -48,10 +48,13 @@ defmodule Arbor.Memory do
   """
 
   alias Arbor.Memory.{
+    Consolidation,
     Events,
     Index,
     IndexSupervisor,
     KnowledgeGraph,
+    Relationship,
+    RelationshipStore,
     Retrieval,
     Signals,
     Summarizer,
@@ -679,6 +682,276 @@ defmodule Arbor.Memory do
   """
   @spec assess_complexity(String.t()) :: Summarizer.complexity()
   defdelegate assess_complexity(text), to: Summarizer
+
+  # ============================================================================
+  # Relationships (Phase 3)
+  # ============================================================================
+
+  @doc """
+  Get a relationship by ID.
+
+  ## Examples
+
+      {:ok, rel} = Arbor.Memory.get_relationship("agent_001", relationship_id)
+  """
+  @spec get_relationship(String.t(), String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_relationship(agent_id, relationship_id) do
+    case RelationshipStore.get(agent_id, relationship_id) do
+      {:ok, rel} ->
+        # Touch to update access tracking, emit signal
+        RelationshipStore.touch(agent_id, relationship_id)
+        Signals.emit_relationship_accessed(agent_id, relationship_id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Get a relationship by name.
+
+  ## Examples
+
+      {:ok, rel} = Arbor.Memory.get_relationship_by_name("agent_001", "Hysun")
+  """
+  @spec get_relationship_by_name(String.t(), String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_relationship_by_name(agent_id, name) do
+    case RelationshipStore.get_by_name(agent_id, name) do
+      {:ok, rel} ->
+        # Touch to update access tracking
+        RelationshipStore.touch(agent_id, rel.id)
+        Signals.emit_relationship_accessed(agent_id, rel.id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Get the primary relationship (highest salience).
+
+  ## Examples
+
+      {:ok, rel} = Arbor.Memory.get_primary_relationship("agent_001")
+  """
+  @spec get_primary_relationship(String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_primary_relationship(agent_id) do
+    case RelationshipStore.get_primary(agent_id) do
+      {:ok, rel} ->
+        # Touch to update access tracking
+        RelationshipStore.touch(agent_id, rel.id)
+        Signals.emit_relationship_accessed(agent_id, rel.id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Save a relationship.
+
+  Creates or updates the relationship in the store.
+
+  ## Examples
+
+      rel = Relationship.new("Hysun", relationship_dynamic: "Collaborative partnership")
+      {:ok, saved_rel} = Arbor.Memory.save_relationship("agent_001", rel)
+  """
+  @spec save_relationship(String.t(), Relationship.t()) ::
+          {:ok, Relationship.t()} | {:error, term()}
+  def save_relationship(agent_id, %Relationship{} = relationship) do
+    # Check if this is a new relationship
+    is_new =
+      case RelationshipStore.get(agent_id, relationship.id) do
+        {:ok, _} -> false
+        {:error, :not_found} -> true
+      end
+
+    case RelationshipStore.put(agent_id, relationship) do
+      {:ok, saved_rel} ->
+        if is_new do
+          Signals.emit_relationship_created(agent_id, saved_rel.id, saved_rel.name)
+          Events.record_relationship_created(agent_id, saved_rel.id, saved_rel.name)
+        else
+          Signals.emit_relationship_updated(agent_id, saved_rel.id, %{action: :saved})
+        end
+
+        {:ok, saved_rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Add a key moment to a relationship.
+
+  ## Options
+
+  - `:emotional_markers` - List of atoms describing emotional tone
+  - `:salience` - Importance of this moment (default: 0.5)
+
+  ## Examples
+
+      {:ok, rel} = Arbor.Memory.add_moment("agent_001", rel_id, "First collaborative blog post",
+        emotional_markers: [:connection, :accomplishment],
+        salience: 0.8
+      )
+  """
+  @spec add_moment(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Relationship.t()} | {:error, term()}
+  def add_moment(agent_id, relationship_id, summary, opts \\ []) do
+    case RelationshipStore.get(agent_id, relationship_id) do
+      {:ok, rel} ->
+        updated_rel = Relationship.add_moment(rel, summary, opts)
+
+        case RelationshipStore.put(agent_id, updated_rel) do
+          {:ok, saved_rel} ->
+            Signals.emit_moment_added(agent_id, relationship_id, summary)
+
+            Events.record_relationship_moment(agent_id, relationship_id, %{
+              summary: summary,
+              emotional_markers: Keyword.get(opts, :emotional_markers, []),
+              salience: Keyword.get(opts, :salience, 0.5)
+            })
+
+            {:ok, saved_rel}
+
+          error ->
+            error
+        end
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  List all relationships for an agent.
+
+  ## Options
+
+  - `:sort_by` - Sort by: `:salience` (default), `:last_interaction`, `:name`, `:access_count`
+  - `:sort_dir` - Sort direction: `:desc` (default), `:asc`
+  - `:limit` - Maximum relationships to return
+
+  ## Examples
+
+      {:ok, relationships} = Arbor.Memory.list_relationships("agent_001")
+      {:ok, recent} = Arbor.Memory.list_relationships("agent_001", sort_by: :last_interaction, limit: 5)
+  """
+  @spec list_relationships(String.t(), keyword()) :: {:ok, [Relationship.t()]}
+  def list_relationships(agent_id, opts \\ []) do
+    RelationshipStore.list(agent_id, opts)
+  end
+
+  @doc """
+  Delete a relationship.
+
+  ## Examples
+
+      :ok = Arbor.Memory.delete_relationship("agent_001", relationship_id)
+  """
+  @spec delete_relationship(String.t(), String.t()) :: :ok | {:error, :not_found}
+  def delete_relationship(agent_id, relationship_id) do
+    RelationshipStore.delete(agent_id, relationship_id)
+  end
+
+  # ============================================================================
+  # Enhanced Consolidation (Phase 3)
+  # ============================================================================
+
+  @doc """
+  Run enhanced consolidation on the agent's knowledge graph.
+
+  This uses the full Consolidation module which includes:
+  - Decay (reduce relevance of non-pinned nodes)
+  - Reinforce (boost recently-accessed nodes)
+  - Archive (save pruned nodes to EventLog before removal)
+  - Prune (remove nodes below threshold)
+  - Quota enforcement (evict if over type limits)
+
+  ## Options
+
+  - `:prune_threshold` - Relevance below which to prune (default: 0.1)
+  - `:reinforce_window_hours` - How recent is "recently accessed" (default: 24)
+  - `:reinforce_boost` - How much to boost recent nodes (default: 0.1)
+  - `:archive` - Whether to archive pruned nodes (default: true)
+
+  ## Examples
+
+      {:ok, new_graph, metrics} = Arbor.Memory.run_consolidation("agent_001")
+  """
+  @spec run_consolidation(String.t(), keyword()) ::
+          {:ok, KnowledgeGraph.t(), map()} | {:error, term()}
+  def run_consolidation(agent_id, opts \\ []) do
+    # Emit start signal
+    Signals.emit_consolidation_started(agent_id)
+
+    with {:ok, graph} <- get_graph(agent_id),
+         {:ok, new_graph, metrics} <- Consolidation.consolidate(agent_id, graph, opts) do
+      # Save updated graph
+      save_graph(agent_id, new_graph)
+
+      # Emit completion signals
+      Signals.emit_consolidation_completed(agent_id, metrics)
+
+      if metrics.pruned_count > 0 do
+        Signals.emit_knowledge_pruned(agent_id, metrics.pruned_count)
+      end
+
+      # Record permanent event
+      Events.record_consolidation_completed(agent_id, metrics)
+
+      {:ok, new_graph, metrics}
+    end
+  end
+
+  @doc """
+  Check if consolidation should run for an agent.
+
+  Based on graph size and time since last consolidation.
+
+  ## Options
+
+  - `:size_threshold` - Consolidate if node count exceeds this (default: 100)
+  - `:min_interval_minutes` - Minimum minutes between consolidations (default: 60)
+  - `:last_consolidation` - DateTime of last consolidation
+
+  ## Examples
+
+      if Arbor.Memory.should_consolidate?("agent_001") do
+        {:ok, _, _} = Arbor.Memory.run_consolidation("agent_001")
+      end
+  """
+  @spec should_consolidate?(String.t(), keyword()) :: boolean()
+  def should_consolidate?(agent_id, opts \\ []) do
+    case get_graph(agent_id) do
+      {:ok, graph} -> Consolidation.should_consolidate?(graph, opts)
+      {:error, _} -> false
+    end
+  end
+
+  @doc """
+  Preview what consolidation would do without actually doing it.
+
+  ## Examples
+
+      preview = Arbor.Memory.preview_consolidation("agent_001")
+  """
+  @spec preview_consolidation(String.t(), keyword()) :: map() | {:error, term()}
+  def preview_consolidation(agent_id, opts \\ []) do
+    case get_graph(agent_id) do
+      {:ok, graph} -> Consolidation.preview(graph, opts)
+      error -> error
+    end
+  end
 
   # ============================================================================
   # Private Helpers
