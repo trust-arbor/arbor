@@ -3,11 +3,19 @@ defmodule Arbor.Memory.Application do
 
   use Application
 
+  @graph_ets :arbor_memory_graphs
+
   @impl true
   def start(_type, _args) do
+    # Create graph ETS table eagerly to avoid race conditions
+    if :ets.whereis(@graph_ets) == :undefined do
+      :ets.new(@graph_ets, [:named_table, :public, :set])
+    end
+
     children = [
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
-      {Arbor.Memory.IndexSupervisor, []}
+      {Arbor.Memory.IndexSupervisor, []},
+      {Arbor.Persistence.EventLog.ETS, name: :memory_events}
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Memory.Supervisor]

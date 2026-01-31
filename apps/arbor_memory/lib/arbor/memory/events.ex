@@ -274,10 +274,10 @@ defmodule Arbor.Memory.Events do
 
     event =
       Event.new(
+        stream_id,
         event_type,
         Map.merge(data, %{
-          agent_id: agent_id,
-          event_type: event_type
+          agent_id: agent_id
         })
       )
 

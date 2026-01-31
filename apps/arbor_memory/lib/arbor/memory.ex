@@ -80,8 +80,8 @@ defmodule Arbor.Memory do
   """
   @spec init_for_agent(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def init_for_agent(agent_id, opts \\ []) do
-    # Ensure graph ETS table exists
-    ensure_graph_table()
+    # Merge caller opts with application config defaults
+    opts = merge_config_defaults(opts)
 
     # Start index if enabled
     index_enabled = Keyword.get(opts, :index_enabled, true)
@@ -126,7 +126,6 @@ defmodule Arbor.Memory do
     IndexSupervisor.stop_index(agent_id)
 
     # Remove knowledge graph
-    ensure_graph_table()
     :ets.delete(@graph_ets, agent_id)
 
     # Emit cleanup signal
@@ -499,17 +498,23 @@ defmodule Arbor.Memory do
   # Private Helpers
   # ============================================================================
 
-  defp ensure_graph_table do
-    if :ets.whereis(@graph_ets) == :undefined do
-      :ets.new(@graph_ets, [:named_table, :public, :set])
-    end
+  # Merge caller-provided opts with application config defaults.
+  # Caller opts take precedence over config.
+  defp merge_config_defaults(opts) do
+    defaults = [
+      max_entries: Application.get_env(:arbor_memory, :index_max_entries, 10_000),
+      threshold: Application.get_env(:arbor_memory, :index_default_threshold, 0.3),
+      decay_rate: Application.get_env(:arbor_memory, :kg_default_decay_rate, 0.10),
+      max_nodes_per_type: Application.get_env(:arbor_memory, :kg_max_nodes_per_type, 500)
+    ]
 
-    :ok
+    Keyword.merge(defaults, opts)
   end
 
-  defp get_graph(agent_id) do
-    ensure_graph_table()
+  # Graph ETS table is created eagerly in Application.start/2
+  # to avoid race conditions from lazy initialization.
 
+  defp get_graph(agent_id) do
     case :ets.lookup(@graph_ets, agent_id) do
       [{^agent_id, graph}] -> {:ok, graph}
       [] -> {:error, :graph_not_initialized}
@@ -522,8 +527,6 @@ defmodule Arbor.Memory do
   end
 
   defp has_graph?(agent_id) do
-    ensure_graph_table()
-
     case :ets.lookup(@graph_ets, agent_id) do
       [{^agent_id, _}] -> true
       [] -> false
