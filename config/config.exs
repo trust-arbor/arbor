@@ -79,7 +79,11 @@ config :arbor_persistence, :backup,
 # The checkpoint_store must implement Arbor.Checkpoint.Store behaviour.
 config :arbor_signals,
   checkpoint_module: Arbor.Checkpoint,
-  checkpoint_store: Arbor.Checkpoint.Store.ETS
+  checkpoint_store: Arbor.Checkpoint.Store.ETS,
+  # Signal bus authorization — OpenAuthorizer allows all (backward compatible).
+  # Switch to SecurityAuthorizer when the security kernel is running.
+  authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
+  restricted_topics: [:security, :identity]
 
 # AI routing defaults
 config :arbor_ai,
