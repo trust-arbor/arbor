@@ -95,6 +95,18 @@ defmodule Arbor.Actions.AI do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Common.SafeAtom
+
+    @allowed_providers [
+      :anthropic,
+      :openai,
+      :gemini,
+      :ollama,
+      :lmstudio,
+      :opencode,
+      :openrouter,
+      :qwen
+    ]
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -136,8 +148,12 @@ defmodule Arbor.Actions.AI do
 
     defp normalize_provider(nil), do: nil
 
-    defp normalize_provider(provider) when is_binary(provider),
-      do: String.to_existing_atom(provider)
+    defp normalize_provider(provider) when is_binary(provider) do
+      case SafeAtom.to_allowed(provider, @allowed_providers) do
+        {:ok, atom} -> atom
+        {:error, _} -> nil
+      end
+    end
 
     defp normalize_provider(provider) when is_atom(provider), do: provider
 
@@ -205,6 +221,18 @@ defmodule Arbor.Actions.AI do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Common.SafeAtom
+
+    @allowed_providers [
+      :anthropic,
+      :openai,
+      :gemini,
+      :ollama,
+      :lmstudio,
+      :opencode,
+      :openrouter,
+      :qwen
+    ]
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -275,8 +303,12 @@ defmodule Arbor.Actions.AI do
 
     defp normalize_provider(nil), do: nil
 
-    defp normalize_provider(provider) when is_binary(provider),
-      do: String.to_existing_atom(provider)
+    defp normalize_provider(provider) when is_binary(provider) do
+      case SafeAtom.to_allowed(provider, @allowed_providers) do
+        {:ok, atom} -> atom
+        {:error, _} -> nil
+      end
+    end
 
     defp normalize_provider(provider) when is_atom(provider), do: provider
 
