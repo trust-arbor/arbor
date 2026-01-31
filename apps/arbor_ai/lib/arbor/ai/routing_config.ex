@@ -164,6 +164,7 @@ defmodule Arbor.AI.RoutingConfig do
   def resolve_model(model) when is_binary(model), do: model
 
   def resolve_model(model) when is_atom(model) do
+    # Atoms here are from config constants, not user input — safe to convert
     Map.get(@model_versions, model, Atom.to_string(model))
   end
 

@@ -77,6 +77,38 @@ config :arbor_signals,
   checkpoint_module: Arbor.Checkpoint,
   checkpoint_store: Arbor.Checkpoint.Store.ETS
 
+# AI routing defaults
+config :arbor_ai,
+  enable_task_routing: true,
+  default_backend: :auto,
+  routing_strategy: :cost_optimized,
+  tier_routing: %{
+    critical: [{:anthropic, :opus}, {:anthropic, :sonnet}],
+    complex: [{:anthropic, :sonnet}, {:openai, :gpt5}, {:gemini, :auto}],
+    moderate: [{:gemini, :auto}, {:anthropic, :sonnet}, {:openai, :gpt5}],
+    simple: [{:opencode, :grok}, {:qwen, :qwen_code}, {:gemini, :auto}],
+    trivial: [{:opencode, :grok}, {:qwen, :qwen_code}]
+  },
+  backend_trust_levels: %{
+    lmstudio: :highest,
+    ollama: :highest,
+    anthropic: :high,
+    opencode: :high,
+    openai: :medium,
+    gemini: :medium,
+    qwen: :low,
+    openrouter: :low
+  },
+  embedding_routing: %{
+    preferred: :local,
+    providers: [
+      {:ollama, "nomic-embed-text"},
+      {:lmstudio, "text-embedding"},
+      {:openai, "text-embedding-3-small"}
+    ],
+    fallback_to_cloud: true
+  }
+
 # Memory system defaults
 config :arbor_memory,
   index_max_entries: 10_000,

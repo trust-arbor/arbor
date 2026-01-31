@@ -277,9 +277,7 @@ defmodule Arbor.AI.TaskMeta do
 
   defp has_keywords?(prompt, keywords) do
     Enum.any?(keywords, fn keyword ->
-      # Match whole word boundaries
-      String.contains?(prompt, keyword) or
-        Regex.match?(~r/\b#{Regex.escape(keyword)}\b/i, prompt)
+      Regex.match?(~r/\b#{Regex.escape(keyword)}\b/i, prompt)
     end)
   end
 

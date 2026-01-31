@@ -1,5 +1,5 @@
 defmodule Arbor.AI.RouterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.AI.{Router, TaskMeta}
 
@@ -61,6 +61,42 @@ defmodule Arbor.AI.RouterTest do
     test "trivial prompt gets classified to trivial tier" do
       meta = TaskMeta.classify("fix typo in readme")
       assert TaskMeta.tier(meta) == :trivial
+    end
+  end
+
+  describe "route_task/2 with routing disabled" do
+    @tag :fast
+    test "returns error when task routing is disabled" do
+      original = Application.get_env(:arbor_ai, :enable_task_routing)
+
+      try do
+        Application.put_env(:arbor_ai, :enable_task_routing, false)
+        assert {:error, :task_routing_disabled} = Router.route_task("any prompt")
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :enable_task_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :enable_task_routing)
+        end
+      end
+    end
+
+    @tag :fast
+    test "manual override still works when routing is disabled" do
+      original = Application.get_env(:arbor_ai, :enable_task_routing)
+
+      try do
+        Application.put_env(:arbor_ai, :enable_task_routing, false)
+
+        result = Router.route_task("any prompt", model: {:anthropic, "custom-model"})
+        assert {:ok, {:anthropic, "custom-model"}} = result
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :enable_task_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :enable_task_routing)
+        end
+      end
     end
   end
 
