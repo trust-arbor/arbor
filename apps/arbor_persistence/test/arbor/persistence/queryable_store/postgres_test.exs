@@ -333,7 +333,7 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
 
     test "sum", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :sum, name: name, repo: Repo)
-      assert result == 60
+      assert Decimal.equal?(result, 60)
     end
 
     test "avg", %{name: name} do
@@ -343,12 +343,12 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
 
     test "min", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :min, name: name, repo: Repo)
-      assert result == 10
+      assert Decimal.equal?(result, 10)
     end
 
     test "max", %{name: name} do
       {:ok, result} = Postgres.aggregate(Filter.new(), :score, :max, name: name, repo: Repo)
-      assert result == 30
+      assert Decimal.equal?(result, 30)
     end
 
     test "returns nil for no matching records", %{name: name} do
@@ -360,7 +360,7 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
     test "aggregates with filter", %{name: name} do
       filter = Filter.new() |> Filter.where(:key, :in, ["a", "b"])
       {:ok, result} = Postgres.aggregate(filter, :score, :sum, name: name, repo: Repo)
-      assert result == 30
+      assert Decimal.equal?(result, 30)
     end
   end
 
