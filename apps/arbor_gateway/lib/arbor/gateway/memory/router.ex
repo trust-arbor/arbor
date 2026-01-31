@@ -112,6 +112,7 @@ defmodule Arbor.Gateway.Memory.Router do
 
   use Plug.Router
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Memory
   alias Arbor.Memory.WorkingMemory
 
@@ -262,30 +263,20 @@ defmodule Arbor.Gateway.Memory.Router do
     end)
   end
 
+  @allowed_metadata_atoms ~w(fact experience skill insight relationship user system tool conversation)a
+
   defp atomize_metadata(metadata) when is_map(metadata) do
-    metadata
-    |> Map.take(["type", "source"])
-    |> Enum.reduce(%{}, fn
-      {"type", v}, acc when is_binary(v) -> Map.put(acc, :type, safe_to_atom(v))
-      {"source", v}, acc when is_binary(v) -> Map.put(acc, :source, safe_to_atom(v))
-      _, acc -> acc
-    end)
+    SafeAtom.atomize_keys(Map.take(metadata, ["type", "source"]), [:type, :source])
+    |> Map.new(fn {k, v} when is_binary(v) -> {k, safe_to_atom(v)}; kv -> kv end)
   end
 
   defp atomize_metadata(_), do: %{}
 
   defp safe_to_atom(str) when is_binary(str) do
-    # Only allow known safe atoms for memory types
-    allowed = ~w(fact experience skill insight relationship user system tool conversation)
-
-    if str in allowed do
-      String.to_existing_atom(str)
-    else
-      # Return as string if not in allowed list
-      str
+    case SafeAtom.to_allowed(str, @allowed_metadata_atoms) do
+      {:ok, atom} -> atom
+      {:error, _} -> str
     end
-  rescue
-    ArgumentError -> str
   end
 
   defp json_response(conn, status, body) do
