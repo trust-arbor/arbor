@@ -350,28 +350,35 @@ defmodule Arbor.Signals.Store do
     checkpoint_store = Application.get_env(:arbor_signals, :checkpoint_store)
 
     if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
-      case checkpoint_mod.load("signal_store", checkpoint_store) do
-        {:ok, snapshot_data} ->
-          Logger.info("Signal Store: restored from checkpoint")
-
-          %{
-            state
-            | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
-              order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
-              stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
-          }
-
-        {:error, :not_found} ->
-          Logger.debug("Signal Store: no checkpoint found, starting fresh")
-          state
-
-        {:error, reason} ->
-          Logger.warning("Signal Store: checkpoint restore failed: #{inspect(reason)}")
-          state
-      end
+      restore_from_checkpoint(checkpoint_mod, checkpoint_store, state)
     else
       state
     end
+  end
+
+  defp restore_from_checkpoint(checkpoint_mod, checkpoint_store, state) do
+    case checkpoint_mod.load("signal_store", checkpoint_store) do
+      {:ok, snapshot_data} ->
+        Logger.info("Signal Store: restored from checkpoint")
+        apply_snapshot(state, snapshot_data)
+
+      {:error, :not_found} ->
+        Logger.debug("Signal Store: no checkpoint found, starting fresh")
+        state
+
+      {:error, reason} ->
+        Logger.warning("Signal Store: checkpoint restore failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp apply_snapshot(state, snapshot_data) do
+    %{
+      state
+      | signals: snapshot_data[:signals] || snapshot_data["signals"] || %{},
+        order: :queue.from_list(snapshot_data[:order] || snapshot_data["order"] || []),
+        stats: Map.merge(state.stats, snapshot_data[:stats] || snapshot_data["stats"] || %{})
+    }
   end
 
   defp checkpoint_available?(checkpoint_mod) do

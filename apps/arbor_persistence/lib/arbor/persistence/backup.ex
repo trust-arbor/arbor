@@ -189,16 +189,14 @@ defmodule Arbor.Persistence.Backup do
   # ============================================================================
 
   defp check_prerequisites do
-    with :ok <- check_command("pg_dump"),
-         :ok <- check_command("age") do
-      :ok
+    with :ok <- check_command("pg_dump") do
+      check_command("age")
     end
   end
 
   defp check_restore_prerequisites do
-    with :ok <- check_command("pg_restore"),
-         :ok <- check_command("age") do
-      :ok
+    with :ok <- check_command("pg_restore") do
+      check_command("age")
     end
   end
 
@@ -249,15 +247,15 @@ defmodule Arbor.Persistence.Backup do
     File.mkdir_p!(backup_dir)
 
     # Verify age key file exists
-    unless File.exists?(age_key_file) do
-      {:error, {:missing_key_file, age_key_file}}
-    else
+    if File.exists?(age_key_file) do
       {:ok,
        %{
          backup_dir: backup_dir,
          age_key_file: age_key_file,
          retention: retention
        }}
+    else
+      {:error, {:missing_key_file, age_key_file}}
     end
   end
 

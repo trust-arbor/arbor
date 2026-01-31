@@ -23,12 +23,14 @@ defmodule Arbor.Gateway.Signals.Router do
   plug(:match)
   plug(:dispatch)
 
+  alias Arbor.Common.SafeAtom
+
   # Allowed signal types per source — prevents atom exhaustion from untrusted input
   @allowed_claude_types ~w(
     session_start session_end subagent_stop notification
     tool_used idle permission_request pre_compact
     pre_tool_use user_prompt
-  )
+  )a
 
   # POST /api/signals/:source/:type — Ingest a signal from an external source
   #
@@ -63,9 +65,11 @@ defmodule Arbor.Gateway.Signals.Router do
   defp validate_source("claude"), do: {:ok, :claude}
   defp validate_source(source), do: {:error, "unknown source: #{source}"}
 
-  # Safe to use String.to_atom/1 here — allowlist prevents arbitrary atom creation
-  defp validate_type(:claude, type) when type in @allowed_claude_types do
-    {:ok, String.to_atom(type)}
+  defp validate_type(:claude, type) do
+    case SafeAtom.to_allowed(type, @allowed_claude_types) do
+      {:ok, atom} -> {:ok, atom}
+      {:error, _} -> {:error, "unknown type: #{type}"}
+    end
   end
 
   defp validate_type(_source, type), do: {:error, "unknown type: #{type}"}

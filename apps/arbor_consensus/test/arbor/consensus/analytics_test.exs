@@ -74,7 +74,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
       result = Analytics.feedback_size(decision)
       assert result.evaluation_count == 1
       assert result.primary_concerns_chars == String.length("main concern")
-      assert result.total_chars == result.primary_concerns_chars + result.reasoning_chars + result.recommendations_chars + result.all_concerns_chars
+      expected_total =
+        result.primary_concerns_chars + result.reasoning_chars +
+          result.recommendations_chars + result.all_concerns_chars
+
+      assert result.total_chars == expected_total
     end
   end
 
@@ -232,7 +236,7 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
       chains = Analytics.revision_chains("chain_agent", coordinator: coord)
 
-      assert length(chains) >= 1
+      assert chains != []
       chain = hd(chains)
       assert length(chain) == 2
       chain_ids = Enum.map(chain, & &1.id)
@@ -254,7 +258,7 @@ defmodule Arbor.Consensus.AnalyticsTest do
       {:ok, _} = TestHelpers.wait_for_decision(coord, id2)
 
       chains = Analytics.revision_chains("implicit_agent", coordinator: coord)
-      assert length(chains) >= 1
+      assert chains != []
     end
 
     test "returns empty for single proposals", %{coordinator: coord} do
@@ -286,7 +290,7 @@ defmodule Arbor.Consensus.AnalyticsTest do
       )
 
       chains = Analytics.revision_chains("string_key_agent", coordinator: coord)
-      assert length(chains) >= 1
+      assert chains != []
     end
   end
 
@@ -360,7 +364,7 @@ defmodule Arbor.Consensus.AnalyticsTest do
       )
 
       # AlwaysRejectBackend uses concerns: ["Test concern"]
-      assert length(concerns) >= 1
+      assert concerns != []
 
       {concern, count, proposal_ids} = hd(concerns)
       assert is_binary(concern)

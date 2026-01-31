@@ -731,16 +731,28 @@ defmodule Arbor.Actions.File do
       end
     end
 
+    @max_pattern_length 500
+
     defp compile_pattern(pattern, false) do
-      # Literal string search - escape regex special characters
-      escaped = Regex.escape(pattern)
-      {:ok, Regex.compile!(escaped)}
+      if String.length(pattern) > @max_pattern_length do
+        {:error, "Pattern too long (max #{@max_pattern_length} characters)"}
+      else
+        # Literal string search - escape regex special characters
+        escaped = Regex.escape(pattern)
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeRegexCompile
+        {:ok, Regex.compile!(escaped)}
+      end
     end
 
     defp compile_pattern(pattern, true) do
-      case Regex.compile(pattern) do
-        {:ok, regex} -> {:ok, regex}
-        {:error, reason} -> {:error, "Invalid regex pattern: #{inspect(reason)}"}
+      if String.length(pattern) > @max_pattern_length do
+        {:error, "Pattern too long (max #{@max_pattern_length} characters)"}
+      else
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeRegexCompile
+        case Regex.compile(pattern) do
+          {:ok, regex} -> {:ok, regex}
+          {:error, _} -> {:error, "Invalid regex pattern: #{pattern}"}
+        end
       end
     end
 
@@ -801,11 +813,10 @@ defmodule Arbor.Actions.File do
       lines
       |> Enum.slice(start_idx..end_idx)
       |> Enum.with_index(start_idx + 1)
-      |> Enum.map(fn {line, idx} ->
+      |> Enum.map_join("\n", fn {line, idx} ->
         prefix = if idx == line_idx, do: "> ", else: "  "
         "#{prefix}#{idx}: #{line}"
       end)
-      |> Enum.join("\n")
     end
   end
 end

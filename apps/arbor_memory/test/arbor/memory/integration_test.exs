@@ -36,11 +36,11 @@ defmodule Arbor.Memory.IntegrationTest do
 
       # Recall from index
       {:ok, results} = Memory.recall(agent_id, "functional language")
-      assert length(results) > 0
+      assert results != []
 
       # Search knowledge graph
       {:ok, nodes} = Memory.search_knowledge(agent_id, "BEAM")
-      assert length(nodes) > 0
+      assert nodes != []
 
       # Stats
       {:ok, index_stats} = Memory.index_stats(agent_id)
@@ -180,7 +180,7 @@ defmodule Arbor.Memory.IntegrationTest do
         })
 
       {:ok, events} = Memory.Events.get_history(agent_id)
-      assert length(events) >= 1
+      assert events != []
     end
   end
 end

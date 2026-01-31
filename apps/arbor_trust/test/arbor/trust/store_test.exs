@@ -449,7 +449,7 @@ defmodule Arbor.Trust.StoreTest do
       # Verify the tier change event was stored
       {:ok, events} = Store.get_events(profile.agent_id)
       tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
-      assert length(tier_events) >= 1
+      assert tier_events != []
     end
 
     test "does not emit tier change event when tier stays the same", %{profile: profile} do
@@ -463,7 +463,7 @@ defmodule Arbor.Trust.StoreTest do
 
       {:ok, events} = Store.get_events(profile.agent_id)
       tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
-      assert length(tier_events) == 0
+      assert tier_events == []
     end
   end
 

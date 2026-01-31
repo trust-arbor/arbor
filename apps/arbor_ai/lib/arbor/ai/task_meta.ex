@@ -167,46 +167,29 @@ defmodule Arbor.AI.TaskMeta do
   @spec tier(t()) :: :critical | :complex | :moderate | :simple | :trivial
   def tier(%__MODULE__{} = meta) do
     cond do
-      # Critical risk or security domain always gets critical tier
-      meta.risk_level == :critical ->
-        :critical
-
-      meta.domain == :security ->
-        :critical
-
-      # Complex complexity or repo-wide scope
-      meta.complexity == :complex ->
-        :complex
-
-      meta.scope == :repo_wide ->
-        :complex
-
-      # High risk or moderate complexity
-      meta.risk_level == :high ->
-        :complex
-
-      meta.complexity == :moderate ->
-        :moderate
-
-      # Multi-file scope or low risk
-      meta.scope == :multi_file ->
-        :moderate
-
-      meta.risk_level == :low ->
-        :simple
-
-      # Simple complexity
-      meta.complexity == :simple ->
-        :simple
-
-      # Trivial - must be trivial complexity and single file
-      meta.complexity == :trivial and meta.scope == :single_file ->
-        :trivial
-
-      # Default to moderate
-      true ->
-        :moderate
+      critical_tier?(meta) -> :critical
+      complex_tier?(meta) -> :complex
+      moderate_tier?(meta) -> :moderate
+      simple_tier?(meta) -> :simple
+      meta.complexity == :trivial and meta.scope == :single_file -> :trivial
+      true -> :moderate
     end
+  end
+
+  defp critical_tier?(meta) do
+    meta.risk_level == :critical or meta.domain == :security
+  end
+
+  defp complex_tier?(meta) do
+    meta.complexity == :complex or meta.scope == :repo_wide or meta.risk_level == :high
+  end
+
+  defp moderate_tier?(meta) do
+    meta.complexity == :moderate or meta.scope == :multi_file
+  end
+
+  defp simple_tier?(meta) do
+    meta.risk_level == :low or meta.complexity == :simple
   end
 
   # ===========================================================================

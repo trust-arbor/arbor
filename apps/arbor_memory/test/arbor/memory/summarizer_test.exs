@@ -2,6 +2,7 @@ defmodule Arbor.Memory.SummarizerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Memory.Summarizer
+  alias Arbor.Memory.TokenBudget
 
   @moduletag :fast
 
@@ -175,7 +176,7 @@ defmodule Arbor.Memory.SummarizerTest do
       complex_length = Summarizer.estimate_summary_length(complex)
 
       # The estimate should be a reasonable fraction of original
-      original_tokens = Arbor.Memory.TokenBudget.estimate_tokens(complex)
+      original_tokens = TokenBudget.estimate_tokens(complex)
       compression = complex_length / original_tokens
 
       assert compression <= 0.4

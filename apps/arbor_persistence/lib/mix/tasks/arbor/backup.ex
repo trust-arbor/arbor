@@ -35,6 +35,8 @@ defmodule Mix.Tasks.Arbor.Backup do
   """
   use Mix.Task
 
+  alias Arbor.Persistence.Backup
+
   @impl Mix.Task
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, switches: [skip_cleanup: :boolean])
@@ -44,7 +46,7 @@ defmodule Mix.Tasks.Arbor.Backup do
 
     Mix.shell().info("Creating database backup...")
 
-    case Arbor.Persistence.Backup.backup(opts) do
+    case Backup.backup(opts) do
       {:ok, path} ->
         Mix.shell().info("Backup created: #{path}")
 

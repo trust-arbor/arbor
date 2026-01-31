@@ -58,7 +58,16 @@ defmodule Arbor.AI do
 
   @behaviour Arbor.Contracts.API.AI
 
-  alias Arbor.AI.{BackendRegistry, BudgetTracker, CliImpl, Config, Response, Router, UsageStats}
+  alias Arbor.AI.{
+    BackendRegistry,
+    BudgetTracker,
+    CliImpl,
+    Config,
+    Response,
+    Router,
+    TaskMeta,
+    UsageStats
+  }
 
   require Logger
 
@@ -265,7 +274,7 @@ defmodule Arbor.AI do
   """
   @spec classify_task(String.t(), keyword()) :: Arbor.AI.TaskMeta.t()
   def classify_task(prompt, opts \\ []) do
-    Arbor.AI.TaskMeta.classify(prompt, opts)
+    TaskMeta.classify(prompt, opts)
   end
 
   # ── Stats & Observability ──

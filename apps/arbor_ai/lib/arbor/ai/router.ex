@@ -53,6 +53,7 @@ defmodule Arbor.AI.Router do
     BackendRegistry,
     BackendTrust,
     BudgetTracker,
+    CliImpl,
     QuotaTracker,
     RoutingConfig,
     TaskMeta,
@@ -165,22 +166,28 @@ defmodule Arbor.AI.Router do
 
     case available do
       [] ->
-        # Check if we should fall back to cloud
-        if RoutingConfig.embedding_fallback_to_cloud?() do
-          # Try cloud providers even if not preferred
-          cloud_fallback = RoutingConfig.get_embedding_providers(prefer: :cloud)
-
-          case Enum.find(cloud_fallback, fn {backend, _model} -> backend_available?(backend) end) do
-            nil -> {:error, :no_embedding_providers}
-            {backend, model} -> {:ok, {backend, model}}
-          end
-        else
-          {:error, :no_embedding_providers}
-        end
+        try_cloud_fallback()
 
       [{backend, model} | _rest] ->
         Logger.debug("Router selected embedding provider", backend: backend, model: model)
         {:ok, {backend, model}}
+    end
+  end
+
+  defp try_cloud_fallback do
+    if RoutingConfig.embedding_fallback_to_cloud?() do
+      find_available_cloud_provider()
+    else
+      {:error, :no_embedding_providers}
+    end
+  end
+
+  defp find_available_cloud_provider do
+    cloud_fallback = RoutingConfig.get_embedding_providers(prefer: :cloud)
+
+    case Enum.find(cloud_fallback, fn {backend, _model} -> backend_available?(backend) end) do
+      nil -> {:error, :no_embedding_providers}
+      {backend, model} -> {:ok, {backend, model}}
     end
   end
 
@@ -241,7 +248,7 @@ defmodule Arbor.AI.Router do
 
     case backend do
       :cli ->
-        Arbor.AI.CliImpl.generate_text(prompt, opts)
+        CliImpl.generate_text(prompt, opts)
 
       :api ->
         # Delegate to the API implementation (ReqLLM path)

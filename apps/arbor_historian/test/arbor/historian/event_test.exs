@@ -174,7 +174,7 @@ defmodule Arbor.Historian.EventTest do
         type: :test_event,
         subject_id: "s1",
         data: %{},
-        timestamp: 12345
+        timestamp: 12_345
       }
 
       {:ok, event} = Event.from_map(map)

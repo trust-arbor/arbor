@@ -298,32 +298,28 @@ defmodule Arbor.Memory.RelationshipStore do
   end
 
   defp serialize_moments(moments) do
-    Enum.map(moments, fn moment ->
-      get_field = fn key ->
-        cond do
-          is_map(moment) -> Map.get(moment, key) || Map.get(moment, to_string(key))
-          true -> nil
-        end
-      end
-
-      timestamp = get_field.(:timestamp)
-
-      timestamp_str =
-        case timestamp do
-          %DateTime{} -> DateTime.to_iso8601(timestamp)
-          str when is_binary(str) -> str
-          nil -> nil
-        end
-
-      markers = get_field.(:emotional_markers) || []
-      markers_strs = Enum.map(markers, &to_string/1)
-
-      %{
-        "summary" => get_field.(:summary),
-        "timestamp" => timestamp_str,
-        "emotional_markers" => markers_strs,
-        "salience" => get_field.(:salience) || 0.5
-      }
-    end)
+    Enum.map(moments, &serialize_single_moment/1)
   end
+
+  defp serialize_single_moment(moment) do
+    timestamp_str = serialize_moment_timestamp(moment_field(moment, :timestamp))
+    markers = moment_field(moment, :emotional_markers) || []
+
+    %{
+      "summary" => moment_field(moment, :summary),
+      "timestamp" => timestamp_str,
+      "emotional_markers" => Enum.map(markers, &to_string/1),
+      "salience" => moment_field(moment, :salience) || 0.5
+    }
+  end
+
+  defp moment_field(moment, key) when is_map(moment) do
+    Map.get(moment, key) || Map.get(moment, to_string(key))
+  end
+
+  defp moment_field(_moment, _key), do: nil
+
+  defp serialize_moment_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp serialize_moment_timestamp(str) when is_binary(str), do: str
+  defp serialize_moment_timestamp(_), do: nil
 end

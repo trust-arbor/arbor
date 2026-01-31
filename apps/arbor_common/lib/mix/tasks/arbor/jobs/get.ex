@@ -70,48 +70,61 @@ defmodule Mix.Tasks.Arbor.Jobs.Get do
   end
 
   defp print_job(job, history, include_history) do
-    job_id = to_string(job["job_id"] || job[:job_id] || "unknown")
-    title = to_string(job["title"] || job[:title] || "untitled")
-    status = to_string(job["status"] || job[:status] || "unknown")
-    priority = to_string(job["priority"] || job[:priority] || "normal")
-    tags = format_tags(job["tags"] || job[:tags])
-    created_at = to_string(job["created_at"] || job[:created_at] || "unknown")
-    updated_at = to_string(job["updated_at"] || job[:updated_at] || "unknown")
-    description = to_string(job["description"] || job[:description] || "")
-
-    notes = job["notes"] || job[:notes] || []
+    fields = extract_job_fields(job)
 
     Mix.shell().info("""
 
     Job Details
     ═══════════════════════════════════════
-      Job ID:      #{job_id}
-      Title:       #{title}
-      Status:      #{status}
-      Priority:    #{priority}
-      Tags:        #{tags}
-      Created:     #{created_at}
-      Updated:     #{updated_at}
-      Description: #{if description == "", do: "(none)", else: description}
+      Job ID:      #{fields.job_id}
+      Title:       #{fields.title}
+      Status:      #{fields.status}
+      Priority:    #{fields.priority}
+      Tags:        #{fields.tags}
+      Created:     #{fields.created_at}
+      Updated:     #{fields.updated_at}
+      Description: #{if fields.description == "", do: "(none)", else: fields.description}
     ═══════════════════════════════════════
     """)
 
-    if notes != [] do
-      Mix.shell().info("  Notes")
-      Mix.shell().info("  ───────────────────────────────────")
-
-      Enum.each(notes, fn note ->
-        at = to_string(note["at"] || note[:at] || "")
-        text = to_string(note["text"] || note[:text] || "")
-        Mix.shell().info("  #{at}  #{text}")
-      end)
-
-      Mix.shell().info("")
-    end
+    print_notes(fields.notes)
 
     if include_history do
       print_history(history || [])
     end
+  end
+
+  defp extract_job_fields(job) do
+    %{
+      job_id: job_field(job, :job_id, "unknown"),
+      title: job_field(job, :title, "untitled"),
+      status: job_field(job, :status, "unknown"),
+      priority: job_field(job, :priority, "normal"),
+      tags: format_tags(job["tags"] || job[:tags]),
+      created_at: job_field(job, :created_at, "unknown"),
+      updated_at: job_field(job, :updated_at, "unknown"),
+      description: job_field(job, :description, ""),
+      notes: job["notes"] || job[:notes] || []
+    }
+  end
+
+  defp job_field(job, key, default) do
+    to_string(job[to_string(key)] || job[key] || default)
+  end
+
+  defp print_notes([]), do: :ok
+
+  defp print_notes(notes) do
+    Mix.shell().info("  Notes")
+    Mix.shell().info("  ───────────────────────────────────")
+
+    Enum.each(notes, fn note ->
+      at = to_string(note["at"] || note[:at] || "")
+      text = to_string(note["text"] || note[:text] || "")
+      Mix.shell().info("  #{at}  #{text}")
+    end)
+
+    Mix.shell().info("")
   end
 
   defp print_history([]) do

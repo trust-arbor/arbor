@@ -249,7 +249,7 @@ defmodule Arbor.Consensus.EventEmitterTest do
                )
 
       {:ok, stored} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(stored) >= 1
+      assert stored != []
     end
   end
 
@@ -298,7 +298,7 @@ defmodule Arbor.Consensus.EventEmitterTest do
                )
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) >= 1
+      assert events != []
     end
   end
 end

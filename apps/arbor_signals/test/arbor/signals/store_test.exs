@@ -127,9 +127,11 @@ defmodule Arbor.Signals.StoreTest do
       # Restart store with a tiny max via the application supervisor
       restart_store_with(max_signals: 3)
 
+      event_types = [:evict_event_1, :evict_event_2, :evict_event_3, :evict_event_4]
+
       signals =
-        for i <- 1..4 do
-          signal = Signal.new(:test, :"evict_event_#{i}", %{index: i})
+        for {type, i} <- Enum.with_index(event_types, 1) do
+          signal = Signal.new(:test, type, %{index: i})
           Store.put(signal)
           Process.sleep(10)
           signal
@@ -233,7 +235,7 @@ defmodule Arbor.Signals.StoreTest do
 
       {:ok, recent} = Store.recent(category: :alpha)
       alpha_with_marker = Enum.filter(recent, &(&1.data[:marker] == marker))
-      assert length(alpha_with_marker) >= 1
+      assert alpha_with_marker != []
       assert Enum.all?(alpha_with_marker, fn s -> s.category == :alpha end)
     end
 
@@ -245,7 +247,7 @@ defmodule Arbor.Signals.StoreTest do
 
       {:ok, recent} = Store.recent(type: :recent_type_a)
       matched = Enum.filter(recent, &(&1.data[:marker] == marker))
-      assert length(matched) >= 1
+      assert matched != []
       assert Enum.all?(matched, fn s -> s.type == :recent_type_a end)
     end
 
@@ -261,7 +263,7 @@ defmodule Arbor.Signals.StoreTest do
 
       {:ok, recent} = Store.recent(limit: 3, type: :recent_order)
       matched = Enum.filter(recent, &(&1.data[:marker] == marker))
-      assert length(matched) >= 1
+      assert matched != []
       # Most recent should be first
       indices = Enum.map(matched, & &1.data.index)
       assert indices == Enum.sort(indices, :desc)
@@ -277,7 +279,7 @@ defmodule Arbor.Signals.StoreTest do
 
       {:ok, results} = Store.query(source: "agent_1", type: :sourced_q)
       matched = Enum.filter(results, &(&1.data[:marker] == marker))
-      assert length(matched) >= 1
+      assert matched != []
       assert Enum.all?(matched, fn s -> s.source == "agent_1" end)
     end
   end

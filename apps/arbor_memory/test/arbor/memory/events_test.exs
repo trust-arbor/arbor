@@ -87,7 +87,7 @@ defmodule Arbor.Memory.EventsTest do
         })
 
       {:ok, events} = Events.get_history(agent_id)
-      assert length(events) >= 1
+      assert events != []
     end
 
     test "get_by_type/3 filters events" do
@@ -110,7 +110,7 @@ defmodule Arbor.Memory.EventsTest do
         })
 
       {:ok, identity_events} = Events.get_by_type(agent_id, :identity_changed)
-      assert length(identity_events) >= 1
+      assert identity_events != []
     end
 
     test "get_recent/2 returns latest events" do
@@ -124,7 +124,7 @@ defmodule Arbor.Memory.EventsTest do
         })
 
       {:ok, recent} = Events.get_recent(agent_id, 5)
-      assert length(recent) >= 1
+      assert recent != []
     end
 
     test "count_by_type/2 counts events" do

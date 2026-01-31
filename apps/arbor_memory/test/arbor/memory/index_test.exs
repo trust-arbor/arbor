@@ -61,7 +61,7 @@ defmodule Arbor.Memory.IndexTest do
       {:ok, results} = Index.recall(pid, "blue sky")
 
       assert is_list(results)
-      assert length(results) > 0
+      assert results != []
 
       Enum.each(results, fn result ->
         assert Map.has_key?(result, :id)

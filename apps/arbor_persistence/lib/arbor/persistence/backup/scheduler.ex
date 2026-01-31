@@ -29,6 +29,8 @@ defmodule Arbor.Persistence.Backup.Scheduler do
   use GenServer
   require Logger
 
+  alias Arbor.Persistence.Backup
+
   @default_schedule {3, 0}
 
   # ============================================================================
@@ -94,7 +96,7 @@ defmodule Arbor.Persistence.Backup.Scheduler do
 
   @impl true
   def handle_call(:run_now, _from, state) do
-    result = Arbor.Persistence.Backup.backup()
+    result = Backup.backup()
 
     case result do
       {:ok, path} ->
@@ -123,7 +125,7 @@ defmodule Arbor.Persistence.Backup.Scheduler do
   def handle_info(:run_backup, state) do
     Logger.info("Starting scheduled backup...")
 
-    result = Arbor.Persistence.Backup.backup()
+    result = Backup.backup()
 
     case result do
       {:ok, path} ->
