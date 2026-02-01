@@ -22,6 +22,7 @@ defmodule Arbor.Persistence.MixProject do
           # Ecto schemas - only testable with PostgreSQL integration tests
           Arbor.Persistence.Schemas.Event,
           Arbor.Persistence.Schemas.Record,
+          Arbor.Persistence.Schemas.MemoryEmbedding,
           # PostgreSQL backends - require database for testing
           Arbor.Persistence.EventLog.Postgres,
           Arbor.Persistence.QueryableStore.Postgres,
@@ -51,6 +52,7 @@ defmodule Arbor.Persistence.MixProject do
       {:jason, "~> 1.4"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.18"},
+      {:pgvector, "~> 0.3"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

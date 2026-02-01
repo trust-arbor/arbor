@@ -139,7 +139,14 @@ config :arbor_memory,
   index_default_threshold: 0.3,
   kg_default_decay_rate: 0.10,
   kg_max_nodes_per_type: 500,
-  default_model: "anthropic:claude-sonnet-4-5-20250514"
+  default_model: "anthropic:claude-sonnet-4-5-20250514",
+  # Embedding backend: :ets (default), :pgvector, or :dual (ETS + pgvector)
+  embedding_backend: :ets
+
+# pgvector embedding configuration
+config :arbor_persistence,
+  # Vector dimension: 384 for MiniLM, 768 for other models, 1536 for OpenAI
+  embedding_dimension: 384
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"

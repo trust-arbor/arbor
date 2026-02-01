@@ -51,6 +51,7 @@ defmodule Arbor.Memory do
     ActionPatterns,
     BackgroundChecks,
     Consolidation,
+    Embedding,
     Events,
     IdentityConsolidator,
     Index,
@@ -515,6 +516,86 @@ defmodule Arbor.Memory do
   See `Arbor.Memory.TokenBudget.model_context_size/1` for details.
   """
   defdelegate model_context_size(model_id), to: TokenBudget
+
+  # ============================================================================
+  # Persistent Embeddings (Phase 6)
+  # ============================================================================
+
+  @doc """
+  Store an embedding in the persistent vector store (pgvector).
+
+  This bypasses the in-memory index and writes directly to Postgres.
+  Use for bulk imports or when you want persistent-only storage.
+
+  ## Examples
+
+      {:ok, id} = Arbor.Memory.store_embedding("agent_001", "Some fact", embedding, %{type: "fact"})
+  """
+  @spec store_embedding(String.t(), String.t(), [float()], map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def store_embedding(agent_id, content, embedding, metadata \\ %{}) do
+    Embedding.store(agent_id, content, embedding, metadata)
+  end
+
+  @doc """
+  Search the persistent vector store directly.
+
+  Bypasses the in-memory index and queries pgvector directly.
+
+  ## Options
+
+  - `:limit` — max results (default 10)
+  - `:threshold` — minimum similarity 0.0-1.0 (default 0.3)
+  - `:type_filter` — filter by memory_type
+
+  ## Examples
+
+      {:ok, results} = Arbor.Memory.search_embeddings("agent_001", query_embedding)
+  """
+  @spec search_embeddings(String.t(), [float()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def search_embeddings(agent_id, query_embedding, opts \\ []) do
+    Embedding.search(agent_id, query_embedding, opts)
+  end
+
+  @doc """
+  Get statistics for an agent's persistent embeddings.
+
+  ## Examples
+
+      stats = Arbor.Memory.embedding_stats("agent_001")
+      #=> %{total: 100, by_type: %{"fact" => 50, ...}, oldest: ~U[...], newest: ~U[...]}
+  """
+  @spec embedding_stats(String.t()) :: map()
+  def embedding_stats(agent_id) do
+    Embedding.stats(agent_id)
+  end
+
+  @doc """
+  Warm the in-memory index cache from persistent storage.
+
+  Loads recent entries from pgvector into the ETS index.
+  Only works when the index is running in `:dual` or `:pgvector` mode.
+
+  ## Options
+
+  - `:limit` — Maximum entries to load (default: 1000)
+
+  ## Examples
+
+      :ok = Arbor.Memory.warm_index_cache("agent_001")
+      :ok = Arbor.Memory.warm_index_cache("agent_001", limit: 500)
+  """
+  @spec warm_index_cache(String.t(), keyword()) :: :ok | {:error, term()}
+  def warm_index_cache(agent_id, opts \\ []) do
+    case IndexSupervisor.get_index(agent_id) do
+      {:ok, pid} ->
+        Index.warm_cache(pid, opts)
+
+      {:error, :not_found} ->
+        {:error, :index_not_initialized}
+    end
+  end
 
   # ============================================================================
   # Working Memory (Phase 2)
