@@ -6,20 +6,12 @@ defmodule Arbor.Actions.JobsTest do
   alias Arbor.Persistence.QueryableStore.ETS, as: QStore
 
   setup do
-    # Start ETS backends for testing
-    qs_name = :jobs
-    el_name = :event_log
-
-    # Clean up any existing processes
-    for name <- [qs_name, el_name] do
-      case Process.whereis(name) do
-        nil -> :ok
-        pid -> GenServer.stop(pid)
-      end
+    # Restart the application-managed ETS stores for a clean state.
+    # These are started by Arbor.Persistence.Application under its supervisor.
+    for id <- [QStore, ELog] do
+      Supervisor.terminate_child(Arbor.Persistence.Supervisor, id)
+      Supervisor.restart_child(Arbor.Persistence.Supervisor, id)
     end
-
-    start_supervised!({QStore, name: qs_name})
-    start_supervised!({ELog, name: el_name})
 
     # Configure actions to use ETS backends
     original = Application.get_env(:arbor_actions, :persistence)
