@@ -75,9 +75,22 @@ defmodule Arbor.Security.CapabilityStore do
   @doc """
   Revoke all capabilities for a principal.
   """
-  @spec revoke_all(String.t()) :: :ok
+  @spec revoke_all(String.t()) :: {:ok, non_neg_integer()}
   def revoke_all(principal_id) do
     GenServer.call(__MODULE__, {:revoke_all, principal_id})
+  end
+
+  @doc """
+  Cascade revoke a capability and all its delegated children.
+
+  Revokes the specified capability and recursively revokes all capabilities
+  that were delegated from it (directly or transitively).
+
+  Returns `{:ok, count}` where count is the total number of capabilities revoked.
+  """
+  @spec cascade_revoke(String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+  def cascade_revoke(capability_id) do
+    GenServer.call(__MODULE__, {:cascade_revoke, capability_id})
   end
 
   @doc """
@@ -99,10 +112,12 @@ defmodule Arbor.Security.CapabilityStore do
        by_id: %{},
        by_principal: %{},
        by_issuer: %{},
+       by_parent: %{},
        stats: %{
          total_granted: 0,
          total_revoked: 0,
-         total_expired: 0
+         total_expired: 0,
+         total_cascade_revoked: 0
        }
      }}
   end
@@ -119,6 +134,7 @@ defmodule Arbor.Security.CapabilityStore do
             ids -> [cap.id | ids]
           end)
           |> index_by_issuer(cap)
+          |> index_by_parent(cap)
           |> update_in([:stats, :total_granted], &(&1 + 1))
 
         {:reply, {:ok, :stored}, state}
@@ -206,7 +222,7 @@ defmodule Arbor.Security.CapabilityStore do
       |> put_in([:by_principal, principal_id], [])
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
-    {:reply, :ok, state}
+    {:reply, {:ok, count}, state}
   end
 
   @impl true
@@ -222,6 +238,27 @@ defmodule Arbor.Security.CapabilityStore do
       })
 
     {:reply, stats, state}
+  end
+
+  @impl true
+  def handle_call({:cascade_revoke, capability_id}, _from, state) do
+    case Map.get(state.by_id, capability_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      _cap ->
+        # Collect all capability IDs to revoke (this one + all children recursively)
+        all_ids = collect_cascade_ids(state, [capability_id], [])
+        count = length(all_ids)
+
+        state =
+          state
+          |> revoke_capability_ids(all_ids)
+          |> update_in([:stats, :total_revoked], &(&1 + count))
+          |> update_in([:stats, :total_cascade_revoked], &(&1 + count))
+
+        {:reply, {:ok, count}, state}
+    end
   end
 
   @impl true
@@ -254,6 +291,15 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp index_by_issuer(state, cap) do
     update_in(state, [:by_issuer, cap.issuer_id], fn
+      nil -> [cap.id]
+      ids -> [cap.id | ids]
+    end)
+  end
+
+  defp index_by_parent(state, %{parent_capability_id: nil}), do: state
+
+  defp index_by_parent(state, cap) do
+    update_in(state, [:by_parent, cap.parent_capability_id], fn
       nil -> [cap.id]
       ids -> [cap.id | ids]
     end)
@@ -325,6 +371,48 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp schedule_cleanup do
     Process.send_after(self(), :cleanup, @cleanup_interval_ms)
+  end
+
+  # ===========================================================================
+  # Cascade Revocation Helpers
+  # ===========================================================================
+
+  # Recursively collect all capability IDs that should be revoked
+  # (the root + all children in the delegation tree)
+  defp collect_cascade_ids(_state, [], acc), do: acc
+
+  defp collect_cascade_ids(state, [cap_id | rest], acc) do
+    children = Map.get(state.by_parent, cap_id, [])
+    collect_cascade_ids(state, children ++ rest, [cap_id | acc])
+  end
+
+  # Revoke multiple capability IDs, cleaning up all indexes
+  defp revoke_capability_ids(state, cap_ids) do
+    Enum.reduce(cap_ids, state, &revoke_single_capability_if_exists/2)
+  end
+
+  defp revoke_single_capability_if_exists(cap_id, state) do
+    case Map.get(state.by_id, cap_id) do
+      nil -> state
+      cap -> remove_capability_from_indexes(state, cap_id, cap)
+    end
+  end
+
+  defp remove_capability_from_indexes(state, cap_id, cap) do
+    state
+    |> update_in([:by_id], &Map.delete(&1, cap_id))
+    |> update_in([:by_principal, cap.principal_id], &List.delete(&1 || [], cap_id))
+    |> deindex_by_parent(cap)
+  end
+
+  # Remove a capability from its parent's children list
+  defp deindex_by_parent(state, %{parent_capability_id: nil}), do: state
+
+  defp deindex_by_parent(state, cap) do
+    update_in(state, [:by_parent, cap.parent_capability_id], fn
+      nil -> nil
+      ids -> List.delete(ids, cap.id)
+    end)
   end
 
   # ===========================================================================
