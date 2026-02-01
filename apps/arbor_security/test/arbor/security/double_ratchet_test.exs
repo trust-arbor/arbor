@@ -160,7 +160,7 @@ defmodule Arbor.Security.DoubleRatchetTest do
       {:ok, bob2, _} = DoubleRatchet.decrypt(bob, h1, c1)
 
       # Bob sends back (this triggers DH ratchet on Alice's side)
-      {bob3, h2, c2} = DoubleRatchet.encrypt(bob2, "Reply")
+      {_bob3, h2, c2} = DoubleRatchet.encrypt(bob2, "Reply")
 
       # Alice receives Bob's message - should trigger DH ratchet
       initial_root_key = alice2.root_key
