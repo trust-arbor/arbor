@@ -11,6 +11,10 @@ defmodule Arbor.Flow.ItemParserTest do
   **Created:** 2026-02-01
   **Priority:** high
   **Category:** feature
+  **Type:** research
+  **Effort:** medium
+  **Depends On:** item_abc123.md, item_def456.md
+  **Blocks:** item_xyz789.md
 
   ## Summary
 
@@ -30,11 +34,6 @@ defmodule Arbor.Flow.ItemParserTest do
 
   - [ ] All tests pass
   - [x] Code reviewed
-
-  ## Dependencies
-
-  - Depends on: item_abc123
-  - Blocks: item_xyz789
 
   ## Related Files
 
@@ -67,6 +66,16 @@ defmodule Arbor.Flow.ItemParserTest do
       assert item.category == :feature
     end
 
+    test "parses type" do
+      item = ItemParser.parse(@sample_markdown)
+      assert item.type == "research"
+    end
+
+    test "parses effort" do
+      item = ItemParser.parse(@sample_markdown)
+      assert item.effort == :medium
+    end
+
     test "parses summary" do
       item = ItemParser.parse(@sample_markdown)
       assert item.summary == "This is a test feature for the workflow system."
@@ -79,7 +88,6 @@ defmodule Arbor.Flow.ItemParserTest do
 
     test "parses acceptance criteria" do
       item = ItemParser.parse(@sample_markdown)
-      assert length(item.acceptance_criteria) == 3
 
       [first, second, third] = item.acceptance_criteria
       assert first.text == "Parse title correctly"
@@ -91,7 +99,6 @@ defmodule Arbor.Flow.ItemParserTest do
 
     test "parses definition of done" do
       item = ItemParser.parse(@sample_markdown)
-      assert length(item.definition_of_done) == 2
 
       [first, second] = item.definition_of_done
       assert first.text == "All tests pass"
@@ -100,20 +107,20 @@ defmodule Arbor.Flow.ItemParserTest do
       assert second.completed == true
     end
 
-    test "parses depends_on" do
+    test "parses depends_on from frontmatter" do
       item = ItemParser.parse(@sample_markdown)
-      assert item.depends_on == ["item_abc123"]
+      assert item.depends_on == ["item_abc123.md", "item_def456.md"]
     end
 
-    test "parses blocks" do
+    test "parses blocks from frontmatter" do
       item = ItemParser.parse(@sample_markdown)
-      assert item.blocks == ["item_xyz789"]
+      assert item.blocks == ["item_xyz789.md"]
     end
 
     test "parses related files" do
       item = ItemParser.parse(@sample_markdown)
-      assert length(item.related_files) == 2
       assert "lib/arbor/flow/item_parser.ex" in item.related_files
+      assert "test/arbor/flow/item_parser_test.exs" in item.related_files
     end
 
     test "parses notes" do
@@ -132,6 +139,36 @@ defmodule Arbor.Flow.ItemParserTest do
       assert String.length(item.content_hash) == 16
     end
 
+    test "captures unknown frontmatter as metadata" do
+      md = """
+      # With Custom Fields
+
+      **Created:** 2026-02-01
+      **Priority:** high
+      **Source:** github-issue-42
+      **Session:** abc123
+
+      ## Summary
+
+      Has custom fields.
+      """
+
+      item = ItemParser.parse(md)
+      assert item.metadata["source"] == "github-issue-42"
+      assert item.metadata["session"] == "abc123"
+    end
+
+    test "metadata excludes known frontmatter keys" do
+      item = ItemParser.parse(@sample_markdown)
+      refute Map.has_key?(item.metadata, "created")
+      refute Map.has_key?(item.metadata, "priority")
+      refute Map.has_key?(item.metadata, "category")
+      refute Map.has_key?(item.metadata, "type")
+      refute Map.has_key?(item.metadata, "effort")
+      refute Map.has_key?(item.metadata, "depends on")
+      refute Map.has_key?(item.metadata, "blocks")
+    end
+
     test "handles missing title" do
       item = ItemParser.parse("No title here\n\nJust content.")
       assert item.title == nil
@@ -148,8 +185,13 @@ defmodule Arbor.Flow.ItemParserTest do
       assert item.title == "Minimal Item"
       assert item.priority == nil
       assert item.category == nil
+      assert item.type == nil
+      assert item.effort == nil
       assert item.summary == nil
       assert item.acceptance_criteria == []
+      assert item.depends_on == []
+      assert item.blocks == []
+      assert item.metadata == %{}
     end
 
     test "handles missing metadata" do
@@ -198,6 +240,21 @@ defmodule Arbor.Flow.ItemParserTest do
       assert item.category == nil
     end
 
+    test "handles invalid effort gracefully" do
+      invalid = """
+      # Invalid Effort
+
+      **Effort:** enormous
+
+      ## Summary
+
+      Has invalid effort.
+      """
+
+      item = ItemParser.parse(invalid)
+      assert item.effort == nil
+    end
+
     test "parses all valid priorities" do
       for priority <- ~w(critical high medium low someday) do
         md = """
@@ -207,12 +264,12 @@ defmodule Arbor.Flow.ItemParserTest do
         """
 
         item = ItemParser.parse(md)
-        assert item.priority == String.to_atom(priority)
+        assert item.priority == String.to_existing_atom(priority)
       end
     end
 
     test "parses all valid categories" do
-      for category <- ~w(feature refactor bug infrastructure idea research documentation) do
+      for category <- ~w(feature refactor bug infrastructure idea research documentation content) do
         md = """
         # Test
 
@@ -220,8 +277,54 @@ defmodule Arbor.Flow.ItemParserTest do
         """
 
         item = ItemParser.parse(md)
-        assert item.category == String.to_atom(category)
+        assert item.category == String.to_existing_atom(category)
       end
+    end
+
+    test "parses all valid efforts" do
+      for effort <- ~w(small medium large ongoing) do
+        md = """
+        # Test
+
+        **Effort:** #{effort}
+        """
+
+        item = ItemParser.parse(md)
+        assert item.effort == String.to_existing_atom(effort)
+      end
+    end
+
+    test "type is a free-form string" do
+      md = """
+      # Test
+
+      **Type:** custom_workflow_type
+      """
+
+      item = ItemParser.parse(md)
+      assert item.type == "custom_workflow_type"
+    end
+
+    test "single depends_on item" do
+      md = """
+      # Test
+
+      **Depends On:** single-item.md
+      """
+
+      item = ItemParser.parse(md)
+      assert item.depends_on == ["single-item.md"]
+    end
+
+    test "empty depends_on when not present" do
+      md = """
+      # Test
+
+      **Priority:** high
+      """
+
+      item = ItemParser.parse(md)
+      assert item.depends_on == []
     end
   end
 
@@ -272,6 +375,35 @@ defmodule Arbor.Flow.ItemParserTest do
       assert md =~ "A test summary."
     end
 
+    test "serializes type and effort" do
+      item = %{
+        title: "With Type",
+        type: "research",
+        effort: :large,
+        created_at: ~D[2026-02-01]
+      }
+
+      md = ItemParser.serialize(item)
+
+      assert md =~ "**Type:** research"
+      assert md =~ "**Effort:** large"
+    end
+
+    test "serializes depends_on and blocks as frontmatter" do
+      item = %{
+        title: "With Deps",
+        depends_on: ["item_123.md", "item_456.md"],
+        blocks: ["item_789.md"]
+      }
+
+      md = ItemParser.serialize(item)
+
+      assert md =~ "**Depends On:** item_123.md, item_456.md"
+      assert md =~ "**Blocks:** item_789.md"
+      # Should NOT have a Dependencies section
+      refute md =~ "## Dependencies"
+    end
+
     test "serializes acceptance criteria" do
       item = %{
         title: "With Criteria",
@@ -302,21 +434,6 @@ defmodule Arbor.Flow.ItemParserTest do
       assert md =~ "- [ ] Tests pass"
     end
 
-    test "serializes dependencies" do
-      item = %{
-        title: "With Dependencies",
-        depends_on: ["item_123", "item_456"],
-        blocks: ["item_789"]
-      }
-
-      md = ItemParser.serialize(item)
-
-      assert md =~ "## Dependencies"
-      assert md =~ "- Depends on: item_123"
-      assert md =~ "- Depends on: item_456"
-      assert md =~ "- Blocks: item_789"
-    end
-
     test "serializes related files" do
       item = %{
         title: "With Files",
@@ -342,6 +459,19 @@ defmodule Arbor.Flow.ItemParserTest do
       assert md =~ "Some important notes"
     end
 
+    test "serializes unknown metadata as frontmatter" do
+      item = %{
+        title: "With Metadata",
+        metadata: %{"source" => "github-42", "session" => "abc123"},
+        created_at: ~D[2026-02-01]
+      }
+
+      md = ItemParser.serialize(item)
+
+      assert md =~ "**Source:** github-42"
+      assert md =~ "**Session:** abc123"
+    end
+
     test "handles nil title" do
       item = %{title: nil}
       md = ItemParser.serialize(item)
@@ -353,6 +483,8 @@ defmodule Arbor.Flow.ItemParserTest do
         title: "Minimal",
         acceptance_criteria: [],
         related_files: [],
+        depends_on: [],
+        blocks: [],
         notes: nil
       }
 
@@ -361,6 +493,8 @@ defmodule Arbor.Flow.ItemParserTest do
       refute md =~ "## Acceptance Criteria"
       refute md =~ "## Related Files"
       refute md =~ "## Notes"
+      refute md =~ "**Depends On:**"
+      refute md =~ "**Blocks:**"
     end
 
     test "adds current date if created_at is nil" do
@@ -382,6 +516,8 @@ defmodule Arbor.Flow.ItemParserTest do
       assert reparsed.title == original.title
       assert reparsed.priority == original.priority
       assert reparsed.category == original.category
+      assert reparsed.type == original.type
+      assert reparsed.effort == original.effort
       assert reparsed.summary == original.summary
       assert reparsed.why_it_matters == original.why_it_matters
       assert reparsed.acceptance_criteria == original.acceptance_criteria
@@ -408,6 +544,8 @@ defmodule Arbor.Flow.ItemParserTest do
         title: "Full Round Trip",
         priority: :critical,
         category: :bug,
+        type: "hotfix",
+        effort: :small,
         summary: "A critical bug fix.",
         why_it_matters: "Users are affected.",
         acceptance_criteria: [
@@ -417,8 +555,8 @@ defmodule Arbor.Flow.ItemParserTest do
         definition_of_done: [
           %{text: "PR approved", completed: false}
         ],
-        depends_on: ["item_dep1"],
-        blocks: ["item_block1"],
+        depends_on: ["item_dep1.md"],
+        blocks: ["item_block1.md"],
         related_files: ["lib/buggy.ex"],
         notes: "Found by QA.",
         created_at: ~D[2026-01-15]
@@ -430,12 +568,27 @@ defmodule Arbor.Flow.ItemParserTest do
       assert reparsed.title == full.title
       assert reparsed.priority == full.priority
       assert reparsed.category == full.category
+      assert reparsed.type == full.type
+      assert reparsed.effort == full.effort
       assert reparsed.summary == full.summary
       assert reparsed.acceptance_criteria == full.acceptance_criteria
       assert reparsed.definition_of_done == full.definition_of_done
       assert reparsed.depends_on == full.depends_on
       assert reparsed.blocks == full.blocks
       assert reparsed.related_files == full.related_files
+    end
+
+    test "metadata round-trips" do
+      item = %{
+        title: "Metadata Round Trip",
+        metadata: %{"source" => "github-42"},
+        created_at: ~D[2026-02-01]
+      }
+
+      serialized = ItemParser.serialize(item)
+      reparsed = ItemParser.parse(serialized)
+
+      assert reparsed.metadata["source"] == "github-42"
     end
   end
 end

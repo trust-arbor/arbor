@@ -16,6 +16,10 @@ defmodule Arbor.Flow.ItemParser do
   **Created:** 2026-02-01
   **Priority:** high
   **Category:** feature
+  **Type:** research
+  **Effort:** medium
+  **Depends On:** other-item.md, another.md
+  **Blocks:** downstream.md
 
   ## Summary
 
@@ -69,20 +73,26 @@ defmodule Arbor.Flow.ItemParser do
   - `:created_at` - Date or nil
   - `:priority` - atom (:critical, :high, :medium, :low, :someday) or nil
   - `:category` - atom (:feature, :bug, etc.) or nil
+  - `:type` - String or nil (processor routing hint)
+  - `:effort` - atom (:small, :medium, :large, :ongoing) or nil
   - `:summary` - String or nil
   - `:why_it_matters` - String or nil
   - `:acceptance_criteria` - List of %{text: String, completed: boolean}
   - `:definition_of_done` - List of %{text: String, completed: boolean}
-  - `:depends_on` - List of Strings (item IDs)
-  - `:blocks` - List of Strings (item IDs)
+  - `:depends_on` - List of Strings (filenames)
+  - `:blocks` - List of Strings (filenames)
   - `:related_files` - List of Strings (file paths)
   - `:notes` - String or nil
+  - `:metadata` - Map of unknown frontmatter key-value pairs
   - `:raw_content` - Original markdown string
   - `:content_hash` - SHA-256 hash (16 hex chars) of raw_content
   """
 
   @valid_priorities ~w(critical high medium low someday)
-  @valid_categories ~w(feature refactor bug infrastructure idea research documentation)
+  @valid_categories ~w(feature refactor bug infrastructure idea research documentation content)
+  @valid_efforts ~w(small medium large ongoing)
+
+  @known_frontmatter_keys ["created", "priority", "category", "type", "effort", "depends on", "blocks"]
 
   @doc """
   Parse a markdown file into an item map.
@@ -105,24 +115,29 @@ defmodule Arbor.Flow.ItemParser do
   Parse markdown content into an item map.
 
   Always succeeds - missing fields become nil or empty lists.
+  Unknown `**Key:** value` frontmatter is captured in `:metadata`.
   """
   @spec parse(String.t()) :: map()
   def parse(content) when is_binary(content) do
     lines = String.split(content, "\n")
+    frontmatter = extract_all_frontmatter(content)
 
     %{
       title: extract_title(lines),
-      created_at: extract_date(content, "Created"),
-      priority: extract_priority(content),
-      category: extract_category(content),
+      created_at: parse_date(frontmatter["created"]),
+      priority: parse_priority(frontmatter["priority"]),
+      category: parse_category(frontmatter["category"]),
+      type: frontmatter["type"],
+      effort: parse_effort(frontmatter["effort"]),
+      depends_on: parse_comma_list(frontmatter["depends on"]),
+      blocks: parse_comma_list(frontmatter["blocks"]),
       summary: extract_section(content, "Summary"),
       why_it_matters: extract_section(content, "Why It Matters"),
       acceptance_criteria: extract_checklist(content, "Acceptance Criteria"),
       definition_of_done: extract_checklist(content, "Definition of Done"),
-      depends_on: extract_depends_on(content),
-      blocks: extract_blocks(content),
       related_files: extract_related_files(content),
       notes: extract_section(content, "Notes"),
+      metadata: extract_metadata(frontmatter),
       raw_content: content,
       content_hash: compute_hash(content)
     }
@@ -138,12 +153,11 @@ defmodule Arbor.Flow.ItemParser do
     sections = [
       serialize_title(item),
       "",
-      serialize_metadata(item),
+      serialize_frontmatter(item),
       serialize_section("Summary", item[:summary]),
       serialize_section("Why It Matters", item[:why_it_matters]),
       serialize_checklist_section("Acceptance Criteria", item[:acceptance_criteria]),
       serialize_checklist_section("Definition of Done", item[:definition_of_done]),
-      serialize_dependencies(item),
       serialize_related_files(item[:related_files]),
       serialize_section("Notes", item[:notes])
     ]
@@ -169,54 +183,88 @@ defmodule Arbor.Flow.ItemParser do
     end)
   end
 
-  defp extract_date(content, field) do
-    case Regex.run(~r/\*\*#{field}:\*\*\s*(\d{4}-\d{2}-\d{2})/i, content) do
-      [_, date_str] ->
-        case Date.from_iso8601(date_str) do
-          {:ok, date} -> date
-          _ -> nil
-        end
+  defp extract_all_frontmatter(content) do
+    # Extract all **Key:** value pairs between title and first ## section
+    # First, get the frontmatter region (between # Title and first ## Section)
+    frontmatter_region =
+      case Regex.run(~r/^#\s+[^\n]+\n(.*?)(?=\n##\s|\z)/s, content) do
+        [_, region] -> region
+        nil -> content
+      end
 
-      nil ->
-        nil
+    Regex.scan(~r/\*\*([^*]+):\*\*\s*(.+)/, frontmatter_region)
+    |> Map.new(fn [_, key, value] ->
+      {String.downcase(String.trim(key)), String.trim(value)}
+    end)
+  end
+
+  defp parse_date(nil), do: nil
+
+  defp parse_date(date_str) do
+    case Date.from_iso8601(String.trim(date_str)) do
+      {:ok, date} -> date
+      _ -> nil
     end
   end
 
-  defp extract_priority(content) do
-    case Regex.run(~r/\*\*Priority:\*\*\s*(\w+)/i, content) do
-      [_, priority_str] ->
-        priority = String.downcase(priority_str)
+  defp parse_priority(nil), do: nil
 
-        if priority in @valid_priorities do
-          String.to_existing_atom(priority)
-        else
-          nil
-        end
+  defp parse_priority(priority_str) do
+    priority = String.downcase(String.trim(priority_str))
 
-      nil ->
-        nil
+    if priority in @valid_priorities do
+      String.to_existing_atom(priority)
+    else
+      nil
     end
   rescue
-    # If the atom doesn't exist, return nil
     ArgumentError -> nil
   end
 
-  defp extract_category(content) do
-    case Regex.run(~r/\*\*Category:\*\*\s*(\w+)/i, content) do
-      [_, category_str] ->
-        category = String.downcase(category_str)
+  defp parse_category(nil), do: nil
 
-        if category in @valid_categories do
-          String.to_existing_atom(category)
-        else
-          nil
-        end
+  defp parse_category(category_str) do
+    category = String.downcase(String.trim(category_str))
 
-      nil ->
-        nil
+    if category in @valid_categories do
+      String.to_existing_atom(category)
+    else
+      nil
     end
   rescue
     ArgumentError -> nil
+  end
+
+  defp parse_effort(nil), do: nil
+
+  defp parse_effort(effort_str) do
+    effort = String.downcase(String.trim(effort_str))
+
+    if effort in @valid_efforts do
+      String.to_existing_atom(effort)
+    else
+      nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp parse_comma_list(nil), do: []
+
+  defp parse_comma_list(value) do
+    value
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp extract_metadata(frontmatter) do
+    frontmatter
+    |> Map.drop(@known_frontmatter_keys)
+    |> case do
+      empty when map_size(empty) == 0 -> %{}
+      metadata -> metadata
+    end
   end
 
   defp extract_section(content, section_name) do
@@ -249,34 +297,6 @@ defmodule Arbor.Flow.ItemParser do
     end
   end
 
-  defp extract_depends_on(content) do
-    section = extract_section(content, "Dependencies") || extract_section(content, "Depends On")
-
-    if section do
-      extract_item_references(section, "Depends on")
-    else
-      []
-    end
-  end
-
-  defp extract_blocks(content) do
-    section = extract_section(content, "Dependencies") || extract_section(content, "Blocks")
-
-    if section do
-      extract_item_references(section, "Blocks")
-    else
-      []
-    end
-  end
-
-  defp extract_item_references(section, prefix) do
-    # Match lines like "- Depends on: item_abc123" or "- Blocks: item_xyz"
-    pattern = ~r/-\s*#{Regex.escape(prefix)}:\s*(.+)/i
-
-    Regex.scan(pattern, section)
-    |> Enum.map(fn [_, ref] -> String.trim(ref) end)
-  end
-
   defp extract_related_files(content) do
     section = extract_section(content, "Related Files")
 
@@ -301,31 +321,43 @@ defmodule Arbor.Flow.ItemParser do
   defp serialize_title(%{title: nil}), do: "# [Untitled]"
   defp serialize_title(%{title: title}), do: "# #{title}"
 
-  defp serialize_metadata(item) do
-    parts = []
+  defp serialize_frontmatter(item) do
+    fields = [
+      format_created(item),
+      format_field(item[:priority], "Priority"),
+      format_field(item[:category], "Category"),
+      format_field(item[:type], "Type"),
+      format_field(item[:effort], "Effort"),
+      format_list_field(item[:depends_on], "Depends On"),
+      format_list_field(item[:blocks], "Blocks")
+    ]
 
-    parts =
-      case item[:created_at] do
-        %Date{} = date -> ["**Created:** #{Date.to_iso8601(date)}" | parts]
-        _ -> ["**Created:** #{Date.to_iso8601(Date.utc_today())}" | parts]
-      end
+    metadata_fields =
+      (item[:metadata] || %{})
+      |> Enum.map(fn {key, value} ->
+        title_key =
+          key |> to_string() |> String.split(" ") |> Enum.map_join(" ", &String.capitalize/1)
 
-    parts =
-      if item[:priority] do
-        ["**Priority:** #{item[:priority]}" | parts]
-      else
-        parts
-      end
+        "**#{title_key}:** #{value}"
+      end)
 
-    parts =
-      if item[:category] do
-        ["**Category:** #{item[:category]}" | parts]
-      else
-        parts
-      end
-
-    [Enum.reverse(parts) |> Enum.join("\n"), ""]
+    all_fields = (fields ++ metadata_fields) |> Enum.reject(&is_nil/1)
+    [Enum.join(all_fields, "\n"), ""]
   end
+
+  defp format_created(item) do
+    case item[:created_at] do
+      %Date{} = date -> "**Created:** #{Date.to_iso8601(date)}"
+      _ -> "**Created:** #{Date.to_iso8601(Date.utc_today())}"
+    end
+  end
+
+  defp format_field(nil, _label), do: nil
+  defp format_field(value, label), do: "**#{label}:** #{value}"
+
+  defp format_list_field(nil, _label), do: nil
+  defp format_list_field([], _label), do: nil
+  defp format_list_field(items, label), do: "**#{label}:** #{Enum.join(items, ", ")}"
 
   defp serialize_section(_name, nil), do: nil
   defp serialize_section(_name, ""), do: nil
@@ -349,31 +381,6 @@ defmodule Arbor.Flow.ItemParser do
       end)
 
     ["## #{name}", "" | items] ++ [""]
-  end
-
-  defp serialize_dependencies(item) do
-    depends_on = item[:depends_on] || []
-    blocks = item[:blocks] || []
-
-    if depends_on == [] and blocks == [] do
-      nil
-    else
-      lines = ["## Dependencies", ""]
-
-      lines =
-        lines ++
-          Enum.map(depends_on, fn ref ->
-            "- Depends on: #{ref}"
-          end)
-
-      lines =
-        lines ++
-          Enum.map(blocks, fn ref ->
-            "- Blocks: #{ref}"
-          end)
-
-      lines ++ [""]
-    end
   end
 
   defp serialize_related_files(nil), do: nil

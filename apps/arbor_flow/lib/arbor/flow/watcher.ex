@@ -50,14 +50,13 @@ defmodule Arbor.Flow.Watcher do
   - `:patterns` - File patterns to match (default: ["*.md"])
   - `:callbacks` - Map with `:on_new`, `:on_changed`, `:on_deleted` functions
   - `:tracker` - FileTracker reference (atom or pid)
+  - `:tracker_module` - Module implementing FileTracker behaviour (default: Arbor.Flow.FileTracker.ETS)
   - `:processor_id` - ID for this processor in the FileTracker
   - `:poll_interval` - Milliseconds between scans (default: 30_000)
   - `:debounce_ms` - Debounce window for rapid changes (default: 1_000)
   """
 
   use GenServer
-
-  alias Arbor.Flow.FileTracker
 
   require Logger
 
@@ -78,6 +77,7 @@ defmodule Arbor.Flow.Watcher do
             optional(:on_deleted) => delete_callback()
           },
           tracker: atom() | pid() | nil,
+          tracker_module: module(),
           processor_id: String.t(),
           poll_interval: non_neg_integer(),
           debounce_ms: non_neg_integer()
@@ -89,12 +89,13 @@ defmodule Arbor.Flow.Watcher do
     :patterns,
     :callbacks,
     :tracker,
+    :tracker_module,
     :processor_id,
     :poll_interval,
     :debounce_ms,
     :timer_ref,
     :known_files,
-    # Track pending debounced files: %{path => {content, hash, timestamp}}
+    # Track pending debounced files: %{path => {content, hash, timestamp, change_type}}
     :pending_changes
   ]
 
@@ -147,6 +148,7 @@ defmodule Arbor.Flow.Watcher do
       patterns: Keyword.get(opts, :patterns, @default_patterns),
       callbacks: Keyword.get(opts, :callbacks, %{}),
       tracker: Keyword.get(opts, :tracker),
+      tracker_module: Keyword.get(opts, :tracker_module, Arbor.Flow.FileTracker.ETS),
       processor_id: Keyword.get(opts, :processor_id, "watcher"),
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
       debounce_ms: Keyword.get(opts, :debounce_ms, @default_debounce_ms),
@@ -241,8 +243,9 @@ defmodule Arbor.Flow.Watcher do
 
   defp load_known_files(%{tracker: nil} = state), do: state
 
-  defp load_known_files(%{tracker: tracker, processor_id: processor_id} = state) do
-    known = FileTracker.ETS.load_known_files(tracker, processor_id)
+  defp load_known_files(state) do
+    %{tracker: tracker, tracker_module: mod, processor_id: processor_id} = state
+    known = mod.load_known_files(tracker, processor_id)
     %{state | known_files: known}
   end
 
@@ -308,11 +311,16 @@ defmodule Arbor.Flow.Watcher do
 
   defp matches_patterns?(filename, patterns) do
     Enum.any?(patterns, fn pattern ->
-      case pattern do
-        "*.md" -> String.ends_with?(filename, ".md")
-        "*.json" -> String.ends_with?(filename, ".json")
-        "*" -> true
-        _ -> filename == pattern
+      cond do
+        pattern == "*" ->
+          true
+
+        String.starts_with?(pattern, "*.") ->
+          ext = String.trim_leading(pattern, "*")
+          String.ends_with?(filename, ext)
+
+        true ->
+          filename == pattern
       end
     end)
   end
@@ -329,8 +337,9 @@ defmodule Arbor.Flow.Watcher do
 
   defp needs_processing?(%{tracker: nil}, _path, _hash), do: false
 
-  defp needs_processing?(%{tracker: tracker, processor_id: processor_id}, path, hash) do
-    FileTracker.ETS.needs_processing?(tracker, path, processor_id, hash)
+  defp needs_processing?(state, path, hash) do
+    %{tracker: tracker, tracker_module: mod, processor_id: processor_id} = state
+    mod.needs_processing?(tracker, path, processor_id, hash)
   end
 
   defp schedule_debounced_change(state, path, hash, change_type) do
@@ -408,13 +417,15 @@ defmodule Arbor.Flow.Watcher do
 
   defp mark_processed(%{tracker: nil}, _path, _hash), do: :ok
 
-  defp mark_processed(%{tracker: tracker, processor_id: processor_id}, path, hash) do
-    FileTracker.ETS.mark_processed(tracker, path, processor_id, hash)
+  defp mark_processed(state, path, hash) do
+    %{tracker: tracker, tracker_module: mod, processor_id: processor_id} = state
+    mod.mark_processed(tracker, path, processor_id, hash)
   end
 
   defp remove_from_tracker(%{tracker: nil}, _path), do: :ok
 
-  defp remove_from_tracker(%{tracker: tracker, processor_id: processor_id}, path) do
-    FileTracker.ETS.remove(tracker, path, processor_id)
+  defp remove_from_tracker(state, path) do
+    %{tracker: tracker, tracker_module: mod, processor_id: processor_id} = state
+    mod.remove(tracker, path, processor_id)
   end
 end

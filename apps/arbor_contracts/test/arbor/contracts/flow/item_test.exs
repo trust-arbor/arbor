@@ -26,6 +26,8 @@ defmodule Arbor.Contracts.Flow.ItemTest do
         id: "item_custom123",
         priority: :high,
         category: :feature,
+        type: "research",
+        effort: :large,
         summary: "A summary",
         why_it_matters: "Important because",
         acceptance_criteria: criteria,
@@ -46,6 +48,8 @@ defmodule Arbor.Contracts.Flow.ItemTest do
       assert item.title == "Full Item"
       assert item.priority == :high
       assert item.category == :feature
+      assert item.type == "research"
+      assert item.effort == :large
       assert item.summary == "A summary"
       assert item.why_it_matters == "Important because"
       assert item.acceptance_criteria == criteria
@@ -89,8 +93,36 @@ defmodule Arbor.Contracts.Flow.ItemTest do
       assert {:ok, _} = Item.new(title: "Test", category: :idea)
       assert {:ok, _} = Item.new(title: "Test", category: :research)
       assert {:ok, _} = Item.new(title: "Test", category: :documentation)
+      assert {:ok, _} = Item.new(title: "Test", category: :content)
       assert {:ok, _} = Item.new(title: "Test", category: nil)
       assert {:error, {:invalid_category, :invalid}} = Item.new(title: "Test", category: :invalid)
+    end
+
+    test "validates effort" do
+      assert {:ok, _} = Item.new(title: "Test", effort: :small)
+      assert {:ok, _} = Item.new(title: "Test", effort: :medium)
+      assert {:ok, _} = Item.new(title: "Test", effort: :large)
+      assert {:ok, _} = Item.new(title: "Test", effort: :ongoing)
+      assert {:ok, _} = Item.new(title: "Test", effort: nil)
+      assert {:error, {:invalid_effort, :huge}} = Item.new(title: "Test", effort: :huge)
+    end
+
+    test "accepts type as free-form string" do
+      assert {:ok, item} = Item.new(title: "Test", type: "research")
+      assert item.type == "research"
+
+      assert {:ok, item} = Item.new(title: "Test", type: "custom_workflow")
+      assert item.type == "custom_workflow"
+    end
+
+    test "type defaults to nil" do
+      assert {:ok, item} = Item.new(title: "Test")
+      assert item.type == nil
+    end
+
+    test "effort defaults to nil" do
+      assert {:ok, item} = Item.new(title: "Test")
+      assert item.effort == nil
     end
 
     test "validates criteria format" do
@@ -220,10 +252,12 @@ defmodule Arbor.Contracts.Flow.ItemTest do
       assert :feature in categories
       assert :bug in categories
       assert :refactor in categories
+      assert :content in categories
     end
 
     test "valid_category? checks correctly" do
       assert Item.valid_category?(:feature)
+      assert Item.valid_category?(:content)
       refute Item.valid_category?(:invalid)
     end
   end
