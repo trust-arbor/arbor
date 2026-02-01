@@ -393,9 +393,9 @@ defmodule Arbor.Consensus.TestHelpers do
   Returns the coordinator pid.
   """
   def start_test_coordinator(opts \\ []) do
-    # Use a unique name to avoid conflicts
+    # Use a guaranteed-unique name to avoid conflicts across async tests
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    name = Keyword.get(opts, :name, :"test_coordinator_#{:rand.uniform(100_000)}")
+    name = Keyword.get(opts, :name, :"test_coordinator_#{System.unique_integer([:positive])}")
 
     default_opts = [
       name: name,
@@ -414,9 +414,9 @@ defmodule Arbor.Consensus.TestHelpers do
   """
   def start_test_event_store(opts \\ []) do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    table_name = Keyword.get(opts, :table_name, :"test_events_#{:rand.uniform(100_000)}")
+    table_name = Keyword.get(opts, :table_name, :"test_events_#{System.unique_integer([:positive])}")
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    name = Keyword.get(opts, :name, :"test_event_store_#{:rand.uniform(100_000)}")
+    name = Keyword.get(opts, :name, :"test_event_store_#{System.unique_integer([:positive])}")
 
     {:ok, pid} =
       EventStore.start_link(
