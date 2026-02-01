@@ -213,6 +213,68 @@ defmodule Arbor.Common.SafeAtomTest do
   end
 
   # ==========================================================================
+  # Taint tracking helpers
+  # ==========================================================================
+
+  describe "taint_levels/0" do
+    test "returns all taint levels" do
+      levels = SafeAtom.taint_levels()
+
+      assert :trusted in levels
+      assert :derived in levels
+      assert :untrusted in levels
+      assert :hostile in levels
+    end
+
+    test "returns levels in order of severity" do
+      assert [:trusted, :derived, :untrusted, :hostile] = SafeAtom.taint_levels()
+    end
+  end
+
+  describe "taint_roles/0" do
+    test "returns all taint roles" do
+      roles = SafeAtom.taint_roles()
+
+      assert :control in roles
+      assert :data in roles
+    end
+  end
+
+  describe "to_taint_level/1" do
+    test "converts valid taint level strings" do
+      assert {:ok, :trusted} = SafeAtom.to_taint_level("trusted")
+      assert {:ok, :derived} = SafeAtom.to_taint_level("derived")
+      assert {:ok, :untrusted} = SafeAtom.to_taint_level("untrusted")
+      assert {:ok, :hostile} = SafeAtom.to_taint_level("hostile")
+    end
+
+    test "rejects invalid taint level strings" do
+      # Known atoms like :invalid return {:error, {:not_allowed, atom}}
+      assert {:error, {:not_allowed, :invalid}} = SafeAtom.to_taint_level("invalid")
+      assert {:error, {:not_allowed, :safe}} = SafeAtom.to_taint_level("safe")
+      # Unknown strings return {:error, {:not_allowed, string}}
+      assert {:error, {:not_allowed, "malicious_level_abc789"}} =
+               SafeAtom.to_taint_level("malicious_level_abc789")
+    end
+  end
+
+  describe "to_taint_role/1" do
+    test "converts valid taint role strings" do
+      assert {:ok, :control} = SafeAtom.to_taint_role("control")
+      assert {:ok, :data} = SafeAtom.to_taint_role("data")
+    end
+
+    test "rejects invalid taint role strings" do
+      # Known atoms like :invalid return {:error, {:not_allowed, atom}}
+      assert {:error, {:not_allowed, :invalid}} = SafeAtom.to_taint_role("invalid")
+      assert {:error, {:not_allowed, :input}} = SafeAtom.to_taint_role("input")
+      # Unknown strings return {:error, {:not_allowed, string}}
+      assert {:error, {:not_allowed, "malicious_role_abc789"}} =
+               SafeAtom.to_taint_role("malicious_role_abc789")
+    end
+  end
+
+  # ==========================================================================
   # Arbor-specific helpers
   # ==========================================================================
 
