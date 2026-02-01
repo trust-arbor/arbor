@@ -18,7 +18,7 @@ defmodule Arbor.AI.Backends.OllamaEmbeddingTest do
       {:ok, result} = OllamaEmbedding.embed("Hello, world!")
 
       assert is_list(result.embedding)
-      assert length(result.embedding) > 0
+      assert result.embedding != []
       assert result.provider == :ollama
       assert is_binary(result.model)
       assert result.dimensions == length(result.embedding)
