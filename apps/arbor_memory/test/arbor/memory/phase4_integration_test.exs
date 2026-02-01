@@ -75,7 +75,7 @@ defmodule Arbor.Memory.Phase4IntegrationTest do
       # 4. Should have detected the Read→Edit pattern and created proposals
       assert is_list(result.suggestions)
 
-      if length(result.suggestions) > 0 do
+      if result.suggestions != [] do
         # At least one learning suggestion
         learning = Enum.find(result.suggestions, &(&1.type == :learning))
         assert learning != nil

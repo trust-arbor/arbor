@@ -67,7 +67,7 @@ defmodule Arbor.Memory.PreconsciousTest do
       {:ok, context} = Preconscious.extract_context(agent_id)
 
       assert is_list(context.topics)
-      assert length(context.topics) > 0
+      assert context.topics != []
       # Should extract significant words like "elixir", "patterns", "genserver", etc.
       assert String.length(context.combined_query) > 0
     end
