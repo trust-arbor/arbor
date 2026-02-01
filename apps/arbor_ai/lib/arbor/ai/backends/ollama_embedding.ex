@@ -31,13 +31,14 @@ defmodule Arbor.AI.Backends.OllamaEmbedding do
   def embed(text, opts \\ []) do
     case do_embed([text], opts) do
       {:ok, %{embeddings: [embedding | _]} = result} ->
-        {:ok, %{
-          embedding: embedding,
-          model: result.model,
-          provider: :ollama,
-          usage: result.usage,
-          dimensions: length(embedding)
-        }}
+        {:ok,
+         %{
+           embedding: embedding,
+           model: result.model,
+           provider: :ollama,
+           usage: result.usage,
+           dimensions: length(embedding)
+         }}
 
       {:error, reason} ->
         {:error, reason}
@@ -91,13 +92,14 @@ defmodule Arbor.AI.Backends.OllamaEmbedding do
         _ -> 0
       end
 
-    {:ok, %{
-      embeddings: embeddings,
-      model: model_name,
-      provider: :ollama,
-      usage: %{prompt_tokens: 0, total_tokens: 0},
-      dimensions: dimensions
-    }}
+    {:ok,
+     %{
+       embeddings: embeddings,
+       model: model_name,
+       provider: :ollama,
+       usage: %{prompt_tokens: 0, total_tokens: 0},
+       dimensions: dimensions
+     }}
   end
 
   defp parse_ollama_response(body, _model) do

@@ -34,13 +34,14 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
   def embed(text, opts \\ []) do
     case do_embed([text], opts) do
       {:ok, %{embeddings: [embedding | _]} = result} ->
-        {:ok, %{
-          embedding: embedding,
-          model: result.model,
-          provider: result.provider,
-          usage: result.usage,
-          dimensions: length(embedding)
-        }}
+        {:ok,
+         %{
+           embedding: embedding,
+           model: result.model,
+           provider: result.provider,
+           usage: result.usage,
+           dimensions: length(embedding)
+         }}
 
       {:error, reason} ->
         {:error, reason}
@@ -74,7 +75,9 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
       [{"content-type", "application/json"}]
       |> maybe_add_auth(auth_header)
 
-    Logger.debug("OpenAI embed request: provider=#{provider}, model=#{model}, texts=#{length(texts)}")
+    Logger.debug(
+      "OpenAI embed request: provider=#{provider}, model=#{model}, texts=#{length(texts)}"
+    )
 
     case Req.post(url,
            body: body,
@@ -86,11 +89,18 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
 
       {:ok, %{status: status, body: body}} ->
         error_msg = extract_error(body)
-        Logger.warning("OpenAI embed failed: provider=#{provider}, status=#{status}, error=#{error_msg}")
+
+        Logger.warning(
+          "OpenAI embed failed: provider=#{provider}, status=#{status}, error=#{error_msg}"
+        )
+
         {:error, {:openai_error, status, error_msg}}
 
       {:error, reason} ->
-        Logger.warning("OpenAI embed request failed: provider=#{provider}, error=#{inspect(reason)}")
+        Logger.warning(
+          "OpenAI embed request failed: provider=#{provider}, error=#{inspect(reason)}"
+        )
+
         {:error, {:connection_error, reason}}
     end
   end
@@ -141,7 +151,11 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
   defp maybe_add_auth(headers, nil), do: headers
   defp maybe_add_auth(headers, auth), do: [{"authorization", auth} | headers]
 
-  defp parse_openai_response(%{"data" => data, "usage" => usage, "model" => model_name}, _model, provider)
+  defp parse_openai_response(
+         %{"data" => data, "usage" => usage, "model" => model_name},
+         _model,
+         provider
+       )
        when is_list(data) do
     # Sort by index to maintain order
     sorted = Enum.sort_by(data, & &1["index"])
@@ -153,16 +167,17 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
         _ -> 0
       end
 
-    {:ok, %{
-      embeddings: embeddings,
-      model: model_name,
-      provider: provider,
-      usage: %{
-        prompt_tokens: Map.get(usage, "prompt_tokens", 0),
-        total_tokens: Map.get(usage, "total_tokens", 0)
-      },
-      dimensions: dimensions
-    }}
+    {:ok,
+     %{
+       embeddings: embeddings,
+       model: model_name,
+       provider: provider,
+       usage: %{
+         prompt_tokens: Map.get(usage, "prompt_tokens", 0),
+         total_tokens: Map.get(usage, "total_tokens", 0)
+       },
+       dimensions: dimensions
+     }}
   end
 
   # Some providers omit usage
@@ -177,13 +192,14 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
         _ -> 0
       end
 
-    {:ok, %{
-      embeddings: embeddings,
-      model: model_name,
-      provider: provider,
-      usage: %{prompt_tokens: 0, total_tokens: 0},
-      dimensions: dimensions
-    }}
+    {:ok,
+     %{
+       embeddings: embeddings,
+       model: model_name,
+       provider: provider,
+       usage: %{prompt_tokens: 0, total_tokens: 0},
+       dimensions: dimensions
+     }}
   end
 
   defp parse_openai_response(body, _model, _provider) do

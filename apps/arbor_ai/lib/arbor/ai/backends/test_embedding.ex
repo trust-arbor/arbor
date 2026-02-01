@@ -27,13 +27,14 @@ defmodule Arbor.AI.Backends.TestEmbedding do
     dimensions = get_dimensions(opts)
     embedding = hash_embedding(text, dimensions)
 
-    {:ok, %{
-      embedding: embedding,
-      model: "test-hash-#{dimensions}d",
-      provider: :test,
-      usage: %{prompt_tokens: 0, total_tokens: 0},
-      dimensions: dimensions
-    }}
+    {:ok,
+     %{
+       embedding: embedding,
+       model: "test-hash-#{dimensions}d",
+       provider: :test,
+       usage: %{prompt_tokens: 0, total_tokens: 0},
+       dimensions: dimensions
+     }}
   end
 
   @impl true
@@ -43,13 +44,14 @@ defmodule Arbor.AI.Backends.TestEmbedding do
     dimensions = get_dimensions(opts)
     embeddings = Enum.map(texts, &hash_embedding(&1, dimensions))
 
-    {:ok, %{
-      embeddings: embeddings,
-      model: "test-hash-#{dimensions}d",
-      provider: :test,
-      usage: %{prompt_tokens: 0, total_tokens: 0},
-      dimensions: dimensions
-    }}
+    {:ok,
+     %{
+       embeddings: embeddings,
+       model: "test-hash-#{dimensions}d",
+       provider: :test,
+       usage: %{prompt_tokens: 0, total_tokens: 0},
+       dimensions: dimensions
+     }}
   end
 
   @doc """
