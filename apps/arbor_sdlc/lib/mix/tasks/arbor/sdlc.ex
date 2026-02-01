@@ -8,6 +8,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       $ mix arbor.sdlc enable all
       $ mix arbor.sdlc disable brainstorming
       $ mix arbor.sdlc disable all
+      $ mix arbor.sdlc root /tmp/roadmap
+      $ mix arbor.sdlc root --reset
       $ mix arbor.sdlc rescan
       $ mix arbor.sdlc backend api
       $ mix arbor.sdlc backend cli
@@ -17,6 +19,7 @@ defmodule Mix.Tasks.Arbor.Sdlc do
     * `status`              - Show current SDLC config and enabled stages
     * `enable <stage|all>`  - Enable a stage (or all) for automatic processing
     * `disable <stage|all>` - Disable a stage (or all) for automatic processing
+    * `root <path|--reset>` - Set roadmap directory (creates stage dirs, triggers rescan)
     * `rescan`              - Force an immediate rescan of watched directories
     * `backend <cli|api>`   - Set the AI backend for processors
   """
@@ -33,6 +36,7 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       ["status" | _] -> cmd_status()
       ["enable", stage] -> cmd_enable(stage)
       ["disable", stage] -> cmd_disable(stage)
+      ["root", path] -> cmd_root(path)
       ["rescan" | _] -> cmd_rescan()
       ["backend", backend] -> cmd_backend(backend)
       _ -> print_usage()
@@ -155,6 +159,47 @@ defmodule Mix.Tasks.Arbor.Sdlc do
     end
   end
 
+  defp cmd_root("--reset") do
+    ensure_running!()
+    node = Helpers.full_node_name()
+
+    case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :roadmap_root, ".arbor/roadmap"]) do
+      :ok ->
+        :rpc.call(node, Arbor.SDLC.Pipeline, :ensure_directories!, [
+          :rpc.call(node, Arbor.SDLC.Config, :absolute_roadmap_root, [])
+        ])
+
+        :rpc.call(node, Arbor.SDLC, :rescan, [])
+        Mix.shell().info("Roadmap root reset to .arbor/roadmap")
+
+      {:badrpc, reason} ->
+        Mix.shell().error("Failed: #{inspect(reason)}")
+    end
+  end
+
+  defp cmd_root(path) do
+    ensure_running!()
+    node = Helpers.full_node_name()
+
+    abs_path =
+      if Path.type(path) == :absolute do
+        path
+      else
+        Path.expand(path)
+      end
+
+    case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :roadmap_root, abs_path]) do
+      :ok ->
+        :rpc.call(node, Arbor.SDLC.Pipeline, :ensure_directories!, [abs_path])
+        :rpc.call(node, Arbor.SDLC, :rescan, [])
+        Mix.shell().info("Roadmap root set to #{abs_path}")
+        Mix.shell().info("Stage directories created. Watcher rescanned.")
+
+      {:badrpc, reason} ->
+        Mix.shell().error("Failed: #{inspect(reason)}")
+    end
+  end
+
   defp cmd_rescan do
     ensure_running!()
     node = Helpers.full_node_name()
@@ -213,6 +258,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       status              Show pipeline config and enabled stages
       enable <stage|all>  Enable stage for automatic processing
       disable <stage|all> Disable stage for automatic processing
+      root <path>         Set roadmap directory (creates stage dirs, rescans)
+      root --reset        Reset roadmap directory to .arbor/roadmap
       rescan              Force immediate rescan of watched directories
       backend <cli|api>   Set AI backend for processors
 
@@ -223,6 +270,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       mix arbor.sdlc enable inbox
       mix arbor.sdlc enable all
       mix arbor.sdlc disable brainstorming
+      mix arbor.sdlc root /tmp/roadmap
+      mix arbor.sdlc root --reset
       mix arbor.sdlc backend api
       mix arbor.sdlc rescan
     """)
