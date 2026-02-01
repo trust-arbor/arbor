@@ -9,10 +9,15 @@ defmodule Arbor.Consensus.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      Arbor.Consensus.EventStore,
-      Arbor.Consensus.Coordinator
-    ]
+    children =
+      if Application.get_env(:arbor_consensus, :start_children, true) do
+        [
+          Arbor.Consensus.EventStore,
+          Arbor.Consensus.Coordinator
+        ]
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.Consensus.Supervisor]
     Supervisor.start_link(children, opts)

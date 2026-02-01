@@ -9,18 +9,23 @@ defmodule Arbor.Memory.Application do
 
   @impl true
   def start(_type, _args) do
-    # Create ETS tables eagerly to avoid race conditions.
-    # Tables must be owned by a long-lived process (the Application starter),
-    # not by transient test or request processes.
-    ensure_ets(@graph_ets)
-    ensure_ets(@working_memory_ets)
-    ensure_ets(@proposals_ets)
+    children =
+      if Application.get_env(:arbor_memory, :start_children, true) do
+        # Create ETS tables eagerly to avoid race conditions.
+        # Tables must be owned by a long-lived process (the Application starter),
+        # not by transient test or request processes.
+        ensure_ets(@graph_ets)
+        ensure_ets(@working_memory_ets)
+        ensure_ets(@proposals_ets)
 
-    children = [
-      {Registry, keys: :unique, name: Arbor.Memory.Registry},
-      {Arbor.Memory.IndexSupervisor, []},
-      {Arbor.Persistence.EventLog.ETS, name: :memory_events}
-    ]
+        [
+          {Registry, keys: :unique, name: Arbor.Memory.Registry},
+          {Arbor.Memory.IndexSupervisor, []},
+          {Arbor.Persistence.EventLog.ETS, name: :memory_events}
+        ]
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.Memory.Supervisor]
     Supervisor.start_link(children, opts)

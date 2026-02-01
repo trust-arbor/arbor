@@ -6,16 +6,15 @@ defmodule Arbor.AI.Application do
   @impl true
   def start(_type, _args) do
     children =
-      [
-        # Backend availability registry with ETS caching
-        Arbor.AI.BackendRegistry,
-
-        # Quota tracking for CLI backends
-        Arbor.AI.QuotaTracker,
-
-        # Session tracking for multi-turn conversations
-        Arbor.AI.SessionRegistry
-      ] ++ budget_tracker_child() ++ usage_stats_child()
+      if Application.get_env(:arbor_ai, :start_children, true) do
+        [
+          Arbor.AI.BackendRegistry,
+          Arbor.AI.QuotaTracker,
+          Arbor.AI.SessionRegistry
+        ] ++ budget_tracker_child() ++ usage_stats_child()
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.AI.Supervisor]
     Supervisor.start_link(children, opts)
