@@ -108,15 +108,92 @@ defmodule Arbor.Actions.HistorianTest do
     end
   end
 
+  describe "TaintTrace" do
+    test "schema validates correctly" do
+      # Test that schema rejects missing required fields
+      assert {:error, _} = Historian.TaintTrace.validate_params(%{})
+
+      # Test that schema accepts valid params for trace_backward
+      assert {:ok, _} =
+               Historian.TaintTrace.validate_params(%{
+                 query_type: :trace_backward,
+                 signal_id: "sig_123"
+               })
+
+      # Test that schema accepts valid params for summary
+      assert {:ok, _} =
+               Historian.TaintTrace.validate_params(%{
+                 query_type: :summary,
+                 agent_id: "agent_001"
+               })
+
+      # Test that schema accepts valid params for events query
+      assert {:ok, _} =
+               Historian.TaintTrace.validate_params(%{
+                 query_type: :events,
+                 taint_level: :untrusted,
+                 limit: 50
+               })
+
+      # Test with optional params
+      assert {:ok, _} =
+               Historian.TaintTrace.validate_params(%{
+                 query_type: :trace_forward,
+                 signal_id: "sig_123",
+                 limit: 25
+               })
+    end
+
+    test "validates action metadata" do
+      assert Historian.TaintTrace.name() == "historian_taint_trace"
+      assert Historian.TaintTrace.category() == "historian"
+      assert "security" in Historian.TaintTrace.tags()
+      assert "taint" in Historian.TaintTrace.tags()
+      assert "provenance" in Historian.TaintTrace.tags()
+    end
+
+    test "generates tool schema" do
+      tool = Historian.TaintTrace.to_tool()
+      assert is_map(tool)
+      assert tool[:name] == "historian_taint_trace"
+      assert tool[:description] =~ "taint"
+    end
+
+    test "run with missing required params returns error" do
+      # trace_backward requires signal_id
+      result =
+        Historian.TaintTrace.run(
+          %{query_type: :trace_backward},
+          %{}
+        )
+
+      assert {:error, message} = result
+      assert message =~ "Missing required parameter" or message =~ "signal_id"
+    end
+
+    test "run with summary requires agent_id" do
+      result =
+        Historian.TaintTrace.run(
+          %{query_type: :summary},
+          %{}
+        )
+
+      assert {:error, message} = result
+      assert message =~ "Missing required parameter" or message =~ "agent_id"
+    end
+  end
+
   describe "module structure" do
     test "modules compile and are usable" do
       assert Code.ensure_loaded?(Historian.QueryEvents)
       assert Code.ensure_loaded?(Historian.CausalityTree)
       assert Code.ensure_loaded?(Historian.ReconstructState)
+      assert Code.ensure_loaded?(Historian.TaintTrace)
 
       assert function_exported?(Historian.QueryEvents, :run, 2)
       assert function_exported?(Historian.CausalityTree, :run, 2)
       assert function_exported?(Historian.ReconstructState, :run, 2)
+      assert function_exported?(Historian.TaintTrace, :run, 2)
     end
   end
 end
