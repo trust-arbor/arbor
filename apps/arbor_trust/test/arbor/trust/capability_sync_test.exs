@@ -3,7 +3,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
   alias Arbor.Trust.CapabilitySync
   alias Arbor.Trust.CapabilityTemplates
-  alias Manager
+  alias Arbor.Trust.Manager, as: Manager
 
   @moduletag :fast
 

@@ -430,33 +430,33 @@ defmodule Arbor.Checkpoint do
 
   defp emit_saved(id) do
     Signals.emit(:checkpoint, :saved, %{
-      checkpoint_id: to_string(id)
+      checkpoint_id: inspect(id)
     })
   end
 
   defp emit_save_failed(id, reason) do
     Signals.emit(:checkpoint, :save_failed, %{
-      checkpoint_id: to_string(id),
+      checkpoint_id: inspect(id),
       reason: inspect(reason, limit: 200)
     })
   end
 
   defp emit_loaded(id) do
     Signals.emit(:checkpoint, :loaded, %{
-      checkpoint_id: to_string(id)
+      checkpoint_id: inspect(id)
     })
   end
 
   defp emit_load_failed(id, reason) do
     Signals.emit(:checkpoint, :load_failed, %{
-      checkpoint_id: to_string(id),
+      checkpoint_id: inspect(id),
       reason: inspect(reason, limit: 200)
     })
   end
 
   defp emit_restored(id, module) do
     Signals.emit(:checkpoint, :restored, %{
-      checkpoint_id: to_string(id),
+      checkpoint_id: inspect(id),
       module: inspect(module)
     })
   end
