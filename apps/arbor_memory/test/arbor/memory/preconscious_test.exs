@@ -1,7 +1,7 @@
 defmodule Arbor.Memory.PreconsciousTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Memory.{Preconscious, WorkingMemory, Index, Proposal}
+  alias Arbor.Memory.{BackgroundChecks, Index, IndexSupervisor, Preconscious, Proposal, WorkingMemory}
 
   @moduletag :fast
 
@@ -14,11 +14,11 @@ defmodule Arbor.Memory.PreconsciousTest do
     ensure_table(:arbor_preconscious_config)
 
     # Start memory index via supervisor
-    {:ok, _pid} = Arbor.Memory.IndexSupervisor.start_index(agent_id)
+    {:ok, _pid} = IndexSupervisor.start_index(agent_id)
 
     on_exit(fn ->
       # Clean up after test
-      Arbor.Memory.IndexSupervisor.stop_index(agent_id)
+      IndexSupervisor.stop_index(agent_id)
       :ets.delete(:arbor_working_memory, agent_id)
       cleanup_proposals(agent_id)
     end)
@@ -135,7 +135,7 @@ defmodule Arbor.Memory.PreconsciousTest do
       embedding = for _ <- 1..768, do: :rand.uniform()
 
       # Index some content
-      {:ok, pid} = Arbor.Memory.IndexSupervisor.get_index(agent_id)
+      {:ok, pid} = IndexSupervisor.get_index(agent_id)
       {:ok, _id1} = Index.index(pid, "Elixir GenServer patterns are useful", %{type: :fact}, embedding: embedding)
       {:ok, _id2} = Index.index(pid, "OTP supervision trees help reliability", %{type: :fact}, embedding: embedding)
 
@@ -161,7 +161,7 @@ defmodule Arbor.Memory.PreconsciousTest do
     test "respects relevance threshold", %{agent_id: agent_id} do
       embedding = for _ <- 1..768, do: :rand.uniform()
 
-      {:ok, pid} = Arbor.Memory.IndexSupervisor.get_index(agent_id)
+      {:ok, pid} = IndexSupervisor.get_index(agent_id)
       {:ok, _id} = Index.index(pid, "Some random content", %{type: :fact}, embedding: embedding)
 
       wm =
@@ -180,7 +180,7 @@ defmodule Arbor.Memory.PreconsciousTest do
     test "respects max_results option", %{agent_id: agent_id} do
       embedding = for _ <- 1..768, do: :rand.uniform()
 
-      {:ok, pid} = Arbor.Memory.IndexSupervisor.get_index(agent_id)
+      {:ok, pid} = IndexSupervisor.get_index(agent_id)
 
       # Index many items
       for i <- 1..10 do
@@ -313,7 +313,7 @@ defmodule Arbor.Memory.PreconsciousTest do
       :ets.insert(:arbor_working_memory, {agent_id, wm})
 
       # Run background checks
-      result = Arbor.Memory.BackgroundChecks.run(agent_id)
+      result = BackgroundChecks.run(agent_id)
 
       # Should include preconscious check results (may be empty if no matches)
       assert is_map(result)
@@ -331,7 +331,7 @@ defmodule Arbor.Memory.PreconsciousTest do
       :ets.insert(:arbor_working_memory, {agent_id, wm})
 
       # Run with skip_preconscious option
-      result = Arbor.Memory.BackgroundChecks.run(agent_id, skip_preconscious: true)
+      result = BackgroundChecks.run(agent_id, skip_preconscious: true)
 
       # Should still return valid result
       assert is_map(result)
@@ -342,7 +342,7 @@ defmodule Arbor.Memory.PreconsciousTest do
     test "check_preconscious returns suggestions when memories found", %{agent_id: agent_id} do
       embedding = for _ <- 1..768, do: :rand.uniform()
 
-      {:ok, pid} = Arbor.Memory.IndexSupervisor.get_index(agent_id)
+      {:ok, pid} = IndexSupervisor.get_index(agent_id)
       {:ok, _id} = Index.index(pid, "Related memory content", %{type: :fact}, embedding: embedding)
 
       wm =
@@ -352,7 +352,7 @@ defmodule Arbor.Memory.PreconsciousTest do
       :ets.insert(:arbor_working_memory, {agent_id, wm})
 
       # Call check_preconscious directly with low threshold
-      result = Arbor.Memory.BackgroundChecks.check_preconscious(agent_id, relevance_threshold: 0.0)
+      result = BackgroundChecks.check_preconscious(agent_id, relevance_threshold: 0.0)
 
       assert is_map(result)
       assert is_list(result.suggestions)

@@ -81,6 +81,8 @@ defmodule Arbor.Memory.SelfKnowledge do
     version_history: []
   ]
 
+  alias Arbor.Common.SafeAtom
+
   @max_version_history 10
 
   # ============================================================================
@@ -509,8 +511,7 @@ defmodule Arbor.Memory.SelfKnowledge do
         cap_summary =
           sk.capabilities
           |> Enum.take(5)
-          |> Enum.map(fn c -> "#{c.name} (#{Float.round(c.proficiency * 100, 0)}%)" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn c -> "#{c.name} (#{Float.round(c.proficiency * 100, 0)}%)" end)
 
         ["Capabilities: #{cap_summary}" | parts]
       else
@@ -522,8 +523,7 @@ defmodule Arbor.Memory.SelfKnowledge do
         trait_summary =
           sk.personality_traits
           |> Enum.take(5)
-          |> Enum.map(fn t -> "#{t.trait}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn t -> "#{t.trait}" end)
 
         ["Traits: #{trait_summary}" | parts]
       else
@@ -535,8 +535,7 @@ defmodule Arbor.Memory.SelfKnowledge do
         value_summary =
           sk.values
           |> Enum.take(5)
-          |> Enum.map(fn v -> "#{v.value}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn v -> "#{v.value}" end)
 
         ["Values: #{value_summary}" | parts]
       else
@@ -717,7 +716,7 @@ defmodule Arbor.Memory.SelfKnowledge do
   defp deserialize_preference_key(key) when is_atom(key), do: key
 
   defp deserialize_preference_key(key) when is_binary(key) do
-    case Arbor.Common.SafeAtom.to_existing(key) do
+    case SafeAtom.to_existing(key) do
       {:ok, atom} -> atom
       {:error, _} -> key
     end
@@ -729,7 +728,7 @@ defmodule Arbor.Memory.SelfKnowledge do
   # only for self-knowledge traits (e.g. :analytical, :creative) on cold start
   # when the atom table hasn't been populated yet.
   defp safe_atom_or_new(str) when is_binary(str) do
-    case Arbor.Common.SafeAtom.to_existing(str) do
+    case SafeAtom.to_existing(str) do
       {:ok, atom} -> atom
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       {:error, _} -> String.to_atom(str)
