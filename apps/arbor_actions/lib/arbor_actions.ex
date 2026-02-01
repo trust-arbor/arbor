@@ -16,6 +16,10 @@ defmodule Arbor.Actions do
   | Comms | `Arbor.Actions.Comms` | Channel messaging |
   | Jobs | `Arbor.Actions.Jobs` | Persistent task tracking |
   | AI | `Arbor.Actions.AI` | AI/LLM text generation and code analysis |
+  | Sandbox | `Arbor.Actions.Sandbox` | Docker sandbox environment management |
+  | Historian | `Arbor.Actions.Historian` | Event log querying and causality tracing |
+  | Code | `Arbor.Actions.Code` | Code compilation, testing, and hot-loading |
+  | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
 
   ## Quick Start
 
@@ -173,6 +177,23 @@ defmodule Arbor.Actions do
       ai: [
         Arbor.Actions.AI.GenerateText,
         Arbor.Actions.AI.AnalyzeCode
+      ],
+      sandbox: [
+        Arbor.Actions.Sandbox.Create,
+        Arbor.Actions.Sandbox.Destroy
+      ],
+      historian: [
+        Arbor.Actions.Historian.QueryEvents,
+        Arbor.Actions.Historian.CausalityTree,
+        Arbor.Actions.Historian.ReconstructState
+      ],
+      code: [
+        Arbor.Actions.Code.CompileAndTest,
+        Arbor.Actions.Code.HotLoad
+      ],
+      proposal: [
+        Arbor.Actions.Proposal.Submit,
+        Arbor.Actions.Proposal.Revise
       ]
     }
   end
