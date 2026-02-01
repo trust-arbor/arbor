@@ -379,10 +379,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
 
-      # Collect signals
-      signals = collect_signals(200)
+      # Wait for the specific signals we expect
+      signals = await_signals([:channel_created, :channel_member_invited, :channel_member_joined])
 
-      # Should have channel_created, channel_member_invited, channel_member_joined
       types = Enum.map(signals, & &1.type)
       assert :channel_created in types
       assert :channel_member_invited in types
@@ -425,7 +424,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       # Leave
       :ok = Channels.leave(channel_id, member_id)
 
-      signals = collect_signals(200)
+      signals = await_signals([:channel_member_left, :channel_key_rotated])
       types = Enum.map(signals, & &1.type)
 
       assert :channel_member_left in types
@@ -466,7 +465,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       # Revoke triggers rotation with reason :member_revoked
       :ok = Channels.revoke(channel_id, member_id, creator_id)
 
-      signals = collect_signals(200)
+      signals = await_signals([:channel_key_rotated])
 
       rotation_signal = Enum.find(signals, &(&1.type == :channel_key_rotated))
       assert rotation_signal != nil
@@ -489,6 +488,37 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         collect_signals([signal | acc], timeout)
     after
       timeout -> Enum.reverse(acc)
+    end
+  end
+
+  # Wait for specific signal types with a bounded timeout.
+  # Returns collected signals once all expected types are found
+  # or the timeout expires.
+  defp await_signals(expected_types, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_signals_loop([], MapSet.new(expected_types), deadline)
+  end
+
+  defp await_signals_loop(acc, remaining, deadline) do
+    if MapSet.size(remaining) == 0 do
+      Enum.reverse(acc)
+    else
+      wait = deadline - System.monotonic_time(:millisecond)
+
+      if wait <= 0 do
+        Enum.reverse(acc)
+      else
+        receive do
+          {:signal, signal} ->
+            await_signals_loop(
+              [signal | acc],
+              MapSet.delete(remaining, signal.type),
+              deadline
+            )
+        after
+          wait -> Enum.reverse(acc)
+        end
+      end
     end
   end
 
