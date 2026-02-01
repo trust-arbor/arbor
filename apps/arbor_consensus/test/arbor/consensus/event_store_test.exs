@@ -3,7 +3,7 @@ defmodule Arbor.Consensus.EventStoreTest do
 
   alias Arbor.Consensus.EventStore
   alias Arbor.Contracts.Consensus.ConsensusEvent
-  alias EventLogETS, as: EventLogETS
+  alias Arbor.Persistence.EventLog.ETS, as: EventLogETS
 
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
