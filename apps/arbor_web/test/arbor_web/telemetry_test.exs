@@ -14,8 +14,7 @@ defmodule Arbor.Web.TelemetryTest do
   describe "metrics/0" do
     test "returns a list of telemetry metrics" do
       metrics = WebTelemetry.metrics()
-      assert is_list(metrics)
-      assert metrics != []
+      assert [_ | _] = metrics
 
       # All should be Telemetry.Metrics structs
       for metric <- metrics do
