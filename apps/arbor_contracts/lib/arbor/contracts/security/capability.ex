@@ -288,4 +288,71 @@ defmodule Arbor.Contracts.Security.Capability do
       _ -> dt2
     end
   end
+
+  # =============================================================================
+  # Taint Policy Accessors
+  # =============================================================================
+
+  @valid_taint_policies [:strict, :permissive, :audit_only]
+
+  @doc """
+  Get the taint policy from a capability's constraints.
+
+  Taint policies control how tainted data is handled for actions:
+  - `:permissive` (default) — Block `:untrusted`/`:hostile` on `:control` params.
+    Allow `:derived` on `:control` (audited but not blocked).
+  - `:strict` — Block `:derived`, `:untrusted`, `:hostile` on `:control` params.
+    Only `:trusted` allowed for control parameters.
+  - `:audit_only` — Log taint violations but don't block execution.
+
+  ## Examples
+
+      iex> {:ok, cap} = Capability.new(
+      ...>   resource_uri: "arbor://actions/execute/shell_execute",
+      ...>   principal_id: "agent_001",
+      ...>   constraints: %{taint_policy: :strict}
+      ...> )
+      iex> Capability.taint_policy(cap)
+      :strict
+
+      iex> {:ok, cap} = Capability.new(
+      ...>   resource_uri: "arbor://actions/execute/shell_execute",
+      ...>   principal_id: "agent_001"
+      ...> )
+      iex> Capability.taint_policy(cap)
+      :permissive
+  """
+  @spec taint_policy(t()) :: :strict | :permissive | :audit_only
+  def taint_policy(%__MODULE__{constraints: constraints}) do
+    Map.get(constraints, :taint_policy, :permissive)
+  end
+
+  @doc """
+  Check if a taint policy value is valid.
+
+  Valid policies are `:strict`, `:permissive`, and `:audit_only`.
+
+  ## Examples
+
+      iex> Capability.valid_taint_policy?(:strict)
+      true
+
+      iex> Capability.valid_taint_policy?(:permissive)
+      true
+
+      iex> Capability.valid_taint_policy?(:audit_only)
+      true
+
+      iex> Capability.valid_taint_policy?(:invalid)
+      false
+  """
+  @spec valid_taint_policy?(term()) :: boolean()
+  def valid_taint_policy?(policy) when policy in @valid_taint_policies, do: true
+  def valid_taint_policy?(_), do: false
+
+  @doc """
+  Returns the list of valid taint policies.
+  """
+  @spec valid_taint_policies() :: [atom()]
+  def valid_taint_policies, do: @valid_taint_policies
 end
