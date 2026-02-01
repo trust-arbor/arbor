@@ -85,6 +85,23 @@ defmodule Arbor.Actions.File do
 
     alias Arbor.Actions
 
+    @doc """
+    Declares taint roles for File.Read parameters.
+
+    Control parameters:
+    - `path` - Which file to read affects security boundary
+
+    Data parameters:
+    - `encoding` - Just affects how content is decoded
+    """
+    @spec taint_roles() :: %{atom() => :control | :data}
+    def taint_roles do
+      %{
+        path: :control,
+        encoding: :data
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, context) do
@@ -177,6 +194,27 @@ defmodule Arbor.Actions.File do
       ]
 
     alias Arbor.Actions
+
+    @doc """
+    Declares taint roles for File.Write parameters.
+
+    Control parameters:
+    - `path` - Which file to write affects security boundary
+    - `mode` - Write mode affects how file is modified
+
+    Data parameters:
+    - `content` - Just the data being written
+    - `create_dirs` - Boolean flag, doesn't affect security
+    """
+    @spec taint_roles() :: %{atom() => :control | :data}
+    def taint_roles do
+      %{
+        path: :control,
+        mode: :control,
+        content: :data,
+        create_dirs: :data
+      }
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}

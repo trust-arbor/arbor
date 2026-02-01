@@ -50,7 +50,7 @@ defmodule Arbor.Signals do
 
   @behaviour Arbor.Contracts.API.Signals
 
-  alias Arbor.Signals.{Bus, Signal, Store}
+  alias Arbor.Signals.{Bus, Signal, Store, Taint}
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -74,6 +74,39 @@ defmodule Arbor.Signals do
   @spec emit(atom(), atom(), map(), keyword()) :: :ok | {:error, term()}
   def emit(category, type, data \\ %{}, opts \\ []),
     do: emit_signal_for_category_and_type(category, type, data, opts)
+
+  @doc """
+  Emit a signal with taint metadata attached.
+
+  This is like `emit/4` but automatically adds taint tracking metadata to the signal.
+  Use this when emitting signals that carry data with known provenance.
+
+  ## Options
+
+  All options from `emit/4` are supported, plus:
+  - `:taint_source` - Identifier of the taint source (e.g., "external_api", "llm_output")
+  - `:taint_chain` - List of signal IDs in the taint propagation chain
+
+  ## Examples
+
+      :ok = Arbor.Signals.emit_tainted(:activity, :data_received, %{content: "..."},
+        :untrusted,
+        taint_source: "external_api"
+      )
+  """
+  @spec emit_tainted(atom(), atom(), map(), Taint.level(), keyword()) :: :ok | {:error, term()}
+  def emit_tainted(category, type, data, taint_level, opts \\ []) do
+    taint_source = Keyword.get(opts, :taint_source)
+    taint_chain = Keyword.get(opts, :taint_chain, [])
+    taint_meta = Taint.to_metadata(taint_level, taint_source, taint_chain)
+
+    merged_opts =
+      Keyword.update(opts, :metadata, taint_meta, fn existing ->
+        Taint.merge_metadata(existing, taint_meta)
+      end)
+
+    emit(category, type, data, merged_opts)
+  end
 
   @doc "Emit a pre-constructed signal."
   @spec emit_signal(Signal.t()) :: :ok | {:error, term()}
