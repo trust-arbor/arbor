@@ -41,6 +41,7 @@ defmodule Arbor.SDLC.Config do
   @default_poll_interval 30_000
   @default_debounce_ms 1_000
   @default_watcher_enabled true
+  @default_enabled_stages []
 
   @default_processor_routing %{
     expander: :moderate,
@@ -57,6 +58,7 @@ defmodule Arbor.SDLC.Config do
     field(:poll_interval, pos_integer(), default: @default_poll_interval)
     field(:debounce_ms, pos_integer(), default: @default_debounce_ms)
     field(:watcher_enabled, boolean(), default: @default_watcher_enabled)
+    field(:enabled_stages, [atom()], default: @default_enabled_stages)
     field(:processor_routing, map(), default: @default_processor_routing)
 
     # Persistence configuration
@@ -86,6 +88,7 @@ defmodule Arbor.SDLC.Config do
       poll_interval: get_value(:poll_interval, opts, @default_poll_interval),
       debounce_ms: get_value(:debounce_ms, opts, @default_debounce_ms),
       watcher_enabled: get_value(:watcher_enabled, opts, @default_watcher_enabled),
+      enabled_stages: get_value(:enabled_stages, opts, @default_enabled_stages),
       processor_routing:
         Map.merge(
           @default_processor_routing,
@@ -179,6 +182,66 @@ defmodule Arbor.SDLC.Config do
   @spec watcher_enabled?() :: boolean()
   def watcher_enabled? do
     Application.get_env(@app, :watcher_enabled, @default_watcher_enabled)
+  end
+
+  @doc """
+  Get the list of stages enabled for automatic processing.
+
+  An empty list means no stages are automatically processed by the watcher.
+  """
+  @spec enabled_stages() :: [atom()]
+  def enabled_stages do
+    Application.get_env(@app, :enabled_stages, @default_enabled_stages)
+  end
+
+  @doc """
+  Check if a specific stage is enabled for automatic processing.
+  """
+  @spec stage_enabled?(atom()) :: boolean()
+  def stage_enabled?(stage) when is_atom(stage) do
+    stage in enabled_stages()
+  end
+
+  @doc """
+  Enable a stage for automatic processing at runtime.
+  """
+  @spec enable_stage(atom()) :: :ok
+  def enable_stage(stage) when is_atom(stage) do
+    current = enabled_stages()
+
+    unless stage in current do
+      Application.put_env(@app, :enabled_stages, [stage | current])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Disable a stage for automatic processing at runtime.
+  """
+  @spec disable_stage(atom()) :: :ok
+  def disable_stage(stage) when is_atom(stage) do
+    current = enabled_stages()
+    Application.put_env(@app, :enabled_stages, List.delete(current, stage))
+    :ok
+  end
+
+  @doc """
+  Enable all processing stages at runtime.
+  """
+  @spec enable_all_stages() :: :ok
+  def enable_all_stages do
+    Application.put_env(@app, :enabled_stages, [:inbox, :brainstorming])
+    :ok
+  end
+
+  @doc """
+  Disable all processing stages at runtime.
+  """
+  @spec disable_all_stages() :: :ok
+  def disable_all_stages do
+    Application.put_env(@app, :enabled_stages, [])
+    :ok
   end
 
   @doc """
