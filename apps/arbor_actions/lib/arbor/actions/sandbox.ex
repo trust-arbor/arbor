@@ -96,30 +96,27 @@ defmodule Arbor.Actions.Sandbox do
 
       opts = build_opts(params)
 
-      # Wrap in try/rescue to handle any failures during sandbox creation
-      try do
-        {:ok, sandbox} = Arbor.Sandbox.create(agent_id, opts)
+      {:ok, sandbox} = Arbor.Sandbox.create(agent_id, opts)
 
-        result = %{
-          sandbox_id: sandbox.id,
-          agent_id: sandbox.agent_id,
-          level: sandbox.level,
-          status: "created"
-        }
+      result = %{
+        sandbox_id: sandbox.id,
+        agent_id: sandbox.agent_id,
+        level: sandbox.level,
+        status: "created"
+      }
 
-        Actions.emit_completed(__MODULE__, %{
-          sandbox_id: sandbox.id,
-          agent_id: agent_id,
-          level: sandbox.level
-        })
+      Actions.emit_completed(__MODULE__, %{
+        sandbox_id: sandbox.id,
+        agent_id: agent_id,
+        level: sandbox.level
+      })
 
-        {:ok, result}
-      rescue
-        e ->
-          reason = Exception.message(e)
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, format_error(reason)}
-      end
+      {:ok, result}
+    rescue
+      e ->
+        reason = Exception.message(e)
+        Actions.emit_failed(__MODULE__, reason)
+        {:error, format_error(reason)}
     end
 
     defp build_opts(params) do

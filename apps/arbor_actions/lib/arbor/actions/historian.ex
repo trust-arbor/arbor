@@ -138,7 +138,14 @@ defmodule Arbor.Actions.Historian do
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
 
     defp maybe_to_atom(nil), do: nil
-    defp maybe_to_atom(str) when is_binary(str), do: String.to_existing_atom(str)
+
+    defp maybe_to_atom(str) when is_binary(str) do
+      case Arbor.Common.SafeAtom.to_existing(str) do
+        {:ok, atom} -> atom
+        {:error, _} -> nil
+      end
+    end
+
     defp maybe_to_atom(atom) when is_atom(atom), do: atom
 
     defp parse_datetime(nil), do: nil
@@ -212,16 +219,6 @@ defmodule Arbor.Actions.Historian do
       opts = [max_depth: max_depth]
 
       case Arbor.Historian.causality_chain(event_id, opts) do
-        {:ok, chain} when is_list(chain) ->
-          result = %{
-            root_event: List.last(chain),
-            chain: chain,
-            depth: length(chain)
-          }
-
-          Actions.emit_completed(__MODULE__, %{depth: result.depth})
-          {:ok, result}
-
         {:ok, []} ->
           # No chain found - event exists but has no causal relationships
           result = %{
@@ -231,6 +228,16 @@ defmodule Arbor.Actions.Historian do
           }
 
           Actions.emit_completed(__MODULE__, %{depth: 0})
+          {:ok, result}
+
+        {:ok, chain} when is_list(chain) ->
+          result = %{
+            root_event: List.last(chain),
+            chain: chain,
+            depth: length(chain)
+          }
+
+          Actions.emit_completed(__MODULE__, %{depth: result.depth})
           {:ok, result}
 
         {:error, reason} ->

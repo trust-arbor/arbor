@@ -324,12 +324,15 @@ defmodule Arbor.Actions.Code do
     defp parse_module(module_str) when is_binary(module_str) do
       module_str = if String.starts_with?(module_str, "Elixir."), do: module_str, else: "Elixir.#{module_str}"
 
-      try do
-        {:ok, String.to_existing_atom(module_str)}
-      rescue
-        ArgumentError ->
-          # Module doesn't exist yet, that's fine for new modules
-          {:ok, String.to_atom(module_str)}
+      case Arbor.Common.SafeAtom.to_existing(module_str) do
+        {:ok, atom} ->
+          {:ok, atom}
+
+        {:error, _} ->
+          # Module doesn't exist as an atom yet — reject it.
+          # HotLoad should only load modules that already exist in the VM.
+          # For truly new modules, the atom must be created through compilation first.
+          {:error, {:unknown_module, module_str}}
       end
     end
 
@@ -353,13 +356,10 @@ defmodule Arbor.Actions.Code do
     end
 
     defp compile_source(source) do
-      # Check if source is a file path
-      source_code =
-        if File.exists?(source) do
-          File.read!(source)
-        else
-          source
-        end
+      # Source is always treated as a source string, never a file path.
+      # Reading arbitrary files is a path traversal risk — the caller
+      # should read the file and pass the content as a string.
+      source_code = source
 
       try do
         case Code.compile_string(source_code) do
@@ -458,8 +458,18 @@ defmodule Arbor.Actions.Code do
           module_str = if String.starts_with?(module_str, "Elixir."), do: module_str, else: "Elixir.#{module_str}"
 
           try do
-            module = String.to_existing_atom(module_str)
-            func = String.to_existing_atom(func_str)
+            module =
+              case Arbor.Common.SafeAtom.to_existing(module_str) do
+                {:ok, m} -> m
+                {:error, _} -> raise ArgumentError, "unknown module"
+              end
+
+            func =
+              case Arbor.Common.SafeAtom.to_existing(func_str) do
+                {:ok, f} -> f
+                {:error, _} -> raise ArgumentError, "unknown function"
+              end
+
             arity = String.to_integer(arity_str)
 
             if arity == 0 do
