@@ -237,6 +237,79 @@ defmodule Arbor.Common.SafeAtom do
   end
 
   # =============================================================================
+  # Taint tracking allowlists and helpers
+  # =============================================================================
+
+  @taint_levels [:trusted, :derived, :untrusted, :hostile]
+  @taint_roles [:control, :data]
+
+  @doc """
+  Returns the list of valid taint levels for the taint tracking system.
+
+  Taint levels (ordered by severity):
+  - `:trusted` - Data from known, verified sources
+  - `:derived` - Data derived from processing that included untrusted context
+  - `:untrusted` - Data from external sources that hasn't been verified
+  - `:hostile` - Data actively identified as malicious
+  """
+  @spec taint_levels() :: [atom()]
+  def taint_levels, do: @taint_levels
+
+  @doc """
+  Returns the list of valid taint roles for action parameters.
+
+  Roles:
+  - `:control` - Parameters that affect execution flow (paths, commands, modules)
+  - `:data` - Parameters that are just processed content
+  """
+  @spec taint_roles() :: [atom()]
+  def taint_roles, do: @taint_roles
+
+  @doc """
+  Safely convert a string to a taint level atom.
+
+  Returns `{:ok, level}` if the string is a valid taint level,
+  or `{:error, {:not_allowed, string}}` otherwise.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_taint_level("trusted")
+      {:ok, :trusted}
+
+      iex> Arbor.Common.SafeAtom.to_taint_level("untrusted")
+      {:ok, :untrusted}
+
+      iex> Arbor.Common.SafeAtom.to_taint_level("invalid")
+      {:error, {:not_allowed, "invalid"}}
+  """
+  @spec to_taint_level(String.t()) :: allowed_result()
+  def to_taint_level(value) when is_binary(value) do
+    to_allowed(value, @taint_levels)
+  end
+
+  @doc """
+  Safely convert a string to a taint role atom.
+
+  Returns `{:ok, role}` if the string is a valid taint role,
+  or `{:error, {:not_allowed, string}}` otherwise.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_taint_role("control")
+      {:ok, :control}
+
+      iex> Arbor.Common.SafeAtom.to_taint_role("data")
+      {:ok, :data}
+
+      iex> Arbor.Common.SafeAtom.to_taint_role("invalid")
+      {:error, {:not_allowed, "invalid"}}
+  """
+  @spec to_taint_role(String.t()) :: allowed_result()
+  def to_taint_role(value) when is_binary(value) do
+    to_allowed(value, @taint_roles)
+  end
+
+  # =============================================================================
   # Arbor-specific allowlists and helpers
   # =============================================================================
 
