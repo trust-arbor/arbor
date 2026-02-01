@@ -34,6 +34,8 @@ defmodule Arbor.SDLC.Config do
 
   use TypedStruct
 
+  alias Arbor.SDLC.Pipeline
+
   @app :arbor_sdlc
 
   # Default values
@@ -227,11 +229,11 @@ defmodule Arbor.SDLC.Config do
   end
 
   @doc """
-  Enable all processing stages at runtime.
+  Enable all pipeline stages at runtime.
   """
   @spec enable_all_stages() :: :ok
   def enable_all_stages do
-    Application.put_env(@app, :enabled_stages, [:inbox, :brainstorming])
+    Application.put_env(@app, :enabled_stages, Pipeline.stages())
     :ok
   end
 
