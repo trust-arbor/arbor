@@ -5,18 +5,16 @@ defmodule Arbor.Memory.Application do
 
   @graph_ets :arbor_memory_graphs
   @working_memory_ets :arbor_working_memory
+  @proposals_ets :arbor_memory_proposals
 
   @impl true
   def start(_type, _args) do
-    # Create graph ETS table eagerly to avoid race conditions
-    if :ets.whereis(@graph_ets) == :undefined do
-      :ets.new(@graph_ets, [:named_table, :public, :set])
-    end
-
-    # Create working memory ETS table (Phase 2)
-    if :ets.whereis(@working_memory_ets) == :undefined do
-      :ets.new(@working_memory_ets, [:named_table, :public, :set])
-    end
+    # Create ETS tables eagerly to avoid race conditions.
+    # Tables must be owned by a long-lived process (the Application starter),
+    # not by transient test or request processes.
+    ensure_ets(@graph_ets)
+    ensure_ets(@working_memory_ets)
+    ensure_ets(@proposals_ets)
 
     children = [
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
@@ -26,5 +24,13 @@ defmodule Arbor.Memory.Application do
 
     opts = [strategy: :one_for_one, name: Arbor.Memory.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp ensure_ets(name) do
+    if :ets.whereis(name) == :undefined do
+      :ets.new(name, [:named_table, :public, :set])
+    end
+  rescue
+    ArgumentError -> :ok
   end
 end
