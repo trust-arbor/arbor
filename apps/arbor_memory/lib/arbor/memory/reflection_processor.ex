@@ -339,12 +339,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
       %{
         capability_confidence:
-          if(length(capabilities) > 0,
+          if(capabilities != [],
             do: 0.7 + length(capabilities) * 0.02,
             else: 0.5
           ),
         trait_alignment:
-          if(length(traits) > 0,
+          if(traits != [],
             do: 0.8,
             else: 0.6
           ),

@@ -134,7 +134,7 @@ defmodule Arbor.Memory.InsightDetectorTest do
 
       {:ok, proposals} = InsightDetector.detect_and_queue(agent_id, include_low_confidence: true)
 
-      if length(proposals) > 0 do
+      if proposals != [] do
         assert Enum.all?(proposals, fn p -> p.type == :insight end)
         assert Enum.all?(proposals, fn p -> p.source == "insight_detector" end)
       end
@@ -168,7 +168,7 @@ defmodule Arbor.Memory.InsightDetectorTest do
       detected = InsightDetector.detect(agent_id, include_low_confidence: true)
 
       personality_insights = Enum.filter(detected, &(&1.category == :personality))
-      assert length(personality_insights) > 0
+      assert personality_insights != []
     end
 
     test "generates preference insights for themed content", %{agent_id: agent_id} do
@@ -188,7 +188,7 @@ defmodule Arbor.Memory.InsightDetectorTest do
       # Should detect technical theme
       preference_insights = Enum.filter(detected, &(&1.category == :preference))
 
-      if length(preference_insights) > 0 do
+      if preference_insights != [] do
         assert Enum.any?(preference_insights, fn i ->
                  String.contains?(i.content, "technical")
                end)
@@ -207,7 +207,7 @@ defmodule Arbor.Memory.InsightDetectorTest do
 
       insights = InsightDetector.detect(agent_id, include_low_confidence: true)
 
-      if length(insights) > 0 do
+      if insights != [] do
         insight = hd(insights)
 
         assert Map.has_key?(insight, :content)

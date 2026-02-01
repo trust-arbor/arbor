@@ -86,7 +86,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
 
     with {:ok, :allowed} <- check_consolidation_allowed(agent_id, force),
          insights <- get_high_confidence_insights(agent_id, min_confidence),
-         true <- length(insights) > 0 do
+         true <- insights != [] do
       sk = get_or_create_self_knowledge(agent_id)
 
       # Snapshot before changes
@@ -104,7 +104,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
           end
         end)
 
-      if length(changes) > 0 do
+      if changes != [] do
         # Save updated SelfKnowledge
         save_self_knowledge(agent_id, updated_sk)
 
@@ -308,7 +308,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
             true
 
           # Cooldown between consolidations
-          length(recent) > 0 and now - Enum.max(recent) < @cooldown_ms ->
+          recent != [] and now - Enum.max(recent) < @cooldown_ms ->
             true
 
           true ->

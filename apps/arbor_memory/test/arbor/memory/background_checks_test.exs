@@ -200,7 +200,7 @@ defmodule Arbor.Memory.BackgroundChecksTest do
       result = BackgroundChecks.check_action_patterns(agent_id, action_history: history, min_occurrences: 3)
 
       # Should find suggestions from detected patterns
-      if length(result.suggestions) > 0 do
+      if result.suggestions != [] do
         assert Enum.all?(result.suggestions, fn s -> s.type == :learning end)
       end
     end

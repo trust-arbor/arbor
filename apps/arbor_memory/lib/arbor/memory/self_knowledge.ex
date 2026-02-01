@@ -505,7 +505,7 @@ defmodule Arbor.Memory.SelfKnowledge do
     parts = ["Agent #{sk.agent_id} (version #{sk.version})"]
 
     parts =
-      if length(sk.capabilities) > 0 do
+      if sk.capabilities != [] do
         cap_summary =
           sk.capabilities
           |> Enum.take(5)
@@ -518,7 +518,7 @@ defmodule Arbor.Memory.SelfKnowledge do
       end
 
     parts =
-      if length(sk.personality_traits) > 0 do
+      if sk.personality_traits != [] do
         trait_summary =
           sk.personality_traits
           |> Enum.take(5)
@@ -531,7 +531,7 @@ defmodule Arbor.Memory.SelfKnowledge do
       end
 
     parts =
-      if length(sk.values) > 0 do
+      if sk.values != [] do
         value_summary =
           sk.values
           |> Enum.take(5)
@@ -544,7 +544,7 @@ defmodule Arbor.Memory.SelfKnowledge do
       end
 
     parts =
-      if length(sk.growth_log) > 0 do
+      if sk.growth_log != [] do
         ["Growth entries: #{length(sk.growth_log)}" | parts]
       else
         parts
