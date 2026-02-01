@@ -95,6 +95,7 @@ defmodule Arbor.SDLC do
       healthy: healthy?(),
       roadmap_root: config.roadmap_root,
       watcher_enabled: config.watcher_enabled,
+      enabled_stages: config.enabled_stages,
       watcher_status: watcher_status(),
       tracker_stats: tracker_stats()
     }
@@ -438,16 +439,25 @@ defmodule Arbor.SDLC do
   defp route_to_processor(item, _path) do
     stage = determine_stage(item)
 
-    Logger.debug("Routing item to processor",
-      title: item.title,
-      stage: stage,
-      path: item.path
-    )
+    if Config.stage_enabled?(stage) do
+      Logger.debug("Routing item to processor",
+        title: item.title,
+        stage: stage,
+        path: item.path
+      )
 
-    case stage do
-      :inbox -> route_to_expander(item)
-      :brainstorming -> route_to_deliberator(item)
-      _ -> :ok
+      case stage do
+        :inbox -> route_to_expander(item)
+        :brainstorming -> route_to_deliberator(item)
+        _ -> :ok
+      end
+    else
+      Logger.debug("Stage disabled, skipping auto-processing",
+        title: item.title,
+        stage: stage
+      )
+
+      :ok
     end
   end
 
