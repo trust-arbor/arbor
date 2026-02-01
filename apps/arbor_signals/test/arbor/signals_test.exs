@@ -119,6 +119,87 @@ defmodule Arbor.SignalsTest do
     end
   end
 
+  describe "emit_tainted/5" do
+    test "emits a signal with taint metadata" do
+      assert :ok =
+               Signals.emit_tainted(
+                 :activity,
+                 :tainted_event,
+                 %{content: "untrusted data"},
+                 :untrusted,
+                 taint_source: "external_api"
+               )
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, type: :tainted_event)
+      assert signal.category == :activity
+      assert signal.type == :tainted_event
+      assert signal.metadata.taint == :untrusted
+      assert signal.metadata.taint_source == "external_api"
+      assert signal.metadata.taint_chain == []
+    end
+
+    test "includes taint_chain when provided" do
+      assert :ok =
+               Signals.emit_tainted(
+                 :activity,
+                 :chain_event,
+                 %{},
+                 :derived,
+                 taint_source: "llm_output",
+                 taint_chain: ["sig_123", "sig_456"]
+               )
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, type: :chain_event)
+      assert signal.metadata.taint == :derived
+      assert signal.metadata.taint_chain == ["sig_123", "sig_456"]
+    end
+
+    test "merges taint metadata with existing metadata" do
+      assert :ok =
+               Signals.emit_tainted(
+                 :activity,
+                 :merged_event,
+                 %{data: "test"},
+                 :trusted,
+                 metadata: %{agent_id: "agent_001", custom: "value"},
+                 taint_source: "internal"
+               )
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, type: :merged_event)
+      assert signal.metadata.taint == :trusted
+      assert signal.metadata.taint_source == "internal"
+      assert signal.metadata.agent_id == "agent_001"
+      assert signal.metadata.custom == "value"
+    end
+
+    test "supports all taint levels" do
+      for level <- [:trusted, :derived, :untrusted, :hostile] do
+        type = String.to_atom("taint_level_#{level}")
+
+        assert :ok =
+                 Signals.emit_tainted(
+                   :activity,
+                   type,
+                   %{},
+                   level,
+                   taint_source: "test"
+                 )
+
+        {:ok, [signal | _]} = Signals.recent(limit: 1, type: type)
+        assert signal.metadata.taint == level
+      end
+    end
+
+    test "default options work correctly" do
+      assert :ok = Signals.emit_tainted(:activity, :default_opts_event, %{}, :trusted)
+
+      {:ok, [signal | _]} = Signals.recent(limit: 1, type: :default_opts_event)
+      assert signal.metadata.taint == :trusted
+      assert signal.metadata.taint_source == nil
+      assert signal.metadata.taint_chain == []
+    end
+  end
+
   describe "contract callbacks" do
     test "emit_signal_for_category_and_type/4" do
       assert :ok = Signals.emit_signal_for_category_and_type(:contract, :test_cb, %{}, [])

@@ -89,6 +89,27 @@ defmodule Arbor.Actions.Sandbox do
 
     @allowed_levels [:pure, :limited, :full, :container]
 
+    @doc """
+    Declares taint roles for Sandbox.Create parameters.
+
+    Control parameters:
+    - `level` - Sandbox level directly affects security restrictions
+
+    Data parameters:
+    - `agent_id` - Identifier, doesn't affect security restrictions
+    - `base_path` - While a path, this is within sandbox constraints
+    - `timeout` - Numeric timeout doesn't affect security
+    """
+    @spec taint_roles() :: %{atom() => :control | :data}
+    def taint_roles do
+      %{
+        level: :control,
+        agent_id: :data,
+        base_path: :data,
+        timeout: :data
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{agent_id: agent_id} = params, _context) do
