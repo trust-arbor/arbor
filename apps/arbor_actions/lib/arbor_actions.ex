@@ -206,7 +206,8 @@ defmodule Arbor.Actions do
       historian: [
         Arbor.Actions.Historian.QueryEvents,
         Arbor.Actions.Historian.CausalityTree,
-        Arbor.Actions.Historian.ReconstructState
+        Arbor.Actions.Historian.ReconstructState,
+        Arbor.Actions.Historian.TaintTrace
       ],
       code: [
         Arbor.Actions.Code.CompileAndTest,
@@ -434,15 +435,24 @@ defmodule Arbor.Actions do
 
   # After successful execution, emit taint propagation signal if context had taint
   defp maybe_emit_taint_propagated(action_module, context, {:ok, _result}) do
-    case Map.get(context, :taint) do
-      nil ->
-        :ok
+    input_taint = extract_taint_level(context)
 
-      input_taint ->
-        output_taint = Arbor.Signals.Taint.propagate([input_taint])
-        TaintEvents.emit_taint_propagated(action_module, input_taint, output_taint, context)
+    if input_taint do
+      output_taint = Arbor.Signals.Taint.propagate([input_taint])
+      TaintEvents.emit_taint_propagated(action_module, input_taint, output_taint, context)
+    else
+      :ok
     end
   end
 
   defp maybe_emit_taint_propagated(_action_module, _context, _error_result), do: :ok
+
+  # Extract taint level from context, checking both flat and nested forms.
+  # Reuses same extraction logic as check_taint for consistency.
+  defp extract_taint_level(nil), do: nil
+  defp extract_taint_level(context) when not is_map(context), do: nil
+
+  defp extract_taint_level(context) do
+    Map.get(context, :taint) || get_in(context, [:taint_context, :taint])
+  end
 end
