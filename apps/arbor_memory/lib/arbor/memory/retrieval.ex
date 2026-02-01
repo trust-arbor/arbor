@@ -12,6 +12,13 @@ defmodule Arbor.Memory.Retrieval do
   - `recall/3` - Semantic similarity search
   - `let_me_recall/3` - Human-readable formatted retrieval for LLM context
 
+  ## Backend Options
+
+  The `:backend` option controls where to search:
+  - `:memory` — ETS only (fast, in-memory)
+  - `:persistent` — pgvector only (persistent, slower)
+  - `:auto` — Default. Uses the configured backend mode.
+
   ## Examples
 
       # Index some content
@@ -20,19 +27,23 @@ defmodule Arbor.Memory.Retrieval do
       # Recall similar content
       {:ok, results} = Retrieval.recall("agent_001", "fact query")
 
+      # Force persistent search
+      {:ok, results} = Retrieval.recall("agent_001", "fact query", backend: :persistent)
+
       # Get formatted text for LLM injection
       {:ok, text} = Retrieval.let_me_recall("agent_001", "fact query")
       #=> {:ok, "I recall the following relevant memories:\\n- Important fact (similarity: 0.95)"}
   """
 
   alias Arbor.Memory
-  alias Arbor.Memory.TokenBudget
+  alias Arbor.Memory.{Embedding, TokenBudget}
 
   @type recall_opts :: [
           limit: pos_integer(),
           threshold: float(),
           type: atom(),
-          types: [atom()]
+          types: [atom()],
+          backend: :memory | :persistent | :auto
         ]
 
   @type index_opts :: [
@@ -95,7 +106,8 @@ defmodule Arbor.Memory.Retrieval do
   @doc """
   Recall content similar to a query.
 
-  Delegates to `Arbor.Memory.recall/3`.
+  Delegates to `Arbor.Memory.recall/3` by default, or directly queries
+  the persistent backend when `:backend` is `:persistent`.
 
   ## Options
 
@@ -103,16 +115,69 @@ defmodule Arbor.Memory.Retrieval do
   - `:threshold` - Minimum similarity threshold (default: 0.3)
   - `:type` - Filter by entry type
   - `:types` - Filter by multiple types
+  - `:backend` - Where to search: `:memory`, `:persistent`, or `:auto` (default)
 
   ## Examples
 
       {:ok, results} = Retrieval.recall("agent_001", "greeting")
       {:ok, facts} = Retrieval.recall("agent_001", "query", type: :fact, limit: 5)
+      {:ok, persistent} = Retrieval.recall("agent_001", "query", backend: :persistent)
   """
   @spec recall(String.t(), String.t(), recall_opts()) ::
           {:ok, [map()]} | {:error, term()}
   def recall(agent_id, query, opts \\ []) do
-    Memory.recall(agent_id, query, opts)
+    backend = Keyword.get(opts, :backend, :auto)
+
+    case backend do
+      :persistent ->
+        # Directly query pgvector
+        recall_from_persistent(agent_id, query, opts)
+
+      _ ->
+        # Use the Memory facade (respects configured backend mode)
+        Memory.recall(agent_id, query, opts)
+    end
+  end
+
+  defp recall_from_persistent(agent_id, query, opts) do
+    limit = Keyword.get(opts, :limit, @default_limit)
+    threshold = Keyword.get(opts, :threshold, @default_threshold)
+
+    type_filter =
+      case Keyword.get(opts, :type) do
+        nil -> nil
+        type -> to_string(type)
+      end
+
+    # Generate embedding for query
+    embedding = compute_query_embedding(query, opts)
+
+    Embedding.search(agent_id, embedding,
+      limit: limit,
+      threshold: threshold,
+      type_filter: type_filter
+    )
+  end
+
+  # Simple hash-based embedding for fallback (matches Index behavior)
+  # Always succeeds - uses hash-based embedding if no pre-computed embedding provided
+  # Dimension must match pgvector column (384 by default)
+  @embedding_dimension Application.compile_env(:arbor_persistence, :embedding_dimension, 384)
+
+  @spec compute_query_embedding(String.t(), keyword()) :: [float()]
+  defp compute_query_embedding(query, opts) do
+    case Keyword.get(opts, :embedding) do
+      nil ->
+        # Use simple hash-based embedding with correct dimension for pgvector
+        hash = :erlang.phash2(query, 1_000_000)
+
+        for i <- 0..(@embedding_dimension - 1) do
+          :math.sin((hash + i) / 1000) * 0.5 + 0.5
+        end
+
+      embedding when is_list(embedding) ->
+        embedding
+    end
   end
 
   @doc """
@@ -147,7 +212,7 @@ defmodule Arbor.Memory.Retrieval do
 
     recall_opts =
       opts
-      |> Keyword.take([:type, :types])
+      |> Keyword.take([:type, :types, :backend])
       |> Keyword.put(:limit, limit)
       |> Keyword.put(:threshold, threshold)
 

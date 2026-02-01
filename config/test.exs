@@ -25,3 +25,11 @@ config :arbor_persistence, Arbor.Persistence.Repo,
   username: "arbor_dev",
   hostname: "localhost",
   pool: Ecto.Adapters.SQL.Sandbox
+
+# Memory tests use ETS by default (no database required)
+config :arbor_memory,
+  embedding_backend: :ets
+
+# pgvector tests (requires postgres + pgvector extension)
+config :arbor_persistence,
+  embedding_dimension: 384

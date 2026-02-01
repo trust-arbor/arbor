@@ -12,6 +12,7 @@ defmodule Arbor.Memory.Index do
   - Batch indexing
   - LRU eviction when max entries exceeded
   - Per-agent isolation via Registry
+  - Optional dual backend mode (ETS + pgvector)
 
   ## Architecture
 
@@ -19,6 +20,14 @@ defmodule Arbor.Memory.Index do
   - Embeddings are stored alongside content
   - On crash, rebuild from Postgres (no re-embedding needed)
   - Embedding backend is pluggable via arbor_ai
+
+  ## Backend Modes
+
+  Configure via `config :arbor_memory, :embedding_backend`:
+
+  - `:ets` — ETS only (default, backward compatible)
+  - `:pgvector` — pgvector only
+  - `:dual` — Write to both, read from ETS first then pgvector
 
   ## Examples
 
@@ -30,11 +39,15 @@ defmodule Arbor.Memory.Index do
 
       # Recall similar content
       {:ok, results} = Arbor.Memory.Index.recall(pid, "greeting")
+
+      # Warm cache from pgvector (in dual mode)
+      :ok = Arbor.Memory.Index.warm_cache(pid, limit: 1000)
   """
 
   use GenServer
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Memory.Embedding
 
   require Logger
 
@@ -182,6 +195,55 @@ defmodule Arbor.Memory.Index do
     GenServer.call(server, {:delete, entry_id})
   end
 
+  @doc """
+  Warm the ETS cache from pgvector.
+
+  Loads recent entries from the persistent backend into ETS.
+  Only useful in `:dual` or `:pgvector` backend modes.
+
+  ## Options
+
+  - `:limit` — Maximum entries to load (default: 1000)
+  - `:query` — Optional query to filter which entries to warm
+
+  ## Examples
+
+      :ok = Arbor.Memory.Index.warm_cache(pid)
+      :ok = Arbor.Memory.Index.warm_cache(pid, limit: 500)
+  """
+  @spec warm_cache(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  def warm_cache(server, opts \\ []) do
+    GenServer.call(server, {:warm_cache, opts}, :infinity)
+  end
+
+  @doc """
+  Sync ETS entries to the persistent backend.
+
+  Flushes entries that haven't been persisted yet to pgvector.
+  Only useful in `:dual` backend mode.
+
+  ## Examples
+
+      {:ok, count} = Arbor.Memory.Index.sync_to_persistent(pid)
+  """
+  @spec sync_to_persistent(GenServer.server(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def sync_to_persistent(server, opts \\ []) do
+    GenServer.call(server, {:sync_to_persistent, opts}, :infinity)
+  end
+
+  @doc """
+  Get the current backend mode.
+
+  ## Examples
+
+      :dual = Arbor.Memory.Index.backend_mode(pid)
+  """
+  @spec backend_mode(GenServer.server()) :: :ets | :pgvector | :dual
+  def backend_mode(server) do
+    GenServer.call(server, :backend_mode)
+  end
+
   # Registry lookup helper
   defp via_tuple(agent_id) do
     {:via, Registry, {Arbor.Memory.Registry, {:index, agent_id}}}
@@ -196,6 +258,7 @@ defmodule Arbor.Memory.Index do
     agent_id = Keyword.fetch!(opts, :agent_id)
     max_entries = Keyword.get(opts, :max_entries, @default_max_entries)
     threshold = Keyword.get(opts, :threshold, @default_threshold)
+    backend = Keyword.get(opts, :backend, get_backend_config())
 
     # Create ETS table for this index
     table = :ets.new(:memory_index, [:set, :protected])
@@ -205,11 +268,18 @@ defmodule Arbor.Memory.Index do
       table: table,
       max_entries: max_entries,
       default_threshold: threshold,
-      entry_count: 0
+      entry_count: 0,
+      backend: backend,
+      # Track entries not yet synced to persistent (for dual mode)
+      pending_sync: MapSet.new()
     }
 
-    Logger.debug("Started memory index for agent #{agent_id}")
+    Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
     {:ok, state}
+  end
+
+  defp get_backend_config do
+    Application.get_env(:arbor_memory, :embedding_backend, :ets)
   end
 
   @impl true
@@ -276,11 +346,49 @@ defmodule Arbor.Memory.Index do
     case :ets.lookup(state.table, entry_id) do
       [{^entry_id, _entry}] ->
         :ets.delete(state.table, entry_id)
-        {:reply, :ok, %{state | entry_count: max(0, state.entry_count - 1)}}
+
+        # Also delete from persistent backend if configured
+        if state.backend in [:pgvector, :dual] do
+          Embedding.delete(state.agent_id, entry_id)
+        end
+
+        new_pending = MapSet.delete(state.pending_sync, entry_id)
+
+        {:reply, :ok,
+         %{state | entry_count: max(0, state.entry_count - 1), pending_sync: new_pending}}
 
       [] ->
         {:reply, {:error, :not_found}, state}
     end
+  end
+
+  def handle_call({:warm_cache, opts}, _from, state) do
+    if state.backend in [:pgvector, :dual] do
+      result = do_warm_cache(opts, state)
+      {:reply, result, state}
+    else
+      {:reply, {:error, :backend_not_persistent}, state}
+    end
+  end
+
+  def handle_call({:sync_to_persistent, _opts}, _from, state) do
+    if state.backend == :dual do
+      result = do_sync_to_persistent(state)
+
+      case result do
+        {:ok, count} ->
+          {:reply, {:ok, count}, %{state | pending_sync: MapSet.new()}}
+
+        error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :not_dual_backend}, state}
+    end
+  end
+
+  def handle_call(:backend_mode, _from, state) do
+    {:reply, state.backend, state}
   end
 
   @impl true
@@ -297,11 +405,13 @@ defmodule Arbor.Memory.Index do
     with {:ok, embedding} <- get_or_compute_embedding(content, opts),
          entry_id <- generate_entry_id(),
          now <- DateTime.utc_now() do
+      normalized_metadata = normalize_metadata(metadata)
+
       entry = %{
         id: entry_id,
         content: content,
         embedding: embedding,
-        metadata: normalize_metadata(metadata),
+        metadata: normalized_metadata,
         indexed_at: now,
         accessed_at: now,
         access_count: 0
@@ -310,10 +420,46 @@ defmodule Arbor.Memory.Index do
       # Check if we need to evict
       new_state = maybe_evict(state)
 
-      # Store in ETS
-      :ets.insert(new_state.table, {entry_id, entry})
+      # Store based on backend mode
+      case new_state.backend do
+        :ets ->
+          # ETS only
+          :ets.insert(new_state.table, {entry_id, entry})
+          {:ok, entry_id, %{new_state | entry_count: new_state.entry_count + 1}}
 
-      {:ok, entry_id, %{new_state | entry_count: new_state.entry_count + 1}}
+        :pgvector ->
+          # pgvector only
+          case Embedding.store(new_state.agent_id, content, embedding, normalized_metadata) do
+            {:ok, _id} ->
+              {:ok, entry_id, new_state}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+
+        :dual ->
+          # Write to both ETS and pgvector
+          :ets.insert(new_state.table, {entry_id, entry})
+
+          # Async write to pgvector with error logging (pass entry_id for consistency)
+          metadata_with_id = Map.put(normalized_metadata, :id, entry_id)
+
+          Task.start(fn ->
+            case Embedding.store(new_state.agent_id, content, embedding, metadata_with_id) do
+              {:ok, _id} -> :ok
+              {:error, reason} ->
+                require Logger
+                Logger.warning("Dual-mode pgvector write failed for #{entry_id}: #{inspect(reason)}")
+            end
+          end)
+
+          {:ok, entry_id,
+           %{
+             new_state
+             | entry_count: new_state.entry_count + 1,
+               pending_sync: MapSet.put(new_state.pending_sync, entry_id)
+           }}
+      end
     end
   end
 
@@ -323,14 +469,102 @@ defmodule Arbor.Memory.Index do
       limit = Keyword.get(opts, :limit, @default_limit)
       type_filter = get_type_filter(opts)
 
-      results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
+      case state.backend do
+        :ets ->
+          # ETS only
+          do_ets_recall(query_embedding, type_filter, threshold, limit, state)
 
+        :pgvector ->
+          # pgvector only
+          do_pgvector_recall(query_embedding, type_filter, threshold, limit, state)
+
+        :dual ->
+          # Two-tier: check ETS first, then pgvector for additional results
+          do_dual_recall(query_embedding, type_filter, threshold, limit, state)
+      end
+    end
+  end
+
+  defp do_ets_recall(query_embedding, type_filter, threshold, limit, state) do
+    results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
+
+    sorted =
+      results
+      |> Enum.sort_by(& &1.similarity, :desc)
+      |> Enum.take(limit)
+
+    {:ok, sorted}
+  end
+
+  defp do_pgvector_recall(query_embedding, type_filter, threshold, limit, state) do
+    type_filter_value =
+      case type_filter do
+        {:single, type} -> to_string(type)
+        _ -> nil
+      end
+
+    opts = [
+      limit: limit,
+      threshold: threshold,
+      type_filter: type_filter_value
+    ]
+
+    Embedding.search(state.agent_id, query_embedding, opts)
+  end
+
+  defp do_dual_recall(query_embedding, type_filter, threshold, limit, state) do
+    # First, search ETS (hot cache)
+    ets_results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
+
+    # If we have enough results from ETS, return them
+    if length(ets_results) >= limit do
       sorted =
-        results
+        ets_results
         |> Enum.sort_by(& &1.similarity, :desc)
         |> Enum.take(limit)
 
       {:ok, sorted}
+    else
+      # Fall back to pgvector for additional results
+      type_filter_value =
+        case type_filter do
+          {:single, type} -> to_string(type)
+          _ -> nil
+        end
+
+      pgvector_opts = [
+        limit: limit,
+        threshold: threshold,
+        type_filter: type_filter_value
+      ]
+
+      case Embedding.search(state.agent_id, query_embedding, pgvector_opts) do
+        {:ok, pgvector_results} ->
+          # Merge results, deduplicating by content
+          # ETS results have priority (fresher access times)
+          ets_contents = MapSet.new(ets_results, & &1.content)
+
+          unique_pgvector =
+            Enum.reject(pgvector_results, fn r -> MapSet.member?(ets_contents, r.content) end)
+
+          merged = ets_results ++ unique_pgvector
+
+          sorted =
+            merged
+            |> Enum.sort_by(& &1.similarity, :desc)
+            |> Enum.take(limit)
+
+          {:ok, sorted}
+
+        {:error, _reason} ->
+          # Fallback to ETS results only
+          sorted =
+            ets_results
+            |> Enum.sort_by(& &1.similarity, :desc)
+            |> Enum.take(limit)
+
+          {:ok, sorted}
+      end
     end
   end
 
@@ -494,5 +728,101 @@ defmodule Arbor.Memory.Index do
 
   defp matches_type_filter?(entry, {:multiple, types}) do
     Map.get(entry.metadata, :type) in types
+  end
+
+  # ============================================================================
+  # Dual Backend Helpers
+  # ============================================================================
+
+  defp do_warm_cache(opts, state) do
+    limit = Keyword.get(opts, :limit, 1000)
+
+    # Use a simple search with a very low threshold to get recent entries
+    # We can't directly query "most recent" without modifying the Embedding module,
+    # so we'll use the stats to understand what's available
+    stats = Embedding.stats(state.agent_id)
+
+    if stats.total == 0 do
+      Logger.debug("No embeddings to warm cache for agent #{state.agent_id}")
+      :ok
+    else
+      # Get a sample embedding to search with (or use a zero vector)
+      # This is a bit of a workaround - ideally we'd have a "list recent" function
+      # For now, we'll load entries by doing a broad search
+      dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 384)
+      zero_vector = List.duplicate(0.0, dimension)
+
+      case Embedding.search(state.agent_id, zero_vector, limit: limit, threshold: 0.0) do
+        {:ok, results} ->
+          loaded_count =
+            Enum.reduce(results, 0, fn result, acc ->
+              # Don't overwrite entries already in ETS
+              case :ets.lookup(state.table, result.id) do
+                [] ->
+                  # Fetch full embedding to store in ETS
+                  case Embedding.get(state.agent_id, result.id) do
+                    {:ok, full_record} ->
+                      now = DateTime.utc_now()
+
+                      entry = %{
+                        id: full_record.id,
+                        content: full_record.content,
+                        embedding:
+                          if(is_list(full_record.embedding),
+                            do: full_record.embedding,
+                            else: Pgvector.to_list(full_record.embedding)
+                          ),
+                        metadata: full_record.metadata || %{},
+                        indexed_at: full_record.inserted_at || now,
+                        accessed_at: now,
+                        access_count: 0
+                      }
+
+                      :ets.insert(state.table, {full_record.id, entry})
+                      acc + 1
+
+                    {:error, _} ->
+                      acc
+                  end
+
+                _ ->
+                  # Already in ETS
+                  acc
+              end
+            end)
+
+          Logger.info("Warmed cache with #{loaded_count} entries for agent #{state.agent_id}")
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to warm cache: #{inspect(reason)}")
+          {:error, reason}
+      end
+    end
+  end
+
+  defp do_sync_to_persistent(state) do
+    pending_ids = MapSet.to_list(state.pending_sync)
+
+    if pending_ids == [] do
+      {:ok, 0}
+    else
+      entries =
+        Enum.flat_map(pending_ids, fn id ->
+          case :ets.lookup(state.table, id) do
+            [{^id, entry}] ->
+              [{entry.content, entry.embedding, entry.metadata}]
+
+            [] ->
+              []
+          end
+        end)
+
+      if entries == [] do
+        {:ok, 0}
+      else
+        Embedding.store_batch(state.agent_id, entries)
+      end
+    end
   end
 end
