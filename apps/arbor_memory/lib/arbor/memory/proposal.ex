@@ -12,6 +12,7 @@ defmodule Arbor.Memory.Proposal do
   - `:insight` - Detected behavior patterns and self-insights
   - `:learning` - Tool usage patterns and workflow learnings
   - `:pattern` - Recurring sequences detected in action history
+  - `:preconscious` - Anticipatory memories surfaced from current context
 
   ## Lifecycle
 
@@ -45,7 +46,7 @@ defmodule Arbor.Memory.Proposal do
 
   alias Arbor.Memory.{Events, KnowledgeGraph, Signals}
 
-  @type proposal_type :: :fact | :insight | :learning | :pattern
+  @type proposal_type :: :fact | :insight | :learning | :pattern | :preconscious
   @type proposal_status :: :pending | :accepted | :rejected | :deferred
 
   @type t :: %__MODULE__{
@@ -81,7 +82,7 @@ defmodule Arbor.Memory.Proposal do
   # Confidence boost when a proposal is accepted
   @acceptance_boost 0.2
 
-  @allowed_types [:fact, :insight, :learning, :pattern]
+  @allowed_types [:fact, :insight, :learning, :pattern, :preconscious]
 
   # ============================================================================
   # Construction
@@ -521,4 +522,5 @@ defmodule Arbor.Memory.Proposal do
   defp proposal_type_to_node_type(:insight), do: :insight
   defp proposal_type_to_node_type(:learning), do: :skill
   defp proposal_type_to_node_type(:pattern), do: :experience
+  defp proposal_type_to_node_type(:preconscious), do: :experience
 end

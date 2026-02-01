@@ -59,6 +59,7 @@ defmodule Arbor.Memory do
     InsightDetector,
     KnowledgeGraph,
     Patterns,
+    Preconscious,
     Preferences,
     Proposal,
     ReflectionProcessor,
@@ -1489,6 +1490,46 @@ defmodule Arbor.Memory do
   """
   @spec reflection_history(String.t(), keyword()) :: {:ok, [ReflectionProcessor.reflection()]}
   defdelegate reflection_history(agent_id, opts \\ []), to: ReflectionProcessor, as: :history
+
+  # ============================================================================
+  # Preconscious (Phase 7)
+  # ============================================================================
+
+  @doc """
+  Run a preconscious anticipation check.
+
+  Analyzes the agent's current conversation context (thoughts, goals) and
+  surfaces relevant long-term memories that might be useful.
+
+  ## Options
+
+  - `:relevance_threshold` - Minimum similarity to include (default: 0.4)
+  - `:max_results` - Maximum memories to return (default: 3)
+  - `:lookback_turns` - Number of recent thoughts to consider (default: 5)
+
+  ## Examples
+
+      {:ok, anticipation} = Arbor.Memory.run_preconscious_check("agent_001")
+  """
+  @spec run_preconscious_check(String.t(), keyword()) ::
+          {:ok, Preconscious.anticipation()} | {:error, term()}
+  defdelegate run_preconscious_check(agent_id, opts \\ []), to: Preconscious, as: :check
+
+  @doc """
+  Configure preconscious sensitivity for an agent.
+
+  ## Options
+
+  - `:relevance_threshold` - Minimum similarity to include (0.0-1.0)
+  - `:max_per_check` - Maximum proposals per check (1-10)
+  - `:lookback_turns` - Number of recent thoughts to consider (1-20)
+
+  ## Examples
+
+      :ok = Arbor.Memory.configure_preconscious("agent_001", relevance_threshold: 0.5)
+  """
+  @spec configure_preconscious(String.t(), keyword()) :: :ok | {:error, term()}
+  defdelegate configure_preconscious(agent_id, opts), to: Preconscious, as: :configure
 
   # ============================================================================
   # Private Helpers (Phase 5)

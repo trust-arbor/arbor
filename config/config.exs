@@ -141,7 +141,12 @@ config :arbor_memory,
   kg_max_nodes_per_type: 500,
   default_model: "anthropic:claude-sonnet-4-5-20250514",
   # Embedding backend: :ets (default), :pgvector, or :dual (ETS + pgvector)
-  embedding_backend: :ets
+  embedding_backend: :ets,
+  # Preconscious (Phase 7): Anticipatory retrieval during heartbeats
+  preconscious_enabled: true,
+  preconscious_threshold: 0.4,
+  preconscious_max_per_check: 3,
+  preconscious_lookback_turns: 5
 
 # pgvector embedding configuration
 config :arbor_persistence,
