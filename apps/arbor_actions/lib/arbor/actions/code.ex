@@ -282,6 +282,27 @@ defmodule Arbor.Actions.Code do
     alias Arbor.Actions
     alias Arbor.Common.SafeAtom
 
+    @doc """
+    Declares taint roles for Code.HotLoad parameters.
+
+    Control parameters:
+    - `module` - Which module to load is a critical control decision
+    - `verify_fn` - The verification function affects what code runs
+
+    Data parameters:
+    - `source` - The source code is data being processed (though dangerous)
+    - `rollback_timeout_ms` - Numeric timeout doesn't affect security
+    """
+    @spec taint_roles() :: %{atom() => :control | :data}
+    def taint_roles do
+      %{
+        module: :control,
+        verify_fn: :control,
+        source: :data,
+        rollback_timeout_ms: :data
+      }
+    end
+
     # Modules that cannot be hot-loaded under any circumstances
     @protected_modules [
       Arbor.Security,
