@@ -30,8 +30,8 @@ defmodule Arbor.Historian.TaintQuery do
   """
 
   alias Arbor.Common.SafeAtom
-  alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.HistoryEntry
+  alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.StreamIds
 
   @taint_event_types [:taint_blocked, :taint_propagated, :taint_reduced, :taint_audited]
@@ -148,11 +148,10 @@ defmodule Arbor.Historian.TaintQuery do
     with {:ok, entries} <- read_security_stream(opts) do
       # Filter to taint events for this agent
       agent_events =
-        entries
-        |> Enum.filter(&is_taint_event/1)
-        |> Enum.filter(fn entry ->
-          get_in(entry.data, [:agent_id]) == agent_id or
-            get_in(entry.data, ["agent_id"]) == agent_id
+        Enum.filter(entries, fn entry ->
+          taint_event?(entry) and
+            (get_in(entry.data, [:agent_id]) == agent_id or
+               get_in(entry.data, ["agent_id"]) == agent_id)
         end)
 
       summary = build_summary(agent_events)
@@ -171,15 +170,15 @@ defmodule Arbor.Historian.TaintQuery do
 
   defp filter_taint_events(entries, opts) do
     entries
-    |> Enum.filter(&is_taint_event/1)
+    |> Enum.filter(&taint_event?/1)
     |> maybe_filter_by_taint_level(opts)
     |> maybe_filter_by_agent_id(opts)
     |> maybe_filter_by_event_type(opts)
     |> maybe_filter_by_time_range(opts)
   end
 
-  defp is_taint_event(%HistoryEntry{type: type}) when type in @taint_event_types, do: true
-  defp is_taint_event(_), do: false
+  defp taint_event?(%HistoryEntry{type: type}) when type in @taint_event_types, do: true
+  defp taint_event?(_), do: false
 
   defp maybe_filter_by_taint_level(entries, opts) do
     case Keyword.get(opts, :taint_level) do
