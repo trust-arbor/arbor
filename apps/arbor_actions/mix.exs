@@ -35,6 +35,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_shell, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
+      {:arbor_sandbox, in_umbrella: true},
+      {:arbor_historian, in_umbrella: true},
+      {:arbor_consensus, in_umbrella: true},
       {:jido_action, path: "../../../jido_action", override: true}
     ]
   end
