@@ -159,24 +159,32 @@ defmodule Arbor.Memory.Retrieval do
     )
   end
 
-  # Simple hash-based embedding for fallback (matches Index behavior)
-  # Always succeeds - uses hash-based embedding if no pre-computed embedding provided
-  # Dimension must match pgvector column (384 by default)
-  @embedding_dimension Application.compile_env(:arbor_persistence, :embedding_dimension, 384)
+  require Logger
 
   @spec compute_query_embedding(String.t(), keyword()) :: [float()]
   defp compute_query_embedding(query, opts) do
     case Keyword.get(opts, :embedding) do
       nil ->
-        # Use simple hash-based embedding with correct dimension for pgvector
-        hash = :erlang.phash2(query, 1_000_000)
+        case Arbor.AI.embed(query) do
+          {:ok, %{embedding: embedding}} ->
+            embedding
 
-        for i <- 0..(@embedding_dimension - 1) do
-          :math.sin((hash + i) / 1000) * 0.5 + 0.5
+          {:error, reason} ->
+            Logger.warning("Embedding provider failed for query, using hash fallback: #{inspect(reason)}")
+            hash_fallback_embedding(query)
         end
 
       embedding when is_list(embedding) ->
         embedding
+    end
+  end
+
+  defp hash_fallback_embedding(text) do
+    dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 768)
+    hash = :erlang.phash2(text, 1_000_000)
+
+    for i <- 0..(dimension - 1) do
+      :math.sin((hash + i) / 1000) * 0.5 + 0.5
     end
   end
 

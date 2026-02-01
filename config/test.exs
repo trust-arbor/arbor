@@ -32,4 +32,7 @@ config :arbor_memory,
 
 # pgvector tests (requires postgres + pgvector extension)
 config :arbor_persistence,
-  embedding_dimension: 384
+  embedding_dimension: 768
+
+# Use hash-based test embeddings when no real providers are available
+config :arbor_ai, embedding_test_fallback: true

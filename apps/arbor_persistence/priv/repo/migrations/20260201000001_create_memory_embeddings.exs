@@ -25,8 +25,8 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateMemoryEmbeddings do
 
     # Vector column — hardcoded dimension in migration (migrations are historical records).
     # If dimension needs to change, create a new migration.
-    # 384 = all-MiniLM-L6-v2, 768 = larger models, 1536 = OpenAI
-    execute "ALTER TABLE memory_embeddings ADD COLUMN embedding vector(384) NOT NULL"
+    # 768 = nomic-embed-text (default), 1536 = OpenAI
+    execute "ALTER TABLE memory_embeddings ADD COLUMN embedding vector(768) NOT NULL"
 
     create index(:memory_embeddings, [:agent_id])
     create index(:memory_embeddings, [:agent_id, :memory_type])
