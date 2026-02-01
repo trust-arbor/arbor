@@ -293,7 +293,7 @@ defmodule Arbor.SDLC.Processors.ConsistencyChecker do
     Respond with ONLY "yes" or "no".
     """
 
-    case ai_module.generate_text(prompt, max_tokens: 10, temperature: 0.1) do
+    case ai_module.generate_text(prompt, max_tokens: 10, temperature: 0.1, backend: :api) do
       {:ok, response} ->
         String.downcase(response.text) |> String.contains?("yes")
 

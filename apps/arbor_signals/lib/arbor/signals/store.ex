@@ -370,6 +370,14 @@ defmodule Arbor.Signals.Store do
         Logger.warning("Signal Store: checkpoint restore failed: #{inspect(reason)}")
         state
     end
+  catch
+    :exit, {:noproc, _} ->
+      Logger.warning("Signal Store: checkpoint store process not available, starting fresh")
+      state
+
+    :exit, reason ->
+      Logger.warning("Signal Store: checkpoint restore crashed: #{inspect(reason)}")
+      state
   end
 
   defp apply_snapshot(state, snapshot_data) do
@@ -404,5 +412,11 @@ defmodule Arbor.Signals.Store do
           Logger.warning("Signal Store: checkpoint save failed: #{inspect(reason)}")
       end
     end
+  catch
+    :exit, {:noproc, _} ->
+      Logger.debug("Signal Store: checkpoint store not available for save")
+
+    :exit, _reason ->
+      :ok
   end
 end
