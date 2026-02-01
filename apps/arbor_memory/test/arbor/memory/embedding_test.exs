@@ -96,7 +96,7 @@ defmodule Arbor.Memory.EmbeddingTest do
 
       {:ok, results} = Embedding.search(@test_agent_id, query_embedding, threshold: 0.0)
 
-      assert length(results) > 0
+      assert results != []
       # First result should be most similar (to itself or similar)
       assert hd(results).content == "The sky is blue"
     end

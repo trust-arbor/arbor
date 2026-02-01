@@ -69,7 +69,7 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
       patterns = ActionPatterns.analyze(history, min_occurrences: 3)
 
-      assert length(patterns) > 0
+      assert patterns != []
       confidences = Enum.map(patterns, & &1.confidence)
       assert confidences == Enum.sort(confidences, :desc)
     end
@@ -251,7 +251,7 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
       {:ok, proposals} = ActionPatterns.analyze_and_queue(agent_id, history, min_occurrences: 3)
 
-      assert length(proposals) > 0
+      assert proposals != []
       assert Enum.all?(proposals, fn p -> p.type == :learning end)
       assert Enum.all?(proposals, fn p -> p.source == "action_patterns" end)
     end

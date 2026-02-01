@@ -216,7 +216,7 @@ defmodule Arbor.Historian.TaintQueryTest do
       {:ok, chain} = TaintQuery.trace_backward("prop_2", event_log: ctx.event_log)
 
       # prop_2 links back to prop_1 via taint_source
-      assert length(chain) >= 1
+      assert chain != []
     end
 
     test "returns single event for chain of length 1", %{ctx: ctx} do
@@ -247,7 +247,7 @@ defmodule Arbor.Historian.TaintQueryTest do
       {:ok, downstream} = TaintQuery.trace_forward("prop_1", event_log: ctx.event_log)
 
       # prop_2 has taint_source: "prop_1"
-      assert length(downstream) >= 1
+      assert downstream != []
 
       downstream_ids = Enum.map(downstream, & &1.signal_id)
       assert "prop_2" in downstream_ids
