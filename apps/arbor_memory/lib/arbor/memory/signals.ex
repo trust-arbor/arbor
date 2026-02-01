@@ -26,6 +26,8 @@ defmodule Arbor.Memory.Signals do
   | `:thought_recorded` | Thought added to working memory (Phase 2) |
   | `:facts_extracted` | Facts extracted from text (Phase 2) |
   | `:context_summarized` | Context was summarized (Phase 2) |
+  | `:preconscious_check` | Preconscious anticipation check started (Phase 7) |
+  | `:preconscious_surfaced` | Preconscious surfaced relevant memories (Phase 7) |
 
   ## Examples
 
@@ -531,6 +533,42 @@ defmodule Arbor.Memory.Signals do
       agent_id: agent_id,
       relationship_id: relationship_id,
       accessed_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Phase 7 Signals (Preconscious)
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a preconscious check starts.
+  """
+  @spec emit_preconscious_check(String.t()) :: :ok
+  def emit_preconscious_check(agent_id) do
+    Arbor.Signals.emit(:memory, :preconscious_check, %{
+      agent_id: agent_id,
+      started_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when preconscious surfaces relevant memories.
+
+  ## Anticipation
+
+  - `:query_used` - The search query derived from context
+  - `:relevance_score` - Average relevance of surfaced memories
+  - `:context_summary` - Summary of the context that triggered this
+  """
+  @spec emit_preconscious_surfaced(String.t(), map(), non_neg_integer()) :: :ok
+  def emit_preconscious_surfaced(agent_id, anticipation, memory_count) do
+    Arbor.Signals.emit(:memory, :preconscious_surfaced, %{
+      agent_id: agent_id,
+      memory_count: memory_count,
+      query_used: anticipation.query_used,
+      relevance_score: anticipation.relevance_score,
+      context_summary: anticipation.context_summary,
+      surfaced_at: DateTime.utc_now()
     })
   end
 end

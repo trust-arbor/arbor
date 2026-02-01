@@ -14,6 +14,7 @@ defmodule Arbor.Memory.BackgroundChecks do
   4. **Action Patterns** - Tool usage patterns detected?
   5. **Introspection** - Pending facts/learnings piling up?
   6. **Insights** - Behavioral patterns worth surfacing?
+  7. **Preconscious** - Relevant memories to surface based on current context?
 
   ## Result Structure
 
@@ -45,6 +46,7 @@ defmodule Arbor.Memory.BackgroundChecks do
     Consolidation,
     InsightDetector,
     Patterns,
+    Preconscious,
     Proposal,
     Signals
   }
@@ -102,6 +104,7 @@ defmodule Arbor.Memory.BackgroundChecks do
   - `:skip_consolidation` - Skip consolidation check (default: false)
   - `:skip_patterns` - Skip action pattern detection (default: false)
   - `:skip_insights` - Skip insight detection (default: false)
+  - `:skip_preconscious` - Skip preconscious anticipation check (default: false)
 
   ## Returns
 
@@ -129,6 +132,7 @@ defmodule Arbor.Memory.BackgroundChecks do
     patterns_result = maybe_check_patterns(agent_id, opts)
     introspection_result = suggest_introspection(agent_id)
     insights_result = maybe_check_insights(agent_id, opts)
+    preconscious_result = maybe_check_preconscious(agent_id, opts)
 
     # Merge all results
     result = merge_results([
@@ -137,7 +141,8 @@ defmodule Arbor.Memory.BackgroundChecks do
       decay_result,
       patterns_result,
       introspection_result,
-      insights_result
+      insights_result,
+      preconscious_result
     ])
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -439,6 +444,51 @@ defmodule Arbor.Memory.BackgroundChecks do
       empty_result()
     else
       check_insights(agent_id, opts)
+    end
+  end
+
+  defp maybe_check_preconscious(agent_id, opts) do
+    enabled = Application.get_env(:arbor_memory, :preconscious_enabled, true)
+
+    if not enabled or Keyword.get(opts, :skip_preconscious, false) do
+      empty_result()
+    else
+      check_preconscious(agent_id, opts)
+    end
+  end
+
+  @doc """
+  Check for anticipatory memories from the preconscious.
+
+  Surfaces relevant long-term memories based on current conversation context.
+  """
+  @spec check_preconscious(String.t(), keyword()) :: check_result()
+  def check_preconscious(agent_id, opts \\ []) do
+    case Preconscious.check(agent_id, opts) do
+      {:ok, %{memories: []}} ->
+        empty_result()
+
+      {:ok, anticipation} ->
+        # Create proposals from preconscious results
+        {:ok, proposals} = Preconscious.create_proposals(agent_id, anticipation)
+
+        %{
+          actions: [],
+          warnings: [],
+          suggestions:
+            Enum.map(proposals, fn proposal ->
+              %{
+                type: :preconscious,
+                content: proposal.content,
+                confidence: proposal.confidence,
+                proposal_id: proposal.id
+              }
+            end)
+        }
+
+      {:error, reason} ->
+        Logger.debug("Preconscious check failed for #{agent_id}: #{inspect(reason)}")
+        empty_result()
     end
   end
 
