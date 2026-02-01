@@ -84,6 +84,7 @@ defmodule Arbor.SDLC.Evaluator do
   defp do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout, opts) do
     system_prompt = system_prompt_for(perspective, opts)
     user_prompt = format_proposal_for_sdlc(proposal, perspective, opts)
+    ai_backend = Keyword.get(opts, :ai_backend, Config.new().ai_backend)
 
     Logger.debug("SDLC evaluator running perspective: #{perspective}")
 
@@ -93,7 +94,7 @@ defmodule Arbor.SDLC.Evaluator do
           system_prompt: system_prompt,
           max_tokens: 2048,
           temperature: temperature_for(perspective),
-          backend: :api
+          backend: ai_backend
         )
       end)
 

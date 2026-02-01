@@ -72,7 +72,7 @@ defmodule Arbor.SDLC.Config do
 
     # AI configuration
     field(:ai_module, module(), default: Arbor.AI)
-    field(:ai_backend, atom(), default: :api)
+    field(:ai_backend, atom(), default: :cli)
     field(:ai_timeout, pos_integer(), default: 60_000)
   end
 
@@ -100,7 +100,7 @@ defmodule Arbor.SDLC.Config do
       consensus_change_type: get_value(:consensus_change_type, opts, :sdlc_decision),
       max_deliberation_attempts: get_value(:max_deliberation_attempts, opts, 3),
       ai_module: get_value(:ai_module, opts, Arbor.AI),
-      ai_backend: get_value(:ai_backend, opts, :api),
+      ai_backend: get_value(:ai_backend, opts, :cli),
       ai_timeout: get_value(:ai_timeout, opts, 60_000)
     }
   end
