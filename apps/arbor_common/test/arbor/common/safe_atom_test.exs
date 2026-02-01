@@ -164,6 +164,55 @@ defmodule Arbor.Common.SafeAtomTest do
   end
 
   # ==========================================================================
+  # Edge cases
+  # ==========================================================================
+
+  describe "edge cases" do
+    test "to_existing/1 with empty string" do
+      # Empty string atom :"" exists in the VM
+      assert {:ok, :""} = SafeAtom.to_existing("")
+    end
+
+    test "to_existing/1 with very long string" do
+      long = String.duplicate("a", 10_000)
+      assert {:error, {:unknown_atom, ^long}} = SafeAtom.to_existing(long)
+    end
+
+    test "to_existing/1 with unicode string" do
+      # Unicode atoms don't exist unless previously created
+      assert {:error, {:unknown_atom, "données"}} = SafeAtom.to_existing("données")
+    end
+
+    test "to_allowed/2 with nil input" do
+      # nil is an atom, so it goes through the atom clause
+      assert {:error, {:not_allowed, nil}} = SafeAtom.to_allowed(nil, [:read, :write])
+    end
+
+    test "to_allowed/2 with nil in allowed list" do
+      assert {:ok, nil} = SafeAtom.to_allowed(nil, [nil, :read])
+    end
+
+    test "to_existing/1 with integer raises FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        SafeAtom.to_existing(42)
+      end
+    end
+
+    test "to_allowed/2 with integer raises FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        SafeAtom.to_allowed(42, [:read])
+      end
+    end
+
+    test "atomize_keys/2 with mixed key types preserves non-string non-atom keys" do
+      input = %{"name" => "test", 42 => "number_key"}
+      result = SafeAtom.atomize_keys(input, [:name])
+      assert result[:name] == "test"
+      assert result[42] == "number_key"
+    end
+  end
+
+  # ==========================================================================
   # Arbor-specific helpers
   # ==========================================================================
 

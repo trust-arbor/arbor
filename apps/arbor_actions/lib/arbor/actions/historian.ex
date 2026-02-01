@@ -299,7 +299,6 @@ defmodule Arbor.Actions.Historian do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Historian.Timeline.Span
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -345,7 +344,7 @@ defmodule Arbor.Actions.Historian do
     defp fetch_events_up_to(stream, as_of) do
       # Create a span from epoch to as_of
       epoch = ~U[1970-01-01 00:00:00Z]
-      span = Span.new(from: epoch, to: as_of, streams: [stream])
+      span = Arbor.Historian.span(from: epoch, to: as_of, streams: [stream])
 
       case Arbor.Historian.reconstruct(span) do
         {:ok, events} -> {:ok, events}

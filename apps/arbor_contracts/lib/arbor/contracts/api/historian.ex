@@ -13,7 +13,7 @@ defmodule Arbor.Contracts.API.Historian do
       {:ok, entries} = Arbor.Historian.for_agent("agent_001")
 
       # Reconstruct a timeline
-      span = Arbor.Historian.Timeline.Span.last_hours(1)
+      span = Arbor.Historian.last_hours(1)
       {:ok, entries} = Arbor.Historian.reconstruct(span)
 
   ## Functional Groups

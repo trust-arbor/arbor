@@ -3,7 +3,8 @@
 > Current state, gaps, and roadmap for the security subsystem across Arbor's library hierarchy.
 >
 > Created: 2026-01-28
-> Status: Draft — for discussion
+> Updated: 2026-01-31
+> Status: Living document — phases 1-8 complete
 
 ---
 
@@ -98,10 +99,13 @@ Bridge.ClaudeSession.authorize_tool/4
 
 ### What Works Well
 
-- **Capability model** is clean: unforgeable tokens, hierarchical URI matching, delegation with depth limits, expiration, constraints
+- **Capability model** is clean: unforgeable tokens, cryptographically signed, hierarchical URI matching, delegation with depth limits, expiration, constraint enforcement
 - **Trust/Security separation** is correct: Security answers "can?", Trust answers "should?"
 - **Consensus is independent**: pluggable evaluators, doesn't depend on Security or Trust directly
-- **Signal-based observability**: all authorization events emitted for monitoring
+- **Durable security observability**: all security events persisted to EventLog via dual-emit (durable + signal bus)
+- **Defense-in-depth enforcement**: every service facade independently checks capabilities
+- **Cryptographic agent identity**: Ed25519 signing + X25519 encryption keypairs, deterministic agent IDs
+- **Signal bus privacy**: subscription authorization with two-layer defense (subscribe-time + delivery-time)
 - **Resource URI scheme** is extensible and hierarchical
 
 ### Capability Data Model (Current)
@@ -115,8 +119,11 @@ Bridge.ClaudeSession.authorize_tool/4
   expires_at: ~U[2026-01-29 00:00:00Z],    # optional
   parent_capability_id: nil,                 # set if delegated
   delegation_depth: 3,                       # decrements on delegation
-  constraints: %{rate_limit: 100},           # not yet enforced
-  signature: nil,                            # reserved, not yet used
+  constraints: %{rate_limit: 100},           # enforced (token bucket rate limiting)
+  issuer_id: "agent_system_authority_...",   # system authority that signed this
+  issuer_signature: <<Ed25519 signature>>,   # verifiable without network call
+  signature: <<Ed25519 signature>>,          # capability content signature
+  delegation_chain: [],                      # signed delegation records
   metadata: %{}
 }
 ```
@@ -134,16 +141,17 @@ Updated for current architecture and federation-aware threat surface.
 | Capabilities | Security | Good locally — ETS store, GenServer choke point. **No protection across nodes.** |
 | Trust Profiles | Trust | Good locally — GenServer-mediated, event-sourced. **Not portable.** |
 | Consensus Decisions | Consensus | Good — sealed evaluations, quorum-based |
-| Audit Trail | Historian/Persistence | Partial — events recorded, no access control |
-| Agent Identity | **None** | **Not implemented** |
+| Security Events | Security/Persistence | Good — dual-emit to EventLog (durable) + signal bus (real-time), best-effort persistence |
+| Audit Trail | Historian/Persistence | Partial — events recorded, access control via signal bus privacy |
+| Agent Identity | Security | Good — Ed25519 signing + X25519 encryption keypairs, deterministic IDs from public key hash, nonce-based replay protection |
 | Configuration | All | Partial — runtime access, no change auditing |
 
 ### Threat Summary
 
 | ID | Threat | Severity | Status | Owner | Federation Impact |
 |----|--------|----------|--------|-------|-------------------|
-| **T8** | **Agent Impersonation** | **CRITICAL** | **None** | **Security** | **Trivial in federated env** |
-| **T1** | **Capability Forgery** | **CRITICAL** | **Partial** | **Security** | **Trivial across nodes** |
+| **T8** | **Agent Impersonation** | **CRITICAL** | **Good** (local) | **Security** | Ed25519 identity, signed requests, nonce replay protection. Cross-cluster needs federation (Phase 9) |
+| **T1** | **Capability Forgery** | **CRITICAL** | **Good** (local) | **Security** | System authority signs all capabilities, delegation chain signatures verified. Cross-node needs federation |
 | T9 | Node Spoofing | CRITICAL | Partial | Ops/Infra | Core federation risk |
 | T2 | Trust Score Manipulation | HIGH | Good | Trust | Score inflation across clusters |
 | T3 | Privilege Escalation via Delegation | HIGH | Good | Security | Delegation chain across clusters |
@@ -168,20 +176,22 @@ This is why **cryptographic identity is the foundation**, not a nice-to-have. Ev
 
 ### 4.1 Agent Identity (DONE — Phase 1, commit `baab417`)
 
-No cryptographic agent identity exists. Agents are string IDs like `"agent_claude_abc123"`. Consequences:
+Cryptographic agent identity with dual keypairs. Agents have Ed25519 for signing and X25519 for encryption. Agent IDs derived from public key hash. Signed request envelopes with timestamp freshness and nonce replay protection.
 
-- Any process/node can impersonate any agent
-- No non-repudiation (agent can deny making a request)
-- Delegation chains are trust-based, not cryptographically verified
-- No basis for cross-node or cross-cluster authentication
+**Before:** Agents were string IDs like `"agent_claude_abc123"` — any process could impersonate any agent, no non-repudiation, no basis for cross-node authentication.
 
-**What's needed:**
+**What was built:**
 
 ```
-Agent Identity = Ed25519 Keypair
-├── Private key: held by agent, signs requests and delegations
-├── Public key: registered, used by anyone to verify signatures
-└── Agent ID: derived from public key hash (verifiable binding)
+Agent Identity = Dual Keypair
+├── Ed25519 Keypair (signing)
+│   ├── Private key: held by agent, signs requests and delegations
+│   ├── Public key: registered, used by anyone to verify signatures
+│   └── Agent ID: derived from public key hash (verifiable binding)
+├── X25519 Keypair (encryption)
+│   ├── Private key: held by agent, used in ECDH key exchange
+│   └── Public key: registered, used to seal messages for this agent
+└── Agent Keychain: stores own keys + known peer public keys
 
 Signed Request Envelope
 ├── Request payload
@@ -189,13 +199,20 @@ Signed Request Envelope
 ├── Timestamp (freshness)
 ├── Nonce (replay protection)
 └── Ed25519 signature (proof)
+
+Crypto Primitives (Arbor.Security.Crypto)
+├── Ed25519: keypair generation, sign, verify
+├── X25519: ECDH key exchange
+├── HKDF-SHA256: key derivation
+├── AES-256-GCM: symmetric encryption/decryption
+└── seal/unseal: ECDH + HKDF + AES-GCM convenience API
 ```
 
 **Where it belongs:** `arbor_security` — authentication is the first half of authorization.
 
 ### 4.2 Self-Verifying Capabilities (DONE — Phase 2, commit `c6cee64`)
 
-Current capabilities are ETS records looked up by a local GenServer. In a federated environment, a node receiving a capability from a remote agent needs to verify it without calling the originating node.
+Capabilities are cryptographically signed by system authority. Delegation chains carry signed delegation records. Any node can verify a capability offline using the issuer's public key.
 
 **What's needed:**
 
@@ -219,7 +236,7 @@ Verification (local, no network call):
 
 ### 4.3 Constraint Enforcement (DONE — Phase 3)
 
-The `constraints` field exists on capabilities but is ignored during authorization. `rate_limit: 100` is metadata, not a gate.
+Constraints on capabilities are enforced during `authorize/4`. Token bucket rate limiting per agent per resource, time windows, allowed paths, and `requires_approval` for consensus escalation.
 
 **What's needed:**
 - Token bucket rate limiting per agent per resource
@@ -230,7 +247,7 @@ The `constraints` field exists on capabilities but is ignored during authorizati
 
 ### 4.4 Consensus Escalation (DONE — Phase 5)
 
-Security's `authorize/4` type spec allows `{:ok, :pending_approval, proposal_id}` but no code path triggers it. High-risk operations get a binary answer.
+Capabilities with `requires_approval: true` trigger consensus escalation. `authorize/4` submits a proposal via the configured consensus module and returns `{:ok, :pending_approval, proposal_id}`. Fail-closed when consensus is unavailable.
 
 **What's needed:**
 - Configurable escalation rules in Security (not Bridge — native agents need this too)
@@ -262,7 +279,7 @@ No cross-cluster consensus coordination is required. A capability granted after 
 
 ### 4.5 Trust-Capability Synchronization (DONE — Phase 4)
 
-Trust profiles exist but don't dynamically control capabilities. Trust tier changes should automatically grant/revoke capabilities.
+Trust tier changes automatically reflected in capabilities via CapabilitySync. Promotion grants from templates, demotion revokes above new tier, freeze revokes modifiable capabilities, unfreeze restores from templates.
 
 **What's needed:**
 - Tier promotion → grant capabilities from CapabilityTemplates
@@ -581,8 +598,12 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 ### Future Considerations (Not Roadmapped)
 
+- **Taint Tracking** — graduated taint levels (trusted/derived/untrusted/hostile) with per-parameter enforcement. Control parameters (paths, commands, modules) enforced strictly; data parameters (content, payloads) flow through. Taint propagation emits signals for historian observability. See `.arbor/roadmap/1-brainstorming/taint-tracking-prompt-injection.md`.
+- **Identity Lifecycle States** — active/suspended/revoked states for agent identities, with automatic capability revocation on suspension. See `.arbor/roadmap/0-inbox/identity-lifecycle-and-federation.md`.
+- **Encrypted Channels** — private agent-to-agent communication channels with shared symmetric keys, key rotation on member revocation, and invitation via sealed (ECDH + AES-GCM) key exchange. See signal bus privacy Phase 2.
+- **Payload Encryption** — restricted topic signals encrypted at rest and in transit. Authorized subscribers get topic key via their keychain.
 - **Signed Delegation Tokens** — compact JWT-like tokens for agent-to-agent task delegation
-- **External Identity Providers** — LDAP, OAuth for human-agent binding
+- **External Identity Providers** — LDAP, OAuth for human-agent binding; cross-domain federation bridge
 - **Human-Agent Accountability** — trace agent actions to responsible humans
 - **Cross-Agent Collusion Detection** (T13) — data flow taint tracking, capability incompatibility rules
 - **TLS Distribution** (T9) — operational concern, documented but not library code
@@ -590,7 +611,90 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 
 ---
 
-## 8. Architectural Constraints
+## 8. Defense-in-Depth: Security Enforcement Wiring
+
+Every service facade in Arbor independently enforces capabilities. Authorization is not just at the gateway — each library checks capabilities at its own boundary.
+
+### Enforcement Points
+
+| Library | Facade | Enforced At | Resource URI Pattern |
+|---------|--------|-------------|---------------------|
+| arbor_security | `Arbor.Security.authorize/4` | Core authorization pipeline | All `arbor://` URIs |
+| arbor_signals | `Arbor.Signals.Bus.subscribe/3` | Subscribe-time + delivery-time filtering | `arbor://signals/subscribe/{topic}` |
+| arbor_persistence | `Arbor.Persistence` | Read/write operations | `arbor://persistence/{read,write}/{stream}` |
+| arbor_historian | `Arbor.Historian` | Query operations | `arbor://historian/query/{scope}` |
+| arbor_sandbox | `Arbor.Sandbox` | Create/destroy operations | `arbor://sandbox/{create,destroy}` |
+| arbor_shell | `Arbor.Shell` | Command execution | `arbor://shell/exec/{command}` |
+| arbor_ai | `Arbor.AI` | LLM API requests | `arbor://ai/request` |
+| arbor_actions | `Arbor.Actions` | Action execution | `arbor://actions/execute/{action}` |
+| arbor_gateway | HTTP endpoints | Request-level auth | Maps to underlying library URIs |
+
+### Pattern
+
+Each facade uses runtime module resolution (`apply/3`) to call `Arbor.Security.authorize/4` without creating a compile-time dependency back to arbor_security. This avoids dependency cycles while ensuring every boundary checks capabilities independently.
+
+---
+
+## 9. Signal Bus Privacy
+
+### Phase 1 (DONE)
+
+Subscription authorization with two-layer defense:
+
+1. **Subscribe-time**: when an agent subscribes to a restricted topic (`:security`, `:identity`), the bus checks capability `arbor://signals/subscribe/{topic}` via the configured authorizer
+2. **Delivery-time**: restricted signals filtered from subscriptions that lack authorization (defense against subscribe-time bypass)
+
+Components:
+- `Arbor.Signals.Behaviours.SubscriptionAuthorizer` — behaviour for pluggable auth
+- `Arbor.Signals.Adapters.OpenAuthorizer` — default, allows everything (backward compatible)
+- `Arbor.Signals.Adapters.SecurityAuthorizer` — uses `apply/3` to call `Arbor.Security.authorize` at runtime
+- `Arbor.Signals.Config` — configures authorizer module and restricted topics
+
+### Phase 2 (In Progress)
+
+Payload encryption for restricted topics and encrypted agent-to-agent channels. Builds on:
+- X25519 encryption keypairs (in `Arbor.Security.Crypto`)
+- Agent keychain (`Arbor.Security.Keychain`) for key storage and peer management
+- ECDH + AES-256-GCM seal/unseal for encrypted key exchange
+
+---
+
+## 10. Security Events Persistence
+
+All security events are durably recorded via the dual-emit pattern:
+
+1. **Write to EventLog** (durable) — `Arbor.Persistence.EventLog.ETS` stores events in stream `"security:events"`
+2. **Emit on signal bus** (real-time) — subscribers get immediate notification
+
+Persistence is **best-effort**: security operations never fail because the audit backend is unavailable. The signal always emits.
+
+### Event Types
+
+| Event | When Emitted |
+|-------|-------------|
+| `authorization_granted` | Agent authorized for resource |
+| `authorization_denied` | Agent denied access |
+| `authorization_pending` | Escalated to consensus |
+| `capability_granted` | Capability token granted |
+| `capability_revoked` | Capability token revoked |
+| `identity_registered` | Agent identity registered |
+| `identity_verification_succeeded` | Signed request verified |
+| `identity_verification_failed` | Signed request rejected |
+
+### Query API
+
+```elixir
+Events.get_history(limit: 50)                    # All events
+Events.get_by_type(:authorization_denied)         # Filter by type
+Events.get_for_principal("agent_001")             # Filter by agent
+Events.get_recent(20)                             # Most recent
+```
+
+Implementation: `Arbor.Security.Events` — uses `apply/3` to call arbor_persistence functions at runtime (avoids dependency cycle since arbor_persistence depends on arbor_security).
+
+---
+
+## 11. Architectural Constraints
 
 These hold across all phases:
 
@@ -617,7 +721,7 @@ These hold across all phases:
 
 ---
 
-## 9. Decision Log
+## 12. Decision Log
 
 | Decision | Rationale | Alternative Considered |
 |----------|-----------|----------------------|
@@ -631,23 +735,63 @@ These hold across all phases:
 | Trust is local, not portable | Trust is a subjective local judgment. Portable trust creates attack surface (inflated scores from compromised clusters). Foreign agents re-earn trust locally. | Portable trust attestations — adds crypto complexity, questionable value, new attack vector |
 | Trust boundary spectrum via config | Operator decides starting tier for foreign agents. No infrastructure needed — just config. | Cryptographic trust transfer — over-engineered for a policy question |
 | Consensus governance is local | Each operator defines own rules, quorum, evaluators. No cross-cluster consensus coordination. | Federated consensus protocol — distributed consensus about consensus is turtles all the way down |
+| Dual keypair (Ed25519 + X25519) | Ed25519 for signing, X25519 for encryption. Same curve family, both native in Erlang `:crypto`. | Ed25519-to-X25519 conversion — risky and less standard |
+| Defense-in-depth enforcement | Every facade independently checks capabilities via `apply/3`. | Gateway-only enforcement — single point of failure |
+| Dual-emit for security events | Durable EventLog + real-time signal bus. Best-effort persistence. | Signal-only — no durability. EventLog-only — no real-time notification |
+| apply/3 for cross-library calls | Runtime module resolution avoids dependency cycles. Pattern established for Persistence←Security, Security←Signals. | Compile-time deps — creates cycles. Behaviours everywhere — too much ceremony for simple calls |
+| Graduated taint (not binary) | Four levels: trusted/derived/untrusted/hostile. LLM output is derived, not untrusted. | Binary taint — all LLM output equally suspect, unusable in practice |
+| Per-parameter taint enforcement | Control params (paths, commands) enforced strictly; data params flow through. | Per-action enforcement — too coarse, blocks legitimate data flow |
 
 ---
 
 ## Appendix A: Resource URI Scheme
 
 ```
+# File system
 arbor://fs/read/{path}          File system read
 arbor://fs/write/{path}         File system write
+
+# Shell
 arbor://shell/exec/{command}    Shell command execution
+
+# Agent
 arbor://agent/spawn             Agent creation
+
+# Network
 arbor://net/http/{url}          HTTP requests
 arbor://net/search              Web search
-arbor://tool/{name}             Generic tool access (fallback)
-arbor://code/write/self/*       Self-modification (future)
-arbor://governance/change/*     Governance changes (future)
-arbor://capability/modify/*     Capability modification (future)
-arbor://audit/read/*            Audit log access (future)
+
+# Signal bus (subscription authorization)
+arbor://signals/subscribe/{topic}   Subscribe to signal topic
+
+# Persistence
+arbor://persistence/read/{stream}   Read from event stream
+arbor://persistence/write/{stream}  Write to event stream
+
+# Historian
+arbor://historian/query/{scope}     Query event history
+
+# Sandbox
+arbor://sandbox/create              Create execution sandbox
+arbor://sandbox/destroy/{id}        Destroy execution sandbox
+
+# AI
+arbor://ai/request                  Make LLM API request
+
+# Actions
+arbor://actions/execute/{action}    Execute an agent action
+
+# Code
+arbor://code/hot_load/{module}      Hot-load a module into the VM
+arbor://code/write/self/*           Self-modification (future)
+
+# Governance
+arbor://governance/change/*         Governance changes (future)
+arbor://capability/modify/*         Capability modification (future)
+arbor://audit/read/*                Audit log access (future)
+
+# Generic fallback
+arbor://tool/{name}                 Generic tool access
 ```
 
 ## Appendix B: Capability Lifecycle (Target State)

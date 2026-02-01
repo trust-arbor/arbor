@@ -333,7 +333,10 @@ defmodule Arbor.Actions.Proposal do
 
     defp format_error(:not_found), do: "Proposal not found"
     defp format_error(:already_approved), do: "Cannot revise an approved proposal"
-    defp format_error({:invalid_status, status}), do: "Cannot revise proposal in status: #{status}"
+
+    defp format_error({:invalid_status, status}),
+      do: "Cannot revise proposal in status: #{status}"
+
     defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
     defp format_error(reason), do: "Proposal revision failed: #{inspect(reason)}"
   end
