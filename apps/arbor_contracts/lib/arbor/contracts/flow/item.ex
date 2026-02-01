@@ -36,7 +36,15 @@ defmodule Arbor.Contracts.Flow.Item do
 
   @type priority :: :critical | :high | :medium | :low | :someday
   @type category ::
-          :feature | :refactor | :bug | :infrastructure | :idea | :research | :documentation
+          :feature
+          | :refactor
+          | :bug
+          | :infrastructure
+          | :idea
+          | :research
+          | :documentation
+          | :content
+  @type effort :: :small | :medium | :large | :ongoing
   @type criterion :: %{text: String.t(), completed: boolean()}
 
   @derive Jason.Encoder
@@ -47,6 +55,8 @@ defmodule Arbor.Contracts.Flow.Item do
     field(:title, String.t())
     field(:priority, priority(), enforce: false)
     field(:category, category(), enforce: false)
+    field(:type, String.t(), enforce: false)
+    field(:effort, effort(), enforce: false)
     field(:summary, String.t(), enforce: false)
     field(:why_it_matters, String.t(), enforce: false)
     field(:acceptance_criteria, [criterion()], default: [])
@@ -63,7 +73,18 @@ defmodule Arbor.Contracts.Flow.Item do
   end
 
   @valid_priorities [:critical, :high, :medium, :low, :someday]
-  @valid_categories [:feature, :refactor, :bug, :infrastructure, :idea, :research, :documentation]
+  @valid_categories [
+    :feature,
+    :refactor,
+    :bug,
+    :infrastructure,
+    :idea,
+    :research,
+    :documentation,
+    :content
+  ]
+
+  @valid_efforts [:small, :medium, :large, :ongoing]
 
   @doc """
   Create a new Item with validation.
@@ -101,25 +122,7 @@ defmodule Arbor.Contracts.Flow.Item do
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
-    item = %__MODULE__{
-      id: attrs[:id] || generate_id(),
-      title: Keyword.fetch!(attrs, :title),
-      priority: attrs[:priority],
-      category: attrs[:category],
-      summary: attrs[:summary],
-      why_it_matters: attrs[:why_it_matters],
-      acceptance_criteria: attrs[:acceptance_criteria] || [],
-      definition_of_done: attrs[:definition_of_done] || [],
-      depends_on: attrs[:depends_on] || [],
-      blocks: attrs[:blocks] || [],
-      related_files: attrs[:related_files] || [],
-      content_hash: attrs[:content_hash],
-      created_at: attrs[:created_at],
-      path: attrs[:path],
-      raw_content: attrs[:raw_content],
-      notes: attrs[:notes],
-      metadata: attrs[:metadata] || %{}
-    }
+    item = build_struct(attrs)
 
     case validate(item) do
       :ok -> {:ok, item}
@@ -213,6 +216,30 @@ defmodule Arbor.Contracts.Flow.Item do
 
   # Private functions
 
+  defp build_struct(attrs) do
+    %__MODULE__{
+      id: attrs[:id] || generate_id(),
+      title: Keyword.fetch!(attrs, :title),
+      priority: attrs[:priority],
+      category: attrs[:category],
+      type: attrs[:type],
+      effort: attrs[:effort],
+      summary: attrs[:summary],
+      why_it_matters: attrs[:why_it_matters],
+      acceptance_criteria: attrs[:acceptance_criteria] || [],
+      definition_of_done: attrs[:definition_of_done] || [],
+      depends_on: attrs[:depends_on] || [],
+      blocks: attrs[:blocks] || [],
+      related_files: attrs[:related_files] || [],
+      content_hash: attrs[:content_hash],
+      created_at: attrs[:created_at],
+      path: attrs[:path],
+      raw_content: attrs[:raw_content],
+      notes: attrs[:notes],
+      metadata: attrs[:metadata] || %{}
+    }
+  end
+
   defp generate_id do
     "item_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
   end
@@ -222,6 +249,7 @@ defmodule Arbor.Contracts.Flow.Item do
       &validate_title/1,
       &validate_priority/1,
       &validate_category/1,
+      &validate_effort/1,
       &validate_criteria/1
     ]
 
@@ -261,10 +289,20 @@ defmodule Arbor.Contracts.Flow.Item do
     {:error, {:invalid_category, category}}
   end
 
+  defp validate_effort(%{effort: nil}), do: :ok
+
+  defp validate_effort(%{effort: effort}) when effort in @valid_efforts do
+    :ok
+  end
+
+  defp validate_effort(%{effort: effort}) do
+    {:error, {:invalid_effort, effort}}
+  end
+
   defp validate_criteria(%{acceptance_criteria: criteria, definition_of_done: done}) do
-    with :ok <- validate_criterion_list(criteria),
-         :ok <- validate_criterion_list(done) do
-      :ok
+    case validate_criterion_list(criteria) do
+      :ok -> validate_criterion_list(done)
+      error -> error
     end
   end
 

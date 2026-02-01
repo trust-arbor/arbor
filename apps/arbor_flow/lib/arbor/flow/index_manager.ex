@@ -74,10 +74,9 @@ defmodule Arbor.Flow.IndexManager do
     inbox: "0-inbox",
     brainstorming: "1-brainstorming",
     planned: "2-planned",
-    in_progress: "3-in_progress",
-    completed: "4-completed",
-    installed: "5-installed",
-    blocked: "6-blocked",
+    in_progress: "3-in-progress",
+    blocked: "4-blocked",
+    completed: "5-completed",
     discarded: "8-discarded"
   }
 
@@ -100,7 +99,6 @@ defmodule Arbor.Flow.IndexManager do
     blocked = scan_stage(base_path, stage_dirs[:blocked])
     planned = scan_stage(base_path, stage_dirs[:planned])
     completed = scan_stage(base_path, stage_dirs[:completed]) |> Enum.take(completed_limit)
-    installed = scan_stage(base_path, stage_dirs[:installed]) |> Enum.take(10)
     inbox = scan_stage(base_path, stage_dirs[:inbox])
     brainstorming = scan_stage(base_path, stage_dirs[:brainstorming])
 
@@ -111,7 +109,6 @@ defmodule Arbor.Flow.IndexManager do
         blocked: blocked,
         planned: planned,
         completed: completed,
-        installed: installed,
         inbox: inbox,
         brainstorming: brainstorming,
         base_path: base_path
@@ -224,7 +221,7 @@ defmodule Arbor.Flow.IndexManager do
       generate_planned_section(data.planned, data.base_path),
       generate_pipeline_section("Inbox", data.inbox, data.base_path),
       generate_pipeline_section("Brainstorming", data.brainstorming, data.base_path),
-      generate_completed_section(data.completed, data.installed, data.base_path)
+      generate_completed_section(data.completed, data.base_path)
     ]
 
     sections
@@ -273,15 +270,11 @@ defmodule Arbor.Flow.IndexManager do
     ]
   end
 
-  defp generate_completed_section(completed, installed, base_path) do
+  defp generate_completed_section(completed, base_path) do
     [
       "## Recently Completed",
       "",
       format_completed_list(completed, base_path),
-      "",
-      "## Recently Installed",
-      "",
-      format_completed_list(installed, base_path),
       ""
     ]
   end
@@ -289,9 +282,7 @@ defmodule Arbor.Flow.IndexManager do
   defp format_item_list([], _base_path), do: "_None_"
 
   defp format_item_list(items, base_path) do
-    items
-    |> Enum.map(&format_item_line(&1, base_path))
-    |> Enum.join("\n")
+    Enum.map_join(items, "\n", &format_item_line(&1, base_path))
   end
 
   defp format_item_line(item, base_path) do
@@ -310,9 +301,7 @@ defmodule Arbor.Flow.IndexManager do
   defp format_completed_list([], _base_path), do: "_None_"
 
   defp format_completed_list(items, base_path) do
-    items
-    |> Enum.map(&format_completed_line(&1, base_path))
-    |> Enum.join("\n")
+    Enum.map_join(items, "\n", &format_completed_line(&1, base_path))
   end
 
   defp format_completed_line(item, base_path) do

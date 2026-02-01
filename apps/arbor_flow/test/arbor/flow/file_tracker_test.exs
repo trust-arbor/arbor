@@ -6,11 +6,10 @@ defmodule Arbor.Flow.FileTrackerTest do
   @moduletag :fast
 
   setup do
-    # Start a unique tracker for each test
-    tracker_name = :"tracker_#{:rand.uniform(100_000)}"
-    {:ok, _pid} = ETS.start_link(name: tracker_name)
+    # Start a unique tracker using pid-based reference (avoids atom creation)
+    {:ok, tracker_pid} = ETS.start_link(name: nil)
 
-    {:ok, tracker: tracker_name}
+    {:ok, tracker: tracker_pid}
   end
 
   describe "mark_processed/4" do
