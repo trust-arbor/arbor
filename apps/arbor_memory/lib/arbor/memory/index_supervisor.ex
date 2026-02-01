@@ -60,26 +60,58 @@ defmodule Arbor.Memory.IndexSupervisor do
   def start_index(agent_id, opts \\ []) do
     case get_index(agent_id) do
       {:ok, pid} ->
-        {:ok, pid}
+        if Process.alive?(pid) do
+          {:ok, pid}
+        else
+          # Stale Registry entry — wait for cleanup and start fresh
+          wait_for_registry_cleanup(agent_id)
+          do_start_child(agent_id, opts)
+        end
 
       {:error, :not_found} ->
-        child_spec = {Arbor.Memory.Index, Keyword.put(opts, :agent_id, agent_id)}
+        do_start_child(agent_id, opts)
+    end
+  end
 
-        case DynamicSupervisor.start_child(__MODULE__, child_spec) do
-          {:ok, pid} ->
-            Logger.debug("Started memory index for agent #{agent_id}")
-            {:ok, pid}
+  defp do_start_child(agent_id, opts) do
+    child_spec = {Arbor.Memory.Index, Keyword.put(opts, :agent_id, agent_id)}
 
-          {:error, {:already_started, pid}} ->
-            {:ok, pid}
+    case DynamicSupervisor.start_child(__MODULE__, child_spec) do
+      {:ok, pid} ->
+        Logger.debug("Started memory index for agent #{agent_id}")
+        {:ok, pid}
 
-          {:error, reason} ->
-            Logger.warning(
-              "Failed to start memory index for agent #{agent_id}: #{inspect(reason)}"
-            )
+      {:error, {:already_started, pid}} ->
+        {:ok, pid}
 
-            {:error, reason}
+      {:error, reason} ->
+        Logger.warning(
+          "Failed to start memory index for agent #{agent_id}: #{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
+  end
+
+  # Registry monitors processes and removes entries on death, but the
+  # DOWN message processing is async. Wait briefly for it to complete.
+  defp wait_for_registry_cleanup(agent_id, attempts \\ 5) do
+    case Registry.lookup(Arbor.Memory.Registry, {:index, agent_id}) do
+      [] ->
+        :ok
+
+      [{pid, _}] when attempts > 0 ->
+        if Process.alive?(pid) do
+          # Process is actually alive, nothing to wait for
+          :ok
+        else
+          Process.sleep(5)
+          wait_for_registry_cleanup(agent_id, attempts - 1)
         end
+
+      _ ->
+        # Give up waiting — start_child will handle the conflict
+        :ok
     end
   end
 
@@ -116,8 +148,15 @@ defmodule Arbor.Memory.IndexSupervisor do
   @spec get_index(String.t()) :: {:ok, pid()} | {:error, :not_found}
   def get_index(agent_id) do
     case Registry.lookup(Arbor.Memory.Registry, {:index, agent_id}) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> {:error, :not_found}
+      [{pid, _}] ->
+        if Process.alive?(pid) do
+          {:ok, pid}
+        else
+          {:error, :not_found}
+        end
+
+      [] ->
+        {:error, :not_found}
     end
   end
 
