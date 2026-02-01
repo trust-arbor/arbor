@@ -12,6 +12,7 @@ defmodule Arbor.Security.Identity.Registry do
   use GenServer
 
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
 
   # Client API
@@ -90,6 +91,93 @@ defmodule Arbor.Security.Identity.Registry do
     GenServer.call(__MODULE__, :stats)
   end
 
+  # ===========================================================================
+  # Identity Lifecycle Management
+  # ===========================================================================
+
+  @doc """
+  Suspend an identity.
+
+  Sets status to `:suspended`, recording the timestamp and optional reason.
+  Suspended identities cannot be looked up (lookup returns error) but
+  can be resumed later.
+
+  ## Examples
+
+      :ok = Registry.suspend("agent_001", "Suspicious activity detected")
+  """
+  @spec suspend(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def suspend(agent_id, reason \\ nil) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:suspend, agent_id, reason})
+  end
+
+  @doc """
+  Resume a suspended identity.
+
+  Sets status back to `:active`. Only works for `:suspended` identities.
+  Returns error if the identity is `:revoked` (terminal state).
+
+  ## Examples
+
+      :ok = Registry.resume("agent_001")
+  """
+  @spec resume(String.t()) :: :ok | {:error, term()}
+  def resume(agent_id) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:resume, agent_id})
+  end
+
+  @doc """
+  Revoke an identity.
+
+  Sets status to `:revoked` (terminal state). The identity entry remains
+  for audit trail but cannot be used. This also triggers capability
+  revocation via the CapabilityStore.
+
+  Returns `{:ok, count}` where count is the number of capabilities that
+  were revoked as a result of this identity revocation.
+
+  ## Examples
+
+      {:ok, 3} = Registry.revoke_identity("agent_001", "Account compromised")
+  """
+  @spec revoke_identity(String.t(), String.t() | nil) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def revoke_identity(agent_id, reason \\ nil) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:revoke_identity, agent_id, reason})
+  end
+
+  @doc """
+  Get the current status of an identity.
+
+  ## Examples
+
+      {:ok, :active} = Registry.get_status("agent_001")
+      {:ok, :suspended} = Registry.get_status("agent_002")
+  """
+  @spec get_status(String.t()) :: {:ok, Identity.status()} | {:error, :not_found}
+  def get_status(agent_id) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:get_status, agent_id})
+  end
+
+  @doc """
+  Check if an identity is active.
+
+  Returns `true` only if the identity exists AND has status `:active`.
+  Returns `false` for suspended, revoked, or non-existent identities.
+
+  ## Examples
+
+      true = Registry.active?("agent_001")
+      false = Registry.active?("suspended_agent")
+  """
+  @spec active?(String.t()) :: boolean()
+  def active?(agent_id) when is_binary(agent_id) do
+    case get_status(agent_id) do
+      {:ok, :active} -> true
+      _ -> false
+    end
+  end
+
   # Server callbacks
 
   @impl true
@@ -123,7 +211,11 @@ defmodule Arbor.Security.Identity.Registry do
           name: identity.name,
           key_version: identity.key_version,
           created_at: identity.created_at,
-          metadata: identity.metadata
+          metadata: identity.metadata,
+          # Lifecycle status (defaults to :active for backward compatibility)
+          status: Map.get(identity, :status, :active),
+          status_changed_at: Map.get(identity, :status_changed_at),
+          status_reason: Map.get(identity, :status_reason)
         }
 
         state =
@@ -141,8 +233,17 @@ defmodule Arbor.Security.Identity.Registry do
   def handle_call({:lookup, agent_id}, _from, state) do
     result =
       case Map.get(state.by_agent_id, agent_id) do
-        nil -> {:error, :not_found}
-        %{public_key: pk} -> {:ok, pk}
+        nil ->
+          {:error, :not_found}
+
+        %{status: :suspended} ->
+          {:error, :identity_suspended}
+
+        %{status: :revoked} ->
+          {:error, :identity_revoked}
+
+        %{public_key: pk} ->
+          {:ok, pk}
       end
 
     {:reply, result, state}
@@ -152,9 +253,20 @@ defmodule Arbor.Security.Identity.Registry do
   def handle_call({:lookup_encryption_key, agent_id}, _from, state) do
     result =
       case Map.get(state.by_agent_id, agent_id) do
-        nil -> {:error, :not_found}
-        %{encryption_public_key: nil} -> {:error, :no_encryption_key}
-        %{encryption_public_key: key} -> {:ok, key}
+        nil ->
+          {:error, :not_found}
+
+        %{status: :suspended} ->
+          {:error, :identity_suspended}
+
+        %{status: :revoked} ->
+          {:error, :identity_revoked}
+
+        %{encryption_public_key: nil} ->
+          {:error, :no_encryption_key}
+
+        %{encryption_public_key: key} ->
+          {:ok, key}
       end
 
     {:reply, result, state}
@@ -203,6 +315,90 @@ defmodule Arbor.Security.Identity.Registry do
       })
 
     {:reply, stats, state}
+  end
+
+  # ===========================================================================
+  # Lifecycle Callbacks
+  # ===========================================================================
+
+  @impl true
+  def handle_call({:suspend, agent_id, reason}, _from, state) do
+    case Map.get(state.by_agent_id, agent_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{status: :revoked} ->
+        {:reply, {:error, :cannot_suspend_revoked}, state}
+
+      entry ->
+        updated_entry = %{
+          entry
+          | status: :suspended,
+            status_changed_at: DateTime.utc_now(),
+            status_reason: reason
+        }
+
+        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:resume, agent_id}, _from, state) do
+    case Map.get(state.by_agent_id, agent_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{status: :revoked} ->
+        {:reply, {:error, :cannot_resume_revoked}, state}
+
+      entry ->
+        updated_entry = %{
+          entry
+          | status: :active,
+            status_changed_at: DateTime.utc_now(),
+            status_reason: nil
+        }
+
+        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:revoke_identity, agent_id, reason}, _from, state) do
+    case Map.get(state.by_agent_id, agent_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      entry ->
+        updated_entry = %{
+          entry
+          | status: :revoked,
+            status_changed_at: DateTime.utc_now(),
+            status_reason: reason
+        }
+
+        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+
+        # Revoke all capabilities for this agent
+        {:ok, revoked_count} = CapabilityStore.revoke_all(agent_id)
+
+        {:reply, {:ok, revoked_count}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:get_status, agent_id}, _from, state) do
+    result =
+      case Map.get(state.by_agent_id, agent_id) do
+        nil -> {:error, :not_found}
+        %{status: status} -> {:ok, status}
+        # Backward compat: old entries without status field default to :active
+        _entry -> {:ok, :active}
+      end
+
+    {:reply, result, state}
   end
 
   # Private helpers

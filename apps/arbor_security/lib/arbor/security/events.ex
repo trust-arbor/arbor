@@ -124,6 +124,61 @@ defmodule Arbor.Security.Events do
   end
 
   # ============================================================================
+  # Identity Lifecycle Events
+  # ============================================================================
+
+  @doc "Record an identity suspension."
+  @spec record_identity_suspended(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def record_identity_suspended(agent_id, reason) do
+    dual_emit(:identity_suspended, %{
+      agent_id: agent_id,
+      reason: reason
+    })
+  end
+
+  @doc "Record an identity resumption."
+  @spec record_identity_resumed(String.t()) :: :ok | {:error, term()}
+  def record_identity_resumed(agent_id) do
+    dual_emit(:identity_resumed, %{
+      agent_id: agent_id
+    })
+  end
+
+  @doc "Record an identity revocation."
+  @spec record_identity_revoked(String.t(), String.t() | nil, non_neg_integer()) ::
+          :ok | {:error, term()}
+  def record_identity_revoked(agent_id, reason, cascade_count) do
+    dual_emit(:identity_revoked, %{
+      agent_id: agent_id,
+      reason: reason,
+      cascade_count: cascade_count
+    })
+  end
+
+  # ============================================================================
+  # Delegation Events
+  # ============================================================================
+
+  @doc "Record a capability delegation."
+  @spec record_delegation_created(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def record_delegation_created(delegator_id, recipient_id, capability_id) do
+    dual_emit(:delegation_created, %{
+      delegator_id: delegator_id,
+      recipient_id: recipient_id,
+      capability_id: capability_id
+    })
+  end
+
+  @doc "Record a cascade revocation of capabilities."
+  @spec record_cascade_revocation(String.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def record_cascade_revocation(root_capability_id, count_revoked) do
+    dual_emit(:cascade_revocation, %{
+      root_capability_id: root_capability_id,
+      count_revoked: count_revoked
+    })
+  end
+
+  # ============================================================================
   # Query Helpers
   # ============================================================================
 

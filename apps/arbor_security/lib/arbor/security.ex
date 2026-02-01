@@ -176,6 +176,117 @@ defmodule Arbor.Security do
     do: verify_signed_request_authenticity(signed_request)
 
   # ===========================================================================
+  # Public API — Identity Lifecycle (short names)
+  # ===========================================================================
+
+  @doc """
+  Suspend an agent's identity.
+
+  Sets the identity status to `:suspended`. Suspended identities cannot
+  be used for lookups or authorization but can be resumed later.
+
+  ## Options
+
+  - `:reason` - Optional reason for suspension
+
+  ## Examples
+
+      :ok = Arbor.Security.suspend_identity("agent_001", reason: "Suspicious activity")
+  """
+  @spec suspend_identity(String.t(), keyword()) :: :ok | {:error, term()}
+  def suspend_identity(agent_id, opts \\ []) do
+    reason = Keyword.get(opts, :reason)
+
+    case Registry.suspend(agent_id, reason) do
+      :ok ->
+        Events.record_identity_suspended(agent_id, reason)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Resume a suspended identity.
+
+  Sets the identity status back to `:active`. Only works for `:suspended`
+  identities — revoked identities cannot be resumed.
+
+  ## Examples
+
+      :ok = Arbor.Security.resume_identity("agent_001")
+  """
+  @spec resume_identity(String.t()) :: :ok | {:error, term()}
+  def resume_identity(agent_id) do
+    case Registry.resume(agent_id) do
+      :ok ->
+        Events.record_identity_resumed(agent_id)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Revoke an agent's identity.
+
+  Sets the identity status to `:revoked` (terminal state). This also
+  revokes all capabilities held by the agent. The identity entry remains
+  for audit trail purposes.
+
+  ## Options
+
+  - `:reason` - Optional reason for revocation
+
+  ## Examples
+
+      :ok = Arbor.Security.revoke_identity("agent_001", reason: "Account compromised")
+  """
+  @spec revoke_identity(String.t(), keyword()) :: :ok | {:error, term()}
+  def revoke_identity(agent_id, opts \\ []) do
+    reason = Keyword.get(opts, :reason)
+
+    case Registry.revoke_identity(agent_id, reason) do
+      {:ok, cascade_count} ->
+        Events.record_identity_revoked(agent_id, reason, cascade_count)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Get the current status of an identity.
+
+  ## Examples
+
+      {:ok, :active} = Arbor.Security.identity_status("agent_001")
+      {:ok, :suspended} = Arbor.Security.identity_status("agent_002")
+  """
+  @spec identity_status(String.t()) :: {:ok, Identity.status()} | {:error, :not_found}
+  def identity_status(agent_id) do
+    Registry.get_status(agent_id)
+  end
+
+  @doc """
+  Check if an identity is active.
+
+  Returns `true` only if the identity exists AND has status `:active`.
+
+  ## Examples
+
+      true = Arbor.Security.identity_active?("agent_001")
+      false = Arbor.Security.identity_active?("suspended_agent")
+  """
+  @spec identity_active?(String.t()) :: boolean()
+  def identity_active?(agent_id) do
+    Registry.active?(agent_id)
+  end
+
+  # ===========================================================================
   # Contract implementations — verbose, AI-readable names
   # ===========================================================================
 
@@ -186,7 +297,8 @@ defmodule Arbor.Security do
         _action,
         opts
       ) do
-    with :ok <- maybe_verify_identity(opts),
+    with :ok <- check_identity_status(principal_id),
+         :ok <- maybe_verify_identity(opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
          escalation_result <- Escalation.maybe_escalate(cap, principal_id, resource_uri) do
@@ -290,6 +402,7 @@ defmodule Arbor.Security do
          # Store with quota enforcement
          {:ok, :stored} <- CapabilityStore.put(signed_cap) do
       emit_capability_granted(signed_cap)
+      emit_delegation_created(parent_cap.principal_id, new_principal_id, signed_cap.id)
       {:ok, signed_cap}
     end
   end
@@ -389,6 +502,24 @@ defmodule Arbor.Security do
   # Private functions
   # ===========================================================================
 
+  defp check_identity_status(principal_id) do
+    case Registry.get_status(principal_id) do
+      {:ok, :active} ->
+        :ok
+
+      {:ok, :suspended} ->
+        {:error, {:unauthorized, :identity_suspended}}
+
+      {:ok, :revoked} ->
+        {:error, {:unauthorized, :identity_revoked}}
+
+      {:error, :not_found} ->
+        # Identity not registered — allow authorization to proceed
+        # (the capability check will handle unknown principals)
+        :ok
+    end
+  end
+
   defp maybe_verify_identity(opts) do
     verify? = Keyword.get(opts, :verify_identity, Config.identity_verification_enabled?())
     signed_request = Keyword.get(opts, :signed_request)
@@ -458,5 +589,9 @@ defmodule Arbor.Security do
 
   defp emit_identity_verification_failed(agent_id, reason) do
     Events.record_identity_verification_failed(agent_id, reason)
+  end
+
+  defp emit_delegation_created(delegator_id, recipient_id, capability_id) do
+    Events.record_delegation_created(delegator_id, recipient_id, capability_id)
   end
 end
