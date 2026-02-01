@@ -99,6 +99,7 @@ defmodule Arbor.Actions.Historian do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Common.SafeAtom
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -140,7 +141,7 @@ defmodule Arbor.Actions.Historian do
     defp maybe_to_atom(nil), do: nil
 
     defp maybe_to_atom(str) when is_binary(str) do
-      case Arbor.Common.SafeAtom.to_existing(str) do
+      case SafeAtom.to_existing(str) do
         {:ok, atom} -> atom
         {:error, _} -> nil
       end
