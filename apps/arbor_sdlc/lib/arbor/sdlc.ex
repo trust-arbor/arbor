@@ -54,7 +54,16 @@ defmodule Arbor.SDLC do
 
   alias Arbor.Contracts.Flow.Item
   alias Arbor.Flow.ItemParser
-  alias Arbor.SDLC.{Config, Events, PersistentFileTracker, Pipeline}
+
+  alias Arbor.SDLC.{
+    Config,
+    Events,
+    PersistentFileTracker,
+    Pipeline,
+    Processors.ConsistencyChecker,
+    Processors.Deliberator,
+    Processors.Expander
+  }
 
   # =============================================================================
   # System Status
@@ -222,11 +231,40 @@ defmodule Arbor.SDLC do
 
   @doc """
   Handle a changed file detected by the watcher.
+
+  When a file's content hash changes, this re-processes the item through the
+  appropriate processor. The file is re-parsed from the updated content so
+  that any authoritative fields the user edited are picked up. The Expander's
+  merge logic then preserves those fields during re-expansion.
+
+  After successful re-processing the tracker is updated with the new content
+  hash so that subsequent scans treat the file as up-to-date.
   """
   @spec handle_changed_file(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def handle_changed_file(path, content, hash) do
-    # For now, treat changed files the same as new files
-    handle_new_file(path, content, hash)
+    Logger.info("File changed, re-processing", path: path, content_hash: hash)
+
+    Events.emit_item_changed(path, hash)
+
+    item_map = ItemParser.parse(content)
+
+    case build_item(item_map, path, content) do
+      {:ok, item} ->
+        Events.emit_item_parsed(item)
+        result = route_to_processor(item, path)
+
+        # Update the tracker so the new hash is recorded.
+        # On success the file is either moved (tracker updated by
+        # write_and_move_item) or stays in place and needs an explicit
+        # mark_processed so the next scan sees the current hash.
+        update_tracker_after_change(path, hash, result)
+
+        result
+
+      {:error, reason} ->
+        Logger.warning("Failed to build changed item", path: path, reason: inspect(reason))
+        {:error, reason}
+    end
   end
 
   @doc """
@@ -268,6 +306,86 @@ defmodule Arbor.SDLC do
   defdelegate ensure_directories!(roadmap_root), to: Pipeline
 
   # =============================================================================
+  # Consistency Checks
+  # =============================================================================
+
+  @doc """
+  Run consistency checks on the roadmap.
+
+  Performs health checks, index refresh, stale item detection, and completion
+  detection across all pipeline stages.
+
+  ## Options
+
+  - `:checks` - List of checks to run (default: all)
+  - `:dry_run` - Don't write changes (default: false)
+  - `:stale_threshold_days` - Days before item is considered stale (default: 14)
+
+  ## Available Checks
+
+  - `:completion_detection` - Find in_progress items that are done
+  - `:index_refresh` - Rebuild INDEX.md files
+  - `:stale_detection` - Find items stuck too long
+  - `:health_check` - Verify required fields
+
+  ## Examples
+
+      # Run all checks
+      {:ok, results} = Arbor.SDLC.run_consistency_checks()
+
+      # Run specific checks
+      {:ok, results} = Arbor.SDLC.run_consistency_checks(checks: [:health_check])
+  """
+  @spec run_consistency_checks(keyword()) :: {:ok, map()} | {:error, term()}
+  defdelegate run_consistency_checks(opts \\ []), to: ConsistencyChecker, as: :run
+
+  @doc """
+  List available consistency checks.
+  """
+  @spec available_consistency_checks() :: [atom()]
+  defdelegate available_consistency_checks(), to: ConsistencyChecker, as: :available_checks
+
+  # =============================================================================
+  # Processors API
+  # =============================================================================
+
+  @doc """
+  Expand an inbox item using the Expander processor.
+
+  Takes a raw inbox item and expands it with LLM-generated content:
+  priority, category, summary, acceptance criteria, etc.
+
+  ## Options
+
+  - `:dry_run` - If true, don't perform actual changes
+  - `:ai_module` - Override the AI module to use
+
+  ## Returns
+
+      {:ok, {:moved_and_updated, :brainstorming, expanded_item}} | {:ok, :no_action} | {:error, reason}
+  """
+  @spec expand_item(Item.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  defdelegate expand_item(item, opts \\ []), to: Expander, as: :process_item
+
+  @doc """
+  Deliberate on a brainstorming item using the Deliberator processor.
+
+  Analyzes the item for decision points and uses the consensus council
+  to make planning decisions.
+
+  ## Options
+
+  - `:dry_run` - If true, don't perform actual changes
+  - `:ai_module` - Override the AI module to use
+
+  ## Returns
+
+      {:ok, {:moved, :planned | :discarded}} | {:ok, {:moved_and_updated, stage, item}} | {:error, reason}
+  """
+  @spec deliberate_item(Item.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  defdelegate deliberate_item(item, opts \\ []), to: Deliberator, as: :process_item
+
+  # =============================================================================
   # Private Functions
   # =============================================================================
 
@@ -289,14 +407,14 @@ defmodule Arbor.SDLC do
 
     case stage do
       :inbox ->
-        # Would route to Expander processor (Phase 3)
-        Logger.info("Item in inbox would be processed by Expander", title: item.title)
-        {:ok, {:pending_processor, :expander}}
+        # Route to Expander processor
+        Logger.info("Processing inbox item with Expander", title: item.title)
+        Expander.process_item(item, opts)
 
       :brainstorming ->
-        # Would route to Deliberator processor (Phase 3)
-        Logger.info("Item in brainstorming would be processed by Deliberator", title: item.title)
-        {:ok, {:pending_processor, :deliberator}}
+        # Route to Deliberator processor
+        Logger.info("Processing brainstorming item with Deliberator", title: item.title)
+        Deliberator.process_item(item, opts)
 
       stage when stage in [:completed, :discarded] ->
         Logger.debug("Item in terminal stage", stage: stage, title: item.title)
@@ -314,7 +432,6 @@ defmodule Arbor.SDLC do
   end
 
   defp route_to_processor(item, _path) do
-    # For Phase 2, just log - processors will be added in Phase 3
     stage = determine_stage(item)
 
     Logger.debug("Routing item to processor",
@@ -323,7 +440,88 @@ defmodule Arbor.SDLC do
       path: item.path
     )
 
+    case stage do
+      :inbox -> route_to_expander(item)
+      :brainstorming -> route_to_deliberator(item)
+      _ -> :ok
+    end
+  end
+
+  defp route_to_expander(item) do
+    case Expander.process_item(item, []) do
+      {:ok, {:moved_and_updated, :brainstorming, expanded_item}} ->
+        write_and_move_item(expanded_item, item.path, :brainstorming)
+
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Expander failed", title: item.title, reason: inspect(reason))
+        {:error, reason}
+    end
+  end
+
+  defp route_to_deliberator(item) do
+    case Deliberator.process_item(item, []) do
+      {:ok, {:moved, stage}} ->
+        move_item(item, stage, [])
+        :ok
+
+      {:ok, {:moved_and_updated, stage, updated_item}} ->
+        write_and_move_item(updated_item, item.path, stage)
+
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Deliberator failed", title: item.title, reason: inspect(reason))
+        {:error, reason}
+    end
+  end
+
+  defp write_and_move_item(item, old_path, to_stage) do
+    config = Config.new()
+
+    # Serialize the item back to markdown
+    content = ItemParser.serialize(Map.from_struct(item))
+
+    # Write to the new location
+    filename = Path.basename(old_path)
+    dest_dir = Pipeline.stage_path(to_stage, config.roadmap_root)
+    dest_path = Path.join(dest_dir, filename)
+
+    File.mkdir_p!(dest_dir)
+    File.write!(dest_path, content)
+
+    # Delete the old file if different from new
+    if old_path != dest_path and File.exists?(old_path) do
+      File.rm(old_path)
+    end
+
+    # Update tracking
+    update_tracking_after_move(
+      %{path: old_path, content_hash: item.content_hash},
+      dest_path,
+      config
+    )
+
+    # Emit event
+    from_stage = Pipeline.stage_from_path(old_path) |> elem(1)
+
+    Events.emit_item_moved(item, from_stage, to_stage,
+      old_path: old_path,
+      new_path: dest_path
+    )
+
     :ok
+  rescue
+    e ->
+      Logger.error("Failed to write and move item",
+        item: item.title,
+        error: Exception.message(e)
+      )
+
+      {:error, {:write_failed, e}}
   end
 
   defp determine_stage(item) do
@@ -379,6 +577,38 @@ defmodule Arbor.SDLC do
           "sdlc_watcher",
           content_hash
         )
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # When a changed file is re-processed and stays in place (e.g. the
+  # processor returned :ok or :no_action without moving the file),
+  # update the tracker with the new content hash so the next scan
+  # treats the file as current.  If the processor moved the file,
+  # write_and_move_item already updated the tracker.
+  defp update_tracker_after_change(path, hash, result) do
+    case result do
+      :ok ->
+        mark_processed_in_tracker(path, hash)
+
+      {:error, _} ->
+        # Processing failed — don't update tracker so it retries next scan
+        :ok
+
+      _ ->
+        # Moved/updated variants are already tracked by write_and_move_item
+        :ok
+    end
+  end
+
+  defp mark_processed_in_tracker(path, hash) do
+    case Process.whereis(Arbor.SDLC.FileTracker) do
+      nil ->
+        :ok
+
+      tracker ->
+        PersistentFileTracker.mark_processed(tracker, path, "sdlc_watcher", hash)
     end
   rescue
     _ -> :ok
