@@ -5,7 +5,7 @@ defmodule Arbor.Security.EscalationTest do
 
   # Mock consensus module for testing
   defmodule MockConsensus do
-    def submit(%{proposer: _} = proposal) do
+    def submit(%{} = proposal) when is_map_key(proposal, :proposer) do
       {:ok, "proposal_#{:erlang.unique_integer([:positive])}"}
     end
 

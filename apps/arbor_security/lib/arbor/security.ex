@@ -57,10 +57,10 @@ defmodule Arbor.Security do
   alias Arbor.Security.Constraint
   alias Arbor.Security.Constraint.RateLimiter
   alias Arbor.Security.Escalation
+  alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.SystemAuthority
-  alias Arbor.Signals
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -424,66 +424,39 @@ defmodule Arbor.Security do
     end
   end
 
-  # Signal emission
+  # Event recording (dual-emit: EventLog + signal bus)
+  # Delegates to Security.Events which persists to EventLog first,
+  # then emits on the signal bus for real-time notification.
 
   defp emit_authorization_granted(principal_id, resource_uri, opts) do
-    Signals.emit(:security, :authorization_granted, %{
-      principal_id: principal_id,
-      resource_uri: resource_uri,
-      trace_id: Keyword.get(opts, :trace_id)
-    })
+    Events.record_authorization_granted(principal_id, resource_uri, opts)
   end
 
   defp emit_authorization_pending(principal_id, resource_uri, proposal_id, opts) do
-    Signals.emit(:security, :authorization_pending, %{
-      principal_id: principal_id,
-      resource_uri: resource_uri,
-      proposal_id: proposal_id,
-      trace_id: Keyword.get(opts, :trace_id)
-    })
+    Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
   end
 
   defp emit_authorization_denied(principal_id, resource_uri, reason, opts) do
-    Signals.emit(:security, :authorization_denied, %{
-      principal_id: principal_id,
-      resource_uri: resource_uri,
-      reason: reason,
-      trace_id: Keyword.get(opts, :trace_id)
-    })
+    Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
   end
 
   defp emit_capability_granted(cap) do
-    Signals.emit(:security, :capability_granted, %{
-      capability_id: cap.id,
-      principal_id: cap.principal_id,
-      resource_uri: cap.resource_uri
-    })
+    Events.record_capability_granted(cap)
   end
 
   defp emit_capability_revoked(capability_id) do
-    Signals.emit(:security, :capability_revoked, %{
-      capability_id: capability_id
-    })
+    Events.record_capability_revoked(capability_id)
   end
 
-  # Identity signals
-
   defp emit_identity_registered(agent_id) do
-    Signals.emit(:security, :identity_registered, %{
-      agent_id: agent_id
-    })
+    Events.record_identity_registered(agent_id)
   end
 
   defp emit_identity_verification_succeeded(agent_id) do
-    Signals.emit(:security, :identity_verification_succeeded, %{
-      agent_id: agent_id
-    })
+    Events.record_identity_verification_succeeded(agent_id)
   end
 
   defp emit_identity_verification_failed(agent_id, reason) do
-    Signals.emit(:security, :identity_verification_failed, %{
-      agent_id: agent_id,
-      reason: reason
-    })
+    Events.record_identity_verification_failed(agent_id, reason)
   end
 end
