@@ -29,6 +29,7 @@ defmodule Arbor.Historian.TaintQuery do
       {:ok, summary} = TaintQuery.taint_summary("agent_001")
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.StreamIds
@@ -198,7 +199,14 @@ defmodule Arbor.Historian.TaintQuery do
   end
 
   defp normalize_level(level) when is_atom(level), do: level
-  defp normalize_level(level) when is_binary(level), do: String.to_existing_atom(level)
+
+  defp normalize_level(level) when is_binary(level) do
+    case SafeAtom.to_existing(level) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
+  end
+
   defp normalize_level(_), do: nil
 
   defp maybe_filter_by_agent_id(entries, opts) do
