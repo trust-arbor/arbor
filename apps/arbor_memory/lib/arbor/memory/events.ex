@@ -256,6 +256,57 @@ defmodule Arbor.Memory.Events do
   end
 
   # ============================================================================
+  # Phase 4 Events (Proposals)
+  # ============================================================================
+
+  @doc """
+  Record a proposal being accepted.
+
+  Tracks the agent's decision to accept a proposed fact, insight, or learning.
+  """
+  @spec record_proposal_accepted(String.t(), String.t(), String.t(), atom()) ::
+          :ok | {:error, term()}
+  def record_proposal_accepted(agent_id, proposal_id, node_id, proposal_type) do
+    dual_emit(agent_id, :proposal_accepted, %{
+      proposal_id: proposal_id,
+      node_id: node_id,
+      proposal_type: proposal_type
+    })
+  end
+
+  @doc """
+  Record an insight being created from a proposal.
+
+  Tracks insights that have been accepted and integrated into the knowledge graph.
+  """
+  @spec record_insight_created(String.t(), map()) :: :ok | {:error, term()}
+  def record_insight_created(agent_id, insight_data) do
+    dual_emit(agent_id, :insight_created, %{
+      node_id: insight_data[:node_id],
+      category: insight_data[:category],
+      content_preview: String.slice(insight_data[:content] || "", 0, 200),
+      confidence: insight_data[:confidence],
+      source: insight_data[:source]
+    })
+  end
+
+  @doc """
+  Record a learning being integrated from a proposal.
+
+  Tracks learnings that have been accepted and integrated into the knowledge graph.
+  """
+  @spec record_learning_integrated(String.t(), map()) :: :ok | {:error, term()}
+  def record_learning_integrated(agent_id, learning_data) do
+    dual_emit(agent_id, :learning_integrated, %{
+      node_id: learning_data[:node_id],
+      pattern_type: learning_data[:pattern_type],
+      content_preview: String.slice(learning_data[:content] || "", 0, 200),
+      confidence: learning_data[:confidence],
+      tools: learning_data[:tools]
+    })
+  end
+
+  # ============================================================================
   # Query Helpers
   # ============================================================================
 
