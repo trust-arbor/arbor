@@ -142,6 +142,59 @@ defmodule Arbor.SDLC do
   end
 
   @doc """
+  Restart the watcher with current configuration.
+
+  Use after changing the roadmap root or other watcher settings at runtime.
+  Terminates the existing watcher and starts a new one under the supervisor.
+  """
+  @spec restart_watcher() :: :ok | {:error, term()}
+  def restart_watcher do
+    supervisor = Arbor.SDLC.Supervisor
+
+    case Process.whereis(supervisor) do
+      nil ->
+        {:error, :supervisor_not_running}
+
+      _pid ->
+        # Terminate old watcher if running
+        case Process.whereis(Arbor.SDLC.Watcher) do
+          nil -> :ok
+          _watcher -> Supervisor.terminate_child(supervisor, Arbor.SDLC.Watcher)
+        end
+
+        # Delete the old child spec
+        Supervisor.delete_child(supervisor, Arbor.SDLC.Watcher)
+
+        # Build new spec with current config
+        config = Config.new()
+        directories = Pipeline.watched_directories(config.roadmap_root)
+
+        watcher_spec =
+          {Arbor.Flow.Watcher,
+           [
+             name: Arbor.SDLC.Watcher,
+             directories: directories,
+             patterns: ["*.md"],
+             tracker: Arbor.SDLC.FileTracker,
+             tracker_module: PersistentFileTracker,
+             processor_id: "sdlc_watcher",
+             poll_interval: config.poll_interval,
+             debounce_ms: config.debounce_ms,
+             callbacks: %{
+               on_new: &handle_new_file/3,
+               on_changed: &handle_changed_file/3,
+               on_deleted: &handle_deleted_file/1
+             }
+           ]}
+
+        case Supervisor.start_child(supervisor, watcher_spec) do
+          {:ok, _pid} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  @doc """
   Process a specific file manually.
 
   Parses the file and routes it to the appropriate processor based on
