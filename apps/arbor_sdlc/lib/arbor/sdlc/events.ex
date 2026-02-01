@@ -10,6 +10,7 @@ defmodule Arbor.SDLC.Events do
 
   ### Item Lifecycle
   - `:item_detected` - New item file detected
+  - `:item_changed` - Previously processed item file changed
   - `:item_parsed` - Item parsed from markdown
   - `:item_expanded` - Item expanded by Expander processor
   - `:item_deliberated` - Item analyzed by Deliberator
@@ -56,10 +57,29 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_detected(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def emit_item_detected(path, content_hash, opts \\ []) do
-    emit(:item_detected, %{
-      path: path,
-      content_hash: content_hash
-    }, opts)
+    emit(
+      :item_detected,
+      %{
+        path: path,
+        content_hash: content_hash
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a previously processed item file is changed.
+  """
+  @spec emit_item_changed(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def emit_item_changed(path, content_hash, opts \\ []) do
+    emit(
+      :item_changed,
+      %{
+        path: path,
+        content_hash: content_hash
+      },
+      opts
+    )
   end
 
   @doc """
@@ -67,13 +87,17 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_parsed(map() | struct(), keyword()) :: :ok | {:error, term()}
   def emit_item_parsed(item, opts \\ []) do
-    emit(:item_parsed, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      path: Map.get(item, :path),
-      category: Map.get(item, :category),
-      priority: Map.get(item, :priority)
-    }, opts)
+    emit(
+      :item_parsed,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        path: Map.get(item, :path),
+        category: Map.get(item, :category),
+        priority: Map.get(item, :priority)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -81,14 +105,18 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_expanded(map() | struct(), keyword()) :: :ok | {:error, term()}
   def emit_item_expanded(item, opts \\ []) do
-    emit(:item_expanded, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      category: Map.get(item, :category),
-      priority: Map.get(item, :priority),
-      has_acceptance_criteria: Map.get(item, :acceptance_criteria, []) != [],
-      has_definition_of_done: Map.get(item, :definition_of_done, []) != []
-    }, opts)
+    emit(
+      :item_expanded,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        category: Map.get(item, :category),
+        priority: Map.get(item, :priority),
+        has_acceptance_criteria: Map.get(item, :acceptance_criteria, []) != [],
+        has_definition_of_done: Map.get(item, :definition_of_done, []) != []
+      },
+      opts
+    )
   end
 
   @doc """
@@ -96,12 +124,16 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_deliberated(map() | struct(), atom(), keyword()) :: :ok | {:error, term()}
   def emit_item_deliberated(item, outcome, opts \\ []) do
-    emit(:item_deliberated, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      outcome: outcome,
-      decision_id: Keyword.get(opts, :decision_id)
-    }, opts)
+    emit(
+      :item_deliberated,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        outcome: outcome,
+        decision_id: Keyword.get(opts, :decision_id)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -109,14 +141,18 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_moved(map() | struct(), atom(), atom(), keyword()) :: :ok | {:error, term()}
   def emit_item_moved(item, from_stage, to_stage, opts \\ []) do
-    emit(:item_moved, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      from_stage: from_stage,
-      to_stage: to_stage,
-      old_path: Keyword.get(opts, :old_path),
-      new_path: Keyword.get(opts, :new_path)
-    }, opts)
+    emit(
+      :item_moved,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        from_stage: from_stage,
+        to_stage: to_stage,
+        old_path: Keyword.get(opts, :old_path),
+        new_path: Keyword.get(opts, :new_path)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -124,12 +160,16 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_item_completed(map() | struct(), atom(), keyword()) :: :ok | {:error, term()}
   def emit_item_completed(item, terminal_stage, opts \\ []) do
-    emit(:item_completed, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      terminal_stage: terminal_stage,
-      duration_ms: Keyword.get(opts, :duration_ms)
-    }, opts)
+    emit(
+      :item_completed,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        terminal_stage: terminal_stage,
+        duration_ms: Keyword.get(opts, :duration_ms)
+      },
+      opts
+    )
   end
 
   # =============================================================================
@@ -141,12 +181,16 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_processing_started(map() | struct(), atom(), keyword()) :: :ok | {:error, term()}
   def emit_processing_started(item, processor, opts \\ []) do
-    emit(:processing_started, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      processor: processor,
-      complexity_tier: Keyword.get(opts, :complexity_tier)
-    }, opts)
+    emit(
+      :processing_started,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        processor: processor,
+        complexity_tier: Keyword.get(opts, :complexity_tier)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -155,13 +199,17 @@ defmodule Arbor.SDLC.Events do
   @spec emit_processing_completed(map() | struct(), atom(), term(), keyword()) ::
           :ok | {:error, term()}
   def emit_processing_completed(item, processor, result, opts \\ []) do
-    emit(:processing_completed, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      processor: processor,
-      result: summarize_result(result),
-      duration_ms: Keyword.get(opts, :duration_ms)
-    }, opts)
+    emit(
+      :processing_completed,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        processor: processor,
+        result: summarize_result(result),
+        duration_ms: Keyword.get(opts, :duration_ms)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -170,13 +218,17 @@ defmodule Arbor.SDLC.Events do
   @spec emit_processing_failed(map() | struct(), atom(), term(), keyword()) ::
           :ok | {:error, term()}
   def emit_processing_failed(item, processor, error, opts \\ []) do
-    emit(:processing_failed, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      processor: processor,
-      error: inspect(error),
-      retryable: Keyword.get(opts, :retryable, true)
-    }, opts)
+    emit(
+      :processing_failed,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        processor: processor,
+        error: inspect(error),
+        retryable: Keyword.get(opts, :retryable, true)
+      },
+      opts
+    )
   end
 
   # =============================================================================
@@ -189,12 +241,16 @@ defmodule Arbor.SDLC.Events do
   @spec emit_decision_requested(map() | struct(), String.t(), keyword()) ::
           :ok | {:error, term()}
   def emit_decision_requested(item, proposal_id, opts \\ []) do
-    emit(:decision_requested, %{
-      item_id: get_item_id(item),
-      title: Map.get(item, :title),
-      proposal_id: proposal_id,
-      attempt: Keyword.get(opts, :attempt, 1)
-    }, opts)
+    emit(
+      :decision_requested,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        proposal_id: proposal_id,
+        attempt: Keyword.get(opts, :attempt, 1)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -202,13 +258,17 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_decision_rendered(String.t(), atom(), map(), keyword()) :: :ok | {:error, term()}
   def emit_decision_rendered(proposal_id, verdict, decision_summary, opts \\ []) do
-    emit(:decision_rendered, %{
-      proposal_id: proposal_id,
-      verdict: verdict,
-      approval_count: Map.get(decision_summary, :approval_count),
-      rejection_count: Map.get(decision_summary, :rejection_count),
-      abstain_count: Map.get(decision_summary, :abstain_count)
-    }, opts)
+    emit(
+      :decision_rendered,
+      %{
+        proposal_id: proposal_id,
+        verdict: verdict,
+        approval_count: Map.get(decision_summary, :approval_count),
+        rejection_count: Map.get(decision_summary, :rejection_count),
+        abstain_count: Map.get(decision_summary, :abstain_count)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -216,10 +276,14 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_decision_documented(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def emit_decision_documented(proposal_id, decision_path, opts \\ []) do
-    emit(:decision_documented, %{
-      proposal_id: proposal_id,
-      decision_path: decision_path
-    }, opts)
+    emit(
+      :decision_documented,
+      %{
+        proposal_id: proposal_id,
+        decision_path: decision_path
+      },
+      opts
+    )
   end
 
   # =============================================================================
@@ -231,10 +295,14 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_watcher_started([String.t()], keyword()) :: :ok | {:error, term()}
   def emit_watcher_started(directories, opts \\ []) do
-    emit(:watcher_started, %{
-      directories: directories,
-      poll_interval: Keyword.get(opts, :poll_interval)
-    }, opts)
+    emit(
+      :watcher_started,
+      %{
+        directories: directories,
+        poll_interval: Keyword.get(opts, :poll_interval)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -242,12 +310,16 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_watcher_scan_completed(map(), keyword()) :: :ok | {:error, term()}
   def emit_watcher_scan_completed(stats, opts \\ []) do
-    emit(:watcher_scan_completed, %{
-      files_scanned: Map.get(stats, :files_scanned, 0),
-      new_files: Map.get(stats, :new_files, 0),
-      changed_files: Map.get(stats, :changed_files, 0),
-      deleted_files: Map.get(stats, :deleted_files, 0)
-    }, opts)
+    emit(
+      :watcher_scan_completed,
+      %{
+        files_scanned: Map.get(stats, :files_scanned, 0),
+        new_files: Map.get(stats, :new_files, 0),
+        changed_files: Map.get(stats, :changed_files, 0),
+        deleted_files: Map.get(stats, :deleted_files, 0)
+      },
+      opts
+    )
   end
 
   @doc """
@@ -255,11 +327,15 @@ defmodule Arbor.SDLC.Events do
   """
   @spec emit_consistency_check_completed(map(), keyword()) :: :ok | {:error, term()}
   def emit_consistency_check_completed(results, opts \\ []) do
-    emit(:consistency_check_completed, %{
-      checks_run: Map.get(results, :checks_run, []),
-      issues_found: Map.get(results, :issues_found, 0),
-      items_flagged: Map.get(results, :items_flagged, [])
-    }, opts)
+    emit(
+      :consistency_check_completed,
+      %{
+        checks_run: Map.get(results, :checks_run, []),
+        issues_found: Map.get(results, :issues_found, 0),
+        items_flagged: Map.get(results, :items_flagged, [])
+      },
+      opts
+    )
   end
 
   # =============================================================================
@@ -292,7 +368,10 @@ defmodule Arbor.SDLC.Events do
   defp summarize_result({:ok, :no_action}), do: "no_action"
   defp summarize_result({:ok, {:moved, stage}}), do: "moved_to_#{stage}"
   defp summarize_result({:ok, {:updated, _}}), do: "updated"
-  defp summarize_result({:ok, {:moved_and_updated, stage, _}}), do: "moved_and_updated_to_#{stage}"
+
+  defp summarize_result({:ok, {:moved_and_updated, stage, _}}),
+    do: "moved_and_updated_to_#{stage}"
+
   defp summarize_result({:error, reason}), do: "error: #{inspect(reason)}"
   defp summarize_result(other), do: inspect(other)
 end
