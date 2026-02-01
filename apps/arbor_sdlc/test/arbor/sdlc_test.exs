@@ -93,23 +93,29 @@ defmodule Arbor.SDLCTest do
   end
 
   describe "process_file/2" do
-    test "processes inbox file", %{temp_roadmap_root: root} do
+    test "processes inbox file via Expander", %{temp_roadmap_root: root} do
       content = TestHelpers.simple_item_content("Process Me")
       path = TestHelpers.create_test_item(root, :inbox, "process.md", content)
 
-      {:ok, result} = SDLC.process_file(path)
+      # Use mock AI to avoid real LLM calls
+      {:ok, result} = SDLC.process_file(path, ai_module: MockAI.ExpansionResponse)
 
-      # In Phase 2, processing just returns pending processor
-      assert result == {:pending_processor, :expander}
+      # Phase 3: Expander processes and returns expanded item ready for brainstorming
+      assert {:moved_and_updated, :brainstorming, expanded_item} = result
+      assert expanded_item.title == "Process Me"
+      assert expanded_item.priority != nil
+      assert expanded_item.category != nil
     end
 
-    test "processes brainstorming file", %{temp_roadmap_root: root} do
+    test "processes brainstorming file via Deliberator", %{temp_roadmap_root: root} do
       content = TestHelpers.expanded_item_content("Deliberate Me")
       path = TestHelpers.create_test_item(root, :brainstorming, "deliberate.md", content)
 
-      {:ok, result} = SDLC.process_file(path)
+      # Use mock AI that says item is well-specified
+      {:ok, result} = SDLC.process_file(path, ai_module: DeliberatorMockAI.WellSpecified)
 
-      assert result == {:pending_processor, :deliberator}
+      # Phase 3: Deliberator processes and moves to planned
+      assert result == {:moved, :planned}
     end
 
     test "returns no_action for completed item", %{temp_roadmap_root: root} do
@@ -132,9 +138,10 @@ defmodule Arbor.SDLCTest do
   end
 
   describe "handle_new_file/3" do
-    test "handles new file callback", %{temp_roadmap_root: root} do
+    test "handles new file callback without crashing", %{temp_roadmap_root: root} do
+      # Item in a non-processing stage (completed) so no processor is invoked
       content = TestHelpers.simple_item_content("New File")
-      path = TestHelpers.create_test_item(root, :inbox, "new.md", content)
+      path = TestHelpers.create_test_item(root, :completed, "new.md", content)
       hash = Arbor.Flow.compute_hash(content)
 
       assert :ok = SDLC.handle_new_file(path, content, hash)
@@ -150,12 +157,57 @@ defmodule Arbor.SDLCTest do
   end
 
   describe "handle_changed_file/3" do
-    test "handles changed file callback", %{temp_roadmap_root: root} do
+    test "re-processes changed file without crashing", %{temp_roadmap_root: root} do
+      # Use a terminal stage so no LLM call is triggered
       content = TestHelpers.simple_item_content("Changed File")
-      path = TestHelpers.create_test_item(root, :inbox, "changed.md", content)
+      path = TestHelpers.create_test_item(root, :completed, "changed.md", content)
       hash = Arbor.Flow.compute_hash(content)
 
       assert :ok = SDLC.handle_changed_file(path, content, hash)
+    end
+
+    test "re-processes file when content changes", %{temp_roadmap_root: root} do
+      original = TestHelpers.simple_item_content("Evolving Item")
+      path = TestHelpers.create_test_item(root, :completed, "evolving.md", original)
+
+      # Simulate content change
+      updated = TestHelpers.simple_item_content("Evolving Item Updated")
+      File.write!(path, updated)
+      new_hash = Arbor.Flow.compute_hash(updated)
+
+      # Changed file in a terminal stage should not crash
+      assert :ok = SDLC.handle_changed_file(path, updated, new_hash)
+    end
+
+    test "handles invalid content gracefully on change" do
+      content = "Not valid markdown item format"
+      hash = Arbor.Flow.compute_hash(content)
+
+      assert {:error, _} = SDLC.handle_changed_file("/fake/path.md", content, hash)
+    end
+
+    test "preserves authoritative fields during re-expansion", %{temp_roadmap_root: root} do
+      # Create an item that already has priority and category set by the user
+      content = """
+      # Re-expand Me
+
+      **Priority:** critical
+      **Category:** bug
+
+      ## Summary
+
+      An existing item that the user edited.
+      """
+
+      path = TestHelpers.create_test_item(root, :inbox, "re-expand.md", content)
+
+      # Process via Expander with mock AI (returns priority: high, category: feature)
+      result = SDLC.process_file(path, ai_module: MockAI.ExpansionResponse)
+
+      assert {:ok, {:moved_and_updated, :brainstorming, expanded}} = result
+      # Authoritative fields from the file should be preserved over AI suggestions
+      assert expanded.priority == :critical
+      assert expanded.category == :bug
     end
   end
 
