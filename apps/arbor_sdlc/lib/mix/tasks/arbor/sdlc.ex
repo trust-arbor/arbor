@@ -165,11 +165,9 @@ defmodule Mix.Tasks.Arbor.Sdlc do
 
     case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :roadmap_root, ".arbor/roadmap"]) do
       :ok ->
-        :rpc.call(node, Arbor.SDLC.Pipeline, :ensure_directories!, [
-          :rpc.call(node, Arbor.SDLC.Config, :absolute_roadmap_root, [])
-        ])
-
-        :rpc.call(node, Arbor.SDLC, :rescan, [])
+        abs = :rpc.call(node, Arbor.SDLC.Config, :absolute_roadmap_root, [])
+        :rpc.call(node, Arbor.SDLC.Pipeline, :ensure_directories!, [abs])
+        :rpc.call(node, Arbor.SDLC, :restart_watcher, [])
         Mix.shell().info("Roadmap root reset to .arbor/roadmap")
 
       {:badrpc, reason} ->
@@ -191,9 +189,16 @@ defmodule Mix.Tasks.Arbor.Sdlc do
     case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :roadmap_root, abs_path]) do
       :ok ->
         :rpc.call(node, Arbor.SDLC.Pipeline, :ensure_directories!, [abs_path])
-        :rpc.call(node, Arbor.SDLC, :rescan, [])
-        Mix.shell().info("Roadmap root set to #{abs_path}")
-        Mix.shell().info("Stage directories created. Watcher rescanned.")
+
+        case :rpc.call(node, Arbor.SDLC, :restart_watcher, []) do
+          :ok ->
+            Mix.shell().info("Roadmap root set to #{abs_path}")
+            Mix.shell().info("Stage directories created. Watcher restarted.")
+
+          {:error, reason} ->
+            Mix.shell().info("Roadmap root set to #{abs_path}")
+            Mix.shell().error("Watcher restart failed: #{inspect(reason)}")
+        end
 
       {:badrpc, reason} ->
         Mix.shell().error("Failed: #{inspect(reason)}")
