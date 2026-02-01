@@ -164,7 +164,8 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     case ai_module.generate_text(prompt,
            system_prompt: system_prompt,
            max_tokens: 2048,
-           temperature: 0.3
+           temperature: 0.3,
+           backend: :api
          ) do
       {:ok, response} ->
         parse_analysis_response(response)
@@ -546,7 +547,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     {"revised_decision_points": [{"question": "...", "context": "...", "options": ["..."]}]}
     """
 
-    case ai_module.generate_text(prompt, max_tokens: 2048, temperature: 0.4) do
+    case ai_module.generate_text(prompt, max_tokens: 2048, temperature: 0.4, backend: :api) do
       {:ok, response} ->
         case Jason.decode(response.text) do
           {:ok, %{"revised_decision_points" => points}} -> points

@@ -370,7 +370,11 @@ defmodule Arbor.Flow.Watcher do
   end
 
   defp process_file_change(state, path, content, hash, change_type) do
-    # Use the change_type from when the change was detected
+    # Mark as processed in tracker BEFORE invoking callback.
+    # This prevents the next scan from re-scheduling the same file
+    # while a long-running callback (e.g., AI expansion) is in progress.
+    mark_processed(state, path, hash)
+
     case change_type do
       :new ->
         invoke_callback(state.callbacks[:on_new], path, content, hash)
@@ -378,9 +382,6 @@ defmodule Arbor.Flow.Watcher do
       :changed ->
         invoke_callback(state.callbacks[:on_changed], path, content, hash)
     end
-
-    # Mark as processed in tracker
-    mark_processed(state, path, hash)
 
     state
   end

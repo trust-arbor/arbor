@@ -221,7 +221,13 @@ defmodule Arbor.SDLC do
     case build_item(item_map, path, content) do
       {:ok, item} ->
         Events.emit_item_parsed(item)
-        route_to_processor(item, path)
+        # Spawn processor work asynchronously so the watcher isn't blocked
+        # by potentially slow LLM calls
+        Task.Supervisor.start_child(Arbor.SDLC.TaskSupervisor, fn ->
+          route_to_processor(item, path)
+        end)
+
+        :ok
 
       {:error, reason} ->
         Logger.warning("Failed to build item", path: path, reason: inspect(reason))
@@ -251,15 +257,13 @@ defmodule Arbor.SDLC do
     case build_item(item_map, path, content) do
       {:ok, item} ->
         Events.emit_item_parsed(item)
-        result = route_to_processor(item, path)
 
-        # Update the tracker so the new hash is recorded.
-        # On success the file is either moved (tracker updated by
-        # write_and_move_item) or stays in place and needs an explicit
-        # mark_processed so the next scan sees the current hash.
-        update_tracker_after_change(path, hash, result)
+        Task.Supervisor.start_child(Arbor.SDLC.TaskSupervisor, fn ->
+          result = route_to_processor(item, path)
+          update_tracker_after_change(path, hash, result)
+        end)
 
-        result
+        :ok
 
       {:error, reason} ->
         Logger.warning("Failed to build changed item", path: path, reason: inspect(reason))

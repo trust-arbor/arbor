@@ -428,36 +428,29 @@ defmodule Arbor.Checkpoint do
   # Signal Emissions
   # ============================================================================
 
-  defp emit_saved(id) do
-    Signals.emit(:checkpoint, :saved, %{
-      checkpoint_id: inspect(id)
-    })
-  end
+  defp emit_saved(id), do: safe_emit(:saved, %{checkpoint_id: inspect(id)})
 
   defp emit_save_failed(id, reason) do
-    Signals.emit(:checkpoint, :save_failed, %{
-      checkpoint_id: inspect(id),
-      reason: inspect(reason, limit: 200)
-    })
+    safe_emit(:save_failed, %{checkpoint_id: inspect(id), reason: inspect(reason, limit: 200)})
   end
 
-  defp emit_loaded(id) do
-    Signals.emit(:checkpoint, :loaded, %{
-      checkpoint_id: inspect(id)
-    })
-  end
+  defp emit_loaded(id), do: safe_emit(:loaded, %{checkpoint_id: inspect(id)})
 
   defp emit_load_failed(id, reason) do
-    Signals.emit(:checkpoint, :load_failed, %{
-      checkpoint_id: inspect(id),
-      reason: inspect(reason, limit: 200)
-    })
+    safe_emit(:load_failed, %{checkpoint_id: inspect(id), reason: inspect(reason, limit: 200)})
   end
 
   defp emit_restored(id, module) do
-    Signals.emit(:checkpoint, :restored, %{
-      checkpoint_id: inspect(id),
-      module: inspect(module)
-    })
+    safe_emit(:restored, %{checkpoint_id: inspect(id), module: inspect(module)})
+  end
+
+  # Signals may not be started yet (checkpoint starts before signals).
+  # Emit best-effort without crashing.
+  defp safe_emit(type, data) do
+    Signals.emit(:checkpoint, type, data)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

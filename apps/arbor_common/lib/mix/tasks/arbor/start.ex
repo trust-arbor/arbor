@@ -42,10 +42,17 @@ defmodule Mix.Tasks.Arbor.Start do
         "--cookie #{Config.cookie()} -S mix run --no-halt " <>
         "> #{log_file} 2>&1 & echo $!"
 
+    # Inherit the full environment so API keys, PATH, etc. are available.
+    # Only override MIX_ENV explicitly.
+    env =
+      System.get_env()
+      |> Map.put("MIX_ENV", to_string(Mix.env()))
+      |> Enum.to_list()
+
     {output, 0} =
       System.cmd("sh", ["-c", elixir_cmd],
         cd: project_dir,
-        env: [{"MIX_ENV", to_string(Mix.env())}]
+        env: env
       )
 
     pid =
