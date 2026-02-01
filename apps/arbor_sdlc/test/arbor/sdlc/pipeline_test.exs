@@ -1,9 +1,15 @@
 defmodule Arbor.SDLC.PipelineTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.SDLC.Pipeline
 
   @moduletag :fast
+
+  # Reset config after each test to avoid test pollution
+  setup do
+    on_exit(fn -> Pipeline.reset_config() end)
+    :ok
+  end
 
   describe "stages/0" do
     test "returns all stages in order" do
@@ -200,6 +206,160 @@ defmodule Arbor.SDLC.PipelineTest do
         path = Pipeline.stage_path(stage, temp_root)
         assert File.dir?(path), "Expected #{path} to exist"
       end
+    end
+  end
+
+  # =============================================================================
+  # Runtime Configuration Tests
+  # =============================================================================
+
+  describe "config/0" do
+    test "returns default configuration when not configured" do
+      config = Pipeline.config()
+
+      assert is_list(config.stages)
+      assert is_map(config.directories)
+      assert match?(%MapSet{}, config.transitions)
+      assert is_list(config.processing_stages)
+    end
+
+    test "includes all default stages" do
+      config = Pipeline.config()
+
+      assert :inbox in config.stages
+      assert :brainstorming in config.stages
+      assert :planned in config.stages
+      assert :in_progress in config.stages
+      assert :completed in config.stages
+      assert :discarded in config.stages
+    end
+  end
+
+  describe "configure/1" do
+    test "updates stages configuration" do
+      custom_stages = [:draft, :review, :published]
+
+      Pipeline.configure(%{stages: custom_stages})
+
+      assert Pipeline.stages() == custom_stages
+    end
+
+    test "updates directory mapping" do
+      custom_dirs = %{
+        draft: "drafts",
+        review: "under-review",
+        published: "live"
+      }
+
+      Pipeline.configure(%{
+        stages: [:draft, :review, :published],
+        directories: custom_dirs
+      })
+
+      assert Pipeline.stage_directory(:draft) == "drafts"
+      assert Pipeline.stage_directory(:review) == "under-review"
+      assert Pipeline.stage_directory(:published) == "live"
+    end
+
+    test "updates transitions" do
+      custom_transitions = [
+        {:draft, :review},
+        {:review, :published},
+        {:review, :draft}
+      ]
+
+      Pipeline.configure(%{transitions: custom_transitions})
+
+      assert Pipeline.transition_allowed?(:draft, :review)
+      assert Pipeline.transition_allowed?(:review, :published)
+      assert Pipeline.transition_allowed?(:review, :draft)
+      # Old transition should not work
+      refute Pipeline.transition_allowed?(:inbox, :brainstorming)
+    end
+
+    test "updates processing stages" do
+      custom_processing = [:draft, :review]
+
+      Pipeline.configure(%{
+        stages: [:draft, :review, :published],
+        directories: %{draft: "drafts", review: "review", published: "published"},
+        processing_stages: custom_processing
+      })
+
+      assert Pipeline.processing_stage?(:draft)
+      assert Pipeline.processing_stage?(:review)
+      refute Pipeline.processing_stage?(:published)
+    end
+
+    test "merges with existing configuration" do
+      # First configure stages
+      Pipeline.configure(%{stages: [:a, :b, :c]})
+
+      # Then configure directories separately
+      Pipeline.configure(%{directories: %{a: "stage-a", b: "stage-b", c: "stage-c"}})
+
+      # Both should be present
+      assert Pipeline.stages() == [:a, :b, :c]
+      assert Pipeline.stage_directory(:a) == "stage-a"
+    end
+  end
+
+  describe "reset_config/0" do
+    test "restores default configuration" do
+      # Configure custom pipeline
+      Pipeline.configure(%{stages: [:custom]})
+      assert Pipeline.stages() == [:custom]
+
+      # Reset
+      Pipeline.reset_config()
+
+      # Should have defaults again
+      assert :inbox in Pipeline.stages()
+      assert length(Pipeline.stages()) == 6
+    end
+  end
+
+  describe "directory_stage/1 with custom config" do
+    test "reverse mapping works with custom directories" do
+      Pipeline.configure(%{
+        stages: [:todo, :doing, :done],
+        directories: %{
+          todo: "1-todo",
+          doing: "2-doing",
+          done: "3-done"
+        }
+      })
+
+      assert Pipeline.directory_stage("1-todo") == {:ok, :todo}
+      assert Pipeline.directory_stage("2-doing") == {:ok, :doing}
+      assert Pipeline.directory_stage("3-done") == {:ok, :done}
+      assert Pipeline.directory_stage("unknown") == :error
+    end
+  end
+
+  describe "initial_stage/0 with custom config" do
+    test "returns first stage from custom configuration" do
+      Pipeline.configure(%{stages: [:start, :middle, :end]})
+
+      assert Pipeline.initial_stage() == :start
+    end
+  end
+
+  describe "watched_directories/1 with custom config" do
+    test "uses custom processing stages" do
+      Pipeline.configure(%{
+        stages: [:draft, :review, :published],
+        directories: %{
+          draft: "drafts",
+          review: "review",
+          published: "published"
+        },
+        processing_stages: [:draft]
+      })
+
+      dirs = Pipeline.watched_directories("/my/root")
+
+      assert dirs == ["/my/root/drafts"]
     end
   end
 end

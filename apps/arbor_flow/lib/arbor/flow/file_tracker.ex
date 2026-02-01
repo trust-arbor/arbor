@@ -304,8 +304,7 @@ defmodule Arbor.Flow.FileTracker.ETS do
     pattern = {{:"$1", processor_name}, %{status: :"$2"}}
 
     guard = [
-      {:orelse, {:orelse, {:==, :"$2", :processed}, {:==, :"$2", :skipped}},
-       {:==, :"$2", :moved}}
+      {:orelse, {:orelse, {:==, :"$2", :processed}, {:==, :"$2", :skipped}}, {:==, :"$2", :moved}}
     ]
 
     result = [:"$1"]
