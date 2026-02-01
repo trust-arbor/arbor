@@ -285,7 +285,7 @@ defmodule Arbor.Signals.Channels do
         {:ok, encrypted_payload} ->
           signal =
             Signal.new(
-              String.to_atom("channel_#{channel_id}"),
+              :channel,
               message_type,
               %{
                 __channel_encrypted__: true,
