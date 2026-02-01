@@ -43,10 +43,11 @@ defmodule Arbor.Actions.CodeTest do
 
     test "accepts worktree_path from context" do
       # This will fail since the path doesn't exist, but it should get past validation
-      result = Code.CompileAndTest.run(
-        %{file: "lib/my_module.ex", compile_only: true},
-        %{worktree_path: "/nonexistent/path"}
-      )
+      result =
+        Code.CompileAndTest.run(
+          %{file: "lib/my_module.ex", compile_only: true},
+          %{worktree_path: "/nonexistent/path"}
+        )
 
       # Should fail at compilation, not at validation
       assert {:ok, %{compiled: false}} = result
@@ -92,13 +93,14 @@ defmodule Arbor.Actions.CodeTest do
 
     test "rejects protected modules" do
       # Arbor.Security is a protected module
-      result = Code.HotLoad.run(
-        %{
-          module: "Arbor.Security",
-          source: "defmodule Arbor.Security do end"
-        },
-        %{}
-      )
+      result =
+        Code.HotLoad.run(
+          %{
+            module: "Arbor.Security",
+            source: "defmodule Arbor.Security do end"
+          },
+          %{}
+        )
 
       assert {:error, msg} = result
       assert msg =~ "protected module"
