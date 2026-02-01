@@ -5,9 +5,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
 
       $ mix arbor.sdlc status
       $ mix arbor.sdlc enable inbox
-      $ mix arbor.sdlc enable brainstorming
       $ mix arbor.sdlc enable all
-      $ mix arbor.sdlc disable inbox
+      $ mix arbor.sdlc disable brainstorming
       $ mix arbor.sdlc disable all
       $ mix arbor.sdlc rescan
       $ mix arbor.sdlc backend api
@@ -23,9 +22,9 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   """
   use Mix.Task
 
+  alias Arbor.SDLC.Pipeline
   alias Mix.Tasks.Arbor.Helpers
 
-  @valid_stages ~w(inbox brainstorming)
   @valid_backends ~w(cli api)
 
   @impl Mix.Task
@@ -72,14 +71,18 @@ defmodule Mix.Tasks.Arbor.Sdlc do
         Mix.shell().info("  Watcher:    #{watcher}")
         Mix.shell().info("  Root:       #{root}")
         Mix.shell().info("  Backend:    #{backend}")
-        Mix.shell().info("")
-        Mix.shell().info("  Stage            Enabled")
-        Mix.shell().info("  ───────────────  ───────")
+        all_stages = Pipeline.stages()
+        processing = Pipeline.config().processing_stages
 
-        for stage <- @valid_stages do
-          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-          marker = if String.to_atom(stage) in enabled, do: "  ✓", else: "  ✗"
-          Mix.shell().info("  #{String.pad_trailing(stage, 15)}#{marker}")
+        Mix.shell().info("")
+        Mix.shell().info("  Stage            Enabled  Processor")
+        Mix.shell().info("  ───────────────  ───────  ─────────")
+
+        for stage <- all_stages do
+          enabled_marker = if stage in enabled, do: "  ✓", else: "  ✗"
+          proc_marker = if stage in processing, do: "  ✓", else: "  ─"
+          name = stage |> Atom.to_string() |> String.pad_trailing(15)
+          Mix.shell().info("  #{name}#{String.pad_trailing(enabled_marker, 9)}#{proc_marker}")
         end
 
         Mix.shell().info("")
@@ -99,23 +102,24 @@ defmodule Mix.Tasks.Arbor.Sdlc do
     end
   end
 
-  defp cmd_enable(stage) when stage in @valid_stages do
-    ensure_running!()
-    node = Helpers.full_node_name()
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    atom = String.to_atom(stage)
-
-    case :rpc.call(node, Arbor.SDLC.Config, :enable_stage, [atom]) do
-      :ok ->
-        Mix.shell().info("Stage :#{stage} enabled.")
-
-      {:badrpc, reason} ->
-        Mix.shell().error("Failed: #{inspect(reason)}")
-    end
-  end
-
   defp cmd_enable(stage) do
-    Mix.shell().error("Unknown stage: #{stage}. Valid stages: #{Enum.join(@valid_stages, ", ")}, all")
+    case validate_stage(stage) do
+      {:ok, atom} ->
+        ensure_running!()
+        node = Helpers.full_node_name()
+
+        case :rpc.call(node, Arbor.SDLC.Config, :enable_stage, [atom]) do
+          :ok ->
+            Mix.shell().info("Stage :#{stage} enabled.")
+
+          {:badrpc, reason} ->
+            Mix.shell().error("Failed: #{inspect(reason)}")
+        end
+
+      :error ->
+        valid = Pipeline.stages() |> Enum.map_join(", ", &Atom.to_string/1)
+        Mix.shell().error("Unknown stage: #{stage}. Valid stages: #{valid}, all")
+    end
   end
 
   defp cmd_disable("all") do
@@ -131,23 +135,24 @@ defmodule Mix.Tasks.Arbor.Sdlc do
     end
   end
 
-  defp cmd_disable(stage) when stage in @valid_stages do
-    ensure_running!()
-    node = Helpers.full_node_name()
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    atom = String.to_atom(stage)
-
-    case :rpc.call(node, Arbor.SDLC.Config, :disable_stage, [atom]) do
-      :ok ->
-        Mix.shell().info("Stage :#{stage} disabled.")
-
-      {:badrpc, reason} ->
-        Mix.shell().error("Failed: #{inspect(reason)}")
-    end
-  end
-
   defp cmd_disable(stage) do
-    Mix.shell().error("Unknown stage: #{stage}. Valid stages: #{Enum.join(@valid_stages, ", ")}, all")
+    case validate_stage(stage) do
+      {:ok, atom} ->
+        ensure_running!()
+        node = Helpers.full_node_name()
+
+        case :rpc.call(node, Arbor.SDLC.Config, :disable_stage, [atom]) do
+          :ok ->
+            Mix.shell().info("Stage :#{stage} disabled.")
+
+          {:badrpc, reason} ->
+            Mix.shell().error("Failed: #{inspect(reason)}")
+        end
+
+      :error ->
+        valid = Pipeline.stages() |> Enum.map_join(", ", &Atom.to_string/1)
+        Mix.shell().error("Unknown stage: #{stage}. Valid stages: #{valid}, all")
+    end
   end
 
   defp cmd_rescan do
@@ -199,6 +204,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   end
 
   defp print_usage do
+    valid = Pipeline.stages() |> Enum.map_join(", ", &Atom.to_string/1)
+
     Mix.shell().info("""
     Usage: mix arbor.sdlc <command> [args]
 
@@ -209,7 +216,7 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       rescan              Force immediate rescan of watched directories
       backend <cli|api>   Set AI backend for processors
 
-    Stages: #{Enum.join(@valid_stages, ", ")}
+    Stages: #{valid}
 
     Examples:
       mix arbor.sdlc status
@@ -219,5 +226,14 @@ defmodule Mix.Tasks.Arbor.Sdlc do
       mix arbor.sdlc backend api
       mix arbor.sdlc rescan
     """)
+  end
+
+  defp validate_stage(name) when is_binary(name) do
+    stage_atoms = Pipeline.stages()
+
+    case Enum.find(stage_atoms, &(Atom.to_string(&1) == name)) do
+      nil -> :error
+      atom -> {:ok, atom}
+    end
   end
 end
