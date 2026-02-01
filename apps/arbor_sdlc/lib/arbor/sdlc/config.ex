@@ -90,11 +90,9 @@ defmodule Arbor.SDLC.Config do
           @default_processor_routing,
           get_value(:processor_routing, opts, %{})
         ),
-      persistence_backend:
-        get_value(:persistence_backend, opts, Arbor.Persistence.Store.ETS),
+      persistence_backend: get_value(:persistence_backend, opts, Arbor.Persistence.Store.ETS),
       persistence_name: get_value(:persistence_name, opts, :sdlc_tracker),
-      consensus_server:
-        get_value(:consensus_server, opts, Arbor.Consensus.Coordinator),
+      consensus_server: get_value(:consensus_server, opts, Arbor.Consensus.Coordinator),
       consensus_change_type: get_value(:consensus_change_type, opts, :sdlc_decision),
       max_deliberation_attempts: get_value(:max_deliberation_attempts, opts, 3),
       ai_module: get_value(:ai_module, opts, Arbor.AI),

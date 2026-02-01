@@ -14,6 +14,15 @@ defmodule Arbor.SDLC.EventsTest do
       assert Events.emit_item_detected("/path/to/file.md", "abc123") == :ok
     end
 
+    test "emit_item_changed/3 handles gracefully when signals unavailable" do
+      assert Events.emit_item_changed("/path/to/file.md", "new_hash") == :ok
+    end
+
+    test "emit_item_changed/3 accepts options" do
+      assert Events.emit_item_changed("/path/to/file.md", "new_hash", correlation_id: "trace_1") ==
+               :ok
+    end
+
     test "emit_item_parsed/2 extracts item fields" do
       item = %{
         id: "item_123",
