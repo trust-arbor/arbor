@@ -113,9 +113,10 @@ defmodule Arbor.SDLC.Processors.Deliberator do
 
   defp deliberate_item(item, config, opts) do
     ai_module = Keyword.get(opts, :ai_module, config.ai_module)
+    ai_backend = Keyword.get(opts, :ai_backend, config.ai_backend)
 
     # Step 1: Analyze item for decision points
-    case analyze_for_decisions(item, ai_module) do
+    case analyze_for_decisions(item, ai_module, ai_backend) do
       {:ok, :well_specified} ->
         # No decisions needed, pass through to planned
         Logger.info("Item well-specified, moving to planned", title: item.title)
@@ -135,7 +136,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     end
   end
 
-  defp analyze_for_decisions(item, ai_module) do
+  defp analyze_for_decisions(item, ai_module, ai_backend) do
     prompt = build_analysis_prompt(item)
 
     system_prompt = """
@@ -165,7 +166,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
            system_prompt: system_prompt,
            max_tokens: 2048,
            temperature: 0.3,
-           backend: :api
+           backend: ai_backend
          ) do
       {:ok, response} ->
         parse_analysis_response(response)
@@ -461,7 +462,8 @@ defmodule Arbor.SDLC.Processors.Deliberator do
       :rejected when attempt < max_attempts ->
         # Collect feedback and revise
         ai_module = Keyword.get(opts, :ai_module, config.ai_module)
-        revised_points = revise_from_feedback(item, decision, decision_points, ai_module)
+        ai_backend = Keyword.get(opts, :ai_backend, config.ai_backend)
+        revised_points = revise_from_feedback(item, decision, decision_points, ai_module, ai_backend)
         deliberate_with_retries(item, revised_points, config, opts, attempt + 1, max_attempts)
 
       :rejected ->
@@ -512,7 +514,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     struct(item, notes: new_notes)
   end
 
-  defp revise_from_feedback(item, decision, decision_points, ai_module) do
+  defp revise_from_feedback(item, decision, decision_points, ai_module, ai_backend) do
     # Collect concerns and recommendations from all evaluations
     evaluations = decision.evaluations || []
 
@@ -547,7 +549,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     {"revised_decision_points": [{"question": "...", "context": "...", "options": ["..."]}]}
     """
 
-    case ai_module.generate_text(prompt, max_tokens: 2048, temperature: 0.4, backend: :api) do
+    case ai_module.generate_text(prompt, max_tokens: 2048, temperature: 0.4, backend: ai_backend) do
       {:ok, response} ->
         case Jason.decode(response.text) do
           {:ok, %{"revised_decision_points" => points}} -> points
