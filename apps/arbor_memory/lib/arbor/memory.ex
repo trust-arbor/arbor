@@ -48,11 +48,16 @@ defmodule Arbor.Memory do
   """
 
   alias Arbor.Memory.{
+    ActionPatterns,
+    BackgroundChecks,
     Consolidation,
     Events,
     Index,
     IndexSupervisor,
+    InsightDetector,
     KnowledgeGraph,
+    Patterns,
+    Proposal,
     Relationship,
     RelationshipStore,
     Retrieval,
@@ -946,6 +951,220 @@ defmodule Arbor.Memory do
       error -> error
     end
   end
+
+  # ============================================================================
+  # Background Checks (Phase 4)
+  # ============================================================================
+
+  @doc """
+  Run all background checks for an agent.
+
+  Call this during heartbeats or on scheduled intervals. Returns:
+  - `:actions` - Things that should happen now (e.g., run consolidation)
+  - `:warnings` - Things the agent should know about
+  - `:suggestions` - Proposals created for agent review
+
+  ## Options
+
+  - `:action_history` - List of recent tool actions for pattern detection
+  - `:last_consolidation` - DateTime of last consolidation
+  - `:skip_consolidation` - Skip consolidation check (default: false)
+  - `:skip_patterns` - Skip action pattern detection (default: false)
+  - `:skip_insights` - Skip insight detection (default: false)
+
+  ## Examples
+
+      result = Arbor.Memory.run_background_checks("agent_001")
+      result = Arbor.Memory.run_background_checks("agent_001", action_history: history)
+  """
+  @spec run_background_checks(String.t(), keyword()) :: BackgroundChecks.check_result()
+  defdelegate run_background_checks(agent_id, opts \\ []), to: BackgroundChecks, as: :run
+
+  @doc """
+  Analyze memory patterns for an agent.
+
+  Returns comprehensive analysis including type distribution, access
+  concentration (Gini coefficient), decay risk, and unused pins.
+
+  ## Examples
+
+      analysis = Arbor.Memory.analyze_memory_patterns("agent_001")
+  """
+  @spec analyze_memory_patterns(String.t()) :: Patterns.analysis() | {:error, term()}
+  defdelegate analyze_memory_patterns(agent_id), to: Patterns, as: :analyze
+
+  # ============================================================================
+  # Proposals (Phase 4)
+  # ============================================================================
+
+  @doc """
+  Create a proposal for agent review.
+
+  ## Types
+
+  - `:fact` - Auto-extracted facts
+  - `:insight` - Behavioral insights
+  - `:learning` - Tool usage patterns
+  - `:pattern` - Recurring sequences
+
+  ## Examples
+
+      {:ok, proposal} = Arbor.Memory.create_proposal("agent_001", :fact, %{
+        content: "User prefers dark mode",
+        confidence: 0.8
+      })
+  """
+  @spec create_proposal(String.t(), Proposal.proposal_type(), map()) ::
+          {:ok, Proposal.t()} | {:error, term()}
+  defdelegate create_proposal(agent_id, type, data), to: Proposal, as: :create
+
+  @doc """
+  List pending proposals for an agent.
+
+  ## Options
+
+  - `:type` - Filter by proposal type
+  - `:limit` - Maximum proposals to return
+  - `:sort_by` - Sort by: `:created_at` (default), `:confidence`
+
+  ## Examples
+
+      {:ok, proposals} = Arbor.Memory.get_proposals("agent_001")
+      {:ok, facts} = Arbor.Memory.get_proposals("agent_001", type: :fact)
+  """
+  @spec get_proposals(String.t(), keyword()) :: {:ok, [Proposal.t()]}
+  defdelegate get_proposals(agent_id, opts \\ []), to: Proposal, as: :list_pending
+
+  @doc """
+  Accept a proposal and integrate it into the knowledge graph.
+
+  The proposal content is added as a knowledge node with a confidence boost.
+
+  ## Examples
+
+      {:ok, node_id} = Arbor.Memory.accept_proposal("agent_001", proposal_id)
+  """
+  @spec accept_proposal(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  defdelegate accept_proposal(agent_id, proposal_id), to: Proposal, as: :accept
+
+  @doc """
+  Reject a proposal.
+
+  The proposal is marked as rejected for calibration purposes.
+
+  ## Options
+
+  - `:reason` - Why the proposal was rejected
+
+  ## Examples
+
+      :ok = Arbor.Memory.reject_proposal("agent_001", proposal_id)
+      :ok = Arbor.Memory.reject_proposal("agent_001", proposal_id, reason: "Not accurate")
+  """
+  @spec reject_proposal(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  defdelegate reject_proposal(agent_id, proposal_id, opts \\ []), to: Proposal, as: :reject
+
+  @doc """
+  Defer a proposal for later review.
+
+  ## Examples
+
+      :ok = Arbor.Memory.defer_proposal("agent_001", proposal_id)
+  """
+  @spec defer_proposal(String.t(), String.t()) :: :ok | {:error, term()}
+  defdelegate defer_proposal(agent_id, proposal_id), to: Proposal, as: :defer
+
+  @doc """
+  Accept all pending proposals, optionally filtered by type.
+
+  ## Examples
+
+      {:ok, results} = Arbor.Memory.accept_all_proposals("agent_001")
+      {:ok, results} = Arbor.Memory.accept_all_proposals("agent_001", :fact)
+  """
+  @spec accept_all_proposals(String.t(), Proposal.proposal_type() | nil) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  defdelegate accept_all_proposals(agent_id, type \\ nil), to: Proposal, as: :accept_all
+
+  @doc """
+  Get proposal statistics for an agent.
+
+  ## Examples
+
+      stats = Arbor.Memory.proposal_stats("agent_001")
+  """
+  @spec proposal_stats(String.t()) :: map()
+  defdelegate proposal_stats(agent_id), to: Proposal, as: :stats
+
+  # ============================================================================
+  # Action Patterns (Phase 4)
+  # ============================================================================
+
+  @doc """
+  Analyze action history for patterns.
+
+  Detects repeated sequences, failure-then-success patterns, and
+  long sequences in tool usage history.
+
+  ## Options
+
+  - `:min_occurrences` - Minimum times a sequence must occur (default: 3)
+
+  ## Examples
+
+      patterns = Arbor.Memory.analyze_action_patterns(action_history)
+  """
+  @spec analyze_action_patterns([ActionPatterns.action()], keyword()) :: [ActionPatterns.pattern()]
+  defdelegate analyze_action_patterns(action_history, opts \\ []), to: ActionPatterns, as: :analyze
+
+  @doc """
+  Analyze action history and queue learnings as proposals.
+
+  ## Examples
+
+      {:ok, proposals} = Arbor.Memory.analyze_and_queue_learnings("agent_001", history)
+  """
+  @spec analyze_and_queue_learnings(String.t(), [ActionPatterns.action()], keyword()) ::
+          {:ok, [Proposal.t()]} | {:error, term()}
+  defdelegate analyze_and_queue_learnings(agent_id, history, opts \\ []),
+    to: ActionPatterns,
+    as: :analyze_and_queue
+
+  # ============================================================================
+  # Insight Detection (Phase 4)
+  # ============================================================================
+
+  @doc """
+  Detect insights from knowledge graph patterns.
+
+  Analyzes the knowledge graph to find patterns that might indicate
+  personality traits, capabilities, values, or preferences.
+
+  ## Options
+
+  - `:include_low_confidence` - Include suggestions below 0.5 confidence
+  - `:max_suggestions` - Maximum suggestions to return (default: 5)
+
+  ## Examples
+
+      suggestions = Arbor.Memory.detect_insights("agent_001")
+  """
+  @spec detect_insights(String.t(), keyword()) ::
+          [InsightDetector.insight_suggestion()] | {:error, term()}
+  defdelegate detect_insights(agent_id, opts \\ []), to: InsightDetector, as: :detect
+
+  @doc """
+  Detect insights and queue them as proposals.
+
+  ## Examples
+
+      {:ok, proposals} = Arbor.Memory.detect_and_queue_insights("agent_001")
+  """
+  @spec detect_and_queue_insights(String.t(), keyword()) ::
+          {:ok, [Proposal.t()]} | {:error, term()}
+  defdelegate detect_and_queue_insights(agent_id, opts \\ []),
+    to: InsightDetector,
+    as: :detect_and_queue
 
   # ============================================================================
   # Private Helpers
