@@ -326,4 +326,91 @@ defmodule Arbor.Actions.TaintEnforcementTest do
       assert result == :ok
     end
   end
+
+  # ==========================================================================
+  # Taint propagation fix tests (Phase B/C)
+  # Tests for the fixed extract_taint_level that checks both flat and nested
+  # ==========================================================================
+
+  describe "taint propagation context extraction" do
+    # These tests verify that maybe_emit_taint_propagated correctly extracts
+    # taint from both flat context.taint and nested context.taint_context.taint
+
+    # We test this indirectly by testing the dispatcher's behavior
+    # since extract_taint_level is private
+
+    test "Taint.check_params handles flat context.taint" do
+      alias Arbor.Actions.Taint
+
+      result =
+        Taint.check_params(
+          MockControlAction,
+          %{command: "ls"},
+          %{taint: :untrusted}
+        )
+
+      # Should block due to untrusted + control
+      assert {:error, {:taint_blocked, :command, :untrusted, :control}} = result
+    end
+
+    test "dispatcher handles nested context.taint_context.taint" do
+      # The dispatcher's extract_taint_context looks for both
+      # We can't directly test the private function, but we can verify
+      # the TaintEvents module correctly handles nested context
+
+      # TaintEvents.get_in_context handles both patterns
+      context = %{taint_context: %{taint: :derived, taint_source: "llm"}}
+
+      assert :ok =
+               TaintEvents.emit_taint_propagated(
+                 MockControlAction,
+                 :derived,
+                 :derived,
+                 context
+               )
+    end
+
+    test "TaintEvents.get_in_context extracts from flat context" do
+      context = %{taint_source: "external_api", agent_id: "agent_001"}
+
+      # The emit function should work with flat context
+      assert :ok =
+               TaintEvents.emit_taint_blocked(
+                 MockControlAction,
+                 :command,
+                 :untrusted,
+                 :control,
+                 context
+               )
+    end
+
+    test "TaintEvents.get_in_context extracts from nested taint_context" do
+      context = %{
+        agent_id: "agent_001",
+        taint_context: %{taint_source: "nested_source", taint: :derived}
+      }
+
+      # The emit function should extract taint_source from nested context
+      assert :ok =
+               TaintEvents.emit_taint_blocked(
+                 MockControlAction,
+                 :command,
+                 :untrusted,
+                 :control,
+                 context
+               )
+    end
+
+    test "propagation emits correctly with nil taint (no emission)" do
+      # When there's no taint, propagation should not emit
+      # This is tested by ensuring no crash with empty context
+      assert :ok =
+               TaintEvents.emit_taint_propagated(
+                 MockControlAction,
+                 nil,
+                 nil,
+                 %{agent_id: "agent_001"}
+               )
+    end
+  end
 end

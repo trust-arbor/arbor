@@ -40,7 +40,7 @@ defmodule Arbor.Historian do
 
   @behaviour Arbor.Contracts.API.Historian
 
-  alias Arbor.Historian.{QueryEngine, StreamRegistry, Timeline}
+  alias Arbor.Historian.{QueryEngine, StreamRegistry, TaintQuery, Timeline}
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
 
@@ -316,6 +316,94 @@ defmodule Arbor.Historian do
   @doc "Get a summary of a timeline span."
   @spec timeline_summary(Span.t(), keyword()) :: map()
   defdelegate timeline_summary(span, opts \\ []), to: Timeline, as: :summary
+
+  # ── Taint Provenance ──
+
+  @doc """
+  Trace a taint chain backward from a signal/event.
+
+  Starting from a signal_id or event, follows taint_propagated events
+  backward via their source references to reconstruct the full provenance chain.
+
+  Returns events ordered from oldest (origin) to newest (the queried event).
+
+  ## Options
+
+  - `:max_depth` — maximum chain depth (default 50)
+  - `:event_log` — test injection for EventLog name
+
+  ## Examples
+
+      {:ok, chain} = Arbor.Historian.trace_taint("sig_abc123")
+  """
+  @spec trace_taint(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate trace_taint(signal_id, opts \\ []), to: TaintQuery, as: :trace_backward
+
+  @doc """
+  Trace taint flow forward from a source signal.
+
+  Starting from a source signal_id, finds all downstream taint_propagated
+  events to show how taint spread through the system.
+
+  ## Options
+
+  - `:max_depth` — maximum chain depth (default 50)
+  - `:event_log` — test injection for EventLog name
+
+  ## Examples
+
+      {:ok, downstream} = Arbor.Historian.taint_flow("sig_abc123")
+  """
+  @spec taint_flow(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate taint_flow(source_signal_id, opts \\ []), to: TaintQuery, as: :trace_forward
+
+  @doc """
+  Query taint events filtered by level, agent, time range, etc.
+
+  ## Options
+
+  - `:taint_level` — filter by taint level (atom: :trusted, :derived, :untrusted, :hostile)
+  - `:agent_id` — filter by agent
+  - `:event_type` — filter by taint event type (:taint_blocked, :taint_propagated, :taint_reduced, :taint_audited)
+  - `:from` / `:to` — time range
+  - `:limit` — max results (default 100)
+  - `:event_log` — test injection for EventLog name
+
+  ## Examples
+
+      {:ok, events} = Arbor.Historian.taint_events(agent_id: "agent_001", limit: 50)
+  """
+  @spec taint_events(keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate taint_events(opts \\ []), to: TaintQuery, as: :query_taint_events
+
+  @doc """
+  Get a summary of taint activity for an agent.
+
+  Returns counts by event type, most common taint levels, recent blocks, etc.
+
+  ## Options
+
+  - `:from` / `:to` — time range
+  - `:event_log` — test injection for EventLog name
+
+  ## Returns
+
+  A map with:
+  - `blocked_count` - Number of taint blocks
+  - `propagated_count` - Number of taint propagations
+  - `audited_count` - Number of audit-only events
+  - `reduced_count` - Number of taint reductions
+  - `total_count` - Total taint events
+  - `taint_level_distribution` - Frequency map by taint level
+  - `most_common_blocked_actions` - Top 5 blocked actions
+  - `recent_blocks` - Last 5 blocked attempts
+
+  ## Examples
+
+      {:ok, summary} = Arbor.Historian.taint_summary("agent_001")
+  """
+  @spec taint_summary(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  defdelegate taint_summary(agent_id, opts \\ []), to: TaintQuery
 
   # ── Stream Registry ──
 

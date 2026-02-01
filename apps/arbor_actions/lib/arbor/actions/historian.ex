@@ -381,4 +381,165 @@ defmodule Arbor.Actions.Historian do
     defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
     defp format_error(reason), do: "State reconstruction failed: #{inspect(reason)}"
   end
+
+  defmodule TaintTrace do
+    @moduledoc """
+    Query taint chains through the historian.
+
+    Provides agent-accessible taint provenance queries for tracing how tainted
+    data flows through the system.
+
+    ## Query Types
+
+    | Type | Description |
+    |------|-------------|
+    | `:trace_backward` | Follow taint chain backward from a signal to its origin |
+    | `:trace_forward` | Follow taint flow forward to see downstream effects |
+    | `:events` | Query filtered taint events |
+    | `:summary` | Get aggregated taint activity summary for an agent |
+
+    ## Examples
+
+        # Trace backward from an event
+        {:ok, result} = Arbor.Actions.Historian.TaintTrace.run(
+          %{query_type: :trace_backward, signal_id: "sig_123"},
+          %{}
+        )
+
+        # Get taint summary for an agent
+        {:ok, result} = Arbor.Actions.Historian.TaintTrace.run(
+          %{query_type: :summary, agent_id: "agent_001"},
+          %{}
+        )
+
+    ## Authorization
+
+    Capability URI: `arbor://actions/execute/historian.taint_trace`
+    Queries access the security stream, which may require additional capabilities.
+    """
+
+    use Jido.Action,
+      name: "historian_taint_trace",
+      description: "Trace taint provenance chains through the security event log",
+      category: "historian",
+      tags: ["historian", "security", "taint", "provenance", "trace"],
+      schema: [
+        query_type: [
+          type: {:in, [:trace_backward, :trace_forward, :events, :summary]},
+          required: true,
+          doc: "Type of taint query: trace_backward, trace_forward, events, or summary"
+        ],
+        signal_id: [
+          type: :string,
+          doc: "Signal ID for trace_backward/trace_forward queries"
+        ],
+        agent_id: [
+          type: :string,
+          doc: "Agent ID for summary queries or filtering events"
+        ],
+        taint_level: [
+          type: :atom,
+          doc: "Filter by taint level (trusted, derived, untrusted, hostile)"
+        ],
+        event_type: [
+          type: :atom,
+          doc: "Filter by taint event type (taint_blocked, taint_propagated, etc.)"
+        ],
+        limit: [
+          type: :integer,
+          default: 100,
+          doc: "Maximum number of results to return"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
+    def run(params, _context) do
+      Actions.emit_started(__MODULE__, sanitize_params(params))
+
+      result =
+        case params.query_type do
+          :trace_backward ->
+            with {:ok, signal_id} <- require_param(params, :signal_id) do
+              Arbor.Historian.trace_taint(signal_id, build_opts(params))
+            end
+
+          :trace_forward ->
+            with {:ok, signal_id} <- require_param(params, :signal_id) do
+              Arbor.Historian.taint_flow(signal_id, build_opts(params))
+            end
+
+          :events ->
+            Arbor.Historian.taint_events(build_opts(params))
+
+          :summary ->
+            with {:ok, agent_id} <- require_param(params, :agent_id) do
+              Arbor.Historian.taint_summary(agent_id, build_opts(params))
+            end
+        end
+
+      case result do
+        {:ok, data} ->
+          Actions.emit_completed(__MODULE__, %{
+            query_type: params.query_type,
+            count: result_count(data)
+          })
+
+          {:ok, wrap_result(params.query_type, data)}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
+      end
+    end
+
+    defp require_param(params, key) do
+      case Map.get(params, key) do
+        nil -> {:error, {:missing_param, key}}
+        "" -> {:error, {:missing_param, key}}
+        value -> {:ok, value}
+      end
+    end
+
+    defp build_opts(params) do
+      []
+      |> maybe_add(:taint_level, Map.get(params, :taint_level))
+      |> maybe_add(:agent_id, Map.get(params, :agent_id))
+      |> maybe_add(:event_type, Map.get(params, :event_type))
+      |> maybe_add(:limit, Map.get(params, :limit))
+    end
+
+    defp maybe_add(opts, _key, nil), do: opts
+    defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
+
+    defp result_count(data) when is_list(data), do: length(data)
+    defp result_count(data) when is_map(data), do: 1
+    defp result_count(_), do: 0
+
+    defp wrap_result(:trace_backward, chain) do
+      %{chain: chain, depth: length(chain)}
+    end
+
+    defp wrap_result(:trace_forward, chain) do
+      %{chain: chain, depth: length(chain)}
+    end
+
+    defp wrap_result(:events, events) do
+      %{events: events, count: length(events)}
+    end
+
+    defp wrap_result(:summary, summary) do
+      summary
+    end
+
+    defp sanitize_params(params) do
+      Map.take(params, [:query_type, :signal_id, :agent_id, :taint_level, :event_type, :limit])
+    end
+
+    defp format_error({:missing_param, key}), do: "Missing required parameter: #{key}"
+    defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
+    defp format_error(reason), do: "Taint trace failed: #{inspect(reason)}"
+  end
 end
