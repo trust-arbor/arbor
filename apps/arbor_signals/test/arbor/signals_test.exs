@@ -173,8 +173,15 @@ defmodule Arbor.SignalsTest do
     end
 
     test "supports all taint levels" do
+      level_types = %{
+        trusted: :taint_level_trusted,
+        derived: :taint_level_derived,
+        untrusted: :taint_level_untrusted,
+        hostile: :taint_level_hostile
+      }
+
       for level <- [:trusted, :derived, :untrusted, :hostile] do
-        type = String.to_atom("taint_level_#{level}")
+        type = Map.fetch!(level_types, level)
 
         assert :ok =
                  Signals.emit_tainted(
