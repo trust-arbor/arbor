@@ -7,6 +7,8 @@ defmodule Arbor.Signals.Application do
   def start(_type, _args) do
     children = [
       {Arbor.Signals.Store, []},
+      {Arbor.Signals.TopicKeys, []},
+      {Arbor.Signals.Channels, []},
       {Arbor.Signals.Bus, []}
     ]
 

@@ -18,6 +18,16 @@ defmodule Arbor.Signals.Bus do
   When no principal_id is provided (legacy callers), subscriptions to
   non-restricted patterns are allowed, but restricted patterns are denied.
 
+  ## Encryption
+
+  Signals on restricted topics have their `data` field encrypted with
+  AES-256-GCM using topic-specific symmetric keys (managed by `TopicKeys`).
+
+  - At **publish time**: `data` is encrypted and stored as an encrypted payload
+  - At **delivery time**: `data` is decrypted for authorized subscribers
+
+  Unauthorized subscribers never receive the plaintext data.
+
   ## Patterns
 
   Patterns use dot-notation to match signal categories and types:
@@ -46,6 +56,7 @@ defmodule Arbor.Signals.Bus do
   alias Arbor.Identifiers
   alias Arbor.Signals.Config
   alias Arbor.Signals.Signal
+  alias Arbor.Signals.TopicKeys
 
   # Client API
 
@@ -127,6 +138,8 @@ defmodule Arbor.Signals.Bus do
 
   @impl true
   def handle_cast({:publish, signal}, state) do
+    # Encrypt data for restricted topics before delivery
+    signal = maybe_encrypt_signal(signal)
     state = deliver_to_subscribers(signal, state)
     {:noreply, state}
   end
@@ -300,13 +313,47 @@ defmodule Arbor.Signals.Bus do
     MapSet.member?(authorized_topics, topic)
   end
 
-  defp deliver_signal(signal, %{async: true, handler: handler}) do
-    Task.start(fn -> safe_invoke(handler, signal) end)
-    :ok
+  defp deliver_signal(signal, %{async: true, handler: handler} = sub) do
+    # Decrypt for authorized subscribers before delivery
+    case prepare_signal_for_delivery(signal, sub) do
+      nil ->
+        # Signal should not be delivered (encryption failed or decryption failed)
+        {:error, :delivery_skipped}
+
+      decrypted_signal ->
+        Task.start(fn -> safe_invoke(handler, decrypted_signal) end)
+        :ok
+    end
   end
 
-  defp deliver_signal(signal, %{async: false, handler: handler}) do
-    safe_invoke_with_error(handler, signal)
+  defp deliver_signal(signal, %{async: false, handler: handler} = sub) do
+    case prepare_signal_for_delivery(signal, sub) do
+      nil ->
+        {:error, :delivery_skipped}
+
+      decrypted_signal ->
+        safe_invoke_with_error(handler, decrypted_signal)
+    end
+  end
+
+  # Prepare signal for delivery: decrypt if encrypted and subscriber is authorized
+  defp prepare_signal_for_delivery(signal, sub) do
+    restricted_topics = Config.restricted_topics()
+    signal_topic = signal.category
+    signal_restricted? = signal_topic in restricted_topics
+
+    if signal_restricted? do
+      # Check if subscriber is authorized for this specific topic
+      if MapSet.member?(sub.authorized_topics, signal_topic) do
+        maybe_decrypt_signal(signal)
+      else
+        # Not authorized - don't deliver encrypted signals
+        nil
+      end
+    else
+      # Not restricted - deliver as-is
+      signal
+    end
   end
 
   defp safe_invoke(handler, signal) do
@@ -346,5 +393,124 @@ defmodule Arbor.Signals.Bus do
 
   defp generate_subscription_id do
     Identifiers.generate_id("sub_")
+  end
+
+  # Private functions — Encryption
+
+  # Encrypt signal data for restricted topics
+  defp maybe_encrypt_signal(%Signal{category: category, data: data} = signal) do
+    restricted_topics = Config.restricted_topics()
+
+    if category in restricted_topics and data != %{} do
+      # Serialize data to JSON for encryption
+      case Jason.encode(data) do
+        {:ok, json} ->
+          case TopicKeys.encrypt(category, json) do
+            {:ok, encrypted_payload} ->
+              # Store encrypted payload in data, mark as encrypted
+              %{
+                signal
+                | data: %{
+                    __encrypted__: true,
+                    payload: encrypted_payload
+                  }
+              }
+
+            {:error, _reason} ->
+              # If encryption fails, don't deliver at all for security
+              %{signal | data: %{__encryption_failed__: true}}
+          end
+
+        {:error, _reason} ->
+          # If serialization fails, mark as failed
+          %{signal | data: %{__encryption_failed__: true}}
+      end
+    else
+      signal
+    end
+  end
+
+  # Decrypt signal data for authorized subscribers
+  defp maybe_decrypt_signal(%Signal{category: category, data: data} = signal) do
+    case data do
+      %{__encrypted__: true, payload: encrypted_payload} ->
+        case TopicKeys.decrypt(category, encrypted_payload) do
+          {:ok, json} ->
+            case Jason.decode(json) do
+              {:ok, decoded_data} ->
+                %{signal | data: decoded_data}
+
+              {:error, _reason} ->
+                # Decryption succeeded but JSON decode failed
+                %{signal | data: %{__decryption_failed__: true}}
+            end
+
+          {:error, _reason} ->
+            %{signal | data: %{__decryption_failed__: true}}
+        end
+
+      %{__encryption_failed__: true} ->
+        # Don't deliver signals that failed encryption
+        nil
+
+      _other ->
+        # Not encrypted, return as-is (could be channel message)
+        maybe_decrypt_channel_signal(signal)
+    end
+  end
+
+  # Decrypt channel-encrypted signal data
+  defp maybe_decrypt_channel_signal(%Signal{data: data} = signal) do
+    case data do
+      %{__channel_encrypted__: true, channel_id: channel_id, sender_id: _sender_id, payload: payload} ->
+        channels_module = Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
+
+        # Note: The subscriber must be a member of the channel.
+        # For now, we attempt decryption using the channel key from Channels.
+        # In practice, subscribers store the key in their keychain.
+        # This is a simplified implementation - full implementation would
+        # require passing the subscriber's keychain context.
+
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        with {:ok, key} <- apply(channels_module, :get_key, [channel_id, signal.source]) do
+          decrypt_channel_payload(signal, payload, key)
+        else
+          {:error, _reason} ->
+            # Not a member or channel not found - return signal as-is
+            signal
+        end
+
+      _other ->
+        signal
+    end
+  end
+
+  defp decrypt_channel_payload(signal, payload, key) do
+    %{ciphertext: ciphertext, iv: iv, tag: tag, key_version: payload_version} = payload
+
+    crypto_module = Application.get_env(:arbor_signals, :crypto_module, Arbor.Security.Crypto)
+
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(crypto_module, :decrypt, [ciphertext, key, iv, tag]) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, decoded_data} ->
+            %{
+              signal
+              | data:
+                  Map.merge(decoded_data, %{
+                    "__channel_id__" => signal.data.channel_id,
+                    "__sender_id__" => signal.data.sender_id,
+                    "__key_version__" => payload_version
+                  })
+            }
+
+          {:error, _reason} ->
+            %{signal | data: %{__channel_decryption_failed__: true}}
+        end
+
+      {:error, _reason} ->
+        %{signal | data: %{__channel_decryption_failed__: true}}
+    end
   end
 end
