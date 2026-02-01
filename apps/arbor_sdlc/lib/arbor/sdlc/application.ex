@@ -62,18 +62,20 @@ defmodule Arbor.SDLC.Application do
   defp build_children do
     config = Config.new()
 
-    # Always start the file tracker
+    # Always start the file tracker and task supervisor
     tracker_spec = {
       PersistentFileTracker,
       [name: Arbor.SDLC.FileTracker, config: config]
     }
 
+    task_supervisor_spec = {Task.Supervisor, name: Arbor.SDLC.TaskSupervisor}
+
     # Only start the watcher if enabled
     if config.watcher_enabled do
       watcher_spec = build_watcher_spec(config)
-      [tracker_spec, watcher_spec]
+      [tracker_spec, task_supervisor_spec, watcher_spec]
     else
-      [tracker_spec]
+      [tracker_spec, task_supervisor_spec]
     end
   end
 

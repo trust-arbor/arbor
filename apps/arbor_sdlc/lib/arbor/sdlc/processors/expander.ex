@@ -107,6 +107,7 @@ defmodule Arbor.SDLC.Processors.Expander do
 
   defp expand_item(item, config, opts) do
     ai_module = Keyword.get(opts, :ai_module, config.ai_module)
+    ai_backend = Keyword.get(opts, :ai_backend, config.ai_backend)
 
     prompt = build_expansion_prompt(item)
     system_prompt = system_prompt_for_expansion()
@@ -114,7 +115,8 @@ defmodule Arbor.SDLC.Processors.Expander do
     ai_opts = [
       system_prompt: system_prompt,
       max_tokens: 4096,
-      temperature: 0.4
+      temperature: 0.4,
+      backend: ai_backend
     ]
 
     Logger.debug("Calling AI for expansion", title: item.title)

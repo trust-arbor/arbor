@@ -92,7 +92,8 @@ defmodule Arbor.SDLC.Evaluator do
         ai_module.generate_text(user_prompt,
           system_prompt: system_prompt,
           max_tokens: 2048,
-          temperature: temperature_for(perspective)
+          temperature: temperature_for(perspective),
+          backend: :api
         )
       end)
 

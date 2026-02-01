@@ -77,6 +77,15 @@ defmodule Arbor.Gateway.Bridge.Router do
       )
 
       %{decision: "passthrough"}
+  catch
+    :exit, reason ->
+      Logger.warning("Bridge authorization process unavailable, falling back to passthrough",
+        tool: tool_name,
+        session: session_id,
+        error: inspect(reason)
+      )
+
+      %{decision: "passthrough"}
   end
 
   defp emit_bridge_signal(session_id, tool_name, result) do
