@@ -274,6 +274,33 @@ defmodule Arbor.Common.SafeAtomTest do
     end
   end
 
+  describe "taint_policies/0" do
+    test "returns all taint policies" do
+      policies = SafeAtom.taint_policies()
+
+      assert :strict in policies
+      assert :permissive in policies
+      assert :audit_only in policies
+    end
+  end
+
+  describe "to_taint_policy/1" do
+    test "converts valid taint policy strings" do
+      assert {:ok, :strict} = SafeAtom.to_taint_policy("strict")
+      assert {:ok, :permissive} = SafeAtom.to_taint_policy("permissive")
+      assert {:ok, :audit_only} = SafeAtom.to_taint_policy("audit_only")
+    end
+
+    test "rejects invalid taint policy strings" do
+      # Known atoms return {:error, {:not_allowed, atom}}
+      assert {:error, {:not_allowed, :invalid}} = SafeAtom.to_taint_policy("invalid")
+      assert {:error, {:not_allowed, :lenient}} = SafeAtom.to_taint_policy("lenient")
+      # Unknown strings return {:error, {:not_allowed, string}}
+      assert {:error, {:not_allowed, "malicious_policy_abc789"}} =
+               SafeAtom.to_taint_policy("malicious_policy_abc789")
+    end
+  end
+
   # ==========================================================================
   # Arbor-specific helpers
   # ==========================================================================

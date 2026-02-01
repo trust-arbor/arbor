@@ -242,6 +242,7 @@ defmodule Arbor.Common.SafeAtom do
 
   @taint_levels [:trusted, :derived, :untrusted, :hostile]
   @taint_roles [:control, :data]
+  @taint_policies [:strict, :permissive, :audit_only]
 
   @doc """
   Returns the list of valid taint levels for the taint tracking system.
@@ -307,6 +308,42 @@ defmodule Arbor.Common.SafeAtom do
   @spec to_taint_role(String.t()) :: allowed_result()
   def to_taint_role(value) when is_binary(value) do
     to_allowed(value, @taint_roles)
+  end
+
+  @doc """
+  Returns the list of valid taint policies for capability constraints.
+
+  Taint policies:
+  - `:strict` - Block derived, untrusted, hostile on control params. Only trusted allowed.
+  - `:permissive` - Block untrusted, hostile on control params. Derived allowed (default).
+  - `:audit_only` - Log taint violations but don't block execution.
+  """
+  @spec taint_policies() :: [atom()]
+  def taint_policies, do: @taint_policies
+
+  @doc """
+  Safely convert a string to a taint policy atom.
+
+  Returns `{:ok, policy}` if the string is a valid taint policy,
+  or `{:error, {:not_allowed, string}}` otherwise.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_taint_policy("strict")
+      {:ok, :strict}
+
+      iex> Arbor.Common.SafeAtom.to_taint_policy("permissive")
+      {:ok, :permissive}
+
+      iex> Arbor.Common.SafeAtom.to_taint_policy("audit_only")
+      {:ok, :audit_only}
+
+      iex> Arbor.Common.SafeAtom.to_taint_policy("invalid")
+      {:error, {:not_allowed, "invalid"}}
+  """
+  @spec to_taint_policy(String.t()) :: allowed_result()
+  def to_taint_policy(value) when is_binary(value) do
+    to_allowed(value, @taint_policies)
   end
 
   # =============================================================================
