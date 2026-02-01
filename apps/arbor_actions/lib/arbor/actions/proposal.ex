@@ -117,6 +117,14 @@ defmodule Arbor.Actions.Proposal do
     alias Arbor.Common.SafeAtom
 
     @allowed_urgencies [:low, :normal, :high, :critical]
+    @allowed_change_types [
+      :code_modification,
+      :config_change,
+      :dependency_update,
+      :authorization_request,
+      :infrastructure_change,
+      :documentation_update
+    ]
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -125,7 +133,7 @@ defmodule Arbor.Actions.Proposal do
 
       evidence = params[:evidence] || []
       urgency = normalize_urgency(params[:urgency])
-      change_type = params[:change_type] || "code_modification"
+      change_type = normalize_change_type(params[:change_type])
 
       # Extract proposer from context (agent_id)
       proposer = Map.get(context, :agent_id, "unknown")
@@ -135,7 +143,7 @@ defmodule Arbor.Actions.Proposal do
       # Build the proposal
       proposal_attrs = %{
         proposer: proposer,
-        change_type: String.to_atom(change_type),
+        change_type: change_type,
         title: title,
         description: description,
         metadata: %{
@@ -176,6 +184,17 @@ defmodule Arbor.Actions.Proposal do
     end
 
     defp normalize_urgency(urgency) when is_atom(urgency), do: urgency
+
+    defp normalize_change_type(nil), do: :code_modification
+
+    defp normalize_change_type(change_type) when is_binary(change_type) do
+      case SafeAtom.to_allowed(change_type, @allowed_change_types) do
+        {:ok, atom} -> atom
+        {:error, _} -> :code_modification
+      end
+    end
+
+    defp normalize_change_type(change_type) when is_atom(change_type), do: change_type
 
     defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
     defp format_error(reason), do: "Proposal submission failed: #{inspect(reason)}"
