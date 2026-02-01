@@ -52,7 +52,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
                String.contains?(reflection.analysis, "improve") or
                String.contains?(reflection.analysis, agent_id)
 
-      assert length(reflection.insights) > 0
+      assert reflection.insights != []
     end
 
     test "stores reflection in history", %{agent_id: agent_id} do

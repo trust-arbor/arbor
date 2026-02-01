@@ -75,7 +75,7 @@ defmodule Arbor.Memory.IndexDualTest do
       # Recall should find it in ETS
       {:ok, results} = Index.recall(pid, "Cache hit test", embedding: embedding, threshold: 0.0)
 
-      assert length(results) >= 1
+      assert results != []
       assert hd(results).content == "Cache hit test"
     end
 
@@ -92,7 +92,7 @@ defmodule Arbor.Memory.IndexDualTest do
       {:ok, results} = Index.recall(pid, "Pgvector only", embedding: embedding, threshold: 0.0)
 
       # Should find the pgvector entry
-      assert length(results) >= 1
+      assert results != []
     end
   end
 
