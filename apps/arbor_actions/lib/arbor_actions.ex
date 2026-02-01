@@ -54,10 +54,21 @@ defmodule Arbor.Actions do
   - `{:action, :completed, %{action: ..., result: ...}}`
   - `{:action, :failed, %{action: ..., error: ...}}`
 
+  ## Taint Enforcement
+
+  Actions enforce taint policies to prevent prompt injection attacks:
+
+  - Control parameters (paths, commands) block untrusted/hostile data
+  - Under strict policy, even derived data is blocked from control params
+  - Under audit-only policy, violations are logged but not blocked
+  - See `Arbor.Signals.Taint` for taint level definitions
+
   See individual action modules for detailed documentation.
   """
 
   alias Arbor.Signals
+  alias Arbor.Actions.Taint
+  alias Arbor.Actions.TaintEvents
 
   # ===========================================================================
   # Public API — Authorized execution (for agent callers)
@@ -95,14 +106,24 @@ defmodule Arbor.Actions do
   @spec authorize_and_execute(String.t(), module(), map(), map()) ::
           {:ok, any()}
           | {:ok, :pending_approval, String.t()}
-          | {:error, :unauthorized | term()}
+          | {:error, :unauthorized | {:taint_blocked, atom(), atom(), atom()} | term()}
   def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
     action_name = action_module_to_name(action_module)
     resource = "arbor://actions/execute/#{action_name}"
 
     case Arbor.Security.authorize(agent_id, resource, :execute) do
       {:ok, :authorized} ->
-        execute_action(action_module, params, context)
+        # Check taint before executing
+        case check_taint(action_module, params, context) do
+          :ok ->
+            result = execute_action(action_module, params, context)
+            maybe_emit_taint_propagated(action_module, context, result)
+            result
+
+          {:error, {:taint_blocked, param, level, role}} = taint_error ->
+            TaintEvents.emit_taint_blocked(action_module, param, level, role, context)
+            taint_error
+        end
 
       {:ok, :pending_approval, proposal_id} ->
         {:ok, :pending_approval, proposal_id}
@@ -295,4 +316,133 @@ defmodule Arbor.Actions do
     |> Macro.underscore()
     |> String.replace("/", ".")
   end
+
+  # ===========================================================================
+  # Taint Enforcement
+  # ===========================================================================
+
+  # Check if action parameters comply with taint policy.
+  # Returns :ok if execution should proceed, {:error, {:taint_blocked, ...}} if blocked.
+  defp check_taint(action_module, params, context) do
+    taint_context = extract_taint_context(context)
+
+    case taint_context do
+      nil ->
+        # No taint metadata — backward compatible, allow execution
+        :ok
+
+      %{taint: nil} ->
+        # Taint context exists but no taint level — allow execution
+        :ok
+
+      %{taint: taint_level} ->
+        policy = Map.get(context, :taint_policy, :permissive)
+        check_taint_with_policy(action_module, params, taint_level, policy, context)
+    end
+  end
+
+  # Extract taint context from the context map.
+  # Looks for :taint key directly or in :taint_context sub-map.
+  defp extract_taint_context(nil), do: nil
+  defp extract_taint_context(context) when not is_map(context), do: nil
+
+  defp extract_taint_context(context) do
+    cond do
+      Map.has_key?(context, :taint) ->
+        %{taint: Map.get(context, :taint)}
+
+      Map.has_key?(context, :taint_context) and is_map(context.taint_context) ->
+        context.taint_context
+
+      true ->
+        nil
+    end
+  end
+
+  # Apply taint policy to parameter check.
+  defp check_taint_with_policy(action_module, params, taint_level, :audit_only, context) do
+    # Audit-only: log violations but don't block
+    case Taint.check_params(action_module, params, %{taint: taint_level}) do
+      :ok ->
+        :ok
+
+      {:error, {:taint_blocked, param, level, _role}} ->
+        # Log the violation but allow execution
+        TaintEvents.emit_taint_audited(action_module, param, level, context)
+        :ok
+    end
+  end
+
+  defp check_taint_with_policy(action_module, params, taint_level, :strict, context) do
+    # Strict: block derived, untrusted, hostile on control params
+    # Only trusted is allowed for control parameters
+    if taint_level == :trusted do
+      :ok
+    else
+      roles = Taint.roles_for(action_module)
+      check_strict_taint(params, roles, taint_level, context, action_module)
+    end
+  end
+
+  defp check_taint_with_policy(action_module, params, taint_level, _permissive, context) do
+    # Permissive (default): use standard check from Taint module
+    # This blocks untrusted/hostile on control, but allows derived
+    case Taint.check_params(action_module, params, %{taint: taint_level}) do
+      :ok ->
+        # If derived was used on control params, emit audit signal
+        if taint_level == :derived do
+          maybe_emit_derived_audit(action_module, params, context)
+        end
+
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  # Strict mode: any non-trusted taint on control params is blocked
+  defp check_strict_taint(params, roles, taint_level, _context, _action_module) do
+    # Find first control param (under strict, any non-trusted is blocked)
+    violation =
+      Enum.find_value(params, fn {param_name, _value} ->
+        role = Map.get(roles, param_name, :data)
+
+        if role == :control do
+          {:taint_blocked, param_name, taint_level, :control}
+        else
+          nil
+        end
+      end)
+
+    case violation do
+      nil -> :ok
+      blocked -> {:error, blocked}
+    end
+  end
+
+  # Emit audit signal for derived data used on control params (permissive mode)
+  defp maybe_emit_derived_audit(action_module, params, context) do
+    roles = Taint.roles_for(action_module)
+
+    Enum.each(params, fn {param_name, _value} ->
+      if Map.get(roles, param_name) == :control do
+        TaintEvents.emit_taint_audited(action_module, param_name, :derived, context)
+      end
+    end)
+  end
+
+  # After successful execution, emit taint propagation signal if context had taint
+  defp maybe_emit_taint_propagated(action_module, context, {:ok, _result}) do
+    case Map.get(context, :taint) do
+      nil ->
+        :ok
+
+      input_taint ->
+        output_taint = Arbor.Signals.Taint.propagate([input_taint])
+        TaintEvents.emit_taint_propagated(action_module, input_taint, output_taint, context)
+    end
+  end
+
+  defp maybe_emit_taint_propagated(_action_module, _context, _error_result), do: :ok
 end
