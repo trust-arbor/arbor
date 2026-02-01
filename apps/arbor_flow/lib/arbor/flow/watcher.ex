@@ -348,7 +348,11 @@ defmodule Arbor.Flow.Watcher do
       {:ok, content} ->
         # Store pending change - include change_type so we know if it was new or changed
         pending =
-          Map.put(state.pending_changes, path, {content, hash, System.monotonic_time(), change_type})
+          Map.put(
+            state.pending_changes,
+            path,
+            {content, hash, System.monotonic_time(), change_type}
+          )
 
         # Schedule debounce expiry
         Process.send_after(self(), {:debounce_expired, path}, state.debounce_ms)
