@@ -55,7 +55,13 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
 
   describe "mark_processed/4" do
     test "marks a file as processed", %{tracker: tracker} do
-      assert :ok = PersistentFileTracker.mark_processed(tracker, "/test/file.md", "expander", "hash123")
+      assert :ok =
+               PersistentFileTracker.mark_processed(
+                 tracker,
+                 "/test/file.md",
+                 "expander",
+                 "hash123"
+               )
     end
 
     test "handles atom and string processors", %{tracker: tracker} do
@@ -66,13 +72,20 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
 
   describe "mark_failed/4" do
     test "marks a file as failed", %{tracker: tracker} do
-      assert :ok = PersistentFileTracker.mark_failed(tracker, "/test/file.md", "expander", "timeout")
+      assert :ok =
+               PersistentFileTracker.mark_failed(tracker, "/test/file.md", "expander", "timeout")
     end
   end
 
   describe "mark_skipped/4" do
     test "marks a file as skipped", %{tracker: tracker} do
-      assert :ok = PersistentFileTracker.mark_skipped(tracker, "/test/file.md", "expander", "invalid format")
+      assert :ok =
+               PersistentFileTracker.mark_skipped(
+                 tracker,
+                 "/test/file.md",
+                 "expander",
+                 "invalid format"
+               )
     end
   end
 
@@ -81,7 +94,14 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
       old_path = "/inbox/file.md"
       new_path = "/brainstorming/file.md"
 
-      assert :ok = PersistentFileTracker.mark_moved(tracker, old_path, new_path, "expander", "hash123")
+      assert :ok =
+               PersistentFileTracker.mark_moved(
+                 tracker,
+                 old_path,
+                 new_path,
+                 "expander",
+                 "hash123"
+               )
 
       # Old path should be marked as moved
       {:ok, old_record} = PersistentFileTracker.get_record(tracker, old_path, "expander")
@@ -97,7 +117,12 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
 
   describe "needs_processing?/4" do
     test "returns true for unknown file", %{tracker: tracker} do
-      assert PersistentFileTracker.needs_processing?(tracker, "/unknown/file.md", "expander", "hash")
+      assert PersistentFileTracker.needs_processing?(
+               tracker,
+               "/unknown/file.md",
+               "expander",
+               "hash"
+             )
     end
 
     test "returns false for processed file with same hash", %{tracker: tracker} do
@@ -224,6 +249,57 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
 
       assert MapSet.member?(deliberator_files, "/file2.md")
       refute MapSet.member?(deliberator_files, "/file1.md")
+    end
+  end
+
+  describe "change detection cycle" do
+    test "process -> change -> re-process cycle updates hash", %{tracker: tracker} do
+      path = "/inbox/item.md"
+
+      # Initial processing
+      :ok = PersistentFileTracker.mark_processed(tracker, path, "expander", "hash_v1")
+      refute PersistentFileTracker.needs_processing?(tracker, path, "expander", "hash_v1")
+
+      # Content changed — new hash detected
+      assert PersistentFileTracker.needs_processing?(tracker, path, "expander", "hash_v2")
+
+      # Re-process with updated hash
+      :ok = PersistentFileTracker.mark_processed(tracker, path, "expander", "hash_v2")
+      refute PersistentFileTracker.needs_processing?(tracker, path, "expander", "hash_v2")
+
+      # Verify the record stores the latest hash
+      {:ok, record} = PersistentFileTracker.get_record(tracker, path, "expander")
+      assert record.content_hash == "hash_v2"
+      assert record.status == :processed
+    end
+
+    test "timestamps update on re-processing", %{tracker: tracker} do
+      path = "/inbox/item.md"
+
+      :ok = PersistentFileTracker.mark_processed(tracker, path, "expander", "hash_v1")
+      {:ok, first_record} = PersistentFileTracker.get_record(tracker, path, "expander")
+
+      # Small delay to ensure timestamp differs
+      Process.sleep(10)
+
+      :ok = PersistentFileTracker.mark_processed(tracker, path, "expander", "hash_v2")
+      {:ok, second_record} = PersistentFileTracker.get_record(tracker, path, "expander")
+
+      assert second_record.processed_at >= first_record.processed_at
+    end
+
+    test "failed re-processing allows retry on next scan", %{tracker: tracker} do
+      path = "/inbox/item.md"
+
+      # Initially processed
+      :ok = PersistentFileTracker.mark_processed(tracker, path, "expander", "hash_v1")
+
+      # Change detected, re-processing fails
+      :ok = PersistentFileTracker.mark_failed(tracker, path, "expander", "ai_timeout")
+
+      # Should be retried on next scan regardless of hash
+      assert PersistentFileTracker.needs_processing?(tracker, path, "expander", "hash_v1")
+      assert PersistentFileTracker.needs_processing?(tracker, path, "expander", "hash_v2")
     end
   end
 
