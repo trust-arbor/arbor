@@ -58,7 +58,8 @@ defmodule Arbor.Security.Capability.Signer do
     %{
       delegator_id: parent_cap.principal_id,
       delegator_signature: signature,
-      constraints: new_cap.constraints
+      constraints: new_cap.constraints,
+      delegated_at: DateTime.utc_now()
     }
   end
 

@@ -141,7 +141,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
       {:ok, :stored} = CapabilityStore.put(cap1)
       {:ok, :stored} = CapabilityStore.put(cap2)
 
-      assert :ok = CapabilityStore.revoke_all(agent_id)
+      assert {:ok, 2} = CapabilityStore.revoke_all(agent_id)
 
       {:ok, caps} = CapabilityStore.list_for_principal(agent_id)
       assert caps == []

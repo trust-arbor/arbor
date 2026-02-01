@@ -237,6 +237,52 @@ defmodule Arbor.Common.SafeAtom do
   end
 
   # =============================================================================
+  # Identity lifecycle allowlists
+  # =============================================================================
+
+  @identity_statuses [:active, :suspended, :revoked]
+
+  @doc """
+  Returns the list of valid identity lifecycle statuses.
+
+  Identity statuses:
+  - `:active` - Identity is active and can be used normally
+  - `:suspended` - Identity is temporarily suspended, can be resumed
+  - `:revoked` - Identity is permanently revoked (terminal state)
+  """
+  @spec identity_statuses() :: [atom()]
+  def identity_statuses, do: @identity_statuses
+
+  @doc """
+  Safely convert a string to an identity status atom.
+
+  Returns `{:ok, status}` if the string is a valid identity status,
+  or `{:error, {:not_allowed, string}}` otherwise.
+
+  ## Examples
+
+      iex> Arbor.Common.SafeAtom.to_identity_status("active")
+      {:ok, :active}
+
+      iex> Arbor.Common.SafeAtom.to_identity_status("suspended")
+      {:ok, :suspended}
+
+      iex> Arbor.Common.SafeAtom.to_identity_status("revoked")
+      {:ok, :revoked}
+
+      iex> Arbor.Common.SafeAtom.to_identity_status("invalid")
+      {:error, {:not_allowed, "invalid"}}
+  """
+  @spec to_identity_status(String.t() | atom()) :: allowed_result()
+  def to_identity_status(value) when is_binary(value) do
+    to_allowed(value, @identity_statuses)
+  end
+
+  def to_identity_status(value) when is_atom(value) do
+    to_allowed(value, @identity_statuses)
+  end
+
+  # =============================================================================
   # Taint tracking allowlists and helpers
   # =============================================================================
 

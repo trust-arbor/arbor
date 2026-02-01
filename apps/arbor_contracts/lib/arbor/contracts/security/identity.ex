@@ -38,6 +38,9 @@ defmodule Arbor.Contracts.Security.Identity do
   @ed25519_private_key_size 32
   @x25519_key_size 32
 
+  @typedoc "Identity lifecycle status"
+  @type status :: :active | :suspended | :revoked
+
   typedstruct enforce: true do
     @typedoc "A cryptographic agent identity"
 
@@ -50,6 +53,10 @@ defmodule Arbor.Contracts.Security.Identity do
     field(:created_at, DateTime.t())
     field(:key_version, Types.key_version(), default: 1)
     field(:metadata, map(), default: %{})
+    # Lifecycle status fields
+    field(:status, status(), default: :active)
+    field(:status_changed_at, DateTime.t(), enforce: false)
+    field(:status_reason, String.t(), enforce: false)
   end
 
   @doc """
@@ -84,7 +91,10 @@ defmodule Arbor.Contracts.Security.Identity do
       encryption_private_key: attrs[:encryption_private_key],
       created_at: attrs[:created_at] || DateTime.utc_now(),
       key_version: attrs[:key_version] || 1,
-      metadata: attrs[:metadata] || %{}
+      metadata: attrs[:metadata] || %{},
+      status: attrs[:status] || :active,
+      status_changed_at: attrs[:status_changed_at],
+      status_reason: attrs[:status_reason]
     }
 
     case validate(identity) do
@@ -139,11 +149,35 @@ defmodule Arbor.Contracts.Security.Identity do
 
   Strips both the Ed25519 signing private key and the X25519 encryption
   private key. Use this before storing in registries or transmitting.
+  Preserves the identity status for registry storage.
   """
   @spec public_only(t()) :: t()
   def public_only(%__MODULE__{} = identity) do
     %{identity | private_key: nil, encryption_private_key: nil}
   end
+
+  @doc """
+  Check if a value is a valid identity status.
+
+  Valid statuses are `:active`, `:suspended`, and `:revoked`.
+
+  ## Examples
+
+      iex> Identity.valid_status?(:active)
+      true
+
+      iex> Identity.valid_status?(:suspended)
+      true
+
+      iex> Identity.valid_status?(:revoked)
+      true
+
+      iex> Identity.valid_status?(:invalid)
+      false
+  """
+  @spec valid_status?(term()) :: boolean()
+  def valid_status?(status) when status in [:active, :suspended, :revoked], do: true
+  def valid_status?(_), do: false
 
   @doc """
   Return a human-readable display string for the identity.
@@ -273,6 +307,12 @@ defimpl Jason.Encoder, for: Arbor.Contracts.Security.Identity do
       end
     end)
     |> Map.update!(:created_at, &DateTime.to_iso8601/1)
+    |> then(fn map ->
+      case map.status_changed_at do
+        nil -> map
+        dt -> Map.put(map, :status_changed_at, DateTime.to_iso8601(dt))
+      end
+    end)
     |> Jason.Encode.map(opts)
   end
 end
