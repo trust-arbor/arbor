@@ -156,14 +156,11 @@ defmodule Arbor.SDLC do
         {:error, :supervisor_not_running}
 
       _pid ->
-        # Terminate old watcher if running
-        case Process.whereis(Arbor.SDLC.Watcher) do
-          nil -> :ok
-          _watcher -> Supervisor.terminate_child(supervisor, Arbor.SDLC.Watcher)
-        end
+        # Child id is the module name (Arbor.Flow.Watcher), not the process name
+        child_id = Arbor.Flow.Watcher
 
-        # Delete the old child spec
-        Supervisor.delete_child(supervisor, Arbor.SDLC.Watcher)
+        Supervisor.terminate_child(supervisor, child_id)
+        Supervisor.delete_child(supervisor, child_id)
 
         # Build new spec with current config
         config = Config.new()
