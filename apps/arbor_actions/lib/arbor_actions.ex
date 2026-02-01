@@ -66,9 +66,9 @@ defmodule Arbor.Actions do
   See individual action modules for detailed documentation.
   """
 
-  alias Arbor.Signals
   alias Arbor.Actions.Taint
   alias Arbor.Actions.TaintEvents
+  alias Arbor.Signals
 
   # ===========================================================================
   # Public API — Authorized execution (for agent callers)

@@ -343,9 +343,9 @@ defmodule Arbor.Memory.IdentityConsolidator do
         []
 
       insights when is_list(insights) ->
-        insights
-        |> Enum.filter(&(&1.confidence >= min_confidence))
-        |> Enum.filter(&(&1.category in [:personality, :capability, :value]))
+        Enum.filter(insights, fn i ->
+          i.confidence >= min_confidence and i.category in [:personality, :capability, :value]
+        end)
     end
   end
 

@@ -472,9 +472,10 @@ defmodule Arbor.Signals.Bus do
         # require passing the subscriber's keychain context.
 
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        with {:ok, key} <- apply(channels_module, :get_key, [channel_id, signal.source]) do
-          decrypt_channel_payload(signal, payload, key)
-        else
+        case apply(channels_module, :get_key, [channel_id, signal.source]) do
+          {:ok, key} ->
+            decrypt_channel_payload(signal, payload, key)
+
           {:error, _reason} ->
             # Not a member or channel not found - return signal as-is
             signal

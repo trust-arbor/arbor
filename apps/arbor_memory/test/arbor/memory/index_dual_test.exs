@@ -13,14 +13,15 @@ defmodule Arbor.Memory.IndexDualTest do
 
   alias Arbor.Memory.{Embedding, Index}
   alias Arbor.Persistence.Repo
+  alias Ecto.Adapters.SQL.Sandbox
 
   @test_agent_id "test_agent_dual_index"
   @dimension 128
 
   setup do
     # Start the sandbox for database transactions
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok = Sandbox.checkout(Repo)
+    Sandbox.mode(Repo, {:shared, self()})
 
     # Clean up any existing test data
     Embedding.delete_all(@test_agent_id)
