@@ -288,6 +288,143 @@ defmodule Arbor.Common.SafePathTest do
     end
   end
 
+  # ==========================================================================
+  # Encoded traversal edge cases
+  # ==========================================================================
+
+  describe "encoded traversal patterns" do
+    test "rejects double-encoded traversal sequences" do
+      assert {:error, :traversal_sequence} = SafePath.validate("%252e%252e/etc/passwd")
+      assert {:error, :traversal_sequence} = SafePath.validate("subdir/%252e%252e/etc/passwd")
+    end
+
+    test "rejects mixed encoding traversal sequences" do
+      assert {:error, :traversal_sequence} = SafePath.validate("%2e./etc/passwd")
+      assert {:error, :traversal_sequence} = SafePath.validate(".%2e/etc/passwd")
+    end
+
+    test "rejects case-insensitive encoded traversal" do
+      # Upper/lower mix beyond what's already tested
+      assert {:error, :traversal_sequence} = SafePath.validate("%2E%2e/etc/passwd")
+      assert {:error, :traversal_sequence} = SafePath.validate("%2e%2E/etc/passwd")
+    end
+
+    test "encoded traversal rejected by resolve_within before path resolution" do
+      assert {:error, :traversal_sequence} =
+               SafePath.resolve_within("%2e%2e/etc/passwd", "/workspace")
+
+      assert {:error, :traversal_sequence} =
+               SafePath.resolve_within("%252e%252e/secret", "/workspace")
+    end
+
+    test "encoded traversal rejected by safe_join" do
+      assert {:error, :traversal_sequence} = SafePath.safe_join("/workspace", "%2e%2e/escape")
+      assert {:error, :traversal_sequence} = SafePath.safe_join("/workspace", ".%2e/escape")
+    end
+  end
+
+  # ==========================================================================
+  # Invalid encoding edge cases
+  # ==========================================================================
+
+  describe "invalid encoding" do
+    test "rejects invalid UTF-8 sequences" do
+      # 0xFF is not valid UTF-8 start byte
+      assert {:error, :invalid_encoding} = SafePath.validate(<<0xFF, 0xFE>>)
+    end
+
+    test "rejects truncated multi-byte UTF-8" do
+      # 0xC3 starts a 2-byte sequence but is alone
+      assert {:error, :invalid_encoding} = SafePath.validate(<<0xC3>>)
+    end
+
+    test "validate! raises for invalid encoding" do
+      assert_raise SafePath.TraversalError, ~r/invalid encoding/i, fn ->
+        SafePath.validate!(<<0xFF, 0xFE>>)
+      end
+    end
+  end
+
+  # ==========================================================================
+  # safe_basename edge cases
+  # ==========================================================================
+
+  describe "safe_basename edge cases" do
+    test "single dot returns traversal error" do
+      assert {:error, :traversal_sequence} = SafePath.safe_basename(".")
+    end
+
+    test "path ending in single dot" do
+      assert {:error, :traversal_sequence} = SafePath.safe_basename("/path/to/.")
+    end
+
+    test "hidden file is allowed" do
+      assert {:ok, ".gitignore"} = SafePath.safe_basename("/path/.gitignore")
+    end
+  end
+
+  # ==========================================================================
+  # Backslash and platform edge cases
+  # ==========================================================================
+
+  describe "platform edge cases" do
+    test "backslash is treated as literal character in paths (Unix)" do
+      # On Unix, backslash is a valid filename character, not a separator
+      # validate/1 doesn't reject it
+      assert :ok = SafePath.validate("file\\name.txt")
+    end
+
+    test "sanitize_filename strips backslashes" do
+      # sanitize_filename treats backslash as separator and replaces it
+      assert "dir_file.txt" = SafePath.sanitize_filename("dir\\file.txt")
+    end
+
+    test "backslash traversal doesn't bypass resolve_within" do
+      # Even if someone tries Windows-style traversal, resolve_within
+      # treats the backslash as a literal character, not a separator
+      result = SafePath.resolve_within("..\\..\\etc\\passwd", "/workspace")
+      # The path resolves within /workspace since \ is literal on Unix
+      assert {:ok, resolved} = result
+      assert String.starts_with?(resolved, "/workspace")
+    end
+  end
+
+  # ==========================================================================
+  # Symlink chain resolution
+  # ==========================================================================
+
+  describe "resolve_real edge cases" do
+    @tag :tmp_dir
+    test "resolves symlink chains", %{tmp_dir: tmp_dir} do
+      real_file = Path.join(tmp_dir, "real.txt")
+      link1 = Path.join(tmp_dir, "link1.txt")
+      link2 = Path.join(tmp_dir, "link2.txt")
+
+      File.write!(real_file, "test")
+      File.ln_s!(real_file, link1)
+      File.ln_s!(link1, link2)
+
+      assert {:ok, resolved} = SafePath.resolve_real(link2)
+      assert String.ends_with?(resolved, "real.txt")
+    end
+
+    @tag :tmp_dir
+    test "resolves relative symlinks", %{tmp_dir: tmp_dir} do
+      subdir = Path.join(tmp_dir, "subdir")
+      File.mkdir_p!(subdir)
+
+      real_file = Path.join(subdir, "target.txt")
+      File.write!(real_file, "test")
+
+      # Create a relative symlink from tmp_dir pointing into subdir
+      link = Path.join(tmp_dir, "rel_link.txt")
+      File.ln_s!("subdir/target.txt", link)
+
+      assert {:ok, resolved} = SafePath.resolve_real(link)
+      assert String.ends_with?(resolved, "target.txt")
+    end
+  end
+
   describe "TraversalError" do
     test "has meaningful messages for all reason types" do
       assert Exception.message(%SafePath.TraversalError{reason: :path_traversal}) =~

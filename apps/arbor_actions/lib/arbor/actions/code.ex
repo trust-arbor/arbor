@@ -322,7 +322,10 @@ defmodule Arbor.Actions.Code do
     end
 
     defp parse_module(module_str) when is_binary(module_str) do
-      module_str = if String.starts_with?(module_str, "Elixir."), do: module_str, else: "Elixir.#{module_str}"
+      module_str =
+        if String.starts_with?(module_str, "Elixir."),
+          do: module_str,
+          else: "Elixir.#{module_str}"
 
       case Arbor.Common.SafeAtom.to_existing(module_str) do
         {:ok, atom} ->
@@ -455,7 +458,10 @@ defmodule Arbor.Actions.Code do
       # Parse "Module.function/arity" format
       case Regex.run(~r/^(.+)\.([^.\/]+)\/(\d+)$/, mfa_str) do
         [_, module_str, func_str, arity_str] ->
-          module_str = if String.starts_with?(module_str, "Elixir."), do: module_str, else: "Elixir.#{module_str}"
+          module_str =
+            if String.starts_with?(module_str, "Elixir."),
+              do: module_str,
+              else: "Elixir.#{module_str}"
 
           try do
             module =

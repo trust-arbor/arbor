@@ -31,7 +31,7 @@ defmodule Arbor.Historian do
       {:ok, entries} = Arbor.Historian.for_category(:security)
 
       # Reconstruct a timeline
-      span = Arbor.Historian.Timeline.Span.last_hours(1)
+      span = Arbor.Historian.span(from: one_hour_ago, to: now)
       {:ok, entries} = Arbor.Historian.reconstruct(span)
 
       # Get statistics
@@ -269,6 +269,35 @@ defmodule Arbor.Historian do
   @doc "Get activity summary for an agent."
   @spec agent_activity(String.t(), keyword()) :: map()
   defdelegate agent_activity(agent_id, opts \\ []), to: Aggregator
+
+  # ── Span Construction ──
+
+  @doc """
+  Create a time span for timeline queries.
+
+  ## Required Options
+
+  - `:from` - Start time (`DateTime`)
+  - `:to` - End time (`DateTime`)
+
+  ## Optional
+
+  - `:streams` - Restrict to specific stream IDs
+  - `:categories` - Filter by category atoms
+  - `:types` - Filter by type atoms
+  - `:agent_id` - Filter by agent
+  - `:correlation_id` - Filter by correlation chain
+  """
+  @spec span(keyword()) :: Span.t()
+  defdelegate span(opts), to: Span, as: :new
+
+  @doc "Create a span covering the last N minutes from now."
+  @spec last_minutes(pos_integer(), keyword()) :: Span.t()
+  defdelegate last_minutes(minutes, opts \\ []), to: Span
+
+  @doc "Create a span covering the last N hours from now."
+  @spec last_hours(pos_integer(), keyword()) :: Span.t()
+  defdelegate last_hours(hours, opts \\ []), to: Span
 
   # ── Timeline ──
 
