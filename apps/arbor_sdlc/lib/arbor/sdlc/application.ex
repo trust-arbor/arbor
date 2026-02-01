@@ -38,7 +38,12 @@ defmodule Arbor.SDLC.Application do
 
   @impl true
   def start(_type, _args) do
-    children = build_children()
+    children =
+      if Application.get_env(:arbor_sdlc, :start_children, true) do
+        build_children()
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.SDLC.Supervisor]
 

@@ -26,7 +26,13 @@ defmodule Arbor.Persistence.Application do
 
   @impl true
   def start(_type, _args) do
-    children = build_children()
+    children =
+      if Application.get_env(:arbor_persistence, :start_children, true) do
+        build_children()
+      else
+        []
+      end
+
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Persistence.Supervisor)
   end
 

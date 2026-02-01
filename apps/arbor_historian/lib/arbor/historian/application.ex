@@ -13,16 +13,21 @@ defmodule Arbor.Historian.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
-      {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
-    ]
+    children =
+      if Application.get_env(:arbor_historian, :start_children, true) do
+        [
+          {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
+          {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
+        ]
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.Historian.Supervisor]
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
-        emit_started()
+        if children != [], do: emit_started()
         {:ok, pid}
 
       error ->

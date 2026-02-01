@@ -5,10 +5,15 @@ defmodule Arbor.Agent.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      Arbor.Agent.Registry,
-      Arbor.Agent.Supervisor
-    ]
+    children =
+      if Application.get_env(:arbor_agent, :start_children, true) do
+        [
+          Arbor.Agent.Registry,
+          Arbor.Agent.Supervisor
+        ]
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.Agent.AppSupervisor]
     Supervisor.start_link(children, opts)

@@ -5,6 +5,22 @@ config :logger, level: :warning
 # Don't start HTTP server in tests
 config :arbor_gateway, start_server: false
 
+# Don't start application supervision trees in tests —
+# tests use start_supervised! for what they need
+config :arbor_signals, start_children: false
+config :arbor_checkpoint, start_children: false
+config :arbor_trust, start_children: false
+config :arbor_security, start_children: false
+config :arbor_persistence, start_children: false
+config :arbor_ai, start_children: false
+config :arbor_consensus, start_children: false
+config :arbor_memory, start_children: false
+config :arbor_shell, start_children: false
+config :arbor_sandbox, start_children: false
+config :arbor_agent, start_children: false
+config :arbor_sdlc, start_children: false
+config :arbor_historian, start_children: false
+
 # Disable checkpoint integration in tests (module may not be available)
 config :arbor_signals,
   checkpoint_module: nil,
