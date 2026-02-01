@@ -92,7 +92,15 @@ defmodule Arbor.Flow.ItemParser do
   @valid_categories ~w(feature refactor bug infrastructure idea research documentation content)
   @valid_efforts ~w(small medium large ongoing)
 
-  @known_frontmatter_keys ["created", "priority", "category", "type", "effort", "depends on", "blocks"]
+  @known_frontmatter_keys [
+    "created",
+    "priority",
+    "category",
+    "type",
+    "effort",
+    "depends on",
+    "blocks"
+  ]
 
   @doc """
   Parse a markdown file into an item map.
