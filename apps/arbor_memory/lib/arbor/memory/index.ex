@@ -638,23 +638,23 @@ defmodule Arbor.Memory.Index do
   defp compute_embedding(""), do: {:error, :empty_content}
 
   defp compute_embedding(content) do
-    # For now, use a simple hash-based embedding as fallback
-    # credo:disable-for-next-line Credo.Check.Design.TagTODO
-    # TODO: Integrate with arbor_ai for real embeddings
-    # This function can return {:error, reason} in production when
-    # the embedding service fails
-    {:ok, simple_embedding(content)}
+    case Arbor.AI.embed(content) do
+      {:ok, %{embedding: embedding}} ->
+        {:ok, embedding}
+
+      {:error, reason} ->
+        Logger.warning("Embedding provider failed, using hash fallback: #{inspect(reason)}")
+        {:ok, hash_fallback_embedding(content)}
+    end
   end
 
-  # Simple hash-based embedding for testing/fallback
-  # In production, this would call arbor_ai's embedding service
-  defp simple_embedding(text) do
-    # Create a deterministic pseudo-embedding from text
-    # This is NOT a real semantic embedding - just for testing
+  # Hash-based fallback embedding when no provider is available.
+  # Deterministic but not semantically meaningful.
+  defp hash_fallback_embedding(text) do
+    dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 768)
     hash = :erlang.phash2(text, 1_000_000)
 
-    for i <- 0..127 do
-      # Create deterministic but varied values
+    for i <- 0..(dimension - 1) do
       :math.sin((hash + i) / 1000) * 0.5 + 0.5
     end
   end
@@ -749,7 +749,7 @@ defmodule Arbor.Memory.Index do
       # Get a sample embedding to search with (or use a zero vector)
       # This is a bit of a workaround - ideally we'd have a "list recent" function
       # For now, we'll load entries by doing a broad search
-      dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 384)
+      dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 768)
       zero_vector = List.duplicate(0.0, dimension)
 
       case Embedding.search(state.agent_id, zero_vector, limit: limit, threshold: 0.0) do

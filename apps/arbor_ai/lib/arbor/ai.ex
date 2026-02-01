@@ -57,9 +57,13 @@ defmodule Arbor.AI do
   """
 
   @behaviour Arbor.Contracts.API.AI
+  @behaviour Arbor.Contracts.API.Embedding
 
   alias Arbor.AI.{
     BackendRegistry,
+    Backends.OllamaEmbedding,
+    Backends.OpenAIEmbedding,
+    Backends.TestEmbedding,
     BudgetTracker,
     CliImpl,
     Config,
@@ -261,6 +265,70 @@ defmodule Arbor.AI do
     Router.route_embedding(opts)
   end
 
+  # ── Embedding API ──
+
+  @doc """
+  Generate an embedding for a single text.
+
+  Routes to the appropriate embedding provider based on configuration.
+  Uses `Router.route_embedding/1` to select the provider, or accepts
+  an explicit `:provider` option.
+
+  ## Options
+
+  - `:provider` - Explicit provider atom (`:ollama`, `:openai`, `:lmstudio`, `:test`)
+  - `:model` - Model override
+  - `:dimensions` - Requested dimensions (if provider supports it)
+  - `:timeout` - Request timeout in ms
+
+  ## Examples
+
+      {:ok, result} = Arbor.AI.embed("Hello world")
+      result.embedding  #=> [0.123, 0.456, ...]
+      result.dimensions  #=> 768
+
+      {:ok, result} = Arbor.AI.embed("Hello", provider: :test)
+  """
+  @impl Arbor.Contracts.API.Embedding
+  @spec embed(String.t(), keyword()) ::
+          {:ok, Arbor.Contracts.API.Embedding.result()} | {:error, term()}
+  def embed(text, opts \\ []) do
+    case resolve_embedding_provider(opts) do
+      {:ok, {module, provider_opts}} ->
+        module.embed(text, Keyword.merge(provider_opts, opts))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Generate embeddings for multiple texts in a single request.
+
+  Routes to the appropriate embedding provider based on configuration.
+
+  ## Options
+
+  Same as `embed/2`.
+
+  ## Examples
+
+      {:ok, result} = Arbor.AI.embed_batch(["Hello", "World"])
+      result.embeddings  #=> [[0.123, ...], [0.456, ...]]
+  """
+  @impl Arbor.Contracts.API.Embedding
+  @spec embed_batch([String.t()], keyword()) ::
+          {:ok, Arbor.Contracts.API.Embedding.batch_result()} | {:error, term()}
+  def embed_batch(texts, opts \\ []) do
+    case resolve_embedding_provider(opts) do
+      {:ok, {module, provider_opts}} ->
+        module.embed_batch(texts, Keyword.merge(provider_opts, opts))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @doc """
   Classify a prompt into task metadata for routing decisions.
 
@@ -430,4 +498,70 @@ defmodule Arbor.AI do
   end
 
   defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+
+  # ===========================================================================
+  # Private Helpers - Embedding
+  # ===========================================================================
+
+  # Resolve which embedding provider module to use.
+  #
+  # Priority:
+  # 1. Explicit :provider opt → use that provider directly
+  # 2. Router.route_embedding/1 → map backend atom to module
+  # 3. TestEmbedding fallback if embedding_test_fallback: true
+  @spec resolve_embedding_provider(keyword()) ::
+          {:ok, {module(), keyword()}} | {:error, term()}
+  defp resolve_embedding_provider(opts) do
+    case Keyword.get(opts, :provider) do
+      nil ->
+        resolve_via_router(opts)
+
+      provider when is_atom(provider) ->
+        case provider_to_module(provider) do
+          {:ok, module} -> {:ok, {module, [provider: provider]}}
+          :error -> {:error, {:unknown_provider, provider}}
+        end
+    end
+  end
+
+  defp resolve_via_router(opts) do
+    case Router.route_embedding(opts) do
+      {:ok, {backend, model}} ->
+        case provider_to_module(backend) do
+          {:ok, module} ->
+            {:ok, {module, [provider: backend, model: model]}}
+
+          :error ->
+            {:error, {:unknown_provider, backend}}
+        end
+
+      {:error, :no_embedding_providers} ->
+        maybe_test_fallback()
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp maybe_test_fallback do
+    if Application.get_env(:arbor_ai, :embedding_test_fallback, false) do
+      {:ok, {TestEmbedding, [provider: :test]}}
+    else
+      {:error, :no_embedding_providers}
+    end
+  end
+
+  @embedding_providers %{
+    ollama: OllamaEmbedding,
+    openai: OpenAIEmbedding,
+    lmstudio: OpenAIEmbedding,
+    test: TestEmbedding
+  }
+
+  defp provider_to_module(provider) do
+    case Map.fetch(@embedding_providers, provider) do
+      {:ok, module} -> {:ok, module}
+      :error -> :error
+    end
+  end
 end

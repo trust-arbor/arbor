@@ -145,8 +145,8 @@ config :arbor_memory,
 
 # pgvector embedding configuration
 config :arbor_persistence,
-  # Vector dimension: 384 for MiniLM, 768 for other models, 1536 for OpenAI
-  embedding_dimension: 384
+  # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
+  embedding_dimension: 768
 
 # Import environment-specific config
 import_config "#{config_env()}.exs"

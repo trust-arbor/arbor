@@ -71,6 +71,9 @@ defmodule Arbor.AI.BackendRegistry do
   @server_backends %{
     lmstudio: %{
       health_url: "http://localhost:1234/v1/models"
+    },
+    ollama: %{
+      health_url: "http://localhost:11434/api/tags"
     }
   }
 
