@@ -427,6 +427,254 @@ defmodule Arbor.Historian do
 
   # ── Stats ──
 
+  # ── Channel Queries ──
+
+  @channel_event_types [
+    :channel_created,
+    :channel_member_invited,
+    :channel_member_joined,
+    :channel_member_left,
+    :channel_member_revoked,
+    :channel_key_rotated,
+    :channel_destroyed
+  ]
+
+  @doc """
+  Query all events for a specific channel.
+
+  Returns events from the :security category that reference the given
+  channel_id, ordered by timestamp.
+
+  ## Options
+
+  - `:from` — start time filter
+  - `:to` — end time filter
+  - `:limit` — maximum number of events
+  - `:types` — filter to specific event types (e.g., [:channel_member_joined])
+  """
+  @spec channel_history(String.t(), keyword()) :: {:ok, [map()]}
+  def channel_history(channel_id, opts \\ []) when is_binary(channel_id) do
+    types = Keyword.get(opts, :types, @channel_event_types)
+
+    query_opts =
+      opts
+      |> Keyword.put(:category, :security)
+      |> Keyword.put(:types, types)
+
+    case QueryEngine.query(query_opts) do
+      {:ok, entries} ->
+        filtered =
+          entries
+          |> Enum.filter(fn entry ->
+            get_in(entry, [:data, :channel_id]) == channel_id ||
+              get_in(entry, ["data", "channel_id"]) == channel_id
+          end)
+          |> Enum.sort_by(fn entry ->
+            entry[:timestamp] || entry["timestamp"]
+          end)
+
+        {:ok, filtered}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Reconstruct current channel membership from event history.
+
+  Replays channel events to compute the current set of members.
+  Returns a map with channel metadata and member list.
+
+  ## Returns
+
+  ```
+  %{
+    channel_id: "chan_abc123",
+    members: ["agent_001", "agent_002"],
+    creator_id: "agent_001",
+    created_at: ~U[2026-01-15 10:00:00Z],
+    key_version: 3,
+    destroyed: false
+  }
+  ```
+  """
+  @spec channel_membership(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def channel_membership(channel_id, opts \\ []) when is_binary(channel_id) do
+    case channel_history(channel_id, opts) do
+      {:ok, []} ->
+        {:error, :not_found}
+
+      {:ok, events} ->
+        membership = reconstruct_membership(channel_id, events)
+        {:ok, membership}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Query all channels an agent has been part of.
+
+  Returns a list of channel IDs with the agent's membership status.
+
+  ## Returns
+
+  ```
+  [
+    %{channel_id: "chan_abc", status: :member, joined_at: ~U[...], left_at: nil},
+    %{channel_id: "chan_def", status: :left, joined_at: ~U[...], left_at: ~U[...]}
+  ]
+  ```
+  """
+  @spec agent_channels(String.t(), keyword()) :: {:ok, [map()]}
+  def agent_channels(agent_id, opts \\ []) when is_binary(agent_id) do
+    # Query all channel events in :security category
+    query_opts =
+      opts
+      |> Keyword.put(:category, :security)
+      |> Keyword.put(:types, @channel_event_types)
+
+    case QueryEngine.query(query_opts) do
+      {:ok, entries} ->
+        channels =
+          entries
+          |> Enum.filter(fn entry ->
+            data = entry[:data] || entry["data"] || %{}
+
+            data_agent_id = data[:agent_id] || data["agent_id"]
+            inviter_id = data[:inviter_id] || data["inviter_id"]
+            revoked_by = data[:revoked_by] || data["revoked_by"]
+
+            data_agent_id == agent_id ||
+              inviter_id == agent_id ||
+              revoked_by == agent_id
+          end)
+          |> Enum.group_by(fn entry ->
+            data = entry[:data] || entry["data"] || %{}
+            data[:channel_id] || data["channel_id"]
+          end)
+          |> Enum.map(fn {channel_id, channel_events} ->
+            compute_agent_channel_status(agent_id, channel_id, channel_events)
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        {:ok, channels}
+
+      error ->
+        error
+    end
+  end
+
+  defp reconstruct_membership(channel_id, events) do
+    initial = %{
+      channel_id: channel_id,
+      members: MapSet.new(),
+      creator_id: nil,
+      created_at: nil,
+      key_version: 1,
+      destroyed: false
+    }
+
+    Enum.reduce(events, initial, fn event, acc ->
+      type = get_event_type(event)
+      data = event[:data] || event["data"] || %{}
+      agent_id = data[:agent_id] || data["agent_id"]
+      timestamp = event[:timestamp] || event["timestamp"]
+
+      case type do
+        :channel_created ->
+          %{
+            acc
+            | members: MapSet.put(acc.members, agent_id),
+              creator_id: agent_id,
+              created_at: timestamp
+          }
+
+        :channel_member_joined ->
+          %{acc | members: MapSet.put(acc.members, agent_id)}
+
+        :channel_member_left ->
+          %{acc | members: MapSet.delete(acc.members, agent_id)}
+
+        :channel_member_revoked ->
+          %{acc | members: MapSet.delete(acc.members, agent_id)}
+
+        :channel_key_rotated ->
+          new_version = data[:new_version] || data["new_version"] || acc.key_version + 1
+          %{acc | key_version: new_version}
+
+        :channel_destroyed ->
+          %{acc | destroyed: true, members: MapSet.new()}
+
+        _ ->
+          acc
+      end
+    end)
+    |> Map.update!(:members, &MapSet.to_list/1)
+  end
+
+  defp get_event_type(event) do
+    type = event[:type] || event["type"]
+
+    cond do
+      is_atom(type) -> type
+      is_binary(type) -> String.to_existing_atom(type)
+      true -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp compute_agent_channel_status(agent_id, channel_id, events) do
+    sorted = Enum.sort_by(events, fn e -> e[:timestamp] || e["timestamp"] end)
+
+    initial = %{
+      channel_id: channel_id,
+      status: nil,
+      joined_at: nil,
+      left_at: nil
+    }
+
+    Enum.reduce(sorted, initial, fn event, acc ->
+      type = get_event_type(event)
+      data = event[:data] || event["data"] || %{}
+      event_agent_id = data[:agent_id] || data["agent_id"]
+      timestamp = event[:timestamp] || event["timestamp"]
+
+      cond do
+        type == :channel_created and event_agent_id == agent_id ->
+          %{acc | status: :member, joined_at: timestamp}
+
+        type == :channel_member_joined and event_agent_id == agent_id ->
+          %{acc | status: :member, joined_at: timestamp}
+
+        type == :channel_member_left and event_agent_id == agent_id ->
+          %{acc | status: :left, left_at: timestamp}
+
+        type == :channel_member_revoked and event_agent_id == agent_id ->
+          %{acc | status: :revoked, left_at: timestamp}
+
+        type == :channel_destroyed ->
+          if acc.status == :member do
+            %{acc | status: :channel_destroyed, left_at: timestamp}
+          else
+            acc
+          end
+
+        true ->
+          acc
+      end
+    end)
+    |> case do
+      %{status: nil} -> nil
+      result -> result
+    end
+  end
+
+  # ── Stats ──
+
   @doc "Get overall historian statistics."
   @spec stats() :: map()
   def stats do
