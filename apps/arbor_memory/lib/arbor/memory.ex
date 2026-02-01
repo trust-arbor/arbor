@@ -52,15 +52,19 @@ defmodule Arbor.Memory do
     BackgroundChecks,
     Consolidation,
     Events,
+    IdentityConsolidator,
     Index,
     IndexSupervisor,
     InsightDetector,
     KnowledgeGraph,
     Patterns,
+    Preferences,
     Proposal,
+    ReflectionProcessor,
     Relationship,
     RelationshipStore,
     Retrieval,
+    SelfKnowledge,
     Signals,
     Summarizer,
     TokenBudget,
@@ -1165,6 +1169,277 @@ defmodule Arbor.Memory do
   defdelegate detect_and_queue_insights(agent_id, opts \\ []),
     to: InsightDetector,
     as: :detect_and_queue
+
+  # ============================================================================
+  # Self-Knowledge (Phase 5)
+  # ============================================================================
+
+  @doc """
+  Get the agent's self-knowledge.
+
+  Returns the SelfKnowledge struct containing capabilities, traits,
+  values, and preferences.
+
+  ## Examples
+
+      sk = Arbor.Memory.get_self_knowledge("agent_001")
+  """
+  @spec get_self_knowledge(String.t()) :: SelfKnowledge.t() | nil
+  defdelegate get_self_knowledge(agent_id), to: IdentityConsolidator
+
+  @doc """
+  Query a specific aspect of self-knowledge.
+
+  ## Aspects
+
+  - `:memory_system` - Understanding of memory architecture
+  - `:identity` - Core identity (traits + values)
+  - `:tools` - Tool capabilities
+  - `:cognition` - Cognitive patterns and preferences
+  - `:capabilities` - Skills and proficiency
+  - `:all` - Everything
+
+  ## Examples
+
+      identity = Arbor.Memory.query_self("agent_001", :identity)
+  """
+  @spec query_self(String.t(), atom()) :: map()
+  def query_self(agent_id, aspect) do
+    case get_self_knowledge(agent_id) do
+      nil -> %{}
+      sk -> SelfKnowledge.query(sk, aspect)
+    end
+  end
+
+  # ============================================================================
+  # Identity Consolidation (Phase 5)
+  # ============================================================================
+
+  @doc """
+  Run identity consolidation for an agent.
+
+  Promotes high-confidence insights from InsightDetector to
+  permanent SelfKnowledge. Rate-limited to prevent identity thrashing.
+
+  ## Options
+
+  - `:force` - Skip rate limit checks (default: false)
+  - `:min_confidence` - Minimum confidence for insights (default: 0.7)
+
+  ## Examples
+
+      {:ok, updated_sk} = Arbor.Memory.consolidate_identity("agent_001")
+  """
+  @spec consolidate_identity(String.t(), keyword()) ::
+          {:ok, SelfKnowledge.t()} | {:ok, :no_changes} | {:error, term()}
+  defdelegate consolidate_identity(agent_id, opts \\ []), to: IdentityConsolidator, as: :consolidate
+
+  @doc """
+  Rollback identity to a previous version.
+
+  ## Examples
+
+      {:ok, sk} = Arbor.Memory.rollback_identity("agent_001")
+      {:ok, sk} = Arbor.Memory.rollback_identity("agent_001", 3)
+  """
+  @spec rollback_identity(String.t(), :previous | pos_integer()) ::
+          {:ok, SelfKnowledge.t()} | {:error, term()}
+  defdelegate rollback_identity(agent_id, version \\ :previous), to: IdentityConsolidator, as: :rollback
+
+  @doc """
+  Get identity change history for an agent.
+
+  ## Examples
+
+      {:ok, history} = Arbor.Memory.identity_history("agent_001")
+  """
+  @spec identity_history(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate identity_history(agent_id, opts \\ []), to: IdentityConsolidator, as: :history
+
+  # ============================================================================
+  # Preferences (Phase 5)
+  # ============================================================================
+
+  # ETS table for preferences storage
+  @preferences_ets :arbor_preferences
+
+  @doc """
+  Get preferences for an agent.
+
+  Returns the Preferences struct or nil if not set.
+
+  ## Examples
+
+      prefs = Arbor.Memory.get_preferences("agent_001")
+  """
+  @spec get_preferences(String.t()) :: Preferences.t() | nil
+  def get_preferences(agent_id) do
+    ensure_preferences_table()
+
+    case :ets.lookup(@preferences_ets, agent_id) do
+      [{^agent_id, prefs}] -> prefs
+      [] -> nil
+    end
+  end
+
+  @doc """
+  Adjust a cognitive preference for an agent.
+
+  ## Parameters
+
+  - `:decay_rate` - 0.01 to 0.50
+  - `:max_pins` - 1 to 200
+  - `:retrieval_threshold` - 0.0 to 1.0
+  - `:consolidation_interval` - 60,000ms to 3,600,000ms
+  - `:attention_focus` - String or nil
+  - `:type_quota` - Tuple of {type, quota}
+
+  ## Examples
+
+      {:ok, prefs} = Arbor.Memory.adjust_preference("agent_001", :decay_rate, 0.15)
+  """
+  @spec adjust_preference(String.t(), atom(), term()) :: {:ok, Preferences.t()} | {:error, term()}
+  def adjust_preference(agent_id, param, value) do
+    prefs = get_or_create_preferences(agent_id)
+
+    case Preferences.adjust(prefs, param, value) do
+      {:ok, updated_prefs} ->
+        save_preferences(agent_id, updated_prefs)
+
+        Signals.emit_cognitive_adjustment(agent_id, param, %{
+          old_value: Map.get(prefs, param),
+          new_value: value
+        })
+
+        {:ok, updated_prefs}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Pin a memory to protect it from decay.
+
+  ## Examples
+
+      {:ok, prefs} = Arbor.Memory.pin_memory("agent_001", "memory_123")
+  """
+  @spec pin_memory(String.t(), String.t()) :: {:ok, Preferences.t()} | {:error, :max_pins_reached}
+  def pin_memory(agent_id, memory_id) do
+    prefs = get_or_create_preferences(agent_id)
+
+    case Preferences.pin(prefs, memory_id) do
+      {:error, _} = error ->
+        error
+
+      updated_prefs ->
+        save_preferences(agent_id, updated_prefs)
+        Signals.emit_cognitive_adjustment(agent_id, :pin_memory, %{memory_id: memory_id})
+        {:ok, updated_prefs}
+    end
+  end
+
+  @doc """
+  Unpin a memory, allowing it to decay normally.
+
+  ## Examples
+
+      {:ok, prefs} = Arbor.Memory.unpin_memory("agent_001", "memory_123")
+  """
+  @spec unpin_memory(String.t(), String.t()) :: {:ok, Preferences.t()}
+  def unpin_memory(agent_id, memory_id) do
+    prefs = get_or_create_preferences(agent_id)
+    updated_prefs = Preferences.unpin(prefs, memory_id)
+    save_preferences(agent_id, updated_prefs)
+    Signals.emit_cognitive_adjustment(agent_id, :unpin_memory, %{memory_id: memory_id})
+    {:ok, updated_prefs}
+  end
+
+  @doc """
+  Get a summary of current preferences and usage.
+
+  ## Examples
+
+      info = Arbor.Memory.inspect_preferences("agent_001")
+  """
+  @spec inspect_preferences(String.t()) :: map()
+  def inspect_preferences(agent_id) do
+    case get_preferences(agent_id) do
+      nil -> %{agent_id: agent_id, status: :not_initialized}
+      prefs -> Preferences.inspect_preferences(prefs)
+    end
+  end
+
+  # ============================================================================
+  # Reflection (Phase 5)
+  # ============================================================================
+
+  @doc """
+  Perform a structured reflection with a specific prompt.
+
+  Uses the configured LLM module (or mock in dev/test) to generate
+  insights from the agent's context.
+
+  ## Options
+
+  - `:include_self_knowledge` - Include SelfKnowledge in context (default: true)
+  - `:include_recent_activity` - Include recent activity summary (default: true)
+
+  ## Examples
+
+      {:ok, reflection} = Arbor.Memory.reflect("agent_001", "What patterns do I see?")
+  """
+  @spec reflect(String.t(), String.t(), keyword()) ::
+          {:ok, ReflectionProcessor.reflection()} | {:error, term()}
+  defdelegate reflect(agent_id, prompt, opts \\ []), to: ReflectionProcessor
+
+  @doc """
+  Get reflection history for an agent.
+
+  ## Options
+
+  - `:limit` - Maximum reflections to return (default: 10)
+  - `:since` - Only reflections after this DateTime
+
+  ## Examples
+
+      {:ok, reflections} = Arbor.Memory.reflection_history("agent_001")
+  """
+  @spec reflection_history(String.t(), keyword()) :: {:ok, [ReflectionProcessor.reflection()]}
+  defdelegate reflection_history(agent_id, opts \\ []), to: ReflectionProcessor, as: :history
+
+  # ============================================================================
+  # Private Helpers (Phase 5)
+  # ============================================================================
+
+  defp get_or_create_preferences(agent_id) do
+    case get_preferences(agent_id) do
+      nil ->
+        prefs = Preferences.new(agent_id)
+        save_preferences(agent_id, prefs)
+        prefs
+
+      prefs ->
+        prefs
+    end
+  end
+
+  defp save_preferences(agent_id, prefs) do
+    ensure_preferences_table()
+    :ets.insert(@preferences_ets, {agent_id, prefs})
+    :ok
+  end
+
+  defp ensure_preferences_table do
+    if :ets.whereis(@preferences_ets) == :undefined do
+      try do
+        :ets.new(@preferences_ets, [:named_table, :public, :set])
+      rescue
+        ArgumentError -> :ok
+      end
+    end
+  end
 
   # ============================================================================
   # Private Helpers

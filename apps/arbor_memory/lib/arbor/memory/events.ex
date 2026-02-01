@@ -307,6 +307,24 @@ defmodule Arbor.Memory.Events do
   end
 
   # ============================================================================
+  # Phase 5 Events (Identity & Self-Model)
+  # ============================================================================
+
+  @doc """
+  Record a reflection being completed.
+
+  Tracks structured self-analysis events.
+  """
+  @spec record_reflection_completed(String.t(), map()) :: :ok | {:error, term()}
+  def record_reflection_completed(agent_id, reflection_data) do
+    dual_emit(agent_id, :reflection_completed, %{
+      reflection_id: reflection_data[:reflection_id],
+      prompt: reflection_data[:prompt],
+      insight_count: reflection_data[:insight_count]
+    })
+  end
+
+  # ============================================================================
   # Query Helpers
   # ============================================================================
 
