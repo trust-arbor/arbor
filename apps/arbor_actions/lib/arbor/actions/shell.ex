@@ -100,6 +100,29 @@ defmodule Arbor.Actions.Shell do
 
     alias Arbor.Actions
 
+    @doc """
+    Declares taint roles for Shell.Execute parameters.
+
+    Control parameters that affect execution flow:
+    - `command` - The shell command to execute
+    - `cwd` - Working directory affects where command runs
+    - `sandbox` - Sandbox level affects execution restrictions
+
+    Data parameters that are just processed:
+    - `env` - Environment variables are passed through
+    - `timeout` - Numeric timeout doesn't affect security
+    """
+    @spec taint_roles() :: %{atom() => :control | :data}
+    def taint_roles do
+      %{
+        command: :control,
+        cwd: :control,
+        sandbox: :control,
+        env: :data,
+        timeout: :data
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
