@@ -280,6 +280,7 @@ defmodule Arbor.Actions.Code do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Common.SafeAtom
 
     # Modules that cannot be hot-loaded under any circumstances
     @protected_modules [
@@ -327,7 +328,7 @@ defmodule Arbor.Actions.Code do
           do: module_str,
           else: "Elixir.#{module_str}"
 
-      case Arbor.Common.SafeAtom.to_existing(module_str) do
+      case SafeAtom.to_existing(module_str) do
         {:ok, atom} ->
           {:ok, atom}
 
@@ -365,6 +366,7 @@ defmodule Arbor.Actions.Code do
       source_code = source
 
       try do
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
         case Code.compile_string(source_code) do
           [{module, _binary}] -> {:ok, module}
           [{module, _binary} | _] -> {:ok, module}
@@ -431,65 +433,53 @@ defmodule Arbor.Actions.Code do
     end
 
     defp run_verification(_module, verify_fn_str) do
-      # Parse MFA string like "MyModule.health_check/0"
-      case parse_mfa(verify_fn_str) do
-        {:ok, {m, f, a}} ->
-          try do
-            result = apply(m, f, a)
-
-            case result do
-              :ok -> :ok
-              true -> :ok
-              {:ok, _} -> :ok
-              false -> {:error, :verification_returned_false}
-              {:error, reason} -> {:error, reason}
-              _ -> :ok
-            end
-          rescue
-            e -> {:error, Exception.message(e)}
-          end
-
-        {:error, reason} ->
-          {:error, reason}
+      with {:ok, {m, f, a}} <- parse_mfa(verify_fn_str) do
+        try do
+          m |> apply(f, a) |> interpret_verification_result()
+        rescue
+          e -> {:error, Exception.message(e)}
+        end
       end
     end
 
+    defp interpret_verification_result(false), do: {:error, :verification_returned_false}
+    defp interpret_verification_result({:error, reason}), do: {:error, reason}
+    defp interpret_verification_result(_), do: :ok
+
     defp parse_mfa(mfa_str) do
       # Parse "Module.function/arity" format
-      case Regex.run(~r/^(.+)\.([^.\/]+)\/(\d+)$/, mfa_str) do
-        [_, module_str, func_str, arity_str] ->
-          module_str =
-            if String.starts_with?(module_str, "Elixir."),
-              do: module_str,
-              else: "Elixir.#{module_str}"
-
-          try do
-            module =
-              case Arbor.Common.SafeAtom.to_existing(module_str) do
-                {:ok, m} -> m
-                {:error, _} -> raise ArgumentError, "unknown module"
-              end
-
-            func =
-              case Arbor.Common.SafeAtom.to_existing(func_str) do
-                {:ok, f} -> f
-                {:error, _} -> raise ArgumentError, "unknown function"
-              end
-
-            arity = String.to_integer(arity_str)
-
-            if arity == 0 do
-              {:ok, {module, func, []}}
-            else
-              {:error, "Verification function must have arity 0"}
-            end
-          rescue
-            ArgumentError -> {:error, "Unknown module or function: #{mfa_str}"}
-          end
-
-        _ ->
-          {:error, "Invalid MFA format. Use 'Module.function/0'"}
+      with [_, module_str, func_str, arity_str] <-
+             Regex.run(~r/^(.+)\.([^.\/]+)\/(\d+)$/, mfa_str),
+           {:ok, module} <- resolve_module_atom(module_str, mfa_str),
+           {:ok, func} <- resolve_func_atom(func_str, mfa_str),
+           :ok <- validate_arity(arity_str) do
+        {:ok, {module, func, []}}
+      else
+        nil -> {:error, "Invalid MFA format. Use 'Module.function/0'"}
+        {:error, _} = error -> error
       end
+    end
+
+    defp resolve_module_atom(str, mfa_str) do
+      fqn = if String.starts_with?(str, "Elixir."), do: str, else: "Elixir.#{str}"
+
+      case SafeAtom.to_existing(fqn) do
+        {:ok, _} = ok -> ok
+        {:error, _} -> {:error, "Unknown module or function: #{mfa_str}"}
+      end
+    end
+
+    defp resolve_func_atom(str, mfa_str) do
+      case SafeAtom.to_existing(str) do
+        {:ok, _} = ok -> ok
+        {:error, _} -> {:error, "Unknown module or function: #{mfa_str}"}
+      end
+    end
+
+    defp validate_arity(arity_str) do
+      if String.to_integer(arity_str) == 0,
+        do: :ok,
+        else: {:error, "Verification function must have arity 0"}
     end
 
     defp restore_original(module, nil) do

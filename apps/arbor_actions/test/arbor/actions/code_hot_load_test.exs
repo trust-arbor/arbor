@@ -25,6 +25,7 @@ defmodule Arbor.Actions.Code.HotLoadBehavioralTest do
     beam_dir = Path.join(System.tmp_dir!(), "hot_load_test_#{System.unique_integer([:positive])}")
     File.mkdir_p!(beam_dir)
 
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
     [{module, binary}] = Code.compile_string(@original_source)
 
     beam_file = Path.join(beam_dir, "#{module}.beam")
