@@ -77,7 +77,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
         Mix.shell().info("  ───────────────  ───────")
 
         for stage <- @valid_stages do
-          marker = if String.to_existing_atom(stage) in enabled, do: "  ✓", else: "  ✗"
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+          marker = if String.to_atom(stage) in enabled, do: "  ✓", else: "  ✗"
           Mix.shell().info("  #{String.pad_trailing(stage, 15)}#{marker}")
         end
 
@@ -101,7 +102,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   defp cmd_enable(stage) when stage in @valid_stages do
     ensure_running!()
     node = Helpers.full_node_name()
-    atom = String.to_existing_atom(stage)
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    atom = String.to_atom(stage)
 
     case :rpc.call(node, Arbor.SDLC.Config, :enable_stage, [atom]) do
       :ok ->
@@ -132,7 +134,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   defp cmd_disable(stage) when stage in @valid_stages do
     ensure_running!()
     node = Helpers.full_node_name()
-    atom = String.to_existing_atom(stage)
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    atom = String.to_atom(stage)
 
     case :rpc.call(node, Arbor.SDLC.Config, :disable_stage, [atom]) do
       :ok ->
@@ -166,7 +169,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   defp cmd_backend(backend) when backend in @valid_backends do
     ensure_running!()
     node = Helpers.full_node_name()
-    atom = String.to_existing_atom(backend)
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    atom = String.to_atom(backend)
 
     case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :ai_backend, atom]) do
       :ok ->
