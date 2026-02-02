@@ -91,6 +91,61 @@ defmodule Arbor.SDLC.TestHelpers do
     """
   end
 
+  @sdlc_perspectives [
+    :scope,
+    :feasibility,
+    :priority,
+    :architecture,
+    :consistency,
+    :adversarial,
+    :random
+  ]
+
+  @doc """
+  Ensures the consensus infrastructure is running for Deliberator tests.
+
+  Starts EventStore and Coordinator (with SDLC-specific perspectives/quorum)
+  if they are not already running. Safe to call multiple times.
+
+  Also sets the SDLC AI module to `EvaluatorMockAI.StandardApprove`.
+  Returns the previous AI module value for restoration.
+  """
+  def ensure_consensus_started do
+    # Stop existing processes — the Coordinator may have been started with
+    # default config (missing SDLC perspectives/quorum), which causes deadlock.
+    # Stop Coordinator first since it depends on EventStore.
+    stop_if_alive(Arbor.Consensus.Coordinator)
+    stop_if_alive(Arbor.Consensus.EventStore)
+
+    Arbor.Consensus.EventStore.start_link([])
+
+    Arbor.Consensus.Coordinator.start_link(
+      config: [
+        perspectives_for_change_type: %{sdlc_decision: @sdlc_perspectives},
+        quorum_rules: %{sdlc_decision: 4}
+      ]
+    )
+
+    prev_ai = Application.get_env(:arbor_sdlc, :ai_module)
+    Application.put_env(:arbor_sdlc, :ai_module, EvaluatorMockAI.StandardApprove)
+    prev_ai
+  end
+
+  defp stop_if_alive(name) do
+    case Process.whereis(name) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal, 5000)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Restores the SDLC AI module to its previous value.
+  """
+  def restore_ai_module(nil), do: Application.delete_env(:arbor_sdlc, :ai_module)
+  def restore_ai_module(prev), do: Application.put_env(:arbor_sdlc, :ai_module, prev)
+
   @doc """
   Starts a test file tracker with ETS backend.
 

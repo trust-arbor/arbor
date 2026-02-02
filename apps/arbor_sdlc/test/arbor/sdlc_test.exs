@@ -7,10 +7,14 @@ defmodule Arbor.SDLCTest do
   @moduletag :fast
 
   setup do
+    # Start consensus infrastructure — Deliberator always convenes council
+    prev_ai = TestHelpers.ensure_consensus_started()
+
     context = TestHelpers.setup_test_roadmap()
 
     on_exit(fn ->
       TestHelpers.cleanup_test_roadmap(context)
+      TestHelpers.restore_ai_module(prev_ai)
     end)
 
     context
