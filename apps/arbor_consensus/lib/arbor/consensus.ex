@@ -143,6 +143,80 @@ defmodule Arbor.Consensus do
   defdelegate stats(server \\ Coordinator), to: Coordinator
 
   # ============================================================================
+  # Phase 2 Agent-Facing API
+  # ============================================================================
+
+  @doc """
+  Submit a formal proposal for consensus evaluation.
+
+  Full Coordinator enforcement: dedup, quota, authorization, capacity.
+  Returns immediately with the proposal ID. Use `await/2` for results.
+
+  ## Options
+
+    * `:server` - Coordinator server (default: `Coordinator`)
+    * `:context` - Domain-specific context map
+    * `:evaluator_backend` - Override evaluator backend
+  """
+  @impl Arbor.Contracts.API.Consensus
+  @spec propose(map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def propose(attrs, opts \\ []) do
+    # Ensure topic is set (default :general if missing)
+    attrs = Map.put_new(attrs, :topic, :general)
+    attrs = Map.put_new(attrs, :mode, :decision)
+    Coordinator.submit(attrs, opts)
+  end
+
+  @doc """
+  Ask an advisory question through the consensus system.
+
+  Routes through Coordinator for TopicMatcher routing but with
+  relaxed enforcement (no dedup, no quota, no quorum requirement).
+  Use `await/2` for results, or fire-and-forget.
+
+  For direct evaluator invocation (developer mode), use
+  `Arbor.Consensus.Evaluators.Consult.ask/3` instead.
+
+  ## Options
+
+    * `:server` - Coordinator server (default: `Coordinator`)
+    * `:context` - Domain-specific context map
+    * `:perspectives` - Override which perspectives to consult
+    * `:proposer` - Identity of the asker (default: "system")
+  """
+  @impl Arbor.Contracts.API.Consensus
+  @spec ask(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def ask(description, opts \\ []) do
+    context = Keyword.get(opts, :context, %{})
+
+    attrs = %{
+      proposer: Keyword.get(opts, :proposer, "system"),
+      topic: :advisory,
+      mode: :advisory,
+      description: description,
+      target_layer: Keyword.get(opts, :target_layer, 4),
+      context: context
+    }
+
+    Coordinator.submit(attrs, Keyword.put(opts, :advisory, true))
+  end
+
+  @doc """
+  Wait for a proposal's result.
+
+  Registers as a waiter in the Coordinator and receives the result
+  via direct message. No polling, no signal bus.
+
+  ## Options
+
+    * `:timeout` - Maximum wait time in ms (default: 30_000)
+    * `:server` - Coordinator server (default: `Coordinator`)
+  """
+  @impl Arbor.Contracts.API.Consensus
+  @spec await(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  defdelegate await(proposal_id, opts \\ []), to: Coordinator
+
+  # ============================================================================
   # Event Store
   # ============================================================================
 
