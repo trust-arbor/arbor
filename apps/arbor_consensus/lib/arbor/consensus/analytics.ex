@@ -400,8 +400,8 @@ defmodule Arbor.Consensus.Analytics do
   end
 
   defp build_implicit_chains(proposals, window_ms) do
-    # Group by change_type
-    by_type = Enum.group_by(proposals, & &1.change_type)
+    # Group by topic (was change_type)
+    by_type = Enum.group_by(proposals, & &1.topic)
 
     Enum.flat_map(by_type, fn {_type, type_proposals} ->
       # Sort by time and find sequences within the window

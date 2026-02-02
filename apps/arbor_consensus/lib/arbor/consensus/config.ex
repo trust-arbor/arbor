@@ -153,27 +153,27 @@ defmodule Arbor.Consensus.Config do
   end
 
   @doc """
-  Get the required quorum for a change type.
+  Get the required quorum for a topic (was change type).
   """
   @spec quorum_for(t(), atom()) :: pos_integer()
-  def quorum_for(%__MODULE__{quorum_rules: rules}, change_type) do
-    Map.get(rules, change_type, Protocol.standard_quorum())
+  def quorum_for(%__MODULE__{quorum_rules: rules}, topic) do
+    Map.get(rules, topic, Protocol.standard_quorum())
   end
 
   @doc """
-  Get the perspectives to evaluate for a change type.
+  Get the perspectives to evaluate for a topic (was change type).
   """
   @spec perspectives_for(t(), atom()) :: [atom()]
-  def perspectives_for(%__MODULE__{perspectives_for_change_type: perspectives}, change_type) do
-    Map.get(perspectives, change_type, Protocol.perspectives() -- [:human])
+  def perspectives_for(%__MODULE__{perspectives_for_change_type: perspectives}, topic) do
+    Map.get(perspectives, topic, Protocol.perspectives() -- [:human])
   end
 
   @doc """
-  Check if a change type requires supermajority (6/7 or higher).
+  Check if a topic requires supermajority (6/7 or higher).
   """
   @spec requires_supermajority?(t(), atom()) :: boolean()
-  def requires_supermajority?(%__MODULE__{} = config, change_type) do
-    quorum_for(config, change_type) >= Protocol.meta_quorum()
+  def requires_supermajority?(%__MODULE__{} = config, topic) do
+    quorum_for(config, topic) >= Protocol.meta_quorum()
   end
 
   # ===========================================================================

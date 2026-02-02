@@ -7,7 +7,7 @@ defmodule Arbor.Consensus.Council do
 
   ## Flow
 
-  1. Determine required perspectives from config based on `change_type`
+  1. Determine required perspectives from config based on `topic`
   2. For each perspective, spawn a Task calling `EvaluatorBackend.evaluate/3`
   3. Collect with early termination: return as soon as quorum is reached
   4. All evaluations are sealed before returning
@@ -67,8 +67,8 @@ defmodule Arbor.Consensus.Council do
   Determine the required perspectives for a proposal using the config.
   """
   @spec required_perspectives(Proposal.t(), Config.t()) :: [atom()]
-  def required_perspectives(%Proposal{change_type: change_type}, %Config{} = config) do
-    Config.perspectives_for(config, change_type)
+  def required_perspectives(%Proposal{topic: topic}, %Config{} = config) do
+    Config.perspectives_for(config, topic)
   end
 
   # ============================================================================

@@ -511,20 +511,23 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         formatted -> "\n### Context\n#{formatted}\n"
       end
 
+    new_code = Map.get(proposal.context, :new_code)
+    code_diff = Map.get(proposal.context, :code_diff)
+
     """
     ## Advisory Request (#{perspective})
 
     ### Question/Description
     #{proposal.description}
     #{context_section}
-    ### Change Type
-    #{proposal.change_type}
+    ### Topic
+    #{proposal.topic}
 
     ### Target Layer
     #{proposal.target_layer}
 
-    #{if proposal.new_code, do: "### Proposed Code\n```elixir\n#{proposal.new_code}\n```\n", else: ""}
-    #{if proposal.code_diff, do: "### Code Diff\n```\n#{proposal.code_diff}\n```\n", else: ""}
+    #{if new_code, do: "### Proposed Code\n```elixir\n#{new_code}\n```\n", else: ""}
+    #{if code_diff, do: "### Code Diff\n```\n#{code_diff}\n```\n", else: ""}
     """
   end
 

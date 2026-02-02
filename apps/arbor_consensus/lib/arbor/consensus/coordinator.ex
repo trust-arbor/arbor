@@ -242,7 +242,7 @@ defmodule Arbor.Consensus.Coordinator do
         proposal_id: proposal.id,
         agent_id: proposal.proposer,
         data: %{
-          change_type: proposal.change_type,
+          change_type: proposal.topic,
           description: proposal.description
         }
       })
@@ -250,7 +250,7 @@ defmodule Arbor.Consensus.Coordinator do
       # Spawn council asynchronously
       evaluator_backend = Keyword.get(opts, :evaluator_backend, state.evaluator_backend)
       perspectives = Council.required_perspectives(proposal, state.config)
-      quorum = Config.quorum_for(state.config, proposal.change_type)
+      quorum = Config.quorum_for(state.config, proposal.topic)
 
       # Emit evaluation started event
       EventEmitter.evaluation_started(
@@ -529,12 +529,13 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp compute_fingerprint(proposal) do
+    # Use topic (was change_type) and context fields for fingerprinting
     data =
       :erlang.term_to_binary({
-        proposal.change_type,
-        proposal.target_module,
+        proposal.topic,
+        Map.get(proposal.context, :target_module),
         proposal.description,
-        proposal.code_diff
+        Map.get(proposal.context, :code_diff)
       })
 
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
@@ -543,7 +544,7 @@ defmodule Arbor.Consensus.Coordinator do
   defp spawn_council(state, proposal, evaluator_backend) do
     config = state.config
     perspectives = Council.required_perspectives(proposal, config)
-    quorum = Config.quorum_for(config, proposal.change_type)
+    quorum = Config.quorum_for(config, proposal.topic)
 
     task =
       Task.async(fn ->
@@ -849,13 +850,19 @@ defmodule Arbor.Consensus.Coordinator do
     # Rebuild proposals map with Proposal structs
     proposals =
       Map.new(recovered.proposals, fn {id, info} ->
+        # Migrate legacy fields into context for recovered proposals
+        context =
+          %{}
+          |> maybe_put(:target_module, info.target_module)
+
         proposal = %Proposal{
           id: id,
           proposer: info.proposer,
-          change_type: info.change_type,
+          topic: info.change_type,
+          mode: :decision,
           description: info.description,
           target_layer: info.target_layer,
-          target_module: info.target_module,
+          context: context,
           metadata: info.metadata || %{},
           status: info.status,
           created_at: info.submitted_at,
@@ -964,7 +971,7 @@ defmodule Arbor.Consensus.Coordinator do
   defp spawn_council_for_perspectives(state, proposal, perspectives) do
     # Similar to spawn_council but with specific perspectives
     config = state.config
-    quorum = Config.quorum_for(config, proposal.change_type)
+    quorum = Config.quorum_for(config, proposal.topic)
 
     task =
       Task.async(fn ->
@@ -1038,4 +1045,8 @@ defmodule Arbor.Consensus.Coordinator do
       inspected
     end
   end
+
+  # Helper to conditionally add to map
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

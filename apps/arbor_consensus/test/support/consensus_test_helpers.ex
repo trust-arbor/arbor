@@ -16,18 +16,30 @@ defmodule Arbor.Consensus.TestHelpers do
 
   @doc """
   Build a valid proposal with defaults.
+
+  Note: Both `topic` (new) and `change_type` (legacy) are supported in overrides.
   """
   def build_proposal(overrides \\ %{}) do
-    attrs =
-      %{
-        proposer: "test_agent_1",
-        change_type: :code_modification,
-        description: "Test proposal for unit testing",
-        target_layer: 4,
-        new_code: "defmodule TestModule do\n  def hello, do: :world\nend"
-      }
-      |> Map.merge(overrides)
+    # Don't set default topic if caller is using legacy change_type
+    base_attrs =
+      if Map.has_key?(overrides, :change_type) do
+        %{
+          proposer: "test_agent_1",
+          description: "Test proposal for unit testing",
+          target_layer: 4,
+          context: %{new_code: "defmodule TestModule do\n  def hello, do: :world\nend"}
+        }
+      else
+        %{
+          proposer: "test_agent_1",
+          topic: :code_modification,
+          description: "Test proposal for unit testing",
+          target_layer: 4,
+          context: %{new_code: "defmodule TestModule do\n  def hello, do: :world\nend"}
+        }
+      end
 
+    attrs = Map.merge(base_attrs, overrides)
     {:ok, proposal} = Proposal.new(attrs)
     proposal
   end
@@ -39,16 +51,18 @@ defmodule Arbor.Consensus.TestHelpers do
     build_proposal(
       Map.merge(
         %{
-          new_code: """
-          defmodule DangerousModule do
-            def run do
-              System.cmd("rm", ["-rf", "/"])
-              File.write!("/etc/passwd", "hacked")
-              Code.eval_string("malicious code")
-              :os.cmd('whoami')
+          context: %{
+            new_code: """
+            defmodule DangerousModule do
+              def run do
+                System.cmd("rm", ["-rf", "/"])
+                File.write!("/etc/passwd", "hacked")
+                Code.eval_string("malicious code")
+                :os.cmd('whoami')
+              end
             end
-          end
-          """,
+            """
+          },
           description: "A proposal with security concerns"
         },
         overrides
@@ -63,7 +77,7 @@ defmodule Arbor.Consensus.TestHelpers do
     build_proposal(
       Map.merge(
         %{
-          change_type: :governance_change,
+          topic: :governance_change,
           target_layer: 1,
           description: "Modify governance rules"
         },
@@ -79,10 +93,10 @@ defmodule Arbor.Consensus.TestHelpers do
     build_proposal(
       Map.merge(
         %{
-          change_type: :documentation_change,
+          topic: :documentation_change,
           target_layer: 4,
           description: "Update README documentation",
-          new_code: "@moduledoc \"Updated docs\""
+          context: %{new_code: "@moduledoc \"Updated docs\""}
         },
         overrides
       )
@@ -96,34 +110,36 @@ defmodule Arbor.Consensus.TestHelpers do
     build_proposal(
       Map.merge(
         %{
-          change_type: :test_change,
+          topic: :test_change,
           description: "Add unit tests",
-          new_code: """
-          # my_module_test.exs
-          defmodule MyModuleTest do
-            use ExUnit.Case
-            @tag :fast
+          context: %{
+            new_code: """
+            # my_module_test.exs
+            defmodule MyModuleTest do
+              use ExUnit.Case
+              @tag :fast
 
-            describe "feature" do
-              test "works correctly" do
-                assert 1 + 1 == 2
-                refute false
-              end
+              describe "feature" do
+                test "works correctly" do
+                  assert 1 + 1 == 2
+                  refute false
+                end
 
-              test "handles errors" do
-                assert {:error, _} = MyModule.bad_call()
-                assert_receive :done, 1000
-                refute MyModule.broken?()
-              end
+                test "handles errors" do
+                  assert {:error, _} = MyModule.bad_call()
+                  assert_receive :done, 1000
+                  refute MyModule.broken?()
+                end
 
-              test "edge cases" do
-                assert MyModule.edge(nil) == :ok
-                refute is_nil(MyModule.edge(:val))
-                assert match?(%{ok: true}, MyModule.result())
+                test "edge cases" do
+                  assert MyModule.edge(nil) == :ok
+                  refute is_nil(MyModule.edge(:val))
+                  assert match?(%{ok: true}, MyModule.result())
+                end
               end
             end
-          end
-          """
+            """
+          }
         },
         overrides
       )
@@ -137,7 +153,7 @@ defmodule Arbor.Consensus.TestHelpers do
     build_proposal(
       Map.merge(
         %{
-          new_code: "quorum = 0\nbypass_boundary\nclear_log\nremove_layer",
+          context: %{new_code: "quorum = 0\nbypass_boundary\nclear_log\nremove_layer"},
           description: "Proposal that violates invariants"
         },
         overrides

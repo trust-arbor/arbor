@@ -13,7 +13,7 @@ defmodule Arbor.Consensus.Executor do
 
         @impl true
         def execute(proposal, decision) do
-          case proposal.change_type do
+          case proposal.topic do
             :code_modification ->
               apply_code_change(proposal)
             :configuration_change ->
