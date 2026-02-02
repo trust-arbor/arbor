@@ -244,7 +244,7 @@ defmodule Arbor.Consensus.Config do
   """
   @spec llm_evaluator_timeout() :: pos_integer()
   def llm_evaluator_timeout do
-    Application.get_env(@app, :llm_evaluator_timeout, 60_000)
+    Application.get_env(@app, :llm_evaluator_timeout, 180_000)
   end
 
   @doc """

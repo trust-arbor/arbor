@@ -104,27 +104,41 @@ defmodule Arbor.SDLC.TestHelpers do
   @doc """
   Ensures the consensus infrastructure is running for Deliberator tests.
 
-  Starts EventStore and Coordinator (with SDLC-specific perspectives/quorum)
-  if they are not already running. Safe to call multiple times.
+  Starts a uniquely-named EventStore and Coordinator with SDLC-specific
+  perspectives/quorum config. Uses unique names to avoid conflicts with
+  the global processes started by the consensus app's test_helper.
 
-  Also sets the SDLC AI module to `EvaluatorMockAI.StandardApprove`.
-  Returns the previous AI module value for restoration.
+  Also sets the SDLC AI module and consensus_server in app config so
+  `Config.new()` picks them up. Returns the previous AI module value
+  for restoration.
   """
   def ensure_consensus_started do
-    # Stop existing processes — the Coordinator may have been started with
-    # default config (missing SDLC perspectives/quorum), which causes deadlock.
-    # Stop Coordinator first since it depends on EventStore.
+    supervisor = Arbor.Consensus.Supervisor
+
+    # Remove existing supervised children so we can restart with SDLC config.
+    # The consensus test_helper.exs adds these as supervisor children, so
+    # GenServer.stop would trigger a supervisor restart with default config.
+    for child_id <- [Arbor.Consensus.Coordinator, Arbor.Consensus.EventStore] do
+      case Supervisor.terminate_child(supervisor, child_id) do
+        :ok -> Supervisor.delete_child(supervisor, child_id)
+        {:error, :not_found} -> :ok
+      end
+    end
+
+    # Also stop any non-supervised instances (e.g. from a previous test run)
     stop_if_alive(Arbor.Consensus.Coordinator)
     stop_if_alive(Arbor.Consensus.EventStore)
 
-    Arbor.Consensus.EventStore.start_link([])
+    # Start fresh with SDLC-specific config
+    {:ok, _} = Arbor.Consensus.EventStore.start_link([])
 
-    Arbor.Consensus.Coordinator.start_link(
-      config: [
-        perspectives_for_change_type: %{sdlc_decision: @sdlc_perspectives},
-        quorum_rules: %{sdlc_decision: 4}
-      ]
-    )
+    {:ok, _} =
+      Arbor.Consensus.Coordinator.start_link(
+        config: [
+          perspectives_for_change_type: %{sdlc_decision: @sdlc_perspectives},
+          quorum_rules: %{sdlc_decision: 4}
+        ]
+      )
 
     prev_ai = Application.get_env(:arbor_sdlc, :ai_module)
     Application.put_env(:arbor_sdlc, :ai_module, EvaluatorMockAI.StandardApprove)
@@ -140,6 +154,12 @@ defmodule Arbor.SDLC.TestHelpers do
     :exit, _ -> :ok
   end
 
+  @doc """
+  Restores the SDLC AI module and consensus_server to their previous values.
+
+  Accepts the tuple returned by `ensure_consensus_started/0`.
+  Also stops the SDLC test consensus processes.
+  """
   @doc """
   Restores the SDLC AI module to its previous value.
   """
