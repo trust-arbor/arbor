@@ -546,8 +546,25 @@ defmodule Arbor.SDLC do
   defp route_to_deliberator(item) do
     case Deliberator.process_item(item, []) do
       {:ok, {:moved, stage}} ->
-        move_item(item, stage, [])
-        :ok
+        case move_item(item, stage, []) do
+          {:ok, new_path} ->
+            Logger.info("Deliberator moved item",
+              title: item.title,
+              stage: stage,
+              new_path: new_path
+            )
+
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Failed to move item after deliberation",
+              title: item.title,
+              stage: stage,
+              reason: inspect(reason)
+            )
+
+            {:error, {:move_failed, reason}}
+        end
 
       {:ok, {:moved_and_updated, stage, updated_item}} ->
         write_and_move_item(updated_item, item.path, stage)
