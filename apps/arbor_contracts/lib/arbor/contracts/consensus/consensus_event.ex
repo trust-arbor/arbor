@@ -12,6 +12,7 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
   - `:evaluation_submitted` - An evaluator cast their vote
   - `:council_complete` - All evaluators have voted
   - `:decision_reached` - Final decision determined
+  - `:advice_rendered` - Advisory mode advice collected
   - `:execution_started` - Approved change execution began
   - `:execution_succeeded` - Change executed successfully
   - `:execution_failed` - Change execution failed
@@ -37,6 +38,7 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
           | :evaluation_submitted
           | :council_complete
           | :decision_reached
+          | :advice_rendered
           | :execution_started
           | :execution_succeeded
           | :execution_failed
@@ -48,6 +50,7 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
     :evaluation_submitted,
     :council_complete,
     :decision_reached,
+    :advice_rendered,
     :execution_started,
     :execution_succeeded,
     :execution_failed,
@@ -212,6 +215,7 @@ defmodule Arbor.Contracts.Consensus.ConsensusEvent do
           | :evaluation_submitted
           | :council_complete
           | :decision_reached
+          | :advice_rendered
           | :execution_started
           | :execution_succeeded
           | :execution_failed
