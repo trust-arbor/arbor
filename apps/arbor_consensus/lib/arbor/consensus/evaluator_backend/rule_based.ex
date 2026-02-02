@@ -20,12 +20,57 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   """
 
   @behaviour Arbor.Consensus.EvaluatorBackend
+  @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   require Logger
 
-  @impl true
+  @supported_perspectives [
+    :security,
+    :stability,
+    :capability,
+    :adversarial,
+    :resource,
+    :emergence,
+    :random,
+    :test_runner,
+    :code_review,
+    :human
+  ]
+
+  # ============================================================================
+  # Evaluator Behaviour Callbacks
+  # ============================================================================
+
+  @doc """
+  Unique name identifying this evaluator.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec name() :: atom()
+  def name, do: :rule_based
+
+  @doc """
+  Perspectives this evaluator can assess from.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec perspectives() :: [atom()]
+  def perspectives, do: @supported_perspectives
+
+  @doc """
+  Strategy this evaluator uses.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec strategy() :: :rule_based
+  def strategy, do: :rule_based
+
+  # ============================================================================
+  # Evaluate Callback (shared by both behaviours)
+  # ============================================================================
+
+  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
+  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
+  @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do
     evaluator_id = Keyword.get(opts, :evaluator_id, generate_evaluator_id(perspective))

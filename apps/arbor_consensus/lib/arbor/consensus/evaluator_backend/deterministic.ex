@@ -32,6 +32,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   """
 
   @behaviour Arbor.Consensus.EvaluatorBackend
+  @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Common.ShellEscape
   alias Arbor.Consensus.Config
@@ -47,7 +48,38 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
     :mix_dialyzer
   ]
 
-  @impl true
+  # ============================================================================
+  # Evaluator Behaviour Callbacks
+  # ============================================================================
+
+  @doc """
+  Unique name identifying this evaluator.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec name() :: atom()
+  def name, do: :deterministic
+
+  @doc """
+  Perspectives this evaluator can assess from.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec perspectives() :: [atom()]
+  def perspectives, do: @supported_perspectives
+
+  @doc """
+  Strategy this evaluator uses.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec strategy() :: :deterministic
+  def strategy, do: :deterministic
+
+  # ============================================================================
+  # Evaluate Callback (shared by both behaviours)
+  # ============================================================================
+
+  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
+  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
+  @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do
     evaluator_id = Keyword.get(opts, :evaluator_id, generate_evaluator_id(perspective))
@@ -61,6 +93,8 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
 
   @doc """
   List supported perspectives for this backend.
+
+  Deprecated: Use `perspectives/0` instead.
   """
   @spec supported_perspectives() :: [atom()]
   def supported_perspectives, do: @supported_perspectives

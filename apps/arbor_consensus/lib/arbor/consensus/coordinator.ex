@@ -1090,7 +1090,10 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp store_event(event) do
-    EventStore.append(event)
+    # Conditionally store based on persistence strategy
+    if Config.event_store_enabled?() do
+      EventStore.append(event)
+    end
   rescue
     _ -> :ok
   end
