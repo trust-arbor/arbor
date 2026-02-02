@@ -105,7 +105,8 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   defp build_advisory_proposal(description, context) do
     Proposal.new(%{
       proposer: "human",
-      change_type: :advisory,
+      topic: :advisory,
+      mode: :advisory,
       description: description,
       target_layer: 4,
       context: context
