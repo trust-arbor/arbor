@@ -77,12 +77,18 @@ defmodule Arbor.AI.Backends.GeminiCli do
 
   @impl true
   def parse_output(output) do
-    # Remove "Loaded cached credentials." line if present
+    # Remove noise lines: "Loaded cached credentials." and node deprecation warnings.
+    # The deprecation lines contain "[DEP0040]" which the JSON regex misidentifies
+    # as a JSON array, causing parse_json_output to fail.
     lines =
       output
       |> String.trim()
       |> String.split("\n")
-      |> Enum.reject(&String.starts_with?(&1, "Loaded cached credentials"))
+      |> Enum.reject(fn line ->
+        String.starts_with?(line, "Loaded cached credentials") or
+          String.starts_with?(line, "(node:") or
+          String.starts_with?(line, "(Use `node")
+      end)
       |> Enum.join("\n")
       |> String.trim()
 
