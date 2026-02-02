@@ -43,7 +43,11 @@ defmodule Arbor.Consensus.Coordinator do
     waiters: %{},
     # Phase 4: Track pending evaluations from persistent agents
     # Map of proposal_id => %{quorum: n, mode: atom, collected: [Evaluation.t()], pending_evaluators: [atom()]}
-    pending_evaluations: %{}
+    pending_evaluations: %{},
+    # Phase 5: Routing stats for organic topic creation
+    # Map of keyword_group => %{count: N, last_seen: DateTime, descriptions: [String.t()]}
+    routing_stats: %{},
+    general_route_count: 0
   ]
 
   @type t :: %__MODULE__{
@@ -62,7 +66,10 @@ defmodule Arbor.Consensus.Coordinator do
           # Map of proposal_id => [{pid, monitor_ref}]
           waiters: %{String.t() => [{pid(), reference()}]},
           # Phase 4: Pending evaluations from persistent agents
-          pending_evaluations: map()
+          pending_evaluations: map(),
+          # Phase 5: Routing stats for organic topic creation
+          routing_stats: map(),
+          general_route_count: non_neg_integer()
         }
 
   # ============================================================================
@@ -293,6 +300,9 @@ defmodule Arbor.Consensus.Coordinator do
       proposal = Proposal.update_status(proposal, :evaluating)
       fingerprint = compute_fingerprint(proposal)
 
+      # Phase 5: Track routing stats for organic topic creation
+      state = track_routing_stats(state, proposal)
+
       state = %{
         state
         | proposals: Map.put(state.proposals, proposal.id, proposal),
@@ -505,7 +515,10 @@ defmodule Arbor.Consensus.Coordinator do
       # Quota stats (Phase 7)
       max_proposals_per_agent: Config.max_proposals_per_agent(),
       agents_with_proposals: map_size(state.proposals_by_agent),
-      proposal_quota_enabled: Config.proposal_quota_enabled?()
+      proposal_quota_enabled: Config.proposal_quota_enabled?(),
+      # Phase 5: Routing stats
+      tracked_patterns: map_size(state.routing_stats),
+      general_route_count: state.general_route_count
     }
 
     {:reply, stats, state}
@@ -584,6 +597,7 @@ defmodule Arbor.Consensus.Coordinator do
     Logger.warning(
       "EvaluatorAgent #{evaluator_name} failed for proposal #{proposal_id}: #{inspect(reason)}"
     )
+
     # Remove evaluator from pending list (treat as abstention)
     state = remove_pending_evaluator(state, proposal_id, evaluator_name)
     {:noreply, state}
@@ -716,6 +730,7 @@ defmodule Arbor.Consensus.Coordinator do
             Logger.warning(
               "EvaluatorAgent #{evaluator_name} mailbox full for proposal #{proposal.id}"
             )
+
             # Continue with other agents
             {:cont, acc}
         end
@@ -724,7 +739,14 @@ defmodule Arbor.Consensus.Coordinator do
     if delivered == [] do
       # No agents accepted the delivery, fall back to legacy
       Logger.warning("No agents accepted proposal #{proposal.id}, falling back to legacy council")
-      spawn_council_legacy(state, proposal, state.evaluator_backend, Map.values(agent_mapping) |> Enum.flat_map(&elem(&1, 1)) |> Enum.uniq(), quorum)
+
+      spawn_council_legacy(
+        state,
+        proposal,
+        state.evaluator_backend,
+        Map.values(agent_mapping) |> Enum.flat_map(&elem(&1, 1)) |> Enum.uniq(),
+        quorum
+      )
     else
       # Track pending evaluations
       pending_entry = %{
@@ -735,7 +757,10 @@ defmodule Arbor.Consensus.Coordinator do
         started_at: DateTime.utc_now()
       }
 
-      %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal.id, pending_entry)}
+      %{
+        state
+        | pending_evaluations: Map.put(state.pending_evaluations, proposal.id, pending_entry)
+      }
     end
   end
 
@@ -779,10 +804,15 @@ defmodule Arbor.Consensus.Coordinator do
         # Add to collected evaluations
         new_collected = [evaluation | pending.collected]
         new_pending = %{pending | collected: new_collected}
-        state = %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)}
+
+        state = %{
+          state
+          | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)
+        }
 
         # Emit evaluation event
         EventEmitter.evaluation_completed(evaluation)
+
         record_event(state, :evaluation_submitted, %{
           proposal_id: proposal_id,
           evaluator_id: evaluation.evaluator_id,
@@ -805,7 +835,11 @@ defmodule Arbor.Consensus.Coordinator do
       pending ->
         new_pending_evaluators = List.delete(pending.pending_evaluators, evaluator_name)
         new_pending = %{pending | pending_evaluators: new_pending_evaluators}
-        state = %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)}
+
+        state = %{
+          state
+          | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)
+        }
 
         # Check if we should finalize (all remaining evaluators done)
         check_agent_evaluation_completion(state, proposal_id, new_pending)
@@ -818,27 +852,28 @@ defmodule Arbor.Consensus.Coordinator do
 
     # For advisory mode (quorum is nil), wait for all evaluators
     # For decision mode, we can terminate early once quorum is reached
-    should_finalize = cond do
-      # All evaluators have responded (or failed)
-      pending.pending_evaluators == [] ->
-        true
+    should_finalize =
+      cond do
+        # All evaluators have responded (or failed)
+        pending.pending_evaluators == [] ->
+          true
 
-      # Decision mode: check if quorum is reached
-      quorum != nil ->
-        approve_count = Enum.count(pending.collected, &(&1.vote == :approve))
-        reject_count = Enum.count(pending.collected, &(&1.vote == :reject))
-        remaining = length(pending.pending_evaluators)
+        # Decision mode: check if quorum is reached
+        quorum != nil ->
+          approve_count = Enum.count(pending.collected, &(&1.vote == :approve))
+          reject_count = Enum.count(pending.collected, &(&1.vote == :reject))
+          remaining = length(pending.pending_evaluators)
 
-        # Quorum reached for approval or rejection
-        approve_count >= quorum or
-        reject_count >= quorum or
-        # Can't reach quorum even with all remaining approvals
-        (approve_count + remaining < quorum and reject_count + remaining < quorum)
+          # Quorum reached for approval or rejection
+          # Can't reach quorum even with all remaining approvals
+          approve_count >= quorum or
+            reject_count >= quorum or
+            (approve_count + remaining < quorum and reject_count + remaining < quorum)
 
-      # Advisory mode: wait for all
-      true ->
-        false
-    end
+        # Advisory mode: wait for all
+        true ->
+          false
+      end
 
     if should_finalize do
       finalize_agent_evaluations(state, proposal_id, pending)
@@ -926,6 +961,7 @@ defmodule Arbor.Consensus.Coordinator do
 
     # Record to in-memory event store
     event_type = if proposal.mode == :advisory, do: :advice_rendered, else: :decision_reached
+
     record_event(state, event_type, %{
       proposal_id: proposal_id,
       decision_id: decision.id,
@@ -1016,7 +1052,10 @@ defmodule Arbor.Consensus.Coordinator do
 
         # Free quota on terminal statuses
         if terminal_status?(status) do
-          %{state | proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)}
+          %{
+            state
+            | proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+          }
         else
           state
         end
@@ -1125,11 +1164,12 @@ defmodule Arbor.Consensus.Coordinator do
       updated_proposal = %{
         proposal
         | topic: matched_topic,
-          metadata: Map.merge(proposal.metadata, %{
-            routing_confidence: confidence,
-            original_topic: proposal.topic,
-            routed_by: :topic_matcher
-          })
+          metadata:
+            Map.merge(proposal.metadata, %{
+              routing_confidence: confidence,
+              original_topic: proposal.topic,
+              routed_by: :topic_matcher
+            })
       }
 
       {:ok, updated_proposal}
@@ -1261,9 +1301,18 @@ defmodule Arbor.Consensus.Coordinator do
   # Log deprecation warning for Config-based routing
   defp maybe_warn_config_fallback(topic) do
     # Only warn for non-legacy topics
-    if topic not in [:code_modification, :governance_change, :capability_change,
-                     :configuration_change, :dependency_change, :layer_modification,
-                     :documentation_change, :test_change, :sdlc_decision, :general] do
+    if topic not in [
+         :code_modification,
+         :governance_change,
+         :capability_change,
+         :configuration_change,
+         :dependency_change,
+         :layer_modification,
+         :documentation_change,
+         :test_change,
+         :sdlc_decision,
+         :general
+       ] do
       Logger.warning(
         "Topic #{inspect(topic)} not found in TopicRegistry, falling back to Config. " <>
           "Consider registering topics via :topic_governance for explicit routing rules."
@@ -1483,7 +1532,10 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp handle_interrupted_evaluations(state, interrupted) do
     strategy = Config.recovery_strategy()
-    Logger.info("Coordinator: handling #{length(interrupted)} interrupted evaluations with strategy: #{strategy}")
+
+    Logger.info(
+      "Coordinator: handling #{length(interrupted)} interrupted evaluations with strategy: #{strategy}"
+    )
 
     Enum.reduce(interrupted, state, fn info, acc_state ->
       handle_single_interrupted(acc_state, info, strategy)
@@ -1585,7 +1637,9 @@ defmodule Arbor.Consensus.Coordinator do
         nil
       end
 
-    EventEmitter.coordinator_started(state.coordinator_id, config_map, recovered_from: recovered_from)
+    EventEmitter.coordinator_started(state.coordinator_id, config_map,
+      recovered_from: recovered_from
+    )
   end
 
   defp emit_recovery_started(state, from_position) do
@@ -1632,4 +1686,170 @@ defmodule Arbor.Consensus.Coordinator do
   # Helper to conditionally add to map
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ===========================================================================
+  # Phase 5: Organic Topic Creation
+  # ===========================================================================
+
+  @organic_topic_threshold 5
+  @organic_check_interval 10
+  @max_tracked_patterns 100
+  @stats_max_age_days 30
+  @max_descriptions_per_pattern 10
+
+  # Track when proposals route to :general
+  defp track_routing_stats(state, proposal) do
+    if proposal.topic == :general do
+      keywords = extract_keywords(proposal.description)
+      now = DateTime.utc_now()
+
+      routing_stats =
+        Enum.reduce(keywords, state.routing_stats, fn keyword, stats ->
+          Map.update(
+            stats,
+            keyword,
+            %{count: 1, last_seen: now, descriptions: [proposal.description]},
+            fn entry ->
+              descriptions =
+                Enum.take(
+                  [proposal.description | entry.descriptions],
+                  @max_descriptions_per_pattern
+                )
+
+              %{entry | count: entry.count + 1, last_seen: now, descriptions: descriptions}
+            end
+          )
+        end)
+
+      # Prune old and excess entries
+      routing_stats = prune_routing_stats(routing_stats, now)
+
+      new_count = state.general_route_count + 1
+
+      state = %{state | routing_stats: routing_stats, general_route_count: new_count}
+
+      # Check for organic topic patterns periodically
+      if rem(new_count, @organic_check_interval) == 0 do
+        check_organic_topics(state)
+      else
+        state
+      end
+    else
+      state
+    end
+  end
+
+  # Extract significant keywords from a description
+  defp extract_keywords(description) do
+    stop_words = ~w(the a an is are was were be been being have has had do does did
+                     will would shall should may might can could of in to for on with
+                     at by from this that it and or but not as if then than)
+
+    description
+    |> String.downcase()
+    |> String.replace(~r/[^\w\s]/, " ")
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.reject(&(&1 in stop_words))
+    |> Enum.reject(&(String.length(&1) < 3))
+    |> Enum.uniq()
+  end
+
+  # Prune routing stats: remove old entries and cap size
+  defp prune_routing_stats(stats, now) do
+    cutoff = DateTime.add(now, -@stats_max_age_days, :day)
+
+    stats
+    |> Enum.reject(fn {_keyword, entry} ->
+      DateTime.compare(entry.last_seen, cutoff) == :lt
+    end)
+    |> Enum.sort_by(fn {_keyword, entry} -> entry.count end, :desc)
+    |> Enum.take(@max_tracked_patterns)
+    |> Map.new()
+  end
+
+  # Analyze routing stats for potential new topics
+  defp check_organic_topics(state) do
+    # Find keywords that appear frequently in :general-routed proposals
+    candidates =
+      state.routing_stats
+      |> Enum.filter(fn {_keyword, entry} -> entry.count >= @organic_topic_threshold end)
+      |> Enum.sort_by(fn {_keyword, entry} -> entry.count end, :desc)
+
+    case candidates do
+      [] ->
+        state
+
+      candidates ->
+        # Group related keywords (those appearing in the same descriptions)
+        topic_candidate = build_topic_candidate(candidates)
+        propose_organic_topic(state, topic_candidate)
+    end
+  end
+
+  # Build a topic candidate from frequently co-occurring keywords
+  defp build_topic_candidate(candidates) do
+    # Take top keywords as match patterns
+    keywords = Enum.map(candidates, fn {keyword, _entry} -> keyword end)
+    top_keywords = Enum.take(keywords, 5)
+
+    # Build a suggested topic name as a string — actual atom creation happens
+    # if/when governance approves the topic via TopicRegistry
+    {primary_keyword, _entry} = hd(candidates)
+    topic_name = "organic_#{primary_keyword}"
+
+    %{
+      topic: topic_name,
+      match_patterns: top_keywords,
+      keyword_counts: Enum.map(Enum.take(candidates, 5), fn {k, e} -> {k, e.count} end)
+    }
+  end
+
+  # Submit topic creation proposal to :topic_governance
+  defp propose_organic_topic(state, candidate) do
+    description =
+      "Organic topic creation: #{candidate.topic}. " <>
+        "Keywords #{inspect(candidate.match_patterns)} appeared frequently in " <>
+        ":general-routed proposals (counts: #{inspect(candidate.keyword_counts)}). " <>
+        "Suggesting dedicated topic for better routing."
+
+    proposal_attrs = %{
+      proposer: "coordinator:#{state.coordinator_id}",
+      topic: :topic_governance,
+      mode: :advisory,
+      description: description,
+      context: %{
+        organic_topic: true,
+        suggested_topic: candidate.topic,
+        match_patterns: candidate.match_patterns,
+        keyword_counts: candidate.keyword_counts
+      },
+      metadata: %{source: :organic_topic_detection}
+    }
+
+    # Submit internally via a Task to avoid blocking.
+    # Capture the coordinator pid before spawning the Task.
+    coordinator_pid = self()
+
+    Task.start(fn ->
+      case Proposal.new(proposal_attrs) do
+        {:ok, proposal} ->
+          try do
+            GenServer.call(coordinator_pid, {:submit, proposal, []})
+          catch
+            :exit, _ ->
+              Logger.debug("Organic topic proposal submission failed (coordinator busy)")
+          end
+
+        {:error, reason} ->
+          Logger.warning("Failed to create organic topic proposal: #{inspect(reason)}")
+      end
+    end)
+
+    # Reset the general route count to avoid re-proposing
+    %{state | general_route_count: 0}
+  rescue
+    e ->
+      Logger.warning("Organic topic creation error: #{inspect(e)}")
+      state
+  end
 end
