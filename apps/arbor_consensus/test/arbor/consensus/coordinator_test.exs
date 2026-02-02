@@ -51,10 +51,12 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
       # Same proposal again
       proposal2 = TestHelpers.build_proposal(%{
-        change_type: proposal.change_type,
-        target_module: proposal.target_module,
-        description: proposal.description,
-        code_diff: proposal.code_diff
+        topic: proposal.topic,
+        context: %{
+          target_module: Map.get(proposal.context, :target_module),
+          code_diff: Map.get(proposal.context, :code_diff)
+        },
+        description: proposal.description
       })
       result = Coordinator.submit(proposal2, server: coord)
       assert result == {:error, :duplicate_proposal}

@@ -198,10 +198,13 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
   # ===========================================================================
 
   defp format_proposal(proposal) do
+    code_diff = Map.get(proposal.context, :code_diff)
+    new_code = Map.get(proposal.context, :new_code)
+
     """
     ## Proposal: #{proposal.id}
 
-    **Type:** #{proposal.change_type}
+    **Type:** #{proposal.topic}
     **Proposer:** #{proposal.proposer}
     **Target Layer:** #{proposal.target_layer}
 
@@ -210,12 +213,12 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
 
     ### Code Diff
     ```
-    #{proposal.code_diff || "No diff provided"}
+    #{code_diff || "No diff provided"}
     ```
 
     ### New Code
     ```elixir
-    #{proposal.new_code || "No new code provided"}
+    #{new_code || "No new code provided"}
     ```
 
     ### Metadata

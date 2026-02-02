@@ -96,7 +96,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
     %{
       vote: if(benefit > 0.4, do: :approve, else: :reject),
       reasoning:
-        "Capability assessment for #{proposal.change_type}: " <>
+        "Capability assessment for #{proposal.topic}: " <>
           "Estimated benefit score #{Float.round(benefit, 2)}.",
       confidence: 0.7,
       concerns: concerns,
@@ -240,11 +240,23 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   # ============================================================================
+  # Context Accessors (for migrated fields)
+  # ============================================================================
+
+  defp get_new_code(proposal) do
+    Map.get(proposal.context, :new_code, "")
+  end
+
+  defp get_target_module(proposal) do
+    Map.get(proposal.context, :target_module)
+  end
+
+  # ============================================================================
   # Security Analysis
   # ============================================================================
 
   defp security_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> check_pattern(code, "System", "Uses System module which could allow command execution")
@@ -279,7 +291,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp stability_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> check_pattern(code, "spawn", "Spawns new processes which could affect system stability")
@@ -316,7 +328,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp capability_concerns(proposal) do
-    case proposal.change_type do
+    case proposal.topic do
       :capability_change -> ["Direct capability modification - verify authorization flow"]
       :governance_change -> ["Governance change affects system-wide behavior"]
       _ -> []
@@ -325,7 +337,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
 
   defp calculate_capability_benefit(proposal) do
     base_benefit =
-      case proposal.change_type do
+      case proposal.topic do
         :code_modification -> 0.5
         :capability_change -> 0.6
         :configuration_change -> 0.4
@@ -341,7 +353,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp find_potential_exploits(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> check_pattern(
@@ -371,7 +383,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp resource_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> check_pattern_pair(
@@ -388,7 +400,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   defp estimate_resource_impact(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
     lines = code |> String.split("\n") |> length()
     has_complex = String.contains?(code, ["Enum.reduce", "recursion", "spawn"])
 
@@ -420,13 +432,13 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   ]
 
   defp calculate_emergence_potential(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
     matches = Enum.count(@novel_patterns, &String.contains?(code, &1))
     min(matches / length(@novel_patterns), 1.0)
   end
 
   defp emergence_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> then(fn concerns ->
@@ -460,7 +472,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   defp emergence_recommendations(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     if String.contains?(code, ["Agent", "autonomous"]) do
       ["Monitor for emergent behaviors", "Ensure proper supervision hierarchy"]
@@ -502,14 +514,14 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp assess_test_quality(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     has_tests = String.contains?(code, ["ExUnit", "describe", "test", "@tag"])
     has_assertions = String.contains?(code, ["assert", "refute", "assert_receive"])
 
     test_file =
       String.contains?(code, "_test.exs") or
-        String.contains?(to_string(proposal.target_module), "_test")
+        String.contains?(to_string(get_target_module(proposal)), "_test")
 
     score = 0.0
     score = if test_file, do: score + 0.4, else: score
@@ -519,7 +531,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   defp estimate_test_coverage(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
     metadata = proposal.metadata || %{}
 
     case metadata[:test_coverage] do
@@ -534,7 +546,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   defp test_runner_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> then(fn c ->
@@ -569,7 +581,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   # ============================================================================
 
   defp assess_code_quality(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     1.0
     |> deduct_if(
@@ -590,7 +602,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   end
 
   defp code_review_concerns(proposal) do
-    code = proposal.new_code || ""
+    code = get_new_code(proposal)
 
     []
     |> then(fn c ->
