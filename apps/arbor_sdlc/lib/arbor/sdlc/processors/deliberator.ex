@@ -336,7 +336,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
 
     %{
       proposer: @processor_id,
-      change_type: :sdlc_decision,
+      topic: :sdlc_decision,
       description: description,
       target_layer: 4,
       metadata: %{

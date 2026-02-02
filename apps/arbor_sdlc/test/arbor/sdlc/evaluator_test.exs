@@ -161,7 +161,7 @@ defmodule Arbor.SDLC.EvaluatorTest do
   defp create_test_proposal do
     Proposal.new(%{
       proposer: "test_deliberator",
-      change_type: :sdlc_decision,
+      topic: :sdlc_decision,
       description: "Test SDLC decision for feature implementation",
       target_layer: 4,
       metadata: %{

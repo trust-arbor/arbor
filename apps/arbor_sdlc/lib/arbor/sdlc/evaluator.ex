@@ -21,7 +21,7 @@ defmodule Arbor.SDLC.Evaluator do
 
       Arbor.Consensus.submit(proposal,
         evaluator_backend: Arbor.SDLC.Evaluator,
-        change_type: :sdlc_decision
+        topic: :sdlc_decision
       )
 
   ## Context Loading
@@ -401,7 +401,7 @@ defmodule Arbor.SDLC.Evaluator do
 
     **ID:** #{proposal.id}
     **Proposer:** #{proposal.proposer}
-    **Type:** #{proposal.change_type}
+    **Type:** #{proposal.topic}
 
     ### Description
     #{proposal.description}
