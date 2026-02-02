@@ -4,6 +4,11 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
 
   A council decision aggregates all evaluator votes and
   determines the final outcome of a proposal.
+
+  ## Modes
+
+  - `:decision` - Formal approve/reject/deadlock with quorum enforcement
+  - `:advisory` - Perspectives collected for advisory input (vote is irrelevant)
   """
 
   use TypedStruct
@@ -11,6 +16,7 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal, Protocol}
 
   @type decision :: :approved | :rejected | :deadlock
+  @type mode :: :decision | :advisory
 
   typedstruct enforce: true do
     @typedoc "The council's final decision on a proposal"
@@ -18,6 +24,7 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
     field(:id, String.t())
     field(:proposal_id, String.t())
     field(:decision, decision())
+    field(:mode, mode(), default: :decision)
     field(:required_quorum, pos_integer())
     field(:quorum_met, boolean())
 
@@ -63,6 +70,7 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
           id: id,
           proposal_id: proposal.id,
           decision: decision,
+          mode: Map.get(proposal, :mode, :decision),
           required_quorum: required_quorum,
           quorum_met: quorum_met,
           approve_count: counts.approve,
@@ -98,6 +106,13 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
   @spec approved?(t()) :: boolean()
   def approved?(%__MODULE__{decision: :approved}), do: true
   def approved?(_), do: false
+
+  @doc """
+  Check if this was an advisory (non-binding) decision.
+  """
+  @spec advisory?(t()) :: boolean()
+  def advisory?(%__MODULE__{mode: :advisory}), do: true
+  def advisory?(_), do: false
 
   @doc """
   Get a summary of the decision.
