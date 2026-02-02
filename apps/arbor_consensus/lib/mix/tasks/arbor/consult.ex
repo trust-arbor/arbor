@@ -7,15 +7,28 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Should we use Redis or ETS?" --perspective brainstorming
       $ mix arbor.consult "Persistent agents?" -p stability --docs .arbor/roadmap/3-in-progress/consensus-redesign.md
       $ mix arbor.consult "Full review" --all --docs design.md --context "budget:low,timeline:2 weeks"
+      $ mix arbor.consult "Build order?" --all --save --docs design.md
 
   ## Options
 
     * `--perspective` / `-p`  — Ask a single perspective (default: brainstorming)
     * `--all` / `-a`          — Ask all 12 perspectives (expensive: 12 LLM calls)
+    * `--save` / `-s`         — Save results to .arbor/council/<slug>/
     * `--docs` / `-d`         — Reference doc paths (comma-separated or repeated)
     * `--context` / `-c`      — Extra context as key:value pairs (comma-separated)
     * `--provider`            — Override CLI provider (anthropic, gemini, openai, opencode)
     * `--timeout`             — Per-perspective timeout in seconds (default: 180)
+
+  ## Saving Results
+
+  With `--save`, results are persisted to `.arbor/council/<date>-<slug>/`:
+
+      .arbor/council/2026-02-02-consensus-build-order/
+        question.md          # Original question, options, metadata
+        perspectives.md      # All perspective responses
+
+  This creates a reviewable audit trail. Follow up with a `synthesis.md`
+  after reviewing the perspectives.
 
   ## Examples
 
@@ -28,9 +41,9 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Persistent agents vs spawned?" -p stability \\
         --docs .arbor/roadmap/3-in-progress/consensus-redesign.md
 
-  Full council (12 perspectives, ~$0.50-1.00):
+  Full council with save (12 perspectives, ~$0.50-1.00):
 
-      $ mix arbor.consult "Should we redesign the Coordinator?" --all
+      $ mix arbor.consult "Should we redesign the Coordinator?" --all --save
   """
   use Mix.Task
 
@@ -43,6 +56,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   @switches [
     perspective: :string,
     all: :boolean,
+    save: :boolean,
     docs: [:string],
     context: :string,
     provider: :string,
@@ -52,6 +66,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   @aliases [
     p: :perspective,
     a: :all,
+    s: :save,
     d: :docs,
     c: :context
   ]
@@ -64,6 +79,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     Options:
       -p, --perspective NAME   Ask one perspective (default: brainstorming)
       -a, --all                Ask all 12 perspectives
+      -s, --save               Save results to .arbor/council/
       -d, --docs PATH          Reference doc paths
       -c, --context KV         Context as key:value pairs
           --provider NAME      Override CLI provider
@@ -90,14 +106,19 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     context = build_context(opts)
     eval_opts = build_eval_opts(opts)
-
     provider_override = eval_opts[:provider]
+    save? = opts[:save] || false
 
-    if opts[:all] do
-      ask_all(question, context, eval_opts, provider_override)
-    else
-      perspective = parse_perspective(opts[:perspective] || "brainstorming")
-      ask_one(question, perspective, context, eval_opts, provider_override)
+    results =
+      if opts[:all] do
+        ask_all(question, context, eval_opts, provider_override)
+      else
+        perspective = parse_perspective(opts[:perspective] || "brainstorming")
+        ask_one(question, perspective, context, eval_opts, provider_override)
+      end
+
+    if save? and results != :error do
+      save_results(question, results, opts, provider_override)
     end
   end
 
@@ -111,6 +132,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     case Consult.ask_one(AdvisoryLLM, question, perspective, [context: context] ++ eval_opts) do
       {:ok, eval} ->
         print_evaluation(perspective, eval, provider_override)
+        [{perspective, eval}]
 
       {:error, reason} ->
         Mix.shell().error("Error: #{inspect(reason)}")
@@ -148,6 +170,9 @@ defmodule Mix.Tasks.Arbor.Consult do
             " ---"
         )
 
+        # Return successful results for saving
+        successes
+
       {:error, reason} ->
         Mix.shell().error("Error: #{inspect(reason)}")
         exit({:shutdown, 1})
@@ -168,6 +193,119 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     #{eval.reasoning}
     """)
+  end
+
+  # ============================================================================
+  # Save to .arbor/council/
+  # ============================================================================
+
+  defp save_results(question, results, opts, provider_override) do
+    slug = slugify(question)
+    date = Date.utc_today() |> Date.to_string()
+    dir = Path.join([".arbor", "council", "#{date}-#{slug}"])
+
+    File.mkdir_p!(dir)
+
+    write_question_file(dir, question, results, opts, provider_override)
+    write_perspectives_file(dir, question, results, provider_override)
+
+    Mix.shell().info("\nSaved to #{dir}/")
+  end
+
+  defp write_question_file(dir, question, results, opts, provider_override) do
+    doc_paths = Keyword.get_values(opts, :docs) |> Enum.flat_map(&split_paths/1)
+
+    perspectives_consulted =
+      if opts[:all],
+        do: "all (#{length(@perspectives)})",
+        else: Enum.map_join(results, ", ", fn {p, _} -> to_string(p) end)
+
+    provider_line =
+      if provider_override, do: "provider: #{provider_override}\n", else: ""
+
+    docs_lines =
+      case doc_paths do
+        [] -> ""
+        paths -> "docs:\n" <> Enum.map_join(paths, "\n", &"  - #{&1}") <> "\n"
+      end
+
+    context_line =
+      case opts[:context] do
+        nil -> ""
+        ctx -> "context: #{ctx}\n"
+      end
+
+    content = """
+    ---
+    date: #{Date.utc_today()}
+    perspectives: #{perspectives_consulted}
+    responded: #{length(results)}/#{if opts[:all], do: length(@perspectives), else: 1}
+    #{provider_line}#{docs_lines}#{context_line}---
+
+    # #{question}
+
+    #{format_docs_section(doc_paths)}#{format_context_section(opts[:context])}
+    """
+
+    File.write!(Path.join(dir, "question.md"), String.trim(content) <> "\n")
+  end
+
+  defp write_perspectives_file(dir, question, results, provider_override) do
+    header = """
+    ---
+    date: #{Date.utc_today()}
+    question: "#{String.replace(question, "\"", "\\\"")}"
+    responded: #{length(results)}
+    ---
+
+    # Council Perspectives
+    """
+
+    body =
+      Enum.map_join(results, "\n---\n\n", fn {perspective, eval} ->
+        provider = provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
+
+        """
+        ## #{perspective} (#{provider})
+
+        #{eval.reasoning}
+        """
+      end)
+
+    File.write!(Path.join(dir, "perspectives.md"), String.trim(header) <> "\n\n" <> String.trim(body) <> "\n")
+  end
+
+  defp format_docs_section([]), do: ""
+
+  defp format_docs_section(doc_paths) do
+    "## Reference Documents\n\n" <>
+      Enum.map_join(doc_paths, "\n", &"- #{&1}") <> "\n\n"
+  end
+
+  defp format_context_section(nil), do: ""
+
+  defp format_context_section(context_str) do
+    pairs =
+      context_str
+      |> String.split(",")
+      |> Enum.map_join("\n", fn pair ->
+        case String.split(pair, ":", parts: 2) do
+          [k, v] -> "- **#{String.trim(k)}**: #{String.trim(v)}"
+          [k] -> "- **#{String.trim(k)}**"
+        end
+      end)
+
+    "## Context\n\n" <> pairs <> "\n\n"
+  end
+
+  defp slugify(text) do
+    text
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, "")
+    |> String.split()
+    |> Enum.take(6)
+    |> Enum.join("-")
+    |> String.slice(0, 50)
   end
 
   # ============================================================================
