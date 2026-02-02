@@ -29,9 +29,9 @@ defmodule Arbor.Consensus do
       # Submit a proposal
       {:ok, proposal_id} = Arbor.Consensus.submit(%{
         proposer: "agent_1",
-        change_type: :code_modification,
+        topic: :code_modification,
         description: "Add caching to API calls",
-        new_code: "defmodule Cache do ... end"
+        context: %{new_code: "defmodule Cache do ... end"}
       })
 
       # Check status
