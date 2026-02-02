@@ -3,6 +3,7 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
 
   alias Arbor.Consensus.EvaluatorAgent
   alias Arbor.Consensus.EvaluatorAgent.Supervisor, as: AgentSupervisor
+  alias Arbor.Contracts.Consensus.Evaluation
 
   # A test evaluator
   defmodule TestEvaluator do
@@ -16,7 +17,7 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
 
     @impl true
     def evaluate(_proposal, perspective, _opts) do
-      Arbor.Contracts.Consensus.Evaluation.new(%{
+      Evaluation.new(%{
         proposal_id: "test",
         evaluator_id: "test",
         perspective: perspective,
@@ -39,7 +40,7 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
 
     @impl true
     def evaluate(_proposal, perspective, _opts) do
-      Arbor.Contracts.Consensus.Evaluation.new(%{
+      Evaluation.new(%{
         proposal_id: "test",
         evaluator_id: "another",
         perspective: perspective,

@@ -202,20 +202,16 @@ defmodule Arbor.Consensus.TopicMatcher do
 
   defp build_classification_prompt(description, context, topics) do
     topic_descriptions =
-      topics
-      |> Enum.map(fn rule ->
+      Enum.map_join(topics, "\n", fn rule ->
         patterns = Enum.join(rule.match_patterns, ", ")
         "- #{rule.topic}: keywords=[#{patterns}]"
       end)
-      |> Enum.join("\n")
 
     context_str =
       if context == %{} do
         "none"
       else
-        context
-        |> Enum.map(fn {k, v} -> "#{k}: #{inspect(v)}" end)
-        |> Enum.join(", ")
+        Enum.map_join(context, ", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
       end
 
     """

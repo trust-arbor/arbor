@@ -498,8 +498,7 @@ defmodule Arbor.Consensus.EvaluatorAgent do
       |> Enum.filter(&match?({:ok, _}, &1))
       |> Enum.map(fn {:ok, eval} -> eval.vote end)
       |> Enum.frequencies()
-      |> Enum.map(fn {vote, count} -> "#{vote}=#{count}" end)
-      |> Enum.join(", ")
+      |> Enum.map_join(", ", fn {vote, count} -> "#{vote}=#{count}" end)
 
     "#{ok_count} evaluations (#{votes}), #{error_count} errors"
   end
