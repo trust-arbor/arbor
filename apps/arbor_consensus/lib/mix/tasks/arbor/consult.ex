@@ -91,11 +91,13 @@ defmodule Mix.Tasks.Arbor.Consult do
     context = build_context(opts)
     eval_opts = build_eval_opts(opts)
 
+    provider_override = eval_opts[:provider]
+
     if opts[:all] do
-      ask_all(question, context, eval_opts)
+      ask_all(question, context, eval_opts, provider_override)
     else
       perspective = parse_perspective(opts[:perspective] || "brainstorming")
-      ask_one(question, perspective, context, eval_opts)
+      ask_one(question, perspective, context, eval_opts, provider_override)
     end
   end
 
@@ -103,12 +105,12 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Single Perspective
   # ============================================================================
 
-  defp ask_one(question, perspective, context, eval_opts) do
+  defp ask_one(question, perspective, context, eval_opts, provider_override) do
     Mix.shell().info("Consulting :#{perspective}...\n")
 
     case Consult.ask_one(AdvisoryLLM, question, perspective, [context: context] ++ eval_opts) do
       {:ok, eval} ->
-        print_evaluation(perspective, eval)
+        print_evaluation(perspective, eval, provider_override)
 
       {:error, reason} ->
         Mix.shell().error("Error: #{inspect(reason)}")
@@ -120,7 +122,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   # All Perspectives
   # ============================================================================
 
-  defp ask_all(question, context, eval_opts) do
+  defp ask_all(question, context, eval_opts, provider_override) do
     count = length(@perspectives)
     Mix.shell().info("Consulting all #{count} perspectives in parallel...\n")
 
@@ -131,7 +133,7 @@ defmodule Mix.Tasks.Arbor.Consult do
             Mix.shell().error("=== #{perspective} === ERROR: #{inspect(reason)}\n")
 
           {perspective, eval} ->
-            print_evaluation(perspective, eval)
+            print_evaluation(perspective, eval, provider_override)
         end)
 
         Mix.shell().info("--- Done: #{count} perspectives consulted ---")
@@ -146,8 +148,8 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Output
   # ============================================================================
 
-  defp print_evaluation(perspective, eval) do
-    provider = AdvisoryLLM.provider_map()[perspective] || :unknown
+  defp print_evaluation(perspective, eval, provider_override) do
+    provider = provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
 
     Mix.shell().info("""
     ╔══════════════════════════════════════════════════════════════╗
