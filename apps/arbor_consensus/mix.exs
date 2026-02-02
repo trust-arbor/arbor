@@ -52,6 +52,7 @@ defmodule Arbor.Consensus.MixProject do
     [
       # Umbrella dependencies
       {:arbor_common, in_umbrella: true},
+      {:arbor_checkpoint, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
