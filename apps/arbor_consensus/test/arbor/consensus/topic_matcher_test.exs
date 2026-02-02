@@ -132,8 +132,8 @@ defmodule Arbor.Consensus.TopicMatcherTest do
         )
       ]
 
-      # "cap" should not match inside "capability"
-      {topic, confidence} = TopicMatcher.match("capability grant", %{}, topics)
+      # "cap" should not match inside "capability" (disable LLM to test pure pattern matching)
+      {topic, confidence} = TopicMatcher.match("capability grant", %{}, topics, llm_enabled: false)
 
       assert topic == :general
       assert confidence == 0.0
@@ -182,10 +182,11 @@ defmodule Arbor.Consensus.TopicMatcherTest do
     end
 
     test "returns correct ratio for partial matches" do
-      rule = TopicRule.new(
-        topic: :test,
-        match_patterns: ["one", "two", "three", "four"]
-      )
+      rule =
+        TopicRule.new(
+          topic: :test,
+          match_patterns: ["one", "two", "three", "four"]
+        )
 
       # 2 out of 4 patterns match = 0.5 base + 0.1 bonus = 0.6
       score = TopicMatcher.score_topic("one two", %{}, rule)
@@ -195,10 +196,11 @@ defmodule Arbor.Consensus.TopicMatcherTest do
     end
 
     test "includes context in scoring" do
-      rule = TopicRule.new(
-        topic: :test,
-        match_patterns: ["keyword"]
-      )
+      rule =
+        TopicRule.new(
+          topic: :test,
+          match_patterns: ["keyword"]
+        )
 
       # Pattern in context, not description
       context = %{type: "keyword"}
@@ -208,10 +210,11 @@ defmodule Arbor.Consensus.TopicMatcherTest do
     end
 
     test "handles nested context maps" do
-      rule = TopicRule.new(
-        topic: :test,
-        match_patterns: ["nested"]
-      )
+      rule =
+        TopicRule.new(
+          topic: :test,
+          match_patterns: ["nested"]
+        )
 
       context = %{
         outer: %{

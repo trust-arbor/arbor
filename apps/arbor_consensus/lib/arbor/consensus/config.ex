@@ -142,8 +142,7 @@ defmodule Arbor.Consensus.Config do
       max_concurrent_proposals:
         Keyword.get(opts, :max_concurrent_proposals, @default_max_concurrent),
       auto_execute_approved: Keyword.get(opts, :auto_execute_approved, false),
-      quorum_rules:
-        Map.merge(@default_quorum_rules, Keyword.get(opts, :quorum_rules, %{})),
+      quorum_rules: Map.merge(@default_quorum_rules, Keyword.get(opts, :quorum_rules, %{})),
       perspectives_for_change_type:
         Map.merge(
           @default_perspectives,

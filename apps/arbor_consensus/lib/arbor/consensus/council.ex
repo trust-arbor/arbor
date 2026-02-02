@@ -153,10 +153,10 @@ defmodule Arbor.Consensus.Council do
     remaining_count = length(remaining_tasks)
 
     # Quorum reached for approval
+    # Quorum reached for rejection
+    # Even if all remaining approve, can't reach quorum (guaranteed rejection/deadlock)
     approve_count >= quorum or
-      # Quorum reached for rejection
       reject_count >= quorum or
-      # Even if all remaining approve, can't reach quorum (guaranteed rejection/deadlock)
       approve_count + remaining_count < quorum
   end
 

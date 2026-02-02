@@ -127,7 +127,9 @@ defmodule Arbor.Consensus.CouncilTest do
 
     test "uses custom config perspectives" do
       proposal = TestHelpers.build_proposal(%{topic: :code_modification})
-      config = Config.new(perspectives_for_change_type: %{code_modification: [:security, :stability]})
+
+      config =
+        Config.new(perspectives_for_change_type: %{code_modification: [:security, :stability]})
 
       perspectives = Council.required_perspectives(proposal, config)
 
@@ -139,7 +141,16 @@ defmodule Arbor.Consensus.CouncilTest do
     test "terminates early when quorum is reached" do
       proposal = TestHelpers.build_proposal()
       # Use 7 perspectives with quorum of 5 — should terminate once 5 approve
-      perspectives = [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
+      perspectives = [
+        :security,
+        :stability,
+        :capability,
+        :adversarial,
+        :resource,
+        :emergence,
+        :random
+      ]
+
       backend = TestHelpers.AlwaysApproveBackend
 
       {:ok, evaluations} =

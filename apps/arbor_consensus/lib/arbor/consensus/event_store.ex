@@ -242,7 +242,9 @@ defmodule Arbor.Consensus.EventStore do
     stream_id = EventConverter.stream_id(event)
 
     case PersistenceETS.append(stream_id, persistence_event, name: event_log) do
-      {:ok, _persisted} -> :ok
+      {:ok, _persisted} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("Consensus.EventStore: failed to persist to EventLog: #{inspect(reason)}")
         :ok

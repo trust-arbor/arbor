@@ -407,5 +407,4 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   end
 
   defp valid_test_path?(_), do: false
-
 end

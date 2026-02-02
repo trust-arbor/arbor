@@ -177,10 +177,12 @@ defmodule Arbor.ConsensusTest do
 
     test "returns empty list when no decisions exist" do
       {_es_pid, _es_name} = TestHelpers.start_test_event_store()
-      {_pid, coord} = TestHelpers.start_test_coordinator(
-        evaluator_backend: TestHelpers.SlowBackend,
-        config: [evaluation_timeout_ms: 60_000]
-      )
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
 
       decisions = Consensus.list_decisions(coord)
       assert decisions == []

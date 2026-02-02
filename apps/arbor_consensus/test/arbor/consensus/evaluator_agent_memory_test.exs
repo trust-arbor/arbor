@@ -223,7 +223,7 @@ defmodule Arbor.Consensus.EvaluatorAgentMemoryTest do
 
       # Check what opts were passed to evaluate
       opts_log = get_evaluate_opts()
-      assert length(opts_log) >= 1
+      assert opts_log != []
       {_id, opts} = hd(opts_log)
       assert opts == []
 
@@ -265,7 +265,7 @@ defmodule Arbor.Consensus.EvaluatorAgentMemoryTest do
 
       # Check recall was called via ETS
       recall_calls = TestMemoryAdapter.get_recall_calls()
-      assert length(recall_calls) >= 1
+      assert recall_calls != []
       {_agent_id, query, _opts} = hd(recall_calls)
       assert query == "Test security assessment"
 
@@ -292,7 +292,7 @@ defmodule Arbor.Consensus.EvaluatorAgentMemoryTest do
 
       # Check that evaluate was called with memory_context in opts
       opts_log = get_evaluate_opts()
-      assert length(opts_log) >= 1
+      assert opts_log != []
       {_id, opts} = hd(opts_log)
       assert Keyword.has_key?(opts, :memory_context)
       memories = Keyword.get(opts, :memory_context)
@@ -319,7 +319,7 @@ defmodule Arbor.Consensus.EvaluatorAgentMemoryTest do
       Process.sleep(200)
 
       store_calls = TestMemoryAdapter.get_store_calls()
-      assert length(store_calls) >= 1
+      assert store_calls != []
       {_agent_id, content, metadata} = hd(store_calls)
       assert content =~ "Important security update"
       assert metadata.type == "evaluation_outcome"

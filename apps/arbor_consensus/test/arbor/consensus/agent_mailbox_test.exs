@@ -28,7 +28,8 @@ defmodule Arbor.Contracts.Consensus.AgentMailboxTest do
     end
 
     test "rejects reserved exceeding max" do
-      assert {:error, :reserved_exceeds_max} = AgentMailbox.new(max_size: 10, reserved_high_priority: 15)
+      assert {:error, :reserved_exceeds_max} =
+               AgentMailbox.new(max_size: 10, reserved_high_priority: 15)
     end
   end
 
@@ -196,8 +197,10 @@ defmodule Arbor.Contracts.Consensus.AgentMailboxTest do
       assert info.high_count == 1
       assert info.normal_count == 1
       assert info.reserved_high_priority == 3
-      assert info.normal_slots_remaining == 5  # 7 - 2 = 5
-      assert info.high_slots_remaining == 8    # 10 - 2 = 8
+      # 7 - 2 = 5
+      assert info.normal_slots_remaining == 5
+      # 10 - 2 = 8
+      assert info.high_slots_remaining == 8
       assert info.utilization == 0.2
     end
   end

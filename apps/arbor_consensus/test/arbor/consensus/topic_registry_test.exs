@@ -81,12 +81,13 @@ defmodule Arbor.Consensus.TopicRegistryTest do
 
   describe "register_topic/2" do
     test "registers a new topic", %{registry: registry, table: table} do
-      rule = TopicRule.new(
-        topic: :security_audit,
-        min_quorum: :supermajority,
-        match_patterns: ["security", "audit"],
-        registered_by: "admin_agent"
-      )
+      rule =
+        TopicRule.new(
+          topic: :security_audit,
+          min_quorum: :supermajority,
+          match_patterns: ["security", "audit"],
+          registered_by: "admin_agent"
+        )
 
       assert {:ok, registered} = TopicRegistry.register_topic(rule, registry)
       assert registered.topic == :security_audit
@@ -135,7 +136,11 @@ defmodule Arbor.Consensus.TopicRegistryTest do
       {:ok, _} = TopicRegistry.register_topic(rule, registry)
 
       assert {:ok, updated} =
-               TopicRegistry.update_topic(:updatable_topic, %{min_quorum: :supermajority}, registry)
+               TopicRegistry.update_topic(
+                 :updatable_topic,
+                 %{min_quorum: :supermajority},
+                 registry
+               )
 
       assert updated.min_quorum == :supermajority
     end
