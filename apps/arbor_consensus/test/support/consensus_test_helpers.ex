@@ -385,6 +385,87 @@ defmodule Arbor.Consensus.TestHelpers do
   end
 
   # ============================================================================
+  # Test Advisory Evaluator (implements Evaluator behaviour)
+  # ============================================================================
+
+  defmodule TestAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :test_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming, :design_review]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    @impl true
+    def evaluate(proposal, perspective, _opts) do
+      {:ok, eval} =
+        Evaluation.new(%{
+          proposal_id: proposal.id,
+          evaluator_id: "test_advisory_#{perspective}",
+          perspective: perspective,
+          vote: :approve,
+          reasoning: "Test analysis from #{perspective} for: #{proposal.description}",
+          confidence: 0.7
+        })
+
+      {:ok, Evaluation.seal(eval)}
+    end
+  end
+
+  defmodule FailingAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :failing_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming]
+
+    @impl true
+    def evaluate(_proposal, _perspective, _opts) do
+      {:error, :intentional_failure}
+    end
+  end
+
+  # ============================================================================
+  # Mock AI Module (for advisory LLM testing)
+  # ============================================================================
+
+  defmodule MockAI do
+    @moduledoc false
+
+    def generate_text(_prompt, _opts) do
+      {:ok,
+       %{
+         text:
+           Jason.encode!(%{
+             "analysis" => "Mock analysis of the design question",
+             "considerations" => ["Consider simplicity", "Consider composability"],
+             "alternatives" => ["Alternative approach A", "Alternative approach B"],
+             "recommendation" => "Start with the simplest approach"
+           }),
+         model: "mock-model",
+         provider: :mock,
+         usage: %{input_tokens: 100, output_tokens: 200}
+       }}
+    end
+  end
+
+  defmodule ErrorAI do
+    @moduledoc false
+
+    def generate_text(_prompt, _opts) do
+      {:error, :api_error}
+    end
+  end
+
+  # ============================================================================
   # Utilities
   # ============================================================================
 

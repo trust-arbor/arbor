@@ -35,6 +35,9 @@ defmodule Arbor.Contracts.Consensus.Proposal do
     field(:created_at, DateTime.t())
     field(:updated_at, DateTime.t())
     field(:decided_at, DateTime.t() | nil, enforce: false)
+
+    # Advisory/context data for evaluators
+    field(:context, map(), default: %{}, enforce: false)
   end
 
   @doc """
@@ -59,7 +62,8 @@ defmodule Arbor.Contracts.Consensus.Proposal do
       metadata: Map.get(attrs, :metadata, %{}),
       created_at: now,
       updated_at: now,
-      decided_at: nil
+      decided_at: nil,
+      context: Map.get(attrs, :context, %{})
     }
 
     {:ok, proposal}
