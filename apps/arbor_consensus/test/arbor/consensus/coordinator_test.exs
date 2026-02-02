@@ -50,14 +50,16 @@ defmodule Arbor.Consensus.CoordinatorTest do
       {:ok, _id} = Coordinator.submit(proposal, server: coord)
 
       # Same proposal again
-      proposal2 = TestHelpers.build_proposal(%{
-        topic: proposal.topic,
-        context: %{
-          target_module: Map.get(proposal.context, :target_module),
-          code_diff: Map.get(proposal.context, :code_diff)
-        },
-        description: proposal.description
-      })
+      proposal2 =
+        TestHelpers.build_proposal(%{
+          topic: proposal.topic,
+          context: %{
+            target_module: Map.get(proposal.context, :target_module),
+            code_diff: Map.get(proposal.context, :code_diff)
+          },
+          description: proposal.description
+        })
+
       result = Coordinator.submit(proposal2, server: coord)
       assert result == {:error, :duplicate_proposal}
     end
@@ -88,9 +90,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
     test "rejects when authorizer denies" do
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          authorizer: TestHelpers.DenyAllAuthorizer
-        )
+        TestHelpers.start_test_coordinator(authorizer: TestHelpers.DenyAllAuthorizer)
 
       result =
         Coordinator.submit(
@@ -307,9 +307,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
     test "proposal gets rejected with rejecting backend" do
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          evaluator_backend: TestHelpers.AlwaysRejectBackend
-        )
+        TestHelpers.start_test_coordinator(evaluator_backend: TestHelpers.AlwaysRejectBackend)
 
       proposal = TestHelpers.build_proposal()
       {:ok, id} = Coordinator.submit(proposal, server: coord)
@@ -346,9 +344,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
   describe "evaluator_backend override" do
     test "per-proposal backend override works" do
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          evaluator_backend: TestHelpers.AlwaysRejectBackend
-        )
+        TestHelpers.start_test_coordinator(evaluator_backend: TestHelpers.AlwaysRejectBackend)
 
       # Default would reject, but we override with approve
       proposal = TestHelpers.build_proposal()
@@ -653,9 +649,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
     test "returns already_decided error for rejected proposal" do
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          evaluator_backend: TestHelpers.AlwaysRejectBackend
-        )
+        TestHelpers.start_test_coordinator(evaluator_backend: TestHelpers.AlwaysRejectBackend)
 
       proposal = TestHelpers.build_proposal()
       {:ok, id} = Coordinator.submit(proposal, server: coord)
@@ -689,9 +683,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
       Process.register(self(), :test_event_sink_receiver)
 
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          event_sink: TestHelpers.TestEventSink
-        )
+        TestHelpers.start_test_coordinator(event_sink: TestHelpers.TestEventSink)
 
       {:ok, id} =
         Coordinator.submit(
@@ -947,7 +939,12 @@ defmodule Arbor.Consensus.CoordinatorTest do
       ]
 
       table = TestHelpers.TestEventLog.start(events)
-      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+
+      Application.put_env(
+        :arbor_consensus,
+        :event_log,
+        {TestHelpers.TestEventLog, [table: table]}
+      )
 
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
@@ -1017,7 +1014,13 @@ defmodule Arbor.Consensus.CoordinatorTest do
       ]
 
       table = TestHelpers.TestEventLog.start(events)
-      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+
+      Application.put_env(
+        :arbor_consensus,
+        :event_log,
+        {TestHelpers.TestEventLog, [table: table]}
+      )
+
       Application.put_env(:arbor_consensus, :recovery_strategy, :deadlock)
       Application.put_env(:arbor_consensus, :emit_recovery_events, false)
 
@@ -1076,7 +1079,13 @@ defmodule Arbor.Consensus.CoordinatorTest do
       ]
 
       table = TestHelpers.TestEventLog.start(events)
-      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+
+      Application.put_env(
+        :arbor_consensus,
+        :event_log,
+        {TestHelpers.TestEventLog, [table: table]}
+      )
+
       Application.put_env(:arbor_consensus, :recovery_strategy, :resume)
       Application.put_env(:arbor_consensus, :emit_recovery_events, false)
 
@@ -1140,7 +1149,13 @@ defmodule Arbor.Consensus.CoordinatorTest do
       ]
 
       table = TestHelpers.TestEventLog.start(events)
-      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+
+      Application.put_env(
+        :arbor_consensus,
+        :event_log,
+        {TestHelpers.TestEventLog, [table: table]}
+      )
+
       Application.put_env(:arbor_consensus, :recovery_strategy, :restart)
       Application.put_env(:arbor_consensus, :emit_recovery_events, false)
 
@@ -1159,7 +1174,12 @@ defmodule Arbor.Consensus.CoordinatorTest do
       # Create an empty ETS table - read_stream will return {:error, :stream_not_found}
       table = :ets.new(:empty_event_log, [:set, :public])
 
-      Application.put_env(:arbor_consensus, :event_log, {TestHelpers.TestEventLog, [table: table]})
+      Application.put_env(
+        :arbor_consensus,
+        :event_log,
+        {TestHelpers.TestEventLog, [table: table]}
+      )
+
       Application.put_env(:arbor_consensus, :emit_recovery_events, false)
 
       {_pid, coord} = TestHelpers.start_test_coordinator()

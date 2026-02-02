@@ -90,7 +90,8 @@ defmodule Arbor.Consensus.TopicRule do
   @spec proposer_allowed?(t(), atom() | String.t()) :: boolean()
   def proposer_allowed?(%__MODULE__{allowed_proposers: :any}, _proposer), do: true
 
-  def proposer_allowed?(%__MODULE__{allowed_proposers: allowed}, proposer) when is_list(allowed) do
+  def proposer_allowed?(%__MODULE__{allowed_proposers: allowed}, proposer)
+      when is_list(allowed) do
     proposer_atom =
       if is_binary(proposer) do
         String.to_existing_atom(proposer)

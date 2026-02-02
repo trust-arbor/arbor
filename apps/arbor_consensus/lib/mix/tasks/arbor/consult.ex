@@ -272,7 +272,10 @@ defmodule Mix.Tasks.Arbor.Consult do
         """
       end)
 
-    File.write!(Path.join(dir, "perspectives.md"), String.trim(header) <> "\n\n" <> String.trim(body) <> "\n")
+    File.write!(
+      Path.join(dir, "perspectives.md"),
+      String.trim(header) <> "\n\n" <> String.trim(body) <> "\n"
+    )
   end
 
   defp format_docs_section([]), do: ""
@@ -343,7 +346,9 @@ defmodule Mix.Tasks.Arbor.Consult do
   end
 
   defp build_docs_context([]), do: %{}
-  defp build_docs_context(doc_paths), do: %{reference_docs: Enum.flat_map(doc_paths, &split_paths/1)}
+
+  defp build_docs_context(doc_paths),
+    do: %{reference_docs: Enum.flat_map(doc_paths, &split_paths/1)}
 
   defp parse_context_string(str) do
     str
@@ -371,7 +376,9 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     eval_opts =
       case opts[:provider] do
-        nil -> eval_opts
+        nil ->
+          eval_opts
+
         p ->
           allowed = [:anthropic, :gemini, :openai, :opencode]
 
