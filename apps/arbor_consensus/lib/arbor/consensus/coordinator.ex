@@ -20,6 +20,7 @@ defmodule Arbor.Consensus.Coordinator do
   use GenServer
 
   alias Arbor.Consensus.{Config, Council, EventEmitter, EventStore, StateRecovery}
+  alias Arbor.Consensus.{TopicMatcher, TopicRegistry, TopicRule}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
 
@@ -277,10 +278,11 @@ defmodule Arbor.Consensus.Coordinator do
   @impl true
   def handle_call({:submit, proposal_or_attrs, opts}, _from, state) do
     with {:ok, proposal} <- resolve_proposal(proposal_or_attrs),
+         {:ok, proposal} <- maybe_route_via_topic_matcher(proposal),
          :ok <- check_capacity(state),
-         :ok <- check_duplicate(state, proposal),
+         :ok <- check_duplicate_unless_advisory(state, proposal),
          :ok <- check_invariants(proposal),
-         :ok <- check_agent_quota(state, proposal),
+         :ok <- check_agent_quota_unless_advisory(state, proposal),
          :ok <- maybe_authorize(state.authorizer, proposal) do
       # Register proposal
       proposal = Proposal.update_status(proposal, :evaluating)
@@ -306,10 +308,11 @@ defmodule Arbor.Consensus.Coordinator do
         }
       })
 
+      # Get council configuration from TopicRegistry or fall back to Config
+      {perspectives, quorum} = resolve_council_config(proposal, state.config)
+
       # Spawn council asynchronously
       evaluator_backend = Keyword.get(opts, :evaluator_backend, state.evaluator_backend)
-      perspectives = Council.required_perspectives(proposal, state.config)
-      quorum = Config.quorum_for(state.config, proposal.topic)
 
       # Emit evaluation started event
       EventEmitter.evaluation_started(
@@ -319,7 +322,7 @@ defmodule Arbor.Consensus.Coordinator do
         quorum
       )
 
-      state = spawn_council(state, proposal, evaluator_backend)
+      state = spawn_council(state, proposal, evaluator_backend, perspectives, quorum)
 
       {:reply, {:ok, proposal.id}, state}
     else
@@ -630,10 +633,8 @@ defmodule Arbor.Consensus.Coordinator do
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
   end
 
-  defp spawn_council(state, proposal, evaluator_backend) do
+  defp spawn_council(state, proposal, evaluator_backend, perspectives, quorum) do
     config = state.config
-    perspectives = Council.required_perspectives(proposal, config)
-    quorum = Config.quorum_for(config, proposal.topic)
 
     task =
       Task.async(fn ->
@@ -703,11 +704,16 @@ defmodule Arbor.Consensus.Coordinator do
         proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
     }
 
-    # Emit to durable event log
-    EventEmitter.decision_rendered(decision)
+    # Emit to durable event log - differentiate between advisory and decision mode
+    if proposal.mode == :advisory do
+      EventEmitter.advice_rendered(decision, proposal)
+    else
+      EventEmitter.decision_rendered(decision)
+    end
 
     # Record to in-memory event store
-    record_event(state, :decision_reached, %{
+    event_type = if proposal.mode == :advisory, do: :advice_rendered, else: :decision_reached
+    record_event(state, event_type, %{
       proposal_id: proposal_id,
       decision_id: decision.id,
       decision: decision.decision,
@@ -715,6 +721,7 @@ defmodule Arbor.Consensus.Coordinator do
       reject_count: decision.reject_count,
       abstain_count: decision.abstain_count,
       data: %{
+        mode: proposal.mode,
         quorum_met: decision.quorum_met,
         average_confidence: decision.average_confidence
       }
@@ -885,6 +892,160 @@ defmodule Arbor.Consensus.Coordinator do
         end
     end
   end
+
+  # ===========================================================================
+  # Phase 3: Topic-Driven Routing
+  # ===========================================================================
+
+  # Route proposals via TopicMatcher when topic is :general or not explicitly set.
+  # If the proposal already has a specific topic AND TopicRegistry has a rule for it,
+  # use that topic directly. Otherwise, run TopicMatcher to find best fit.
+  defp maybe_route_via_topic_matcher(proposal) do
+    # If topic is explicitly set (not :general) and exists in registry, use it
+    if proposal.topic != :general and topic_exists_in_registry?(proposal.topic) do
+      {:ok, proposal}
+    else
+      # Run TopicMatcher to find best-fit topic
+      {matched_topic, confidence} = match_topic(proposal)
+
+      # Update proposal with matched topic and store routing metadata
+      updated_proposal = %{
+        proposal
+        | topic: matched_topic,
+          metadata: Map.merge(proposal.metadata, %{
+            routing_confidence: confidence,
+            original_topic: proposal.topic,
+            routed_by: :topic_matcher
+          })
+      }
+
+      {:ok, updated_proposal}
+    end
+  end
+
+  # Check if topic exists in TopicRegistry
+  defp topic_exists_in_registry?(topic) do
+    case TopicRegistry.get(topic) do
+      {:ok, _rule} -> true
+      {:error, :not_found} -> false
+    end
+  rescue
+    # TopicRegistry may not be running
+    _ -> false
+  end
+
+  # Match proposal to topic via TopicMatcher
+  defp match_topic(proposal) do
+    topics = get_all_topic_rules()
+
+    if topics == [] do
+      # No registry available, keep existing topic
+      {proposal.topic, 0.0}
+    else
+      TopicMatcher.match(
+        proposal.description,
+        proposal.context,
+        topics
+      )
+    end
+  end
+
+  # Get all topic rules from registry
+  defp get_all_topic_rules do
+    TopicRegistry.list()
+  rescue
+    # TopicRegistry may not be running
+    _ -> []
+  end
+
+  # Resolve council configuration from TopicRegistry or fall back to Config.
+  # Advisory mode proposals get quorum of 0.
+  defp resolve_council_config(proposal, config) do
+    case TopicRegistry.get(proposal.topic) do
+      {:ok, rule} ->
+        resolve_from_topic_rule(proposal, rule, config)
+
+      {:error, :not_found} ->
+        # Fallback to Config-based routing (with deprecation warning)
+        maybe_warn_config_fallback(proposal.topic)
+        resolve_from_config(proposal, config)
+    end
+  rescue
+    # TopicRegistry not running, use Config
+    _ ->
+      resolve_from_config(proposal, config)
+  end
+
+  # Resolve council config from TopicRule
+  defp resolve_from_topic_rule(proposal, rule, config) do
+    # Get perspectives from required_evaluators if present, otherwise fall back to Config
+    perspectives =
+      case rule.required_evaluators do
+        [] ->
+          # No evaluators specified in rule, use Config
+          Config.perspectives_for(config, proposal.topic)
+
+        evaluators ->
+          # Resolve perspectives from evaluator modules
+          resolve_perspectives_from_evaluators(evaluators, proposal.topic, config)
+      end
+
+    # Calculate quorum - advisory mode gets nil (no early termination, collect all)
+    quorum =
+      if proposal.mode == :advisory do
+        nil
+      else
+        council_size = length(perspectives)
+        TopicRule.quorum_to_number(rule.min_quorum, council_size)
+      end
+
+    {perspectives, quorum}
+  end
+
+  # Resolve perspectives from evaluator modules.
+  # For now, falls back to Config since evaluator modules with perspectives/0
+  # are not yet implemented (Phase 4).
+  defp resolve_perspectives_from_evaluators(_evaluators, topic, config) do
+    # TODO (Phase 4): Call evaluator.perspectives() for each module
+    # and flatten the results.
+    Config.perspectives_for(config, topic)
+  end
+
+  # Resolve council config from Config (legacy path)
+  defp resolve_from_config(proposal, config) do
+    perspectives = Council.required_perspectives(proposal, config)
+
+    # Advisory mode gets nil quorum (no early termination, collect all perspectives)
+    quorum =
+      if proposal.mode == :advisory do
+        nil
+      else
+        Config.quorum_for(config, proposal.topic)
+      end
+
+    {perspectives, quorum}
+  end
+
+  # Log deprecation warning for Config-based routing
+  defp maybe_warn_config_fallback(topic) do
+    # Only warn for non-legacy topics
+    if topic not in [:code_modification, :governance_change, :capability_change,
+                     :configuration_change, :dependency_change, :layer_modification,
+                     :documentation_change, :test_change, :sdlc_decision, :general] do
+      Logger.warning(
+        "Topic #{inspect(topic)} not found in TopicRegistry, falling back to Config. " <>
+          "Consider registering topics via :topic_governance for explicit routing rules."
+      )
+    end
+  end
+
+  # Advisory mode skips duplicate check
+  defp check_duplicate_unless_advisory(_state, %{mode: :advisory}), do: :ok
+  defp check_duplicate_unless_advisory(state, proposal), do: check_duplicate(state, proposal)
+
+  # Advisory mode skips agent quota check
+  defp check_agent_quota_unless_advisory(_state, %{mode: :advisory}), do: :ok
+  defp check_agent_quota_unless_advisory(state, proposal), do: check_agent_quota(state, proposal)
 
   # ===========================================================================
   # Waiter Support (Phase 2: Tier 1 Notification)
@@ -1140,14 +1301,28 @@ defmodule Arbor.Consensus.Coordinator do
 
       proposal ->
         Logger.info("Coordinator: restarting full evaluation for #{info.proposal_id}")
-        spawn_council(state, proposal, state.evaluator_backend)
+        {perspectives, quorum} = resolve_council_config(proposal, state.config)
+        spawn_council(state, proposal, state.evaluator_backend, perspectives, quorum)
     end
   end
 
   defp spawn_council_for_perspectives(state, proposal, perspectives) do
-    # Similar to spawn_council but with specific perspectives
+    # Similar to spawn_council but with specific perspectives (used for recovery)
     config = state.config
-    quorum = Config.quorum_for(config, proposal.topic)
+
+    # Resolve quorum from TopicRegistry or Config
+    quorum =
+      if proposal.mode == :advisory do
+        0
+      else
+        case TopicRegistry.get(proposal.topic) do
+          {:ok, rule} ->
+            TopicRule.quorum_to_number(rule.min_quorum, length(perspectives))
+
+          _ ->
+            Config.quorum_for(config, proposal.topic)
+        end
+      end
 
     task =
       Task.async(fn ->

@@ -237,10 +237,6 @@ defmodule Arbor.Consensus.EventEmitter do
       |> emit(Keyword.put(opts, :correlation_id, decision.proposal_id))
 
     # Real-time signal (Tier 2 notification)
-    # Use different signal types for decision vs advisory mode
-    # Note: decision struct doesn't have mode, but we can infer from context
-    # For now, always emit :decision_rendered — advisory mode detection
-    # would require passing the proposal or adding mode to CouncilDecision
     emit_signal(:decision_rendered, %{
       proposal_id: decision.proposal_id,
       outcome: decision.decision,
@@ -248,6 +244,36 @@ defmodule Arbor.Consensus.EventEmitter do
       approve_count: decision.approve_count,
       reject_count: decision.reject_count,
       decided_at: DateTime.utc_now()
+    })
+
+    result
+  end
+
+  @doc "Emit an AdviceRendered event for advisory mode proposals."
+  def advice_rendered(decision, proposal, opts \\ []) do
+    # Durable event to EventLog (reuse DecisionRendered event type for storage)
+    result =
+      Events.DecisionRendered.new(%{
+        proposal_id: decision.proposal_id,
+        decision_id: decision.id,
+        decision: decision.decision,
+        approve_count: decision.approve_count,
+        reject_count: decision.reject_count,
+        abstain_count: decision.abstain_count,
+        required_quorum: 0,
+        quorum_met: true,
+        primary_concerns: decision.primary_concerns,
+        average_confidence: decision.average_confidence
+      })
+      |> emit(Keyword.put(opts, :correlation_id, decision.proposal_id))
+
+    # Real-time signal (Tier 2 notification) — distinct event type for advisory
+    emit_signal(:advice_rendered, %{
+      proposal_id: decision.proposal_id,
+      topic: proposal.topic,
+      perspective_count: decision.approve_count + decision.reject_count + decision.abstain_count,
+      average_confidence: decision.average_confidence,
+      rendered_at: DateTime.utc_now()
     })
 
     result
