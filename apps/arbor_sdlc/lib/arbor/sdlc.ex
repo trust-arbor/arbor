@@ -281,10 +281,22 @@ defmodule Arbor.SDLC do
     case build_item(item_map, path, content) do
       {:ok, item} ->
         Events.emit_item_parsed(item)
-        # Spawn processor work asynchronously so the watcher isn't blocked
-        # by potentially slow LLM calls
+
+        # Mark as processed BEFORE spawning async task to prevent the watcher
+        # from spawning duplicate tasks during slow processor runs (Deliberator
+        # can take 90+ seconds via CLI backend). If processing fails, the task
+        # clears the tracker entry so the file gets retried on next scan.
+        mark_processed_in_tracker(path, hash)
+
         Task.Supervisor.start_child(Arbor.SDLC.TaskSupervisor, fn ->
-          route_to_processor(item, path)
+          case route_to_processor(item, path) do
+            {:error, _reason} ->
+              # Processing failed — clear tracker so file is retried next scan
+              clear_tracker_entry(path)
+
+            _ ->
+              :ok
+          end
         end)
 
         :ok
@@ -708,6 +720,18 @@ defmodule Arbor.SDLC do
 
       tracker ->
         PersistentFileTracker.mark_processed(tracker, path, "sdlc_watcher", hash)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp clear_tracker_entry(path) do
+    case Process.whereis(Arbor.SDLC.FileTracker) do
+      nil ->
+        :ok
+
+      tracker ->
+        PersistentFileTracker.remove(tracker, path, "sdlc_watcher")
     end
   rescue
     _ -> :ok
