@@ -334,34 +334,35 @@ defmodule Mix.Tasks.Arbor.Consult do
   end
 
   defp build_context(opts) do
-    base =
-      case Keyword.get_values(opts, :docs) do
-        [] -> %{}
-        doc_paths -> %{reference_docs: Enum.flat_map(doc_paths, &split_paths/1)}
-      end
+    base = build_docs_context(Keyword.get_values(opts, :docs))
 
     case opts[:context] do
-      nil ->
-        base
+      nil -> base
+      context_str -> Map.merge(base, parse_context_string(context_str))
+    end
+  end
 
-      context_str ->
-        extra =
-          context_str
-          |> String.split(",")
-          |> Enum.map(fn pair ->
-            case String.split(pair, ":", parts: 2) do
-              [k, v] -> {String.trim(k), String.trim(v)}
-              [k] -> {String.trim(k), "true"}
-            end
-          end)
-          |> Map.new(fn {k, v} ->
-            case SafeAtom.to_existing(k) do
-              {:ok, atom} -> {atom, v}
-              {:error, _} -> {k, v}
-            end
-          end)
+  defp build_docs_context([]), do: %{}
+  defp build_docs_context(doc_paths), do: %{reference_docs: Enum.flat_map(doc_paths, &split_paths/1)}
 
-        Map.merge(base, extra)
+  defp parse_context_string(str) do
+    str
+    |> String.split(",")
+    |> Enum.map(&parse_context_pair/1)
+    |> Map.new(&atomize_context_key/1)
+  end
+
+  defp parse_context_pair(pair) do
+    case String.split(pair, ":", parts: 2) do
+      [k, v] -> {String.trim(k), String.trim(v)}
+      [k] -> {String.trim(k), "true"}
+    end
+  end
+
+  defp atomize_context_key({k, v}) do
+    case SafeAtom.to_existing(k) do
+      {:ok, atom} -> {atom, v}
+      {:error, _} -> {k, v}
     end
   end
 
