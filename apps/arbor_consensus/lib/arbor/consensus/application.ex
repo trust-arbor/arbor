@@ -2,7 +2,8 @@ defmodule Arbor.Consensus.Application do
   @moduledoc """
   Supervisor for the consensus system.
 
-  Starts the EventStore and Coordinator under supervision.
+  Starts the EventStore, Coordinator, EvaluatorAgent Registry, and
+  EvaluatorAgent Supervisor under supervision.
   """
 
   use Application
@@ -13,6 +14,11 @@ defmodule Arbor.Consensus.Application do
       if Application.get_env(:arbor_consensus, :start_children, true) do
         [
           Arbor.Consensus.EventStore,
+          # Registry for EvaluatorAgent name lookups
+          {Registry, keys: :unique, name: Arbor.Consensus.EvaluatorAgent.Registry},
+          # DynamicSupervisor for persistent EvaluatorAgents
+          Arbor.Consensus.EvaluatorAgent.Supervisor,
+          # Coordinator starts after agents are available
           Arbor.Consensus.Coordinator
         ]
       else
