@@ -207,7 +207,7 @@ defmodule Mix.Tasks.Arbor.Consult do
           |> Map.new(fn {k, v} ->
             case SafeAtom.to_existing(k) do
               {:ok, atom} -> {atom, v}
-              :error -> {k, v}
+              {:error, _} -> {k, v}
             end
           end)
 
