@@ -263,7 +263,7 @@ defmodule Arbor.Actions.Proposal do
         # Resubmit the proposal with updated metadata
         updated_attrs = %{
           proposer: proposal.proposer,
-          change_type: proposal.change_type,
+          topic: proposal.topic,
           title: proposal.title,
           description: proposal.description,
           metadata:

@@ -120,7 +120,7 @@ defmodule Arbor.Security.EscalationTest do
 
       assert_receive {:proposal, proposal}
       assert proposal.proposer == "agent_test"
-      assert proposal.change_type == :authorization_request
+      assert proposal.topic == :authorization_request
       assert proposal.metadata.principal_id == "agent_test"
       assert proposal.metadata.resource_uri == "arbor://fs/write/sensitive"
       assert proposal.metadata.capability_id == "cap_test"
