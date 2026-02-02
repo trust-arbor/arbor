@@ -524,7 +524,10 @@ defmodule Arbor.Consensus.TestHelpers do
   end
 
   @doc """
-  Wait for a proposal to reach a terminal status.
+  Wait for a proposal to reach a terminal status (polling-based).
+
+  Prefer `await_decision/3` for new tests as it uses the direct
+  waiter notification mechanism instead of polling.
   """
   def wait_for_decision(coordinator, proposal_id, timeout \\ 10_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
@@ -547,5 +550,17 @@ defmodule Arbor.Consensus.TestHelpers do
           error
       end
     end
+  end
+
+  @doc """
+  Wait for a proposal's decision using direct notification (Phase 2).
+
+  Uses the Coordinator's waiter mechanism for efficient waiting without
+  polling. This is the preferred method for new tests.
+
+  Returns `{:ok, decision}` or `{:error, reason}`.
+  """
+  def await_decision(coordinator, proposal_id, timeout \\ 10_000) do
+    Coordinator.await(proposal_id, server: coordinator, timeout: timeout)
   end
 end

@@ -205,6 +205,125 @@ defmodule Arbor.Signals.BusTest do
     end
   end
 
+  describe "N-segment pattern matching" do
+    test "3-segment pattern with trailing wildcard matches category.type" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "channel.chan_123.*",
+          fn signal ->
+            send(test_pid, {:channel, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      # Matches: channel.chan_123 (category.type matches first two segments)
+      Bus.publish(Signal.new(:channel, :chan_123, %{msg: "hello"}))
+      assert_receive {:channel, %Signal{category: :channel, type: :chan_123}}, 500
+
+      # Does NOT match: different channel ID
+      Bus.publish(Signal.new(:channel, :chan_456, %{msg: "nope"}))
+      refute_receive {:channel, _}, 100
+
+      # Does NOT match: different category
+      Bus.publish(Signal.new(:activity, :chan_123, %{}))
+      refute_receive {:channel, _}, 100
+
+      Bus.unsubscribe(sub_id)
+    end
+
+    test "exact 2-segment pattern matches only exact category.type" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "consensus.decision",
+          fn signal ->
+            send(test_pid, {:exact, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      Bus.publish(Signal.new(:consensus, :decision, %{}))
+      assert_receive {:exact, %Signal{type: :decision}}, 500
+
+      Bus.publish(Signal.new(:consensus, :proposal, %{}))
+      refute_receive {:exact, _}, 100
+
+      Bus.unsubscribe(sub_id)
+    end
+
+    test "pattern with middle wildcard matches any value in that position" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "consensus.*",
+          fn signal ->
+            send(test_pid, {:middle_wild, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      Bus.publish(Signal.new(:consensus, :decision_rendered, %{}))
+      assert_receive {:middle_wild, %Signal{type: :decision_rendered}}, 500
+
+      Bus.publish(Signal.new(:consensus, :advice_rendered, %{}))
+      assert_receive {:middle_wild, %Signal{type: :advice_rendered}}, 500
+
+      Bus.publish(Signal.new(:activity, :something, %{}))
+      refute_receive {:middle_wild, _}, 100
+
+      Bus.unsubscribe(sub_id)
+    end
+
+    test "single-segment pattern acts as category-only match" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "metrics",
+          fn signal ->
+            send(test_pid, {:single, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      # Single-segment pattern matches first segment only, no trailing wildcard
+      # This should NOT match a signal with category=metrics, type=latency
+      # because the pattern is just "metrics" (one segment) vs signal "metrics.latency" (two segments)
+      Bus.publish(Signal.new(:metrics, :latency, %{}))
+      refute_receive {:single, _}, 100
+
+      Bus.unsubscribe(sub_id)
+    end
+
+    test "channel topic pattern matches channel messages" do
+      test_pid = self()
+
+      # This is the actual pattern the Channel module constructs
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "channel.test_chan_abc.*",
+          fn signal ->
+            send(test_pid, {:chan_msg, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      Bus.publish(Signal.new(:channel, :test_chan_abc, %{msg: "test"}))
+      assert_receive {:chan_msg, %Signal{type: :test_chan_abc}}, 500
+
+      Bus.unsubscribe(sub_id)
+    end
+  end
+
   describe "subscription authorization" do
     # With the default OpenAuthorizer, all subscriptions are allowed
     # (even restricted topics) because authorize_subscription always returns :authorized.
