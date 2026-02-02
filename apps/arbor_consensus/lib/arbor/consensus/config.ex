@@ -154,6 +154,10 @@ defmodule Arbor.Consensus.Config do
 
   @doc """
   Get the required quorum for a topic (was change type).
+
+  DEPRECATED: Use TopicRegistry for topic-specific quorum rules. This function
+  is maintained for backward compatibility and will be removed in Phase 5+.
+  Consider registering topics via :topic_governance for explicit routing rules.
   """
   @spec quorum_for(t(), atom()) :: pos_integer()
   def quorum_for(%__MODULE__{quorum_rules: rules}, topic) do
@@ -162,6 +166,10 @@ defmodule Arbor.Consensus.Config do
 
   @doc """
   Get the perspectives to evaluate for a topic (was change type).
+
+  DEPRECATED: Use TopicRegistry and evaluator modules for topic-specific perspective
+  configuration. This function is maintained for backward compatibility and will be
+  removed in Phase 5+. Consider registering topics via :topic_governance.
   """
   @spec perspectives_for(t(), atom()) :: [atom()]
   def perspectives_for(%__MODULE__{perspectives_for_change_type: perspectives}, topic) do
