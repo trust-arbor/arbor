@@ -1,9 +1,14 @@
 defmodule Arbor.Consensus.EventEmitter do
   @moduledoc """
-  Emits consensus events to the configured EventLog.
+  Emits consensus events to the configured EventLog and Signal bus.
 
   Wraps event creation and persistence, handling both ETS (dev/test)
   and Postgres (production) backends transparently.
+
+  ## Two-tier notification (Phase 2)
+
+  - **Durable events**: Persisted to EventLog for audit trails and recovery
+  - **Real-time signals**: Emitted to Signal bus for live observability
 
   ## Configuration
 
@@ -30,6 +35,7 @@ defmodule Arbor.Consensus.EventEmitter do
   alias Arbor.Consensus.Config
   alias Arbor.Contracts.Consensus.Events
   alias Arbor.Persistence.Event, as: PersistenceEvent
+  alias Arbor.Signals
 
   require Logger
 
@@ -175,19 +181,31 @@ defmodule Arbor.Consensus.EventEmitter do
 
   @doc "Emit an EvaluationCompleted event."
   def evaluation_completed(evaluation, opts \\ []) do
-    Events.EvaluationCompleted.new(%{
+    # Durable event to EventLog
+    result =
+      Events.EvaluationCompleted.new(%{
+        proposal_id: evaluation.proposal_id,
+        evaluation_id: evaluation.id,
+        perspective: evaluation.perspective,
+        vote: evaluation.vote,
+        confidence: evaluation.confidence,
+        risk_score: evaluation.risk_score,
+        benefit_score: evaluation.benefit_score,
+        concerns: evaluation.concerns,
+        recommendations: evaluation.recommendations,
+        reasoning: evaluation.reasoning
+      })
+      |> emit(Keyword.put(opts, :correlation_id, evaluation.proposal_id))
+
+    # Real-time signal (Tier 2 notification)
+    emit_signal(:evaluation_completed, %{
       proposal_id: evaluation.proposal_id,
-      evaluation_id: evaluation.id,
       perspective: evaluation.perspective,
       vote: evaluation.vote,
-      confidence: evaluation.confidence,
-      risk_score: evaluation.risk_score,
-      benefit_score: evaluation.benefit_score,
-      concerns: evaluation.concerns,
-      recommendations: evaluation.recommendations,
-      reasoning: evaluation.reasoning
+      confidence: evaluation.confidence
     })
-    |> emit(Keyword.put(opts, :correlation_id, evaluation.proposal_id))
+
+    result
   end
 
   @doc "Emit an EvaluationFailed event."
@@ -202,19 +220,37 @@ defmodule Arbor.Consensus.EventEmitter do
 
   @doc "Emit a DecisionRendered event."
   def decision_rendered(decision, opts \\ []) do
-    Events.DecisionRendered.new(%{
+    # Durable event to EventLog
+    result =
+      Events.DecisionRendered.new(%{
+        proposal_id: decision.proposal_id,
+        decision_id: decision.id,
+        decision: decision.decision,
+        approve_count: decision.approve_count,
+        reject_count: decision.reject_count,
+        abstain_count: decision.abstain_count,
+        required_quorum: decision.required_quorum,
+        quorum_met: decision.quorum_met,
+        primary_concerns: decision.primary_concerns,
+        average_confidence: decision.average_confidence
+      })
+      |> emit(Keyword.put(opts, :correlation_id, decision.proposal_id))
+
+    # Real-time signal (Tier 2 notification)
+    # Use different signal types for decision vs advisory mode
+    # Note: decision struct doesn't have mode, but we can infer from context
+    # For now, always emit :decision_rendered — advisory mode detection
+    # would require passing the proposal or adding mode to CouncilDecision
+    emit_signal(:decision_rendered, %{
       proposal_id: decision.proposal_id,
-      decision_id: decision.id,
-      decision: decision.decision,
+      outcome: decision.decision,
+      quorum_met: decision.quorum_met,
       approve_count: decision.approve_count,
       reject_count: decision.reject_count,
-      abstain_count: decision.abstain_count,
-      required_quorum: decision.required_quorum,
-      quorum_met: decision.quorum_met,
-      primary_concerns: decision.primary_concerns,
-      average_confidence: decision.average_confidence
+      decided_at: DateTime.utc_now()
     })
-    |> emit(Keyword.put(opts, :correlation_id, decision.proposal_id))
+
+    result
   end
 
   @doc "Emit a ProposalExecuted event."
@@ -301,5 +337,14 @@ defmodule Arbor.Consensus.EventEmitter do
 
   defp event_log_config do
     Config.event_log()
+  end
+
+  # Emit a signal to the signal bus for real-time observability.
+  # Gracefully handles signal bus unavailability (e.g., in tests).
+  defp emit_signal(type, data) when is_atom(type) and is_map(data) do
+    Signals.emit(:consensus, type, data)
+  rescue
+    # Signal bus may not be running in test environments
+    _ -> :ok
   end
 end

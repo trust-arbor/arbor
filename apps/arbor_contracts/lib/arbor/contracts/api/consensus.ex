@@ -95,6 +95,54 @@ defmodule Arbor.Contracts.API.Consensus do
               {:ok, proposal_id()} | {:error, :invalid_proposal | :authorization_denied | term()}
 
   @doc """
+  Submit a formal proposal for consensus evaluation (Phase 2 API).
+
+  Full Coordinator enforcement: dedup, quota, authorization, capacity.
+  Returns immediately with the proposal ID. Use `await/2` for results.
+
+  ## Options
+
+    * `:server` - Coordinator server (default: `Arbor.Consensus.Coordinator`)
+    * `:context` - Domain-specific context map
+    * `:evaluator_backend` - Override evaluator backend
+  """
+  @callback propose(proposal_attrs(), keyword()) ::
+              {:ok, proposal_id()} | {:error, term()}
+
+  @doc """
+  Ask an advisory question through the consensus system (Phase 2 API).
+
+  Routes through Coordinator for TopicMatcher routing but with
+  relaxed enforcement (no dedup, no quota, no quorum requirement).
+  Use `await/2` for results, or fire-and-forget.
+
+  For direct evaluator invocation (developer mode), use
+  `Arbor.Consensus.Evaluators.Consult.ask/3` instead.
+
+  ## Options
+
+    * `:server` - Coordinator server
+    * `:context` - Domain-specific context map
+    * `:perspectives` - Override which perspectives to consult
+  """
+  @callback ask(description :: String.t(), keyword()) ::
+              {:ok, proposal_id()} | {:error, term()}
+
+  @doc """
+  Wait for a proposal's result (Phase 2 API).
+
+  Registers as a waiter in the Coordinator and receives the result
+  via direct message. No polling, no signal bus.
+
+  ## Options
+
+    * `:timeout` - Maximum wait time in ms (default: 30_000)
+    * `:server` - Coordinator server
+  """
+  @callback await(proposal_id(), keyword()) ::
+              {:ok, CouncilDecision.t()} | {:error, :not_found | :timeout | :coordinator_down}
+
+  @doc """
   Get the current status of a proposal by its ID.
 
   Returns the proposal's lifecycle status atom.
@@ -231,6 +279,10 @@ defmodule Arbor.Contracts.API.Consensus do
   # ===========================================================================
 
   @optional_callbacks [
+    # Phase 2 API (agent-facing)
+    propose: 2,
+    ask: 2,
+    await: 2,
     # Listing
     list_pending_proposals: 0,
     list_all_proposals: 0,

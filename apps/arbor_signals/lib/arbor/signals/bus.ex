@@ -371,22 +371,29 @@ defmodule Arbor.Signals.Bus do
   defp matches_pattern?("*", _signal), do: true
 
   defp matches_pattern?(pattern, %Signal{category: category, type: type}) do
-    [pattern_category, pattern_type] =
-      case String.split(pattern, ".") do
-        [cat] -> [cat, "*"]
-        [cat, typ] -> [cat, typ]
-        _ -> ["*", "*"]
-      end
+    pattern_segments = String.split(pattern, ".")
+    # Build signal topic from category.type - this is the minimum topic
+    # Signals can match deeper patterns via their category/type combo
+    signal_segments = [to_string(category), to_string(type)]
 
-    category_matches?(pattern_category, category) and
-      type_matches?(pattern_type, type)
+    match_segments?(pattern_segments, signal_segments)
   end
 
-  defp category_matches?("*", _), do: true
-  defp category_matches?(pattern, category), do: pattern == to_string(category)
-
-  defp type_matches?("*", _), do: true
-  defp type_matches?(pattern, type), do: pattern == to_string(type)
+  # N-segment pattern matching with trailing wildcard support
+  # Empty pattern matches empty signal - exact match at end
+  defp match_segments?([], []), do: true
+  # Trailing "*" matches any remaining segments (including none)
+  defp match_segments?(["*"], _remaining), do: true
+  # Pattern has more segments than signal - no match (unless trailing wildcard handled above)
+  defp match_segments?([], _signal_rest), do: false
+  # Signal exhausted but pattern continues (and it's not just "*") - no match
+  defp match_segments?(_pattern_rest, []), do: false
+  # "*" in middle position matches exactly one segment
+  defp match_segments?(["*" | p_rest], [_ | s_rest]), do: match_segments?(p_rest, s_rest)
+  # Exact segment match - continue
+  defp match_segments?([seg | p_rest], [seg | s_rest]), do: match_segments?(p_rest, s_rest)
+  # Segments don't match
+  defp match_segments?(_, _), do: false
 
   defp passes_filter?(nil, _signal), do: true
   defp passes_filter?(filter, signal) when is_function(filter, 1), do: filter.(signal)

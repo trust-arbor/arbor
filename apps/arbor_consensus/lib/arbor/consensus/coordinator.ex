@@ -37,7 +37,9 @@ defmodule Arbor.Consensus.Coordinator do
     active_councils: %{},
     pending_fingerprints: %{},
     proposals_by_agent: %{},
-    last_event_position: 0
+    last_event_position: 0,
+    # Waiter support for await/2 (Phase 2)
+    waiters: %{}
   ]
 
   @type t :: %__MODULE__{
@@ -52,7 +54,9 @@ defmodule Arbor.Consensus.Coordinator do
           active_councils: map(),
           pending_fingerprints: map(),
           proposals_by_agent: %{String.t() => [String.t()]},
-          last_event_position: non_neg_integer()
+          last_event_position: non_neg_integer(),
+          # Map of proposal_id => [{pid, monitor_ref}]
+          waiters: %{String.t() => [{pid(), reference()}]}
         }
 
   # ============================================================================
@@ -175,6 +179,61 @@ defmodule Arbor.Consensus.Coordinator do
   @spec stats(GenServer.server()) :: map()
   def stats(server \\ __MODULE__) do
     GenServer.call(server, :stats)
+  end
+
+  @doc """
+  Wait for a proposal's result.
+
+  Registers as a waiter in the Coordinator and receives the result
+  via direct message. No polling required.
+
+  ## Options
+
+    * `:timeout` - Maximum wait time in ms (default: 30_000)
+    * `:server` - Coordinator server (default: `__MODULE__`)
+
+  ## Returns
+
+    * `{:ok, decision}` - The decision was rendered
+    * `{:error, :not_found}` - Proposal doesn't exist
+    * `{:error, :timeout}` - Timed out waiting for decision
+    * `{:error, :coordinator_down}` - Coordinator crashed while waiting
+  """
+  @spec await(String.t(), keyword()) :: {:ok, CouncilDecision.t()} | {:error, term()}
+  def await(proposal_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    timeout = Keyword.get(opts, :timeout, 30_000)
+
+    # Monitor the coordinator so we know if it crashes
+    coord_ref = Process.monitor(server)
+
+    case GenServer.call(server, {:register_waiter, proposal_id, self()}) do
+      {:ok, :already_decided, decision} ->
+        # Decision already exists, return immediately
+        Process.demonitor(coord_ref, [:flush])
+        {:ok, decision}
+
+      {:ok, :registered} ->
+        # Wait for the result or timeout
+        receive do
+          {:consensus_result, ^proposal_id, result} ->
+            Process.demonitor(coord_ref, [:flush])
+            {:ok, result}
+
+          {:DOWN, ^coord_ref, :process, _pid, _reason} ->
+            {:error, :coordinator_down}
+        after
+          timeout ->
+            # Clean up our registration
+            GenServer.cast(server, {:unregister_waiter, proposal_id, self()})
+            Process.demonitor(coord_ref, [:flush])
+            {:error, :timeout}
+        end
+
+      {:error, _} = error ->
+        Process.demonitor(coord_ref, [:flush])
+        error
+    end
   end
 
   # ============================================================================
@@ -445,6 +504,34 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   @impl true
+  def handle_call({:register_waiter, proposal_id, pid}, _from, state) do
+    # Check if proposal exists
+    case Map.get(state.proposals, proposal_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      _proposal ->
+        # Check if decision already exists
+        case Map.get(state.decisions, proposal_id) do
+          nil ->
+            # Register the waiter and monitor it
+            state = register_waiter(state, proposal_id, pid)
+            {:reply, {:ok, :registered}, state}
+
+          decision ->
+            # Already decided, return immediately
+            {:reply, {:ok, :already_decided, decision}, state}
+        end
+    end
+  end
+
+  @impl true
+  def handle_cast({:unregister_waiter, proposal_id, pid}, state) do
+    state = unregister_waiter(state, proposal_id, pid)
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info({ref, {:council_result, proposal_id, result}}, state) when is_reference(ref) do
     # Demonitor the task
     Process.demonitor(ref, [:flush])
@@ -477,8 +564,10 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
-    # Task monitor DOWN message — already handled by the ref message above
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    # Could be a task monitor OR a waiter monitor
+    # Clean up dead waiters
+    state = cleanup_waiter_by_ref(state, ref, pid)
     {:noreply, state}
   end
 
@@ -630,6 +719,9 @@ defmodule Arbor.Consensus.Coordinator do
         average_confidence: decision.average_confidence
       }
     })
+
+    # Notify any waiters (Phase 2: Tier 1 notification)
+    state = notify_waiters(state, proposal_id, decision)
 
     maybe_execute(state, proposal, decision)
   end
@@ -792,6 +884,90 @@ defmodule Arbor.Consensus.Coordinator do
           Map.put(proposals_by_agent, proposal.proposer, new_ids)
         end
     end
+  end
+
+  # ===========================================================================
+  # Waiter Support (Phase 2: Tier 1 Notification)
+  # ===========================================================================
+
+  defp register_waiter(state, proposal_id, pid) do
+    ref = Process.monitor(pid)
+    waiter = {pid, ref}
+
+    waiters =
+      Map.update(state.waiters, proposal_id, [waiter], fn existing ->
+        [waiter | existing]
+      end)
+
+    %{state | waiters: waiters}
+  end
+
+  defp unregister_waiter(state, proposal_id, pid) do
+    case Map.get(state.waiters, proposal_id) do
+      nil -> state
+      waiters -> do_unregister_waiter(state, proposal_id, waiters, pid)
+    end
+  end
+
+  defp do_unregister_waiter(state, proposal_id, waiters, pid) do
+    case Enum.find(waiters, fn {p, _ref} -> p == pid end) do
+      nil ->
+        state
+
+      {_pid, ref} ->
+        Process.demonitor(ref, [:flush])
+        new_waiters = Enum.reject(waiters, fn {p, _} -> p == pid end)
+        update_waiters_for_proposal(state, proposal_id, new_waiters)
+    end
+  end
+
+  defp notify_waiters(state, proposal_id, decision) do
+    case Map.get(state.waiters, proposal_id) do
+      nil ->
+        state
+
+      waiters ->
+        # Send result to all waiters and demonitor them
+        Enum.each(waiters, fn {pid, ref} ->
+          Process.demonitor(ref, [:flush])
+          send(pid, {:consensus_result, proposal_id, decision})
+        end)
+
+        # Remove all waiters for this proposal
+        %{state | waiters: Map.delete(state.waiters, proposal_id)}
+    end
+  end
+
+  defp cleanup_waiter_by_ref(state, ref, pid) do
+    # Find which proposal this waiter was for and remove them
+    case find_waiter_proposal(state.waiters, ref, pid) do
+      nil ->
+        state
+
+      {proposal_id, waiters} ->
+        new_waiters = Enum.reject(waiters, fn {p, _} -> p == pid end)
+        update_waiters_for_proposal(state, proposal_id, new_waiters)
+    end
+  end
+
+  # Find which proposal a waiter belongs to by ref and pid
+  defp find_waiter_proposal(all_waiters, ref, pid) do
+    Enum.find_value(all_waiters, fn {proposal_id, waiters} ->
+      if waiter_in_list?(waiters, ref, pid), do: {proposal_id, waiters}
+    end)
+  end
+
+  defp waiter_in_list?(waiters, ref, pid) do
+    Enum.any?(waiters, fn {p, r} -> p == pid and r == ref end)
+  end
+
+  # Update waiters map for a proposal, removing entry if empty
+  defp update_waiters_for_proposal(state, proposal_id, []) do
+    %{state | waiters: Map.delete(state.waiters, proposal_id)}
+  end
+
+  defp update_waiters_for_proposal(state, proposal_id, new_waiters) do
+    %{state | waiters: Map.put(state.waiters, proposal_id, new_waiters)}
   end
 
   # ===========================================================================
