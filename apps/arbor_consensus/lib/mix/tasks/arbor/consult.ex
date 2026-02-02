@@ -223,7 +223,13 @@ defmodule Mix.Tasks.Arbor.Consult do
         nil -> eval_opts
         p ->
           allowed = [:anthropic, :gemini, :openai, :opencode]
-          provider = SafeAtom.to_allowed(p, allowed) || :anthropic
+
+          provider =
+            case SafeAtom.to_allowed(p, allowed) do
+              {:ok, atom} -> atom
+              {:error, _} -> :anthropic
+            end
+
           Keyword.put(eval_opts, :provider, provider)
       end
 
