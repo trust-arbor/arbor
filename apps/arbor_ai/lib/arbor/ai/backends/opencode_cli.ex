@@ -12,7 +12,7 @@ defmodule Arbor.AI.Backends.OpencodeCli do
 
   ## Models
 
-  Default is `opencode/grok-code` (free), but other models may be available.
+  Default is `opencode/glm-4.7-free` (free), but other models may be available.
 
   ## Usage
 
@@ -25,7 +25,7 @@ defmodule Arbor.AI.Backends.OpencodeCli do
 
   use Arbor.AI.Backends.CliBackend, provider: :opencode_cli
 
-  @default_model "opencode/grok-code"
+  @default_model "opencode/glm-4.7-free"
 
   # ============================================================================
   # Callback Implementations
@@ -77,7 +77,7 @@ defmodule Arbor.AI.Backends.OpencodeCli do
   def default_model, do: @default_model
 
   @impl true
-  def available_models, do: ["opencode/grok-code"]
+  def available_models, do: ["opencode/glm-4.7-free"]
 
   @impl true
   def supports_json_output?, do: true
