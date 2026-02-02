@@ -19,7 +19,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   use GenServer
 
-  alias Arbor.Consensus.{Config, Council, EventEmitter, EventStore, StateRecovery}
+  alias Arbor.Consensus.{Config, Council, EvaluatorAgent, EventEmitter, EventStore, StateRecovery}
   alias Arbor.Consensus.{TopicMatcher, TopicRegistry, TopicRule}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
@@ -40,7 +40,10 @@ defmodule Arbor.Consensus.Coordinator do
     proposals_by_agent: %{},
     last_event_position: 0,
     # Waiter support for await/2 (Phase 2)
-    waiters: %{}
+    waiters: %{},
+    # Phase 4: Track pending evaluations from persistent agents
+    # Map of proposal_id => %{quorum: n, mode: atom, collected: [Evaluation.t()], pending_evaluators: [atom()]}
+    pending_evaluations: %{}
   ]
 
   @type t :: %__MODULE__{
@@ -57,7 +60,9 @@ defmodule Arbor.Consensus.Coordinator do
           proposals_by_agent: %{String.t() => [String.t()]},
           last_event_position: non_neg_integer(),
           # Map of proposal_id => [{pid, monitor_ref}]
-          waiters: %{String.t() => [{pid(), reference()}]}
+          waiters: %{String.t() => [{pid(), reference()}]},
+          # Phase 4: Pending evaluations from persistent agents
+          pending_evaluations: map()
         }
 
   # ============================================================================
@@ -566,6 +571,24 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
+  # Phase 4: Handle evaluation completion from persistent agents
+  @impl true
+  def handle_info({:evaluation_complete, proposal_id, evaluation}, state) do
+    state = collect_agent_evaluation(state, proposal_id, evaluation)
+    {:noreply, state}
+  end
+
+  # Phase 4: Handle evaluation failure from persistent agents
+  @impl true
+  def handle_info({:evaluation_failed, proposal_id, evaluator_name, reason}, state) do
+    Logger.warning(
+      "EvaluatorAgent #{evaluator_name} failed for proposal #{proposal_id}: #{inspect(reason)}"
+    )
+    # Remove evaluator from pending list (treat as abstention)
+    state = remove_pending_evaluator(state, proposal_id, evaluator_name)
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     # Could be a task monitor OR a waiter monitor
@@ -585,7 +608,8 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp check_capacity(state) do
-    active = map_size(state.active_councils)
+    # Count both legacy active councils and pending agent evaluations
+    active = map_size(state.active_councils) + map_size(state.pending_evaluations)
 
     if active < state.config.max_concurrent_proposals do
       :ok
@@ -633,7 +657,22 @@ defmodule Arbor.Consensus.Coordinator do
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
   end
 
+  # Phase 4: Strangler Fig pattern - try agent delivery first, fall back to legacy
   defp spawn_council(state, proposal, evaluator_backend, perspectives, quorum) do
+    # Try to get available evaluator agents for these perspectives
+    case resolve_evaluator_agents(perspectives) do
+      {:ok, agent_mapping} when map_size(agent_mapping) > 0 ->
+        # New path: deliver to persistent agents
+        deliver_to_agents(state, proposal, agent_mapping, quorum)
+
+      _ ->
+        # Legacy path: spawn temporary council tasks
+        spawn_council_legacy(state, proposal, evaluator_backend, perspectives, quorum)
+    end
+  end
+
+  # Legacy council spawning (preserved for fallback)
+  defp spawn_council_legacy(state, proposal, evaluator_backend, perspectives, quorum) do
     config = state.config
 
     task =
@@ -648,6 +687,180 @@ defmodule Arbor.Consensus.Coordinator do
       end)
 
     %{state | active_councils: Map.put(state.active_councils, proposal.id, task)}
+  end
+
+  # Phase 4: Deliver proposal to persistent evaluator agents
+  defp deliver_to_agents(state, proposal, agent_mapping, quorum) do
+    config = state.config
+    deadline = DateTime.add(DateTime.utc_now(), config.evaluation_timeout_ms, :millisecond)
+
+    # Determine priority based on topic (governance gets high priority)
+    priority = if proposal.topic == :topic_governance, do: :high, else: :normal
+
+    # Deliver to each agent's mailbox
+    delivered =
+      Enum.reduce_while(agent_mapping, [], fn {evaluator_name, {pid, perspectives}}, acc ->
+        envelope = %{
+          proposal: proposal,
+          perspectives: perspectives,
+          reply_to: self(),
+          deadline: deadline,
+          priority: priority
+        }
+
+        case EvaluatorAgent.deliver(pid, envelope, priority) do
+          :ok ->
+            {:cont, [evaluator_name | acc]}
+
+          {:error, :mailbox_full} ->
+            Logger.warning(
+              "EvaluatorAgent #{evaluator_name} mailbox full for proposal #{proposal.id}"
+            )
+            # Continue with other agents
+            {:cont, acc}
+        end
+      end)
+
+    if delivered == [] do
+      # No agents accepted the delivery, fall back to legacy
+      Logger.warning("No agents accepted proposal #{proposal.id}, falling back to legacy council")
+      spawn_council_legacy(state, proposal, state.evaluator_backend, Map.values(agent_mapping) |> Enum.flat_map(&elem(&1, 1)) |> Enum.uniq(), quorum)
+    else
+      # Track pending evaluations
+      pending_entry = %{
+        quorum: quorum,
+        mode: proposal.mode,
+        collected: [],
+        pending_evaluators: delivered,
+        started_at: DateTime.utc_now()
+      }
+
+      %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal.id, pending_entry)}
+    end
+  end
+
+  # Resolve which evaluator agents are available for the given perspectives
+  defp resolve_evaluator_agents(perspectives) do
+    alias Arbor.Consensus.EvaluatorAgent.Supervisor, as: AgentSupervisor
+
+    try do
+      agents = AgentSupervisor.list_agents()
+
+      # Build a mapping: evaluator_name => {pid, [perspectives it can handle]}
+      agent_mapping =
+        agents
+        |> Enum.reduce(%{}, fn {name, pid, status}, acc ->
+          agent_perspectives = status.perspectives
+          # Find which requested perspectives this agent can handle
+          matching = Enum.filter(perspectives, &(&1 in agent_perspectives))
+
+          if matching != [] do
+            Map.put(acc, name, {pid, matching})
+          else
+            acc
+          end
+        end)
+
+      {:ok, agent_mapping}
+    rescue
+      _ -> {:error, :no_agents}
+    end
+  end
+
+  # Phase 4: Collect an evaluation from a persistent agent
+  defp collect_agent_evaluation(state, proposal_id, evaluation) do
+    case Map.get(state.pending_evaluations, proposal_id) do
+      nil ->
+        # Not tracking this proposal via agents (might be legacy path)
+        Logger.debug("Received agent evaluation for untracked proposal #{proposal_id}")
+        state
+
+      pending ->
+        # Add to collected evaluations
+        new_collected = [evaluation | pending.collected]
+        new_pending = %{pending | collected: new_collected}
+        state = %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)}
+
+        # Emit evaluation event
+        EventEmitter.evaluation_completed(evaluation)
+        record_event(state, :evaluation_submitted, %{
+          proposal_id: proposal_id,
+          evaluator_id: evaluation.evaluator_id,
+          vote: evaluation.vote,
+          perspective: evaluation.perspective,
+          confidence: evaluation.confidence
+        })
+
+        # Check if we should finalize (quorum reached or all evaluators done)
+        check_agent_evaluation_completion(state, proposal_id, new_pending)
+    end
+  end
+
+  # Phase 4: Remove a failed evaluator from pending list
+  defp remove_pending_evaluator(state, proposal_id, evaluator_name) do
+    case Map.get(state.pending_evaluations, proposal_id) do
+      nil ->
+        state
+
+      pending ->
+        new_pending_evaluators = List.delete(pending.pending_evaluators, evaluator_name)
+        new_pending = %{pending | pending_evaluators: new_pending_evaluators}
+        state = %{state | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)}
+
+        # Check if we should finalize (all remaining evaluators done)
+        check_agent_evaluation_completion(state, proposal_id, new_pending)
+    end
+  end
+
+  # Phase 4: Check if agent evaluations are complete
+  defp check_agent_evaluation_completion(state, proposal_id, pending) do
+    quorum = pending.quorum
+
+    # For advisory mode (quorum is nil), wait for all evaluators
+    # For decision mode, we can terminate early once quorum is reached
+    should_finalize = cond do
+      # All evaluators have responded (or failed)
+      pending.pending_evaluators == [] ->
+        true
+
+      # Decision mode: check if quorum is reached
+      quorum != nil ->
+        approve_count = Enum.count(pending.collected, &(&1.vote == :approve))
+        reject_count = Enum.count(pending.collected, &(&1.vote == :reject))
+        remaining = length(pending.pending_evaluators)
+
+        # Quorum reached for approval or rejection
+        approve_count >= quorum or
+        reject_count >= quorum or
+        # Can't reach quorum even with all remaining approvals
+        (approve_count + remaining < quorum and reject_count + remaining < quorum)
+
+      # Advisory mode: wait for all
+      true ->
+        false
+    end
+
+    if should_finalize do
+      finalize_agent_evaluations(state, proposal_id, pending)
+    else
+      state
+    end
+  end
+
+  # Phase 4: Finalize agent evaluations and render decision
+  defp finalize_agent_evaluations(state, proposal_id, pending) do
+    evaluations = Enum.reverse(pending.collected)
+
+    record_event(state, :council_complete, %{
+      proposal_id: proposal_id,
+      data: %{evaluation_count: length(evaluations)}
+    })
+
+    # Clean up pending tracking
+    state = %{state | pending_evaluations: Map.delete(state.pending_evaluations, proposal_id)}
+
+    # Process evaluations (same as legacy path)
+    process_evaluations(state, proposal_id, evaluations)
   end
 
   defp process_evaluations(state, proposal_id, evaluations) do
@@ -1003,12 +1216,31 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   # Resolve perspectives from evaluator modules.
-  # For now, falls back to Config since evaluator modules with perspectives/0
-  # are not yet implemented (Phase 4).
-  defp resolve_perspectives_from_evaluators(_evaluators, topic, config) do
-    # TODO (Phase 4): Call evaluator.perspectives() for each module
-    # and flatten the results.
-    Config.perspectives_for(config, topic)
+  # Calls evaluator.perspectives() for each module and flattens the results.
+  # Falls back to Config if no valid perspectives are returned.
+  defp resolve_perspectives_from_evaluators(evaluators, topic, config) do
+    perspectives =
+      evaluators
+      |> Enum.flat_map(fn evaluator ->
+        try do
+          # Check if module implements the Evaluator behaviour
+          if function_exported?(evaluator, :perspectives, 0) do
+            evaluator.perspectives()
+          else
+            []
+          end
+        rescue
+          _ -> []
+        end
+      end)
+      |> Enum.uniq()
+
+    if perspectives == [] do
+      # No valid perspectives from evaluators, fall back to Config
+      Config.perspectives_for(config, topic)
+    else
+      perspectives
+    end
   end
 
   # Resolve council config from Config (legacy path)
