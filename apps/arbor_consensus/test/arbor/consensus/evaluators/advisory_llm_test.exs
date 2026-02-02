@@ -206,7 +206,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       # Multiple providers are represented (not all the same model)
       providers = map |> Map.values() |> Enum.uniq()
-      assert length(providers) >= 3, "expected at least 3 different providers, got: #{inspect(providers)}"
+
+      assert length(providers) >= 3,
+             "expected at least 3 different providers, got: #{inspect(providers)}"
     end
 
     test "each perspective has a default provider assignment" do

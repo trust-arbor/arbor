@@ -1749,8 +1749,7 @@ defmodule Arbor.Consensus.Coordinator do
     |> String.downcase()
     |> String.replace(~r/[^\w\s]/, " ")
     |> String.split(~r/\s+/, trim: true)
-    |> Enum.reject(&(&1 in stop_words))
-    |> Enum.reject(&(String.length(&1) < 3))
+    |> Enum.reject(&(&1 in stop_words or String.length(&1) < 3))
     |> Enum.uniq()
   end
 

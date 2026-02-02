@@ -130,11 +130,12 @@ defmodule Arbor.Consensus.EvaluatorAgentTest do
       # Note: First envelope is immediately dequeued for processing, so we need
       # mailbox_size=2 and must deliver 3 envelopes to hit the limit.
       # The third goes into the queue while 1 is processing and 1 is queued.
-      {:ok, pid} = EvaluatorAgent.start_link(
-        evaluator: SlowEvaluator,
-        mailbox_size: 2,
-        reserved_high_priority: 0
-      )
+      {:ok, pid} =
+        EvaluatorAgent.start_link(
+          evaluator: SlowEvaluator,
+          mailbox_size: 2,
+          reserved_high_priority: 0
+        )
 
       {:ok, proposal} =
         Proposal.new(%{
@@ -211,21 +212,31 @@ defmodule Arbor.Consensus.EvaluatorAgentTest do
         })
 
       # Deliver normal first, then high
-      :ok = EvaluatorAgent.deliver(pid, %{
-        proposal: proposal1,
-        perspectives: [:slow_perspective],
-        reply_to: self(),
-        deadline: nil,
-        priority: :normal
-      }, :normal)
+      :ok =
+        EvaluatorAgent.deliver(
+          pid,
+          %{
+            proposal: proposal1,
+            perspectives: [:slow_perspective],
+            reply_to: self(),
+            deadline: nil,
+            priority: :normal
+          },
+          :normal
+        )
 
-      :ok = EvaluatorAgent.deliver(pid, %{
-        proposal: proposal2,
-        perspectives: [:slow_perspective],
-        reply_to: self(),
-        deadline: nil,
-        priority: :high
-      }, :high)
+      :ok =
+        EvaluatorAgent.deliver(
+          pid,
+          %{
+            proposal: proposal2,
+            perspectives: [:slow_perspective],
+            reply_to: self(),
+            deadline: nil,
+            priority: :high
+          },
+          :high
+        )
 
       # First processed should be whatever was being processed (proposal1 started first)
       # Second should be high priority

@@ -29,10 +29,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
         })
       ]
 
-      decision = build_test_decision(
-        primary_concerns: ["Security risk detected", "Performance issue"],
-        evaluations: evals
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: ["Security risk detected", "Performance issue"],
+          evaluations: evals
+        )
 
       result = Analytics.feedback_size(decision)
 
@@ -47,10 +48,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "handles empty feedback" do
-      decision = build_test_decision(
-        primary_concerns: [],
-        evaluations: []
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: [],
+          evaluations: []
+        )
 
       result = Analytics.feedback_size(decision)
 
@@ -60,20 +62,23 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "handles single evaluation with all fields populated" do
-      eval = TestHelpers.build_evaluation(%{
-        reasoning: String.duplicate("word ", 100),
-        concerns: ["concern1", "concern2", "concern3"],
-        recommendations: ["rec1", "rec2"]
-      })
+      eval =
+        TestHelpers.build_evaluation(%{
+          reasoning: String.duplicate("word ", 100),
+          concerns: ["concern1", "concern2", "concern3"],
+          recommendations: ["rec1", "rec2"]
+        })
 
-      decision = build_test_decision(
-        primary_concerns: ["main concern"],
-        evaluations: [eval]
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: ["main concern"],
+          evaluations: [eval]
+        )
 
       result = Analytics.feedback_size(decision)
       assert result.evaluation_count == 1
       assert result.primary_concerns_chars == String.length("main concern")
+
       expected_total =
         result.primary_concerns_chars + result.reasoning_chars +
           result.recommendations_chars + result.all_concerns_chars
@@ -84,10 +89,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
   describe "feedback_exceeds_limit?/2" do
     test "returns false for small feedback" do
-      decision = build_test_decision(
-        primary_concerns: ["Minor"],
-        evaluations: [TestHelpers.build_evaluation(%{reasoning: "OK"})]
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: ["Minor"],
+          evaluations: [TestHelpers.build_evaluation(%{reasoning: "OK"})]
+        )
 
       refute Analytics.feedback_exceeds_limit?(decision)
     end
@@ -95,10 +101,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
     test "returns true for large feedback exceeding 4000 token default" do
       long_text = String.duplicate("a", 20_000)
 
-      decision = build_test_decision(
-        primary_concerns: [long_text],
-        evaluations: []
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: [long_text],
+          evaluations: []
+        )
 
       assert Analytics.feedback_exceeds_limit?(decision)
     end
@@ -106,10 +113,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
     test "respects custom max_tokens option" do
       eval = TestHelpers.build_evaluation(%{reasoning: String.duplicate("x", 100)})
 
-      decision = build_test_decision(
-        primary_concerns: ["Short"],
-        evaluations: [eval]
-      )
+      decision =
+        build_test_decision(
+          primary_concerns: ["Short"],
+          evaluations: [eval]
+        )
 
       # Very low limit should trigger
       assert Analytics.feedback_exceeds_limit?(decision, max_tokens: 1)
@@ -130,10 +138,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns proposals with decisions for a proposer", %{coordinator: coord} do
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "history_agent", change_type: :code_modification, description: "test"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "history_agent", change_type: :code_modification, description: "test"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       history = Analytics.proposer_history("history_agent", coordinator: coord)
@@ -153,10 +163,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
     test "filters by since option", %{coordinator: coord} do
       future = DateTime.add(DateTime.utc_now(), 3600, :second)
 
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "since_agent", change_type: :code_modification, description: "old"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "since_agent", change_type: :code_modification, description: "old"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       # Filter for proposals after future time
@@ -167,10 +179,16 @@ defmodule Arbor.Consensus.AnalyticsTest do
     test "includes proposals when since is before creation time", %{coordinator: coord} do
       past = DateTime.add(DateTime.utc_now(), -3600, :second)
 
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "since_before_agent", change_type: :code_modification, description: "recent"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{
+            proposer: "since_before_agent",
+            change_type: :code_modification,
+            description: "recent"
+          },
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       history = Analytics.proposer_history("since_before_agent", coordinator: coord, since: past)
@@ -179,10 +197,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
     test "respects limit option", %{coordinator: coord} do
       for i <- 1..3 do
-        {:ok, id} = Coordinator.submit(
-          %{proposer: "limit_agent", change_type: :code_modification, description: "p#{i}"},
-          server: coord
-        )
+        {:ok, id} =
+          Coordinator.submit(
+            %{proposer: "limit_agent", change_type: :code_modification, description: "p#{i}"},
+            server: coord
+          )
+
         {:ok, _} = TestHelpers.wait_for_decision(coord, id)
       end
 
@@ -192,15 +212,18 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
     test "returns nil decision for pending proposals" do
       {_es, _es_name} = TestHelpers.start_test_event_store()
-      {_pid, coord} = TestHelpers.start_test_coordinator(
-        evaluator_backend: TestHelpers.SlowBackend,
-        config: [evaluation_timeout_ms: 60_000]
-      )
 
-      {:ok, _id} = Coordinator.submit(
-        %{proposer: "pending_agent", change_type: :code_modification, description: "slow"},
-        server: coord
-      )
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      {:ok, _id} =
+        Coordinator.submit(
+          %{proposer: "pending_agent", change_type: :code_modification, description: "slow"},
+          server: coord
+        )
 
       history = Analytics.proposer_history("pending_agent", coordinator: coord)
       assert length(history) == 1
@@ -217,21 +240,25 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "detects explicit chains via parent_proposal_id", %{coordinator: coord} do
-      {:ok, id1} = Coordinator.submit(
-        %{proposer: "chain_agent", change_type: :code_modification, description: "v1"},
-        server: coord
-      )
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: "chain_agent", change_type: :code_modification, description: "v1"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id1)
 
-      {:ok, id2} = Coordinator.submit(
-        %{
-          proposer: "chain_agent",
-          change_type: :code_modification,
-          description: "v2 after feedback",
-          metadata: %{parent_proposal_id: id1}
-        },
-        server: coord
-      )
+      {:ok, id2} =
+        Coordinator.submit(
+          %{
+            proposer: "chain_agent",
+            change_type: :code_modification,
+            description: "v2 after feedback",
+            metadata: %{parent_proposal_id: id1}
+          },
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id2)
 
       chains = Analytics.revision_chains("chain_agent", coordinator: coord)
@@ -245,16 +272,20 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "detects implicit chains via time clustering", %{coordinator: coord} do
-      {:ok, id1} = Coordinator.submit(
-        %{proposer: "implicit_agent", change_type: :test_change, description: "test v1"},
-        server: coord
-      )
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: "implicit_agent", change_type: :test_change, description: "test v1"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id1)
 
-      {:ok, id2} = Coordinator.submit(
-        %{proposer: "implicit_agent", change_type: :test_change, description: "test v2"},
-        server: coord
-      )
+      {:ok, id2} =
+        Coordinator.submit(
+          %{proposer: "implicit_agent", change_type: :test_change, description: "test v2"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id2)
 
       chains = Analytics.revision_chains("implicit_agent", coordinator: coord)
@@ -262,10 +293,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns empty for single proposals", %{coordinator: coord} do
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "solo_agent", change_type: :code_modification, description: "solo"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "solo_agent", change_type: :code_modification, description: "solo"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       chains = Analytics.revision_chains("solo_agent", coordinator: coord)
@@ -273,21 +306,24 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "handles string parent_proposal_id key", %{coordinator: coord} do
-      {:ok, id1} = Coordinator.submit(
-        %{proposer: "string_key_agent", change_type: :code_modification, description: "v1"},
-        server: coord
-      )
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: "string_key_agent", change_type: :code_modification, description: "v1"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id1)
 
-      {:ok, _id2} = Coordinator.submit(
-        %{
-          proposer: "string_key_agent",
-          change_type: :code_modification,
-          description: "v2",
-          metadata: %{"parent_proposal_id" => id1}
-        },
-        server: coord
-      )
+      {:ok, _id2} =
+        Coordinator.submit(
+          %{
+            proposer: "string_key_agent",
+            change_type: :code_modification,
+            description: "v2",
+            metadata: %{"parent_proposal_id" => id1}
+          },
+          server: coord
+        )
 
       chains = Analytics.revision_chains("string_key_agent", coordinator: coord)
       assert chains != []
@@ -302,10 +338,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns 0 when no chains exist", %{coordinator: coord} do
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "depth_zero_agent", change_type: :code_modification, description: "solo"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "depth_zero_agent", change_type: :code_modification, description: "solo"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
       depth = Analytics.max_revision_depth("depth_zero_agent", coordinator: coord)
@@ -313,21 +351,24 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns chain length for chained proposals", %{coordinator: coord} do
-      {:ok, id1} = Coordinator.submit(
-        %{proposer: "depth_agent", change_type: :code_modification, description: "v1"},
-        server: coord
-      )
+      {:ok, id1} =
+        Coordinator.submit(
+          %{proposer: "depth_agent", change_type: :code_modification, description: "v1"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id1)
 
-      {:ok, _id2} = Coordinator.submit(
-        %{
-          proposer: "depth_agent",
-          change_type: :code_modification,
-          description: "v2",
-          metadata: %{parent_proposal_id: id1}
-        },
-        server: coord
-      )
+      {:ok, _id2} =
+        Coordinator.submit(
+          %{
+            proposer: "depth_agent",
+            change_type: :code_modification,
+            description: "v2",
+            metadata: %{parent_proposal_id: id1}
+          },
+          server: coord
+        )
 
       depth = Analytics.max_revision_depth("depth_agent", coordinator: coord)
       assert depth >= 2
@@ -343,25 +384,32 @@ defmodule Arbor.Consensus.AnalyticsTest do
     setup do
       {_es, _es_name} = TestHelpers.start_test_event_store()
       # Use rejecting backend so decisions have concerns
-      {_pid, coord} = TestHelpers.start_test_coordinator(
-        evaluator_backend: TestHelpers.AlwaysRejectBackend
-      )
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(evaluator_backend: TestHelpers.AlwaysRejectBackend)
+
       %{coordinator: coord}
     end
 
     test "finds concerns repeated across proposals", %{coordinator: coord} do
       for i <- 1..3 do
-        {:ok, id} = Coordinator.submit(
-          %{proposer: "concern_agent", change_type: :code_modification, description: "attempt #{i}"},
-          server: coord
-        )
+        {:ok, id} =
+          Coordinator.submit(
+            %{
+              proposer: "concern_agent",
+              change_type: :code_modification,
+              description: "attempt #{i}"
+            },
+            server: coord
+          )
+
         {:ok, _} = TestHelpers.wait_for_decision(coord, id)
       end
 
-      concerns = Analytics.repeated_concerns("concern_agent",
-        coordinator: coord,
-        min_occurrences: 2
-      )
+      concerns =
+        Analytics.repeated_concerns("concern_agent",
+          coordinator: coord,
+          min_occurrences: 2
+        )
 
       # AlwaysRejectBackend uses concerns: ["Test concern"]
       assert concerns != []
@@ -373,16 +421,20 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns empty when no concerns repeat", %{coordinator: coord} do
-      {:ok, id} = Coordinator.submit(
-        %{proposer: "once_agent", change_type: :code_modification, description: "once"},
-        server: coord
-      )
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: "once_agent", change_type: :code_modification, description: "once"},
+          server: coord
+        )
+
       {:ok, _} = TestHelpers.wait_for_decision(coord, id)
 
-      concerns = Analytics.repeated_concerns("once_agent",
-        coordinator: coord,
-        min_occurrences: 2
-      )
+      concerns =
+        Analytics.repeated_concerns("once_agent",
+          coordinator: coord,
+          min_occurrences: 2
+        )
+
       assert concerns == []
     end
 
@@ -393,18 +445,22 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
     test "respects min_occurrences option", %{coordinator: coord} do
       for i <- 1..2 do
-        {:ok, id} = Coordinator.submit(
-          %{proposer: "min_occ_agent", change_type: :code_modification, description: "p#{i}"},
-          server: coord
-        )
+        {:ok, id} =
+          Coordinator.submit(
+            %{proposer: "min_occ_agent", change_type: :code_modification, description: "p#{i}"},
+            server: coord
+          )
+
         {:ok, _} = TestHelpers.wait_for_decision(coord, id)
       end
 
       # With high min_occurrences, nothing should match
-      concerns = Analytics.repeated_concerns("min_occ_agent",
-        coordinator: coord,
-        min_occurrences: 100
-      )
+      concerns =
+        Analytics.repeated_concerns("min_occ_agent",
+          coordinator: coord,
+          min_occurrences: 100
+        )
+
       assert concerns == []
     end
   end
@@ -418,10 +474,12 @@ defmodule Arbor.Consensus.AnalyticsTest do
 
     test "returns aggregate statistics for proposer with proposals", %{coordinator: coord} do
       for i <- 1..2 do
-        {:ok, id} = Coordinator.submit(
-          %{proposer: "stats_agent", change_type: :code_modification, description: "p#{i}"},
-          server: coord
-        )
+        {:ok, id} =
+          Coordinator.submit(
+            %{proposer: "stats_agent", change_type: :code_modification, description: "p#{i}"},
+            server: coord
+          )
+
         {:ok, _} = TestHelpers.wait_for_decision(coord, id)
       end
 
@@ -462,10 +520,11 @@ defmodule Arbor.Consensus.AnalyticsTest do
     end
 
     test "returns events for a proposer", %{coordinator: coord, event_store: es} do
-      {:ok, _id} = Coordinator.submit(
-        %{proposer: "event_agent", change_type: :code_modification, description: "test"},
-        server: coord
-      )
+      {:ok, _id} =
+        Coordinator.submit(
+          %{proposer: "event_agent", change_type: :code_modification, description: "test"},
+          server: coord
+        )
 
       events = Analytics.proposer_events("event_agent", event_store: es)
       assert is_list(events)

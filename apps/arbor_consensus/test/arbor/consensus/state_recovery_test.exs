@@ -34,15 +34,16 @@ defmodule Arbor.Consensus.StateRecoveryTest do
 
     test "recovers proposal from ProposalSubmitted event", %{table: table} do
       # Emit a ProposalSubmitted event
-      event = create_persistence_event("proposal.submitted", %{
-        proposal_id: "prop_1",
-        proposer: "agent_1",
-        change_type: "code_modification",
-        description: "Add caching",
-        target_layer: 1,
-        target_module: "Foo.Bar",
-        metadata: %{}
-      })
+      event =
+        create_persistence_event("proposal.submitted", %{
+          proposal_id: "prop_1",
+          proposer: "agent_1",
+          change_type: "code_modification",
+          description: "Add caching",
+          target_layer: 1,
+          target_module: "Foo.Bar",
+          metadata: %{}
+        })
 
       {:ok, _} = ETS.append("arbor:consensus", event, name: table)
 
@@ -349,10 +350,11 @@ defmodule Arbor.Consensus.StateRecoveryTest do
     end
 
     test "handles RecoveryStarted event", %{table: table} do
-      event = create_persistence_event("recovery.started", %{
-        coordinator_id: "coord_1",
-        from_position: 0
-      })
+      event =
+        create_persistence_event("recovery.started", %{
+          coordinator_id: "coord_1",
+          from_position: 0
+        })
 
       {:ok, _} = ETS.append("arbor:consensus", event, name: table)
       {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
@@ -360,13 +362,14 @@ defmodule Arbor.Consensus.StateRecoveryTest do
     end
 
     test "handles RecoveryCompleted event", %{table: table} do
-      event = create_persistence_event("recovery.completed", %{
-        coordinator_id: "coord_1",
-        proposals_recovered: 3,
-        decisions_recovered: 1,
-        interrupted_count: 1,
-        events_replayed: 5
-      })
+      event =
+        create_persistence_event("recovery.completed", %{
+          coordinator_id: "coord_1",
+          proposals_recovered: 3,
+          decisions_recovered: 1,
+          interrupted_count: 1,
+          events_replayed: 5
+        })
 
       {:ok, _} = ETS.append("arbor:consensus", event, name: table)
       {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
@@ -397,12 +400,13 @@ defmodule Arbor.Consensus.StateRecoveryTest do
   describe "event for unknown proposal" do
     test "handles evaluation.started for non-existent proposal", %{table: table} do
       # No ProposalSubmitted, just EvaluationStarted
-      event = create_persistence_event("evaluation.started", %{
-        proposal_id: "nonexistent_prop",
-        perspectives: ["security"],
-        council_size: 1,
-        required_quorum: 1
-      })
+      event =
+        create_persistence_event("evaluation.started", %{
+          proposal_id: "nonexistent_prop",
+          perspectives: ["security"],
+          council_size: 1,
+          required_quorum: 1
+        })
 
       {:ok, _} = ETS.append("arbor:consensus", event, name: table)
       {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
@@ -414,8 +418,6 @@ defmodule Arbor.Consensus.StateRecoveryTest do
 
   # Helper to create persistence events
   defp create_persistence_event(type, data) do
-    Event.new("arbor:consensus", type, data,
-      timestamp: DateTime.utc_now()
-    )
+    Event.new("arbor:consensus", type, data, timestamp: DateTime.utc_now())
   end
 end

@@ -45,7 +45,8 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLMTest do
         # Then check system prompt for perspective-specific responses
         String.contains?(system_prompt, "security") ->
           %{
-            text: ~s({"vote": "approve", "reasoning": "No security issues found", "concerns": []}),
+            text:
+              ~s({"vote": "approve", "reasoning": "No security issues found", "concerns": []}),
             usage: %{input_tokens: 100, output_tokens: 50, total_tokens: 150},
             model: "test-model",
             provider: :mock

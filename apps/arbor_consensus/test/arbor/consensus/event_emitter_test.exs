@@ -293,9 +293,7 @@ defmodule Arbor.Consensus.EventEmitterTest do
   describe "coordinator_started/3 with recovered_from" do
     test "emits event with recovered_from position", %{table: table} do
       assert :ok =
-               EventEmitter.coordinator_started("coord_2", %{size: 7},
-                 recovered_from: 100
-               )
+               EventEmitter.coordinator_started("coord_2", %{size: 7}, recovered_from: 100)
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
       assert events != []

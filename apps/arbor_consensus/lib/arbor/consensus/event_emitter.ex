@@ -164,7 +164,9 @@ defmodule Arbor.Consensus.EventEmitter do
   defp get_topic_or_change_type(%{change_type: change_type}), do: change_type
 
   # Get target_module from context (Proposal struct) or directly (map)
-  defp get_target_module(%{context: context}) when is_map(context), do: Map.get(context, :target_module)
+  defp get_target_module(%{context: context}) when is_map(context),
+    do: Map.get(context, :target_module)
+
   defp get_target_module(%{target_module: target_module}), do: target_module
   defp get_target_module(_), do: nil
 

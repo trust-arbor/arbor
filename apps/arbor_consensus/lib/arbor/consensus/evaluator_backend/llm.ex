@@ -81,17 +81,15 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
     system_prompt = system_prompt_for(perspective)
     user_prompt = format_proposal(proposal)
 
-    Logger.debug(
-      "LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms)"
-    )
+    Logger.debug("LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms)")
 
     task =
       Task.async(fn ->
-        ai_module.generate_text(user_prompt, [
+        ai_module.generate_text(user_prompt,
           system_prompt: system_prompt,
           max_tokens: 2048,
           temperature: 0.3
-        ])
+        )
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

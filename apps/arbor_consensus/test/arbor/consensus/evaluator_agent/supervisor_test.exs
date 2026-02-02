@@ -51,9 +51,29 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
   end
 
   setup do
+    # Stop any leftover agents from previous tests (shared Registry)
+    stop_leftover_agents()
+    Process.sleep(10)
+
     # Start a test supervisor
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     {:ok, sup_pid} = AgentSupervisor.start_link(name: :"test_sup_#{System.unique_integer()}")
+
+    on_exit(fn -> stop_leftover_agents() end)
+
     %{supervisor: sup_pid}
+  end
+
+  defp stop_leftover_agents do
+    for name <- [:supervisor_test_evaluator, :another_test_evaluator] do
+      case AgentSupervisor.lookup_agent(name) do
+        {:ok, pid} when is_pid(pid) ->
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+
+        _ ->
+          :ok
+      end
+    end
   end
 
   describe "start_agent/3" do
@@ -121,7 +141,8 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
       # Either found via registry or scan
       case result do
         {:ok, found_pid} -> assert found_pid == pid
-        :not_found -> :ok  # Registry not available, which is fine
+        # Registry not available, which is fine
+        :not_found -> :ok
       end
     end
 
