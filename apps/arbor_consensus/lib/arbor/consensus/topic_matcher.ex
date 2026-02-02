@@ -40,7 +40,7 @@ defmodule Arbor.Consensus.TopicMatcher do
 
   """
 
-  alias Arbor.Consensus.TopicRule
+  alias Arbor.Consensus.{Config, TopicRule}
 
   require Logger
 
@@ -142,7 +142,7 @@ defmodule Arbor.Consensus.TopicMatcher do
   # ============================================================================
 
   defp maybe_llm_classify(description, context, topics, pattern_result, opts) do
-    llm_enabled = Keyword.get(opts, :llm_enabled, llm_available?())
+    llm_enabled = Keyword.get(opts, :llm_enabled, llm_enabled_by_default?())
 
     if llm_enabled do
       case llm_classify(description, context, topics, opts) do
@@ -276,6 +276,10 @@ defmodule Arbor.Consensus.TopicMatcher do
 
   defp llm_available? do
     Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2)
+  end
+
+  defp llm_enabled_by_default? do
+    Config.llm_topic_classification_enabled?() and llm_available?()
   end
 
   # ============================================================================
