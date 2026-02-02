@@ -19,8 +19,12 @@ defmodule Arbor.SDLC.IntegrationTest do
     setup do
       context = TestHelpers.setup_test_roadmap()
 
+      # Start consensus infrastructure — Deliberator always convenes council
+      prev_ai = TestHelpers.ensure_consensus_started()
+
       on_exit(fn ->
         TestHelpers.cleanup_test_roadmap(context)
+        TestHelpers.restore_ai_module(prev_ai)
       end)
 
       context

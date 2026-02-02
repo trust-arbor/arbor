@@ -22,7 +22,8 @@ defmodule Arbor.Consensus.Config do
     dependency_change: 5,
     layer_modification: 5,
     documentation_change: 4,
-    test_change: 4
+    test_change: 4,
+    sdlc_decision: 5
   }
 
   @default_perspectives %{
@@ -97,6 +98,15 @@ defmodule Arbor.Consensus.Config do
       :resource,
       :random,
       :emergence
+    ],
+    sdlc_decision: [
+      :scope,
+      :feasibility,
+      :priority,
+      :architecture,
+      :consistency,
+      :adversarial,
+      :random
     ]
   }
 

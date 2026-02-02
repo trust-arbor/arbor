@@ -1,5 +1,5 @@
 defmodule Arbor.SDLC.Processors.DeliberatorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Flow.Item
   alias Arbor.SDLC.Processors.Deliberator
@@ -61,11 +61,21 @@ defmodule Arbor.SDLC.Processors.DeliberatorTest do
   describe "process_item/2 with mock AI for well-specified items" do
     setup do
       context = TestHelpers.setup_test_roadmap()
-      on_exit(fn -> TestHelpers.cleanup_test_roadmap(context) end)
+
+      # Start consensus infrastructure — all paths now go through council
+      prev_ai = TestHelpers.ensure_consensus_started()
+
+      on_exit(fn ->
+        TestHelpers.cleanup_test_roadmap(context)
+        TestHelpers.restore_ai_module(prev_ai)
+      end)
+
       context
     end
 
-    test "well-specified item passes through to planned", %{temp_roadmap_root: root} do
+    test "well-specified item goes through council and is approved", %{
+      temp_roadmap_root: root
+    } do
       content = TestHelpers.expanded_item_content("Well Specified Feature")
       path = TestHelpers.create_test_item(root, :brainstorming, "well-specified.md", content)
 
@@ -86,7 +96,8 @@ defmodule Arbor.SDLC.Processors.DeliberatorTest do
           ]
         )
 
-      # Mock AI that says item is well-specified
+      # Mock AI that says item is well-specified (for Deliberator analysis)
+      # Council then evaluates and approves via EvaluatorMockAI.StandardApprove
       mock_ai = DeliberatorMockAI.well_specified()
 
       result = Deliberator.process_item(item, ai_module: mock_ai)

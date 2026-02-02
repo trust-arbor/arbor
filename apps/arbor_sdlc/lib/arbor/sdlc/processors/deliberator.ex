@@ -12,7 +12,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
   5. Updates the item with resolved decisions
   6. Moves resolved items to `2-planned/` or `8-discarded/`
 
-  If no decisions are needed (well-specified item), it passes straight through.
+  All items are reviewed by the council, even well-specified ones, to catch gaps.
 
   ## Pipeline Stage
 
@@ -118,9 +118,23 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     # Step 1: Analyze item for decision points
     case analyze_for_decisions(item, ai_module, ai_backend) do
       {:ok, :well_specified} ->
-        # No decisions needed, pass through to planned
-        Logger.info("Item well-specified, moving to planned", title: item.title)
-        {:ok, {:moved, :planned}}
+        # Council still reviews well-specified items to catch gaps
+        Logger.info("Item well-specified, convening council for readiness review",
+          title: item.title
+        )
+
+        readiness_points = [
+          %{
+            "question" => "Is this item ready for implementation as specified?",
+            "context" =>
+              "The item appears well-specified. Review for gaps, missing " <>
+                "requirements, scope issues, or architectural concerns that " <>
+                "the initial analysis may have missed.",
+            "options" => ["approve", "needs_revision"]
+          }
+        ]
+
+        deliberate_with_council(item, readiness_points, config, opts)
 
       {:ok, {:needs_decisions, decision_points}} ->
         # Submit to council for deliberation
@@ -234,6 +248,14 @@ defmodule Arbor.SDLC.Processors.Deliberator do
       {:ok, %{"needs_decisions" => true}} ->
         # Has decisions but no points specified
         {:ok, {:needs_decisions, []}}
+
+      {:ok, %{"decision_points" => points}} when is_list(points) and points != [] ->
+        # LLM returned decision_points without needs_decisions key
+        {:ok, {:needs_decisions, points}}
+
+      {:ok, %{}} ->
+        # Valid JSON but no decision points — treat as well-specified
+        {:ok, :well_specified}
 
       {:error, _} ->
         # Try to extract JSON
@@ -400,7 +422,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
       {:ok, decision} ->
         Events.emit_decision_rendered(
           proposal_id,
-          decision.verdict,
+          decision.decision,
           %{
             approval_count: count_votes(decision.evaluations, :approve),
             rejection_count: count_votes(decision.evaluations, :reject),
@@ -425,20 +447,21 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     timeout = config.ai_timeout * 10
     poll_interval = 500
     max_polls = div(timeout, poll_interval)
+    server = config.consensus_server
 
-    wait_for_decision_loop(proposal_id, max_polls, poll_interval)
+    wait_for_decision_loop(proposal_id, max_polls, poll_interval, server)
   end
 
-  defp wait_for_decision_loop(_proposal_id, 0, _interval), do: {:error, :timeout}
+  defp wait_for_decision_loop(_proposal_id, 0, _interval, _server), do: {:error, :timeout}
 
-  defp wait_for_decision_loop(proposal_id, remaining, interval) do
-    case Arbor.Consensus.get_decision(proposal_id) do
+  defp wait_for_decision_loop(proposal_id, remaining, interval, server) do
+    case Arbor.Consensus.get_decision(proposal_id, server) do
       {:ok, decision} ->
         {:ok, decision}
 
-      {:error, :pending} ->
+      {:error, reason} when reason in [:pending, :not_decided] ->
         Process.sleep(interval)
-        wait_for_decision_loop(proposal_id, remaining - 1, interval)
+        wait_for_decision_loop(proposal_id, remaining - 1, interval, server)
 
       {:error, reason} ->
         {:error, reason}
@@ -452,7 +475,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
   defp count_votes(_, _), do: 0
 
   defp process_decision(item, decision, decision_points, config, opts, attempt, max_attempts) do
-    case decision.verdict do
+    case decision.decision do
       :approved ->
         # Document decision and move to planned
         document_decision(item, decision, config, opts)
@@ -639,7 +662,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     # SDLC Decision: #{item.title}
 
     **Date:** #{Date.utc_today() |> Date.to_iso8601()}
-    **Status:** #{decision.verdict}
+    **Status:** #{decision.decision}
     **Decision ID:** #{decision.id}
 
     ## Item Summary
@@ -648,7 +671,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
 
     ## Decision
 
-    The council #{decision.verdict} this item for transition to planned status.
+    The council #{decision.decision} this item for transition to planned status.
 
     ## Council Deliberation
 
