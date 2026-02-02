@@ -15,7 +15,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     * `--docs` / `-d`         — Reference doc paths (comma-separated or repeated)
     * `--context` / `-c`      — Extra context as key:value pairs (comma-separated)
     * `--provider`            — Override CLI provider (anthropic, gemini, openai, opencode)
-    * `--timeout`             — Per-perspective timeout in seconds (default: 120)
+    * `--timeout`             — Per-perspective timeout in seconds (default: 180)
 
   ## Examples
 
@@ -67,7 +67,7 @@ defmodule Mix.Tasks.Arbor.Consult do
       -d, --docs PATH          Reference doc paths
       -c, --context KV         Context as key:value pairs
           --provider NAME      Override CLI provider
-          --timeout SECONDS    Timeout per perspective (default: 120)
+          --timeout SECONDS    Timeout per perspective (default: 180)
 
     Perspectives: #{Enum.join(@perspectives, ", ")}
     """)

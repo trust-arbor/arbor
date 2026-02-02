@@ -330,6 +330,8 @@ defmodule Arbor.AI.BackendRegistry do
     end
   rescue
     _ -> :not_found
+  catch
+    :exit, _ -> :not_found
   end
 
   defp now, do: System.monotonic_time(:millisecond)

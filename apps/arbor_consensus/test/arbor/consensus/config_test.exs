@@ -150,7 +150,7 @@ defmodule Arbor.Consensus.ConfigTest do
 
   describe "LLM evaluator config" do
     test "llm_evaluator_timeout/0 returns default" do
-      assert Config.llm_evaluator_timeout() == 60_000
+      assert Config.llm_evaluator_timeout() == 180_000
     end
 
     test "llm_evaluator_ai_module/0 returns default module" do

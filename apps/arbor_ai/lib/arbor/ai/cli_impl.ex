@@ -355,7 +355,7 @@ defmodule Arbor.AI.CliImpl do
   defp record_budget_usage(provider, opts, response) do
     if BudgetTracker.started?() do
       model = Keyword.get(opts, :model, "unknown")
-      usage = Map.get(response, :usage, %{})
+      usage = response.usage || %{}
 
       BudgetTracker.record_usage(provider, %{
         model: to_string(model),
@@ -370,7 +370,7 @@ defmodule Arbor.AI.CliImpl do
     if UsageStats.started?() do
       model = Keyword.get(opts, :model, "unknown")
       tier = Keyword.get(opts, :tier, :unknown)
-      usage = Map.get(response, :usage, %{})
+      usage = response.usage || %{}
       input_tokens = Map.get(usage, :input_tokens, 0)
       output_tokens = Map.get(usage, :output_tokens, 0)
 
