@@ -128,15 +128,25 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     case Consult.ask(AdvisoryLLM, question, [context: context] ++ eval_opts) do
       {:ok, results} ->
-        Enum.each(results, fn
-          {perspective, {:error, reason}} ->
-            Mix.shell().error("=== #{perspective} === ERROR: #{inspect(reason)}\n")
+        {successes, failures} =
+          Enum.split_with(results, fn
+            {_, {:error, _}} -> false
+            _ -> true
+          end)
 
-          {perspective, eval} ->
-            print_evaluation(perspective, eval, provider_override)
+        Enum.each(successes, fn {perspective, eval} ->
+          print_evaluation(perspective, eval, provider_override)
         end)
 
-        Mix.shell().info("--- Done: #{count} perspectives consulted ---")
+        Enum.each(failures, fn {perspective, {:error, reason}} ->
+          Mix.shell().error("=== #{perspective} === ERROR: #{inspect(reason)}\n")
+        end)
+
+        Mix.shell().info(
+          "--- Done: #{length(successes)}/#{count} perspectives responded" <>
+            if(failures != [], do: ", #{length(failures)} failed", else: "") <>
+            " ---"
+        )
 
       {:error, reason} ->
         Mix.shell().error("Error: #{inspect(reason)}")

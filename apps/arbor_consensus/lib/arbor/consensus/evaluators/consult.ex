@@ -28,7 +28,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
   alias Arbor.Contracts.Consensus.Proposal
 
-  @default_timeout 120_000
+  @default_timeout 180_000
 
   @doc """
   Ask an evaluator all its perspectives about a question.
@@ -55,17 +55,22 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       perspectives = evaluator_module.perspectives()
       eval_opts = Keyword.drop(opts, [:context])
 
-      results =
-        perspectives
-        |> Enum.map(fn perspective ->
-          Task.async(fn ->
-            {perspective, evaluator_module.evaluate(proposal, perspective, eval_opts)}
-          end)
+      tasks =
+        Enum.map(perspectives, fn perspective ->
+          {perspective,
+           Task.async(fn ->
+             evaluator_module.evaluate(proposal, perspective, eval_opts)
+           end)}
         end)
-        |> Task.await_many(timeout + 5_000)
-        |> Enum.map(fn
-          {perspective, {:ok, evaluation}} -> {perspective, evaluation}
-          {perspective, {:error, reason}} -> {perspective, {:error, reason}}
+
+      results =
+        tasks
+        |> Enum.map(fn {perspective, task} ->
+          case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+            {:ok, {:ok, evaluation}} -> {perspective, evaluation}
+            {:ok, {:error, reason}} -> {perspective, {:error, reason}}
+            nil -> {perspective, {:error, :timeout}}
+          end
         end)
         |> Enum.sort_by(fn {perspective, _} -> perspective end)
 
