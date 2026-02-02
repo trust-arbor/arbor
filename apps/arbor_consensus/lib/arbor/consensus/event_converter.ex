@@ -24,6 +24,7 @@ defmodule Arbor.Consensus.EventConverter do
     :evaluation_submitted,
     :council_complete,
     :decision_reached,
+    :advice_rendered,
     :execution_started,
     :execution_succeeded,
     :execution_failed,
