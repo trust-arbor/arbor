@@ -9,6 +9,14 @@
     <%= if extra_css = assigns[:extra_css] do %>
       <link :for={css <- List.wrap(extra_css)} rel="stylesheet" href={css} />
     <% end %>
+    <link rel="modulepreload"
+          href="https://cdn.jsdelivr.net/npm/phoenix@1.7.14/priv/static/phoenix.min.mjs"
+          integrity="sha384-rdpMe3GsMx+IkmT83rFK9rqMMQEqXZiFC1EjyLjvPZqci8hmo8JfPsezJliMiFWX"
+          crossorigin="anonymous" />
+    <link rel="modulepreload"
+          href="https://cdn.jsdelivr.net/npm/phoenix_live_view@1.1.19/priv/static/phoenix_live_view.esm.js"
+          integrity="sha384-8E1IMlJE+Q3bEgERzZjWFbddl351PRorOgpY/a8TXRJEKx80oO4XYJC54wUIYgRQ"
+          crossorigin="anonymous" />
     <script type="importmap">
       {
         "imports": {
