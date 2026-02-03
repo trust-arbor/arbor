@@ -276,6 +276,18 @@ defmodule Arbor.Consensus.Config do
   end
 
   @doc """
+  Whether LLM-based topic classification is enabled in TopicMatcher.
+
+  Default: true. When false, TopicMatcher uses only pattern-based matching
+  and falls back to `:general` for unmatched proposals.
+  Useful for environments without LLM API access or for testing.
+  """
+  @spec llm_topic_classification_enabled?() :: boolean()
+  def llm_topic_classification_enabled? do
+    Application.get_env(@app, :llm_topic_classification_enabled, true)
+  end
+
+  @doc """
   LLM-based perspectives available for consensus evaluation.
 
   These perspectives use LLM analysis for subjective review.
@@ -346,5 +358,50 @@ defmodule Arbor.Consensus.Config do
   @spec emit_recovery_events?() :: boolean()
   def emit_recovery_events? do
     Application.get_env(@app, :emit_recovery_events, true)
+  end
+
+  # ===========================================================================
+  # Event Recording Decoupling (Phase 6a)
+  # ===========================================================================
+
+  @doc """
+  Event persistence strategy.
+
+  Controls which persistence layers are used for consensus events:
+  - `:signals_only` - Only emit signals (default, lightweight)
+  - `:with_event_store` - Signals + in-memory EventStore
+  - `:with_event_log` - Signals + durable EventLog (requires event_log config)
+  - `:full` - Signals + EventStore + EventLog
+
+  Signals are always emitted for real-time observability regardless of strategy.
+  EventStore provides in-memory queryable storage for the current session.
+  EventLog provides durable persistence across restarts.
+
+  Default: :signals_only
+  """
+  @spec event_persistence_strategy() :: :signals_only | :with_event_store | :with_event_log | :full
+  def event_persistence_strategy do
+    Application.get_env(@app, :event_persistence_strategy, :signals_only)
+  end
+
+  @doc """
+  Whether to record events to the in-memory EventStore.
+
+  Returns true if strategy is `:with_event_store` or `:full`.
+  """
+  @spec event_store_enabled?() :: boolean()
+  def event_store_enabled? do
+    event_persistence_strategy() in [:with_event_store, :full]
+  end
+
+  @doc """
+  Whether to record events to the durable EventLog.
+
+  Returns true if strategy is `:with_event_log` or `:full`, AND
+  an event_log backend is configured.
+  """
+  @spec event_log_enabled?() :: boolean()
+  def event_log_enabled? do
+    event_persistence_strategy() in [:with_event_log, :full] and event_log() != nil
   end
 end

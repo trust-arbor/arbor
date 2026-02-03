@@ -22,7 +22,13 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   - Resource: efficiency impact
   - Emergence: novel behavior potential
   - Random: unpredictable fresh perspective
+
+  ## Invariants
+
+  For quorum calculations and invariant rules, see `Arbor.Contracts.Consensus.Invariants`.
   """
+
+  alias Arbor.Contracts.Consensus.Invariants
 
   @type proposal_id :: String.t()
   @type agent_id :: String.t()
@@ -133,13 +139,9 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   """
   @callback violates_invariants?(proposal()) :: boolean()
 
-  # Helper functions
-
-  @council_size 7
-  @meta_quorum 6
-  @standard_quorum 5
-  # 4/7 = majority for low-risk changes
-  @low_risk_quorum 4
+  # ===========================================================================
+  # Helper Functions - Delegating to Invariants
+  # ===========================================================================
 
   # Module name patterns mapped to architecture layers.
   # Layer 1: Governance, Layer 2: Core Systems, Layer 3: Shared Infrastructure
@@ -156,27 +158,35 @@ defmodule Arbor.Contracts.Consensus.Protocol do
 
   @doc """
   Returns the council size.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.council_size/0`.
   """
   @spec council_size() :: 7
-  def council_size, do: @council_size
+  defdelegate council_size(), to: Invariants
 
   @doc """
   Returns the standard quorum requirement.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.standard_quorum/0`.
   """
   @spec standard_quorum() :: 5
-  def standard_quorum, do: @standard_quorum
+  defdelegate standard_quorum(), to: Invariants
 
   @doc """
   Returns the meta-change quorum requirement.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.meta_quorum/0`.
   """
   @spec meta_quorum() :: 6
-  def meta_quorum, do: @meta_quorum
+  defdelegate meta_quorum(), to: Invariants
 
   @doc """
   Returns the low-risk change quorum requirement.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.low_risk_quorum/0`.
   """
   @spec low_risk_quorum() :: 4
-  def low_risk_quorum, do: @low_risk_quorum
+  defdelegate low_risk_quorum(), to: Invariants
 
   @doc """
   All evaluator perspectives.
@@ -203,42 +213,34 @@ defmodule Arbor.Contracts.Consensus.Protocol do
   @doc """
   Get the required quorum for a change type.
 
-  Returns the number of approvals needed:
-  - 6/7 for governance changes (meta-changes)
-  - 5/7 for standard changes (code, capabilities, config, dependencies)
-  - 4/7 for low-risk changes (documentation, tests)
+  Delegates to `Arbor.Contracts.Consensus.Invariants.quorum_for_change_type/1`.
   """
   @spec quorum_for_change_type(change_type()) :: non_neg_integer()
-  def quorum_for_change_type(change_type) do
-    cond do
-      meta_change?(change_type) -> @meta_quorum
-      low_risk_change?(change_type) -> @low_risk_quorum
-      true -> @standard_quorum
-    end
-  end
+  defdelegate quorum_for_change_type(change_type), to: Invariants
 
   @doc """
   Check if a decision meets quorum.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.meets_quorum?/2`.
   """
   @spec meets_quorum?(non_neg_integer(), change_type()) :: boolean()
-  def meets_quorum?(approve_count, change_type) do
-    approve_count >= quorum_for_change_type(change_type)
-  end
+  defdelegate meets_quorum?(approve_count, change_type), to: Invariants
 
   @doc """
   Check if a change type is a meta-change (governance modification).
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.meta_change?/1`.
   """
   @spec meta_change?(change_type()) :: boolean()
-  def meta_change?(:governance_change), do: true
-  def meta_change?(_), do: false
+  defdelegate meta_change?(change_type), to: Invariants
 
   @doc """
   Check if a change type is a low-risk change (documentation, tests).
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.low_risk_change?/1`.
   """
   @spec low_risk_change?(change_type()) :: boolean()
-  def low_risk_change?(:documentation_change), do: true
-  def low_risk_change?(:test_change), do: true
-  def low_risk_change?(_), do: false
+  defdelegate low_risk_change?(change_type), to: Invariants
 
   @doc """
   Determine which layer a module belongs to.
@@ -257,22 +259,9 @@ defmodule Arbor.Contracts.Consensus.Protocol do
 
   @doc """
   Immutable invariants that cannot be changed.
+
+  Delegates to `Arbor.Contracts.Consensus.Invariants.immutable_invariants/0`.
   """
-  @spec immutable_invariants() :: [
-          :consensus_requires_quorum
-          | :evaluators_are_independent
-          | :containment_boundary_exists
-          | :audit_log_append_only
-          | :layer_hierarchy_enforced,
-          ...
-        ]
-  def immutable_invariants do
-    [
-      :consensus_requires_quorum,
-      :evaluators_are_independent,
-      :containment_boundary_exists,
-      :audit_log_append_only,
-      :layer_hierarchy_enforced
-    ]
-  end
+  @spec immutable_invariants() :: [atom()]
+  defdelegate immutable_invariants(), to: Invariants
 end
