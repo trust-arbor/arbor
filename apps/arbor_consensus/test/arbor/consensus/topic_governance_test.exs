@@ -38,9 +38,13 @@ defmodule Arbor.Consensus.TopicGovernanceTest do
       {_coord_pid, coord_name} = TestHelpers.start_test_coordinator()
 
       on_exit(fn ->
-        # Clean up any test topics
-        if TopicRegistry.exists?(:test_new_topic) do
-          TopicRegistry.retire_topic(:test_new_topic)
+        # Clean up any test topics (process may already be stopped)
+        try do
+          if TopicRegistry.exists?(:test_new_topic) do
+            TopicRegistry.retire_topic(:test_new_topic)
+          end
+        catch
+          :exit, _ -> :ok
         end
       end)
 
