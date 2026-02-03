@@ -35,6 +35,7 @@ defmodule Arbor.SDLC.Application do
   require Logger
 
   alias Arbor.SDLC.{Config, PersistentFileTracker, Pipeline}
+  alias Arbor.SDLC.Processors.{InProgress, Planned}
 
   @impl true
   def start(_type, _args) do
@@ -75,12 +76,34 @@ defmodule Arbor.SDLC.Application do
 
     task_supervisor_spec = {Task.Supervisor, name: Arbor.SDLC.TaskSupervisor}
 
-    # Only start the watcher if enabled
-    if config.watcher_enabled do
-      watcher_spec = build_watcher_spec(config)
-      [tracker_spec, task_supervisor_spec, watcher_spec]
+    base_children = [tracker_spec, task_supervisor_spec]
+
+    # Add watcher if enabled
+    children =
+      if config.watcher_enabled do
+        watcher_spec = build_watcher_spec(config)
+        base_children ++ [watcher_spec]
+      else
+        base_children
+      end
+
+    # Add auto-hand processors if enabled
+    children = children ++ build_auto_hand_children(config)
+
+    children
+  end
+
+  # Build auto-hand processor children if enabled
+  defp build_auto_hand_children(config) do
+    if Config.auto_hand_enabled?() do
+      Logger.info("Auto-hand processing enabled, starting processors")
+
+      planned_spec = {Planned, [name: Planned, config: config]}
+      in_progress_spec = {InProgress, [name: InProgress, config: config]}
+
+      [planned_spec, in_progress_spec]
     else
-      [tracker_spec, task_supervisor_spec]
+      []
     end
   end
 
