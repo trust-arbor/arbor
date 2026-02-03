@@ -33,6 +33,8 @@ defmodule Arbor.SDLC.Events do
   - `:session_failed` - Session failed or tests didn't pass
   - `:session_blocked` - Session hit max turns and was blocked
   - `:session_interrupted` - Session was interrupted by user
+  - `:session_stale` - Session has no activity for extended period
+  - `:session_activity` - Session tool usage detected (heartbeat)
 
   ### System
   - `:watcher_started` - File watcher initialized
@@ -376,6 +378,40 @@ defmodule Arbor.SDLC.Events do
         item_path: item_path,
         session_id: session_id,
         metadata: metadata
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a session has no activity for an extended period.
+  """
+  @spec emit_session_stale(String.t() | nil, String.t(), non_neg_integer(), keyword()) ::
+          :ok | {:error, term()}
+  def emit_session_stale(item_path, session_id, minutes_stale, opts \\ []) do
+    emit(
+      :session_stale,
+      %{
+        item_path: item_path,
+        session_id: session_id,
+        minutes_without_activity: minutes_stale
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit activity heartbeat for a session (tool usage detected).
+  """
+  @spec emit_session_activity(String.t() | nil, String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def emit_session_activity(item_path, session_id, tool_name, opts \\ []) do
+    emit(
+      :session_activity,
+      %{
+        item_path: item_path,
+        session_id: session_id,
+        tool_name: tool_name
       },
       opts
     )

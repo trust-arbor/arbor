@@ -7,6 +7,8 @@ defmodule Arbor.SDLC.Processors.InProgress do
   - Runs tests and quality checks on completed sessions
   - Moves items to completed or back to planned based on results
   - Handles blocked sessions (max_turns reached)
+  - Routes interrupted sessions to comms for human input
+  - Tracks session activity via PostToolUse hooks
 
   ## Pipeline Stage
 
@@ -38,6 +40,19 @@ defmodule Arbor.SDLC.Processors.InProgress do
   1. Mark item as blocked in frontmatter
   2. Emit signal for human attention
   3. Item stays in in_progress for review
+
+  ## Interrupted Sessions
+
+  When a session is interrupted (user_request reason):
+  1. Route message to comms for human input
+  2. Subscribe to comms response signal
+  3. On response, resume session with `--resume <session_id>`
+
+  ## Activity Tracking
+
+  Subscribes to `PostToolUse` hook signals to track session activity:
+  - Maintains last activity timestamp per session
+  - Emits stale session warning if no activity for configurable duration
   """
 
   use GenServer
@@ -48,16 +63,23 @@ defmodule Arbor.SDLC.Processors.InProgress do
 
   alias Arbor.Contracts.Flow.Item
   alias Arbor.Flow.ItemParser
-  alias Arbor.SDLC.{Config, Events, Pipeline}
+  alias Arbor.SDLC.{Config, Events, Pipeline, SessionRunner}
   alias Arbor.SDLC.Processors.Planned
   alias Mix.Tasks.Arbor.HandsHelpers, as: Hands
 
   @processor_id "sdlc_in_progress"
 
+  # Default stale session threshold: 10 minutes without activity
+  @default_stale_threshold_ms 600_000
+
   defstruct [
     :config,
     :subscription_id,
-    :pending_completions
+    :tool_use_subscription_id,
+    :pending_completions,
+    :session_activity,
+    :stale_check_timer,
+    :awaiting_comms_responses
   ]
 
   # =============================================================================
@@ -133,33 +155,106 @@ defmodule Arbor.SDLC.Processors.InProgress do
     state = %__MODULE__{
       config: config,
       subscription_id: nil,
-      pending_completions: %{}
+      tool_use_subscription_id: nil,
+      pending_completions: %{},
+      session_activity: %{},
+      stale_check_timer: nil,
+      awaiting_comms_responses: %{}
     }
 
     # Subscribe to session signals
     send(self(), :subscribe_to_signals)
 
+    # Start periodic stale session check
+    timer_ref = schedule_stale_check()
+
     Logger.info("InProgress processor started")
 
-    {:ok, state}
+    {:ok, %{state | stale_check_timer: timer_ref}}
   end
 
   @impl GenServer
   def handle_info(:subscribe_to_signals, state) do
     # Subscribe to Claude session_end signals
-    case subscribe_to_session_signals() do
-      {:ok, sub_id} ->
-        Logger.info("Subscribed to session signals", subscription_id: sub_id)
-        {:noreply, %{state | subscription_id: sub_id}}
+    state =
+      case subscribe_to_session_signals() do
+        {:ok, sub_id} ->
+          Logger.info("Subscribed to session signals", subscription_id: sub_id)
+          %{state | subscription_id: sub_id}
 
-      {:error, reason} ->
-        Logger.warning("Failed to subscribe to signals, will retry",
-          reason: inspect(reason)
+        {:error, reason} ->
+          Logger.warning("Failed to subscribe to session signals, will retry",
+            reason: inspect(reason)
+          )
+
+          # Retry subscription after delay
+          Process.send_after(self(), :subscribe_to_signals, 5_000)
+          state
+      end
+
+    # Subscribe to PostToolUse signals for activity tracking
+    state =
+      case subscribe_to_tool_use_signals() do
+        {:ok, sub_id} ->
+          Logger.info("Subscribed to tool_used signals", subscription_id: sub_id)
+          %{state | tool_use_subscription_id: sub_id}
+
+        {:error, reason} ->
+          Logger.debug("Failed to subscribe to tool_used signals",
+            reason: inspect(reason)
+          )
+
+          state
+      end
+
+    # Subscribe to comms response signals for resume handling
+    subscribe_to_comms_responses()
+
+    {:noreply, state}
+  end
+
+  @impl GenServer
+  def handle_info(:check_stale_sessions, state) do
+    state = check_stale_sessions(state)
+    timer_ref = schedule_stale_check()
+    {:noreply, %{state | stale_check_timer: timer_ref}}
+  end
+
+  @impl GenServer
+  def handle_info({:tool_used, session_id, tool_name}, state) do
+    # Update activity timestamp for this session
+    now = System.monotonic_time(:millisecond)
+
+    activity =
+      Map.update(
+        state.session_activity,
+        session_id,
+        %{last_activity: now, tool_count: 1, last_tool: tool_name},
+        fn info ->
+          %{info | last_activity: now, tool_count: info.tool_count + 1, last_tool: tool_name}
+        end
+      )
+
+    {:noreply, %{state | session_activity: activity}}
+  end
+
+  @impl GenServer
+  def handle_info({:comms_response, correlation_id, response}, state) do
+    case Map.pop(state.awaiting_comms_responses, correlation_id) do
+      {nil, _awaiting} ->
+        # Not waiting for this response
+        {:noreply, state}
+
+      {{item_path, session_id}, awaiting} ->
+        Logger.info("Received comms response for interrupted session",
+          item_path: item_path,
+          session_id: session_id
         )
 
-        # Retry subscription after delay
-        Process.send_after(self(), :subscribe_to_signals, 5_000)
-        {:noreply, state}
+        # Resume the session with the response
+        resume_session(item_path, session_id, response, state.config)
+
+        {:noreply, %{state | awaiting_comms_responses: awaiting}}
     end
   end
 
@@ -252,6 +347,11 @@ defmodule Arbor.SDLC.Processors.InProgress do
     {:noreply, state}
   end
 
+  def handle_cast({:await_comms_response, correlation_id, item_path, session_id}, state) do
+    awaiting = Map.put(state.awaiting_comms_responses, correlation_id, {item_path, session_id})
+    {:noreply, %{state | awaiting_comms_responses: awaiting}}
+  end
+
   @impl GenServer
   def handle_call({:process_completion, item_path, session_id, output}, _from, state) do
     result = do_process_completion(item_path, session_id, output, state.config)
@@ -260,9 +360,18 @@ defmodule Arbor.SDLC.Processors.InProgress do
 
   @impl GenServer
   def terminate(_reason, state) do
+    # Cancel stale check timer
+    if state.stale_check_timer do
+      Process.cancel_timer(state.stale_check_timer)
+    end
+
     # Unsubscribe from signals
     if state.subscription_id do
       Arbor.Signals.unsubscribe(state.subscription_id)
+    end
+
+    if state.tool_use_subscription_id do
+      Arbor.Signals.unsubscribe(state.tool_use_subscription_id)
     end
 
     :ok
@@ -273,27 +382,112 @@ defmodule Arbor.SDLC.Processors.InProgress do
   # =============================================================================
 
   defp subscribe_to_session_signals do
-    # Check if signals module is loaded and the Bus process is running
-    signals_available? =
-      Code.ensure_loaded?(Arbor.Signals) and
-        function_exported?(Arbor.Signals, :subscribe, 3) and
-        Process.whereis(Arbor.Signals.Bus) != nil
-
-    if signals_available? do
-      handler = fn signal ->
-        # Extract session_id and reason from signal data
-        session_id = get_in(signal.data, [:session_id]) || get_in(signal.data, ["session_id"])
-        reason = get_in(signal.data, [:reason]) || get_in(signal.data, ["reason"]) || "completed"
-
-        # Notify the processor
-        handle_session_end(__MODULE__, session_id, reason, signal.data)
-        :ok
-      end
-
-      Arbor.Signals.subscribe("claude.session_end", handler)
+    if signals_available?() do
+      do_subscribe_to_session_signals()
     else
       {:error, :signals_not_available}
     end
+  end
+
+  defp do_subscribe_to_session_signals do
+    handler = fn signal ->
+      session_id = get_in(signal.data, [:session_id]) || get_in(signal.data, ["session_id"])
+      reason = get_in(signal.data, [:reason]) || get_in(signal.data, ["reason"]) || "completed"
+
+      handle_session_end(__MODULE__, session_id, reason, signal.data)
+      :ok
+    end
+
+    Arbor.Signals.subscribe("claude.session_end", handler)
+  end
+
+  defp subscribe_to_tool_use_signals do
+    if signals_available?() do
+      do_subscribe_to_tool_use()
+    else
+      {:error, :signals_not_available}
+    end
+  end
+
+  defp do_subscribe_to_tool_use do
+    processor = self()
+
+    handler = fn signal ->
+      session_id = get_in(signal.data, [:session_id]) || get_in(signal.data, ["session_id"])
+      tool_name = get_in(signal.data, [:tool_name]) || get_in(signal.data, ["tool_name"])
+
+      if session_id, do: send(processor, {:tool_used, session_id, tool_name})
+      :ok
+    end
+
+    Arbor.Signals.subscribe("claude.tool_used", handler)
+  end
+
+  defp subscribe_to_comms_responses do
+    if signals_available?() do
+      do_subscribe_to_comms_responses()
+    else
+      :ok
+    end
+  end
+
+  defp do_subscribe_to_comms_responses do
+    processor = self()
+
+    handler = fn signal ->
+      correlation_id =
+        get_in(signal.data, [:correlation_id]) ||
+          get_in(signal.data, ["correlation_id"])
+
+      response =
+        get_in(signal.data, [:response]) ||
+          get_in(signal.data, ["response"])
+
+      if correlation_id, do: send(processor, {:comms_response, correlation_id, response})
+      :ok
+    end
+
+    Arbor.Signals.subscribe("comms.response_received", handler)
+  end
+
+  defp signals_available? do
+    Code.ensure_loaded?(Arbor.Signals) and
+      function_exported?(Arbor.Signals, :subscribe, 3) and
+      Process.whereis(Arbor.Signals.Bus) != nil
+  end
+
+  defp schedule_stale_check do
+    # Check every minute for stale sessions
+    Process.send_after(self(), :check_stale_sessions, 60_000)
+  end
+
+  defp check_stale_sessions(state) do
+    now = System.monotonic_time(:millisecond)
+    threshold = Application.get_env(:arbor_sdlc, :stale_session_threshold_ms, @default_stale_threshold_ms)
+
+    stale_sessions =
+      state.session_activity
+      |> Enum.filter(fn {_session_id, info} ->
+        now - info.last_activity > threshold
+      end)
+
+    # Emit warning for stale sessions
+    for {session_id, info} <- stale_sessions do
+      item_path = get_in(state.pending_completions, [session_id, :item_path])
+      minutes_stale = div(now - info.last_activity, 60_000)
+
+      Logger.warning("Stale session detected",
+        session_id: session_id,
+        item_path: item_path,
+        minutes_without_activity: minutes_stale,
+        last_tool: info.last_tool,
+        tool_count: info.tool_count
+      )
+
+      Events.emit_session_stale(item_path, session_id, minutes_stale)
+    end
+
+    state
   end
 
   # =============================================================================
@@ -634,16 +828,115 @@ defmodule Arbor.SDLC.Processors.InProgress do
     end
   end
 
-  defp handle_interrupted_session(item_path, session_id, metadata, _config) do
+  defp handle_interrupted_session(item_path, session_id, metadata, config) do
     Logger.info("Session interrupted",
       item_path: item_path,
       session_id: session_id
     )
 
-    # For interrupted sessions, we keep the session_id for potential resume
+    # Emit the interrupted event
     Events.emit_session_interrupted(item_path, session_id, metadata)
 
+    # Route to comms for human input
+    route_to_comms(item_path, session_id, config)
+
     {:ok, :interrupted}
+  end
+
+  defp route_to_comms(item_path, session_id, _config) do
+    # Generate a correlation ID for tracking the response
+    correlation_id = "sdlc-resume-#{session_id}-#{System.system_time(:millisecond)}"
+
+    item_name = Path.basename(item_path, ".md")
+    message = build_interrupt_message(item_name, session_id, item_path)
+    recipient = Application.get_env(:arbor_sdlc, :comms_recipient, nil)
+
+    do_route_to_comms(recipient, message, session_id, correlation_id, item_path)
+  end
+
+  defp build_interrupt_message(item_name, session_id, item_path) do
+    """
+    SDLC session interrupted for work item: #{item_name}
+
+    Session ID: #{session_id}
+    Item path: #{item_path}
+
+    The session was interrupted and may need your input to continue.
+    Reply to this message to resume the session with your guidance.
+    """
+  end
+
+  defp do_route_to_comms(nil, _message, _session_id, _correlation_id, _item_path) do
+    Logger.debug("No comms recipient configured, skipping comms routing")
+  end
+
+  defp do_route_to_comms(recipient, message, session_id, correlation_id, item_path) do
+    comms_available? =
+      Code.ensure_loaded?(Arbor.Comms) and
+        function_exported?(Arbor.Comms, :send_signal, 2)
+
+    if comms_available? do
+      send_via_comms(recipient, message, session_id, correlation_id, item_path)
+    else
+      Logger.debug("Comms not available, skipping comms routing")
+    end
+  end
+
+  defp send_via_comms(recipient, message, session_id, correlation_id, item_path) do
+    # Use Kernel.apply to explicitly indicate dynamic call
+    case Kernel.apply(Arbor.Comms, :send_signal, [recipient, message]) do
+      :ok ->
+        Logger.info("Routed interrupted session to comms",
+          session_id: session_id,
+          correlation_id: correlation_id
+        )
+
+        GenServer.cast(self(), {:await_comms_response, correlation_id, item_path, session_id})
+
+      {:error, reason} ->
+        Logger.warning("Failed to route to comms",
+          session_id: session_id,
+          reason: inspect(reason)
+        )
+    end
+  end
+
+  defp resume_session(item_path, session_id, response, config) do
+    Logger.info("Resuming session with human input",
+      item_path: item_path,
+      session_id: session_id
+    )
+
+    # Build resume prompt with the human's response
+    prompt = """
+    Previous session was interrupted. Human provided the following guidance:
+
+    #{response}
+
+    Please continue working on the task.
+    """
+
+    # Resume using SessionRunner
+    runner_opts = [
+      item_path: item_path,
+      prompt: prompt,
+      parent: self(),
+      execution_mode: :auto,
+      config: config,
+      working_dir: config.roadmap_root,
+      resume_session_id: session_id
+    ]
+
+    case SessionRunner.start_link(runner_opts) do
+      {:ok, _runner_pid} ->
+        Logger.info("Session resume initiated", session_id: session_id)
+
+      {:error, reason} ->
+        Logger.error("Failed to resume session",
+          session_id: session_id,
+          reason: inspect(reason)
+        )
+    end
   end
 
   @doc """
