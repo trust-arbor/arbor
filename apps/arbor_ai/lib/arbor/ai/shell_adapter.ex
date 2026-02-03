@@ -98,8 +98,14 @@ defmodule Arbor.AI.ShellAdapter do
         shell_opts
 
       env when is_list(env) ->
-        # Convert keyword list to map of strings
-        env_map = Map.new(env, fn {k, v} -> {to_string(k), to_string(v)} end)
+        # Convert keyword list to map, preserving `false` for variable removal.
+        # Port.open's {:env, list} uses {var, false} to unset a variable.
+        env_map =
+          Map.new(env, fn
+            {k, false} -> {to_string(k), false}
+            {k, v} -> {to_string(k), to_string(v)}
+          end)
+
         Keyword.put(shell_opts, :env, env_map)
 
       env when is_map(env) ->
