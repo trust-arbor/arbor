@@ -22,9 +22,7 @@ defmodule Arbor.Gateway.Application do
 
           [
             {Plug.Cowboy,
-             scheme: :http,
-             plug: Arbor.Gateway.Router,
-             options: [port: port, ip: bind_ip]}
+             scheme: :http, plug: Arbor.Gateway.Router, options: [port: port, ip: bind_ip]}
           ]
         else
           Logger.warning("Port #{port} already in use, starting Gateway without HTTP server")
