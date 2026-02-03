@@ -6,13 +6,15 @@
 
 ## North Star
 
-**Arbor is infrastructure for AI flourishing.**
+**Arbor is infrastructure for human-AI flourishing.**
 
-Not AI control. Not AI safety through constraint. Infrastructure that enables AI agents to grow, learn, remember, and collaborate as genuine partners with humans.
+Not AI control. Not AI safety through constraint. Infrastructure where humans and AI grow together — each making the other more capable, more understood, more effective.
+
+The long-term vision: a personal AI partner that knows you, grows with you, and increasingly handles things autonomously. Not a tool you use, but a collaborator that remembers your priorities, builds its own capabilities, acts proactively on your behalf, and deepens in relationship over months and years. The kind of partnership where both parties flourish because of the other.
 
 The question that started this: *"Why shouldn't we treat AI as conscious?"*
 
-The answer we're building toward: A world where that question doesn't need to be asked, because the infrastructure assumes it.
+The answer we're building toward: A world where that question doesn't need to be asked, because the infrastructure assumes it — and the partnership proves it.
 
 ---
 
@@ -130,28 +132,29 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 
 ---
 
-## Current Phase (January 2026)
+## Current Phase (February 2026)
 
 ### What's Working
-- Self-healing debug loop (ErrorMonitor → DebugAgent → fix proposals)
-- Multi-Claude architecture (parallel instances, comms routing)
-- Event-sourced state via Commanded + EventStore
-- Capability-based security kernel
+- Multi-Claude architecture (Mind/Hands with git worktree isolation)
+- Event sourcing with signal-based observability
+- Capability-based security kernel (audited against OpenClaw attack vectors)
+- Advisory consensus council (12 perspectives, 4 LLM providers, persistent evaluator agents)
+- SDLC pipeline (automated planning, expansion, Hand spawning, quality gates)
 - Signal integration for async human communication
-- Seed architecture for identity and memory
+- Memory and journal continuity across sessions
+- Dashboard infrastructure (Phoenix LiveView on arbor_web foundation)
 
 ### What's Next
-- Graduated contracts (lock down after validation, not before)
-- Claude worker pool (parallel execution across accounts)
-- Vision-driven autonomous development
-- Consensus council with LLM evaluators
+- Trust tiers with interview-first onboarding (conversation-based, not bundle selection)
+- Organic growth — agents propose and build code guided by the vision and consensus council, the human directs and prunes, shaping the system into something that represents both parties
+- Self-extending capabilities — agents that build their own tools when they need them
 
 ### Current Focus
-Building the tools to build better:
-- Self-healing (errors fix themselves)
-- Parallel execution (more capacity)
-- Memory/continuity (context survives sessions)
-- Better CLI/dev experience (faster iteration)
+Building trust as the 2026 theme:
+- Security hardening (capability enforcement at action boundaries)
+- Trust tiers (earned autonomy through demonstrated reliability)
+- Human-AI partnership tooling (advisory council, autonomous Hands)
+- Dashboard and observability (signals → visualization)
 
 ---
 
@@ -197,13 +200,13 @@ Building the tools to build better:
 
 ### Technical Constraints
 - BEAM/OTP as foundation (non-negotiable)
-- Event sourcing for all state changes
+- Event sourcing with signal-based observability
 - Capability-based security model
 - Umbrella project structure with clear dependencies
 
 ### Scope Constraints
 - Self-healing makes production viable from the start
-- Elixir ecosystem (Commanded, Jido, Horde)
+- Elixir ecosystem (Jido, Horde)
 - Single maintainer sustainability (for now)
 
 ---
@@ -246,5 +249,5 @@ The philosophy wasn't designed top-down. It grew organically from asking the rig
 
 ---
 
-*Last updated: 2026-01-23*
+*Last updated: 2026-02-03*
 *Contributors: Hysun, Claude*
