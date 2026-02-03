@@ -3,6 +3,7 @@ defmodule Arbor.SDLC.TestHelpers do
   Test helpers for arbor_sdlc tests.
   """
 
+  alias Arbor.Consensus.{Coordinator, EvaluatorAgent, EventStore, TopicRegistry}
   alias Arbor.Persistence.Store.ETS, as: ETSStore
   alias Arbor.SDLC.{Config, PersistentFileTracker, Pipeline}
 
@@ -91,16 +92,6 @@ defmodule Arbor.SDLC.TestHelpers do
     """
   end
 
-  @sdlc_perspectives [
-    :scope,
-    :feasibility,
-    :priority,
-    :architecture,
-    :consistency,
-    :adversarial,
-    :random
-  ]
-
   @doc """
   Ensures the consensus infrastructure is running for Deliberator tests.
 
@@ -113,16 +104,28 @@ defmodule Arbor.SDLC.TestHelpers do
   for restoration.
   """
   def ensure_consensus_started do
+    stop_consensus_children()
+    start_consensus_services()
+
+    # Disable LLM topic classification for tests (avoid CLI calls)
+    Application.put_env(:arbor_consensus, :llm_topic_classification_enabled, false)
+
+    prev_ai = Application.get_env(:arbor_sdlc, :ai_module)
+    Application.put_env(:arbor_sdlc, :ai_module, EvaluatorMockAI.StandardApprove)
+    prev_ai
+  end
+
+  defp stop_consensus_children do
     supervisor = Arbor.Consensus.Supervisor
 
     # Remove existing supervised children so we can restart with SDLC config.
     # The consensus test_helper.exs adds these as supervisor children, so
     # GenServer.stop would trigger a supervisor restart with default config.
     children_to_stop = [
-      Arbor.Consensus.Coordinator,
-      Arbor.Consensus.EventStore,
-      Arbor.Consensus.EvaluatorAgent.Supervisor,
-      Arbor.Consensus.TopicRegistry
+      Coordinator,
+      EventStore,
+      EvaluatorAgent.Supervisor,
+      TopicRegistry
     ]
 
     for child_id <- children_to_stop do
@@ -133,22 +136,24 @@ defmodule Arbor.SDLC.TestHelpers do
     end
 
     # Also stop any non-supervised instances (e.g. from a previous test run)
-    stop_if_alive(Arbor.Consensus.Coordinator)
-    stop_if_alive(Arbor.Consensus.EventStore)
-    stop_if_alive(Arbor.Consensus.EvaluatorAgent.Supervisor)
-    stop_if_alive(Arbor.Consensus.TopicRegistry)
+    stop_if_alive(Coordinator)
+    stop_if_alive(EventStore)
+    stop_if_alive(EvaluatorAgent.Supervisor)
+    stop_if_alive(TopicRegistry)
+  end
 
+  defp start_consensus_services do
     # Start fresh with SDLC-specific config
-    {:ok, _} = Arbor.Consensus.EventStore.start_link([])
+    {:ok, _} = EventStore.start_link([])
 
     # Start TopicRegistry (required by Coordinator)
-    case Arbor.Consensus.TopicRegistry.start_link([]) do
+    case TopicRegistry.start_link([]) do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
     end
 
     # Start EvaluatorAgent.Supervisor (required by Coordinator)
-    case Arbor.Consensus.EvaluatorAgent.Supervisor.start_link([]) do
+    case EvaluatorAgent.Supervisor.start_link([]) do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
     end
@@ -163,20 +168,7 @@ defmodule Arbor.SDLC.TestHelpers do
       {:error, _} -> :ok
     end
 
-    {:ok, _} =
-      Arbor.Consensus.Coordinator.start_link(
-        config: [
-          perspectives_for_change_type: %{sdlc_decision: @sdlc_perspectives},
-          quorum_rules: %{sdlc_decision: 4}
-        ]
-      )
-
-    # Disable LLM topic classification for tests (avoid CLI calls)
-    Application.put_env(:arbor_consensus, :llm_topic_classification_enabled, false)
-
-    prev_ai = Application.get_env(:arbor_sdlc, :ai_module)
-    Application.put_env(:arbor_sdlc, :ai_module, EvaluatorMockAI.StandardApprove)
-    prev_ai
+    {:ok, _} = Coordinator.start_link([])
   end
 
   defp stop_if_alive(name) do
@@ -188,12 +180,6 @@ defmodule Arbor.SDLC.TestHelpers do
     :exit, _ -> :ok
   end
 
-  @doc """
-  Restores the SDLC AI module and consensus_server to their previous values.
-
-  Accepts the tuple returned by `ensure_consensus_started/0`.
-  Also stops the SDLC test consensus processes.
-  """
   @doc """
   Restores the SDLC AI module to its previous value.
   """

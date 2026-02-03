@@ -289,14 +289,7 @@ defmodule Arbor.SDLC do
         mark_processed_in_tracker(path, hash)
 
         Task.Supervisor.start_child(Arbor.SDLC.TaskSupervisor, fn ->
-          case route_to_processor(item, path) do
-            {:error, _reason} ->
-              # Processing failed — clear tracker so file is retried next scan
-              clear_tracker_entry(path)
-
-            _ ->
-              :ok
-          end
+          async_process_item(item, path)
         end)
 
         :ok
@@ -304,6 +297,17 @@ defmodule Arbor.SDLC do
       {:error, reason} ->
         Logger.warning("Failed to build item", path: path, reason: inspect(reason))
         {:error, reason}
+    end
+  end
+
+  defp async_process_item(item, path) do
+    case route_to_processor(item, path) do
+      {:error, _reason} ->
+        # Processing failed — clear tracker so file is retried next scan
+        clear_tracker_entry(path)
+
+      _ ->
+        :ok
     end
   end
 

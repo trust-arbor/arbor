@@ -537,21 +537,21 @@ defmodule Arbor.Memory.IdentityConsolidator do
           String.contains?(content_lower, String.replace(val_str, "_", " "))
       end)
 
-    # Try pattern matching for common value indicators
-    cond do
-      found ->
-        found
+    found || match_value_pattern(content_lower)
+  end
 
-      String.contains?(content_lower, "growth mindset") or
-          String.contains?(content_lower, "capability development") ->
+  defp match_value_pattern(content) when is_binary(content) do
+    cond do
+      String.contains?(content, "growth mindset") or
+          String.contains?(content, "capability development") ->
         :growth
 
-      String.contains?(content_lower, "self-reflection") or
-          String.contains?(content_lower, "metacognition") ->
+      String.contains?(content, "self-reflection") or
+          String.contains?(content, "metacognition") ->
         :self_reflection
 
-      String.contains?(content_lower, "learning") or
-          String.contains?(content_lower, "skills") ->
+      String.contains?(content, "learning") or
+          String.contains?(content, "skills") ->
         :learning
 
       true ->
