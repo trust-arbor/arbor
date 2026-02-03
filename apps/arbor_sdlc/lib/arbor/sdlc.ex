@@ -306,6 +306,11 @@ defmodule Arbor.SDLC do
         # Processing failed — clear tracker so file is retried next scan
         clear_tracker_entry(path)
 
+      {:skipped, _reason} ->
+        # Stage disabled or other skip — clear tracker so file is retried
+        # when the stage is enabled and a rescan is triggered
+        clear_tracker_entry(path)
+
       _ ->
         :ok
     end
@@ -541,7 +546,7 @@ defmodule Arbor.SDLC do
         stage: stage
       )
 
-      :ok
+      {:skipped, :stage_disabled}
     end
   end
 
@@ -717,6 +722,10 @@ defmodule Arbor.SDLC do
 
       {:error, _} ->
         # Processing failed — don't update tracker so it retries next scan
+        :ok
+
+      {:skipped, _} ->
+        # Stage disabled — don't update tracker so it retries when enabled
         :ok
 
       _ ->
