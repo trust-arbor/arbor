@@ -20,6 +20,7 @@ defmodule Arbor.Actions do
   | Historian | `Arbor.Actions.Historian` | Event log querying and causality tracing |
   | Code | `Arbor.Actions.Code` | Code compilation, testing, and hot-loading |
   | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
+  | Council | `Arbor.Actions.Council` | Advisory council consultation |
 
   ## Quick Start
 
@@ -216,6 +217,10 @@ defmodule Arbor.Actions do
       proposal: [
         Arbor.Actions.Proposal.Submit,
         Arbor.Actions.Proposal.Revise
+      ],
+      council: [
+        Arbor.Actions.Council.Consult,
+        Arbor.Actions.Council.ConsultOne
       ]
     }
   end
