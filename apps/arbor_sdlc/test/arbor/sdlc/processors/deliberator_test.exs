@@ -102,7 +102,10 @@ defmodule Arbor.SDLC.Processors.DeliberatorTest do
 
       result = Deliberator.process_item(item, ai_module: mock_ai)
 
-      assert {:ok, {:moved, :planned}} = result
+      # Council may return moved (no changes) or moved_and_updated (with decision notes)
+      assert {:ok, outcome} = result
+      assert elem(outcome, 1) == :planned
+      assert elem(outcome, 0) in [:moved, :moved_and_updated]
     end
   end
 
