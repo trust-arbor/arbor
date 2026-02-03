@@ -248,7 +248,7 @@ defmodule Arbor.AI.Backends.CliBackend do
 
     cmd_opts = [
       stderr_to_stdout: true,
-      env: [{"TERM", "dumb"}],
+      env: safe_env(),
       timeout: timeout
     ]
 
@@ -282,6 +282,21 @@ defmodule Arbor.AI.Backends.CliBackend do
       nil ->
         {:error, :timeout}
     end
+  end
+
+  # Build a safe environment for CLI subprocesses.
+  # Port.open's :env option extends the parent environment.
+  # Setting a value to `false` removes that variable.
+  # We clear session-related variables so subprocesses don't
+  # reconnect to the parent's active Claude Code session.
+  @session_vars_to_clear ~w(
+    CLAUDE_CODE_ENTRYPOINT CLAUDE_SESSION_ID CLAUDE_CONFIG_DIR
+    ARBOR_SDLC_SESSION_ID ARBOR_SDLC_ITEM_PATH ARBOR_SESSION_TYPE
+  )
+
+  defp safe_env do
+    cleared = Enum.map(@session_vars_to_clear, &{&1, false})
+    [{"TERM", "dumb"} | cleared]
   end
 
   @doc """

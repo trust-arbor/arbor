@@ -562,7 +562,11 @@ defmodule Arbor.SDLC do
   defp route_to_deliberator(item) do
     case Deliberator.process_item(item, []) do
       {:ok, {:moved, stage}} ->
-        case move_item(item, stage, []) do
+        # Derive config from item's actual path to respect runtime roadmap root
+        roadmap_root = item.path |> Path.dirname() |> Path.dirname()
+        config = Config.new(roadmap_root: roadmap_root)
+
+        case move_item(item, stage, config: config) do
           {:ok, new_path} ->
             Logger.info("Deliberator moved item",
               title: item.title,
@@ -595,14 +599,18 @@ defmodule Arbor.SDLC do
   end
 
   defp write_and_move_item(item, old_path, to_stage) do
-    config = Config.new()
+    # Derive roadmap root from the item's actual source path rather than
+    # Config.new() which may not reflect runtime-configured roadmap root.
+    # Path structure: <roadmap_root>/<stage_dir>/<filename.md>
+    roadmap_root = old_path |> Path.dirname() |> Path.dirname()
+    config = Config.new(roadmap_root: roadmap_root)
 
     # Serialize the item back to markdown
     content = ItemParser.serialize(Map.from_struct(item))
 
     # Write to the new location
     filename = Path.basename(old_path)
-    dest_dir = Pipeline.stage_path(to_stage, config.roadmap_root)
+    dest_dir = Pipeline.stage_path(to_stage, roadmap_root)
     dest_path = Path.join(dest_dir, filename)
 
     File.mkdir_p!(dest_dir)

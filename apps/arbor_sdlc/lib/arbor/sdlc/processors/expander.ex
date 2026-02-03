@@ -116,7 +116,8 @@ defmodule Arbor.SDLC.Processors.Expander do
       system_prompt: system_prompt,
       max_tokens: 4096,
       temperature: 0.4,
-      backend: ai_backend
+      backend: ai_backend,
+      new_session: true
     ]
 
     Logger.debug("Calling AI for expansion", title: item.title)

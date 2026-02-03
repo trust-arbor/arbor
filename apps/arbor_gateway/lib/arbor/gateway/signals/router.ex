@@ -14,6 +14,7 @@ defmodule Arbor.Gateway.Signals.Router do
   ## Supported Sources
 
   - `claude` — Claude Code session hooks (session lifecycle, tool usage, etc.)
+  - `sdlc` — SDLC pipeline events (session lifecycle for auto-hand processing)
   """
 
   use Plug.Router
@@ -30,6 +31,10 @@ defmodule Arbor.Gateway.Signals.Router do
     session_start session_end subagent_stop notification
     tool_used idle permission_request pre_compact
     pre_tool_use user_prompt
+  )a
+
+  @allowed_sdlc_types ~w(
+    session_started session_complete
   )a
 
   # POST /api/signals/:source/:type — Ingest a signal from an external source
@@ -63,10 +68,18 @@ defmodule Arbor.Gateway.Signals.Router do
   # Private helpers
 
   defp validate_source("claude"), do: {:ok, :claude}
+  defp validate_source("sdlc"), do: {:ok, :sdlc}
   defp validate_source(source), do: {:error, "unknown source: #{source}"}
 
   defp validate_type(:claude, type) do
     case SafeAtom.to_allowed(type, @allowed_claude_types) do
+      {:ok, atom} -> {:ok, atom}
+      {:error, _} -> {:error, "unknown type: #{type}"}
+    end
+  end
+
+  defp validate_type(:sdlc, type) do
+    case SafeAtom.to_allowed(type, @allowed_sdlc_types) do
       {:ok, atom} -> {:ok, atom}
       {:error, _} -> {:error, "unknown type: #{type}"}
     end

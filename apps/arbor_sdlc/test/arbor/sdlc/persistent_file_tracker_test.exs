@@ -108,9 +108,9 @@ defmodule Arbor.SDLC.PersistentFileTrackerTest do
       assert old_record.status == :moved
       assert old_record.metadata[:moved_to] == new_path
 
-      # New path should be marked as processed
+      # New path should be marked as pending (needs processing by next stage)
       {:ok, new_record} = PersistentFileTracker.get_record(tracker, new_path, "expander")
-      assert new_record.status == :processed
+      assert new_record.status == :pending
       assert new_record.metadata[:moved_from] == old_path
     end
   end

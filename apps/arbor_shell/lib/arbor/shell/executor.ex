@@ -76,7 +76,13 @@ defmodule Arbor.Shell.Executor do
       end
 
     if map_size(env) > 0 do
-      env_list = Enum.map(env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)
+      env_list =
+        Enum.map(env, fn
+          # Port.open convention: {var, false} removes the variable
+          {k, false} -> {to_charlist(k), false}
+          {k, v} -> {to_charlist(k), to_charlist(v)}
+        end)
+
       [{:env, env_list} | opts]
     else
       opts
