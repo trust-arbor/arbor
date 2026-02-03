@@ -193,8 +193,22 @@ defmodule Arbor.Consensus.TopicRegistry do
     checkpoint_store = Keyword.get(opts, :checkpoint_store, @default_checkpoint_store)
     checkpoint_id = Keyword.get(opts, :checkpoint_id, @checkpoint_id)
 
-    # Attempt checkpoint restore
-    restored = restore_from_checkpoint(checkpoint_id, checkpoint_store, opts)
+    # Ed25519 signing — injectable via opts, nil disables
+    {signing_key, verify_key} =
+      case Keyword.get(opts, :signing_key) do
+        nil ->
+          if Keyword.get(opts, :enable_signing, true) do
+            generate_keypair()
+          else
+            {nil, nil}
+          end
+
+        key ->
+          {key, Keyword.get(opts, :verify_key)}
+      end
+
+    # Attempt checkpoint restore (verify signature if we have a verify_key)
+    restored = restore_from_checkpoint(checkpoint_id, checkpoint_store, verify_key, opts)
 
     # Insert restored topics (non-bootstrap only)
     insert_restored_topics(table, restored)
@@ -202,7 +216,9 @@ defmodule Arbor.Consensus.TopicRegistry do
     state = %{
       table: table,
       checkpoint_id: checkpoint_id,
-      checkpoint_store: checkpoint_store
+      checkpoint_store: checkpoint_store,
+      signing_key: signing_key,
+      verify_key: verify_key
     }
 
     {:ok, state}
@@ -293,10 +309,10 @@ defmodule Arbor.Consensus.TopicRegistry do
     end)
   end
 
-  defp restore_from_checkpoint(nil, _checkpoint_store, _opts), do: %{}
-  defp restore_from_checkpoint(_checkpoint_id, nil, _opts), do: %{}
+  defp restore_from_checkpoint(nil, _checkpoint_store, _verify_key, _opts), do: %{}
+  defp restore_from_checkpoint(_checkpoint_id, nil, _verify_key, _opts), do: %{}
 
-  defp restore_from_checkpoint(checkpoint_id, checkpoint_store, _opts) do
+  defp restore_from_checkpoint(checkpoint_id, checkpoint_store, verify_key, _opts) do
     Arbor.Checkpoint.load(checkpoint_id, checkpoint_store, retries: 0)
   rescue
     e ->
@@ -304,8 +320,7 @@ defmodule Arbor.Consensus.TopicRegistry do
       %{}
   else
     {:ok, data} when is_map(data) ->
-      Logger.info("TopicRegistry: restored #{map_size(data)} topics from checkpoint")
-      data
+      verify_and_extract_checkpoint(data, verify_key)
 
     {:ok, _other} ->
       Logger.warning("TopicRegistry: checkpoint data invalid format, starting fresh")
@@ -361,8 +376,10 @@ defmodule Arbor.Consensus.TopicRegistry do
         {topic, topic_rule_to_checkpoint(rule)}
       end)
 
+    payload = sign_checkpoint(topics, state.signing_key)
+
     try do
-      case Arbor.Checkpoint.save(state.checkpoint_id, topics, state.checkpoint_store) do
+      case Arbor.Checkpoint.save(state.checkpoint_id, payload, state.checkpoint_store) do
         :ok ->
           Logger.debug("TopicRegistry: checkpointed #{map_size(topics)} topics")
 
@@ -392,6 +409,61 @@ defmodule Arbor.Consensus.TopicRegistry do
   defp resolve_topic_rule(%TopicRule{} = rule), do: rule
   defp resolve_topic_rule(attrs) when is_list(attrs), do: TopicRule.new(attrs)
   defp resolve_topic_rule(attrs) when is_map(attrs), do: TopicRule.new(attrs)
+
+  # ============================================================================
+  # Ed25519 Checkpoint Signing
+  # ============================================================================
+
+  defp generate_keypair do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {priv, pub}
+  end
+
+  defp sign_checkpoint(topics, nil), do: topics
+
+  defp sign_checkpoint(topics, signing_key) do
+    serialized = :erlang.term_to_binary(topics)
+    signature = :crypto.sign(:eddsa, :none, serialized, [signing_key, :ed25519])
+
+    %{
+      data: topics,
+      signature: signature,
+      signed_at: DateTime.utc_now()
+    }
+  end
+
+  # Signed checkpoint with verify key — verify signature
+  defp verify_and_extract_checkpoint(
+         %{data: data, signature: signature} = _checkpoint,
+         verify_key
+       )
+       when is_binary(signature) and verify_key != nil do
+    serialized = :erlang.term_to_binary(data)
+
+    if :crypto.verify(:eddsa, :none, serialized, signature, [verify_key, :ed25519]) do
+      Logger.info("TopicRegistry: restored #{map_size(data)} signed topics from checkpoint")
+      data
+    else
+      Logger.warning("TopicRegistry: checkpoint signature invalid, starting fresh (bootstrap only)")
+      %{}
+    end
+  end
+
+  # Signed checkpoint but no verify key — accept with warning
+  defp verify_and_extract_checkpoint(%{data: data, signature: _sig}, nil) do
+    Logger.warning("TopicRegistry: signed checkpoint but no verify key, accepting unsigned")
+    Logger.info("TopicRegistry: restored #{map_size(data)} topics from checkpoint (unverified)")
+    data
+  end
+
+  # Unsigned checkpoint (pre-signing migration) — accept with log
+  defp verify_and_extract_checkpoint(data, _verify_key) when is_map(data) do
+    Logger.info(
+      "TopicRegistry: restored #{map_size(data)} topics from unsigned checkpoint (migration)"
+    )
+
+    data
+  end
 
   # Signal emission for observability
   defp emit_topic_registered(rule) do

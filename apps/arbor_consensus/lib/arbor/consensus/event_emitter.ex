@@ -143,14 +143,12 @@ defmodule Arbor.Consensus.EventEmitter do
 
   @doc "Emit a ProposalSubmitted event."
   def proposal_submitted(proposal, opts \\ []) do
-    # Handle both Proposal structs (with :topic) and maps (with :change_type or :topic)
-    change_type = get_topic_or_change_type(proposal)
     target_module = get_target_module(proposal)
 
     Events.ProposalSubmitted.new(%{
       proposal_id: proposal.id,
       proposer: proposal.proposer,
-      change_type: change_type,
+      change_type: proposal.topic,
       description: proposal.description,
       target_layer: proposal.target_layer,
       target_module: target_module,
@@ -158,10 +156,6 @@ defmodule Arbor.Consensus.EventEmitter do
     })
     |> emit(Keyword.put(opts, :correlation_id, proposal.id))
   end
-
-  # Get topic from Proposal struct or change_type from map
-  defp get_topic_or_change_type(%{topic: topic}), do: topic
-  defp get_topic_or_change_type(%{change_type: change_type}), do: change_type
 
   # Get target_module from context (Proposal struct) or directly (map)
   defp get_target_module(%{context: context}) when is_map(context),

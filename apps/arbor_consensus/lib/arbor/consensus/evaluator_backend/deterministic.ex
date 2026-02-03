@@ -31,7 +31,6 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
       )
   """
 
-  @behaviour Arbor.Consensus.EvaluatorBackend
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Common.ShellEscape
@@ -74,11 +73,9 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   def strategy, do: :deterministic
 
   # ============================================================================
-  # Evaluate Callback (shared by both behaviours)
+  # Evaluate Callback
   # ============================================================================
 
-  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
-  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
   @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do

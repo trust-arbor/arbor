@@ -10,15 +10,15 @@ defmodule Arbor.Consensus do
 
       Proposal  →  Coordinator  →  Council  →  Evaluators (behaviour)
                        │                           │
-                  EventStore (ETS)          EvaluatorBackend.evaluate/3
+                  EventStore (ETS)          Evaluator.evaluate/3
                        │                     (rule-based default)
-                  Decision rendered          (LLM adapter in host app)
+                  Decision rendered          (LLM / deterministic / advisory)
                        │
               on_decision callback  →  host app executes
 
   ## Pluggable Behaviours
 
-    * `EvaluatorBackend` — Required. Evaluates proposals from a perspective.
+    * `Evaluator` — Required. Evaluates proposals from a perspective.
       Default: `EvaluatorBackend.RuleBased`
     * `Authorizer` — Optional. Pre-submit and pre-execution authorization.
     * `Executor` — Optional. Executes approved proposals.
@@ -143,7 +143,7 @@ defmodule Arbor.Consensus do
   defdelegate stats(server \\ Coordinator), to: Coordinator
 
   # ============================================================================
-  # Phase 2 Agent-Facing API
+  # Async Agent-Facing API
   # ============================================================================
 
   @doc """

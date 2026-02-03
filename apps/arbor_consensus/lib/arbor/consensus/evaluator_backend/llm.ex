@@ -39,7 +39,6 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
   error, the evaluator returns `:abstain` rather than blocking consensus.
   """
 
-  @behaviour Arbor.Consensus.EvaluatorBackend
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Consensus.Config
@@ -80,11 +79,9 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
   def strategy, do: :llm
 
   # ===========================================================================
-  # Evaluate Callback (shared by both behaviours)
+  # Evaluate Callback
   # ===========================================================================
 
-  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
-  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
   @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do
