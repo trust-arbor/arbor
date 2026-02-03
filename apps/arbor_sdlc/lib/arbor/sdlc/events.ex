@@ -27,6 +27,13 @@ defmodule Arbor.SDLC.Events do
   - `:decision_rendered` - Council made a decision
   - `:decision_documented` - Decision written to .arbor/decisions/
 
+  ### Session Lifecycle
+  - `:session_spawned` - Auto session spawned for work item
+  - `:session_completed` - Session finished successfully
+  - `:session_failed` - Session failed or tests didn't pass
+  - `:session_blocked` - Session hit max turns and was blocked
+  - `:session_interrupted` - Session was interrupted by user
+
   ### System
   - `:watcher_started` - File watcher initialized
   - `:watcher_scan_completed` - Periodic scan finished
@@ -281,6 +288,94 @@ defmodule Arbor.SDLC.Events do
       %{
         proposal_id: proposal_id,
         decision_path: decision_path
+      },
+      opts
+    )
+  end
+
+  # =============================================================================
+  # Session Lifecycle Events
+  # =============================================================================
+
+  @doc """
+  Emit when an auto session is spawned for a work item.
+  """
+  @spec emit_session_spawned(map() | struct(), String.t(), atom(), keyword()) ::
+          :ok | {:error, term()}
+  def emit_session_spawned(item, session_id, execution_mode, opts \\ []) do
+    emit(
+      :session_spawned,
+      %{
+        item_id: get_item_id(item),
+        title: Map.get(item, :title),
+        path: Map.get(item, :path),
+        session_id: session_id,
+        execution_mode: execution_mode
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a session completes successfully.
+  """
+  @spec emit_session_completed(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def emit_session_completed(item_path, session_id, opts \\ []) do
+    emit(
+      :session_completed,
+      %{
+        item_path: item_path,
+        session_id: session_id
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a session fails (tests didn't pass, errors, etc.).
+  """
+  @spec emit_session_failed(String.t(), String.t(), atom(), keyword()) :: :ok | {:error, term()}
+  def emit_session_failed(item_path, session_id, reason, opts \\ []) do
+    emit(
+      :session_failed,
+      %{
+        item_path: item_path,
+        session_id: session_id,
+        reason: reason
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a session is blocked (hit max_turns).
+  """
+  @spec emit_session_blocked(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def emit_session_blocked(item_path, session_id, reason, opts \\ []) do
+    emit(
+      :session_blocked,
+      %{
+        item_path: item_path,
+        session_id: session_id,
+        reason: reason
+      },
+      opts
+    )
+  end
+
+  @doc """
+  Emit when a session is interrupted by user.
+  """
+  @spec emit_session_interrupted(String.t(), String.t(), map(), keyword()) ::
+          :ok | {:error, term()}
+  def emit_session_interrupted(item_path, session_id, metadata, opts \\ []) do
+    emit(
+      :session_interrupted,
+      %{
+        item_path: item_path,
+        session_id: session_id,
+        metadata: metadata
       },
       opts
     )

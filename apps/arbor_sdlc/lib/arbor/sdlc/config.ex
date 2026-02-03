@@ -48,8 +48,16 @@ defmodule Arbor.SDLC.Config do
   @default_processor_routing %{
     expander: :moderate,
     deliberator: :moderate,
-    consistency_checker: :none
+    consistency_checker: :none,
+    planned: :none,
+    in_progress: :none
   }
+
+  # Auto-hand defaults
+  @default_max_concurrent_sessions 3
+  @default_session_max_turns 50
+  @default_session_test_timeout 300_000
+  @default_session_spawn_cooldown 60_000
 
   @type complexity_tier :: :none | :simple | :moderate | :complex
 
@@ -333,5 +341,73 @@ defmodule Arbor.SDLC.Config do
   @spec component_vision_directory() :: String.t()
   def component_vision_directory do
     Application.get_env(@app, :component_vision_directory, "docs/vision")
+  end
+
+  # =============================================================================
+  # Auto-Hand Session Configuration
+  # =============================================================================
+
+  @doc """
+  Get the maximum number of concurrent auto-hand sessions.
+  """
+  @spec max_concurrent_sessions() :: pos_integer()
+  def max_concurrent_sessions do
+    Application.get_env(@app, :max_concurrent_sessions, @default_max_concurrent_sessions)
+  end
+
+  @doc """
+  Get the maximum turns for a single auto-hand session.
+  """
+  @spec session_max_turns() :: pos_integer()
+  def session_max_turns do
+    Application.get_env(@app, :session_max_turns, @default_session_max_turns)
+  end
+
+  @doc """
+  Get the timeout for test execution in milliseconds.
+  """
+  @spec session_test_timeout() :: pos_integer()
+  def session_test_timeout do
+    Application.get_env(@app, :session_test_timeout, @default_session_test_timeout)
+  end
+
+  @doc """
+  Get the cooldown between session spawns in milliseconds.
+  """
+  @spec session_spawn_cooldown() :: pos_integer()
+  def session_spawn_cooldown do
+    Application.get_env(@app, :session_spawn_cooldown, @default_session_spawn_cooldown)
+  end
+
+  @doc """
+  Check if auto-hand processing is enabled.
+
+  Auto-hand processing is enabled when both :planned and :in_progress
+  stages are in the enabled_stages list.
+  """
+  @spec auto_hand_enabled?() :: boolean()
+  def auto_hand_enabled? do
+    stages = enabled_stages()
+    :planned in stages and :in_progress in stages
+  end
+
+  @doc """
+  Enable auto-hand processing at runtime.
+  """
+  @spec enable_auto_hand() :: :ok
+  def enable_auto_hand do
+    enable_stage(:planned)
+    enable_stage(:in_progress)
+    :ok
+  end
+
+  @doc """
+  Disable auto-hand processing at runtime.
+  """
+  @spec disable_auto_hand() :: :ok
+  def disable_auto_hand do
+    disable_stage(:planned)
+    disable_stage(:in_progress)
+    :ok
   end
 end
