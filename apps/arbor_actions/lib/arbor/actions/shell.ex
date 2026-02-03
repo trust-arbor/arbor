@@ -234,12 +234,27 @@ defmodule Arbor.Actions.Shell do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Shell.Sandbox
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
       Actions.emit_started(__MODULE__, params)
 
+      sandbox_level = params[:sandbox] || :basic
+
+      # Validate each line of the script against the sandbox BEFORE execution
+      case validate_script_content(params.script, sandbox_level) do
+        :ok ->
+          execute_script(params, context, sandbox_level)
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
+      end
+    end
+
+    defp execute_script(params, context, sandbox_level) do
       # Create a temporary script file
       script_path = create_temp_script(params.script)
 
@@ -250,7 +265,7 @@ defmodule Arbor.Actions.Shell do
         opts =
           [
             timeout: params[:timeout] || 60_000,
-            sandbox: params[:sandbox] || :basic
+            sandbox: sandbox_level
           ]
           |> maybe_add_opt(:cwd, params[:cwd])
           |> maybe_add_opt(:env, params[:env])
@@ -277,6 +292,23 @@ defmodule Arbor.Actions.Shell do
         # Clean up the temporary script file
         File.rm(script_path)
       end
+    end
+
+    defp validate_script_content(_script, :none), do: :ok
+
+    defp validate_script_content(script, sandbox_level) do
+      script
+      |> String.split("\n")
+      |> Enum.reject(fn line ->
+        trimmed = String.trim(line)
+        trimmed == "" or String.starts_with?(trimmed, "#")
+      end)
+      |> Enum.reduce_while(:ok, fn line, :ok ->
+        case Sandbox.check(String.trim(line), sandbox_level) do
+          {:ok, :allowed} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:script_line_blocked, line, reason}}}
+        end
+      end)
     end
 
     defp create_temp_script(script_content) do

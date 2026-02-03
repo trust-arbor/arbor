@@ -58,9 +58,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
     %{resource_uri: "arbor://agent/spawn", constraints: %{rate_limit: 10}},
     # Network access - limited
     %{resource_uri: "arbor://net/http/", constraints: %{rate_limit: 30}},
-    %{resource_uri: "arbor://net/search", constraints: %{rate_limit: 20}},
-    # Generic tool access - fallback
-    %{resource_uri: "arbor://tool/", constraints: %{}}
+    %{resource_uri: "arbor://net/search", constraints: %{rate_limit: 20}}
   ]
 
   # Dangerous commands that require elevated trust

@@ -17,8 +17,15 @@ defmodule Arbor.Gateway.Application do
         port = Application.get_env(:arbor_gateway, :port, 4000)
 
         if port_available?(port) do
-          Logger.info("Starting Arbor Gateway HTTP server on port #{port}")
-          [{Plug.Cowboy, scheme: :http, plug: Arbor.Gateway.Router, options: [port: port]}]
+          bind_ip = Application.get_env(:arbor_gateway, :bind_ip, {127, 0, 0, 1})
+          Logger.info("Starting Arbor Gateway HTTP server on #{:inet.ntoa(bind_ip)}:#{port}")
+
+          [
+            {Plug.Cowboy,
+             scheme: :http,
+             plug: Arbor.Gateway.Router,
+             options: [port: port, ip: bind_ip]}
+          ]
         else
           Logger.warning("Port #{port} already in use, starting Gateway without HTTP server")
           []
