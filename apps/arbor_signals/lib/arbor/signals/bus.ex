@@ -409,27 +409,19 @@ defmodule Arbor.Signals.Bus do
     restricted_topics = Config.restricted_topics()
 
     if category in restricted_topics and data != %{} do
-      # Serialize data to JSON for encryption
-      case Jason.encode(data) do
-        {:ok, json} ->
-          case TopicKeys.encrypt(category, json) do
-            {:ok, encrypted_payload} ->
-              # Store encrypted payload in data, mark as encrypted
-              %{
-                signal
-                | data: %{
-                    __encrypted__: true,
-                    payload: encrypted_payload
-                  }
-              }
-
-            {:error, _reason} ->
-              # If encryption fails, don't deliver at all for security
-              %{signal | data: %{__encryption_failed__: true}}
-          end
-
+      with {:ok, json} <- Jason.encode(data),
+           {:ok, encrypted_payload} <- TopicKeys.encrypt(category, json) do
+        # Store encrypted payload in data, mark as encrypted
+        %{
+          signal
+          | data: %{
+              __encrypted__: true,
+              payload: encrypted_payload
+            }
+        }
+      else
+        # If serialization or encryption fails, don't deliver at all for security
         {:error, _reason} ->
-          # If serialization fails, mark as failed
           %{signal | data: %{__encryption_failed__: true}}
       end
     else
@@ -441,17 +433,10 @@ defmodule Arbor.Signals.Bus do
   defp maybe_decrypt_signal(%Signal{category: category, data: data} = signal) do
     case data do
       %{__encrypted__: true, payload: encrypted_payload} ->
-        case TopicKeys.decrypt(category, encrypted_payload) do
-          {:ok, json} ->
-            case Jason.decode(json) do
-              {:ok, decoded_data} ->
-                %{signal | data: decoded_data}
-
-              {:error, _reason} ->
-                # Decryption succeeded but JSON decode failed
-                %{signal | data: %{__decryption_failed__: true}}
-            end
-
+        with {:ok, json} <- TopicKeys.decrypt(category, encrypted_payload),
+             {:ok, decoded_data} <- Jason.decode(json) do
+          %{signal | data: decoded_data}
+        else
           {:error, _reason} ->
             %{signal | data: %{__decryption_failed__: true}}
         end

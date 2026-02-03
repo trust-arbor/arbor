@@ -540,17 +540,7 @@ defmodule Arbor.Historian do
       {:ok, entries} ->
         channels =
           entries
-          |> Enum.filter(fn entry ->
-            data = entry[:data] || entry["data"] || %{}
-
-            data_agent_id = data[:agent_id] || data["agent_id"]
-            inviter_id = data[:inviter_id] || data["inviter_id"]
-            revoked_by = data[:revoked_by] || data["revoked_by"]
-
-            data_agent_id == agent_id ||
-              inviter_id == agent_id ||
-              revoked_by == agent_id
-          end)
+          |> Enum.filter(&event_involves_agent?(&1, agent_id))
           |> Enum.group_by(fn entry ->
             data = entry[:data] || entry["data"] || %{}
             data[:channel_id] || data["channel_id"]
@@ -567,6 +557,18 @@ defmodule Arbor.Historian do
     end
   end
 
+  defp event_involves_agent?(entry, agent_id) do
+    data = entry[:data] || entry["data"] || %{}
+
+    data_agent_id = data[:agent_id] || data["agent_id"]
+    inviter_id = data[:inviter_id] || data["inviter_id"]
+    revoked_by = data[:revoked_by] || data["revoked_by"]
+
+    data_agent_id == agent_id ||
+      inviter_id == agent_id ||
+      revoked_by == agent_id
+  end
+
   defp reconstruct_membership(channel_id, events) do
     initial = %{
       channel_id: channel_id,
@@ -579,41 +581,53 @@ defmodule Arbor.Historian do
 
     Enum.reduce(events, initial, fn event, acc ->
       type = get_event_type(event)
-      data = event[:data] || event["data"] || %{}
-      agent_id = data[:agent_id] || data["agent_id"]
-      timestamp = event[:timestamp] || event["timestamp"]
-
-      case type do
-        :channel_created ->
-          %{
-            acc
-            | members: MapSet.put(acc.members, agent_id),
-              creator_id: agent_id,
-              created_at: timestamp
-          }
-
-        :channel_member_joined ->
-          %{acc | members: MapSet.put(acc.members, agent_id)}
-
-        :channel_member_left ->
-          %{acc | members: MapSet.delete(acc.members, agent_id)}
-
-        :channel_member_revoked ->
-          %{acc | members: MapSet.delete(acc.members, agent_id)}
-
-        :channel_key_rotated ->
-          new_version = data[:new_version] || data["new_version"] || acc.key_version + 1
-          %{acc | key_version: new_version}
-
-        :channel_destroyed ->
-          %{acc | destroyed: true, members: MapSet.new()}
-
-        _ ->
-          acc
-      end
+      apply_membership_event(type, event, acc)
     end)
     |> Map.update!(:members, &MapSet.to_list/1)
   end
+
+  defp apply_membership_event(:channel_created, event, acc) do
+    data = event[:data] || event["data"] || %{}
+    agent_id = data[:agent_id] || data["agent_id"]
+    timestamp = event[:timestamp] || event["timestamp"]
+
+    %{
+      acc
+      | members: MapSet.put(acc.members, agent_id),
+        creator_id: agent_id,
+        created_at: timestamp
+    }
+  end
+
+  defp apply_membership_event(:channel_member_joined, event, acc) do
+    data = event[:data] || event["data"] || %{}
+    agent_id = data[:agent_id] || data["agent_id"]
+    %{acc | members: MapSet.put(acc.members, agent_id)}
+  end
+
+  defp apply_membership_event(:channel_member_left, event, acc) do
+    data = event[:data] || event["data"] || %{}
+    agent_id = data[:agent_id] || data["agent_id"]
+    %{acc | members: MapSet.delete(acc.members, agent_id)}
+  end
+
+  defp apply_membership_event(:channel_member_revoked, event, acc) do
+    data = event[:data] || event["data"] || %{}
+    agent_id = data[:agent_id] || data["agent_id"]
+    %{acc | members: MapSet.delete(acc.members, agent_id)}
+  end
+
+  defp apply_membership_event(:channel_key_rotated, event, acc) do
+    data = event[:data] || event["data"] || %{}
+    new_version = data[:new_version] || data["new_version"] || acc.key_version + 1
+    %{acc | key_version: new_version}
+  end
+
+  defp apply_membership_event(:channel_destroyed, _event, acc) do
+    %{acc | destroyed: true, members: MapSet.new()}
+  end
+
+  defp apply_membership_event(_type, _event, acc), do: acc
 
   defp get_event_type(event) do
     type = event[:type] || event["type"]
@@ -643,35 +657,39 @@ defmodule Arbor.Historian do
       event_agent_id = data[:agent_id] || data["agent_id"]
       timestamp = event[:timestamp] || event["timestamp"]
 
-      cond do
-        type == :channel_created and event_agent_id == agent_id ->
-          %{acc | status: :member, joined_at: timestamp}
-
-        type == :channel_member_joined and event_agent_id == agent_id ->
-          %{acc | status: :member, joined_at: timestamp}
-
-        type == :channel_member_left and event_agent_id == agent_id ->
-          %{acc | status: :left, left_at: timestamp}
-
-        type == :channel_member_revoked and event_agent_id == agent_id ->
-          %{acc | status: :revoked, left_at: timestamp}
-
-        type == :channel_destroyed ->
-          if acc.status == :member do
-            %{acc | status: :channel_destroyed, left_at: timestamp}
-          else
-            acc
-          end
-
-        true ->
-          acc
-      end
+      apply_channel_status_event(type, event_agent_id, agent_id, timestamp, acc)
     end)
     |> case do
       %{status: nil} -> nil
       result -> result
     end
   end
+
+  defp apply_channel_status_event(:channel_created, agent_id, agent_id, timestamp, acc) do
+    %{acc | status: :member, joined_at: timestamp}
+  end
+
+  defp apply_channel_status_event(:channel_member_joined, agent_id, agent_id, timestamp, acc) do
+    %{acc | status: :member, joined_at: timestamp}
+  end
+
+  defp apply_channel_status_event(:channel_member_left, agent_id, agent_id, timestamp, acc) do
+    %{acc | status: :left, left_at: timestamp}
+  end
+
+  defp apply_channel_status_event(:channel_member_revoked, agent_id, agent_id, timestamp, acc) do
+    %{acc | status: :revoked, left_at: timestamp}
+  end
+
+  defp apply_channel_status_event(:channel_destroyed, _event_agent_id, _agent_id, timestamp, acc) do
+    if acc.status == :member do
+      %{acc | status: :channel_destroyed, left_at: timestamp}
+    else
+      acc
+    end
+  end
+
+  defp apply_channel_status_event(_type, _event_agent_id, _agent_id, _timestamp, acc), do: acc
 
   # ── Stats ──
 
