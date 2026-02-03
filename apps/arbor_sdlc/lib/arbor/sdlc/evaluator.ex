@@ -19,7 +19,7 @@ defmodule Arbor.SDLC.Evaluator do
 
   Register as the evaluator backend for SDLC decisions:
 
-      Arbor.Consensus.submit(proposal,
+      Arbor.Consensus.propose(attrs,
         evaluator_backend: Arbor.SDLC.Evaluator,
         topic: :sdlc_decision
       )

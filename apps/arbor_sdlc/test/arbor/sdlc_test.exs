@@ -119,7 +119,9 @@ defmodule Arbor.SDLCTest do
       {:ok, result} = SDLC.process_file(path, ai_module: DeliberatorMockAI.WellSpecified)
 
       # Phase 3: Deliberator processes and moves to planned
-      assert result == {:moved, :planned}
+      # Council may return moved or moved_and_updated (with decision notes)
+      assert elem(result, 0) in [:moved, :moved_and_updated]
+      assert elem(result, 1) == :planned
     end
 
     test "returns no_action for completed item", %{temp_roadmap_root: root} do

@@ -71,8 +71,11 @@ defmodule Arbor.SDLC.IntegrationTest do
       assert item.title == "Feature to Plan"
 
       # Process through Deliberator (well-specified = move to planned)
-      {:ok, {:moved, :planned}} =
+      {:ok, outcome} =
         Deliberator.process_item(item, ai_module: DeliberatorMockAI.WellSpecified)
+
+      assert elem(outcome, 0) in [:moved, :moved_and_updated]
+      assert elem(outcome, 1) == :planned
     end
 
     test "complete flow: inbox -> brainstorming -> planned", %{temp_roadmap_root: root} do
@@ -100,8 +103,11 @@ defmodule Arbor.SDLC.IntegrationTest do
       {:ok, brainstorm_item} = SDLC.parse_file(brainstorm_path)
 
       # Stage 3: Deliberate brainstorming item
-      {:ok, {:moved, :planned}} =
+      {:ok, outcome} =
         Deliberator.process_item(brainstorm_item, ai_module: DeliberatorMockAI.WellSpecified)
+
+      assert elem(outcome, 0) in [:moved, :moved_and_updated]
+      assert elem(outcome, 1) == :planned
 
       # Verify the item would be placed in planned directory
       planned_path = Pipeline.stage_path(:planned, root)
