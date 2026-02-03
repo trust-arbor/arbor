@@ -83,4 +83,6 @@ venv/
 .claude-sdlc/debug/
 .claude-sdlc/projects/
 .claude-sdlc/todos/
+.claude-sdlc/.claude.json
 .claude-sdlc/.claude.json.backup.*
+.claude-sdlc/session-env/
