@@ -41,7 +41,7 @@ defmodule Arbor.Consensus.StateRecovery do
   @type proposal_info :: %{
           id: String.t(),
           proposer: String.t(),
-          change_type: atom(),
+          topic: atom(),
           description: String.t(),
           status: :submitted | :evaluating | :decided | :executed | :deadlocked,
           submitted_at: DateTime.t(),
@@ -182,7 +182,7 @@ defmodule Arbor.Consensus.StateRecovery do
     proposal = %{
       id: event.proposal_id,
       proposer: event.proposer,
-      change_type: event.change_type,
+      topic: event.change_type,
       description: event.description,
       target_layer: event.target_layer,
       target_module: event.target_module,

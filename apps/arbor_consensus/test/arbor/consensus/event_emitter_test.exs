@@ -86,7 +86,7 @@ defmodule Arbor.Consensus.EventEmitterTest do
       proposal = %{
         id: "prop_1",
         proposer: "agent_1",
-        change_type: :code_modification,
+        topic: :code_modification,
         description: "Fix bug",
         target_layer: 1,
         target_module: "Foo.Bar",

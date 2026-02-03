@@ -40,7 +40,6 @@ defmodule Arbor.SDLC.Evaluator do
   intentional unpredictability to prevent groupthink.
   """
 
-  @behaviour Arbor.Consensus.EvaluatorBackend
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   require Logger

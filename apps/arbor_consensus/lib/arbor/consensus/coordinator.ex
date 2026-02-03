@@ -41,7 +41,7 @@ defmodule Arbor.Consensus.Coordinator do
     last_event_position: 0,
     # Waiter support for await/2 (Phase 2)
     waiters: %{},
-    # Phase 4: Track pending evaluations from persistent agents
+    # Track pending evaluations from persistent agents
     # Map of proposal_id => %{quorum: n, mode: atom, collected: [Evaluation.t()], pending_evaluators: [atom()]}
     pending_evaluations: %{},
     # Phase 5: Routing stats for organic topic creation
@@ -65,7 +65,7 @@ defmodule Arbor.Consensus.Coordinator do
           last_event_position: non_neg_integer(),
           # Map of proposal_id => [{pid, monitor_ref}]
           waiters: %{String.t() => [{pid(), reference()}]},
-          # Phase 4: Pending evaluations from persistent agents
+          # Pending evaluations from persistent agents
           pending_evaluations: map(),
           # Phase 5: Routing stats for organic topic creation
           routing_stats: map(),
@@ -318,12 +318,12 @@ defmodule Arbor.Consensus.Coordinator do
         proposal_id: proposal.id,
         agent_id: proposal.proposer,
         data: %{
-          change_type: proposal.topic,
+          topic: proposal.topic,
           description: proposal.description
         }
       })
 
-      # Get council configuration from TopicRegistry or fall back to Config
+      # Get council configuration from TopicRegistry
       {perspectives, quorum} = resolve_council_config(proposal, state.config)
 
       # Spawn council asynchronously
@@ -508,7 +508,6 @@ defmodule Arbor.Consensus.Coordinator do
       deadlocked: state.proposals |> Map.values() |> Enum.count(&(&1.status == :deadlock)),
       evaluator_backend: state.evaluator_backend,
       config: %{
-        council_size: state.config.council_size,
         max_concurrent: state.config.max_concurrent_proposals,
         auto_execute: state.config.auto_execute_approved
       },
@@ -584,14 +583,14 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Phase 4: Handle evaluation completion from persistent agents
+  # Handle evaluation completion from persistent agents
   @impl true
   def handle_info({:evaluation_complete, proposal_id, evaluation}, state) do
     state = collect_agent_evaluation(state, proposal_id, evaluation)
     {:noreply, state}
   end
 
-  # Phase 4: Handle evaluation failure from persistent agents
+  # Handle evaluation failure from persistent agents
   @impl true
   def handle_info({:evaluation_failed, proposal_id, evaluator_name, reason}, state) do
     Logger.warning(
@@ -622,7 +621,7 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp check_capacity(state) do
-    # Count both legacy active councils and pending agent evaluations
+    # Count both direct active councils and pending agent evaluations
     active = map_size(state.active_councils) + map_size(state.pending_evaluations)
 
     if active < state.config.max_concurrent_proposals do
@@ -671,22 +670,20 @@ defmodule Arbor.Consensus.Coordinator do
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
   end
 
-  # Phase 4: Strangler Fig pattern - try agent delivery first, fall back to legacy
+  # Try agent delivery first, fall back to direct council spawning
   defp spawn_council(state, proposal, evaluator_backend, perspectives, quorum) do
-    # Try to get available evaluator agents for these perspectives
     case resolve_evaluator_agents(perspectives) do
       {:ok, agent_mapping} when map_size(agent_mapping) > 0 ->
-        # New path: deliver to persistent agents
         deliver_to_agents(state, proposal, agent_mapping, quorum)
 
       _ ->
-        # Legacy path: spawn temporary council tasks
-        spawn_council_legacy(state, proposal, evaluator_backend, perspectives, quorum)
+        # Direct path: spawn temporary council tasks
+        spawn_council_direct(state, proposal, evaluator_backend, perspectives, quorum)
     end
   end
 
-  # Legacy council spawning (preserved for fallback)
-  defp spawn_council_legacy(state, proposal, evaluator_backend, perspectives, quorum) do
+  # Direct council spawning: temporary tasks for each perspective
+  defp spawn_council_direct(state, proposal, evaluator_backend, perspectives, quorum) do
     config = state.config
 
     task =
@@ -703,7 +700,7 @@ defmodule Arbor.Consensus.Coordinator do
     %{state | active_councils: Map.put(state.active_councils, proposal.id, task)}
   end
 
-  # Phase 4: Deliver proposal to persistent evaluator agents
+  # Deliver proposal to persistent evaluator agents
   defp deliver_to_agents(state, proposal, agent_mapping, quorum) do
     config = state.config
     deadline = DateTime.add(DateTime.utc_now(), config.evaluation_timeout_ms, :millisecond)
@@ -737,10 +734,10 @@ defmodule Arbor.Consensus.Coordinator do
       end)
 
     if delivered == [] do
-      # No agents accepted the delivery, fall back to legacy
-      Logger.warning("No agents accepted proposal #{proposal.id}, falling back to legacy council")
+      # No agents accepted the delivery, fall back to direct council
+      Logger.warning("No agents accepted proposal #{proposal.id}, falling back to direct council")
 
-      spawn_council_legacy(
+      spawn_council_direct(
         state,
         proposal,
         state.evaluator_backend,
@@ -792,11 +789,11 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Phase 4: Collect an evaluation from a persistent agent
+  # Collect an evaluation from a persistent agent
   defp collect_agent_evaluation(state, proposal_id, evaluation) do
     case Map.get(state.pending_evaluations, proposal_id) do
       nil ->
-        # Not tracking this proposal via agents (might be legacy path)
+        # Not tracking this proposal via agents (might be direct path)
         Logger.debug("Received agent evaluation for untracked proposal #{proposal_id}")
         state
 
@@ -826,7 +823,7 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Phase 4: Remove a failed evaluator from pending list
+  # Remove a failed evaluator from pending list
   defp remove_pending_evaluator(state, proposal_id, evaluator_name) do
     case Map.get(state.pending_evaluations, proposal_id) do
       nil ->
@@ -846,7 +843,7 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Phase 4: Check if agent evaluations are complete
+  # Check if agent evaluations are complete
   defp check_agent_evaluation_completion(state, proposal_id, pending) do
     quorum = pending.quorum
 
@@ -882,7 +879,7 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Phase 4: Finalize agent evaluations and render decision
+  # Finalize agent evaluations and render decision
   defp finalize_agent_evaluations(state, proposal_id, pending) do
     evaluations = Enum.reverse(pending.collected)
 
@@ -894,7 +891,7 @@ defmodule Arbor.Consensus.Coordinator do
     # Clean up pending tracking
     state = %{state | pending_evaluations: Map.delete(state.pending_evaluations, proposal_id)}
 
-    # Process evaluations (same as legacy path)
+    # Process evaluations (same as direct council path)
     process_evaluations(state, proposal_id, evaluations)
   end
 
@@ -1214,36 +1211,44 @@ defmodule Arbor.Consensus.Coordinator do
     _ -> []
   end
 
-  # Resolve council configuration from TopicRegistry or fall back to Config.
-  # Advisory mode proposals get quorum of 0.
-  defp resolve_council_config(proposal, config) do
-    case TopicRegistry.get(proposal.topic) do
+  # Resolve council configuration from TopicRegistry.
+  # Advisory mode proposals get quorum of nil (collect all perspectives).
+  defp resolve_council_config(proposal, _config) do
+    topic = proposal.topic
+
+    case TopicRegistry.get(topic) do
       {:ok, rule} ->
-        resolve_from_topic_rule(proposal, rule, config)
+        resolve_from_topic_rule(proposal, rule)
 
       {:error, :not_found} ->
-        # Fallback to Config-based routing (with deprecation warning)
-        maybe_warn_config_fallback(proposal.topic)
-        resolve_from_config(proposal, config)
+        # Topic not in registry — use default perspectives (all non-human)
+        Logger.warning("Topic #{inspect(topic)} not found in TopicRegistry, using defaults")
+        default_perspectives_and_quorum(proposal)
     end
   rescue
-    # TopicRegistry not running, use Config
+    # TopicRegistry not running — fall back to default perspectives
     _ ->
-      resolve_from_config(proposal, config)
+      default_perspectives_and_quorum(proposal)
+  end
+
+  defp default_perspectives_and_quorum(proposal) do
+    perspectives = Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
+    quorum = if proposal.mode == :advisory, do: nil, else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
+    {perspectives, quorum}
   end
 
   # Resolve council config from TopicRule
-  defp resolve_from_topic_rule(proposal, rule, config) do
-    # Get perspectives from required_evaluators if present, otherwise fall back to Config
+  defp resolve_from_topic_rule(proposal, rule) do
+    # Get perspectives from required_evaluators if present, otherwise use defaults
     perspectives =
       case rule.required_evaluators do
         [] ->
-          # No evaluators specified in rule, use Config
-          Config.perspectives_for(config, proposal.topic)
+          # No evaluators specified in rule, use default perspectives
+          Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
 
         evaluators ->
           # Resolve perspectives from evaluator modules
-          resolve_perspectives_from_evaluators(evaluators, proposal.topic, config)
+          resolve_perspectives_from_evaluators(evaluators)
       end
 
     # Calculate quorum - advisory mode gets nil (no early termination, collect all)
@@ -1260,13 +1265,12 @@ defmodule Arbor.Consensus.Coordinator do
 
   # Resolve perspectives from evaluator modules.
   # Calls evaluator.perspectives() for each module and flattens the results.
-  # Falls back to Config if no valid perspectives are returned.
-  defp resolve_perspectives_from_evaluators(evaluators, topic, config) do
+  # Falls back to Protocol defaults if no valid perspectives are returned.
+  defp resolve_perspectives_from_evaluators(evaluators) do
     perspectives =
       evaluators
       |> Enum.flat_map(fn evaluator ->
         try do
-          # Check if module implements the Evaluator behaviour
           if function_exported?(evaluator, :perspectives, 0) do
             evaluator.perspectives()
           else
@@ -1279,47 +1283,9 @@ defmodule Arbor.Consensus.Coordinator do
       |> Enum.uniq()
 
     if perspectives == [] do
-      # No valid perspectives from evaluators, fall back to Config
-      Config.perspectives_for(config, topic)
+      Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
     else
       perspectives
-    end
-  end
-
-  # Resolve council config from Config (legacy path)
-  defp resolve_from_config(proposal, config) do
-    perspectives = Council.required_perspectives(proposal, config)
-
-    # Advisory mode gets nil quorum (no early termination, collect all perspectives)
-    quorum =
-      if proposal.mode == :advisory do
-        nil
-      else
-        Config.quorum_for(config, proposal.topic)
-      end
-
-    {perspectives, quorum}
-  end
-
-  # Log deprecation warning for Config-based routing
-  defp maybe_warn_config_fallback(topic) do
-    # Only warn for non-legacy topics
-    if topic not in [
-         :code_modification,
-         :governance_change,
-         :capability_change,
-         :configuration_change,
-         :dependency_change,
-         :layer_modification,
-         :documentation_change,
-         :test_change,
-         :sdlc_decision,
-         :general
-       ] do
-      Logger.warning(
-        "Topic #{inspect(topic)} not found in TopicRegistry, falling back to Config. " <>
-          "Consider registering topics via :topic_governance for explicit routing rules."
-      )
     end
   end
 
@@ -1471,7 +1437,7 @@ defmodule Arbor.Consensus.Coordinator do
     # Rebuild proposals map with Proposal structs
     proposals =
       Map.new(recovered.proposals, fn {id, info} ->
-        # Migrate legacy fields into context for recovered proposals
+        # Migrate old fields into context for recovered proposals
         context =
           %{}
           |> maybe_put(:target_module, info.target_module)
@@ -1479,7 +1445,7 @@ defmodule Arbor.Consensus.Coordinator do
         proposal = %Proposal{
           id: id,
           proposer: info.proposer,
-          topic: info.change_type,
+          topic: info.topic,
           mode: :decision,
           description: info.description,
           target_layer: info.target_layer,
@@ -1597,17 +1563,17 @@ defmodule Arbor.Consensus.Coordinator do
     # Similar to spawn_council but with specific perspectives (used for recovery)
     config = state.config
 
-    # Resolve quorum from TopicRegistry or Config
+    # Resolve quorum from TopicRegistry or Protocol default
     quorum =
       if proposal.mode == :advisory do
-        0
+        nil
       else
         case TopicRegistry.get(proposal.topic) do
           {:ok, rule} ->
             TopicRule.quorum_to_number(rule.min_quorum, length(perspectives))
 
           _ ->
-            Config.quorum_for(config, proposal.topic)
+            Arbor.Contracts.Consensus.Protocol.standard_quorum()
         end
       end
 
@@ -1627,7 +1593,6 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp emit_coordinator_started(state) do
     config_map = %{
-      council_size: state.config.council_size,
       evaluation_timeout_ms: state.config.evaluation_timeout_ms,
       max_concurrent_proposals: state.config.max_concurrent_proposals,
       auto_execute_approved: state.config.auto_execute_approved

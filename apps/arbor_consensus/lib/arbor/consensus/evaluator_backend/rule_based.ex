@@ -19,7 +19,6 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   - `:human` — Always abstains, signals need for human review
   """
 
-  @behaviour Arbor.Consensus.EvaluatorBackend
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
@@ -65,11 +64,9 @@ defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
   def strategy, do: :rule_based
 
   # ============================================================================
-  # Evaluate Callback (shared by both behaviours)
+  # Evaluate Callback
   # ============================================================================
 
-  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
-  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
   @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do

@@ -95,7 +95,7 @@ defmodule Arbor.Contracts.API.Consensus do
               {:ok, proposal_id()} | {:error, :invalid_proposal | :authorization_denied | term()}
 
   @doc """
-  Submit a formal proposal for consensus evaluation (Phase 2 API).
+  Submit a formal proposal for consensus evaluation.
 
   Full Coordinator enforcement: dedup, quota, authorization, capacity.
   Returns immediately with the proposal ID. Use `await/2` for results.
@@ -110,7 +110,7 @@ defmodule Arbor.Contracts.API.Consensus do
               {:ok, proposal_id()} | {:error, term()}
 
   @doc """
-  Ask an advisory question through the consensus system (Phase 2 API).
+  Ask an advisory question through the consensus system.
 
   Routes through Coordinator for TopicMatcher routing but with
   relaxed enforcement (no dedup, no quota, no quorum requirement).
@@ -129,7 +129,7 @@ defmodule Arbor.Contracts.API.Consensus do
               {:ok, proposal_id()} | {:error, term()}
 
   @doc """
-  Wait for a proposal's result (Phase 2 API).
+  Wait for a proposal's result.
 
   Registers as a waiter in the Coordinator and receives the result
   via direct message. No polling, no signal bus.
@@ -279,7 +279,7 @@ defmodule Arbor.Contracts.API.Consensus do
   # ===========================================================================
 
   @optional_callbacks [
-    # Phase 2 API (agent-facing)
+    # Async agent-facing API
     propose: 2,
     ask: 2,
     await: 2,
