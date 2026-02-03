@@ -70,22 +70,22 @@ defmodule Arbor.Gateway.Bridge.Router do
     end
   rescue
     e ->
-      Logger.warning("Bridge authorization error, falling back to passthrough",
+      Logger.error("Bridge authorization error, failing closed to deny",
         tool: tool_name,
         session: session_id,
         error: Exception.message(e)
       )
 
-      %{decision: "passthrough"}
+      %{decision: "deny", reason: "authorization error: #{Exception.message(e)}"}
   catch
     :exit, reason ->
-      Logger.warning("Bridge authorization process unavailable, falling back to passthrough",
+      Logger.error("Bridge authorization process unavailable, failing closed to deny",
         tool: tool_name,
         session: session_id,
         error: inspect(reason)
       )
 
-      %{decision: "passthrough"}
+      %{decision: "deny", reason: "authorization unavailable"}
   end
 
   defp emit_bridge_signal(session_id, tool_name, result) do
