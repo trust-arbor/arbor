@@ -49,7 +49,8 @@ defmodule Arbor.SDLC.SessionRunner do
     :config,
     :hand_name,
     :working_dir,
-    :env_vars
+    :env_vars,
+    :resume_session_id
   ]
 
   # =============================================================================
@@ -104,6 +105,7 @@ defmodule Arbor.SDLC.SessionRunner do
     execution_mode = Keyword.get(opts, :execution_mode, :auto)
     working_dir = Keyword.get(opts, :working_dir, File.cwd!())
     env_vars = Keyword.get(opts, :env_vars, %{})
+    resume_session_id = Keyword.get(opts, :resume_session_id)
 
     state = %__MODULE__{
       item_path: item_path,
@@ -113,7 +115,8 @@ defmodule Arbor.SDLC.SessionRunner do
       config: config,
       working_dir: working_dir,
       env_vars: env_vars,
-      started_at: DateTime.utc_now()
+      started_at: DateTime.utc_now(),
+      resume_session_id: resume_session_id
     }
 
     # Start the session asynchronously
@@ -161,23 +164,41 @@ defmodule Arbor.SDLC.SessionRunner do
   # =============================================================================
 
   defp start_auto_session(state) do
-    Logger.info("Starting auto session for item", item_path: state.item_path)
+    Logger.info("Starting auto session for item",
+      item_path: state.item_path,
+      resume: state.resume_session_id != nil
+    )
 
-    # Build a session ID based on item path
-    session_id = generate_session_id(state.item_path)
+    # Build a session ID based on item path (or use resume ID)
+    session_id = state.resume_session_id || generate_session_id(state.item_path)
 
     # Prepare environment with SDLC context
     env = build_env(state, session_id)
 
     # Build the claude command
-    # Use -p for print mode with the prompt
-    args = [
-      "-p",
-      state.prompt,
-      "--output-format",
-      "json",
-      "--dangerously-skip-permissions"
-    ]
+    # Use -p for print mode with the prompt, or --resume for continuing
+    args =
+      if state.resume_session_id do
+        # Resume an existing session
+        [
+          "--resume",
+          state.resume_session_id,
+          "-p",
+          state.prompt,
+          "--output-format",
+          "json",
+          "--dangerously-skip-permissions"
+        ]
+      else
+        # Start a new session
+        [
+          "-p",
+          state.prompt,
+          "--output-format",
+          "json",
+          "--dangerously-skip-permissions"
+        ]
+      end
 
     # Notify parent that session is starting
     send(state.parent, {:session_started, state.item_path, session_id})
@@ -405,12 +426,56 @@ defmodule Arbor.SDLC.SessionRunner do
   end
 
   defp build_env(state, session_id) do
+    # Get the SDLC config directory for custom hooks
+    sdlc_config_dir = sdlc_config_directory(state.working_dir)
+
     base_env = %{
       "ARBOR_SDLC_ITEM_PATH" => state.item_path,
       "ARBOR_SDLC_SESSION_ID" => session_id,
       "ARBOR_SESSION_TYPE" => "sdlc_auto"
     }
 
+    # Add CLAUDE_CONFIG_DIR if SDLC hooks exist
+    base_env =
+      if File.dir?(sdlc_config_dir) do
+        Map.put(base_env, "CLAUDE_CONFIG_DIR", sdlc_config_dir)
+      else
+        base_env
+      end
+
     Map.merge(base_env, state.env_vars)
+  end
+
+  # Get the path to the SDLC-specific Claude config directory
+  defp sdlc_config_directory(working_dir) do
+    # Look for .claude-sdlc in the working directory or project root
+    cond do
+      File.dir?(Path.join(working_dir, ".claude-sdlc")) ->
+        Path.join(working_dir, ".claude-sdlc")
+
+      # Check if we're in a subdirectory
+      File.dir?(Path.join([working_dir, "..", ".claude-sdlc"])) ->
+        Path.expand(Path.join([working_dir, "..", ".claude-sdlc"]))
+
+      # Fall back to project root detection
+      true ->
+        find_sdlc_config_dir(working_dir)
+    end
+  end
+
+  defp find_sdlc_config_dir(dir) do
+    sdlc_dir = Path.join(dir, ".claude-sdlc")
+
+    cond do
+      File.dir?(sdlc_dir) ->
+        sdlc_dir
+
+      dir == "/" or dir == "" ->
+        # Not found, return a default path that won't exist
+        Path.join(File.cwd!(), ".claude-sdlc")
+
+      true ->
+        find_sdlc_config_dir(Path.dirname(dir))
+    end
   end
 end
