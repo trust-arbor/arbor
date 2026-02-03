@@ -20,7 +20,7 @@ defmodule Arbor.Security.Escalation do
 
       %{
         proposer: principal_id,
-        change_type: :authorization_request,
+        topic: :authorization_request,
         description: "Authorization request for resource",
         metadata: %{
           principal_id: "agent_...",
@@ -75,7 +75,7 @@ defmodule Arbor.Security.Escalation do
   def submit_for_approval(consensus_module, capability, principal_id, resource_uri) do
     proposal = %{
       proposer: principal_id,
-      change_type: :authorization_request,
+      topic: :authorization_request,
       description: "Authorization request for #{resource_uri}",
       metadata: %{
         principal_id: principal_id,
