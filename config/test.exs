@@ -22,6 +22,11 @@ config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
 
+# Don't start the dashboard HTTP server in tests
+config :arbor_dashboard, Arbor.Dashboard.Endpoint,
+  http: [port: 4002],
+  server: false
+
 # Disable checkpoint integration in tests (module may not be available)
 config :arbor_signals,
   checkpoint_module: nil,
