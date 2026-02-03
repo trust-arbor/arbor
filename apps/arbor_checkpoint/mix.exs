@@ -8,6 +8,10 @@ defmodule Arbor.Checkpoint.MixProject do
     [
       app: :arbor_checkpoint,
       version: @version,
+      build_path: "../../_build",
+      config_path: "../../config/config.exs",
+      deps_path: "../../deps",
+      lockfile: "../../mix.lock",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -17,6 +21,7 @@ defmodule Arbor.Checkpoint.MixProject do
       docs: docs(),
       # Testing
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_pattern: "*_test.exs",
       test_coverage: [
         threshold: 90,
         ignore_modules: [

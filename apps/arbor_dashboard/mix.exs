@@ -22,7 +22,8 @@ defmodule Arbor.Dashboard.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Arbor.Dashboard.Application, []}
+      mod: {Arbor.Dashboard.Application, []},
+      env: [start_children: Mix.env() != :test]
     ]
   end
 

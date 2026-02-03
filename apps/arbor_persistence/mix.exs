@@ -13,6 +13,7 @@ defmodule Arbor.Persistence.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: [~r/test\/support/],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: docs(),

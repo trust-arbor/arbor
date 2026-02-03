@@ -16,7 +16,8 @@ defmodule Arbor.SDLC.MixProject do
       deps: deps(),
       docs: docs(),
       description: description(),
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: [~r/test\/support/]
     ]
   end
 
