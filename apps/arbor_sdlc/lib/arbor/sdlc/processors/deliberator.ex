@@ -51,7 +51,6 @@ defmodule Arbor.SDLC.Processors.Deliberator do
   require Logger
 
   alias Arbor.Consensus.Helpers, as: ConsensusHelpers
-  alias Arbor.Contracts.Consensus.Proposal
   alias Arbor.Contracts.Flow.Item
   alias Arbor.Flow.ItemParser
   alias Arbor.SDLC.{Config, Evaluator, Events}
@@ -292,73 +291,67 @@ defmodule Arbor.SDLC.Processors.Deliberator do
   defp deliberate_with_retries(item, decision_points, config, opts, attempt, max_attempts) do
     Logger.info("Council deliberation attempt #{attempt}/#{max_attempts}", title: item.title)
 
-    # Build proposal for council
+    # Build proposal attrs for council
     proposal_attrs = build_proposal(item, decision_points, attempt)
 
-    case Proposal.new(proposal_attrs) do
-      {:ok, proposal} ->
-        # Submit to consensus using propose (async) + await (signal-based)
-        submit_result =
-          Arbor.Consensus.submit(proposal,
-            evaluator_backend: Evaluator,
-            server: config.consensus_server
-          )
+    # Submit to consensus using propose/2 (async) + await (signal-based)
+    # propose/2 handles Proposal construction internally
+    propose_opts = [
+      evaluator_backend: Evaluator,
+      server: config.consensus_server
+    ]
 
-        case submit_result do
-          {:ok, proposal_id} ->
-            Events.emit_decision_requested(item, proposal_id, attempt: attempt)
+    case Arbor.Consensus.propose(proposal_attrs, propose_opts) do
+      {:ok, proposal_id} ->
+        Events.emit_decision_requested(item, proposal_id, attempt: attempt)
 
-            # Use signal-based await instead of polling
-            timeout = config.ai_timeout * 10
-            await_opts = [timeout: timeout]
+        # Use signal-based await instead of polling
+        timeout = config.ai_timeout * 10
+        await_opts = [timeout: timeout]
 
-            await_opts =
-              if config.consensus_server do
-                Keyword.put(await_opts, :server, config.consensus_server)
-              else
-                await_opts
-              end
+        await_opts =
+          if config.consensus_server do
+            Keyword.put(await_opts, :server, config.consensus_server)
+          else
+            await_opts
+          end
 
-            case ConsensusHelpers.await(proposal_id, await_opts) do
-              {:ok, decision} ->
-                Events.emit_decision_rendered(
-                  proposal_id,
-                  decision.decision,
-                  %{
-                    approval_count: count_votes(decision.evaluations, :approve),
-                    rejection_count: count_votes(decision.evaluations, :reject),
-                    abstain_count: count_votes(decision.evaluations, :abstain)
-                  }
-                )
+        case ConsensusHelpers.await(proposal_id, await_opts) do
+          {:ok, decision} ->
+            Events.emit_decision_rendered(
+              proposal_id,
+              decision.decision,
+              %{
+                approval_count: count_votes(decision.evaluations, :approve),
+                rejection_count: count_votes(decision.evaluations, :reject),
+                abstain_count: count_votes(decision.evaluations, :abstain)
+              }
+            )
 
-                process_decision(
-                  item,
-                  decision,
-                  decision_points,
-                  config,
-                  opts,
-                  attempt,
-                  max_attempts
-                )
+            process_decision(
+              item,
+              decision,
+              decision_points,
+              config,
+              opts,
+              attempt,
+              max_attempts
+            )
 
-              {:error, :timeout} ->
-                # Deadlock - document as open question and move to planned
-                Logger.warning("Council decision timeout, treating as deadlock",
-                  title: item.title
-                )
+          {:error, :timeout} ->
+            # Deadlock - document as open question and move to planned
+            Logger.warning("Council decision timeout, treating as deadlock",
+              title: item.title
+            )
 
-                handle_deadlock(item, decision_points, config, opts)
-
-              {:error, reason} ->
-                {:error, {:council_decision_failed, reason}}
-            end
+            handle_deadlock(item, decision_points, config, opts)
 
           {:error, reason} ->
-            {:error, {:council_submit_failed, reason}}
+            {:error, {:council_decision_failed, reason}}
         end
 
       {:error, reason} ->
-        {:error, {:proposal_creation_failed, reason}}
+        {:error, {:proposal_submit_failed, reason}}
     end
   end
 
