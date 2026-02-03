@@ -61,8 +61,8 @@ defmodule Arbor.Web.Endpoint do
         only: ~w(arbor_web.css arbor_web.js)
       )
 
-      # Code reloading in dev
-      if code_reloading? do
+      # Code reloading in dev (use config check to avoid macro hygiene issues)
+      if Application.compile_env(unquote(otp_app), __MODULE__)[:code_reloader] do
         plug(Phoenix.CodeReloader)
       end
 
