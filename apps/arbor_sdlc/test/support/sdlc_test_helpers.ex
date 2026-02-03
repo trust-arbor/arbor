@@ -192,10 +192,10 @@ defmodule Arbor.SDLC.TestHelpers do
   Uses fixed atom names to avoid atom exhaustion in tests.
   """
   def start_test_tracker(name \\ :test_sdlc_tracker) do
-    config = %Config{
+    config = Config.new(
       persistence_backend: ETSStore,
       persistence_name: name
-    }
+    )
 
     # Start the ETS store first
     {:ok, _store} = ETSStore.start_link(name: name)
