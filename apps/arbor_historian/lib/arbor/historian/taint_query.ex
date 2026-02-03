@@ -325,12 +325,16 @@ defmodule Arbor.Historian.TaintQuery do
 
         # Recurse for each child's downstream
         Enum.reduce(child_ids, new_acc, fn child_id, acc_inner ->
-          # Remove already-seen events to prevent infinite loops
-          seen_ids = Enum.map(acc_inner, fn e -> e.signal_id end)
-          remaining_events = Enum.reject(events, fn e -> e.signal_id in seen_ids end)
-          find_downstream_events(remaining_events, child_id, depth - 1, acc_inner)
+          accumulate_child_events(events, child_id, depth, acc_inner)
         end)
     end
+  end
+
+  defp accumulate_child_events(events, child_id, depth, acc_inner) do
+    # Remove already-seen events to prevent infinite loops
+    seen_ids = Enum.map(acc_inner, fn e -> e.signal_id end)
+    remaining_events = Enum.reject(events, fn e -> e.signal_id in seen_ids end)
+    find_downstream_events(remaining_events, child_id, depth - 1, acc_inner)
   end
 
   defp build_summary(events) do

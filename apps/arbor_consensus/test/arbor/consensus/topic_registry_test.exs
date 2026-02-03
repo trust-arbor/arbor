@@ -1,6 +1,7 @@
 defmodule Arbor.Consensus.TopicRegistryTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Checkpoint.Store.ETS, as: CheckpointETS
   alias Arbor.Consensus.{TopicRegistry, TopicRule}
 
   setup do
@@ -288,10 +289,10 @@ defmodule Arbor.Consensus.TopicRegistryTest do
 
       # Tamper with the checkpoint data
       {:ok, checkpoint} =
-        Arbor.Checkpoint.Store.ETS.get(ctx.checkpoint_id, [])
+        CheckpointETS.get(ctx.checkpoint_id, [])
 
       tampered_data = %{checkpoint.data | data: %{evil_topic: %{min_quorum: :none}}}
-      Arbor.Checkpoint.Store.ETS.put(ctx.checkpoint_id, %{checkpoint | data: tampered_data}, [])
+      CheckpointETS.put(ctx.checkpoint_id, %{checkpoint | data: tampered_data}, [])
 
       # Start new registry with same keys — tampered checkpoint should be rejected
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
@@ -390,9 +391,9 @@ defmodule Arbor.Consensus.TopicRegistryTest do
   end
 
   defp ensure_checkpoint_store_running do
-    case Process.whereis(Arbor.Checkpoint.Store.ETS) do
+    case Process.whereis(CheckpointETS) do
       nil ->
-        Arbor.Checkpoint.Store.ETS.start_link([])
+        CheckpointETS.start_link([])
 
       pid when is_pid(pid) ->
         :ok

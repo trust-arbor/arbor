@@ -239,32 +239,32 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     text = Map.get(response, :text) || ""
 
     case Jason.decode(text) do
-      {:ok, %{"needs_decisions" => false}} ->
-        {:ok, :well_specified}
-
-      {:ok, %{"needs_decisions" => true, "decision_points" => points}} ->
-        {:ok, {:needs_decisions, points}}
-
-      {:ok, %{"needs_decisions" => true}} ->
-        # Has decisions but no points specified
-        {:ok, {:needs_decisions, []}}
-
-      {:ok, %{"decision_points" => points}} when is_list(points) and points != [] ->
-        # LLM returned decision_points without needs_decisions key
-        {:ok, {:needs_decisions, points}}
-
-      {:ok, %{}} ->
-        # Valid JSON but no decision points — treat as well-specified
-        {:ok, :well_specified}
+      {:ok, data} ->
+        interpret_analysis(data)
 
       {:error, _} ->
         # Try to extract JSON
         case extract_json(text) do
-          {:ok, data} -> parse_analysis_response(%{text: Jason.encode!(data)})
+          {:ok, data} -> interpret_analysis(data)
           :error -> {:ok, :well_specified}
         end
     end
   end
+
+  defp interpret_analysis(%{"needs_decisions" => false}), do: {:ok, :well_specified}
+
+  defp interpret_analysis(%{"needs_decisions" => true, "decision_points" => points}),
+    do: {:ok, {:needs_decisions, points}}
+
+  # Has decisions but no points specified
+  defp interpret_analysis(%{"needs_decisions" => true}), do: {:ok, {:needs_decisions, []}}
+
+  # LLM returned decision_points without needs_decisions key
+  defp interpret_analysis(%{"decision_points" => points}) when is_list(points) and points != [],
+    do: {:ok, {:needs_decisions, points}}
+
+  # Valid JSON but no decision points — treat as well-specified
+  defp interpret_analysis(%{}), do: {:ok, :well_specified}
 
   defp extract_json(text) do
     case Regex.run(~r/\{[\s\S]*\}/, text) do

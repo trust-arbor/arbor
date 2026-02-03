@@ -305,34 +305,49 @@ defmodule Arbor.Memory.Preferences do
   """
   @spec deserialize(map()) :: t()
   def deserialize(data) do
+    %__MODULE__{
+      agent_id: get_field(data, "agent_id", nil),
+      decay_rate: get_field(data, "decay_rate", 0.10) * 1.0,
+      type_quotas: deserialize_type_quotas(get_field(data, "type_quotas", %{})),
+      pinned_memories: get_field(data, "pinned_memories", []),
+      max_pins: get_field(data, "max_pins", 50),
+      attention_focus: get_field(data, "attention_focus", nil),
+      retrieval_threshold: get_field(data, "retrieval_threshold", 0.3) * 1.0,
+      consolidation_interval: get_field(data, "consolidation_interval", 1_800_000)
+    }
+  end
+
+  # ============================================================================
+  # Deserialization Helpers
+  # ============================================================================
+
+  defp get_field(data, string_key, default) do
+    case data[string_key] do
+      nil ->
+        atom_key = String.to_existing_atom(string_key)
+        data[atom_key] || default
+
+      value ->
+        value
+    end
+  end
+
+  @known_quota_types [:fact, :experience, :skill, :insight, :relationship]
+
+  defp deserialize_type_quotas(quotas) do
     alias Arbor.Common.SafeAtom
 
-    # Known quota types that are safe to convert
-    known_types = [:fact, :experience, :skill, :insight, :relationship]
+    quotas
+    |> Enum.map(fn {k, v} ->
+      key =
+        case SafeAtom.to_allowed(to_string(k), @known_quota_types) do
+          {:ok, atom} -> atom
+          {:error, _} -> String.to_existing_atom(to_string(k))
+        end
 
-    type_quotas =
-      (data["type_quotas"] || data[:type_quotas] || %{})
-      |> Enum.map(fn {k, v} ->
-        key =
-          case SafeAtom.to_allowed(to_string(k), known_types) do
-            {:ok, atom} -> atom
-            {:error, _} -> String.to_existing_atom(to_string(k))
-          end
-
-        {key, deserialize_quota(v)}
-      end)
-      |> Map.new()
-
-    %__MODULE__{
-      agent_id: data["agent_id"] || data[:agent_id],
-      decay_rate: (data["decay_rate"] || data[:decay_rate] || 0.10) * 1.0,
-      type_quotas: type_quotas,
-      pinned_memories: data["pinned_memories"] || data[:pinned_memories] || [],
-      max_pins: data["max_pins"] || data[:max_pins] || 50,
-      attention_focus: data["attention_focus"] || data[:attention_focus],
-      retrieval_threshold: (data["retrieval_threshold"] || data[:retrieval_threshold] || 0.3) * 1.0,
-      consolidation_interval: data["consolidation_interval"] || data[:consolidation_interval] || 1_800_000
-    }
+      {key, deserialize_quota(v)}
+    end)
+    |> Map.new()
   end
 
   # ============================================================================

@@ -1677,15 +1677,7 @@ defmodule Arbor.Consensus.Coordinator do
             stats,
             keyword,
             %{count: 1, last_seen: now, descriptions: [proposal.description]},
-            fn entry ->
-              descriptions =
-                Enum.take(
-                  [proposal.description | entry.descriptions],
-                  @max_descriptions_per_pattern
-                )
-
-              %{entry | count: entry.count + 1, last_seen: now, descriptions: descriptions}
-            end
+            &update_routing_stat_entry(&1, now, proposal.description)
           )
         end)
 
@@ -1705,6 +1697,16 @@ defmodule Arbor.Consensus.Coordinator do
     else
       state
     end
+  end
+
+  defp update_routing_stat_entry(entry, now, description) do
+    descriptions =
+      Enum.take(
+        [description | entry.descriptions],
+        @max_descriptions_per_pattern
+      )
+
+    %{entry | count: entry.count + 1, last_seen: now, descriptions: descriptions}
   end
 
   # Extract significant keywords from a description

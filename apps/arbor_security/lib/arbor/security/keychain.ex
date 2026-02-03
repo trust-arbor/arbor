@@ -553,37 +553,40 @@ defmodule Arbor.Security.Keychain do
   defp build_peers(peers_data, ratchet_sessions) when is_map(peers_data) do
     ratchet_sessions = ratchet_sessions || %{}
 
-    result =
-      Enum.reduce_while(peers_data, {:ok, %{}}, fn {id, data}, {:ok, acc} ->
-        with {:ok, sign_pub} <- Base.decode64(data["signing_public"]),
-             {:ok, enc_pub} <- Base.decode64(data["encryption_public"]),
-             {:ok, trusted_at, _} <- DateTime.from_iso8601(data["trusted_at"]) do
-          # Restore ratchet session if one existed
-          ratchet_session =
-            case Map.get(ratchet_sessions, id) do
-              nil -> nil
-              session_data ->
-                case DoubleRatchet.from_map(session_data) do
-                  {:ok, session} -> session
-                  {:error, _} -> nil
-                end
-            end
+    Enum.reduce_while(peers_data, {:ok, %{}}, fn {id, data}, {:ok, acc} ->
+      build_peer_entry(id, data, ratchet_sessions, acc)
+    end)
+  end
 
-          peer = %{
-            signing_public: sign_pub,
-            encryption_public: enc_pub,
-            name: data["name"],
-            trusted_at: trusted_at,
-            ratchet_session: ratchet_session
-          }
+  defp build_peer_entry(id, data, ratchet_sessions, acc) do
+    with {:ok, sign_pub} <- Base.decode64(data["signing_public"]),
+         {:ok, enc_pub} <- Base.decode64(data["encryption_public"]),
+         {:ok, trusted_at, _} <- DateTime.from_iso8601(data["trusted_at"]) do
+      ratchet_session = restore_ratchet_session(ratchet_sessions, id)
 
-          {:cont, {:ok, Map.put(acc, id, peer)}}
-        else
-          _ -> {:halt, {:error, :invalid_peer_data}}
+      peer = %{
+        signing_public: sign_pub,
+        encryption_public: enc_pub,
+        name: data["name"],
+        trusted_at: trusted_at,
+        ratchet_session: ratchet_session
+      }
+
+      {:cont, {:ok, Map.put(acc, id, peer)}}
+    else
+      _ -> {:halt, {:error, :invalid_peer_data}}
+    end
+  end
+
+  defp restore_ratchet_session(ratchet_sessions, id) do
+    case Map.get(ratchet_sessions, id) do
+      nil -> nil
+      session_data ->
+        case DoubleRatchet.from_map(session_data) do
+          {:ok, session} -> session
+          {:error, _} -> nil
         end
-      end)
-
-    result
+    end
   end
 
   defp build_channel_keys(nil), do: {:ok, %{}}

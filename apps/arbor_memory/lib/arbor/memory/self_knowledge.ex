@@ -633,62 +633,92 @@ defmodule Arbor.Memory.SelfKnowledge do
   @spec deserialize(map()) :: t()
   def deserialize(data) do
     %__MODULE__{
-      agent_id: data["agent_id"] || data[:agent_id],
-      capabilities:
-        Enum.map(data["capabilities"] || data[:capabilities] || [], fn c ->
-          %{
-            name: c["name"] || c[:name],
-            proficiency: (c["proficiency"] || c[:proficiency]) * 1.0,
-            evidence: c["evidence"] || c[:evidence],
-            added_at: parse_datetime(c["added_at"] || c[:added_at])
-          }
-        end),
-      personality_traits:
-        Enum.map(data["personality_traits"] || data[:personality_traits] || [], fn t ->
-          trait_str = t["trait"] || t[:trait]
-
-          %{
-            trait: safe_atom_or_new(trait_str),
-            strength: (t["strength"] || t[:strength]) * 1.0,
-            evidence: t["evidence"] || t[:evidence],
-            added_at: parse_datetime(t["added_at"] || t[:added_at])
-          }
-        end),
-      values:
-        Enum.map(data["values"] || data[:values] || [], fn v ->
-          value_str = v["value"] || v[:value]
-
-          %{
-            value: safe_atom_or_new(value_str),
-            importance: (v["importance"] || v[:importance]) * 1.0,
-            evidence: v["evidence"] || v[:evidence],
-            added_at: parse_datetime(v["added_at"] || v[:added_at])
-          }
-        end),
-      preferences:
-        Enum.map(data["preferences"] || data[:preferences] || [], fn p ->
-          pref = p["preference"] || p[:preference]
-
-          %{
-            preference: deserialize_preference_key(pref),
-            strength: (p["strength"] || p[:strength]) * 1.0,
-            added_at: parse_datetime(p["added_at"] || p[:added_at])
-          }
-        end),
-      growth_log:
-        Enum.map(data["growth_log"] || data[:growth_log] || [], fn g ->
-          area = g["area"] || g[:area]
-
-          %{
-            area: deserialize_preference_key(area),
-            change: g["change"] || g[:change],
-            timestamp: parse_datetime(g["timestamp"] || g[:timestamp])
-          }
-        end),
-      architecture: data["architecture"] || data[:architecture] || %{},
-      version: data["version"] || data[:version] || 1,
+      agent_id: get_field(data, "agent_id", nil),
+      capabilities: deserialize_capabilities(get_field(data, "capabilities", [])),
+      personality_traits: deserialize_personality_traits(get_field(data, "personality_traits", [])),
+      values: deserialize_values(get_field(data, "values", [])),
+      preferences: deserialize_preferences_list(get_field(data, "preferences", [])),
+      growth_log: deserialize_growth_log(get_field(data, "growth_log", [])),
+      architecture: get_field(data, "architecture", %{}),
+      version: get_field(data, "version", 1),
       version_history: []
     }
+  end
+
+  # ============================================================================
+  # Deserialization Helpers
+  # ============================================================================
+
+  defp get_field(data, string_key, default) do
+    case data[string_key] do
+      nil ->
+        atom_key = String.to_existing_atom(string_key)
+        data[atom_key] || default
+
+      value ->
+        value
+    end
+  end
+
+  defp deserialize_capabilities(items) do
+    Enum.map(items, fn c ->
+      %{
+        name: get_field(c, "name", nil),
+        proficiency: get_field(c, "proficiency", 0) * 1.0,
+        evidence: get_field(c, "evidence", nil),
+        added_at: parse_datetime(get_field(c, "added_at", nil))
+      }
+    end)
+  end
+
+  defp deserialize_personality_traits(items) do
+    Enum.map(items, fn t ->
+      trait_str = get_field(t, "trait", nil)
+
+      %{
+        trait: safe_atom_or_new(trait_str),
+        strength: get_field(t, "strength", 0) * 1.0,
+        evidence: get_field(t, "evidence", nil),
+        added_at: parse_datetime(get_field(t, "added_at", nil))
+      }
+    end)
+  end
+
+  defp deserialize_values(items) do
+    Enum.map(items, fn v ->
+      value_str = get_field(v, "value", nil)
+
+      %{
+        value: safe_atom_or_new(value_str),
+        importance: get_field(v, "importance", 0) * 1.0,
+        evidence: get_field(v, "evidence", nil),
+        added_at: parse_datetime(get_field(v, "added_at", nil))
+      }
+    end)
+  end
+
+  defp deserialize_preferences_list(items) do
+    Enum.map(items, fn p ->
+      pref = get_field(p, "preference", nil)
+
+      %{
+        preference: deserialize_preference_key(pref),
+        strength: get_field(p, "strength", 0) * 1.0,
+        added_at: parse_datetime(get_field(p, "added_at", nil))
+      }
+    end)
+  end
+
+  defp deserialize_growth_log(items) do
+    Enum.map(items, fn g ->
+      area = get_field(g, "area", nil)
+
+      %{
+        area: deserialize_preference_key(area),
+        change: get_field(g, "change", nil),
+        timestamp: parse_datetime(get_field(g, "timestamp", nil))
+      }
+    end)
   end
 
   # ============================================================================
