@@ -176,9 +176,11 @@ defmodule Arbor.SDLC.PersistentFileTracker do
   def handle_call({:mark_moved, old_path, new_path, processor, content_hash}, _from, state) do
     processor_name = normalize_processor(processor)
     old_key = build_key(old_path, processor_name)
-    new_key = build_key(new_path, processor_name)
 
-    # Mark old path as moved
+    # Mark old path as moved. The new path gets a :pending record so the
+    # watcher treats it as needing processing by the next pipeline stage.
+    # needs_processing?/4 returns true for :pending, so the file will be
+    # picked up on the next scan and routed to the appropriate processor.
     old_record = %{
       path: old_path,
       processor: processor_name,
@@ -188,11 +190,15 @@ defmodule Arbor.SDLC.PersistentFileTracker do
       metadata: %{moved_to: new_path}
     }
 
-    # Create record for new path
+    # Create a :pending record for the new path so the watcher picks it
+    # up for the next pipeline stage. This preserves provenance (moved_from)
+    # while signaling that the file still needs processing at its new location.
+    new_key = build_key(new_path, processor_name)
+
     new_record = %{
       path: new_path,
       processor: processor_name,
-      status: :processed,
+      status: :pending,
       content_hash: content_hash,
       processed_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       metadata: %{moved_from: old_path}
@@ -213,6 +219,10 @@ defmodule Arbor.SDLC.PersistentFileTracker do
 
     result =
       case get_record_by_key(state, key) do
+        {:ok, %{status: :pending}} ->
+          # Moved here from a previous stage, needs processing
+          true
+
         {:ok, %{status: :failed}} ->
           # Failed before, retry
           true
@@ -341,7 +351,10 @@ defmodule Arbor.SDLC.PersistentFileTracker do
   end
 
   # Status may be atom or string depending on decode path
-  defp valid_known_status?(status) when status in [:processed, :skipped, :moved], do: true
+  defp valid_known_status?(status) when status in [:pending, :processed, :skipped, :moved],
+    do: true
+
+  defp valid_known_status?("pending"), do: true
   defp valid_known_status?("processed"), do: true
   defp valid_known_status?("skipped"), do: true
   defp valid_known_status?("moved"), do: true
