@@ -50,6 +50,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
 
   require Logger
 
+  alias Arbor.Consensus.Helpers, as: ConsensusHelpers
   alias Arbor.Contracts.Consensus.Proposal
   alias Arbor.Contracts.Flow.Item
   alias Arbor.Flow.ItemParser
@@ -296,7 +297,7 @@ defmodule Arbor.SDLC.Processors.Deliberator do
 
     case Proposal.new(proposal_attrs) do
       {:ok, proposal} ->
-        # Submit to consensus
+        # Submit to consensus using propose (async) + await (signal-based)
         submit_result =
           Arbor.Consensus.submit(proposal,
             evaluator_backend: Evaluator,
@@ -307,15 +308,50 @@ defmodule Arbor.SDLC.Processors.Deliberator do
           {:ok, proposal_id} ->
             Events.emit_decision_requested(item, proposal_id, attempt: attempt)
 
-            handle_council_decision(
-              item,
-              proposal_id,
-              decision_points,
-              config,
-              opts,
-              attempt,
-              max_attempts
-            )
+            # Use signal-based await instead of polling
+            timeout = config.ai_timeout * 10
+            await_opts = [timeout: timeout]
+
+            await_opts =
+              if config.consensus_server do
+                Keyword.put(await_opts, :server, config.consensus_server)
+              else
+                await_opts
+              end
+
+            case ConsensusHelpers.await(proposal_id, await_opts) do
+              {:ok, decision} ->
+                Events.emit_decision_rendered(
+                  proposal_id,
+                  decision.decision,
+                  %{
+                    approval_count: count_votes(decision.evaluations, :approve),
+                    rejection_count: count_votes(decision.evaluations, :reject),
+                    abstain_count: count_votes(decision.evaluations, :abstain)
+                  }
+                )
+
+                process_decision(
+                  item,
+                  decision,
+                  decision_points,
+                  config,
+                  opts,
+                  attempt,
+                  max_attempts
+                )
+
+              {:error, :timeout} ->
+                # Deadlock - document as open question and move to planned
+                Logger.warning("Council decision timeout, treating as deadlock",
+                  title: item.title
+                )
+
+                handle_deadlock(item, decision_points, config, opts)
+
+              {:error, reason} ->
+                {:error, {:council_decision_failed, reason}}
+            end
 
           {:error, reason} ->
             {:error, {:council_submit_failed, reason}}
@@ -408,65 +444,9 @@ defmodule Arbor.SDLC.Processors.Deliberator do
     |> Enum.join("\n")
   end
 
-  defp handle_council_decision(
-         item,
-         proposal_id,
-         decision_points,
-         config,
-         opts,
-         attempt,
-         max_attempts
-       ) do
-    # Wait for decision (poll with timeout)
-    case wait_for_decision(proposal_id, config) do
-      {:ok, decision} ->
-        Events.emit_decision_rendered(
-          proposal_id,
-          decision.decision,
-          %{
-            approval_count: count_votes(decision.evaluations, :approve),
-            rejection_count: count_votes(decision.evaluations, :reject),
-            abstain_count: count_votes(decision.evaluations, :abstain)
-          }
-        )
-
-        process_decision(item, decision, decision_points, config, opts, attempt, max_attempts)
-
-      {:error, :timeout} ->
-        # Deadlock - document as open question and move to planned
-        Logger.warning("Council decision timeout, treating as deadlock", title: item.title)
-        handle_deadlock(item, decision_points, config, opts)
-
-      {:error, reason} ->
-        {:error, {:council_decision_failed, reason}}
-    end
-  end
-
-  defp wait_for_decision(proposal_id, config) do
-    # Poll for decision with timeout
-    timeout = config.ai_timeout * 10
-    poll_interval = 500
-    max_polls = div(timeout, poll_interval)
-    server = config.consensus_server
-
-    wait_for_decision_loop(proposal_id, max_polls, poll_interval, server)
-  end
-
-  defp wait_for_decision_loop(_proposal_id, 0, _interval, _server), do: {:error, :timeout}
-
-  defp wait_for_decision_loop(proposal_id, remaining, interval, server) do
-    case Arbor.Consensus.get_decision(proposal_id, server) do
-      {:ok, decision} ->
-        {:ok, decision}
-
-      {:error, reason} when reason in [:pending, :not_decided] ->
-        Process.sleep(interval)
-        wait_for_decision_loop(proposal_id, remaining - 1, interval, server)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+  # Note: The old handle_council_decision, wait_for_decision, and wait_for_decision_loop
+  # functions have been removed. The Deliberator now uses ConsensusHelpers.await/2
+  # which is signal-based instead of polling.
 
   defp count_votes(evaluations, vote_type) when is_list(evaluations) do
     Enum.count(evaluations, fn eval -> eval.vote == vote_type end)

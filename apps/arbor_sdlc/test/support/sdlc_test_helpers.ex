@@ -118,7 +118,14 @@ defmodule Arbor.SDLC.TestHelpers do
     # Remove existing supervised children so we can restart with SDLC config.
     # The consensus test_helper.exs adds these as supervisor children, so
     # GenServer.stop would trigger a supervisor restart with default config.
-    for child_id <- [Arbor.Consensus.Coordinator, Arbor.Consensus.EventStore] do
+    children_to_stop = [
+      Arbor.Consensus.Coordinator,
+      Arbor.Consensus.EventStore,
+      Arbor.Consensus.EvaluatorAgent.Supervisor,
+      Arbor.Consensus.TopicRegistry
+    ]
+
+    for child_id <- children_to_stop do
       case Supervisor.terminate_child(supervisor, child_id) do
         :ok -> Supervisor.delete_child(supervisor, child_id)
         {:error, :not_found} -> :ok
@@ -128,9 +135,33 @@ defmodule Arbor.SDLC.TestHelpers do
     # Also stop any non-supervised instances (e.g. from a previous test run)
     stop_if_alive(Arbor.Consensus.Coordinator)
     stop_if_alive(Arbor.Consensus.EventStore)
+    stop_if_alive(Arbor.Consensus.EvaluatorAgent.Supervisor)
+    stop_if_alive(Arbor.Consensus.TopicRegistry)
 
     # Start fresh with SDLC-specific config
     {:ok, _} = Arbor.Consensus.EventStore.start_link([])
+
+    # Start TopicRegistry (required by Coordinator)
+    case Arbor.Consensus.TopicRegistry.start_link([]) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    # Start EvaluatorAgent.Supervisor (required by Coordinator)
+    case Arbor.Consensus.EvaluatorAgent.Supervisor.start_link([]) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    # Ensure Shell.ExecutionRegistry is available for TopicMatcher LLM classification
+    case Supervisor.start_child(
+           Arbor.Shell.Supervisor,
+           {Arbor.Shell.ExecutionRegistry, []}
+         ) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+      {:error, _} -> :ok
+    end
 
     {:ok, _} =
       Arbor.Consensus.Coordinator.start_link(
@@ -139,6 +170,9 @@ defmodule Arbor.SDLC.TestHelpers do
           quorum_rules: %{sdlc_decision: 4}
         ]
       )
+
+    # Disable LLM topic classification for tests (avoid CLI calls)
+    Application.put_env(:arbor_consensus, :llm_topic_classification_enabled, false)
 
     prev_ai = Application.get_env(:arbor_sdlc, :ai_module)
     Application.put_env(:arbor_sdlc, :ai_module, EvaluatorMockAI.StandardApprove)
