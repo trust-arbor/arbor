@@ -41,6 +41,7 @@ defmodule Arbor.SDLC.Evaluator do
   """
 
   @behaviour Arbor.Consensus.EvaluatorBackend
+  @behaviour Arbor.Contracts.Consensus.Evaluator
 
   require Logger
 
@@ -57,7 +58,38 @@ defmodule Arbor.SDLC.Evaluator do
     :random
   ]
 
-  @impl true
+  # =============================================================================
+  # Evaluator Behaviour Callbacks
+  # =============================================================================
+
+  @doc """
+  Unique name identifying this evaluator.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec name() :: atom()
+  def name, do: :sdlc
+
+  @doc """
+  Perspectives this evaluator can assess from.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec perspectives() :: [atom()]
+  def perspectives, do: @perspectives
+
+  @doc """
+  Strategy this evaluator uses.
+  """
+  @impl Arbor.Contracts.Consensus.Evaluator
+  @spec strategy() :: :llm
+  def strategy, do: :llm
+
+  # =============================================================================
+  # Evaluate Callback (shared by both behaviours)
+  # =============================================================================
+
+  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
+  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
+  @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do
     evaluator_id = Keyword.get(opts, :evaluator_id, generate_evaluator_id(perspective))
@@ -73,6 +105,8 @@ defmodule Arbor.SDLC.Evaluator do
 
   @doc """
   List supported SDLC perspectives.
+
+  Deprecated: Use `perspectives/0` instead.
   """
   @spec supported_perspectives() :: [atom()]
   def supported_perspectives, do: @perspectives
