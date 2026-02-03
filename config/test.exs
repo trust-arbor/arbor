@@ -20,6 +20,7 @@ config :arbor_sandbox, start_children: false
 config :arbor_agent, start_children: false
 config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
+config :arbor_dashboard, start_children: false
 
 # Disable checkpoint integration in tests (module may not be available)
 config :arbor_signals,

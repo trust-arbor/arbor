@@ -153,5 +153,11 @@ config :arbor_persistence,
   # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
   embedding_dimension: 768
 
+# Dashboard endpoint
+config :arbor_dashboard, Arbor.Dashboard.Endpoint,
+  url: [host: "localhost"],
+  pubsub_server: Arbor.Dashboard.PubSub,
+  live_view: [signing_salt: "arbor_dashboard_lv"]
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"

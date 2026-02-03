@@ -76,3 +76,9 @@ venv/
 
 # Claude session data (may contain PII)
 .claude/HANDOFF.md
+
+# SDLC Hand session artifacts (debug logs, session transcripts, todos)
+.claude-sdlc/debug/
+.claude-sdlc/projects/
+.claude-sdlc/todos/
+.claude-sdlc/.claude.json.backup.*
