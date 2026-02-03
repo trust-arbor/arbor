@@ -1,7 +1,7 @@
 defmodule Arbor.Consensus.CouncilTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Consensus.{Config, Council}
+  alias Arbor.Consensus.Council
   alias Arbor.Consensus.TestHelpers
   alias Arbor.Contracts.Consensus.Evaluation
 
@@ -102,38 +102,18 @@ defmodule Arbor.Consensus.CouncilTest do
     end
   end
 
-  describe "required_perspectives/2" do
-    test "returns perspectives for code_modification" do
+  describe "required_perspectives/1" do
+    test "returns all non-human perspectives" do
       proposal = TestHelpers.build_proposal(%{topic: :code_modification})
-      config = Config.new()
 
-      perspectives = Council.required_perspectives(proposal, config)
+      perspectives = Council.required_perspectives(proposal)
 
       assert :security in perspectives
       assert :stability in perspectives
-      assert length(perspectives) == 7
-    end
-
-    test "returns perspectives for test_change" do
-      proposal = TestHelpers.build_proposal(%{topic: :test_change})
-      # test_change isn't explicitly configured in default perspectives, so it gets the default
-      # To enable :test_runner for :test_change, the config would need to be configured accordingly
-      config = Config.new(perspectives_for_change_type: %{test_change: [:test_runner, :security]})
-
-      perspectives = Council.required_perspectives(proposal, config)
-
       assert :test_runner in perspectives
-    end
-
-    test "uses custom config perspectives" do
-      proposal = TestHelpers.build_proposal(%{topic: :code_modification})
-
-      config =
-        Config.new(perspectives_for_change_type: %{code_modification: [:security, :stability]})
-
-      perspectives = Council.required_perspectives(proposal, config)
-
-      assert perspectives == [:security, :stability]
+      assert :code_review in perspectives
+      refute :human in perspectives
+      assert length(perspectives) == 9
     end
   end
 

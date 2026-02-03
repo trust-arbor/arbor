@@ -229,17 +229,15 @@ defmodule Arbor.Consensus.TestHelpers do
   end
 
   # ============================================================================
-  # Test Evaluator Backend (implements both EvaluatorBackend and Evaluator)
+  # Test Evaluator Backends (implements Evaluator behaviour)
   # ============================================================================
 
   defmodule AlwaysApproveBackend do
     @moduledoc false
-    @behaviour Arbor.Consensus.EvaluatorBackend
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
     @test_perspectives [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
 
-    # Evaluator behaviour
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :always_approve
 
@@ -249,8 +247,7 @@ defmodule Arbor.Consensus.TestHelpers do
     @impl Arbor.Contracts.Consensus.Evaluator
     def strategy, do: :deterministic
 
-    # EvaluatorBackend behaviour
-    @impl Arbor.Consensus.EvaluatorBackend
+    @impl Arbor.Contracts.Consensus.Evaluator
     def evaluate(proposal, perspective, opts) do
       evaluator_id = Keyword.get(opts, :evaluator_id, "eval_#{perspective}_approve")
 
@@ -272,12 +269,10 @@ defmodule Arbor.Consensus.TestHelpers do
 
   defmodule AlwaysRejectBackend do
     @moduledoc false
-    @behaviour Arbor.Consensus.EvaluatorBackend
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
     @test_perspectives [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
 
-    # Evaluator behaviour
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :always_reject
 
@@ -287,8 +282,7 @@ defmodule Arbor.Consensus.TestHelpers do
     @impl Arbor.Contracts.Consensus.Evaluator
     def strategy, do: :deterministic
 
-    # EvaluatorBackend behaviour
-    @impl Arbor.Consensus.EvaluatorBackend
+    @impl Arbor.Contracts.Consensus.Evaluator
     def evaluate(proposal, perspective, opts) do
       evaluator_id = Keyword.get(opts, :evaluator_id, "eval_#{perspective}_reject")
 
@@ -311,10 +305,8 @@ defmodule Arbor.Consensus.TestHelpers do
 
   defmodule FailingBackend do
     @moduledoc false
-    @behaviour Arbor.Consensus.EvaluatorBackend
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
-    # Evaluator behaviour
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :failing
 
@@ -324,8 +316,7 @@ defmodule Arbor.Consensus.TestHelpers do
     @impl Arbor.Contracts.Consensus.Evaluator
     def strategy, do: :deterministic
 
-    # EvaluatorBackend behaviour
-    @impl Arbor.Consensus.EvaluatorBackend
+    @impl Arbor.Contracts.Consensus.Evaluator
     def evaluate(_proposal, _perspective, _opts) do
       {:error, :intentional_failure}
     end
@@ -333,10 +324,8 @@ defmodule Arbor.Consensus.TestHelpers do
 
   defmodule SlowBackend do
     @moduledoc false
-    @behaviour Arbor.Consensus.EvaluatorBackend
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
-    # Evaluator behaviour
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :slow
 
@@ -346,8 +335,7 @@ defmodule Arbor.Consensus.TestHelpers do
     @impl Arbor.Contracts.Consensus.Evaluator
     def strategy, do: :deterministic
 
-    # EvaluatorBackend behaviour
-    @impl Arbor.Consensus.EvaluatorBackend
+    @impl Arbor.Contracts.Consensus.Evaluator
     def evaluate(_proposal, _perspective, _opts) do
       Process.sleep(60_000)
       {:error, :should_have_timed_out}

@@ -206,6 +206,199 @@ defmodule Arbor.Consensus.TopicRegistryTest do
     end
   end
 
+  describe "Ed25519 checkpoint signing" do
+    setup do
+      suffix = System.unique_integer([:positive])
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      table_name = :"test_signing_registry_#{suffix}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      registry_name = :"test_signing_#{suffix}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      checkpoint_id = "test:signing_#{suffix}"
+
+      # Ensure checkpoint store is running
+      ensure_checkpoint_store_running()
+
+      %{
+        table_name: table_name,
+        registry_name: registry_name,
+        checkpoint_id: checkpoint_id
+      }
+    end
+
+    test "signed checkpoint saves and restores correctly", ctx do
+      # Start with signing enabled (default)
+      {:ok, pid} =
+        TopicRegistry.start_link(
+          name: ctx.registry_name,
+          table_name: ctx.table_name,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS
+        )
+
+      # Get the verify key from the GenServer state
+      state = :sys.get_state(pid)
+
+      # Register a custom topic
+      rule = TopicRule.new(topic: :signed_test_topic, min_quorum: :supermajority)
+      {:ok, _} = TopicRegistry.register_topic(rule, ctx.registry_name)
+
+      # Stop the registry
+      GenServer.stop(pid)
+
+      # Start a new registry with the same checkpoint but provide the verify key
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_table = :"test_signing_restore_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_name = :"test_signing_restore_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid2} =
+        TopicRegistry.start_link(
+          name: new_name,
+          table_name: new_table,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          signing_key: state.signing_key,
+          verify_key: state.verify_key
+        )
+
+      # The custom topic should be restored
+      assert {:ok, restored_rule} = TopicRegistry.get(:signed_test_topic, new_table)
+      assert restored_rule.topic == :signed_test_topic
+      assert restored_rule.min_quorum == :supermajority
+    end
+
+    test "tampered checkpoint is rejected", ctx do
+      # Start with signing
+      {:ok, pid} =
+        TopicRegistry.start_link(
+          name: ctx.registry_name,
+          table_name: ctx.table_name,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS
+        )
+
+      state = :sys.get_state(pid)
+
+      # Register a topic
+      rule = TopicRule.new(topic: :tamper_test, min_quorum: :majority)
+      {:ok, _} = TopicRegistry.register_topic(rule, ctx.registry_name)
+
+      GenServer.stop(pid)
+
+      # Tamper with the checkpoint data
+      {:ok, checkpoint} =
+        Arbor.Checkpoint.Store.ETS.get(ctx.checkpoint_id, [])
+
+      tampered_data = %{checkpoint.data | data: %{evil_topic: %{min_quorum: :none}}}
+      Arbor.Checkpoint.Store.ETS.put(ctx.checkpoint_id, %{checkpoint | data: tampered_data}, [])
+
+      # Start new registry with same keys — tampered checkpoint should be rejected
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_table = :"test_tamper_restore_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_name = :"test_tamper_restore_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid2} =
+        TopicRegistry.start_link(
+          name: new_name,
+          table_name: new_table,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          signing_key: state.signing_key,
+          verify_key: state.verify_key
+        )
+
+      # Tampered topic should NOT be restored — only bootstrap topics
+      assert {:error, :not_found} = TopicRegistry.get(:tamper_test, new_table)
+      assert {:error, :not_found} = TopicRegistry.get(:evil_topic, new_table)
+      # Bootstrap topics still present
+      assert {:ok, _} = TopicRegistry.get(:general, new_table)
+    end
+
+    test "unsigned checkpoint accepted with log (migration compat)", ctx do
+      # Save an unsigned checkpoint directly (simulates pre-signing data)
+      ensure_checkpoint_store_running()
+
+      unsigned_data = %{
+        migration_topic: %{
+          required_evaluators: [],
+          min_quorum: :majority,
+          allowed_proposers: :any,
+          allowed_modes: [:decision],
+          match_patterns: [],
+          registered_by: nil,
+          registered_at: nil
+        }
+      }
+
+      :ok = Arbor.Checkpoint.save(ctx.checkpoint_id, unsigned_data, Arbor.Checkpoint.Store.ETS)
+
+      # Start registry with signing — should accept unsigned checkpoint
+      {:ok, _pid} =
+        TopicRegistry.start_link(
+          name: ctx.registry_name,
+          table_name: ctx.table_name,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS
+        )
+
+      # The unsigned topic should be restored (migration compat)
+      assert {:ok, rule} = TopicRegistry.get(:migration_topic, ctx.table_name)
+      assert rule.topic == :migration_topic
+    end
+
+    test "signing_key: nil disables signing", ctx do
+      {:ok, pid} =
+        TopicRegistry.start_link(
+          name: ctx.registry_name,
+          table_name: ctx.table_name,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          enable_signing: false
+        )
+
+      state = :sys.get_state(pid)
+      assert state.signing_key == nil
+      assert state.verify_key == nil
+
+      # Register a topic — should checkpoint without signing
+      rule = TopicRule.new(topic: :unsigned_topic, min_quorum: :majority)
+      {:ok, _} = TopicRegistry.register_topic(rule, ctx.registry_name)
+
+      GenServer.stop(pid)
+
+      # Restore — unsigned checkpoint, no verify key
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_table = :"test_unsigned_restore_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      new_name = :"test_unsigned_restore_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid2} =
+        TopicRegistry.start_link(
+          name: new_name,
+          table_name: new_table,
+          checkpoint_id: ctx.checkpoint_id,
+          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          enable_signing: false
+        )
+
+      # Topic should be restored (unsigned, no verification)
+      assert {:ok, restored} = TopicRegistry.get(:unsigned_topic, new_table)
+      assert restored.topic == :unsigned_topic
+    end
+  end
+
+  defp ensure_checkpoint_store_running do
+    case Process.whereis(Arbor.Checkpoint.Store.ETS) do
+      nil ->
+        Arbor.Checkpoint.Store.ETS.start_link([])
+
+      pid when is_pid(pid) ->
+        :ok
+    end
+  end
+
   describe "TopicRule helpers" do
     test "proposer_allowed?/2 with :any" do
       rule = TopicRule.new(topic: :test, allowed_proposers: :any)

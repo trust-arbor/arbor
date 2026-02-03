@@ -14,7 +14,6 @@ defmodule Arbor.Consensus.Council do
   5. Kill remaining evaluator tasks on quorum
   """
 
-  alias Arbor.Consensus.Config
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   require Logger
@@ -64,11 +63,14 @@ defmodule Arbor.Consensus.Council do
   end
 
   @doc """
-  Determine the required perspectives for a proposal using the config.
+  Determine the required perspectives for a proposal.
+
+  Returns all non-human perspectives from the Protocol defaults.
+  Topic-specific perspective configuration is handled by TopicRegistry.
   """
-  @spec required_perspectives(Proposal.t(), Config.t()) :: [atom()]
-  def required_perspectives(%Proposal{topic: topic}, %Config{} = config) do
-    Config.perspectives_for(config, topic)
+  @spec required_perspectives(Proposal.t()) :: [atom()]
+  def required_perspectives(%Proposal{}) do
+    Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
   end
 
   # ============================================================================
