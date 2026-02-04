@@ -1108,8 +1108,20 @@ defmodule Arbor.Consensus.Coordinator do
   # ===========================================================================
 
   defp check_agent_quota(state, proposal) do
-    if Config.proposal_quota_enabled?() do
-      max_per_agent = Config.max_proposals_per_agent()
+    # Use per-coordinator config if set, otherwise fall back to Application env
+    quota_enabled =
+      case state.config.proposal_quota_enabled do
+        nil -> Config.proposal_quota_enabled?()
+        val -> val
+      end
+
+    if quota_enabled do
+      max_per_agent =
+        case state.config.max_proposals_per_agent do
+          nil -> Config.max_proposals_per_agent()
+          val -> val
+        end
+
       agent_proposals = Map.get(state.proposals_by_agent, proposal.proposer, [])
       current_count = length(agent_proposals)
 
@@ -1233,7 +1245,12 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp default_perspectives_and_quorum(proposal) do
     perspectives = Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
-    quorum = if proposal.mode == :advisory, do: nil, else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
+
+    quorum =
+      if proposal.mode == :advisory,
+        do: nil,
+        else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
+
     {perspectives, quorum}
   end
 

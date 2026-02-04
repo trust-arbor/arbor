@@ -229,11 +229,22 @@ defmodule Arbor.Consensus.EventStoreTest do
   end
 
   describe "event_sink forwarding" do
+    # This test uses the fixed :test_event_sink_receiver name that TestEventSink.record/1 expects.
+    # Tag it to avoid conflicts with other tests that use the same name.
+    @tag :event_sink_test
     test "forwards events to event sink" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       table_name = :"sink_test_#{:rand.uniform(1_000_000)}"
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"sink_es_#{:rand.uniform(1_000_000)}"
+
+      # Ensure no stale registration from previous test runs
+      # (can happen with async tests using the same fixed name)
+      case Process.whereis(:test_event_sink_receiver) do
+        nil -> :ok
+        pid when pid != self() -> Process.unregister(:test_event_sink_receiver)
+        _self -> :ok
+      end
 
       # Register ourselves to receive sink events
       Process.register(self(), :test_event_sink_receiver)
