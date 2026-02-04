@@ -81,8 +81,10 @@ defmodule Arbor.Consensus.CompositionTest do
       approve_count = Enum.count(evaluations, &(&1.vote == :approve))
       reject_count = Enum.count(evaluations, &(&1.vote == :reject))
 
-      assert approve_count == 2  # indices 0, 2
-      assert reject_count == 1   # index 1
+      # indices 0, 2
+      assert approve_count == 2
+      # index 1
+      assert reject_count == 1
     end
 
     test "evaluations from different evaluators have unique IDs" do

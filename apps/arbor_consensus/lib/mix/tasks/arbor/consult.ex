@@ -170,7 +170,10 @@ defmodule Mix.Tasks.Arbor.Consult do
     providers = [:anthropic, :gemini, :openai, :opencode]
     Mix.shell().info("Consulting :#{perspective} across #{length(providers)} providers...\n")
 
-    case Consult.ask_multi_model(AdvisoryLLM, question, perspective,
+    case Consult.ask_multi_model(
+           AdvisoryLLM,
+           question,
+           perspective,
            [context: context] ++ eval_opts
          ) do
       {:ok, results} ->

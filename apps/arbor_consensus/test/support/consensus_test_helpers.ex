@@ -192,7 +192,15 @@ defmodule Arbor.Consensus.TestHelpers do
   Build a set of evaluations that result in approval.
   """
   def build_approving_evaluations(proposal_id, count \\ 5) do
-    perspectives = [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
+    perspectives = [
+      :security,
+      :stability,
+      :capability,
+      :adversarial,
+      :resource,
+      :emergence,
+      :random
+    ]
 
     perspectives
     |> Enum.take(count)
@@ -211,7 +219,15 @@ defmodule Arbor.Consensus.TestHelpers do
   Build a set of evaluations that result in rejection.
   """
   def build_rejecting_evaluations(proposal_id, count \\ 5) do
-    perspectives = [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
+    perspectives = [
+      :security,
+      :stability,
+      :capability,
+      :adversarial,
+      :resource,
+      :emergence,
+      :random
+    ]
 
     perspectives
     |> Enum.take(count)
@@ -236,7 +252,15 @@ defmodule Arbor.Consensus.TestHelpers do
     @moduledoc false
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
-    @test_perspectives [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
+    @test_perspectives [
+      :security,
+      :stability,
+      :capability,
+      :adversarial,
+      :resource,
+      :emergence,
+      :random
+    ]
 
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :always_approve
@@ -271,7 +295,15 @@ defmodule Arbor.Consensus.TestHelpers do
     @moduledoc false
     @behaviour Arbor.Contracts.Consensus.Evaluator
 
-    @test_perspectives [:security, :stability, :capability, :adversarial, :resource, :emergence, :random]
+    @test_perspectives [
+      :security,
+      :stability,
+      :capability,
+      :adversarial,
+      :resource,
+      :emergence,
+      :random
+    ]
 
     @impl Arbor.Contracts.Consensus.Evaluator
     def name, do: :always_reject
@@ -550,15 +582,15 @@ defmodule Arbor.Consensus.TestHelpers do
   Returns the event store pid.
   """
   def start_test_event_store(opts \\ []) do
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    table_name = Keyword.get(opts, :table_name, :"test_events_#{System.unique_integer([:positive])}")
+    # credo:disable-for-lines:2 Credo.Check.Security.UnsafeAtomConversion
+    table_name =
+      Keyword.get(opts, :table_name, :"test_events_#{System.unique_integer([:positive])}")
+
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = Keyword.get(opts, :name, :"test_event_store_#{System.unique_integer([:positive])}")
 
     {:ok, pid} =
-      EventStore.start_link(
-        Keyword.merge(opts, name: name, table_name: table_name)
-      )
+      EventStore.start_link(Keyword.merge(opts, name: name, table_name: table_name))
 
     {pid, name}
   end

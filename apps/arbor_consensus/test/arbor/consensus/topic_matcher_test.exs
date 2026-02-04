@@ -133,7 +133,8 @@ defmodule Arbor.Consensus.TopicMatcherTest do
       ]
 
       # "cap" should not match inside "capability" (disable LLM to test pure pattern matching)
-      {topic, confidence} = TopicMatcher.match("capability grant", %{}, topics, llm_enabled: false)
+      {topic, confidence} =
+        TopicMatcher.match("capability grant", %{}, topics, llm_enabled: false)
 
       assert topic == :general
       assert confidence == 0.0

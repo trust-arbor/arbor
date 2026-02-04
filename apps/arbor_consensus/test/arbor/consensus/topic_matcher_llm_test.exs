@@ -162,7 +162,8 @@ defmodule Arbor.Consensus.TopicMatcherLlmTest do
           llm_enabled: false
         )
 
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
   end
 
@@ -254,7 +255,8 @@ defmodule Arbor.Consensus.TopicMatcherLlmTest do
           ai_module: ErrorAI
         )
 
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
 
     test "handles garbage LLM response gracefully" do
@@ -286,7 +288,8 @@ defmodule Arbor.Consensus.TopicMatcherLlmTest do
         )
 
       # UnknownTopicAI returns a topic not in the list, should fall back
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
 
     test "handles LLM crash gracefully" do
@@ -301,7 +304,8 @@ defmodule Arbor.Consensus.TopicMatcherLlmTest do
           ai_module: CrashingAI
         )
 
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
   end
 
@@ -321,12 +325,14 @@ defmodule Arbor.Consensus.TopicMatcherLlmTest do
 
     test "handles empty topics list" do
       result = TopicMatcher.match("Something", %{}, [])
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
 
     test "handles non-string description" do
       result = TopicMatcher.match(nil, %{}, test_topics())
-      assert {:general, 0.0} = result
+      assert {:general, confidence} = result
+      assert confidence == 0.0
     end
   end
 
