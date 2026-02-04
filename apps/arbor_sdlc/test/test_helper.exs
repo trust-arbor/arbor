@@ -12,4 +12,16 @@ for child <- [
   Supervisor.start_child(Arbor.SDLC.Supervisor, child)
 end
 
+# Ensure Shell infrastructure is available for SessionRunner (PortSession-based execution)
+for child <- [
+      {Arbor.Shell.ExecutionRegistry, []},
+      {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+    ] do
+  case Supervisor.start_child(Arbor.Shell.Supervisor, child) do
+    {:ok, _} -> :ok
+    {:error, {:already_started, _}} -> :ok
+    {:error, _} -> :ok
+  end
+end
+
 ExUnit.start()

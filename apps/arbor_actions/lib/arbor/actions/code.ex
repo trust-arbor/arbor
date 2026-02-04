@@ -149,31 +149,35 @@ defmodule Arbor.Actions.Code do
     end
 
     defp run_compile(worktree) do
-      case System.cmd("mix", ["compile", "--warnings-as-errors"],
-             cd: worktree,
-             stderr_to_stdout: true
+      case Arbor.Shell.execute("mix compile --warnings-as-errors",
+             cwd: worktree,
+             sandbox: :none,
+             timeout: 120_000
            ) do
-        {output, 0} ->
+        {:ok, %{exit_code: 0, stdout: output}} ->
           warnings = extract_warnings(output)
           {:ok, warnings}
 
-        {output, _} ->
+        {:ok, %{stdout: output}} ->
           errors = extract_errors(output)
           warnings = extract_warnings(output)
           {:error, errors, warnings}
+
+        {:error, reason} ->
+          {:error, [inspect(reason)], []}
       end
     end
 
     defp run_tests(worktree, test_files, warnings) do
       # Build test command
-      test_args =
+      test_cmd =
         case test_files do
-          [] -> ["test"]
-          files -> ["test" | files]
+          [] -> "mix test"
+          files -> "mix test #{Enum.join(files, " ")}"
         end
 
-      case System.cmd("mix", test_args, cd: worktree, stderr_to_stdout: true) do
-        {output, 0} ->
+      case Arbor.Shell.execute(test_cmd, cwd: worktree, sandbox: :none, timeout: 300_000) do
+        {:ok, %{exit_code: 0, stdout: output}} ->
           result = %{
             compiled: true,
             tests_passed: true,
@@ -185,11 +189,23 @@ defmodule Arbor.Actions.Code do
           Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: true})
           {:ok, result}
 
-        {output, _} ->
+        {:ok, %{stdout: output}} ->
           result = %{
             compiled: true,
             tests_passed: false,
             test_output: truncate(output, 5000),
+            warnings: warnings,
+            errors: []
+          }
+
+          Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
+          {:ok, result}
+
+        {:error, reason} ->
+          result = %{
+            compiled: true,
+            tests_passed: false,
+            test_output: inspect(reason),
             warnings: warnings,
             errors: []
           }

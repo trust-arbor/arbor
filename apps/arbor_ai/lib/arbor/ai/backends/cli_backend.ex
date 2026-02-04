@@ -54,7 +54,6 @@ defmodule Arbor.AI.Backends.CliBackend do
 
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
-  alias Arbor.AI.ShellAdapter
   alias Arbor.Common.ShellEscape
 
   require Logger
@@ -238,49 +237,39 @@ defmodule Arbor.AI.Backends.CliBackend do
   Executes a CLI command and returns the output.
 
   Common implementation used by all CLI backends.
+  Uses `Arbor.Shell.execute/2` with Port-based execution, which provides
+  proper BEAM process ownership and timeout handling without Task wrappers.
   """
   @spec execute_command(String.t(), [String.t()], keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def execute_command(cmd, args, opts \\ []) do
-    # 5 minutes default
     timeout = Keyword.get(opts, :timeout, 300_000)
     working_dir = Keyword.get(opts, :working_dir)
 
-    cmd_opts = [
-      stderr_to_stdout: true,
-      env: safe_env(),
-      timeout: timeout
+    # Build shell command with escaped args and stdin redirect
+    quoted_args = Enum.map(args, &ShellEscape.escape_arg!/1)
+    shell_cmd = "#{cmd} #{Enum.join(quoted_args, " ")} < /dev/null"
+
+    shell_opts = [
+      sandbox: :none,
+      timeout: timeout,
+      env: safe_env()
     ]
 
-    cmd_opts = if working_dir, do: [{:cd, working_dir} | cmd_opts], else: cmd_opts
+    shell_opts = if working_dir, do: [{:cwd, working_dir} | shell_opts], else: shell_opts
 
-    task =
-      Task.async(fn ->
-        try do
-          # Redirect stdin from /dev/null to prevent CLI tools from hanging
-          # waiting for interactive input. This applies to all CLI tools
-          # (claude, opencode, gemini, etc.) as they may wait for stdin
-          # when using session continuation flags like --continue or --resume
-          quoted_args = Enum.map(args, &ShellEscape.escape_arg!/1)
-          shell_cmd = "#{cmd} #{Enum.join(quoted_args, " ")} < /dev/null"
-          ShellAdapter.cmd("sh", ["-c", shell_cmd], cmd_opts)
-        rescue
-          e in ErlangError -> {:error, e.original}
-        end
-      end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {output, 0}} ->
+    case Arbor.Shell.execute(shell_cmd, shell_opts) do
+      {:ok, %{exit_code: 0, stdout: output}} ->
         {:ok, output}
 
-      {:ok, {:error, reason}} ->
-        {:error, {:command_error, reason}}
-
-      {:ok, {output, exit_code}} ->
-        {:error, {:exit_code, exit_code, output}}
-
-      nil ->
+      {:ok, %{timed_out: true}} ->
         {:error, :timeout}
+
+      {:ok, %{exit_code: code, stdout: output}} ->
+        {:error, {:exit_code, code, output}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

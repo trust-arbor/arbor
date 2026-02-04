@@ -216,6 +216,44 @@ defmodule Arbor.ShellTest do
     end
   end
 
+  describe "execute_streaming/2" do
+    test "returns session_id" do
+      {:ok, session_id} = Shell.execute_streaming("echo streaming", stream_to: self(), sandbox: :none)
+      assert is_binary(session_id)
+      assert String.starts_with?(session_id, "port_")
+
+      assert_receive {:port_exit, ^session_id, 0, output}, 5_000
+      assert String.contains?(output, "streaming")
+    end
+
+    test "subscriber receives chunks then exit" do
+      script = "sh -c 'echo chunk1; echo chunk2'"
+      {:ok, session_id} = Shell.execute_streaming(script, stream_to: self(), sandbox: :none)
+
+      assert_receive {:port_exit, ^session_id, 0, output}, 5_000
+      assert String.contains?(output, "chunk1")
+      assert String.contains?(output, "chunk2")
+    end
+
+    test "sandbox enforcement applies to streaming" do
+      {:error, {:blocked_command, "sudo"}} =
+        Shell.execute_streaming("sudo ls", stream_to: self(), sandbox: :basic)
+    end
+  end
+
+  describe "stop_session/1" do
+    test "stops a running streaming session" do
+      {:ok, session_id} =
+        Shell.execute_streaming("sleep 60", stream_to: self(), sandbox: :none, timeout: :infinity)
+
+      assert :ok = Shell.stop_session(session_id)
+    end
+
+    test "returns not_found for unknown session" do
+      assert {:error, :not_found} = Shell.stop_session("port_nonexistent")
+    end
+  end
+
   describe "executor edge cases" do
     test "handles command with environment variables" do
       {:ok, result} =

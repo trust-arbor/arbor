@@ -45,7 +45,7 @@ defmodule Arbor.Shell do
 
   @behaviour Arbor.Contracts.API.Shell
 
-  alias Arbor.Shell.{ExecutionRegistry, Executor, Sandbox}
+  alias Arbor.Shell.{ExecutionRegistry, Executor, PortSession, Sandbox}
   alias Arbor.Signals
 
   @default_sandbox :basic
@@ -183,6 +183,74 @@ defmodule Arbor.Shell do
   def list_executions(opts \\ []), do: list_active_executions_with_filters(opts)
 
   # ===========================================================================
+  # Public API — Streaming (PortSession-backed)
+  # ===========================================================================
+
+  @doc """
+  Execute a command as a streaming session.
+
+  Starts a supervised PortSession and returns the session ID.
+  Output is streamed to the caller specified via `stream_to:` in opts.
+
+  ## Options
+
+  Same as `execute/2`, plus:
+  - `:stream_to` - PID or list of PIDs to receive output messages (required)
+
+  ## Subscriber Messages
+
+  - `{:port_data, session_id, chunk}` — output chunk
+  - `{:port_exit, session_id, exit_code, full_output}` — process exited
+
+  ## Examples
+
+      {:ok, session_id} = Arbor.Shell.execute_streaming("long-command", stream_to: self())
+
+      receive do
+        {:port_data, ^session_id, chunk} -> IO.write(chunk)
+        {:port_exit, ^session_id, 0, output} -> IO.puts("Done")
+      end
+  """
+  @spec execute_streaming(String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def execute_streaming(command, opts \\ []) do
+    execute_streaming_shell_command(command, opts)
+  end
+
+  @doc """
+  Stop a streaming session by session ID.
+  """
+  @spec stop_session(String.t()) :: :ok | {:error, :not_found}
+  def stop_session(session_id) do
+    stop_streaming_session(session_id)
+  end
+
+  @doc """
+  Execute a streaming command with authorization check.
+
+  Same as `authorize_and_execute/3` but for streaming sessions.
+  """
+  @spec authorize_and_execute_streaming(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | term()}
+  def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
+    command_name = extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+
+    case Arbor.Security.authorize(agent_id, resource, :execute) do
+      {:ok, :authorized} ->
+        execute_streaming(command, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
+    end
+  end
+
+  # ===========================================================================
   # Contract implementations — verbose, AI-readable names
   # ===========================================================================
 
@@ -284,6 +352,67 @@ defmodule Arbor.Shell do
   @impl true
   def list_active_executions_with_filters(opts) do
     ExecutionRegistry.list(opts)
+  end
+
+  # Streaming contract implementations
+
+  @impl true
+  def execute_streaming_shell_command(command, opts) do
+    sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
+
+    case Sandbox.check(command, sandbox) do
+      {:ok, :allowed} ->
+        session_opts =
+          opts
+          |> Keyword.take([:timeout, :cwd, :env, :stream_to])
+          |> Keyword.put_new(:timeout, 30_000)
+
+        case PortSession.start_supervised(command, session_opts) do
+          {:ok, pid} ->
+            session_id = PortSession.get_id(pid)
+
+            # Register in the ExecutionRegistry for tracking
+            {:ok, exec_id} = register_execution(command, opts)
+            ExecutionRegistry.update_status(exec_id, :running, %{port_session_pid: pid})
+
+            emit_started(command, session_id, opts)
+            {:ok, session_id}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        emit_blocked(command, reason)
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def stop_streaming_session(session_id) do
+    case find_port_session(session_id) do
+      {:ok, pid} ->
+        PortSession.stop(pid)
+        :ok
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  defp find_port_session(session_id) do
+    # Search DynamicSupervisor children for the matching session
+    children = DynamicSupervisor.which_children(Arbor.Shell.PortSessionSupervisor)
+
+    Enum.find_value(children, :error, fn {_, pid, _, _} ->
+      if is_pid(pid) and Process.alive?(pid) do
+        try do
+          if PortSession.get_id(pid) == session_id, do: {:ok, pid}
+        catch
+          :exit, _ -> nil
+        end
+      end
+    end)
   end
 
   # System API

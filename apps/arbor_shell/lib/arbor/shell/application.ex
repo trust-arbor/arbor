@@ -7,7 +7,11 @@ defmodule Arbor.Shell.Application do
   def start(_type, _args) do
     children =
       if Application.get_env(:arbor_shell, :start_children, true) do
-        [{Arbor.Shell.ExecutionRegistry, []}]
+        [
+          {Arbor.Shell.ExecutionRegistry, []},
+          {DynamicSupervisor,
+           name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+        ]
       else
         []
       end

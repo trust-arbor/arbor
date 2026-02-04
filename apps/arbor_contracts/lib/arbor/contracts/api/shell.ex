@@ -91,6 +91,24 @@ defmodule Arbor.Contracts.API.Shell do
   @callback list_active_executions_with_filters(opts :: keyword()) :: {:ok, [map()]}
 
   @doc """
+  Execute a shell command as a streaming session.
+
+  Returns a session_id for tracking. Output is streamed to subscribers
+  specified via `stream_to:` in opts.
+
+  Subscribers receive:
+  - `{:port_data, session_id, chunk}` — output chunk
+  - `{:port_exit, session_id, exit_code, full_output}` — process exited
+  """
+  @callback execute_streaming_shell_command(command :: String.t(), execute_opts()) ::
+              {:ok, execution_id()} | {:error, term()}
+
+  @doc """
+  Stop a streaming session by its execution ID.
+  """
+  @callback stop_streaming_session(execution_id()) :: :ok | {:error, :not_found}
+
+  @doc """
   Start the shell system.
   """
   @callback start_link(opts :: keyword()) :: GenServer.on_start()
@@ -104,6 +122,8 @@ defmodule Arbor.Contracts.API.Shell do
     get_execution_status_by_id: 1,
     get_execution_result_by_id: 2,
     kill_running_execution_by_id: 2,
-    list_active_executions_with_filters: 1
+    list_active_executions_with_filters: 1,
+    execute_streaming_shell_command: 2,
+    stop_streaming_session: 1
   ]
 end
