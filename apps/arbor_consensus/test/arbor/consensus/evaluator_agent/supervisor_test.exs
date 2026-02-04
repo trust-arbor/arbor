@@ -67,12 +67,29 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
 
   defp stop_leftover_agents do
     for name <- [:supervisor_test_evaluator, :another_test_evaluator] do
-      case AgentSupervisor.lookup_agent(name) do
-        {:ok, pid} when is_pid(pid) ->
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+      try do
+        case AgentSupervisor.lookup_agent(name) do
+          {:ok, pid} when is_pid(pid) ->
+            # Double-check process is alive before stopping
+            # The process may have been stopped by its supervisor already
+            if Process.alive?(pid) do
+              try do
+                GenServer.stop(pid, :normal, 100)
+              catch
+                # Process may die between alive? check and stop call
+                :exit, _ -> :ok
+              end
+            else
+              :ok
+            end
 
-        _ ->
-          :ok
+          _ ->
+            :ok
+        end
+      catch
+        # Handle any process-related errors during cleanup
+        :exit, _ -> :ok
+        :error, _ -> :ok
       end
     end
   end
