@@ -100,7 +100,9 @@ defmodule Arbor.SandboxTest do
 
     test "blocks dangerous code", %{base_path: base_path} do
       {:ok, sandbox} = Sandbox.create("agent_facade_11", level: :full, base_path: base_path)
-      ast = quote do: System.cmd("ls", [])
+      # Code.eval_string is always blocked, even at :full level
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+      ast = quote do: Code.eval_string("1 + 1")
       assert {:error, {:code_violations, _}} = Sandbox.check_code(sandbox, ast)
     end
   end
