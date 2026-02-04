@@ -81,7 +81,7 @@ defmodule Arbor.Security.Reflex.RegistryTest do
     test "lists all reflexes including builtins" do
       reflexes = Registry.list()
       # Should have built-in reflexes
-      assert length(reflexes) > 0
+      assert reflexes != []
     end
 
     test "sorts by priority descending by default" do

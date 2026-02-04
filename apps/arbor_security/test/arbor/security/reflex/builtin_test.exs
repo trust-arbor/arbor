@@ -8,7 +8,7 @@ defmodule Arbor.Security.Reflex.BuiltinTest do
     test "returns a non-empty list of reflexes" do
       all = Builtin.all()
       assert is_list(all)
-      assert length(all) > 0
+      assert all != []
     end
 
     test "all reflexes have valid structure" do
