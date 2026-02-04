@@ -54,7 +54,8 @@ defmodule Arbor.Persistence.MixProject do
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.18"},
       {:pgvector, "~> 0.3"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

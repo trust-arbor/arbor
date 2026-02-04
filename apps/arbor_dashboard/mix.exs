@@ -49,7 +49,8 @@ defmodule Arbor.Dashboard.MixProject do
 
       # Dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:floki, "~> 0.37", only: :test}
+      {:floki, "~> 0.37", only: :test},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 end
