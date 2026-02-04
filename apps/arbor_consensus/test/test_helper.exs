@@ -1,6 +1,8 @@
 # Add children to the empty app supervisors (start_children: false leaves them empty)
-# Order matters: Registry first, then Supervisor, then EventStore, then Coordinator
+# Order matters: TopicRegistry first (for topic-based routing), Registry, then Supervisor,
+# then EventStore, then Coordinator
 children = [
+  Arbor.Consensus.TopicRegistry,
   Arbor.Consensus.EventStore,
   {Registry, keys: :unique, name: Arbor.Consensus.EvaluatorAgent.Registry},
   Arbor.Consensus.EvaluatorAgent.Supervisor,

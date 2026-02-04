@@ -305,26 +305,13 @@ defmodule Arbor.Persistence.Backup do
 
     env = if db_config.password != "", do: [{"PGPASSWORD", db_config.password}], else: []
 
-    # Build shell command with args
-    cmd = "pg_dump #{Enum.join(args, " ")}"
-
-    shell_env =
-      case env do
-        [] -> %{}
-        list -> Map.new(list)
-      end
-
-    case Arbor.Shell.execute(cmd, env: shell_env, sandbox: :none, timeout: 300_000) do
-      {:ok, %{exit_code: 0}} ->
+    case System.cmd("pg_dump", args, env: env, stderr_to_stdout: true) do
+      {_output, 0} ->
         {:ok, temp_path}
 
-      {:ok, %{exit_code: code, stdout: output}} ->
+      {output, code} ->
         File.rm(temp_path)
         {:error, {:pg_dump_failed, code, output}}
-
-      {:error, reason} ->
-        File.rm(temp_path)
-        {:error, {:pg_dump_failed, 1, inspect(reason)}}
     end
   end
 
@@ -341,17 +328,12 @@ defmodule Arbor.Persistence.Backup do
       temp_path
     ]
 
-    cmd = "age #{Enum.join(args, " ")}"
-
-    case Arbor.Shell.execute(cmd, sandbox: :none, timeout: 120_000) do
-      {:ok, %{exit_code: 0}} ->
+    case System.cmd("age", args, stderr_to_stdout: true) do
+      {_output, 0} ->
         {:ok, backup_path}
 
-      {:ok, %{exit_code: code, stdout: output}} ->
+      {output, code} ->
         {:error, {:age_encrypt_failed, code, output}}
-
-      {:error, reason} ->
-        {:error, {:age_encrypt_failed, 1, inspect(reason)}}
     end
   end
 
@@ -380,17 +362,12 @@ defmodule Arbor.Persistence.Backup do
       backup_path
     ]
 
-    cmd = "age #{Enum.join(args, " ")}"
-
-    case Arbor.Shell.execute(cmd, sandbox: :none, timeout: 120_000) do
-      {:ok, %{exit_code: 0}} ->
+    case System.cmd("age", args, stderr_to_stdout: true) do
+      {_output, 0} ->
         {:ok, temp_path}
 
-      {:ok, %{exit_code: code, stdout: output}} ->
+      {output, code} ->
         {:error, {:age_decrypt_failed, code, output}}
-
-      {:error, reason} ->
-        {:error, {:age_decrypt_failed, 1, inspect(reason)}}
     end
   end
 
@@ -407,19 +384,11 @@ defmodule Arbor.Persistence.Backup do
 
     env = if db_config.password != "", do: [{"PGPASSWORD", db_config.password}], else: []
 
-    cmd = "pg_restore #{Enum.join(args, " ")}"
-
-    shell_env =
-      case env do
-        [] -> %{}
-        list -> Map.new(list)
-      end
-
-    case Arbor.Shell.execute(cmd, env: shell_env, sandbox: :none, timeout: 300_000) do
-      {:ok, %{exit_code: 0}} ->
+    case System.cmd("pg_restore", args, env: env, stderr_to_stdout: true) do
+      {_output, 0} ->
         :ok
 
-      {:ok, %{exit_code: code, stdout: output}} ->
+      {output, code} ->
         # pg_restore returns non-zero for warnings too, check for actual errors
         if String.contains?(output, "ERROR") do
           {:error, {:pg_restore_failed, code, output}}

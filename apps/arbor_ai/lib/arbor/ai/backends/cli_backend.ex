@@ -284,8 +284,8 @@ defmodule Arbor.AI.Backends.CliBackend do
   )
 
   defp safe_env do
-    cleared = Enum.map(@session_vars_to_clear, &{&1, false})
-    [{"TERM", "dumb"} | cleared]
+    cleared = Map.new(@session_vars_to_clear, &{&1, false})
+    Map.put(cleared, "TERM", "dumb")
   end
 
   @doc """
