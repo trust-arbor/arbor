@@ -10,6 +10,7 @@ defmodule Arbor.Consensus.Config do
 
   @default_evaluation_timeout_ms 90_000
   @default_max_concurrent 10
+  @default_max_proposals_per_agent 10
 
   typedstruct do
     @typedoc "Consensus system configuration"
@@ -17,6 +18,9 @@ defmodule Arbor.Consensus.Config do
     field(:evaluation_timeout_ms, pos_integer(), default: @default_evaluation_timeout_ms)
     field(:max_concurrent_proposals, pos_integer(), default: @default_max_concurrent)
     field(:auto_execute_approved, boolean(), default: false)
+    # Per-coordinator quota settings (override Application env if set)
+    field(:max_proposals_per_agent, pos_integer() | nil, default: nil)
+    field(:proposal_quota_enabled, boolean() | nil, default: nil)
   end
 
   @doc """
@@ -27,6 +31,8 @@ defmodule Arbor.Consensus.Config do
     * `:evaluation_timeout_ms` - Timeout for evaluator tasks (default: 90_000)
     * `:max_concurrent_proposals` - Max proposals being evaluated at once (default: 10)
     * `:auto_execute_approved` - Whether to auto-execute approved proposals (default: false)
+    * `:max_proposals_per_agent` - Per-instance override for agent quota (default: nil, uses Application env)
+    * `:proposal_quota_enabled` - Per-instance override for quota enabled (default: nil, uses Application env)
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -35,7 +41,9 @@ defmodule Arbor.Consensus.Config do
         Keyword.get(opts, :evaluation_timeout_ms, @default_evaluation_timeout_ms),
       max_concurrent_proposals:
         Keyword.get(opts, :max_concurrent_proposals, @default_max_concurrent),
-      auto_execute_approved: Keyword.get(opts, :auto_execute_approved, false)
+      auto_execute_approved: Keyword.get(opts, :auto_execute_approved, false),
+      max_proposals_per_agent: Keyword.get(opts, :max_proposals_per_agent),
+      proposal_quota_enabled: Keyword.get(opts, :proposal_quota_enabled)
     }
   end
 
@@ -235,7 +243,8 @@ defmodule Arbor.Consensus.Config do
 
   Default: :signals_only
   """
-  @spec event_persistence_strategy() :: :signals_only | :with_event_store | :with_event_log | :full
+  @spec event_persistence_strategy() ::
+          :signals_only | :with_event_store | :with_event_log | :full
   def event_persistence_strategy do
     Application.get_env(@app, :event_persistence_strategy, :signals_only)
   end

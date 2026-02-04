@@ -365,6 +365,10 @@ defmodule Arbor.Consensus.CoordinatorTest do
   # ===========================================================================
 
   describe "submit/2 per-agent quota enforcement" do
+    # These tests modify global Application config, so they cannot run async
+    # with other tests that also modify quota settings
+    @describetag :quota_config
+
     setup do
       original_max = Application.get_env(:arbor_consensus, :max_proposals_per_agent)
       original_enabled = Application.get_env(:arbor_consensus, :proposal_quota_enabled)
@@ -562,18 +566,22 @@ defmodule Arbor.Consensus.CoordinatorTest do
     end
 
     test "quota disabled allows unlimited proposals" do
-      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 1)
-      Application.put_env(:arbor_consensus, :proposal_quota_enabled, false)
-
+      # Pass quota config directly to coordinator to avoid race conditions
+      # with other async tests modifying Application env
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
           evaluator_backend: TestHelpers.SlowBackend,
-          config: [evaluation_timeout_ms: 60_000, max_concurrent_proposals: 10]
+          config: [
+            evaluation_timeout_ms: 60_000,
+            max_concurrent_proposals: 10,
+            max_proposals_per_agent: 1,
+            proposal_quota_enabled: false
+          ]
         )
 
       agent_id = "agent_no_quota_#{:erlang.unique_integer([:positive])}"
 
-      # Should be able to submit more than the limit
+      # Should be able to submit more than the limit since quota is disabled
       for i <- 1..5 do
         {:ok, _} =
           Coordinator.submit(
@@ -679,11 +687,26 @@ defmodule Arbor.Consensus.CoordinatorTest do
   end
 
   describe "event_sink integration" do
+    # This test uses a fixed receiver name that TestEventSink.record/1 expects
+    # Run synchronously to avoid conflicts with other tests using the same name
+    @tag :event_sink_test
     test "forwards events to configured event sink" do
+      # Ensure no stale registration from previous test runs
+      # (can happen with async tests using the same fixed name)
+      case Process.whereis(:test_event_sink_receiver) do
+        nil -> :ok
+        pid when pid != self() -> Process.unregister(:test_event_sink_receiver)
+        _self -> :ok
+      end
+
+      # Use the fixed name that TestEventSink.record/1 expects
+      # (TestEventSink has :test_event_sink_receiver hardcoded)
       Process.register(self(), :test_event_sink_receiver)
 
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(event_sink: TestHelpers.TestEventSink)
+        TestHelpers.start_test_coordinator(
+          event_sink: TestHelpers.TestEventSink
+        )
 
       {:ok, id} =
         Coordinator.submit(
@@ -816,6 +839,9 @@ defmodule Arbor.Consensus.CoordinatorTest do
   # ===========================================================================
 
   describe "event sourcing recovery" do
+    # These tests modify global Application config
+    @describetag :recovery_config
+
     setup do
       original_event_log = Application.get_env(:arbor_consensus, :event_log)
       original_recovery_strategy = Application.get_env(:arbor_consensus, :recovery_strategy)
