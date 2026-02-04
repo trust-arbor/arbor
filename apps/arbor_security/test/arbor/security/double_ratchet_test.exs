@@ -65,7 +65,11 @@ defmodule Arbor.Security.DoubleRatchetTest do
       }
     end
 
-    test "basic message round-trip works", %{shared_secret: secret, bob_keypair: bob_kp, bob_pub: bob_pub} do
+    test "basic message round-trip works", %{
+      shared_secret: secret,
+      bob_keypair: bob_kp,
+      bob_pub: bob_pub
+    } do
       # Alice is sender, Bob is receiver
       alice = DoubleRatchet.init_sender(secret, bob_pub)
       bob = DoubleRatchet.init_receiver(secret, bob_kp)
@@ -82,7 +86,11 @@ defmodule Arbor.Security.DoubleRatchetTest do
       assert bob2.recv_chain.n == 1
     end
 
-    test "multiple messages maintain session state", %{shared_secret: secret, bob_keypair: bob_kp, bob_pub: bob_pub} do
+    test "multiple messages maintain session state", %{
+      shared_secret: secret,
+      bob_keypair: bob_kp,
+      bob_pub: bob_pub
+    } do
       alice = DoubleRatchet.init_sender(secret, bob_pub)
       bob = DoubleRatchet.init_receiver(secret, bob_kp)
 
@@ -100,8 +108,13 @@ defmodule Arbor.Security.DoubleRatchetTest do
       assert final_bob.recv_chain.n == 3
     end
 
-    test "bidirectional communication works", %{shared_secret: secret, alice_keypair: alice_kp, bob_keypair: bob_kp, bob_pub: bob_pub} do
-      {alice_pub, _} = alice_kp
+    test "bidirectional communication works", %{
+      shared_secret: secret,
+      alice_keypair: alice_kp,
+      bob_keypair: bob_kp,
+      bob_pub: bob_pub
+    } do
+      {_alice_pub, _} = alice_kp
 
       # Alice sends first
       alice = DoubleRatchet.init_sender(secret, bob_pub)
@@ -120,8 +133,8 @@ defmodule Arbor.Security.DoubleRatchetTest do
       assert m2 == "Hello from Bob"
 
       # Alice -> Bob again
-      {alice4, h3, c3} = DoubleRatchet.encrypt(alice3, "Another message")
-      {:ok, bob4, m3} = DoubleRatchet.decrypt(bob3, h3, c3)
+      {_alice4, h3, c3} = DoubleRatchet.encrypt(alice3, "Another message")
+      {:ok, _bob4, m3} = DoubleRatchet.decrypt(bob3, h3, c3)
       assert m3 == "Another message"
     end
   end

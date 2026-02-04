@@ -34,13 +34,15 @@ defmodule Arbor.AI.QuotaTracker do
   @default_cooldown_hours 6
 
   # Patterns that indicate quota exhaustion
-  @quota_patterns [
-    ~r/exhausted your capacity/i,
-    ~r/quota.*exceeded/i,
-    ~r/rate limit/i,
-    ~r/too many requests/i,
-    ~r/resource exhausted/i
-  ]
+  defp quota_patterns do
+    [
+      ~r/exhausted your capacity/i,
+      ~r/quota.*exceeded/i,
+      ~r/rate limit/i,
+      ~r/too many requests/i,
+      ~r/resource exhausted/i
+    ]
+  end
 
   defstruct backends: %{}
 
@@ -257,7 +259,7 @@ defmodule Arbor.AI.QuotaTracker do
   end
 
   defp quota_error?(output) do
-    Enum.any?(@quota_patterns, &Regex.match?(&1, output))
+    Enum.any?(quota_patterns(), &Regex.match?(&1, output))
   end
 
   defp extract_cooldown(output) do

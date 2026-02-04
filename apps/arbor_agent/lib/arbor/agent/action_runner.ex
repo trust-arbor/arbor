@@ -41,17 +41,22 @@ defmodule Arbor.Agent.ActionRunner do
     concrete_module = Keyword.get(opts, :agent_module, agent.__struct__)
     Code.ensure_loaded(concrete_module)
 
-    action = {action_module, params}
-    {updated_agent, directives} = concrete_module.cmd(agent, action)
+    if function_exported?(concrete_module, :cmd, 2) do
+      action = {action_module, params}
+      {updated_agent, directives} = concrete_module.cmd(agent, action)
 
-    # Check for error directives
-    case find_error_directive(directives) do
-      nil ->
-        result = extract_result(updated_agent, directives)
-        {:ok, updated_agent, result}
+      # Check for error directives
+      case find_error_directive(directives) do
+        nil ->
+          result = extract_result(updated_agent, directives)
+          {:ok, updated_agent, result}
 
-      error_directive ->
-        {:error, error_directive.error}
+        error_directive ->
+          {:error, error_directive.error}
+      end
+    else
+      Logger.warning("Action module not available: #{inspect(concrete_module)}.cmd/2")
+      {:error, {:action_failed, "Action module not available"}}
     end
   rescue
     e in [UndefinedFunctionError] ->

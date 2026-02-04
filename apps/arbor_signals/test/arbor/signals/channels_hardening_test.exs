@@ -247,8 +247,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member1_id, inv1.sealed_key, member1_keychain)
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member2_id, inv2.sealed_key, member2_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member1_id, inv1.sealed_key, member1_keychain)
+
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member2_id, inv2.sealed_key, member2_keychain)
 
       # Member1 tries to revoke member2 (should fail)
       result = Channels.revoke(channel_id, member2_id, member1_id)
@@ -269,14 +272,22 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
   end
 
   describe "periodic rotation" do
+    setup do
+      previous = Application.get_env(:arbor_signals, :channel_auto_rotate_interval_ms)
+      Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, 50)
+
+      on_exit(fn ->
+        Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, previous)
+      end)
+
+      :ok
+    end
+
     test "scheduled rotation fires on interval" do
       creator_id = "agent_creator"
 
       {:ok, channel, _key} = Channels.create("test-channel", creator_id)
       channel_id = channel.id
-
-      # Configure very short interval for testing
-      Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, 50)
 
       # Schedule rotation
       :ok = Channels.schedule_rotation(channel_id, creator_id)
@@ -288,6 +299,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       {:ok, key_after} = Channels.get_key(channel_id, creator_id)
       assert key_after != key_before
+
+      :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)
     end
 
     test "cancel_scheduled_rotation stops the timer" do
@@ -295,8 +308,6 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       {:ok, channel, _key} = Channels.create("test-channel", creator_id)
       channel_id = channel.id
-
-      Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, 50)
 
       :ok = Channels.schedule_rotation(channel_id, creator_id)
       :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)
@@ -334,9 +345,13 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       {:ok, channel, _key} = Channels.create("audit-test", creator_id)
@@ -355,9 +370,13 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -377,7 +396,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
 
       # Wait for the specific signals we expect
       signals = await_signals([:channel_created, :channel_member_invited, :channel_member_joined])
@@ -394,9 +414,13 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -416,7 +440,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
 
       # Clear previous signals
       flush_messages()
@@ -437,9 +462,13 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -459,7 +488,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+
       flush_messages()
 
       # Revoke triggers rotation with reason :member_revoked
@@ -477,20 +508,6 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
   end
 
   # Helper functions
-
-  defp collect_signals(timeout) do
-    collect_signals([], timeout)
-  end
-
-  defp collect_signals(acc, timeout) do
-    receive do
-      {:signal, signal} ->
-        collect_signals([signal | acc], timeout)
-    after
-      timeout -> Enum.reverse(acc)
-    end
-  end
-
   # Wait for specific signal types with a bounded timeout.
   # Returns collected signals once all expected types are found
   # or the timeout expires.

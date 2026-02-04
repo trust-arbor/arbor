@@ -3,6 +3,8 @@ defmodule Arbor.MixProject do
 
   def project do
     [
+      app: :arbor,
+      name: "Arbor",
       apps_path: "apps",
       version: "2.0.0-dev",
       start_permanent: Mix.env() == :prod,

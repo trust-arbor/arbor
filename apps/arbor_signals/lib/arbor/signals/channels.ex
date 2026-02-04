@@ -116,7 +116,10 @@ defmodule Arbor.Signals.Channels do
   def accept_invitation(channel_id, agent_id, sealed_key, recipient_keychain)
       when is_binary(channel_id) and is_binary(agent_id) and is_map(sealed_key) and
              is_map(recipient_keychain) do
-    GenServer.call(__MODULE__, {:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain})
+    GenServer.call(
+      __MODULE__,
+      {:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain}
+    )
   end
 
   @doc """
@@ -129,7 +132,8 @@ defmodule Arbor.Signals.Channels do
   """
   @spec send(channel_id(), agent_id(), atom(), map()) :: :ok | {:error, term()}
   def send(channel_id, sender_id, message_type, data)
-      when is_binary(channel_id) and is_binary(sender_id) and is_atom(message_type) and is_map(data) do
+      when is_binary(channel_id) and is_binary(sender_id) and is_atom(message_type) and
+             is_map(data) do
     GenServer.call(__MODULE__, {:send, channel_id, sender_id, message_type, data})
   end
 
@@ -173,7 +177,8 @@ defmodule Arbor.Signals.Channels do
   Returns `{:ok, new_key, members_to_reinvite}`.
   """
   @spec rotate_key(channel_id(), agent_id()) :: {:ok, binary(), [agent_id()]} | {:error, term()}
-  def rotate_key(channel_id, requester_id) when is_binary(channel_id) and is_binary(requester_id) do
+  def rotate_key(channel_id, requester_id)
+      when is_binary(channel_id) and is_binary(requester_id) do
     GenServer.call(__MODULE__, {:rotate_key, channel_id, requester_id})
   end
 
@@ -285,7 +290,8 @@ defmodule Arbor.Signals.Channels do
          :ok <- verify_member(entry.channel, sender_keychain.agent_id),
          {:ok, invitee_enc_pub} <- lookup_encryption_key(invitee_id) do
       # Seal the channel key for the invitee
-      sealed_key = seal_key(entry.key, invitee_enc_pub, sender_keychain.encryption_keypair.private)
+      sealed_key =
+        seal_key(entry.key, invitee_enc_pub, sender_keychain.encryption_keypair.private)
 
       invitation = %{
         channel_id: channel_id,
@@ -319,7 +325,11 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
-  def handle_call({:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain}, _from, state) do
+  def handle_call(
+        {:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain},
+        _from,
+        state
+      ) do
     with {:ok, entry} <- get_channel_entry(state, channel_id),
          {:ok, key} <- unseal_key(sealed_key, recipient_keychain.encryption_keypair.private) do
       # Verify the unsealed key matches (in case of tampering or wrong key)
@@ -399,7 +409,10 @@ defmodule Arbor.Signals.Channels do
 
         # Emit security audit signals
         emit_membership_event(:channel_member_left, channel_id, agent_id, %{})
-        emit_membership_event(:channel_destroyed, channel_id, agent_id, %{reason: :last_member_left})
+
+        emit_membership_event(:channel_destroyed, channel_id, agent_id, %{
+          reason: :last_member_left
+        })
 
         {:reply, :ok, state}
       else
@@ -632,8 +645,10 @@ defmodule Arbor.Signals.Channels do
 
   defp lookup_encryption_key(agent_id) do
     registry_module = identity_registry_module()
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(registry_module, :lookup_encryption_key, [agent_id])
+
+    registry_module.lookup_encryption_key(agent_id)
+  catch
+    :exit, _reason -> {:error, :registry_unavailable}
   end
 
   defp seal_key(key, recipient_public, sender_private) do
@@ -677,7 +692,11 @@ defmodule Arbor.Signals.Channels do
   end
 
   defp identity_registry_module do
-    Application.get_env(:arbor_signals, :identity_registry_module, Arbor.Security.Identity.Registry)
+    Application.get_env(
+      :arbor_signals,
+      :identity_registry_module,
+      Arbor.Security.Identity.Registry
+    )
   end
 
   defp cancel_rotation_timer(nil), do: :ok

@@ -42,7 +42,7 @@ defmodule Arbor.Memory.IndexDualTest do
     {:ok, pid: pid}
   end
 
-  defp generate_embedding(seed \\ 0) do
+  defp generate_embedding(seed) do
     for i <- 0..(@dimension - 1) do
       :math.sin((seed + i) / 100) * 0.5 + 0.5
     end

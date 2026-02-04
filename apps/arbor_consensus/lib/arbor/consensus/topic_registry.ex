@@ -75,11 +75,11 @@ defmodule Arbor.Consensus.TopicRegistry do
   @doc """
   Get a topic rule by name.
 
-  Returns `{:ok, TopicRule.t()}` or `{:error, :not_found}`.
+  Returns `{:ok, TopicRule.t()}`, `{:error, :not_found}`, or `{:error, :unavailable}`.
 
   Optionally accepts a table name for testing isolation.
   """
-  @spec get(atom(), atom()) :: {:ok, TopicRule.t()} | {:error, :not_found}
+  @spec get(atom(), atom()) :: {:ok, TopicRule.t()} | {:error, :not_found | :unavailable}
   def get(topic, table \\ @table_name) when is_atom(topic) do
     do_get(topic, table)
   end
@@ -90,7 +90,7 @@ defmodule Arbor.Consensus.TopicRegistry do
       [] -> {:error, :not_found}
     end
   rescue
-    ArgumentError -> {:error, :not_found}
+    ArgumentError -> {:error, :unavailable}
   end
 
   @doc """
@@ -444,7 +444,10 @@ defmodule Arbor.Consensus.TopicRegistry do
       Logger.info("TopicRegistry: restored #{map_size(data)} signed topics from checkpoint")
       data
     else
-      Logger.warning("TopicRegistry: checkpoint signature invalid, starting fresh (bootstrap only)")
+      Logger.warning(
+        "TopicRegistry: checkpoint signature invalid, starting fresh (bootstrap only)"
+      )
+
       %{}
     end
   end

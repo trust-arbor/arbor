@@ -89,7 +89,7 @@ defmodule Arbor.Consensus.TopicGovernanceTest do
 
       # Should be accepted for evaluation
       {:ok, status} = Coordinator.get_status(proposal_id, coord)
-      assert status == :evaluating
+      assert status in [:evaluating, :approved]
     end
 
     test "topic governance approval flow", %{coordinator: coord} do

@@ -47,7 +47,9 @@ defmodule Arbor.ShellTest do
 
     test "strict sandbox only allows allowlisted commands" do
       {:ok, _} = Shell.execute("echo hello", sandbox: :strict)
-      {:error, {:not_in_allowlist, "curl"}} = Shell.execute("curl http://example.com", sandbox: :strict)
+
+      {:error, {:not_in_allowlist, "curl"}} =
+        Shell.execute("curl http://example.com", sandbox: :strict)
     end
 
     test "none sandbox allows everything" do
@@ -239,17 +241,11 @@ defmodule Arbor.ShellTest do
     end
 
     test "handles invalid working directory" do
-      # Invalid cwd results in either an error or a non-zero exit code
-      result =
-        Shell.execute("echo test",
-          sandbox: :none,
-          cwd: "/nonexistent/path/to/project"
-        )
-
-      case result do
-        {:error, _reason} -> :ok
-        {:ok, %{exit_code: code}} -> assert code != 0
-      end
+      assert {:error, {:invalid_cwd, "/nonexistent/path/to/project"}} =
+               Shell.execute("echo test",
+                 sandbox: :none,
+                 cwd: "/nonexistent/path/to/project"
+               )
     end
 
     test "handles command-only input (no args) in basic sandbox" do

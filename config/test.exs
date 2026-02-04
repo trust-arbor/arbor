@@ -14,6 +14,7 @@ config :arbor_security, start_children: false
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
 config :arbor_consensus, start_children: false
+config :arbor_consensus, llm_topic_classification_enabled: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
 config :arbor_sandbox, start_children: false

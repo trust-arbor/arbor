@@ -18,4 +18,4 @@ for child <- children do
   Supervisor.start_child(Arbor.AI.Supervisor, child)
 end
 
-ExUnit.start(exclude: [:external, :skip])
+ExUnit.start(exclude: [:external, :skip], capture_log: true)

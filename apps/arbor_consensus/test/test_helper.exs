@@ -14,4 +14,4 @@ end
 # Deterministic evaluator tests need shell processes
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
 
-ExUnit.start()
+ExUnit.start(capture_log: true)

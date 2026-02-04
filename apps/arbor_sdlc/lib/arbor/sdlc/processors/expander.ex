@@ -17,7 +17,7 @@ defmodule Arbor.SDLC.Processors.Expander do
 
   ## AI Routing
 
-  Uses `Arbor.AI.generate_text/2` with complexity-based routing:
+  Uses the Arbor.AI facade with complexity-based routing:
   - Simple items (docs, bugs, ideas) -> moderate-tier API call
   - Features/infrastructure -> escalated to complex tier if needed
 

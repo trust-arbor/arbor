@@ -46,12 +46,8 @@ defmodule Arbor.Shell.ExecutorTest do
     test "returns error when port open fails" do
       # Passing an invalid port option type causes Port.open to raise
       # We test this by using a command that Erlang can't spawn
-      result = Executor.run("", cwd: "/dev/null/impossible/path")
-
-      case result do
-        {:error, _reason} -> :ok
-        {:ok, %{exit_code: code}} when code != 0 -> :ok
-      end
+      assert {:error, {:invalid_cwd, "/dev/null/impossible/path"}} =
+               Executor.run("", cwd: "/dev/null/impossible/path")
     end
   end
 

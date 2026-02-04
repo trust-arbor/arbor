@@ -14,4 +14,4 @@ for child <- [
   Supervisor.start_child(Arbor.Memory.Supervisor, child)
 end
 
-ExUnit.start()
+ExUnit.start(capture_log: true)

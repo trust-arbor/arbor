@@ -69,12 +69,18 @@ defmodule Arbor.Consensus.EvaluatorAgent.SupervisorTest do
     for name <- [:supervisor_test_evaluator, :another_test_evaluator] do
       case AgentSupervisor.lookup_agent(name) do
         {:ok, pid} when is_pid(pid) ->
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+          if Process.alive?(pid), do: safe_stop(pid)
 
         _ ->
           :ok
       end
     end
+  end
+
+  defp safe_stop(pid) when is_pid(pid) do
+    GenServer.stop(pid, :normal, 100)
+  catch
+    :exit, _reason -> :ok
   end
 
   describe "start_agent/3" do

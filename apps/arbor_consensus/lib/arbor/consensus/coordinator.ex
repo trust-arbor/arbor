@@ -81,7 +81,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   ## Options
 
-    * `:config` - `Config.t()` or keyword opts for `Config.new/1`
+    * `:config` - `Arbor.Consensus.Config.t()` struct or keyword opts
     * `:evaluator_backend` - Module implementing `EvaluatorBackend` behaviour
     * `:authorizer` - Module implementing `Authorizer` behaviour (optional)
     * `:executor` - Module implementing `Executor` behaviour (optional)
@@ -1220,6 +1220,10 @@ defmodule Arbor.Consensus.Coordinator do
       {:ok, rule} ->
         resolve_from_topic_rule(proposal, rule)
 
+      {:error, :unavailable} ->
+        # TopicRegistry not running — fall back to defaults silently
+        default_perspectives_and_quorum(proposal)
+
       {:error, :not_found} ->
         # Topic not in registry — use default perspectives (all non-human)
         Logger.warning("Topic #{inspect(topic)} not found in TopicRegistry, using defaults")
@@ -1233,7 +1237,12 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp default_perspectives_and_quorum(proposal) do
     perspectives = Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
-    quorum = if proposal.mode == :advisory, do: nil, else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
+
+    quorum =
+      if proposal.mode == :advisory,
+        do: nil,
+        else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
+
     {perspectives, quorum}
   end
 

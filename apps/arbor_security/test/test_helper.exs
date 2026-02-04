@@ -9,4 +9,4 @@ for child <- [
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end
 
-ExUnit.start()
+ExUnit.start(capture_log: true)

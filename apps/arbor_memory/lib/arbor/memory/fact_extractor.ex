@@ -52,68 +52,79 @@ defmodule Arbor.Memory.FactExtractor do
   # ============================================================================
 
   # Person-related patterns
-  @person_patterns [
-    # Name patterns
-    {~r/(?:my name is|I'm called|I am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i, :name, 0.9},
-    {~r/(?:call me|they call me)\s+([A-Z][a-z]+)/i, :name, 0.85},
+  defp person_patterns do
+    [
+      # Name patterns
+      {~r/(?:my name is|I'm called|I am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i, :name, 0.9},
+      {~r/(?:call me|they call me)\s+([A-Z][a-z]+)/i, :name, 0.85},
 
-    # Work/role patterns
-    {~r/I (?:work at|work for|am employed at|am employed by)\s+([A-Z][A-Za-z\s&]+)/i, :employer,
-     0.85},
-    {~r/I(?:'m| am) (?:a|an)\s+([A-Za-z\s]+(?:developer|engineer|designer|manager|lead|architect|analyst|consultant))/i,
-     :role, 0.85},
-    {~r/my (?:job|role|title|position) is\s+([A-Za-z\s]+)/i, :role, 0.8},
+      # Work/role patterns
+      {~r/I (?:work at|work for|am employed at|am employed by)\s+([A-Z][A-Za-z\s&]+)/i, :employer,
+       0.85},
+      {~r/I(?:'m| am) (?:a|an)\s+([A-Za-z\s]+(?:developer|engineer|designer|manager|lead|architect|analyst|consultant))/i,
+       :role, 0.85},
+      {~r/my (?:job|role|title|position) is\s+([A-Za-z\s]+)/i, :role, 0.8},
 
-    # Location patterns
-    {~r/I (?:live in|am from|am based in|reside in)\s+([A-Z][A-Za-z\s,]+)/i, :location, 0.85},
-    {~r/(?:I'm|I am) located in\s+([A-Z][A-Za-z\s,]+)/i, :location, 0.8}
-  ]
+      # Location patterns
+      {~r/I (?:live in|am from|am based in|reside in)\s+([A-Z][A-Za-z\s,]+)/i, :location, 0.85},
+      {~r/(?:I'm|I am) located in\s+([A-Z][A-Za-z\s,]+)/i, :location, 0.8}
+    ]
+  end
 
   # Project-related patterns
-  @project_patterns [
-    {~r/(?:I'm|I am|we're|we are) (?:working on|building|developing|creating)\s+(.+?)(?:\.|,|$)/i,
-     :current_project, 0.8},
-    {~r/the project is (?:called |named )?([A-Za-z][A-Za-z0-9\-_\s]+)/i, :project_name, 0.85},
-    {~r/(?:my|our) project (?:is called |is named )?([A-Za-z][A-Za-z0-9\-_\s]+)/i, :project_name,
-     0.8},
-    {~r/building\s+(?:a|an)\s+([A-Za-z][A-Za-z0-9\s]+?)(?:\s+(?:with|using|in)|\.|,|$)/i,
-     :project_type, 0.7}
-  ]
+  defp project_patterns do
+    [
+      {~r/(?:I'm|I am|we're|we are) (?:working on|building|developing|creating)\s+(.+?)(?:\.|,|$)/i,
+       :current_project, 0.8},
+      {~r/the project is (?:called |named )?([A-Za-z][A-Za-z0-9\-_\s]+)/i, :project_name, 0.85},
+      {~r/(?:my|our) project (?:is called |is named )?([A-Za-z][A-Za-z0-9\-_\s]+)/i,
+       :project_name, 0.8},
+      {~r/building\s+(?:a|an)\s+([A-Za-z][A-Za-z0-9\s]+?)(?:\s+(?:with|using|in)|\.|,|$)/i,
+       :project_type, 0.7}
+    ]
+  end
 
   # Technical patterns
-  @technical_patterns [
-    # Language/framework usage
-    {~r/(?:uses?|using|written in|built with|developed in|coded in)\s+([A-Z][A-Za-z0-9\+#\.]+)/i,
-     :technology, 0.85},
-    {~r/(?:runs on|deployed on|hosted on)\s+([A-Z][A-Za-z0-9\s]+)/i, :platform, 0.8},
-    {~r/depends on\s+([A-Za-z][A-Za-z0-9\-_]+)/i, :dependency, 0.85},
-    {~r/(?:we use|I use|using)\s+([A-Z][A-Za-z0-9]+)\s+(?:for|as)/i, :tool, 0.75},
+  defp technical_patterns do
+    [
+      # Language/framework usage
+      {~r/(?:uses?|using|written in|built with|developed in|coded in)\s+([A-Z][A-Za-z0-9\+#\.]+)/i,
+       :technology, 0.85},
+      {~r/(?:runs on|deployed on|hosted on)\s+([A-Z][A-Za-z0-9\s]+)/i, :platform, 0.8},
+      {~r/depends on\s+([A-Za-z][A-Za-z0-9\-_]+)/i, :dependency, 0.85},
+      {~r/(?:we use|I use|using)\s+([A-Z][A-Za-z0-9]+)\s+(?:for|as)/i, :tool, 0.75},
 
-    # Database patterns
-    {~r/(?:uses?|using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database, 0.9},
+      # Database patterns
+      {~r/(?:uses?|using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database,
+       0.9},
 
-    # Framework patterns
-    {~r/(?:uses?|using|with|built on)\s+(Phoenix|Rails|Django|Express|Next\.js|React|Vue|Angular)/i,
-     :framework, 0.9}
-  ]
+      # Framework patterns
+      {~r/(?:uses?|using|with|built on)\s+(Phoenix|Rails|Django|Express|Next\.js|React|Vue|Angular)/i,
+       :framework, 0.9}
+    ]
+  end
 
   # Preference patterns
-  @preference_patterns [
-    {~r/I (?:prefer|like|love|enjoy)\s+(.+?)(?:\s+(?:over|to|more than)|\.|,|$)/i, :likes, 0.8},
-    {~r/I (?:don't like|dislike|hate|avoid)\s+(.+?)(?:\.|,|$)/i, :dislikes, 0.8},
-    {~r/(?:my|the) favorite\s+([A-Za-z]+)\s+is\s+(.+?)(?:\.|,|$)/i, :favorite, 0.85},
-    {~r/I always\s+(.+?)(?:\s+when|\.|,|$)/i, :habit, 0.6},
-    {~r/I never\s+(.+?)(?:\.|,|$)/i, :avoidance, 0.6}
-  ]
+  defp preference_patterns do
+    [
+      {~r/I (?:prefer|like|love|enjoy)\s+(.+?)(?:\s+(?:over|to|more than)|\.|,|$)/i, :likes, 0.8},
+      {~r/I (?:don't like|dislike|hate|avoid)\s+(.+?)(?:\.|,|$)/i, :dislikes, 0.8},
+      {~r/(?:my|the) favorite\s+([A-Za-z]+)\s+is\s+(.+?)(?:\.|,|$)/i, :favorite, 0.85},
+      {~r/I always\s+(.+?)(?:\s+when|\.|,|$)/i, :habit, 0.6},
+      {~r/I never\s+(.+?)(?:\.|,|$)/i, :avoidance, 0.6}
+    ]
+  end
 
   # Relationship patterns
-  @relationship_patterns [
-    {~r/([A-Z][a-z]+)\s+is my\s+([A-Za-z\s]+)/i, :personal_relationship, 0.85},
-    {~r/I know\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i, :acquaintance, 0.6},
-    {~r/(?:my|our)\s+(friend|colleague|coworker|partner|mentor|manager)\s+([A-Z][a-z]+)/i,
-     :named_relationship, 0.8},
-    {~r/([A-Z][a-z]+)\s+(?:works with|collaborates with)\s+me/i, :work_relationship, 0.75}
-  ]
+  defp relationship_patterns do
+    [
+      {~r/([A-Z][a-z]+)\s+is my\s+([A-Za-z\s]+)/i, :personal_relationship, 0.85},
+      {~r/I know\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i, :acquaintance, 0.6},
+      {~r/(?:my|our)\s+(friend|colleague|coworker|partner|mentor|manager)\s+([A-Z][a-z]+)/i,
+       :named_relationship, 0.8},
+      {~r/([A-Z][a-z]+)\s+(?:works with|collaborates with)\s+me/i, :work_relationship, 0.75}
+    ]
+  end
 
   # ============================================================================
   # Public API
@@ -211,11 +222,11 @@ defmodule Arbor.Memory.FactExtractor do
 
   defp get_patterns_for_categories(categories) do
     all_patterns = [
-      {:person, @person_patterns},
-      {:project, @project_patterns},
-      {:technical, @technical_patterns},
-      {:preference, @preference_patterns},
-      {:relationship, @relationship_patterns}
+      {:person, person_patterns()},
+      {:project, project_patterns()},
+      {:technical, technical_patterns()},
+      {:preference, preference_patterns()},
+      {:relationship, relationship_patterns()}
     ]
 
     all_patterns

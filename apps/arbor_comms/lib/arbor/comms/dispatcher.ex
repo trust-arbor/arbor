@@ -59,7 +59,7 @@ defmodule Arbor.Comms.Dispatcher do
 
   Resolves the reply channel: if the origin channel can send, replies
   there. Otherwise checks `metadata[:response_channel]`, then falls
-  back to `Config.default_response_channel/0`.
+  back to the configured default response channel.
   """
   @spec reply(Message.t(), String.t()) :: :ok | {:error, term()}
   def reply(%Message{} = original, response) do

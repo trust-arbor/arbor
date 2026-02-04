@@ -42,7 +42,7 @@ defmodule Arbor.Actions.AI do
     @moduledoc """
     Generate text using an LLM provider.
 
-    Wraps `Arbor.AI.generate_text/2` as a Jido action for consistent
+    Wraps the Arbor.AI facade as a Jido action for consistent
     execution and LLM tool schema generation.
 
     ## Parameters

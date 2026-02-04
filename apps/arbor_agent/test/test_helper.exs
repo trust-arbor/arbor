@@ -3,4 +3,4 @@ for child <- [Arbor.Agent.Registry, Arbor.Agent.Supervisor] do
   Supervisor.start_child(Arbor.Agent.AppSupervisor, child)
 end
 
-ExUnit.start(exclude: [:skip])
+ExUnit.start(exclude: [:skip], capture_log: true)

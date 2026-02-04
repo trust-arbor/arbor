@@ -128,7 +128,7 @@ defmodule Arbor.Memory.ProposalTest do
     end
 
     test "sorts by created_at by default", %{agent_id: agent_id} do
-      {:ok, p1} = Proposal.create(agent_id, :fact, %{content: "First"})
+      {:ok, _p1} = Proposal.create(agent_id, :fact, %{content: "First"})
       Process.sleep(1)
       {:ok, p2} = Proposal.create(agent_id, :fact, %{content: "Second"})
 

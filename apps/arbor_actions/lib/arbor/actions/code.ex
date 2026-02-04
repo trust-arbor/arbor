@@ -149,18 +149,22 @@ defmodule Arbor.Actions.Code do
     end
 
     defp run_compile(worktree) do
-      case System.cmd("mix", ["compile", "--warnings-as-errors"],
-             cd: worktree,
-             stderr_to_stdout: true
-           ) do
-        {output, 0} ->
-          warnings = extract_warnings(output)
-          {:ok, warnings}
+      if File.dir?(worktree) do
+        case System.cmd("mix", ["compile", "--warnings-as-errors"],
+               cd: worktree,
+               stderr_to_stdout: true
+             ) do
+          {output, 0} ->
+            warnings = extract_warnings(output)
+            {:ok, warnings}
 
-        {output, _} ->
-          errors = extract_errors(output)
-          warnings = extract_warnings(output)
-          {:error, errors, warnings}
+          {output, _} ->
+            errors = extract_errors(output)
+            warnings = extract_warnings(output)
+            {:error, errors, warnings}
+        end
+      else
+        {:error, ["Invalid worktree_path: #{worktree}"], []}
       end
     end
 

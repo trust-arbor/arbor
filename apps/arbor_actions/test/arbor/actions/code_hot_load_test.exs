@@ -18,6 +18,8 @@ defmodule Arbor.Actions.Code.HotLoadBehavioralTest do
   """
 
   setup do
+    previous_compiler_opts = Code.compiler_options(ignore_module_conflict: true)
+
     # Write the Target module's .beam file to disk so that HotLoad's
     # save_original/1 (which uses :code.get_object_code) can find it.
     # Without this, in-memory test modules have no .beam on the code path
@@ -33,6 +35,7 @@ defmodule Arbor.Actions.Code.HotLoadBehavioralTest do
     true = :code.add_patha(String.to_charlist(beam_dir))
 
     on_exit(fn ->
+      Code.compiler_options(previous_compiler_opts)
       # Restore the original module from the saved binary
       :code.load_binary(module, String.to_charlist(beam_file), binary)
       :code.del_path(String.to_charlist(beam_dir))

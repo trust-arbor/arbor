@@ -16,4 +16,4 @@ exclude =
     true -> [:integration, :distributed, :chaos]
   end
 
-ExUnit.start(exclude: exclude, async: !is_ci)
+ExUnit.start(exclude: exclude, async: !is_ci, capture_log: true)

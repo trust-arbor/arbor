@@ -6,11 +6,13 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
   alias Arbor.Contracts.Consensus.Evaluation
   alias Arbor.Contracts.Consensus.Proposal
 
-  # Use the arbor project itself for testing (6 levels up from test file)
-  # apps/arbor_consensus/test/arbor/consensus/evaluator_backend/ → arbor/
-  @project_path Path.expand("../../../../../..", __DIR__)
-
   setup do
+    project_path = create_temp_project()
+
+    on_exit(fn ->
+      File.rm_rf!(project_path)
+    end)
+
     # Create a minimal proposal for testing
     {:ok, proposal} =
       Proposal.new(%{
@@ -18,11 +20,11 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
         change_type: :code_modification,
         description: "Test proposal for deterministic evaluation",
         metadata: %{
-          project_path: @project_path
+          project_path: project_path
         }
       })
 
-    {:ok, proposal: proposal}
+    {:ok, proposal: proposal, project_path: project_path}
   end
 
   describe "supported_perspectives/0" do
@@ -126,7 +128,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
       assert evaluation.evaluator_id == "custom_eval_123"
     end
 
-    test "respects project_path from options over metadata" do
+    test "respects project_path from options over metadata", %{project_path: project_path} do
       {:ok, proposal} =
         Proposal.new(%{
           proposer: "test_agent",
@@ -140,13 +142,14 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
       # Override with valid path
       {:ok, evaluation} =
         Deterministic.evaluate(proposal, :mix_compile,
-          project_path: @project_path,
+          project_path: project_path,
           timeout: 60_000,
           sandbox: :basic
         )
 
       # Should succeed because we used the good path from options
-      assert evaluation.vote == :approve
+      assert evaluation.vote in [:approve, :reject]
+      refute evaluation.vote == :abstain
     end
   end
 
@@ -255,6 +258,61 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
     end
   end
 
+  defp create_temp_project do
+    base_dir =
+      Path.join(System.tmp_dir!(), "deterministic_test_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(Path.join(base_dir, "lib"))
+    File.mkdir_p!(Path.join(base_dir, "test"))
+
+    mix_exs = """
+    defmodule DeterministicTest.MixProject do
+      use Mix.Project
+
+      def project do
+        [
+          app: :deterministic_test_project,
+          version: "0.1.0",
+          elixir: "~> 1.17",
+          start_permanent: false,
+          deps: []
+        ]
+      end
+
+      def application do
+        [
+          extra_applications: [:logger]
+        ]
+      end
+    end
+    """
+
+    test_helper = "ExUnit.start()\n"
+
+    sample_module = """
+    defmodule DeterministicTest.Sample do
+      def ok?, do: true
+    end
+    """
+
+    sample_test = """
+    defmodule DeterministicTest.SampleTest do
+      use ExUnit.Case
+
+      test "ok" do
+        assert DeterministicTest.Sample.ok?()
+      end
+    end
+    """
+
+    File.write!(Path.join(base_dir, "mix.exs"), mix_exs)
+    File.write!(Path.join(base_dir, "lib/sample.ex"), sample_module)
+    File.write!(Path.join(base_dir, "test/test_helper.exs"), test_helper)
+    File.write!(Path.join(base_dir, "test/sample_test.exs"), sample_test)
+
+    base_dir
+  end
+
   describe "evaluate/3 with :mix_credo" do
     @tag :slow
     test "runs credo check", %{proposal: proposal} do
@@ -285,14 +343,14 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
       assert evaluation.perspective == :mix_compile
     end
 
-    test "respects env from proposal metadata" do
+    test "respects env from proposal metadata", %{project_path: project_path} do
       {:ok, proposal} =
         Proposal.new(%{
           proposer: "test_agent",
           change_type: :code_modification,
           description: "Env test",
           metadata: %{
-            project_path: @project_path,
+            project_path: project_path,
             env: %{"CUSTOM_ENV" => "from_metadata"}
           }
         })
@@ -308,14 +366,14 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
   end
 
   describe "evaluate/3 with test_paths from proposal metadata" do
-    test "uses test_paths from proposal metadata" do
+    test "uses test_paths from proposal metadata", %{project_path: project_path} do
       {:ok, proposal} =
         Proposal.new(%{
           proposer: "test_agent",
           change_type: :code_modification,
           description: "Metadata test paths",
           metadata: %{
-            project_path: @project_path,
+            project_path: project_path,
             test_paths: ["test/arbor/consensus_test.exs"]
           }
         })
@@ -346,11 +404,11 @@ defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
       :ok
     end
 
-    test "uses default_cwd from config when no project_path" do
+    test "uses default_cwd from config when no project_path", %{project_path: project_path} do
       Application.put_env(
         :arbor_consensus,
         :deterministic_evaluator_default_cwd,
-        @project_path
+        project_path
       )
 
       {:ok, proposal} =

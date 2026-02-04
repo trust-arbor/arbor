@@ -235,30 +235,8 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_call({:freeze_trust, agent_id, reason}, _from, state) do
-    case Store.freeze_profile(agent_id, reason) do
-      {:ok, profile} ->
-        # Store freeze event
-        {:ok, event} =
-          Event.freeze_event(agent_id, :frozen,
-            reason: reason,
-            previous_score: profile.trust_score,
-            new_score: profile.trust_score
-          )
-
-        Store.store_event(event)
-        persist_to_event_store(event, state)
-
-        Logger.warning("Trust frozen for agent #{agent_id}: #{reason}",
-          agent_id: agent_id,
-          reason: reason
-        )
-
-        broadcast_trust_event(agent_id, :trust_frozen, %{reason: reason})
-        {:reply, :ok, state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+    {reply, state} = do_freeze_trust(agent_id, reason, state)
+    {:reply, reply, state}
   end
 
   @impl true
@@ -360,9 +338,12 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_info({:check_circuit_breaker, agent_id}, state) do
-    if state.circuit_breaker_enabled do
-      check_circuit_breaker(agent_id)
-    end
+    state =
+      if state.circuit_breaker_enabled do
+        check_circuit_breaker(agent_id, state)
+      else
+        state
+      end
 
     {:noreply, state}
   end
@@ -375,29 +356,33 @@ defmodule Arbor.Trust.Manager do
         # Update profile based on event type
         {:ok, new_profile} = update_profile_for_event(agent_id, event_type, metadata)
 
-        # Create and store event
-        {:ok, event} =
-          Event.new(
-            agent_id: agent_id,
-            event_type: event_type,
-            previous_score: old_profile.trust_score,
-            new_score: new_profile.trust_score,
-            previous_tier: old_profile.tier,
-            new_tier: new_profile.tier,
-            metadata: metadata
-          )
+        case Event.new(
+               agent_id: agent_id,
+               event_type: event_type,
+               previous_score: old_profile.trust_score,
+               new_score: new_profile.trust_score,
+               previous_tier: old_profile.tier,
+               new_tier: new_profile.tier,
+               metadata: metadata
+             ) do
+          {:ok, event} ->
+            Store.store_event(event)
 
-        Store.store_event(event)
+            # Persist to durable event store
+            persist_to_event_store(event, state)
 
-        # Persist to durable event store
-        persist_to_event_store(event, state)
+            # Broadcast event
+            broadcast_trust_event(agent_id, event_type, metadata)
 
-        # Broadcast event
-        broadcast_trust_event(agent_id, event_type, metadata)
+            # Check circuit breaker for negative events
+            maybe_trigger_circuit_breaker(event, agent_id, state)
 
-        # Check circuit breaker for negative events
-        if Event.circuit_breaker_relevant?(event) and state.circuit_breaker_enabled do
-          send(self(), {:check_circuit_breaker, agent_id})
+          {:error, reason} ->
+            Logger.warning("Trust event ignored due to invalid event type",
+              agent_id: agent_id,
+              event_type: event_type,
+              reason: inspect(reason)
+            )
         end
 
       {:error, :not_found} ->
@@ -406,6 +391,12 @@ defmodule Arbor.Trust.Manager do
         {:ok, _profile} = create_trust_profile(agent_id)
         # Retry the event
         handle_trust_event(agent_id, event_type, metadata, state)
+    end
+  end
+
+  defp maybe_trigger_circuit_breaker(event, agent_id, state) do
+    if Event.circuit_breaker_relevant?(event) and state.circuit_breaker_enabled do
+      send(self(), {:check_circuit_breaker, agent_id})
     end
   end
 
@@ -460,7 +451,7 @@ defmodule Arbor.Trust.Manager do
   defp update_profile_for_event(agent_id, _event_type, _metadata),
     do: Store.get_profile(agent_id)
 
-  defp check_circuit_breaker(agent_id) do
+  defp check_circuit_breaker(agent_id, state) do
     # Get recent events to check for patterns
     {:ok, events} = Store.get_events(agent_id, limit: 20)
 
@@ -490,17 +481,47 @@ defmodule Arbor.Trust.Manager do
     # Trigger circuit breaker if thresholds exceeded
     cond do
       recent_failures >= 5 ->
-        freeze_trust(agent_id, :rapid_failures)
+        {_reply, state} = do_freeze_trust(agent_id, :rapid_failures, state)
+        state
 
       recent_violations >= 3 ->
-        freeze_trust(agent_id, :security_violations)
+        {_reply, state} = do_freeze_trust(agent_id, :security_violations, state)
+        state
 
       recent_rollbacks >= 3 ->
         # Just drop tier, don't freeze
         demote_tier(agent_id)
+        state
 
       true ->
-        :ok
+        state
+    end
+  end
+
+  defp do_freeze_trust(agent_id, reason, state) do
+    case Store.freeze_profile(agent_id, reason) do
+      {:ok, profile} ->
+        # Store freeze event
+        {:ok, event} =
+          Event.freeze_event(agent_id, :frozen,
+            reason: reason,
+            previous_score: profile.trust_score,
+            new_score: profile.trust_score
+          )
+
+        Store.store_event(event)
+        persist_to_event_store(event, state)
+
+        Logger.warning("Trust frozen for agent #{agent_id}: #{reason}",
+          agent_id: agent_id,
+          reason: reason
+        )
+
+        broadcast_trust_event(agent_id, :trust_frozen, %{reason: reason})
+        {:ok, state}
+
+      {:error, _} = error ->
+        {error, state}
     end
   end
 

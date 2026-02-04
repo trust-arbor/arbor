@@ -134,6 +134,26 @@ defmodule Arbor.AI do
 
   # ── Unchecked API (for system callers) ──
 
+  @doc """
+  Generate text using an LLM.
+
+  Routes to either CLI backend (Claude Code, etc.) or API backend (ReqLLM)
+  based on the `:backend` option or routing strategy.
+
+  ## Options
+
+  - `:backend` - `:api`, `:cli`, or `:auto` (default: `:auto`)
+  - `:provider` - Provider atom (`:anthropic`, `:openai`, etc.)
+  - `:model` - Model name override
+  - `:system_prompt` - System prompt for context
+  - `:max_tokens` - Maximum tokens in response
+  - `:temperature` - Sampling temperature (0.0-1.0)
+
+  ## Returns
+
+  - `{:ok, result}` where result has `:text`, `:usage`, `:model`, `:provider`
+  - `{:error, reason}` on failure
+  """
   @impl true
   @spec generate_text(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.AI.result()} | {:error, term()}

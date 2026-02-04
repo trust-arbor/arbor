@@ -30,7 +30,7 @@ defmodule Arbor.Comms.MessageHandlerTest do
     case MessageHandler.start_link([]) do
       {:ok, pid} ->
         on_exit(fn ->
-          if Process.alive?(pid), do: GenServer.stop(pid)
+          if Process.alive?(pid), do: safe_stop(pid)
           Application.put_env(:arbor_comms, :handler, original_handler)
         end)
 
@@ -43,6 +43,12 @@ defmodule Arbor.Comms.MessageHandlerTest do
 
         {:ok, handler: pid}
     end
+  end
+
+  defp safe_stop(pid) when is_pid(pid) do
+    GenServer.stop(pid)
+  catch
+    :exit, _reason -> :ok
   end
 
   describe "authorization" do

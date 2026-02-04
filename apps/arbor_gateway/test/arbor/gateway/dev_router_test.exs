@@ -45,11 +45,17 @@ defmodule Arbor.Gateway.Dev.RouterTest do
     end
 
     test "returns error for invalid code" do
-      conn =
-        conn(:post, "/eval", Jason.encode!(%{code: "undefined_var + 1"}))
-        |> put_req_header("content-type", "application/json")
-        |> Map.put(:remote_ip, {127, 0, 0, 1})
-        |> Router.call(@opts)
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        conn =
+          conn(:post, "/eval", Jason.encode!(%{code: "undefined_var + 1"}))
+          |> put_req_header("content-type", "application/json")
+          |> Map.put(:remote_ip, {127, 0, 0, 1})
+          |> Router.call(@opts)
+
+        send(self(), {:dev_eval_conn, conn})
+      end)
+
+      assert_received {:dev_eval_conn, conn}
 
       assert conn.status == 422
       body = Jason.decode!(conn.resp_body)

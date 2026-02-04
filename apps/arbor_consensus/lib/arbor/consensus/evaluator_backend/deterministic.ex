@@ -114,7 +114,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
     command = build_command(perspective, proposal, opts)
     timeout = Keyword.get(opts, :timeout, Config.deterministic_evaluator_timeout())
     sandbox = Keyword.get(opts, :sandbox, Config.deterministic_evaluator_sandbox())
-    env = get_env(proposal, perspective, opts)
+    env = get_env(proposal, perspective, opts, project_path)
 
     shell_opts = [
       timeout: timeout,
@@ -386,7 +386,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
       (get_in(proposal.metadata, [:test_paths]) || [])
   end
 
-  defp get_env(proposal, perspective, opts) do
+  defp get_env(proposal, perspective, opts, project_path) do
     base_env = Keyword.get(opts, :env, %{})
     proposal_env = get_in(proposal.metadata, [:env]) || %{}
 
@@ -398,8 +398,17 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
         _ -> "dev"
       end
 
-    Map.merge(proposal_env, base_env)
-    |> Map.put_new("MIX_ENV", mix_env)
+    env =
+      Map.merge(proposal_env, base_env)
+      |> Map.put_new("MIX_ENV", mix_env)
+
+    if is_binary(project_path) do
+      # Isolate mix build artifacts to avoid lock contention with the parent mix process.
+      build_path = Path.join(project_path, "_build_deterministic")
+      Map.put_new(env, "MIX_BUILD_PATH", build_path)
+    else
+      env
+    end
   end
 
   defp generate_evaluator_id(perspective) do
