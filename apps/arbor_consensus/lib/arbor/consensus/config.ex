@@ -10,7 +10,6 @@ defmodule Arbor.Consensus.Config do
 
   @default_evaluation_timeout_ms 90_000
   @default_max_concurrent 10
-  @default_max_proposals_per_agent 10
 
   typedstruct do
     @typedoc "Consensus system configuration"

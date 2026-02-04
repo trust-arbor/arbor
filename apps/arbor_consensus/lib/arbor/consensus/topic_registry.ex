@@ -444,7 +444,10 @@ defmodule Arbor.Consensus.TopicRegistry do
       Logger.info("TopicRegistry: restored #{map_size(data)} signed topics from checkpoint")
       data
     else
-      Logger.warning("TopicRegistry: checkpoint signature invalid, starting fresh (bootstrap only)")
+      Logger.warning(
+        "TopicRegistry: checkpoint signature invalid, starting fresh (bootstrap only)"
+      )
+
       %{}
     end
   end

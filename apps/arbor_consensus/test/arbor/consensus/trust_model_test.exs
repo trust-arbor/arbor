@@ -80,7 +80,9 @@ defmodule Arbor.Consensus.TrustModelTest do
       assert perspectives1 == perspectives2
     end
 
-    test "evaluator_backend opt in submit affects routing but not proposal metadata", %{coordinator: coord} do
+    test "evaluator_backend opt in submit affects routing but not proposal metadata", %{
+      coordinator: coord
+    } do
       proposal = TestHelpers.build_proposal()
 
       # The evaluator_backend option should be used by Coordinator, but not stored
@@ -129,11 +131,12 @@ defmodule Arbor.Consensus.TrustModelTest do
 
     test "proposal cannot bypass evaluator independence", %{coordinator: coord} do
       # Attempt to include pre-made evaluations
-      fake_eval = TestHelpers.build_evaluation(%{
-        vote: :approve,
-        perspective: :security,
-        reasoning: "Pre-approved by proposer"
-      })
+      fake_eval =
+        TestHelpers.build_evaluation(%{
+          vote: :approve,
+          perspective: :security,
+          reasoning: "Pre-approved by proposer"
+        })
 
       proposal =
         TestHelpers.build_proposal(%{
@@ -172,8 +175,11 @@ defmodule Arbor.Consensus.TrustModelTest do
         TestHelpers.start_test_coordinator(evaluator_backend: TestHelpers.SlowBackend)
 
       on_exit(fn ->
-        if prev_quota, do: Application.put_env(:arbor_consensus, :max_proposals_per_agent, prev_quota)
-        if prev_enabled != nil, do: Application.put_env(:arbor_consensus, :proposal_quota_enabled, prev_enabled)
+        if prev_quota,
+          do: Application.put_env(:arbor_consensus, :max_proposals_per_agent, prev_quota)
+
+        if prev_enabled != nil,
+          do: Application.put_env(:arbor_consensus, :proposal_quota_enabled, prev_enabled)
       end)
 
       {:ok, coordinator: coord_name}
