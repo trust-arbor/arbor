@@ -86,3 +86,4 @@ venv/
 .claude-sdlc/.claude.json
 .claude-sdlc/.claude.json.backup.*
 .claude-sdlc/session-env/
+.claude-sdlc/stats-cache.json
