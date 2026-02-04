@@ -98,6 +98,51 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end
   end
 
+  @doc """
+  Ask a single perspective across all providers simultaneously.
+
+  Runs the same perspective prompt through each CLI provider in parallel,
+  so diversity comes from model differences rather than prompt differences.
+
+  Returns `{:ok, [{provider, evaluation}]}` sorted by provider,
+  or `{:error, reason}` if proposal creation fails.
+  """
+  @providers [:anthropic, :gemini, :openai, :opencode]
+
+  @spec ask_multi_model(module(), String.t(), atom(), keyword()) ::
+          {:ok, [{atom(), Arbor.Contracts.Consensus.Evaluation.t()}]} | {:error, term()}
+  def ask_multi_model(evaluator_module, description, perspective, opts \\ []) do
+    context = Keyword.get(opts, :context, %{})
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+
+    with {:ok, proposal} <- build_advisory_proposal(description, context) do
+      eval_opts = Keyword.drop(opts, [:context])
+
+      tasks =
+        Enum.map(@providers, fn provider ->
+          provider_opts = Keyword.put(eval_opts, :provider, provider)
+
+          {provider,
+           Task.async(fn ->
+             evaluator_module.evaluate(proposal, perspective, provider_opts)
+           end)}
+        end)
+
+      results =
+        tasks
+        |> Enum.map(fn {provider, task} ->
+          case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+            {:ok, {:ok, evaluation}} -> {provider, evaluation}
+            {:ok, {:error, reason}} -> {provider, {:error, reason}}
+            nil -> {provider, {:error, :timeout}}
+          end
+        end)
+        |> Enum.sort_by(fn {provider, _} -> provider end)
+
+      {:ok, results}
+    end
+  end
+
   # ============================================================================
   # Private
   # ============================================================================

@@ -8,11 +8,13 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Persistent agents?" -p stability --docs .arbor/roadmap/3-in-progress/consensus-redesign.md
       $ mix arbor.consult "Full review" --all --docs design.md --context "budget:low,timeline:2 weeks"
       $ mix arbor.consult "Build order?" --all --save --docs design.md
+      $ mix arbor.consult "What is consciousness?" --multi-model --save
 
   ## Options
 
     * `--perspective` / `-p`  — Ask a single perspective (default: brainstorming)
     * `--all` / `-a`          — Ask all 12 perspectives (expensive: 12 LLM calls)
+    * `--multi-model` / `-m`  — Same perspective across all 4 providers (4 LLM calls)
     * `--save` / `-s`         — Save results to .arbor/council/<slug>/
     * `--docs` / `-d`         — Reference doc paths (comma-separated or repeated)
     * `--context` / `-c`      — Extra context as key:value pairs (comma-separated)
@@ -56,6 +58,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   @switches [
     perspective: :string,
     all: :boolean,
+    multi_model: :boolean,
     save: :boolean,
     docs: [:string],
     context: :string,
@@ -66,6 +69,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   @aliases [
     p: :perspective,
     a: :all,
+    m: :multi_model,
     s: :save,
     d: :docs,
     c: :context
@@ -79,6 +83,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     Options:
       -p, --perspective NAME   Ask one perspective (default: brainstorming)
       -a, --all                Ask all 12 perspectives
+      -m, --multi-model        Same perspective, all 4 providers (use with -p)
       -s, --save               Save results to .arbor/council/
       -d, --docs PATH          Reference doc paths
       -c, --context KV         Context as key:value pairs
@@ -109,16 +114,33 @@ defmodule Mix.Tasks.Arbor.Consult do
     provider_override = eval_opts[:provider]
     save? = opts[:save] || false
 
-    results =
-      if opts[:all] do
-        ask_all(question, context, eval_opts, provider_override)
-      else
-        perspective = parse_perspective(opts[:perspective] || "brainstorming")
-        ask_one(question, perspective, context, eval_opts, provider_override)
-      end
+    {results, mode} = dispatch_consultation(opts, question, context, eval_opts, provider_override)
 
     if save? and results != :error do
-      save_results(question, results, opts, provider_override)
+      save_results(question, results, opts, provider_override, mode)
+    end
+  end
+
+  # ============================================================================
+  # Dispatch
+  # ============================================================================
+
+  defp dispatch_consultation(opts, question, context, eval_opts, provider_override) do
+    if opts[:multi_model] do
+      perspective = parse_perspective(opts[:perspective] || "brainstorming")
+      {ask_multi_model(question, perspective, context, eval_opts), :multi_model}
+    else
+      results = dispatch_standard(opts, question, context, eval_opts, provider_override)
+      {results, :standard}
+    end
+  end
+
+  defp dispatch_standard(opts, question, context, eval_opts, provider_override) do
+    if opts[:all] do
+      ask_all(question, context, eval_opts, provider_override)
+    else
+      perspective = parse_perspective(opts[:perspective] || "brainstorming")
+      ask_one(question, perspective, context, eval_opts, provider_override)
     end
   end
 
@@ -133,6 +155,46 @@ defmodule Mix.Tasks.Arbor.Consult do
       {:ok, eval} ->
         print_evaluation(perspective, eval, provider_override)
         [{perspective, eval}]
+
+      {:error, reason} ->
+        Mix.shell().error("Error: #{inspect(reason)}")
+        exit({:shutdown, 1})
+    end
+  end
+
+  # ============================================================================
+  # Multi-Model (same perspective, all providers)
+  # ============================================================================
+
+  defp ask_multi_model(question, perspective, context, eval_opts) do
+    providers = [:anthropic, :gemini, :openai, :opencode]
+    Mix.shell().info("Consulting :#{perspective} across #{length(providers)} providers...\n")
+
+    case Consult.ask_multi_model(AdvisoryLLM, question, perspective,
+           [context: context] ++ eval_opts
+         ) do
+      {:ok, results} ->
+        {successes, failures} =
+          Enum.split_with(results, fn
+            {_, {:error, _}} -> false
+            _ -> true
+          end)
+
+        Enum.each(successes, fn {provider, eval} ->
+          print_multi_model_evaluation(perspective, provider, eval)
+        end)
+
+        Enum.each(failures, fn {provider, {:error, reason}} ->
+          Mix.shell().error("=== #{provider} === ERROR: #{inspect(reason)}\n")
+        end)
+
+        Mix.shell().info(
+          "--- Done: #{length(successes)}/#{length(providers)} providers responded" <>
+            if(failures != [], do: ", #{length(failures)} failed", else: "") <>
+            " ---"
+        )
+
+        successes
 
       {:error, reason} ->
         Mix.shell().error("Error: #{inspect(reason)}")
@@ -195,30 +257,36 @@ defmodule Mix.Tasks.Arbor.Consult do
     """)
   end
 
+  defp print_multi_model_evaluation(perspective, provider, eval) do
+    Mix.shell().info("""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  #{String.pad_trailing(to_string(provider), 20)} (as :#{perspective})#{String.duplicate(" ", max(0, 30 - String.length(to_string(perspective))))}║
+    ╚══════════════════════════════════════════════════════════════╝
+
+    #{eval.reasoning}
+    """)
+  end
+
   # ============================================================================
   # Save to .arbor/council/
   # ============================================================================
 
-  defp save_results(question, results, opts, provider_override) do
+  defp save_results(question, results, opts, provider_override, mode) do
     slug = slugify(question)
     date = Date.utc_today() |> Date.to_string()
     dir = Path.join([".arbor", "council", "#{date}-#{slug}"])
 
     File.mkdir_p!(dir)
 
-    write_question_file(dir, question, results, opts, provider_override)
-    write_perspectives_file(dir, question, results, provider_override)
+    write_question_file(dir, question, results, opts, provider_override, mode)
+    write_perspectives_file(dir, question, results, provider_override, mode)
 
     Mix.shell().info("\nSaved to #{dir}/")
   end
 
-  defp write_question_file(dir, question, results, opts, provider_override) do
+  defp write_question_file(dir, question, results, opts, provider_override, mode) do
     doc_paths = Keyword.get_values(opts, :docs) |> Enum.flat_map(&split_paths/1)
-
-    perspectives_consulted =
-      if opts[:all],
-        do: "all (#{length(@perspectives)})",
-        else: Enum.map_join(results, ", ", fn {p, _} -> to_string(p) end)
+    perspectives_consulted = format_consulted(results, opts, mode)
 
     provider_line =
       if provider_override, do: "provider: #{provider_override}\n", else: ""
@@ -250,32 +318,60 @@ defmodule Mix.Tasks.Arbor.Consult do
     File.write!(Path.join(dir, "question.md"), String.trim(content) <> "\n")
   end
 
-  defp write_perspectives_file(dir, question, results, provider_override) do
+  defp write_perspectives_file(dir, question, results, provider_override, mode) do
+    {title, body} =
+      case mode do
+        :multi_model ->
+          {"# Multi-Model Responses",
+           Enum.map_join(results, "\n---\n\n", fn {provider, eval} ->
+             """
+             ## #{provider}
+
+             #{eval.reasoning}
+             """
+           end)}
+
+        _ ->
+          {"# Council Perspectives",
+           Enum.map_join(results, "\n---\n\n", fn {perspective, eval} ->
+             provider =
+               provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
+
+             """
+             ## #{perspective} (#{provider})
+
+             #{eval.reasoning}
+             """
+           end)}
+      end
+
     header = """
     ---
     date: #{Date.utc_today()}
     question: "#{String.replace(question, "\"", "\\\"")}"
+    mode: #{mode}
     responded: #{length(results)}
     ---
 
-    # Council Perspectives
+    #{title}
     """
-
-    body =
-      Enum.map_join(results, "\n---\n\n", fn {perspective, eval} ->
-        provider = provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
-
-        """
-        ## #{perspective} (#{provider})
-
-        #{eval.reasoning}
-        """
-      end)
 
     File.write!(
       Path.join(dir, "perspectives.md"),
       String.trim(header) <> "\n\n" <> String.trim(body) <> "\n"
     )
+  end
+
+  defp format_consulted(results, opts, :multi_model) do
+    perspective = opts[:perspective] || "brainstorming"
+    providers = Enum.map_join(results, ", ", fn {p, _} -> to_string(p) end)
+    "multi-model :#{perspective} (#{providers})"
+  end
+
+  defp format_consulted(results, opts, _mode) do
+    if opts[:all],
+      do: "all (#{length(@perspectives)})",
+      else: Enum.map_join(results, ", ", fn {p, _} -> to_string(p) end)
   end
 
   defp format_docs_section([]), do: ""
