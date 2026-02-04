@@ -4,7 +4,8 @@ for child <- [
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
       {Arbor.Security.Constraint.RateLimiter, []},
-      {Arbor.Security.CapabilityStore, []}
+      {Arbor.Security.CapabilityStore, []},
+      {Arbor.Security.Reflex.Registry, []}
     ] do
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end

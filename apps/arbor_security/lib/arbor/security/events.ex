@@ -156,6 +156,34 @@ defmodule Arbor.Security.Events do
   end
 
   # ============================================================================
+  # Reflex Events
+  # ============================================================================
+
+  @doc "Record a reflex being triggered (blocked or warned)."
+  @spec record_reflex_triggered(String.t(), map(), String.t(), atom(), atom()) ::
+          :ok | {:error, term()}
+  def record_reflex_triggered(agent_id, reflex, resource, action, response) do
+    dual_emit(:reflex_triggered, %{
+      agent_id: agent_id,
+      reflex_id: reflex.id,
+      reflex_name: reflex.name,
+      resource: resource,
+      action: action,
+      response: response
+    })
+  end
+
+  @doc "Record a reflex warning (action allowed but logged)."
+  @spec record_reflex_warning(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def record_reflex_warning(agent_id, reflex_id, message) do
+    dual_emit(:reflex_warning, %{
+      agent_id: agent_id,
+      reflex_id: reflex_id,
+      message: message
+    })
+  end
+
+  # ============================================================================
   # Delegation Events
   # ============================================================================
 
