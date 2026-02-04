@@ -60,6 +60,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.Reflex
   alias Arbor.Security.SystemAuthority
 
   # ===========================================================================
@@ -294,10 +295,15 @@ defmodule Arbor.Security do
   def check_if_principal_has_capability_for_resource_action(
         principal_id,
         resource_uri,
-        _action,
+        action,
         opts
       ) do
-    with :ok <- check_identity_status(principal_id),
+    # Build reflex check context from the authorization parameters
+    reflex_context = build_reflex_context(resource_uri, action, opts)
+
+    # Check reflexes FIRST (instant block before expensive checks)
+    with :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
+         :ok <- check_identity_status(principal_id),
          :ok <- maybe_verify_identity(opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
@@ -471,7 +477,8 @@ defmodule Arbor.Security do
       Process.whereis(Registry) != nil and
       Process.whereis(Arbor.Security.Identity.NonceCache) != nil and
       Process.whereis(SystemAuthority) != nil and
-      Process.whereis(RateLimiter) != nil
+      Process.whereis(RateLimiter) != nil and
+      Process.whereis(Arbor.Security.Reflex.Registry) != nil
   end
 
   @doc """
@@ -553,6 +560,73 @@ defmodule Arbor.Security do
     else
       :ok
     end
+  end
+
+  # Reflex checking — instant safety blocks before expensive authorization
+  defp check_reflexes(principal_id, context, resource_uri, action, _opts) do
+    if Config.reflex_checking_enabled?() do
+      case Reflex.check(context) do
+        :ok ->
+          :ok
+
+        {:blocked, reflex, message} ->
+          emit_reflex_triggered(principal_id, reflex, resource_uri, action, :blocked)
+          {:error, {:reflex_blocked, reflex.id, message}}
+
+        {:warned, warnings} ->
+          # Log warnings but allow the request to proceed
+          for {reflex, message} <- warnings do
+            emit_reflex_warning(principal_id, reflex.id, message)
+          end
+
+          :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    # If reflex registry isn't started yet, allow request to proceed
+    # This prevents startup ordering issues from blocking authorization
+    _ -> :ok
+  end
+
+  defp build_reflex_context(resource_uri, action, opts) do
+    context = %{resource: resource_uri, action: action}
+
+    # Add command if provided in opts (for shell operations)
+    context =
+      case Keyword.get(opts, :command) do
+        nil -> context
+        cmd -> Map.put(context, :command, cmd)
+      end
+
+    # Add path if it can be extracted from the resource URI
+    context =
+      case extract_path_from_uri(resource_uri) do
+        nil -> context
+        path -> Map.put(context, :path, path)
+      end
+
+    # Add URL if provided
+    context =
+      case Keyword.get(opts, :url) do
+        nil -> context
+        url -> Map.put(context, :url, url)
+      end
+
+    context
+  end
+
+  # Extract file path from arbor:// resource URIs
+  defp extract_path_from_uri("arbor://fs/" <> rest), do: "/" <> rest
+  defp extract_path_from_uri(_), do: nil
+
+  defp emit_reflex_triggered(principal_id, reflex, resource_uri, action, response) do
+    Events.record_reflex_triggered(principal_id, reflex, resource_uri, action, response)
+  end
+
+  defp emit_reflex_warning(principal_id, reflex_id, message) do
+    Events.record_reflex_warning(principal_id, reflex_id, message)
   end
 
   # Event recording (dual-emit: EventLog + signal bus)

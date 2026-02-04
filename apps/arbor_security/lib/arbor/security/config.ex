@@ -65,6 +65,18 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  Whether reflex checking is enabled for authorization.
+
+  When `true` (default), reflexes are checked before capability verification.
+  Reflexes provide instant safety blocks for obviously dangerous actions.
+  When `false`, reflexes are skipped entirely.
+  """
+  @spec reflex_checking_enabled?() :: boolean()
+  def reflex_checking_enabled? do
+    Application.get_env(@app, :reflex_checking_enabled, true)
+  end
+
+  @doc """
   The period over which rate limit tokens fully refill (in seconds).
 
   A capability with `rate_limit: 100` gets 100 tokens per refill period.
