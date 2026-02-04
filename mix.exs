@@ -26,7 +26,10 @@ defmodule Arbor.MixProject do
       {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
 
       # Dev/test tools
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
 
       # These are umbrella apps now, auto-discovered via apps_path
       # arbor_eval — code quality evaluation (dev/test only via its mix.exs)
@@ -37,6 +40,7 @@ defmodule Arbor.MixProject do
   defp aliases do
     [
       quality: ["format --check-formatted", "credo --strict"],
+      security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": ["test --only fast"]
     ]
   end

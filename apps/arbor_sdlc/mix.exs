@@ -51,7 +51,8 @@ defmodule Arbor.SDLC.MixProject do
       # External deps
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

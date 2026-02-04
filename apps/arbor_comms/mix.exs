@@ -33,7 +33,8 @@ defmodule ArborComms.MixProject do
       {:req, "~> 0.5"},
       {:swoosh, "~> 1.17"},
       {:gen_smtp, "~> 1.2"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

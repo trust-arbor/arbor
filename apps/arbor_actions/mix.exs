@@ -39,7 +39,8 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_sandbox, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
-      {:jido_action, path: "../../../jido_action", override: true}
+      {:jido_action, path: "../../../jido_action", override: true},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 end
