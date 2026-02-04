@@ -2,9 +2,9 @@ defmodule Arbor.AI.ShellAdapter do
   @moduledoc """
   Adapts Arbor.Shell to the System.cmd-style interface expected by CLI backends.
 
-  The old arbor codebase used `Arbor.ShellAdapter.cmd/3` which returns
-  `{output, exit_code}` like `System.cmd/3`. This module provides that
-  interface on top of `Arbor.Shell.execute/2`.
+  **Deprecated:** CLI backends now use `Arbor.Shell.execute/2` directly via
+  `CliBackend.execute_command/3`. This module is retained only for
+  `BackendRegistry.detect_cli_tool/1` which uses the `cmd/3` function.
 
   ## Usage
 

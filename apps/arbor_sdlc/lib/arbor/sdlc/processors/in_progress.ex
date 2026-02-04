@@ -592,40 +592,47 @@ defmodule Arbor.SDLC.Processors.InProgress do
   defp run_tests(config) do
     Logger.info("Running tests")
 
-    _timeout = Config.session_test_timeout()
-    test_command = "mix test"
+    timeout = Config.session_test_timeout()
 
-    case System.cmd("sh", ["-c", test_command], stderr_to_stdout: true, cd: config.roadmap_root) do
-      {_output, 0} ->
+    case Arbor.Shell.execute("mix test",
+           cwd: config.roadmap_root,
+           sandbox: :none,
+           timeout: timeout
+         ) do
+      {:ok, %{exit_code: 0}} ->
         Logger.info("Tests passed")
         :ok
 
-      {output, exit_code} ->
-        Logger.warning("Tests failed", exit_code: exit_code)
-        {:error, {:test_failed, exit_code, String.slice(output, 0, 2000)}}
+      {:ok, %{exit_code: code, stdout: output}} ->
+        Logger.warning("Tests failed", exit_code: code)
+        {:error, {:test_failed, code, String.slice(output, 0, 2000)}}
+
+      {:error, reason} ->
+        Logger.error("Test execution failed", error: inspect(reason))
+        {:error, {:test_exception, inspect(reason)}}
     end
-  rescue
-    e ->
-      Logger.error("Test execution failed", error: Exception.message(e))
-      {:error, {:test_exception, Exception.message(e)}}
   end
 
   defp run_quality_checks(config) do
     Logger.info("Running quality checks")
 
-    case System.cmd("sh", ["-c", "mix quality"], stderr_to_stdout: true, cd: config.roadmap_root) do
-      {_output, 0} ->
+    case Arbor.Shell.execute("mix quality",
+           cwd: config.roadmap_root,
+           sandbox: :none,
+           timeout: 120_000
+         ) do
+      {:ok, %{exit_code: 0}} ->
         Logger.info("Quality checks passed")
         :ok
 
-      {output, exit_code} ->
-        Logger.warning("Quality checks failed", exit_code: exit_code)
-        {:error, {:quality_failed, exit_code, String.slice(output, 0, 2000)}}
+      {:ok, %{exit_code: code, stdout: output}} ->
+        Logger.warning("Quality checks failed", exit_code: code)
+        {:error, {:quality_failed, code, String.slice(output, 0, 2000)}}
+
+      {:error, reason} ->
+        Logger.error("Quality check execution failed", error: inspect(reason))
+        {:error, {:quality_exception, inspect(reason)}}
     end
-  rescue
-    e ->
-      Logger.error("Quality check execution failed", error: Exception.message(e))
-      {:error, {:quality_exception, Exception.message(e)}}
   end
 
   defp move_to_completed(item_map, item_path, _session_id, output, config) do

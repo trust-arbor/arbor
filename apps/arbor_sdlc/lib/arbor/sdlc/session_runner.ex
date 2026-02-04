@@ -34,6 +34,7 @@ defmodule Arbor.SDLC.SessionRunner do
 
   require Logger
 
+  alias Arbor.Common.ShellEscape
   alias Arbor.SDLC.Config
   alias Mix.Tasks.Arbor.HandsHelpers, as: Hands
 
@@ -50,7 +51,8 @@ defmodule Arbor.SDLC.SessionRunner do
     :hand_name,
     :working_dir,
     :env_vars,
-    :resume_session_id
+    :resume_session_id,
+    :shell_session_id
   ]
 
   # =============================================================================
@@ -136,6 +138,34 @@ defmodule Arbor.SDLC.SessionRunner do
     end
   end
 
+  # Handle streaming output from PortSession
+  def handle_info({:port_data, _shell_id, _chunk}, state) do
+    # Output chunks can be used for dashboard streaming in the future.
+    # For now, we just accumulate via PortSession internally.
+    {:noreply, state}
+  end
+
+  def handle_info({:port_exit, _shell_id, 0, output}, state) do
+    Logger.info("CLI session completed successfully",
+      item_path: state.item_path,
+      session_id: state.session_id
+    )
+
+    send(state.parent, {:session_complete, state.item_path, state.session_id, output})
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:port_exit, _shell_id, exit_code, output}, state) do
+    Logger.warning("CLI session exited with error",
+      item_path: state.item_path,
+      session_id: state.session_id,
+      exit_code: exit_code
+    )
+
+    send(state.parent, {:session_error, state.item_path, {:exit_code, exit_code, output}})
+    {:stop, :normal, state}
+  end
+
   @impl GenServer
   def handle_call(:get_state, _from, state) do
     info = %{
@@ -153,7 +183,12 @@ defmodule Arbor.SDLC.SessionRunner do
   def terminate(_reason, state) do
     # Clean up Hand if we spawned one
     if state.hand_name do
-      cleanup_hand(state.hand_name)
+      cleanup_hand(state.hand_name, state)
+    end
+
+    # Also stop any streaming session
+    if state.shell_session_id do
+      Arbor.Shell.stop_session(state.shell_session_id)
     end
 
     :ok
@@ -175,88 +210,49 @@ defmodule Arbor.SDLC.SessionRunner do
     # Prepare environment with SDLC context
     env = build_env(state, session_id)
 
-    # Build the claude command
-    # Use -p for print mode with the prompt, or --resume for continuing
+    # Build the claude command args
     args =
       if state.resume_session_id do
-        # Resume an existing session
-        [
-          "--resume",
-          state.resume_session_id,
-          "-p",
-          state.prompt,
-          "--output-format",
-          "json",
-          "--dangerously-skip-permissions"
-        ]
+        ["--resume", state.resume_session_id, "-p", state.prompt,
+         "--output-format", "json", "--dangerously-skip-permissions"]
       else
-        # Start a new session
-        [
-          "-p",
-          state.prompt,
-          "--output-format",
-          "json",
-          "--dangerously-skip-permissions"
-        ]
+        ["-p", state.prompt, "--output-format", "json",
+         "--dangerously-skip-permissions"]
       end
+
+    # Build shell command with escaped args and stdin redirect
+    quoted_args = Enum.map(args, &ShellEscape.escape_arg!/1)
+    shell_cmd = "claude #{Enum.join(quoted_args, " ")} < /dev/null"
+
+    shell_opts = [
+      sandbox: :none,
+      timeout: :infinity,
+      cwd: state.working_dir,
+      env: env,
+      stream_to: self()
+    ]
 
     # Notify parent that session is starting
     send(state.parent, {:session_started, state.item_path, session_id})
 
-    # Run the CLI command asynchronously
-    Task.start(fn ->
-      run_cli_session(state.parent, state.item_path, session_id, args, env, state.working_dir)
-    end)
-
-    {:noreply, %{state | session_id: session_id}}
-  end
-
-  defp run_cli_session(parent, item_path, session_id, args, env, working_dir) do
-    Logger.info("Executing CLI session",
-      item_path: item_path,
-      session_id: session_id
-    )
-
-    # Convert env map to list of tuples for System.cmd
-    env_list = Enum.map(env, fn {k, v} -> {to_string(k), to_string(v)} end)
-
-    cmd_opts = [
-      stderr_to_stdout: true,
-      cd: working_dir,
-      env: env_list
-    ]
-
-    # Use Port for long-running session with streaming output
-    case System.cmd("claude", args, cmd_opts) do
-      {output, 0} ->
-        Logger.info("CLI session completed successfully",
-          item_path: item_path,
-          session_id: session_id
-        )
-
-        send(parent, {:session_complete, item_path, session_id, output})
-
-      {output, exit_code} ->
-        Logger.warning("CLI session exited with error",
-          item_path: item_path,
+    case Arbor.Shell.execute_streaming(shell_cmd, shell_opts) do
+      {:ok, shell_session_id} ->
+        Logger.info("Auto session started via PortSession",
+          item_path: state.item_path,
           session_id: session_id,
-          exit_code: exit_code
+          shell_session_id: shell_session_id
         )
 
-        send(parent, {:session_error, item_path, {:exit_code, exit_code, output}})
-    end
-  rescue
-    e ->
-      Logger.error("CLI session failed",
-        item_path: item_path,
-        error: Exception.message(e)
-      )
+        {:noreply, %{state | session_id: session_id, shell_session_id: shell_session_id}}
 
-      send(parent, {:session_error, item_path, {:exception, Exception.message(e)}})
+      {:error, reason} ->
+        send(state.parent, {:session_error, state.item_path, reason})
+        {:stop, :normal, state}
+    end
   end
 
   # =============================================================================
-  # Hand Session (Full worktree + tmux)
+  # Hand Session (Full worktree + PortSession)
   # =============================================================================
 
   defp start_hand_session(state) do
@@ -302,11 +298,13 @@ defmodule Arbor.SDLC.SessionRunner do
         # Build environment
         env = build_env(state, session_id)
 
-        # Spawn the hand via tmux
-        case spawn_tmux_hand(hand_name, hand_dir, prompt_file, wt_path, env) do
-          :ok ->
+        # Spawn the hand via PortSession
+        case spawn_port_hand(hand_name, hand_dir, prompt_file, wt_path, env) do
+          {:ok, shell_session_id} ->
             send(state.parent, {:session_started, state.item_path, session_id})
-            {:noreply, %{state | session_id: session_id, hand_name: hand_name}}
+
+            {:noreply,
+             %{state | session_id: session_id, hand_name: hand_name, shell_session_id: shell_session_id}}
 
           {:error, reason} ->
             send(state.parent, {:session_error, state.item_path, {:spawn_failed, reason}})
@@ -324,9 +322,8 @@ defmodule Arbor.SDLC.SessionRunner do
     end
   end
 
-  defp spawn_tmux_hand(hand_name, hand_dir, prompt_file, working_dir, env) do
+  defp spawn_port_hand(hand_name, hand_dir, prompt_file, working_dir, env) do
     config_dir = Hands.config_dir()
-    session = Hands.tmux_session_name(hand_name)
 
     unless File.dir?(config_dir) do
       Logger.error("Hands credential directory not found", config_dir: config_dir)
@@ -355,50 +352,39 @@ defmodule Arbor.SDLC.SessionRunner do
     File.write!(run_script, script_content)
     File.chmod!(run_script, 0o755)
 
-    # Start tmux session
-    {output, exit_code} =
-      System.cmd(
-        "tmux",
-        [
-          "new-session",
-          "-d",
-          "-s",
-          session,
-          "#{run_script}; exec bash"
-        ],
-        stderr_to_stdout: true
-      )
+    shell_opts = [
+      sandbox: :none,
+      timeout: :infinity,
+      cwd: working_dir,
+      env: env,
+      stream_to: self()
+    ]
 
-    if exit_code == 0 do
-      Logger.info("Hand spawned via tmux",
-        hand_name: hand_name,
-        session: session
-      )
+    case Arbor.Shell.execute_streaming("bash #{run_script}", shell_opts) do
+      {:ok, shell_session_id} ->
+        Logger.info("Hand spawned via PortSession",
+          hand_name: hand_name,
+          shell_session_id: shell_session_id
+        )
 
-      :ok
-    else
-      Logger.error("Failed to start tmux session",
-        output: output,
-        exit_code: exit_code
-      )
+        {:ok, shell_session_id}
 
-      {:error, output}
+      {:error, reason} ->
+        Logger.error("Failed to start Hand PortSession",
+          reason: inspect(reason)
+        )
+
+        {:error, reason}
     end
   end
 
-  defp cleanup_hand(hand_name) do
-    Logger.info("Cleaning up Hand", hand_name: hand_name)
-
-    case Hands.find_hand(hand_name) do
-      {:local, %{session: session}} ->
-        System.cmd("tmux", ["kill-session", "-t", session], stderr_to_stdout: true)
-
-      {:sandbox, %{container: container}} ->
-        System.cmd("docker", ["rm", "-f", container], stderr_to_stdout: true)
-
-      :not_found ->
-        :ok
+  defp cleanup_hand(_hand_name, state) do
+    # Stop the PortSession if we have one
+    if state.shell_session_id do
+      Arbor.Shell.stop_session(state.shell_session_id)
     end
+
+    :ok
   end
 
   # =============================================================================
