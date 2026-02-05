@@ -21,7 +21,12 @@ defmodule Arbor.Memory.Application do
         [
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
           {Arbor.Memory.IndexSupervisor, []},
-          {Arbor.Persistence.EventLog.ETS, name: :memory_events}
+          {Arbor.Persistence.EventLog.ETS, name: :memory_events},
+          # Seed/Host Phase 3 stores
+          {Arbor.Memory.GoalStore, []},
+          {Arbor.Memory.IntentStore, []},
+          {Arbor.Memory.Thinking, []},
+          {Arbor.Memory.CodeStore, []}
         ]
       else
         []

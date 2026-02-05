@@ -50,13 +50,17 @@ defmodule Arbor.Memory do
   alias Arbor.Memory.{
     ActionPatterns,
     BackgroundChecks,
+    Bridge,
+    CodeStore,
     Consolidation,
     Embedding,
     Events,
+    GoalStore,
     IdentityConsolidator,
     Index,
     IndexSupervisor,
     InsightDetector,
+    IntentStore,
     KnowledgeGraph,
     Patterns,
     Preconscious,
@@ -69,6 +73,7 @@ defmodule Arbor.Memory do
     SelfKnowledge,
     Signals,
     Summarizer,
+    Thinking,
     TokenBudget,
     WorkingMemory
   }
@@ -252,9 +257,7 @@ defmodule Arbor.Memory do
   defp emit_recall_signal(agent_id, query, results) do
     top_similarity = if results != [], do: hd(results).similarity, else: nil
 
-    Signals.emit_recalled(agent_id, query, length(results),
-      top_similarity: top_similarity
-    )
+    Signals.emit_recalled(agent_id, query, length(results), top_similarity: top_similarity)
   end
 
   @doc """
@@ -1200,8 +1203,12 @@ defmodule Arbor.Memory do
 
       patterns = Arbor.Memory.analyze_action_patterns(action_history)
   """
-  @spec analyze_action_patterns([ActionPatterns.action()], keyword()) :: [ActionPatterns.pattern()]
-  defdelegate analyze_action_patterns(action_history, opts \\ []), to: ActionPatterns, as: :analyze
+  @spec analyze_action_patterns([ActionPatterns.action()], keyword()) :: [
+          ActionPatterns.pattern()
+        ]
+  defdelegate analyze_action_patterns(action_history, opts \\ []),
+    to: ActionPatterns,
+    as: :analyze
 
   @doc """
   Analyze action history and queue learnings as proposals.
@@ -1314,7 +1321,9 @@ defmodule Arbor.Memory do
   """
   @spec consolidate_identity(String.t(), keyword()) ::
           {:ok, SelfKnowledge.t()} | {:ok, :no_changes} | {:error, term()}
-  defdelegate consolidate_identity(agent_id, opts \\ []), to: IdentityConsolidator, as: :consolidate
+  defdelegate consolidate_identity(agent_id, opts \\ []),
+    to: IdentityConsolidator,
+    as: :consolidate
 
   @doc """
   Rollback identity to a previous version.
@@ -1326,7 +1335,9 @@ defmodule Arbor.Memory do
   """
   @spec rollback_identity(String.t(), :previous | pos_integer()) ::
           {:ok, SelfKnowledge.t()} | {:error, term()}
-  defdelegate rollback_identity(agent_id, version \\ :previous), to: IdentityConsolidator, as: :rollback
+  defdelegate rollback_identity(agent_id, version \\ :previous),
+    to: IdentityConsolidator,
+    as: :rollback
 
   @doc """
   Get identity change history for an agent.
@@ -1530,6 +1541,193 @@ defmodule Arbor.Memory do
   """
   @spec configure_preconscious(String.t(), keyword()) :: :ok | {:error, term()}
   defdelegate configure_preconscious(agent_id, opts), to: Preconscious, as: :configure
+
+  # ============================================================================
+  # Goals (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc """
+  Add a goal for an agent.
+
+  Accepts a `Goal` struct or a description string with options.
+
+  ## Examples
+
+      goal = Goal.new("Fix the login bug", type: :achieve, priority: 80)
+      {:ok, goal} = Arbor.Memory.add_goal("agent_001", goal)
+  """
+  @spec add_goal(String.t(), struct()) :: {:ok, struct()}
+  defdelegate add_goal(agent_id, goal), to: GoalStore
+
+  @doc """
+  Get all active goals for an agent, sorted by priority.
+  """
+  @spec get_active_goals(String.t()) :: [struct()]
+  defdelegate get_active_goals(agent_id), to: GoalStore
+
+  @doc """
+  Update goal progress (0.0 to 1.0).
+  """
+  @spec update_goal_progress(String.t(), String.t(), float()) ::
+          {:ok, struct()} | {:error, :not_found}
+  defdelegate update_goal_progress(agent_id, goal_id, progress), to: GoalStore
+
+  @doc """
+  Mark a goal as achieved.
+  """
+  @spec achieve_goal(String.t(), String.t()) :: {:ok, struct()} | {:error, :not_found}
+  defdelegate achieve_goal(agent_id, goal_id), to: GoalStore
+
+  @doc """
+  Mark a goal as abandoned with an optional reason.
+  """
+  @spec abandon_goal(String.t(), String.t(), String.t() | nil) ::
+          {:ok, struct()} | {:error, :not_found}
+  defdelegate abandon_goal(agent_id, goal_id, reason \\ nil), to: GoalStore
+
+  @doc """
+  Get the goal tree starting from a given goal (with children hierarchy).
+  """
+  @spec get_goal_tree(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  defdelegate get_goal_tree(agent_id, goal_id), to: GoalStore
+
+  # ============================================================================
+  # Intents & Percepts (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc """
+  Record an intent for an agent.
+
+  Intents represent what the Mind has decided to do.
+  """
+  @spec record_intent(String.t(), struct()) :: {:ok, struct()}
+  defdelegate record_intent(agent_id, intent), to: IntentStore
+
+  @doc """
+  Get recent intents for an agent.
+
+  ## Options
+
+  - `:limit` — max intents (default: 10)
+  - `:type` — filter by intent type
+  - `:since` — only intents after this DateTime
+  """
+  @spec recent_intents(String.t(), keyword()) :: [struct()]
+  defdelegate recent_intents(agent_id, opts \\ []), to: IntentStore
+
+  @doc """
+  Record a percept for an agent.
+
+  Percepts represent the Body's observation after executing an intent.
+  """
+  @spec record_percept(String.t(), struct()) :: {:ok, struct()}
+  defdelegate record_percept(agent_id, percept), to: IntentStore
+
+  @doc """
+  Get recent percepts for an agent.
+
+  ## Options
+
+  - `:limit` — max percepts (default: 10)
+  - `:type` — filter by percept type
+  - `:since` — only percepts after this DateTime
+  """
+  @spec recent_percepts(String.t(), keyword()) :: [struct()]
+  defdelegate recent_percepts(agent_id, opts \\ []), to: IntentStore
+
+  @doc """
+  Get the percept (outcome) for a specific intent.
+  """
+  @spec get_percept_for_intent(String.t(), String.t()) ::
+          {:ok, struct()} | {:error, :not_found}
+  defdelegate get_percept_for_intent(agent_id, intent_id), to: IntentStore
+
+  # ============================================================================
+  # Bridge (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc """
+  Emit an intent from Mind to Body via the signal bus.
+  """
+  @spec emit_intent(String.t(), struct()) :: :ok
+  defdelegate emit_intent(agent_id, intent), to: Bridge
+
+  @doc """
+  Emit a percept from Body to Mind via the signal bus.
+  """
+  @spec emit_percept(String.t(), struct()) :: :ok
+  defdelegate emit_percept(agent_id, percept), to: Bridge
+
+  @doc """
+  Execute an intent and wait for the percept response.
+
+  ## Options
+
+  - `:timeout` — maximum wait time in ms (default: 30_000)
+  """
+  @spec execute_and_wait(String.t(), struct(), keyword()) ::
+          {:ok, struct()} | {:error, :timeout}
+  defdelegate execute_and_wait(agent_id, intent, opts \\ []), to: Bridge
+
+  # ============================================================================
+  # Thinking (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc """
+  Record a thinking block for an agent.
+
+  ## Options
+
+  - `:significant` — flag for reflection (default: false)
+  - `:metadata` — additional metadata
+  """
+  @spec record_thinking(String.t(), String.t(), keyword()) :: {:ok, map()}
+  defdelegate record_thinking(agent_id, text, opts \\ []), to: Thinking
+
+  @doc """
+  Get recent thinking entries for an agent.
+
+  ## Options
+
+  - `:limit` — max entries (default: 10)
+  - `:since` — only entries after this DateTime
+  - `:significant_only` — only significant entries (default: false)
+  """
+  @spec recent_thinking(String.t(), keyword()) :: [map()]
+  defdelegate recent_thinking(agent_id, opts \\ []), to: Thinking
+
+  # ============================================================================
+  # CodeStore (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc """
+  Store a code pattern for an agent.
+
+  ## Required Fields
+
+  - `:code` — the code text
+  - `:language` — programming language
+  - `:purpose` — description of what it does
+  """
+  @spec store_code(String.t(), map()) :: {:ok, map()} | {:error, :missing_fields}
+  defdelegate store_code(agent_id, params), to: CodeStore, as: :store
+
+  @doc """
+  Find code patterns by purpose (keyword search).
+  """
+  @spec find_code_by_purpose(String.t(), String.t()) :: [map()]
+  defdelegate find_code_by_purpose(agent_id, query), to: CodeStore, as: :find_by_purpose
+
+  @doc """
+  List all code patterns for an agent.
+
+  ## Options
+
+  - `:language` — filter by language
+  - `:limit` — max results
+  """
+  @spec list_code(String.t(), keyword()) :: [map()]
+  defdelegate list_code(agent_id, opts \\ []), to: CodeStore, as: :list
 
   # ============================================================================
   # Private Helpers (Phase 5)
