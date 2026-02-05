@@ -153,6 +153,11 @@ config :arbor_persistence,
   # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
   embedding_dimension: 768
 
+# Monitor signal bridge
+config :arbor_monitor,
+  signal_emission_enabled: true,
+  signal_module: Arbor.Signals
+
 # Dashboard endpoint
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   url: [host: "localhost"],

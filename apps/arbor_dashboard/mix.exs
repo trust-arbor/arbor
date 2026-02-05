@@ -46,6 +46,8 @@ defmodule Arbor.Dashboard.MixProject do
 
       # Standalone
       {:arbor_eval, in_umbrella: true},
+      {:arbor_demo, in_umbrella: true},
+      {:arbor_monitor, in_umbrella: true},
 
       # Phoenix stack (via arbor_web, but needed for endpoint)
       {:phoenix, "~> 1.7"},
