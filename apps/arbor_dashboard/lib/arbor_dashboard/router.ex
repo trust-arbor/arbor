@@ -16,6 +16,7 @@ defmodule Arbor.Dashboard.Router do
       live "/activity", ActivityLive
       live "/agents", AgentsLive
       live "/roadmap", RoadmapLive
+      live "/demo", DemoLive
     end
   end
 end

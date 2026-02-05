@@ -32,7 +32,11 @@ defmodule Arbor.Web.Icons do
     message_sent: "📤",
     message_received: "📥",
     broadcast: "📡",
-    handoff: "🤝"
+    handoff: "🤝",
+    # Demo events
+    fault_injected: "💥",
+    fault_cleared: "🩹",
+    anomaly_detected: "🚨"
   }
 
   @category_icons %{
@@ -46,7 +50,9 @@ defmodule Arbor.Web.Icons do
     task: "📋",
     system: "⚙️",
     network: "🔗",
-    debug: "🐛"
+    debug: "🐛",
+    demo: "🔬",
+    monitor: "📊"
   }
 
   @perspective_icons %{
