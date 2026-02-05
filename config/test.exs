@@ -25,7 +25,8 @@ config :arbor_dashboard, start_children: false
 # Don't start the dashboard HTTP server in tests
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   http: [port: 4002],
-  server: false
+  server: false,
+  secret_key_base: String.duplicate("test_secret_", 8)
 
 # Disable checkpoint integration in tests (module may not be available)
 config :arbor_signals,
