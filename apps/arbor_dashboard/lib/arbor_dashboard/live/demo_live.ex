@@ -4,6 +4,14 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   Visualizes the self-healing pipeline: Detect -> Diagnose -> Propose -> Review -> Fix -> Verify.
   Provides controls for injecting and clearing faults, and shows a real-time activity feed.
+
+  ## Signal Integration
+
+  Subscribes to multiple signal categories:
+  - `demo.*` — Fault injection events
+  - `monitor.*` — Anomaly detection
+  - `consensus.*` — Proposal submission, evaluation, and decisions
+  - `code.*` — Hot-load events
   """
 
   use Phoenix.LiveView
@@ -26,10 +34,12 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    sub_id =
+    subscription_ids =
       if connected?(socket) do
         :timer.send_interval(@refresh_interval_ms, :refresh)
-        safe_subscribe()
+        subscribe_to_signals()
+      else
+        []
       end
 
     socket =
@@ -39,8 +49,12 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         active_faults: safe_active_faults(),
         available_faults: safe_available_faults(),
         feed: [],
-        sub_id: sub_id,
-        monitor_status: safe_monitor_status()
+        subscription_ids: subscription_ids,
+        monitor_status: safe_monitor_status(),
+        # Consensus tracking
+        current_proposal: nil,
+        evaluations: [],
+        decision: nil
       )
 
     {:ok, socket}
@@ -48,14 +62,8 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:sub_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+    for sub_id <- socket.assigns[:subscription_ids] || [] do
+      safe_unsubscribe(sub_id)
     end
   end
 
@@ -75,6 +83,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     feed = Enum.take([entry | socket.assigns.feed], @max_feed_entries)
 
     pipeline = update_pipeline_from_signal(socket.assigns.pipeline_stages, signal)
+    socket = update_consensus_state(socket, signal)
 
     socket =
       assign(socket,
@@ -132,7 +141,10 @@ defmodule Arbor.Dashboard.Live.DemoLive do
            active_faults: safe_active_faults(),
            available_faults: safe_available_faults(),
            feed: feed,
-           pipeline_stages: build_pipeline(:idle)
+           pipeline_stages: build_pipeline(:idle),
+           current_proposal: nil,
+           evaluations: [],
+           decision: nil
          )}
 
       {:error, reason} ->
@@ -156,7 +168,10 @@ defmodule Arbor.Dashboard.Live.DemoLive do
        active_faults: %{},
        available_faults: safe_available_faults(),
        feed: feed,
-       pipeline_stages: build_pipeline(:idle)
+       pipeline_stages: build_pipeline(:idle),
+       current_proposal: nil,
+       evaluations: [],
+       decision: nil
      )}
   end
 
@@ -253,6 +268,76 @@ defmodule Arbor.Dashboard.Live.DemoLive do
       </.card>
     </div>
 
+    <%!-- Council Review Panel (shows during review stage) --%>
+    <%= if @current_proposal || @evaluations != [] || @decision do %>
+      <div style="margin-top: 1.5rem;">
+        <.card title="Council Review">
+          <%!-- Current Proposal --%>
+          <%= if @current_proposal do %>
+            <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--aw-surface-secondary); border-radius: 6px;">
+              <div style="font-weight: 600; margin-bottom: 0.5rem;">Proposal</div>
+              <div style="font-size: 0.85rem; color: var(--aw-text-secondary);">
+                {Map.get(@current_proposal, :description, "No description")}
+              </div>
+              <%= if Map.get(@current_proposal, :context) do %>
+                <div style="font-size: 0.8rem; color: var(--aw-text-secondary); margin-top: 0.5rem;">
+                  Target: {inspect(get_in(@current_proposal, [:context, :target_module]) || "N/A")}
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+
+          <%!-- Evaluations --%>
+          <%= if @evaluations != [] do %>
+            <div style="margin-bottom: 1rem;">
+              <div style="font-weight: 600; margin-bottom: 0.5rem;">Evaluator Votes</div>
+              <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                <%= for eval <- @evaluations do %>
+                  <div style={"padding: 0.5rem; border-radius: 4px; border-left: 3px solid #{vote_color(eval.vote)}; background: var(--aw-surface-secondary);"}>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <span style="font-weight: 500;">{eval.perspective}</span>
+                      <.badge label={to_string(eval.vote)} color={vote_badge_color(eval.vote)} />
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--aw-text-secondary); margin-top: 0.25rem;">
+                      {String.slice(eval.reasoning || "", 0, 100)}{if String.length(
+                                                                        eval.reasoning || ""
+                                                                      ) > 100, do: "...", else: ""}
+                    </div>
+                    <%= if eval.concerns != [] do %>
+                      <div style="font-size: 0.75rem; color: var(--aw-accent-yellow); margin-top: 0.25rem;">
+                        Concerns: {Enum.join(eval.concerns, ", ")}
+                      </div>
+                    <% end %>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+
+          <%!-- Decision --%>
+          <%= if @decision do %>
+            <div style={"padding: 0.75rem; border-radius: 6px; background: #{decision_bg(@decision)}; border: 1px solid #{decision_border(@decision)};"}>
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 600;">
+                  {decision_icon(@decision)} Decision: {String.capitalize(
+                    to_string(@decision.outcome)
+                  )}
+                </span>
+                <span style="font-size: 0.8rem; color: var(--aw-text-secondary);">
+                  {format_time(Map.get(@decision, :decided_at) || System.system_time(:millisecond))}
+                </span>
+              </div>
+              <%= if Map.get(@decision, :reason) do %>
+                <div style="font-size: 0.85rem; color: var(--aw-text-secondary); margin-top: 0.5rem;">
+                  {Map.get(@decision, :reason)}
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        </.card>
+      </div>
+    <% end %>
+
     <%!-- Monitor Status --%>
     <div style="margin-top: 1.5rem;">
       <.card title="Monitor Status">
@@ -322,15 +407,107 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         |> set_stage("detect", :complete)
         |> set_stage("diagnose", :active)
 
-      match_signal?(category, type, :demo, :fault_cleared) ->
+      match_signal?(category, type, :demo, :pipeline_stage_changed) ->
+        data = extract_signal_data(signal)
+        stage_name = data[:stage] || data["stage"]
+        update_pipeline_for_stage(stages, stage_name)
+
+      match_signal?(category, type, :consensus, :proposal_submitted) ->
+        stages
+        |> set_stage("diagnose", :complete)
+        |> set_stage("propose", :active)
+
+      match_signal?(category, type, :consensus, :evaluation_started) ->
+        stages
+        |> set_stage("propose", :complete)
+        |> set_stage("review", :active)
+
+      match_signal?(category, type, :consensus, :decision_made) ->
+        data = extract_signal_data(signal)
+        decision = data[:decision] || data["decision"]
+
+        if decision == :approved or decision == "approved" do
+          stages
+          |> set_stage("review", :complete)
+          |> set_stage("fix", :active)
+        else
+          set_stage(stages, "review", :error)
+        end
+
+      match_signal?(category, type, :code, :hot_loaded) ->
         stages
         |> set_stage("fix", :complete)
         |> set_stage("verify", :active)
+
+      match_signal?(category, type, :demo, :fault_cleared) ->
+        set_stage(stages, "verify", :complete)
 
       true ->
         stages
     end
   end
+
+  defp update_pipeline_for_stage(stages, stage_name) when is_atom(stage_name) do
+    update_pipeline_for_stage(stages, to_string(stage_name))
+  end
+
+  defp update_pipeline_for_stage(stages, stage_name) when is_binary(stage_name) do
+    case stage_name do
+      "detect" -> set_stage(stages, "detect", :active)
+      "diagnose" -> stages |> set_stage("detect", :complete) |> set_stage("diagnose", :active)
+      "propose" -> stages |> set_stage("diagnose", :complete) |> set_stage("propose", :active)
+      "review" -> stages |> set_stage("propose", :complete) |> set_stage("review", :active)
+      "fix" -> stages |> set_stage("review", :complete) |> set_stage("fix", :active)
+      "verify" -> stages |> set_stage("fix", :complete) |> set_stage("verify", :active)
+      "rejected" -> set_stage(stages, "review", :error)
+      "idle" -> build_pipeline(:idle)
+      _ -> stages
+    end
+  end
+
+  defp update_pipeline_for_stage(stages, _), do: stages
+
+  defp update_consensus_state(socket, signal) do
+    category = get_in(signal, [:data, :category]) || signal[:category]
+    type = get_in(signal, [:data, :type]) || signal[:type]
+    data = extract_signal_data(signal)
+
+    cond do
+      match_signal?(category, type, :consensus, :proposal_submitted) ->
+        proposal = data[:proposal] || data["proposal"] || data
+        assign(socket, current_proposal: proposal)
+
+      match_signal?(category, type, :consensus, :evaluation_completed) ->
+        evaluation = data[:evaluation] || data["evaluation"] || data
+        evaluations = [normalize_evaluation(evaluation) | socket.assigns.evaluations]
+        assign(socket, evaluations: evaluations)
+
+      match_signal?(category, type, :consensus, :decision_made) ->
+        decision = %{
+          outcome: data[:decision] || data["decision"],
+          reason: data[:reason] || data["reason"],
+          decided_at: System.system_time(:millisecond)
+        }
+
+        assign(socket, decision: decision)
+
+      true ->
+        socket
+    end
+  end
+
+  defp normalize_evaluation(eval) when is_map(eval) do
+    %{
+      perspective: eval[:perspective] || eval["perspective"] || :unknown,
+      vote: eval[:vote] || eval["vote"] || :abstain,
+      reasoning: eval[:reasoning] || eval["reasoning"] || "",
+      concerns: eval[:concerns] || eval["concerns"] || [],
+      confidence: eval[:confidence] || eval["confidence"] || 0.0
+    }
+  end
+
+  defp normalize_evaluation(_),
+    do: %{perspective: :unknown, vote: :abstain, reasoning: "", concerns: [], confidence: 0.0}
 
   defp match_signal?(cat, type, expected_cat, expected_type) do
     (cat == expected_cat or cat == to_string(expected_cat)) and
@@ -343,6 +520,14 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     end)
   end
 
+  defp extract_signal_data(signal) do
+    case signal do
+      %{data: data} when is_map(data) -> data
+      data when is_map(data) -> data
+      _ -> %{}
+    end
+  end
+
   defp format_signal(signal) do
     type = get_in(signal, [:data, :type]) || signal[:type] || :unknown
     category = get_in(signal, [:data, :category]) || signal[:category] || :unknown
@@ -352,6 +537,12 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         t when t in [:fault_injected, "fault_injected"] -> "💥"
         t when t in [:fault_cleared, "fault_cleared"] -> "🩹"
         t when t in [:anomaly_detected, "anomaly_detected"] -> "🚨"
+        t when t in [:proposal_submitted, "proposal_submitted"] -> "📝"
+        t when t in [:evaluation_started, "evaluation_started"] -> "🗳"
+        t when t in [:evaluation_completed, "evaluation_completed"] -> "✓"
+        t when t in [:decision_made, "decision_made"] -> "⚖️"
+        t when t in [:hot_loaded, "hot_loaded"] -> "🔧"
+        t when t in [:pipeline_stage_changed, "pipeline_stage_changed"] -> "➡️"
         _ -> "📡"
       end
 
@@ -369,6 +560,46 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp format_time(_), do: "--:--:--"
+
+  # ── Vote styling helpers ────────────────────────────────────────────
+
+  defp vote_color(:approve), do: "var(--aw-accent-green)"
+  defp vote_color("approve"), do: "var(--aw-accent-green)"
+  defp vote_color(:reject), do: "var(--aw-accent-red)"
+  defp vote_color("reject"), do: "var(--aw-accent-red)"
+  defp vote_color(_), do: "var(--aw-accent-yellow)"
+
+  defp vote_badge_color(:approve), do: :success
+  defp vote_badge_color("approve"), do: :success
+  defp vote_badge_color(:reject), do: :error
+  defp vote_badge_color("reject"), do: :error
+  defp vote_badge_color(_), do: :warning
+
+  defp decision_icon(%{outcome: :approved}), do: "✅"
+  defp decision_icon(%{outcome: "approved"}), do: "✅"
+  defp decision_icon(%{outcome: :rejected}), do: "❌"
+  defp decision_icon(%{outcome: "rejected"}), do: "❌"
+  defp decision_icon(_), do: "❓"
+
+  defp decision_bg(%{outcome: outcome}) when outcome in [:approved, "approved"] do
+    "rgba(63, 185, 80, 0.1)"
+  end
+
+  defp decision_bg(%{outcome: outcome}) when outcome in [:rejected, "rejected"] do
+    "rgba(248, 81, 73, 0.1)"
+  end
+
+  defp decision_bg(_), do: "var(--aw-surface-secondary)"
+
+  defp decision_border(%{outcome: outcome}) when outcome in [:approved, "approved"] do
+    "var(--aw-accent-green)"
+  end
+
+  defp decision_border(%{outcome: outcome}) when outcome in [:rejected, "rejected"] do
+    "var(--aw-accent-red)"
+  end
+
+  defp decision_border(_), do: "var(--aw-border)"
 
   # ── Safe external calls ────────────────────────────────────────────
 
@@ -428,19 +659,34 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     :exit, _ -> %{process_count: 0, memory_mb: 0, anomaly_count: 0}
   end
 
-  defp safe_subscribe do
+  defp subscribe_to_signals do
     pid = self()
 
-    case Arbor.Signals.subscribe("demo.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
+    patterns = ["demo.*", "monitor.*", "consensus.*", "code.*"]
+
+    Enum.map(patterns, fn pattern ->
+      case Arbor.Signals.subscribe(pattern, fn signal ->
+             send(pid, {:signal_received, signal})
+             :ok
+           end) do
+        {:ok, id} -> id
+        _ -> nil
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
   rescue
-    _ -> nil
+    _ -> []
   catch
-    :exit, _ -> nil
+    :exit, _ -> []
+  end
+
+  defp safe_unsubscribe(nil), do: :ok
+
+  defp safe_unsubscribe(sub_id) do
+    Arbor.Signals.unsubscribe(sub_id)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
