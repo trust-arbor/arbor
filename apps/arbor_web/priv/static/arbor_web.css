@@ -632,3 +632,175 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* ── Pipeline Visualization ─────────────────────────────────────── */
+
+.aw-pipeline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 1rem 0;
+  overflow-x: auto;
+}
+
+.aw-pipeline-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--aw-border);
+  background: var(--aw-bg-card);
+  min-width: 80px;
+  transition: all 0.3s ease;
+}
+
+.aw-pipeline-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.aw-pipeline-label {
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.aw-pipeline-connector {
+  display: flex;
+  align-items: center;
+  padding: 0 0.25rem;
+}
+
+.aw-pipeline-arrow {
+  color: var(--aw-text-secondary);
+  font-size: 1.25rem;
+}
+
+/* Pipeline stage states */
+.aw-pipeline-idle {
+  opacity: 0.5;
+}
+
+.aw-pipeline-active {
+  border-color: var(--aw-accent-blue);
+  background: rgba(88, 166, 255, 0.1);
+  animation: aw-pipeline-pulse 2s ease-in-out infinite;
+}
+
+.aw-pipeline-active .aw-pipeline-label {
+  color: var(--aw-accent-blue);
+  font-weight: 600;
+}
+
+.aw-pipeline-complete {
+  border-color: var(--aw-accent-green);
+  background: rgba(63, 185, 80, 0.1);
+  opacity: 1;
+}
+
+.aw-pipeline-complete .aw-pipeline-label {
+  color: var(--aw-accent-green);
+}
+
+.aw-pipeline-failed {
+  border-color: var(--aw-accent-red);
+  background: rgba(248, 81, 73, 0.1);
+  opacity: 1;
+}
+
+.aw-pipeline-failed .aw-pipeline-label {
+  color: var(--aw-accent-red);
+}
+
+@keyframes aw-pipeline-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.3); }
+  50% { box-shadow: 0 0 12px 4px rgba(88, 166, 255, 0.15); }
+}
+
+/* ── Demo Controls ──────────────────────────────────────────────── */
+
+.aw-demo-controls {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.aw-demo-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--aw-border);
+  background: var(--aw-bg-card);
+  color: var(--aw-text-primary);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.aw-demo-btn:hover {
+  background: var(--aw-bg-card-hover);
+  border-color: var(--aw-accent-blue);
+}
+
+.aw-demo-btn-danger {
+  border-color: var(--aw-accent-red);
+  color: var(--aw-accent-red);
+}
+
+.aw-demo-btn-danger:hover {
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.aw-demo-btn-clear {
+  border-color: var(--aw-accent-yellow);
+  color: var(--aw-accent-yellow);
+}
+
+.aw-demo-btn-clear:hover {
+  background: rgba(210, 153, 34, 0.1);
+}
+
+.aw-demo-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Activity Feed ──────────────────────────────────────────────── */
+
+.aw-activity-feed {
+  max-height: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.aw-activity-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-family: var(--aw-font-mono);
+}
+
+.aw-activity-entry:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.aw-activity-time {
+  color: var(--aw-text-secondary);
+  white-space: nowrap;
+  min-width: 5em;
+}
+
+.aw-activity-icon {
+  flex-shrink: 0;
+}
+
+.aw-activity-message {
+  color: var(--aw-text-primary);
+}

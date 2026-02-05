@@ -85,6 +85,13 @@ defmodule Arbor.Dashboard.Live.LandingLive do
         <a href="/roadmap" class="aw-nav-link">Open Roadmap Dashboard &rarr;</a>
       </.card>
 
+      <.card title="Self-Healing Demo">
+        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
+          BEAM fault injection and autonomous recovery pipeline visualization.
+        </p>
+        <a href="/demo" class="aw-nav-link">Open Demo Dashboard &rarr;</a>
+      </.card>
+
       <.card title="Trust & Security">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
           Agent trust tiers, capability grants, and security events.

@@ -380,6 +380,44 @@ defmodule Arbor.Web.Components do
     """
   end
 
+  # ── pipeline_stage ─────────────────────────────────────────────────
+
+  @doc """
+  Renders a pipeline stage indicator for workflow visualization.
+
+  ## Attributes
+
+    * `id` - Stage identifier (required)
+    * `label` - Display label (required)
+    * `icon` - Icon/emoji (required)
+    * `status` - One of :idle, :active, :complete, :failed (default: :idle)
+    * `is_last` - Whether this is the last stage (no connector arrow)
+    * `class` - Additional CSS classes
+
+  ## Examples
+
+      <.pipeline_stage id="detect" label="Detect" icon="🔍" status={:active} />
+      <.pipeline_stage id="fix" label="Fix" icon="🔧" status={:complete} is_last={true} />
+  """
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :icon, :string, required: true
+  attr :status, :atom, default: :idle
+  attr :is_last, :boolean, default: false
+  attr :class, :string, default: nil
+
+  def pipeline_stage(assigns) do
+    ~H"""
+    <div class={["aw-pipeline-stage", "aw-pipeline-#{@status}", @class]} id={"pipeline-#{@id}"}>
+      <div class="aw-pipeline-icon"><%= @icon %></div>
+      <div class="aw-pipeline-label"><%= @label %></div>
+    </div>
+    <div :if={!@is_last} class="aw-pipeline-connector">
+      <span class="aw-pipeline-arrow">&rarr;</span>
+    </div>
+    """
+  end
+
   # ── nav_link ───────────────────────────────────────────────────────
 
   @doc """

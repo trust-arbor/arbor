@@ -21,6 +21,8 @@ config :arbor_agent, start_children: false
 config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
+config :arbor_demo, start_children: false
+config :arbor_monitor, start_children: false, signal_emission_enabled: false
 
 # Don't start the dashboard HTTP server in tests
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
