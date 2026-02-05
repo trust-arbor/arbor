@@ -106,8 +106,10 @@ defmodule Mix.Tasks.Arbor.Consult do
       exit({:shutdown, 1})
     end
 
-    # Start dependencies for AI calls
-    Mix.Task.run("app.start")
+    # Start only what the council needs: AI backends, consensus config, and logger.
+    # Using app.start boots the entire application tree including gateway/dashboard
+    # HTTP servers, which fails with :eaddrinuse if they're already running.
+    ensure_minimal_deps()
 
     context = build_context(opts)
     eval_opts = build_eval_opts(opts)
@@ -497,4 +499,19 @@ defmodule Mix.Tasks.Arbor.Consult do
   end
 
   defp split_paths(str), do: String.split(str, ",", trim: true)
+
+  defp ensure_minimal_deps do
+    # The council only needs:
+    # - arbor_ai: LLM API calls (BackendRegistry, QuotaTracker, SessionRegistry)
+    # - logger/jason/req: transitive deps for AI calls
+    # - arbor_contracts/arbor_common: pure modules, no processes needed
+    #
+    # It does NOT need: gateway, dashboard, signals, historian, shell, sandbox,
+    # sdlc, agent, security, trust, persistence — all of which may bind ports
+    # or start heavy process trees.
+    {:ok, _} = Application.ensure_all_started(:logger)
+    {:ok, _} = Application.ensure_all_started(:jason)
+    {:ok, _} = Application.ensure_all_started(:req)
+    {:ok, _} = Application.ensure_all_started(:arbor_ai)
+  end
 end
