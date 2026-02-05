@@ -1,5 +1,12 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
-for child <- [Arbor.Agent.Registry, Arbor.Agent.Supervisor] do
+children = [
+  {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
+  {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
+  Arbor.Agent.Registry,
+  Arbor.Agent.Supervisor
+]
+
+for child <- children do
   Supervisor.start_child(Arbor.Agent.AppSupervisor, child)
 end
 

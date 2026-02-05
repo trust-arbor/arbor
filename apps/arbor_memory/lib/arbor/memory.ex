@@ -1730,6 +1730,34 @@ defmodule Arbor.Memory do
   defdelegate list_code(agent_id, opts \\ []), to: CodeStore, as: :list
 
   # ============================================================================
+  # Bridge Subscriptions (Seed/Host Phase 4)
+  # ============================================================================
+
+  @doc """
+  Subscribe to intents emitted for a specific agent.
+
+  The handler function receives the full signal when an intent is emitted
+  for the given agent_id.
+
+  Returns `{:ok, subscription_id}` or `{:error, reason}`.
+  """
+  @spec subscribe_to_intents(String.t(), (map() -> :ok)) ::
+          {:ok, String.t()} | {:error, term()}
+  defdelegate subscribe_to_intents(agent_id, handler), to: Bridge
+
+  @doc """
+  Subscribe to percepts emitted for a specific agent.
+
+  The handler function receives the full signal when a percept is emitted
+  for the given agent_id.
+
+  Returns `{:ok, subscription_id}` or `{:error, reason}`.
+  """
+  @spec subscribe_to_percepts(String.t(), (map() -> :ok)) ::
+          {:ok, String.t()} | {:error, term()}
+  defdelegate subscribe_to_percepts(agent_id, handler), to: Bridge
+
+  # ============================================================================
   # Private Helpers (Phase 5)
   # ============================================================================
 

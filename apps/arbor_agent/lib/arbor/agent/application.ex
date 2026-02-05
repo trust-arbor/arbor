@@ -8,6 +8,8 @@ defmodule Arbor.Agent.Application do
     children =
       if Application.get_env(:arbor_agent, :start_children, true) do
         [
+          {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
+          {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
           Arbor.Agent.Registry,
           Arbor.Agent.Supervisor
         ]

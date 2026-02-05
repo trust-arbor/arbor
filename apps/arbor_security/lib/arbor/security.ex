@@ -60,6 +60,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.Keychain
   alias Arbor.Security.Reflex
   alias Arbor.Security.SystemAuthority
 
@@ -504,6 +505,26 @@ defmodule Arbor.Security do
       healthy: healthy?()
     }
   end
+
+  # ===========================================================================
+  # Reflex System (Seed/Host Phase 4)
+  # ===========================================================================
+
+  @doc """
+  Check context against all active reflexes.
+
+  Returns `:ok`, `{:blocked, reflex, reason}`, or `{:warned, warnings}`.
+  """
+  defdelegate check_reflex(context), to: Reflex, as: :check
+
+  # ===========================================================================
+  # Keychain (Seed/Host Phase 4)
+  # ===========================================================================
+
+  @doc """
+  Create a new keychain for an agent (signing + encryption keypairs).
+  """
+  defdelegate new_keychain(agent_id), to: Keychain, as: :new
 
   # ===========================================================================
   # Private functions

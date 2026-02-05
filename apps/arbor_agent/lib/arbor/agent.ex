@@ -48,9 +48,42 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{Registry, Server, Supervisor}
+  alias Arbor.Agent.{Lifecycle, Registry, Server, Supervisor}
 
   require Logger
+
+  # ===========================================================================
+  # Public API — Agent Lifecycle (Phase 4: Seed/Host)
+  # ===========================================================================
+
+  @doc """
+  Create a new agent from a template or options.
+
+  ## Examples
+
+      {:ok, profile} = Arbor.Agent.create_agent("scout-1",
+        template: Arbor.Agent.Templates.Scout)
+
+      {:ok, profile} = Arbor.Agent.create_agent("custom",
+        character: Character.new(name: "My Agent"),
+        trust_tier: :probationary)
+  """
+  defdelegate create_agent(agent_id, opts \\ []), to: Lifecycle, as: :create
+
+  @doc "Restore an agent from a persisted profile."
+  defdelegate restore_agent(agent_id), to: Lifecycle, as: :restore
+
+  @doc "Start an agent's executor (subscribe to intents, begin processing)."
+  defdelegate start_agent(agent_id, opts \\ []), to: Lifecycle, as: :start
+
+  @doc "Stop an agent's executor cleanly."
+  defdelegate stop_agent(agent_id), to: Lifecycle, as: :stop
+
+  @doc "List all persisted agent profiles."
+  defdelegate list_agents(), to: Lifecycle
+
+  @doc "Delete an agent and all its data."
+  defdelegate destroy_agent(agent_id), to: Lifecycle, as: :destroy
 
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
