@@ -153,12 +153,21 @@ defmodule Arbor.SDLCTest do
       assert :ok = SDLC.handle_new_file(path, content, hash)
     end
 
-    test "handles invalid content gracefully" do
+    test "handles invalid content gracefully", %{temp_roadmap_root: root} do
       # Content that won't parse as valid markdown item
       content = "Not valid markdown item format"
       hash = Arbor.Flow.compute_hash(content)
 
-      assert {:error, _} = SDLC.handle_new_file("/fake/path.md", content, hash)
+      # Use a real stage path so the stage check passes (temporarily enable inbox)
+      prev = Application.get_env(:arbor_sdlc, :enabled_stages, [])
+      Application.put_env(:arbor_sdlc, :enabled_stages, [:inbox])
+      path = Path.join([root, "0-inbox", "invalid.md"])
+
+      try do
+        assert {:error, _} = SDLC.handle_new_file(path, content, hash)
+      after
+        Application.put_env(:arbor_sdlc, :enabled_stages, prev)
+      end
     end
   end
 
@@ -185,11 +194,20 @@ defmodule Arbor.SDLCTest do
       assert :ok = SDLC.handle_changed_file(path, updated, new_hash)
     end
 
-    test "handles invalid content gracefully on change" do
+    test "handles invalid content gracefully on change", %{temp_roadmap_root: root} do
       content = "Not valid markdown item format"
       hash = Arbor.Flow.compute_hash(content)
 
-      assert {:error, _} = SDLC.handle_changed_file("/fake/path.md", content, hash)
+      # Use a real stage path so the stage check passes (temporarily enable inbox)
+      prev = Application.get_env(:arbor_sdlc, :enabled_stages, [])
+      Application.put_env(:arbor_sdlc, :enabled_stages, [:inbox])
+      path = Path.join([root, "0-inbox", "invalid.md"])
+
+      try do
+        assert {:error, _} = SDLC.handle_changed_file(path, content, hash)
+      after
+        Application.put_env(:arbor_sdlc, :enabled_stages, prev)
+      end
     end
 
     test "preserves authoritative fields during re-expansion", %{temp_roadmap_root: root} do
