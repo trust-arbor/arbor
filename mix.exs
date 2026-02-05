@@ -7,7 +7,10 @@ defmodule Arbor.MixProject do
       version: "2.0.0-dev",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      aliases: aliases()
+      aliases: aliases(),
+      dialyzer: [
+        plt_add_apps: [:mix, :iex, :ex_unit]
+      ]
     ]
   end
 

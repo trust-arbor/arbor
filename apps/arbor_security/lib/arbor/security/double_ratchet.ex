@@ -48,7 +48,7 @@ defmodule Arbor.Security.DoubleRatchet do
   @chain_info "arbor-dr-chain-v1"
   @msg_info "arbor-dr-msg-v1"
 
-  @type chain :: %{key: binary(), n: non_neg_integer()}
+  @type chain :: %{key: binary() | nil, n: non_neg_integer()}
 
   @type t :: %__MODULE__{
           dh_keypair: {public :: binary(), private :: binary()},

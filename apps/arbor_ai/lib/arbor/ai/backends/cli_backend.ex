@@ -355,7 +355,7 @@ defmodule Arbor.AI.Backends.CliBackend do
   @doc """
   Parses JSON output from CLI, handling common edge cases.
   """
-  @spec parse_json_output(String.t()) :: {:ok, map()} | {:error, term()}
+  @spec parse_json_output(String.t()) :: {:ok, map() | list()} | {:error, term()}
   def parse_json_output(output) do
     # Try to find JSON in the output (CLIs sometimes print extra text)
     trimmed = String.trim(output)

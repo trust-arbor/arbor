@@ -77,40 +77,46 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     description: "Detects potential PII in source code"
 
   # Common username patterns in paths
-  @path_patterns [
-    ~r{/Users/[a-zA-Z][a-zA-Z0-9_-]+/},
-    ~r{/home/[a-zA-Z][a-zA-Z0-9_-]+/},
-    ~r{C:\\Users\\[a-zA-Z][a-zA-Z0-9_-]+\\}
-  ]
+  defp path_patterns do
+    [
+      ~r{/Users/[a-zA-Z][a-zA-Z0-9_-]+/},
+      ~r{/home/[a-zA-Z][a-zA-Z0-9_-]+/},
+      ~r{C:\\Users\\[a-zA-Z][a-zA-Z0-9_-]+\\}
+    ]
+  end
 
   # Email pattern
   @email_pattern ~r/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
 
   # Phone number patterns (various formats)
   # Note: We use word boundaries and specific formats to avoid matching timestamps
-  @phone_patterns [
-    # US format with area code and 7 digits
-    ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/,
-    # International format with country code prefix
-    ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
-  ]
+  defp phone_patterns do
+    [
+      # US format with area code and 7 digits
+      ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/,
+      # International format with country code prefix
+      ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
+    ]
+  end
 
   # ===========================================================================
   # Credit Card Patterns
   # Source: Microsoft Presidio - https://microsoft.github.io/presidio/supported_entities/
   # Validated with Luhn algorithm to reduce false positives
   # ===========================================================================
-  @credit_card_patterns [
-    # Visa: starts with 4, 13-16 digits
-    ~r/\b4[0-9]{12}(?:[0-9]{3})?\b/,
-    # Mastercard: starts with 51-55 or 2221-2720, 16 digits
-    ~r/\b5[1-5][0-9]{14}\b/,
-    ~r/\b2(?:2[2-9][1-9]|2[3-9][0-9]{2}|[3-6][0-9]{3}|7[0-1][0-9]{2}|720[0-9])[0-9]{12}\b/,
-    # American Express: starts with 34 or 37, 15 digits
-    ~r/\b3[47][0-9]{13}\b/,
-    # Discover: starts with 6011, 622126-622925, 644-649, 65
-    ~r/\b6(?:011|5[0-9]{2})[0-9]{12}\b/
-  ]
+  defp credit_card_patterns do
+    [
+      # Visa: starts with 4, 13-16 digits
+      ~r/\b4[0-9]{12}(?:[0-9]{3})?\b/,
+      # Mastercard: starts with 51-55 or 2221-2720, 16 digits
+      ~r/\b5[1-5][0-9]{14}\b/,
+      ~r/\b2(?:2[2-9][1-9]|2[3-9][0-9]{2}|[3-6][0-9]{3}|7[0-1][0-9]{2}|720[0-9])[0-9]{12}\b/,
+      # American Express: starts with 34 or 37, 15 digits
+      ~r/\b3[47][0-9]{13}\b/,
+      # Discover: starts with 6011, 622126-622925, 644-649, 65
+      ~r/\b6(?:011|5[0-9]{2})[0-9]{12}\b/
+    ]
+  end
 
   # ===========================================================================
   # US Social Security Number
@@ -128,40 +134,42 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   #   - AWS documentation
   #   - Stripe documentation
   # ===========================================================================
-  @secret_patterns [
-    # Generic API key patterns
-    ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
-    ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
-    # Anthropic API keys (sk-ant-...)
-    # Source: Anthropic API documentation
-    ~r/sk-ant-[A-Za-z0-9\-_]{20,}/,
-    # OpenAI-style keys (sk-...)
-    # Source: OpenAI API documentation
-    # Note: Anthropic pattern above is matched first to avoid false overlap
-    ~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/,
-    # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
-    # Source: https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
-    ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
-    # Slack tokens (xoxb, xoxa, xoxp, xoxr, xoxs)
-    # Source: Slack API documentation
-    ~r/xox[baprs]-[a-zA-Z0-9-]+/,
-    # AWS Access Key ID (starts with AKIA, ABIA, ACCA, ASIA)
-    # Source: AWS IAM documentation
-    ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
-    # AWS Secret Access Key (40 char base64)
-    ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
-    # Google API key
-    # Source: Google Cloud documentation
-    ~r/AIza[0-9A-Za-z\-_]{35}/,
-    # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
-    # Source: Stripe API documentation
-    ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
-    # Private keys (PEM format marker)
-    ~r/-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
-    # JWT tokens (three base64 segments)
-    # Source: RFC 7519
-    ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/
-  ]
+  defp secret_patterns do
+    [
+      # Generic API key patterns
+      ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
+      ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
+      # Anthropic API keys (sk-ant-...)
+      # Source: Anthropic API documentation
+      ~r/sk-ant-[A-Za-z0-9\-_]{20,}/,
+      # OpenAI-style keys (sk-...)
+      # Source: OpenAI API documentation
+      # Note: Anthropic pattern above is matched first to avoid false overlap
+      ~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/,
+      # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+      # Source: https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
+      ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
+      # Slack tokens (xoxb, xoxa, xoxp, xoxr, xoxs)
+      # Source: Slack API documentation
+      ~r/xox[baprs]-[a-zA-Z0-9-]+/,
+      # AWS Access Key ID (starts with AKIA, ABIA, ACCA, ASIA)
+      # Source: AWS IAM documentation
+      ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
+      # AWS Secret Access Key (40 char base64)
+      ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
+      # Google API key
+      # Source: Google Cloud documentation
+      ~r/AIza[0-9A-Za-z\-_]{35}/,
+      # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
+      # Source: Stripe API documentation
+      ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
+      # Private keys (PEM format marker)
+      ~r/-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
+      # JWT tokens (three base64 segments)
+      # Source: RFC 7519
+      ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/
+    ]
+  end
 
   # IP address pattern (basic IPv4)
   @ip_pattern ~r/\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/
@@ -170,22 +178,24 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   @allowlist_pattern ~r/#\s*arbor:allow\s+pii/i
 
   # Regex patterns that indicate a timestamp context rather than a phone number
-  @timestamp_regexes [
-    # Cursor format: timestamp:id
-    ~r/\d{10,13}:[a-zA-Z_]/,
-    # Docstring examples with timestamps (iex> or result lines)
-    ~r/iex>.*\d{10,13}/,
-    # Result tuple with timestamp: {:ok, {1705..., ...}}
-    ~r/\{:ok,\s*\{\d{10,13}/,
-    # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
-    # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
-    ~r/\b1[67]\d{8,11}\b/,
-    # Just a number in a docstring example
-    ~r/^\s*#.*\d{10,13}/,
-    ~r/^\s*@doc.*\d{10,13}/,
-    # Lines with 13+ digit sequences are likely credit card numbers, not phones
-    ~r/\d{13,}/
-  ]
+  defp timestamp_regexes do
+    [
+      # Cursor format: timestamp:id
+      ~r/\d{10,13}:[a-zA-Z_]/,
+      # Docstring examples with timestamps (iex> or result lines)
+      ~r/iex>.*\d{10,13}/,
+      # Result tuple with timestamp: {:ok, {1705..., ...}}
+      ~r/\{:ok,\s*\{\d{10,13}/,
+      # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
+      # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
+      ~r/\b1[67]\d{8,11}\b/,
+      # Just a number in a docstring example
+      ~r/^\s*#.*\d{10,13}/,
+      ~r/^\s*@doc.*\d{10,13}/,
+      # Lines with 13+ digit sequences are likely credit card numbers, not phones
+      ~r/\d{13,}/
+    ]
+  end
 
   @impl Arbor.Eval
   def run(%{code: code} = context) do
@@ -193,6 +203,11 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     additional_patterns = Map.get(context, :additional_patterns, [])
 
     lines = String.split(code, "\n")
+    path_patterns = path_patterns()
+    phone_patterns = phone_patterns()
+    credit_card_patterns = credit_card_patterns()
+    secret_patterns = secret_patterns()
+    timestamp_regexes = timestamp_regexes()
 
     # Find allowlisted lines
     allowlisted_lines =
@@ -204,12 +219,12 @@ defmodule Arbor.Eval.Checks.PIIDetection do
 
     violations =
       []
-      |> check_paths(lines, allowlisted_lines)
+      |> check_paths(lines, allowlisted_lines, path_patterns)
       |> check_emails(lines, allowlisted_lines)
-      |> check_phones(lines, allowlisted_lines)
-      |> check_credit_cards(lines, allowlisted_lines)
+      |> check_phones(lines, allowlisted_lines, phone_patterns, timestamp_regexes)
+      |> check_credit_cards(lines, allowlisted_lines, credit_card_patterns)
       |> check_ssn(lines, allowlisted_lines)
-      |> check_secrets(lines, allowlisted_lines)
+      |> check_secrets(lines, allowlisted_lines, secret_patterns)
       |> check_ips(lines, allowlisted_lines)
       |> check_names(lines, allowlisted_lines, additional_names)
       |> check_additional_patterns(lines, allowlisted_lines, additional_patterns)
@@ -232,26 +247,26 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   # Pattern Checks
   # ============================================================================
 
-  defp check_paths(violations, lines, allowlisted) do
+  defp check_paths(violations, lines, allowlisted, path_patterns) do
     new_violations =
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if skip_line?(idx, allowlisted), do: [], else: check_paths_line(line, idx)
+        if skip_line?(idx, allowlisted), do: [], else: check_paths_line(line, idx, path_patterns)
       end)
 
     violations ++ new_violations
   end
 
-  defp check_paths_line(line, idx) do
+  defp check_paths_line(line, idx, path_patterns) do
     if looks_like_docstring_example?(line) or looks_like_uri_path?(line) do
       []
     else
-      @path_patterns
+      path_patterns
       |> Enum.filter(&Regex.match?(&1, line))
       |> Enum.take(1)
       |> Enum.map(fn _pattern ->
-        path = extract_first_match(@path_patterns, line)
+        path = extract_first_match(path_patterns, line)
 
         %{
           type: :hardcoded_path,
@@ -295,22 +310,24 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     end
   end
 
-  defp check_phones(violations, lines, allowlisted) do
+  defp check_phones(violations, lines, allowlisted, phone_patterns, timestamp_regexes) do
     new_violations =
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if skip_line?(idx, allowlisted), do: [], else: check_phones_line(line, idx)
+        if skip_line?(idx, allowlisted),
+          do: [],
+          else: check_phones_line(line, idx, phone_patterns, timestamp_regexes)
       end)
 
     violations ++ new_violations
   end
 
-  defp check_phones_line(line, idx) do
-    if looks_like_timestamp_context?(line) do
+  defp check_phones_line(line, idx, phone_patterns, timestamp_regexes) do
+    if looks_like_timestamp_context?(line, timestamp_regexes) do
       []
     else
-      @phone_patterns
+      phone_patterns
       |> Enum.filter(&Regex.match?(&1, line))
       |> Enum.take(1)
       |> Enum.map(fn pattern ->
@@ -328,22 +345,24 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     end
   end
 
-  defp check_credit_cards(violations, lines, allowlisted) do
+  defp check_credit_cards(violations, lines, allowlisted, credit_card_patterns) do
     new_violations =
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if skip_line?(idx, allowlisted), do: [], else: check_credit_cards_line(line, idx)
+        if skip_line?(idx, allowlisted),
+          do: [],
+          else: check_credit_cards_line(line, idx, credit_card_patterns)
       end)
 
     violations ++ new_violations
   end
 
-  defp check_credit_cards_line(line, idx) do
+  defp check_credit_cards_line(line, idx, credit_card_patterns) do
     if looks_like_test_card?(line) do
       []
     else
-      @credit_card_patterns
+      credit_card_patterns
       |> extract_luhn_matches(line)
       |> Enum.take(1)
       |> Enum.map(fn card ->
@@ -391,20 +410,22 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     end
   end
 
-  defp check_secrets(violations, lines, allowlisted) do
+  defp check_secrets(violations, lines, allowlisted, secret_patterns) do
     new_violations =
       lines
       |> Enum.with_index(1)
       |> Enum.flat_map(fn {line, idx} ->
-        if skip_line?(idx, allowlisted), do: [], else: check_secrets_line(line, idx)
+        if skip_line?(idx, allowlisted),
+          do: [],
+          else: check_secrets_line(line, idx, secret_patterns)
       end)
 
     violations ++ new_violations
   end
 
-  defp check_secrets_line(line, idx) do
+  defp check_secrets_line(line, idx, secret_patterns) do
     # Use SafeRegex with timeout protection against ReDoS attacks
-    @secret_patterns
+    secret_patterns
     |> Enum.filter(&safe_match?(&1, line))
     |> Enum.take(1)
     |> Enum.map(fn _pattern ->
@@ -580,11 +601,11 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     String.contains?(line, ["127.0.0.1", "0.0.0.0", "192.168.", "10.0.", "172.16."])
   end
 
-  defp looks_like_timestamp_context?(line) do
+  defp looks_like_timestamp_context?(line, timestamp_regexes) do
     # Lines containing Unix timestamps (10-13 digits starting with 1) in contexts like:
     # - "1705123456789:evt_123" (cursor format)
     # - timestamp_ms, DateTime.from_unix, etc.
-    has_timestamp_keyword?(line) or matches_any_timestamp_regex?(line)
+    has_timestamp_keyword?(line) or matches_any_timestamp_regex?(line, timestamp_regexes)
   end
 
   defp has_timestamp_keyword?(line) do
@@ -592,8 +613,8 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     String.contains?(line, ["timestamp", "unix", "epoch", "millisecond", "DateTime"])
   end
 
-  defp matches_any_timestamp_regex?(line) do
-    Enum.any?(@timestamp_regexes, &Regex.match?(&1, line))
+  defp matches_any_timestamp_regex?(line, timestamp_regexes) do
+    Enum.any?(timestamp_regexes, &Regex.match?(&1, line))
   end
 
   defp looks_like_docstring_example?(line) do
