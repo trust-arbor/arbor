@@ -18,6 +18,8 @@ defmodule Arbor.Dashboard.Live.LandingLiveTest do
       assert html =~ "Open Eval Dashboard"
       assert html =~ "Open Consensus Dashboard"
       assert html =~ "Open Activity Dashboard"
+      assert html =~ "Open Agents Dashboard"
+      assert html =~ "Open Roadmap Dashboard"
     end
 
     test "shows coming soon cards", %{conn: conn} do

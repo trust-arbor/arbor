@@ -71,6 +71,20 @@ defmodule Arbor.Dashboard.Live.LandingLive do
         <a href="/activity" class="aw-nav-link">Open Activity Dashboard &rarr;</a>
       </.card>
 
+      <.card title="Agents">
+        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
+          Running agent instances, profiles, executor and reasoning status.
+        </p>
+        <a href="/agents" class="aw-nav-link">Open Agents Dashboard &rarr;</a>
+      </.card>
+
+      <.card title="Roadmap">
+        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
+          SDLC pipeline kanban with items, priorities, and progress tracking.
+        </p>
+        <a href="/roadmap" class="aw-nav-link">Open Roadmap Dashboard &rarr;</a>
+      </.card>
+
       <.card title="Trust & Security">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
           Agent trust tiers, capability grants, and security events.
