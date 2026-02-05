@@ -36,19 +36,21 @@ defmodule Arbor.Shell.Executor do
 
     start_time = System.monotonic_time(:millisecond)
 
-    port_opts = build_port_opts(cwd, env)
+    with :ok <- validate_cwd(cwd) do
+      port_opts = build_port_opts(cwd, env)
 
-    try do
-      port = Port.open({:spawn, command}, port_opts)
+      try do
+        port = Port.open({:spawn, command}, port_opts)
 
-      if stdin do
-        Port.command(port, stdin)
+        if stdin do
+          Port.command(port, stdin)
+        end
+
+        collect_output(port, timeout, start_time)
+      catch
+        :error, reason ->
+          {:error, reason}
       end
-
-      collect_output(port, timeout, start_time)
-    catch
-      :error, reason ->
-        {:error, reason}
     end
   end
 
@@ -86,6 +88,16 @@ defmodule Arbor.Shell.Executor do
       [{:env, env_list} | opts]
     else
       opts
+    end
+  end
+
+  defp validate_cwd(nil), do: :ok
+
+  defp validate_cwd(cwd) when is_binary(cwd) do
+    if File.dir?(cwd) do
+      :ok
+    else
+      {:error, {:invalid_cwd, cwd}}
     end
   end
 

@@ -85,8 +85,6 @@ defmodule Arbor.Gateway.Signals.Router do
     end
   end
 
-  defp validate_type(_source, type), do: {:error, "unknown type: #{type}"}
-
   defp emit_signal(source, type, payload) do
     Arbor.Signals.emit(source, type, payload)
   rescue

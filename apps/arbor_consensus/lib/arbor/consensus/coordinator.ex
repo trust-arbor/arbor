@@ -1038,6 +1038,7 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
+  @spec update_proposal_status(t(), String.t(), Proposal.status()) :: t()
   defp update_proposal_status(state, proposal_id, status) do
     case Map.get(state.proposals, proposal_id) do
       nil ->
