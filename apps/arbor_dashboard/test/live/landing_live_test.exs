@@ -16,13 +16,14 @@ defmodule Arbor.Dashboard.Live.LandingLiveTest do
       assert html =~ "Evaluation"
       assert html =~ "Open Signals Dashboard"
       assert html =~ "Open Eval Dashboard"
+      assert html =~ "Open Consensus Dashboard"
+      assert html =~ "Open Activity Dashboard"
     end
 
     test "shows coming soon cards", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Trust &amp; Security"
-      assert html =~ "Consensus"
       assert html =~ "Coming Soon"
     end
 
