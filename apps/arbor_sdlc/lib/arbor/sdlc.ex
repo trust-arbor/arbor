@@ -273,6 +273,14 @@ defmodule Arbor.SDLC do
   end
 
   defp handle_new_work_item(path, content, hash) do
+    if stage_enabled_for_path?(path) do
+      process_new_item(path, content, hash)
+    else
+      :ok
+    end
+  end
+
+  defp process_new_item(path, content, hash) do
     Events.emit_item_detected(path, hash)
 
     # ItemParser.parse returns a map directly (always succeeds)
@@ -338,6 +346,14 @@ defmodule Arbor.SDLC do
   end
 
   defp handle_changed_work_item(path, content, hash) do
+    if stage_enabled_for_path?(path) do
+      process_changed_item(path, content, hash)
+    else
+      :ok
+    end
+  end
+
+  defp process_changed_item(path, content, hash) do
     Logger.info("File changed, re-processing", path: path, content_hash: hash)
 
     Events.emit_item_changed(path, hash)
@@ -652,13 +668,21 @@ defmodule Arbor.SDLC do
       {:error, {:write_failed, e}}
   end
 
+  defp stage_from_path(path) do
+    Pipeline.stage_from_path(path) |> elem(1)
+  rescue
+    _ -> :inbox
+  end
+
+  defp stage_enabled_for_path?(path) do
+    path |> stage_from_path() |> Config.stage_enabled?()
+  end
+
   defp determine_stage(item) do
     case Map.get(item, :path) do
       nil -> :inbox
-      path -> Pipeline.stage_from_path(path) |> elem(1)
+      path -> stage_from_path(path)
     end
-  rescue
-    _ -> :inbox
   end
 
   defp validate_transition(from_stage, to_stage) do
