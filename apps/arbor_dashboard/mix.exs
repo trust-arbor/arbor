@@ -51,6 +51,7 @@ defmodule Arbor.Dashboard.MixProject do
       {:tidewave, "~> 0.5", only: :dev},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:floki, "~> 0.37", only: :test},
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
