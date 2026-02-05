@@ -57,16 +57,23 @@ defmodule Arbor.Dashboard.Live.LandingLive do
         <a href="/eval" class="aw-nav-link">Open Eval Dashboard &rarr;</a>
       </.card>
 
-      <.card title="Trust & Security">
-        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
-          Agent trust tiers, capability grants, and security events.
-        </p>
-        <.badge label="Coming Soon" color={:gray} />
-      </.card>
-
       <.card title="Consensus">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
           Multi-perspective deliberation and proposal outcomes.
+        </p>
+        <a href="/consensus" class="aw-nav-link">Open Consensus Dashboard &rarr;</a>
+      </.card>
+
+      <.card title="Activity">
+        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
+          Unified activity feed with agent and category filtering.
+        </p>
+        <a href="/activity" class="aw-nav-link">Open Activity Dashboard &rarr;</a>
+      </.card>
+
+      <.card title="Trust & Security">
+        <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
+          Agent trust tiers, capability grants, and security events.
         </p>
         <.badge label="Coming Soon" color={:gray} />
       </.card>

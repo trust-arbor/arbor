@@ -36,6 +36,8 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_web, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:arbor_consensus, in_umbrella: true},
+      {:arbor_historian, in_umbrella: true},
 
       # Standalone
       {:arbor_eval, in_umbrella: true},

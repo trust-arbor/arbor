@@ -9,12 +9,14 @@ defmodule Arbor.Dashboard.Nav do
 
   import Phoenix.Component, only: [assign: 3]
 
-  alias Arbor.Dashboard.Live.{EvalLive, LandingLive, SignalsLive}
+  alias Arbor.Dashboard.Live.{ActivityLive, ConsensusLive, EvalLive, LandingLive, SignalsLive}
 
   @nav_entries [
     %{href: "/", label: "Home", icon: "\u{1F3E0}", view: LandingLive},
     %{href: "/signals", label: "Signals", icon: "\u{1F4E1}", view: SignalsLive},
-    %{href: "/eval", label: "Eval", icon: "\u{1F4CA}", view: EvalLive}
+    %{href: "/eval", label: "Eval", icon: "\u{1F4CA}", view: EvalLive},
+    %{href: "/consensus", label: "Consensus", icon: "\u{1F5F3}", view: ConsensusLive},
+    %{href: "/activity", label: "Activity", icon: "\u{1F4CA}", view: ActivityLive}
   ]
 
   def on_mount(:default, _params, _session, socket) do
