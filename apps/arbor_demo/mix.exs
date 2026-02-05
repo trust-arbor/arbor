@@ -28,7 +28,9 @@ defmodule Arbor.Demo.MixProject do
 
   defp deps do
     [
+      {:arbor_contracts, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:arbor_agent, in_umbrella: true},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
