@@ -39,6 +39,11 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_consensus, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
 
+      # Level 2
+      {:arbor_agent, in_umbrella: true},
+      {:arbor_sdlc, in_umbrella: true},
+      {:arbor_memory, in_umbrella: true},
+
       # Standalone
       {:arbor_eval, in_umbrella: true},
 
