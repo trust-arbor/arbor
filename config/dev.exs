@@ -16,6 +16,11 @@ config :arbor_persistence,
   stores: []
 
 # Dashboard — local dev server on port 4001
+# LiveView debug annotations for Tidewave AI integration
+config :phoenix_live_view,
+  debug_heex_annotations: true,
+  debug_attributes: true
+
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   http: [port: 4001],
   secret_key_base: String.duplicate("arbor_dashboard_dev_secret_", 4),

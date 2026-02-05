@@ -69,6 +69,11 @@ defmodule Arbor.Web.Endpoint do
       plug(Plug.RequestId)
       plug(Plug.Telemetry, event_prefix: [:arbor, :web, :endpoint])
 
+      # Tidewave AI integration (dev only, before body parsing)
+      if Code.ensure_loaded?(Tidewave) do
+        plug(Tidewave)
+      end
+
       plug(Plug.Parsers,
         parsers: [:urlencoded, :multipart, :json],
         pass: ["*/*"],
