@@ -198,6 +198,9 @@ defmodule Arbor.Agent.DebugAgent do
       :await_analysis ->
         process_analysis_result(agent_id, state, last_percept)
 
+      :await_submission ->
+        process_submission(agent_id, state, last_percept)
+
       :await_decision ->
         process_decision(agent_id, state, last_percept)
 
@@ -245,9 +248,10 @@ defmodule Arbor.Agent.DebugAgent do
 
         if callbacks[:on_proposal], do: callbacks[:on_proposal].(proposal)
 
+        # Transition to await_submission - we expect to get proposal_id back first
         update_state(agent_id, %{
           state
-          | phase: :await_decision,
+          | phase: :await_submission,
             current_proposal: proposal
         })
 
@@ -266,6 +270,36 @@ defmodule Arbor.Agent.DebugAgent do
       :no_percept ->
         # Still waiting for analysis result
         Intent.wait(reasoning: "Waiting for AI analysis result...")
+    end
+  end
+
+  defp process_submission(agent_id, state, percept) do
+    case extract_percept_outcome(percept) do
+      {:success, %{proposal_id: proposal_id}} ->
+        # Proposal submitted successfully, now wait for decision
+        Logger.info("[DebugAgent] Proposal submitted: #{proposal_id}")
+
+        update_state(agent_id, %{
+          state
+          | phase: :await_decision,
+            current_proposal_id: proposal_id
+        })
+
+        # Query for the decision - in a real system this would subscribe to the decision signal
+        # For the demo, we'll poll the proposal status
+        Intent.action(
+          :proposal_status,
+          %{proposal_id: proposal_id},
+          reasoning: "Proposal submitted. Checking decision status."
+        )
+
+      {:failure, reason} ->
+        Logger.warning("[DebugAgent] Proposal submission failed: #{inspect(reason)}")
+        update_state(agent_id, %{state | phase: :check_anomalies, current_proposal: nil})
+        Intent.think("Proposal submission failed: #{inspect(reason)}. Will retry.")
+
+      :no_percept ->
+        Intent.wait(reasoning: "Waiting for proposal submission confirmation...")
     end
   end
 
@@ -316,14 +350,62 @@ defmodule Arbor.Agent.DebugAgent do
 
         Intent.think("Proposal rejected by council: #{reason}. Returning to monitoring.")
 
+      # Handle proposal status response (status: approved | rejected | evaluating)
+      {:success, %{status: status}} when status in ["approved", :approved] ->
+        Logger.info("[DebugAgent] Proposal approved by council")
+        callbacks = get_callbacks(agent_id)
+
+        if callbacks[:on_decision],
+          do: callbacks[:on_decision].(%{decision: :approved, proposal: state.current_proposal})
+
+        update_state(agent_id, %{
+          state
+          | phase: :complete,
+            current_anomaly: nil,
+            current_proposal: nil
+        })
+
+        Intent.action(
+          :code_hot_load,
+          %{
+            module: state.current_proposal[:target_module],
+            code: state.current_proposal[:fix_code]
+          },
+          reasoning: "Proposal approved. Executing hot-load."
+        )
+
+      {:success, %{status: status}} when status in ["rejected", :rejected] ->
+        Logger.info("[DebugAgent] Proposal rejected by council")
+        callbacks = get_callbacks(agent_id)
+
+        if callbacks[:on_decision],
+          do: callbacks[:on_decision].(%{decision: :rejected, proposal: state.current_proposal})
+
+        update_state(agent_id, %{
+          state
+          | phase: :check_anomalies,
+            current_anomaly: nil,
+            current_proposal: nil
+        })
+
+        Intent.think("Proposal rejected. Returning to monitoring.")
+
+      {:success, %{status: status}} when status in ["evaluating", :evaluating, :pending] ->
+        # Still evaluating, keep waiting
+        proposal_id = state[:current_proposal_id] || state.current_proposal[:proposal_id]
+        Intent.action(
+          :proposal_status,
+          %{proposal_id: proposal_id},
+          reasoning: "Still evaluating. Checking status again."
+        )
+
       {:failure, reason} ->
         Logger.warning("[DebugAgent] Decision retrieval failed: #{inspect(reason)}")
         update_state(agent_id, %{state | phase: :check_anomalies})
         Intent.think("Failed to get decision: #{inspect(reason)}. Will retry.")
 
       {:success, other} ->
-        # Unexpected success structure (e.g., got AI analysis result in decision phase)
-        # This can happen due to phase/percept mismatch — reset and continue
+        # Unexpected success structure
         Logger.warning("[DebugAgent] Unexpected percept in decision phase: #{inspect(Map.keys(other))}")
         update_state(agent_id, %{state | phase: :check_anomalies})
         Intent.think("Unexpected response format. Returning to monitoring.")
@@ -342,6 +424,7 @@ defmodule Arbor.Agent.DebugAgent do
       phase: :check_anomalies,
       current_anomaly: nil,
       current_proposal: nil,
+      current_proposal_id: nil,
       proposals_submitted: 0,
       proposals_approved: 0,
       proposals_rejected: 0,
