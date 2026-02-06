@@ -158,4 +158,44 @@ defmodule Arbor.Contracts.Security.TrustBoundsTest do
       assert TrustBounds.sandbox_required_for_action(:network) == :permissive
     end
   end
+
+  describe "display_name/1" do
+    test "returns partnership-framed name for :untrusted" do
+      assert TrustBounds.display_name(:untrusted) == "New"
+    end
+
+    test "returns partnership-framed name for :probationary" do
+      assert TrustBounds.display_name(:probationary) == "Guided"
+    end
+
+    test "returns partnership-framed name for :trusted" do
+      assert TrustBounds.display_name(:trusted) == "Established"
+    end
+
+    test "returns partnership-framed name for :veteran" do
+      assert TrustBounds.display_name(:veteran) == "Trusted Partner"
+    end
+
+    test "returns partnership-framed name for :autonomous" do
+      assert TrustBounds.display_name(:autonomous) == "Full Partner"
+    end
+
+    test "falls back to capitalized atom for unknown tier" do
+      assert TrustBounds.display_name(:unknown_tier) == "Unknown_tier"
+    end
+  end
+
+  describe "tier_description/1" do
+    test "returns description for each tier" do
+      assert TrustBounds.tier_description(:untrusted) == "Just getting started together"
+      assert TrustBounds.tier_description(:probationary) == "Building our working relationship"
+      assert TrustBounds.tier_description(:trusted) == "Demonstrated reliability"
+      assert TrustBounds.tier_description(:veteran) == "Proven track record"
+      assert TrustBounds.tier_description(:autonomous) == "Complete partnership"
+    end
+
+    test "returns nil for unknown tier" do
+      assert TrustBounds.tier_description(:unknown_tier) == nil
+    end
+  end
 end

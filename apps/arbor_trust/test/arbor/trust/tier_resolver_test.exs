@@ -352,24 +352,25 @@ defmodule Arbor.Trust.TierResolverTest do
   end
 
   describe "describe/1" do
+    # Descriptions are now config-driven with partnership-framed defaults
     test "returns description for :untrusted" do
-      assert TierResolver.describe(:untrusted) == "Untrusted - Read own code only"
+      assert TierResolver.describe(:untrusted) == "New - Just getting started together"
     end
 
     test "returns description for :probationary" do
-      assert TierResolver.describe(:probationary) == "Probationary - Sandbox modifications"
+      assert TierResolver.describe(:probationary) == "Guided - Building our working relationship"
     end
 
     test "returns description for :trusted" do
-      assert TierResolver.describe(:trusted) == "Trusted - Self-modify with approval"
+      assert TierResolver.describe(:trusted) == "Established - Demonstrated reliability"
     end
 
     test "returns description for :veteran" do
-      assert TierResolver.describe(:veteran) == "Veteran - Self-modify auto-approved"
+      assert TierResolver.describe(:veteran) == "Trusted Partner - Proven track record"
     end
 
     test "returns description for :autonomous" do
-      assert TierResolver.describe(:autonomous) == "Autonomous - Can modify own capabilities"
+      assert TierResolver.describe(:autonomous) == "Full Partner - Complete partnership"
     end
 
     test "all tiers have descriptions" do
@@ -377,6 +378,37 @@ defmodule Arbor.Trust.TierResolverTest do
         desc = TierResolver.describe(tier)
         assert is_binary(desc), "Expected string description for #{tier}"
         assert String.length(desc) > 0, "Expected non-empty description for #{tier}"
+      end
+    end
+  end
+
+  describe "display_name/1" do
+    # Partnership-framed display names from council consultation
+    test "returns partnership-framed name for :untrusted" do
+      assert TierResolver.display_name(:untrusted) == "New"
+    end
+
+    test "returns partnership-framed name for :probationary" do
+      assert TierResolver.display_name(:probationary) == "Guided"
+    end
+
+    test "returns partnership-framed name for :trusted" do
+      assert TierResolver.display_name(:trusted) == "Established"
+    end
+
+    test "returns partnership-framed name for :veteran" do
+      assert TierResolver.display_name(:veteran) == "Trusted Partner"
+    end
+
+    test "returns partnership-framed name for :autonomous" do
+      assert TierResolver.display_name(:autonomous) == "Full Partner"
+    end
+
+    test "all tiers have display names" do
+      for tier <- TierResolver.all_tiers() do
+        name = TierResolver.display_name(tier)
+        assert is_binary(name), "Expected string display_name for #{tier}"
+        assert String.length(name) > 0, "Expected non-empty display_name for #{tier}"
       end
     end
   end
