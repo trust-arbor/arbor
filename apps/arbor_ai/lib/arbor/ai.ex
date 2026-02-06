@@ -189,6 +189,7 @@ defmodule Arbor.AI do
         temperature: temperature
       ]
       |> maybe_add_system_prompt(system_prompt)
+      |> maybe_add_api_key(provider)
 
     Logger.debug("Arbor.AI API generating with #{provider}:#{model}")
 
@@ -452,8 +453,33 @@ defmodule Arbor.AI do
   defp maybe_add_system_prompt(opts, nil), do: opts
   defp maybe_add_system_prompt(opts, system), do: Keyword.put(opts, :system_prompt, system)
 
+  # Inject API key from environment since ReqLLM.put_key may not work
+  # after application startup
+  defp maybe_add_api_key(opts, provider) do
+    key_var = api_key_env_var(provider)
+
+    case System.get_env(key_var) do
+      nil -> opts
+      "" -> opts
+      key -> Keyword.put(opts, :api_key, key)
+    end
+  end
+
+  defp api_key_env_var(:openrouter), do: "OPENROUTER_API_KEY"
+  defp api_key_env_var(:anthropic), do: "ANTHROPIC_API_KEY"
+  defp api_key_env_var(:openai), do: "OPENAI_API_KEY"
+  defp api_key_env_var(:google), do: "GOOGLE_API_KEY"
+  defp api_key_env_var(:gemini), do: "GEMINI_API_KEY"
+  defp api_key_env_var(_), do: nil
+
   defp build_model_spec(provider, model) do
-    "#{provider}:#{model}"
+    # Build raw LLMDB.Model struct to bypass LLMDB lookup
+    # This allows using models not yet in the database
+    %LLMDB.Model{
+      provider: provider,
+      model: model,
+      id: model
+    }
   end
 
   defp format_api_response(response, provider, model) do
@@ -483,7 +509,32 @@ defmodule Arbor.AI do
   defp extract_text_from_map(%{message: %{content: content}}) when is_binary(content),
     do: content
 
+  # Handle ReqLLM.Response with message containing content parts list
+  defp extract_text_from_map(%{message: message}) when is_struct(message) do
+    message
+    |> Map.from_struct()
+    |> Map.get(:content, [])
+    |> extract_content_parts()
+  end
+
   defp extract_text_from_map(_), do: ""
+
+  # Extract text from ReqLLM content parts list
+  defp extract_content_parts(parts) when is_list(parts) do
+    parts
+    |> Enum.map(&extract_content_part/1)
+    |> Enum.join("")
+  end
+
+  defp extract_content_parts(_), do: ""
+
+  defp extract_content_part(part) when is_struct(part) do
+    # ReqLLM ContentPart uses :text field, not :content
+    part |> Map.from_struct() |> Map.get(:text, "")
+  end
+
+  defp extract_content_part(part) when is_binary(part), do: part
+  defp extract_content_part(_), do: ""
 
   defp extract_usage(response) when is_map(response) do
     usage = Map.get(response, :usage) || %{}
