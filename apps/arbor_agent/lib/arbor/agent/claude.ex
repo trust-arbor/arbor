@@ -527,6 +527,10 @@ defmodule Arbor.Agent.Claude do
     e ->
       Logger.warning("Error saving working memory: #{Exception.message(e)}")
       :error
+  catch
+    :exit, reason ->
+      Logger.warning("Working memory save timeout or exit: #{inspect(reason)}")
+      :error
   end
 
   defp recall_memories(agent_id, query) do
@@ -546,6 +550,10 @@ defmodule Arbor.Agent.Claude do
   rescue
     e ->
       Logger.warning("Error recalling memories: #{Exception.message(e)}")
+      []
+  catch
+    :exit, reason ->
+      Logger.warning("Memory recall timeout or exit: #{inspect(reason)}")
       []
   end
 
@@ -572,6 +580,10 @@ defmodule Arbor.Agent.Claude do
   rescue
     e ->
       Logger.warning("Error indexing response: #{Exception.message(e)}")
+      :error
+  catch
+    :exit, reason ->
+      Logger.warning("Memory index timeout or exit: #{inspect(reason)}")
       :error
   end
 
