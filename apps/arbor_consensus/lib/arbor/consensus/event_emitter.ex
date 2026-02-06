@@ -145,16 +145,35 @@ defmodule Arbor.Consensus.EventEmitter do
   def proposal_submitted(proposal, opts \\ []) do
     target_module = get_target_module(proposal)
 
-    Events.ProposalSubmitted.new(%{
+    result =
+      Events.ProposalSubmitted.new(%{
+        proposal_id: proposal.id,
+        proposer: proposal.proposer,
+        change_type: proposal.topic,
+        description: proposal.description,
+        target_layer: proposal.target_layer,
+        target_module: target_module,
+        metadata: proposal.metadata
+      })
+      |> emit(Keyword.put(opts, :correlation_id, proposal.id))
+
+    # Real-time signal for dashboard/observability
+    # Convert struct to map for Access compatibility in dashboard
+    emit_signal(:proposal_submitted, %{
       proposal_id: proposal.id,
       proposer: proposal.proposer,
-      change_type: proposal.topic,
-      description: proposal.description,
-      target_layer: proposal.target_layer,
-      target_module: target_module,
-      metadata: proposal.metadata
+      topic: proposal.topic,
+      proposal: %{
+        id: proposal.id,
+        description: proposal.description,
+        topic: proposal.topic,
+        proposer: proposal.proposer,
+        target_module: target_module,
+        context: proposal.context
+      }
     })
-    |> emit(Keyword.put(opts, :correlation_id, proposal.id))
+
+    result
   end
 
   # Get target_module from context (Proposal struct) or directly (map)
@@ -166,13 +185,24 @@ defmodule Arbor.Consensus.EventEmitter do
 
   @doc "Emit an EvaluationStarted event."
   def evaluation_started(proposal_id, perspectives, council_size, required_quorum, opts \\ []) do
-    Events.EvaluationStarted.new(%{
+    result =
+      Events.EvaluationStarted.new(%{
+        proposal_id: proposal_id,
+        perspectives: perspectives,
+        council_size: council_size,
+        required_quorum: required_quorum
+      })
+      |> emit(Keyword.put(opts, :correlation_id, proposal_id))
+
+    # Real-time signal for dashboard/observability
+    emit_signal(:evaluation_started, %{
       proposal_id: proposal_id,
       perspectives: perspectives,
       council_size: council_size,
       required_quorum: required_quorum
     })
-    |> emit(Keyword.put(opts, :correlation_id, proposal_id))
+
+    result
   end
 
   @doc "Emit an EvaluationCompleted event."
@@ -194,11 +224,16 @@ defmodule Arbor.Consensus.EventEmitter do
       |> emit(Keyword.put(opts, :correlation_id, evaluation.proposal_id))
 
     # Real-time signal (Tier 2 notification)
+    # Include full evaluation for dashboard display
     emit_signal(:evaluation_completed, %{
       proposal_id: evaluation.proposal_id,
-      perspective: evaluation.perspective,
-      vote: evaluation.vote,
-      confidence: evaluation.confidence
+      evaluation: %{
+        perspective: evaluation.perspective,
+        vote: evaluation.vote,
+        confidence: evaluation.confidence,
+        reasoning: evaluation.reasoning,
+        concerns: evaluation.concerns || []
+      }
     })
 
     result
@@ -233,8 +268,10 @@ defmodule Arbor.Consensus.EventEmitter do
       |> emit(Keyword.put(opts, :correlation_id, decision.proposal_id))
 
     # Real-time signal (Tier 2 notification)
-    emit_signal(:decision_rendered, %{
+    # Use :decision_made to match dashboard expectations
+    emit_signal(:decision_made, %{
       proposal_id: decision.proposal_id,
+      decision: decision.decision,
       outcome: decision.decision,
       quorum_met: decision.quorum_met,
       approve_count: decision.approve_count,
