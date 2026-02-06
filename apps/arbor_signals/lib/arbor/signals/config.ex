@@ -46,7 +46,11 @@ defmodule Arbor.Signals.Config do
   """
   @spec channel_auto_rotate_interval_ms() :: pos_integer()
   def channel_auto_rotate_interval_ms do
-    Application.get_env(:arbor_signals, :channel_auto_rotate_interval_ms, @default_auto_rotate_interval_ms)
+    Application.get_env(
+      :arbor_signals,
+      :channel_auto_rotate_interval_ms,
+      @default_auto_rotate_interval_ms
+    )
   end
 
   @doc """

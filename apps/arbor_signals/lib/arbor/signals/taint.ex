@@ -160,7 +160,8 @@ defmodule Arbor.Signals.Taint do
     max_level = Enum.reduce(input_levels, :trusted, &max_taint/2)
 
     # If any input was untrusted but max isn't hostile, output is at least derived
-    has_untrusted = Enum.any?(input_levels, fn level -> severity(level) >= severity(:untrusted) end)
+    has_untrusted =
+      Enum.any?(input_levels, fn level -> severity(level) >= severity(:untrusted) end)
 
     cond do
       max_level == :hostile -> :hostile

@@ -454,8 +454,14 @@ defmodule Arbor.Signals.Bus do
   # Decrypt channel-encrypted signal data
   defp maybe_decrypt_channel_signal(%Signal{data: data} = signal) do
     case data do
-      %{__channel_encrypted__: true, channel_id: channel_id, sender_id: _sender_id, payload: payload} ->
-        channels_module = Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
+      %{
+        __channel_encrypted__: true,
+        channel_id: channel_id,
+        sender_id: _sender_id,
+        payload: payload
+      } ->
+        channels_module =
+          Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
 
         # Note: The subscriber must be a member of the channel.
         # For now, we attempt decryption using the channel key from Channels.
