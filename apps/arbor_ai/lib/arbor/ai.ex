@@ -179,6 +179,8 @@ defmodule Arbor.AI do
     system_prompt = Keyword.get(opts, :system_prompt)
     max_tokens = Keyword.get(opts, :max_tokens, 1024)
     temperature = Keyword.get(opts, :temperature, 0.7)
+    thinking_enabled = Keyword.get(opts, :thinking, false)
+    thinking_budget = Keyword.get(opts, :thinking_budget, 4096)
 
     messages = build_messages(prompt, system_prompt)
     model_spec = build_model_spec(provider, model)
@@ -190,8 +192,9 @@ defmodule Arbor.AI do
       ]
       |> maybe_add_system_prompt(system_prompt)
       |> maybe_add_api_key(provider)
+      |> maybe_add_thinking(thinking_enabled, thinking_budget)
 
-    Logger.debug("Arbor.AI API generating with #{provider}:#{model}")
+    Logger.debug("Arbor.AI API generating with #{provider}:#{model}, thinking: #{thinking_enabled}")
 
     case ReqLLM.generate_text(model_spec, messages, req_opts) do
       {:ok, response} ->
@@ -346,6 +349,52 @@ defmodule Arbor.AI do
     TaskMeta.classify(prompt, opts)
   end
 
+  # ── Thinking Integration ──
+
+  @doc """
+  Record thinking blocks from a response to the memory system.
+
+  If the response contains thinking blocks (from extended thinking),
+  this records them to `Arbor.Memory.Thinking` for the given agent.
+
+  ## Options
+
+  - `:significant` — flag as significant for reflection (default: false)
+  - `:metadata` — additional metadata map
+
+  ## Examples
+
+      {:ok, response} = Arbor.AI.generate_text(prompt, thinking: true)
+      Arbor.AI.record_thinking("my_agent", response)
+  """
+  @spec record_thinking(String.t(), map(), keyword()) :: :ok | {:ok, [map()]}
+  def record_thinking(agent_id, response, opts \\ [])
+
+  def record_thinking(_agent_id, %{thinking: nil}, _opts), do: :ok
+  def record_thinking(_agent_id, %{thinking: []}, _opts), do: :ok
+
+  def record_thinking(agent_id, %{thinking: blocks}, opts) when is_list(blocks) do
+    # Only try to record if arbor_memory is available and Thinking server is running
+    # arbor_ai is Standalone and can't depend on arbor_memory at compile time
+    with true <- Code.ensure_loaded?(Arbor.Memory.Thinking),
+         pid when is_pid(pid) <- Process.whereis(Arbor.Memory.Thinking) do
+      entries =
+        Enum.map(blocks, fn block ->
+          text = block[:text] || block["text"] || ""
+          {:ok, entry} = apply(Arbor.Memory.Thinking, :record_thinking, [agent_id, text, opts])
+          entry
+        end)
+
+      {:ok, entries}
+    else
+      _ ->
+        Logger.debug("Thinking server not available, skipping thinking record")
+        :ok
+    end
+  end
+
+  def record_thinking(_agent_id, _response, _opts), do: :ok
+
   # ── Stats & Observability ──
 
   @doc """
@@ -426,6 +475,7 @@ defmodule Arbor.AI do
   defp normalize_response(%Response{} = response) do
     %{
       text: response.text || "",
+      thinking: response.thinking,
       usage: response.usage || %{input_tokens: 0, output_tokens: 0, total_tokens: 0},
       model: response.model,
       provider: response.provider
@@ -435,6 +485,7 @@ defmodule Arbor.AI do
   defp normalize_response(response) when is_map(response) do
     %{
       text: response[:text] || response["text"] || "",
+      thinking: response[:thinking] || response["thinking"],
       usage: response[:usage] || response["usage"] || %{},
       model: response[:model] || response["model"],
       provider: response[:provider] || response["provider"]
@@ -452,6 +503,14 @@ defmodule Arbor.AI do
 
   defp maybe_add_system_prompt(opts, nil), do: opts
   defp maybe_add_system_prompt(opts, system), do: Keyword.put(opts, :system_prompt, system)
+
+  # Add extended thinking configuration for Anthropic models
+  # See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+  defp maybe_add_thinking(opts, false, _budget), do: opts
+
+  defp maybe_add_thinking(opts, true, budget) do
+    Keyword.put(opts, :thinking, %{type: :enabled, budget_tokens: budget})
+  end
 
   # Inject API key from environment since ReqLLM.put_key may not work
   # after application startup
@@ -485,6 +544,7 @@ defmodule Arbor.AI do
   defp format_api_response(response, provider, model) do
     %{
       text: extract_text(response),
+      thinking: extract_thinking(response),
       usage: extract_usage(response),
       model: model,
       provider: provider
@@ -549,6 +609,68 @@ defmodule Arbor.AI do
   end
 
   defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+
+  # Extract thinking blocks from extended thinking responses
+  # ReqLLM returns thinking blocks in the message content array
+  defp extract_thinking(response) when is_struct(response) do
+    response
+    |> Map.from_struct()
+    |> extract_thinking()
+  end
+
+  defp extract_thinking(%{message: message}) when is_struct(message) do
+    message
+    |> Map.from_struct()
+    |> Map.get(:content, [])
+    |> extract_thinking_blocks()
+  end
+
+  defp extract_thinking(%{message: %{content: content}}) when is_list(content) do
+    extract_thinking_blocks(content)
+  end
+
+  defp extract_thinking(_), do: nil
+
+  defp extract_thinking_blocks(parts) when is_list(parts) do
+    thinking_blocks =
+      parts
+      |> Enum.filter(&thinking_block?/1)
+      |> Enum.map(&normalize_thinking_block/1)
+
+    case thinking_blocks do
+      [] -> nil
+      blocks -> blocks
+    end
+  end
+
+  defp extract_thinking_blocks(_), do: nil
+
+  defp thinking_block?(%{type: :thinking}), do: true
+  defp thinking_block?(%{type: "thinking"}), do: true
+  defp thinking_block?(part) when is_struct(part) do
+    part |> Map.from_struct() |> thinking_block?()
+  end
+  defp thinking_block?(_), do: false
+
+  defp normalize_thinking_block(part) when is_struct(part) do
+    part |> Map.from_struct() |> normalize_thinking_block()
+  end
+
+  defp normalize_thinking_block(%{thinking: text} = block) do
+    %{
+      text: text,
+      signature: Map.get(block, :signature)
+    }
+  end
+
+  defp normalize_thinking_block(%{text: text} = block) do
+    %{
+      text: text,
+      signature: Map.get(block, :signature)
+    }
+  end
+
+  defp normalize_thinking_block(_), do: nil
 
   # ===========================================================================
   # Private Helpers - Embedding
