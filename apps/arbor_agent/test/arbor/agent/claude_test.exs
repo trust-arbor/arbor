@@ -1,0 +1,91 @@
+defmodule Arbor.Agent.ClaudeTest do
+  use ExUnit.Case, async: true
+
+  alias Arbor.Agent.Claude
+  alias Arbor.Agent.Templates.ClaudeCode
+
+  describe "ClaudeCode template" do
+    test "defines a character" do
+      character = ClaudeCode.character()
+      assert character.name == "Claude"
+      assert character.role == "AI collaborator and thought partner"
+      assert length(character.traits) == 5
+      assert length(character.values) == 4
+    end
+
+    test "uses established trust tier" do
+      assert ClaudeCode.trust_tier() == :established
+    end
+
+    test "defines initial goals" do
+      goals = ClaudeCode.initial_goals()
+      assert length(goals) == 3
+      assert Enum.any?(goals, &(&1.type == :collaborate))
+    end
+
+    test "requires appropriate capabilities" do
+      caps = ClaudeCode.required_capabilities()
+      assert length(caps) >= 5
+
+      resources = Enum.map(caps, & &1.resource)
+      assert "arbor://fs/**" in resources
+      assert "arbor://memory/**" in resources
+      assert "arbor://ai/**" in resources
+    end
+
+    test "provides metadata" do
+      meta = ClaudeCode.metadata()
+      assert meta.session_integration == true
+      assert meta.thinking_capture == true
+      assert meta.provider == :anthropic
+    end
+  end
+
+  describe "Claude agent" do
+    test "starts with default options" do
+      {:ok, agent} = Claude.start_link()
+      assert is_pid(agent)
+
+      assert Claude.agent_id(agent) == "claude-code"
+      assert Claude.session_id(agent) == nil
+
+      GenServer.stop(agent)
+    end
+
+    test "starts with custom id" do
+      {:ok, agent} = Claude.start_link(id: "test-claude")
+      assert Claude.agent_id(agent) == "test-claude"
+      GenServer.stop(agent)
+    end
+
+    test "get_thinking returns empty list initially" do
+      {:ok, agent} = Claude.start_link()
+      assert {:ok, []} = Claude.get_thinking(agent)
+      GenServer.stop(agent)
+    end
+  end
+
+  describe "Claude agent queries" do
+    @tag :external
+    @tag timeout: 120_000
+    test "executes a query and returns response" do
+      {:ok, agent} = Claude.start_link(model: :haiku)
+
+      case Claude.query(agent, "What is 2+2?", timeout: 60_000) do
+        {:ok, response} ->
+          assert is_binary(response.text)
+          assert String.contains?(response.text, "4")
+
+        {:error, :cli_not_found} ->
+          # CLI not available in CI
+          :ok
+
+        {:error, {:transport_closed, _status}} ->
+          # Transport issue
+          :ok
+      end
+
+      GenServer.stop(agent)
+    end
+  end
+end
