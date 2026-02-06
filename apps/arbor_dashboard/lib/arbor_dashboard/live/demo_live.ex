@@ -661,11 +661,21 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp update_pipeline_from_signal(stages, signal) do
-    category = get_in(signal, [:data, :category]) || signal[:category]
-    type = get_in(signal, [:data, :type]) || signal[:type]
+    category = signal_category(signal)
+    type = signal_type(signal)
     key = {normalize_category(category), normalize_signal_type(type)}
     dispatch_pipeline_update(key, stages, signal)
   end
+
+  # Helper to safely extract category from signal struct or map
+  defp signal_category(%{category: cat}) when not is_nil(cat), do: cat
+  defp signal_category(%{"category" => cat}) when not is_nil(cat), do: cat
+  defp signal_category(_), do: nil
+
+  # Helper to safely extract type from signal struct or map
+  defp signal_type(%{type: t}) when not is_nil(t), do: t
+  defp signal_type(%{"type" => t}) when not is_nil(t), do: t
+  defp signal_type(_), do: nil
 
   defp dispatch_pipeline_update({:demo, :fault_injected}, stages, _signal),
     do: set_stage(stages, "detect", :active)
@@ -735,8 +745,8 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   defp update_pipeline_for_stage(stages, _), do: stages
 
   defp update_consensus_state(socket, signal) do
-    category = get_in(signal, [:data, :category]) || signal[:category]
-    type = get_in(signal, [:data, :type]) || signal[:type]
+    category = signal_category(signal)
+    type = signal_type(signal)
     key = {normalize_category(category), normalize_signal_type(type)}
     dispatch_consensus_update(key, socket, signal)
   end
@@ -800,8 +810,8 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp format_signal(signal) do
-    type = get_in(signal, [:data, :type]) || signal[:type] || :unknown
-    category = get_in(signal, [:data, :category]) || signal[:category] || :unknown
+    type = signal_type(signal) || :unknown
+    category = signal_category(signal) || :unknown
     data = extract_signal_data(signal)
     {icon, message, details} = format_signal_content(normalize_type(type), data, category)
 
@@ -1041,8 +1051,8 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   # ── Phase 4: Thinking state updates ───────────────────────────────
 
   defp update_thinking_state(socket, signal) do
-    category = get_in(signal, [:data, :category]) || signal[:category]
-    type = get_in(signal, [:data, :type]) || signal[:type]
+    category = signal_category(signal)
+    type = signal_type(signal)
     key = {normalize_category(category), normalize_signal_type(type)}
     thinking = determine_thinking(key, signal, socket.assigns.system_thinking)
     assign(socket, system_thinking: thinking)

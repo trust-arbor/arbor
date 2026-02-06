@@ -238,9 +238,8 @@ defmodule Arbor.Agent.Lifecycle do
       resource = cap[:resource] || cap["resource"]
 
       Arbor.Security.grant(
-        principal_id: agent_id,
-        resource: resource,
-        actions: [:read, :execute]
+        principal: agent_id,
+        resource: resource
       )
     end)
 
