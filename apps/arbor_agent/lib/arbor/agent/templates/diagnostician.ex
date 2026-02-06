@@ -81,7 +81,11 @@ defmodule Arbor.Agent.Templates.Diagnostician do
       %{resource: "arbor://consensus/proposal/submit"},
       %{resource: "arbor://consensus/proposal/revise"},
       # Hot reload (requires council approval to execute)
-      %{resource: "arbor://code/reload/**"}
+      %{resource: "arbor://code/reload/**"},
+      # Action-based capabilities for Executor dispatch
+      %{resource: "arbor://agent/action/ai_analyze"},
+      %{resource: "arbor://agent/action/proposal_submit"},
+      %{resource: "arbor://agent/action/code_hot_load"}
     ]
   end
 

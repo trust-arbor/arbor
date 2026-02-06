@@ -82,15 +82,18 @@ defmodule Arbor.Gateway.Bridge.Router do
 
   defp emit_bridge_signal(session_id, tool_name, result) do
     agent_id = ClaudeSession.to_agent_id(session_id)
+    decision = result[:decision]
+    type = if decision == "allow", do: :allowed, else: :denied
 
     Arbor.Signals.emit(
       :tool_authorization,
+      type,
       %{
         tool_name: tool_name,
-        decision: result[:decision],
-        reason: result[:reason]
-      },
-      agent_id: agent_id
+        decision: decision,
+        reason: result[:reason],
+        agent_id: agent_id
+      }
     )
   rescue
     _ -> :ok

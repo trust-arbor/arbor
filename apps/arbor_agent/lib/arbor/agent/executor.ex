@@ -534,10 +534,20 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp subscribe_to_intents(state) do
+    # Capture the Executor's PID - the handler runs in a spawned async process
+    # so self() inside the handler would return the wrong PID
+    executor_pid = self()
+
     result =
       safe_call(fn ->
-        Arbor.Memory.subscribe_to_intents(state.agent_id, fn intent_map ->
-          GenServer.cast(self(), {:intent, intent_map})
+        Arbor.Memory.subscribe_to_intents(state.agent_id, fn signal ->
+          # Signal.data contains %{intent: %Intent{}, ...}
+          intent = extract_intent_from_signal(signal)
+
+          if intent do
+            GenServer.cast(executor_pid, {:intent, intent})
+          end
+
           :ok
         end)
       end)
@@ -546,6 +556,11 @@ defmodule Arbor.Agent.Executor do
       {:ok, sub_id} -> %{state | intent_subscription: sub_id}
       _ -> state
     end
+  end
+
+  defp extract_intent_from_signal(signal) do
+    data = Map.get(signal, :data) || %{}
+    data[:intent] || data["intent"]
   end
 
   defp safe_reflex_check(context) do
