@@ -720,6 +720,115 @@
   50% { box-shadow: 0 0 12px 4px rgba(88, 166, 255, 0.15); }
 }
 
+/* Processing state - spinning indicator for AI/LLM work */
+.aw-pipeline-processing {
+  border-color: var(--aw-accent-purple);
+  background: rgba(188, 140, 255, 0.1);
+  opacity: 1;
+  position: relative;
+}
+
+.aw-pipeline-processing .aw-pipeline-label {
+  color: var(--aw-accent-purple);
+  font-weight: 600;
+}
+
+.aw-pipeline-processing::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--aw-accent-purple);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: aw-spin 0.8s linear infinite;
+}
+
+/* Error state with shake animation */
+.aw-pipeline-error {
+  border-color: var(--aw-accent-red);
+  background: rgba(248, 81, 73, 0.1);
+  animation: aw-shake 0.5s ease-in-out;
+  opacity: 1;
+}
+
+.aw-pipeline-error .aw-pipeline-label {
+  color: var(--aw-accent-red);
+}
+
+@keyframes aw-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+
+/* Stage completion icon overlay */
+.aw-pipeline-complete::after {
+  content: '✓';
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  background: var(--aw-accent-green);
+  color: var(--aw-bg-dark);
+  border-radius: 50%;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: aw-fade-scale-in 0.3s ease-out;
+}
+
+.aw-pipeline-error::before {
+  content: '✗';
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  background: var(--aw-accent-red);
+  color: var(--aw-bg-dark);
+  border-radius: 50%;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: aw-fade-scale-in 0.3s ease-out;
+}
+
+@keyframes aw-fade-scale-in {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Connector animation - flowing dots during active transitions */
+.aw-pipeline-connector-active .aw-pipeline-arrow {
+  color: var(--aw-accent-blue);
+  position: relative;
+}
+
+.aw-pipeline-connector-active .aw-pipeline-arrow::after {
+  content: '•';
+  position: absolute;
+  left: 0;
+  animation: aw-flow-dot 1s ease-in-out infinite;
+  color: var(--aw-accent-blue);
+}
+
+@keyframes aw-flow-dot {
+  0% { opacity: 0; transform: translateX(-10px); }
+  50% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(10px); }
+}
+
+/* Pipeline stage needs position relative for pseudo-elements */
+.aw-pipeline-stage {
+  position: relative;
+}
+
 /* ── Demo Controls ──────────────────────────────────────────────── */
 
 .aw-demo-controls {
@@ -803,4 +912,316 @@
 
 .aw-activity-message {
   color: var(--aw-text-primary);
+}
+
+/* ── System Thinking Indicator ────────────────────────────────────── */
+
+.aw-system-thinking {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: rgba(188, 140, 255, 0.08);
+  border: 1px solid var(--aw-accent-purple);
+  border-radius: var(--aw-radius);
+  margin-top: 1rem;
+  animation: aw-fade-in 0.3s ease-out;
+}
+
+.aw-system-thinking-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(188, 140, 255, 0.3);
+  border-top-color: var(--aw-accent-purple);
+  border-radius: 50%;
+  animation: aw-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.aw-system-thinking-text {
+  color: var(--aw-accent-purple);
+  font-size: 0.875rem;
+  animation: aw-pulse 2s ease-in-out infinite;
+}
+
+/* ── Timing Display ───────────────────────────────────────────────── */
+
+.aw-timing-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  margin-top: 0.75rem;
+  font-family: var(--aw-font-mono);
+  font-size: 0.8rem;
+}
+
+.aw-timing-stages {
+  display: flex;
+  gap: 1rem;
+}
+
+.aw-timing-stage {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-timing-stage-active {
+  color: var(--aw-accent-blue);
+}
+
+.aw-timing-stage-complete {
+  color: var(--aw-accent-green);
+}
+
+.aw-timing-total {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.aw-timing-total-label {
+  color: var(--aw-text-secondary);
+  font-weight: 400;
+}
+
+.aw-timing-budget-green {
+  color: var(--aw-accent-green);
+}
+
+.aw-timing-budget-yellow {
+  color: var(--aw-accent-yellow);
+}
+
+.aw-timing-budget-red {
+  color: var(--aw-accent-red);
+}
+
+/* ── Proposal Diff ────────────────────────────────────────────────── */
+
+.aw-diff {
+  background: var(--aw-bg-dark);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  overflow: hidden;
+  font-family: var(--aw-font-mono);
+  font-size: 0.8rem;
+}
+
+.aw-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: var(--aw-bg-card);
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-diff-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 500;
+  color: var(--aw-text-primary);
+}
+
+.aw-diff-meta {
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-diff-body {
+  padding: 0.5rem 0;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.aw-diff-line {
+  padding: 0.125rem 0.75rem;
+  white-space: pre;
+  line-height: 1.4;
+}
+
+.aw-diff-add {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--aw-accent-green);
+}
+
+.aw-diff-remove {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--aw-accent-red);
+}
+
+.aw-diff-context {
+  color: var(--aw-text-secondary);
+}
+
+.aw-diff-expand {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--aw-border);
+  background: var(--aw-bg-card);
+}
+
+.aw-diff-expand-btn {
+  background: none;
+  border: none;
+  color: var(--aw-accent-blue);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0;
+}
+
+.aw-diff-expand-btn:hover {
+  text-decoration: underline;
+}
+
+/* ── Evaluator Cards ──────────────────────────────────────────────── */
+
+.aw-evaluator-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.aw-evaluator-card {
+  padding: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--aw-border);
+  background: var(--aw-bg-dark);
+  animation: aw-slide-in 0.3s ease-out;
+}
+
+.aw-evaluator-card-approve {
+  border-left: 3px solid var(--aw-accent-green);
+}
+
+.aw-evaluator-card-reject {
+  border-left: 3px solid var(--aw-accent-red);
+}
+
+.aw-evaluator-card-abstain {
+  border-left: 3px solid var(--aw-accent-yellow);
+}
+
+.aw-evaluator-card-pending {
+  border-left: 3px solid var(--aw-border);
+  opacity: 0.6;
+}
+
+.aw-evaluator-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.aw-evaluator-name {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-weight: 500;
+}
+
+.aw-evaluator-icon {
+  font-size: 1rem;
+}
+
+.aw-evaluator-reasoning {
+  font-size: 0.8rem;
+  color: var(--aw-text-secondary);
+  line-height: 1.4;
+}
+
+.aw-evaluator-reasoning-collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.aw-evaluator-toggle {
+  background: none;
+  border: none;
+  color: var(--aw-accent-blue);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0;
+  margin-top: 0.25rem;
+}
+
+.aw-evaluator-toggle:hover {
+  text-decoration: underline;
+}
+
+.aw-evaluator-concerns {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--aw-border);
+  font-size: 0.75rem;
+  color: var(--aw-accent-yellow);
+}
+
+@keyframes aw-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Vote Tally ───────────────────────────────────────────────────── */
+
+.aw-vote-tally {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  margin-bottom: 0.75rem;
+}
+
+.aw-vote-count {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.aw-vote-approve {
+  color: var(--aw-accent-green);
+}
+
+.aw-vote-reject {
+  color: var(--aw-accent-red);
+}
+
+.aw-vote-abstain {
+  color: var(--aw-accent-yellow);
+}
+
+.aw-vote-pending {
+  color: var(--aw-text-secondary);
+}
+
+/* ── Activity Feed Enhancements ───────────────────────────────────── */
+
+.aw-activity-entry-expandable {
+  cursor: pointer;
+}
+
+.aw-activity-entry-expandable:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.aw-activity-details {
+  padding: 0.5rem 0.75rem;
+  padding-left: 4.5rem;
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+  border-top: 1px solid var(--aw-border);
+  animation: aw-fade-in 0.2s ease-out;
 }

@@ -12,11 +12,21 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   - `monitor.*` — Anomaly detection
   - `consensus.*` — Proposal submission, evaluation, and decisions
   - `code.*` — Hot-load events
+
+  ## Phase 4 Features
+
+  - Pipeline stage animations (processing, complete, failed states)
+  - Evaluator reasoning display with streaming votes
+  - Proposal diff view with syntax highlighting
+  - "System Thinking" status indicators
+  - Enhanced activity feed with expandable entries
+  - Timing display (per-stage and total elapsed)
   """
 
   use Phoenix.LiveView
 
   import Arbor.Web.Components
+  import Arbor.Dashboard.Components.ProposalDiff
 
   alias Arbor.Demo.FaultInjector
 
@@ -31,6 +41,18 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   @refresh_interval_ms 2_000
   @max_feed_entries 100
+  @timer_interval_ms 100
+
+  # System thinking messages for each stage
+  @thinking_messages %{
+    "detect" => "Monitoring for anomalies...",
+    "diagnose" => "Analyzing anomaly...",
+    "diagnose_to_propose" => "Forming proposal...",
+    "propose" => "Submitting proposal...",
+    "review" => "Awaiting council...",
+    "fix" => "Applying fix...",
+    "verify" => "Verifying..."
+  }
 
   @impl true
   def mount(_params, _session, socket) do
@@ -54,7 +76,18 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         # Consensus tracking
         current_proposal: nil,
         evaluations: [],
-        decision: nil
+        decision: nil,
+        # Phase 4: UI state
+        system_thinking: nil,
+        diff_expanded: false,
+        expanded_evaluations: MapSet.new(),
+        expanded_feed_entries: MapSet.new(),
+        # Timing
+        pipeline_start_time: nil,
+        stage_start_times: %{},
+        stage_elapsed: %{},
+        total_elapsed: 0,
+        timer_ref: nil
       )
 
     {:ok, socket}
@@ -78,12 +111,38 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     {:noreply, socket}
   end
 
+  def handle_info(:tick_timer, socket) do
+    now = System.monotonic_time(:millisecond)
+
+    socket =
+      if socket.assigns.pipeline_start_time do
+        total = now - socket.assigns.pipeline_start_time
+
+        # Update elapsed time for active stage
+        stage_elapsed =
+          update_stage_elapsed(
+            socket.assigns.stage_start_times,
+            socket.assigns.stage_elapsed,
+            socket.assigns.pipeline_stages,
+            now
+          )
+
+        assign(socket, total_elapsed: total, stage_elapsed: stage_elapsed)
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
   def handle_info({:signal_received, signal}, socket) do
     entry = format_signal(signal)
     feed = Enum.take([entry | socket.assigns.feed], @max_feed_entries)
 
     pipeline = update_pipeline_from_signal(socket.assigns.pipeline_stages, signal)
     socket = update_consensus_state(socket, signal)
+    socket = update_thinking_state(socket, signal)
+    socket = update_timing_state(socket, signal, pipeline)
 
     socket =
       assign(socket,
@@ -103,10 +162,15 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
     case safe_inject_fault(type_atom) do
       {:ok, _} ->
+        now = System.monotonic_time(:millisecond)
+        timer_ref = start_timer(socket.assigns.timer_ref)
+
         entry = %{
+          id: System.unique_integer([:positive]),
           icon: "💥",
           message: "Fault injected: #{type}",
-          time: format_time(System.system_time(:millisecond))
+          time: format_time(System.system_time(:millisecond)),
+          details: "Type: #{type}\nTriggered self-healing pipeline"
         }
 
         feed = Enum.take([entry | socket.assigns.feed], @max_feed_entries)
@@ -115,7 +179,13 @@ defmodule Arbor.Dashboard.Live.DemoLive do
          assign(socket,
            active_faults: safe_active_faults(),
            available_faults: safe_available_faults(),
-           feed: feed
+           feed: feed,
+           pipeline_start_time: now,
+           stage_start_times: %{"detect" => now},
+           stage_elapsed: %{},
+           total_elapsed: 0,
+           timer_ref: timer_ref,
+           system_thinking: @thinking_messages["detect"]
          )}
 
       {:error, reason} ->
@@ -128,10 +198,14 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
     case safe_clear_fault(type_atom) do
       :ok ->
+        stop_timer(socket.assigns.timer_ref)
+
         entry = %{
+          id: System.unique_integer([:positive]),
           icon: "🩹",
           message: "Fault cleared: #{type}",
-          time: format_time(System.system_time(:millisecond))
+          time: format_time(System.system_time(:millisecond)),
+          details: nil
         }
 
         feed = Enum.take([entry | socket.assigns.feed], @max_feed_entries)
@@ -144,7 +218,13 @@ defmodule Arbor.Dashboard.Live.DemoLive do
            pipeline_stages: build_pipeline(:idle),
            current_proposal: nil,
            evaluations: [],
-           decision: nil
+           decision: nil,
+           system_thinking: nil,
+           pipeline_start_time: nil,
+           stage_start_times: %{},
+           stage_elapsed: %{},
+           total_elapsed: 0,
+           timer_ref: nil
          )}
 
       {:error, reason} ->
@@ -154,11 +234,14 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   def handle_event("clear_all", _params, socket) do
     safe_clear_all()
+    stop_timer(socket.assigns.timer_ref)
 
     entry = %{
+      id: System.unique_integer([:positive]),
       icon: "🧹",
       message: "All faults cleared",
-      time: format_time(System.system_time(:millisecond))
+      time: format_time(System.system_time(:millisecond)),
+      details: nil
     }
 
     feed = Enum.take([entry | socket.assigns.feed], @max_feed_entries)
@@ -171,8 +254,45 @@ defmodule Arbor.Dashboard.Live.DemoLive do
        pipeline_stages: build_pipeline(:idle),
        current_proposal: nil,
        evaluations: [],
-       decision: nil
+       decision: nil,
+       system_thinking: nil,
+       pipeline_start_time: nil,
+       stage_start_times: %{},
+       stage_elapsed: %{},
+       total_elapsed: 0,
+       timer_ref: nil
      )}
+  end
+
+  def handle_event("toggle_diff", _params, socket) do
+    {:noreply, assign(socket, diff_expanded: !socket.assigns.diff_expanded)}
+  end
+
+  def handle_event("toggle_evaluation", %{"perspective" => perspective}, socket) do
+    expanded = socket.assigns.expanded_evaluations
+
+    expanded =
+      if MapSet.member?(expanded, perspective) do
+        MapSet.delete(expanded, perspective)
+      else
+        MapSet.put(expanded, perspective)
+      end
+
+    {:noreply, assign(socket, expanded_evaluations: expanded)}
+  end
+
+  def handle_event("toggle_feed_entry", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    expanded = socket.assigns.expanded_feed_entries
+
+    expanded =
+      if MapSet.member?(expanded, id) do
+        MapSet.delete(expanded, id)
+      else
+        MapSet.put(expanded, id)
+      end
+
+    {:noreply, assign(socket, expanded_feed_entries: expanded)}
   end
 
   @impl true
@@ -193,15 +313,33 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     <.card title="Pipeline">
       <div class="aw-pipeline">
         <%= for {stage, idx} <- Enum.with_index(@pipeline_stages) do %>
-          <.pipeline_stage
+          <.pipeline_stage_enhanced
             id={stage.id}
             label={stage.label}
             icon={stage.icon}
             status={stage.status}
             is_last={idx == length(@pipeline_stages) - 1}
+            elapsed={Map.get(@stage_elapsed, stage.id)}
           />
         <% end %>
       </div>
+
+      <%!-- Timing Bar --%>
+      <%= if @pipeline_start_time do %>
+        <.timing_bar
+          total_elapsed={@total_elapsed}
+          stage_elapsed={@stage_elapsed}
+          pipeline_stages={@pipeline_stages}
+        />
+      <% end %>
+
+      <%!-- System Thinking Indicator --%>
+      <%= if @system_thinking do %>
+        <div class="aw-system-thinking">
+          <div class="aw-system-thinking-spinner"></div>
+          <span class="aw-system-thinking-text">{@system_thinking}</span>
+        </div>
+      <% end %>
     </.card>
 
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.5rem;">
@@ -268,55 +406,43 @@ defmodule Arbor.Dashboard.Live.DemoLive do
       </.card>
     </div>
 
+    <%!-- Proposal Diff (shows in Propose/Review stages) --%>
+    <%= if @current_proposal do %>
+      <div style="margin-top: 1.5rem;">
+        <.card title="Proposed Change">
+          <.proposal_diff
+            proposal={@current_proposal}
+            expanded={@diff_expanded}
+            on_toggle="toggle_diff"
+          />
+        </.card>
+      </div>
+    <% end %>
+
     <%!-- Council Review Panel (shows during review stage) --%>
-    <%= if @current_proposal || @evaluations != [] || @decision do %>
+    <%= if @evaluations != [] || @decision do %>
       <div style="margin-top: 1.5rem;">
         <.card title="Council Review">
-          <%!-- Current Proposal --%>
-          <%= if @current_proposal do %>
-            <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--aw-surface-secondary); border-radius: 6px;">
-              <div style="font-weight: 600; margin-bottom: 0.5rem;">Proposal</div>
-              <div style="font-size: 0.85rem; color: var(--aw-text-secondary);">
-                {Map.get(@current_proposal, :description, "No description")}
-              </div>
-              <%= if Map.get(@current_proposal, :context) do %>
-                <div style="font-size: 0.8rem; color: var(--aw-text-secondary); margin-top: 0.5rem;">
-                  Target: {inspect(get_in(@current_proposal, [:context, :target_module]) || "N/A")}
-                </div>
-              <% end %>
-            </div>
+          <%!-- Vote Tally --%>
+          <%= if @evaluations != [] do %>
+            <.vote_tally evaluations={@evaluations} />
           <% end %>
 
-          <%!-- Evaluations --%>
+          <%!-- Evaluator Cards --%>
           <%= if @evaluations != [] do %>
-            <div style="margin-bottom: 1rem;">
-              <div style="font-weight: 600; margin-bottom: 0.5rem;">Evaluator Votes</div>
-              <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                <%= for eval <- @evaluations do %>
-                  <div style={"padding: 0.5rem; border-radius: 4px; border-left: 3px solid #{vote_color(eval.vote)}; background: var(--aw-surface-secondary);"}>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                      <span style="font-weight: 500;">{eval.perspective}</span>
-                      <.badge label={to_string(eval.vote)} color={vote_badge_color(eval.vote)} />
-                    </div>
-                    <div style="font-size: 0.8rem; color: var(--aw-text-secondary); margin-top: 0.25rem;">
-                      {String.slice(eval.reasoning || "", 0, 100)}{if String.length(
-                                                                        eval.reasoning || ""
-                                                                      ) > 100, do: "...", else: ""}
-                    </div>
-                    <%= if eval.concerns != [] do %>
-                      <div style="font-size: 0.75rem; color: var(--aw-accent-yellow); margin-top: 0.25rem;">
-                        Concerns: {Enum.join(eval.concerns, ", ")}
-                      </div>
-                    <% end %>
-                  </div>
-                <% end %>
-              </div>
+            <div class="aw-evaluator-grid">
+              <%= for eval <- Enum.reverse(@evaluations) do %>
+                <.evaluator_card
+                  evaluation={eval}
+                  expanded={MapSet.member?(@expanded_evaluations, to_string(eval.perspective))}
+                />
+              <% end %>
             </div>
           <% end %>
 
           <%!-- Decision --%>
           <%= if @decision do %>
-            <div style={"padding: 0.75rem; border-radius: 6px; background: #{decision_bg(@decision)}; border: 1px solid #{decision_border(@decision)};"}>
+            <div style={"margin-top: 1rem; padding: 0.75rem; border-radius: 6px; background: #{decision_bg(@decision)}; border: 1px solid #{decision_border(@decision)};"}>
               <div style="display: flex; justify-content: space-between; align-items: center;">
                 <span style="font-weight: 600;">
                   {decision_icon(@decision)} Decision: {String.capitalize(
@@ -373,15 +499,155 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         <% else %>
           <div class="aw-activity-feed">
             <%= for entry <- @feed do %>
-              <div class="aw-activity-entry">
-                <span class="aw-activity-time">{entry.time}</span>
-                <span class="aw-activity-icon">{entry.icon}</span>
-                <span class="aw-activity-message">{entry.message}</span>
+              <div>
+                <div
+                  class={"aw-activity-entry #{if entry[:details], do: "aw-activity-entry-expandable", else: ""}"}
+                  phx-click={if entry[:details], do: "toggle_feed_entry", else: nil}
+                  phx-value-id={entry[:id]}
+                >
+                  <span class="aw-activity-time">{entry.time}</span>
+                  <span class="aw-activity-icon">{entry.icon}</span>
+                  <span class="aw-activity-message">{entry.message}</span>
+                  <%= if entry[:details] do %>
+                    <span style="color: var(--aw-text-secondary); font-size: 0.75rem; margin-left: auto;">
+                      {if MapSet.member?(@expanded_feed_entries, entry[:id]), do: "▼", else: "▶"}
+                    </span>
+                  <% end %>
+                </div>
+                <%= if entry[:details] && MapSet.member?(@expanded_feed_entries, entry[:id]) do %>
+                  <div class="aw-activity-details">
+                    {entry.details}
+                  </div>
+                <% end %>
               </div>
             <% end %>
           </div>
         <% end %>
       </.card>
+    </div>
+    """
+  end
+
+  # ── Function Components ────────────────────────────────────────────
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :icon, :string, required: true
+  attr :status, :atom, default: :idle
+  attr :is_last, :boolean, default: false
+  attr :elapsed, :integer, default: nil
+
+  defp pipeline_stage_enhanced(assigns) do
+    ~H"""
+    <div class={["aw-pipeline-stage", "aw-pipeline-#{@status}"]} id={"pipeline-#{@id}"}>
+      <div class="aw-pipeline-icon">{@icon}</div>
+      <div class="aw-pipeline-label">{@label}</div>
+      <%= if @elapsed && @status in [:active, :processing] do %>
+        <div style="font-size: 0.65rem; color: var(--aw-text-secondary); margin-top: 0.125rem;">
+          {format_elapsed(@elapsed)}
+        </div>
+      <% end %>
+    </div>
+    <div
+      :if={!@is_last}
+      class={[
+        "aw-pipeline-connector",
+        if(@status in [:active, :processing], do: "aw-pipeline-connector-active", else: "")
+      ]}
+    >
+      <span class="aw-pipeline-arrow">&rarr;</span>
+    </div>
+    """
+  end
+
+  attr :total_elapsed, :integer, required: true
+  attr :stage_elapsed, :map, required: true
+  attr :pipeline_stages, :list, required: true
+
+  defp timing_bar(assigns) do
+    ~H"""
+    <div class="aw-timing-bar">
+      <div class="aw-timing-stages">
+        <%= for stage <- @pipeline_stages do %>
+          <%= if Map.has_key?(@stage_elapsed, stage.id) || stage.status == :complete do %>
+            <div class={"aw-timing-stage #{if stage.status == :complete, do: "aw-timing-stage-complete", else: "aw-timing-stage-active"}"}>
+              <span>{stage.label}:</span>
+              <span>{format_elapsed(Map.get(@stage_elapsed, stage.id, 0))}</span>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+      <div class={"aw-timing-total #{timing_budget_class(@total_elapsed)}"}>
+        <span class="aw-timing-total-label">Total:</span>
+        <span>{format_elapsed(@total_elapsed)}</span>
+      </div>
+    </div>
+    """
+  end
+
+  attr :evaluations, :list, required: true
+
+  defp vote_tally(assigns) do
+    approve_count = Enum.count(assigns.evaluations, &vote_is?(&1, :approve))
+    reject_count = Enum.count(assigns.evaluations, &vote_is?(&1, :reject))
+    abstain_count = Enum.count(assigns.evaluations, &vote_is?(&1, :abstain))
+
+    assigns =
+      assign(assigns,
+        approve_count: approve_count,
+        reject_count: reject_count,
+        abstain_count: abstain_count
+      )
+
+    ~H"""
+    <div class="aw-vote-tally">
+      <div class="aw-vote-count aw-vote-approve">
+        <span>✓</span>
+        <span>{@approve_count}</span>
+      </div>
+      <div class="aw-vote-count aw-vote-reject">
+        <span>✗</span>
+        <span>{@reject_count}</span>
+      </div>
+      <div class="aw-vote-count aw-vote-abstain">
+        <span>○</span>
+        <span>{@abstain_count}</span>
+      </div>
+    </div>
+    """
+  end
+
+  attr :evaluation, :map, required: true
+  attr :expanded, :boolean, default: false
+
+  defp evaluator_card(assigns) do
+    ~H"""
+    <div class={"aw-evaluator-card aw-evaluator-card-#{vote_class(@evaluation.vote)}"}>
+      <div class="aw-evaluator-header">
+        <div class="aw-evaluator-name">
+          <span class="aw-evaluator-icon">{evaluator_icon(@evaluation.perspective)}</span>
+          <span>{format_perspective(@evaluation.perspective)}</span>
+        </div>
+        <.badge label={format_vote(@evaluation.vote)} color={vote_badge_color(@evaluation.vote)} />
+      </div>
+      <div class={"aw-evaluator-reasoning #{if !@expanded, do: "aw-evaluator-reasoning-collapsed", else: ""}"}>
+        {@evaluation.reasoning || "No reasoning provided"}
+      </div>
+      <%= if String.length(@evaluation.reasoning || "") > 100 do %>
+        <button
+          type="button"
+          class="aw-evaluator-toggle"
+          phx-click="toggle_evaluation"
+          phx-value-perspective={@evaluation.perspective}
+        >
+          {if @expanded, do: "Show less", else: "Show more"}
+        </button>
+      <% end %>
+      <%= if @evaluation.concerns != [] do %>
+        <div class="aw-evaluator-concerns">
+          ⚠️ {Enum.join(@evaluation.concerns, ", ")}
+        </div>
+      <% end %>
     </div>
     """
   end
@@ -397,121 +663,126 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   defp update_pipeline_from_signal(stages, signal) do
     category = get_in(signal, [:data, :category]) || signal[:category]
     type = get_in(signal, [:data, :type]) || signal[:type]
-
-    cond do
-      match_signal?(category, type, :demo, :fault_injected) ->
-        set_stage(stages, "detect", :active)
-
-      match_signal?(category, type, :monitor, :anomaly_detected) ->
-        stages
-        |> set_stage("detect", :complete)
-        |> set_stage("diagnose", :active)
-
-      match_signal?(category, type, :demo, :pipeline_stage_changed) ->
-        data = extract_signal_data(signal)
-        stage_name = data[:stage] || data["stage"]
-        update_pipeline_for_stage(stages, stage_name)
-
-      match_signal?(category, type, :consensus, :proposal_submitted) ->
-        stages
-        |> set_stage("diagnose", :complete)
-        |> set_stage("propose", :active)
-
-      match_signal?(category, type, :consensus, :evaluation_started) ->
-        stages
-        |> set_stage("propose", :complete)
-        |> set_stage("review", :active)
-
-      match_signal?(category, type, :consensus, :decision_made) ->
-        data = extract_signal_data(signal)
-        decision = data[:decision] || data["decision"]
-
-        if decision == :approved or decision == "approved" do
-          stages
-          |> set_stage("review", :complete)
-          |> set_stage("fix", :active)
-        else
-          set_stage(stages, "review", :error)
-        end
-
-      match_signal?(category, type, :code, :hot_loaded) ->
-        stages
-        |> set_stage("fix", :complete)
-        |> set_stage("verify", :active)
-
-      match_signal?(category, type, :demo, :fault_cleared) ->
-        set_stage(stages, "verify", :complete)
-
-      true ->
-        stages
-    end
+    key = {normalize_category(category), normalize_signal_type(type)}
+    dispatch_pipeline_update(key, stages, signal)
   end
 
-  defp update_pipeline_for_stage(stages, stage_name) when is_atom(stage_name) do
-    update_pipeline_for_stage(stages, to_string(stage_name))
+  defp dispatch_pipeline_update({:demo, :fault_injected}, stages, _signal),
+    do: set_stage(stages, "detect", :active)
+
+  defp dispatch_pipeline_update({:monitor, :anomaly_detected}, stages, _signal),
+    do: stages |> set_stage("detect", :complete) |> set_stage("diagnose", :active)
+
+  defp dispatch_pipeline_update({:demo, :pipeline_stage_changed}, stages, signal) do
+    data = extract_signal_data(signal)
+    stage_name = data[:stage] || data["stage"]
+    update_pipeline_for_stage(stages, stage_name)
   end
 
-  defp update_pipeline_for_stage(stages, stage_name) when is_binary(stage_name) do
-    case stage_name do
-      "detect" -> set_stage(stages, "detect", :active)
-      "diagnose" -> stages |> set_stage("detect", :complete) |> set_stage("diagnose", :active)
-      "propose" -> stages |> set_stage("diagnose", :complete) |> set_stage("propose", :active)
-      "review" -> stages |> set_stage("propose", :complete) |> set_stage("review", :active)
-      "fix" -> stages |> set_stage("review", :complete) |> set_stage("fix", :active)
-      "verify" -> stages |> set_stage("fix", :complete) |> set_stage("verify", :active)
-      "rejected" -> set_stage(stages, "review", :error)
-      "idle" -> build_pipeline(:idle)
-      _ -> stages
-    end
+  defp dispatch_pipeline_update({:consensus, :proposal_submitted}, stages, _signal),
+    do: stages |> set_stage("diagnose", :complete) |> set_stage("propose", :active)
+
+  defp dispatch_pipeline_update({:consensus, :evaluation_started}, stages, _signal),
+    do: stages |> set_stage("propose", :complete) |> set_stage("review", :active)
+
+  defp dispatch_pipeline_update({:consensus, :decision_made}, stages, signal) do
+    data = extract_signal_data(signal)
+    decision = data[:decision] || data["decision"]
+    apply_decision_to_pipeline(stages, decision)
   end
+
+  defp dispatch_pipeline_update({:code, :hot_loaded}, stages, _signal),
+    do: stages |> set_stage("fix", :complete) |> set_stage("verify", :active)
+
+  defp dispatch_pipeline_update({:demo, :fault_cleared}, stages, _signal),
+    do: set_stage(stages, "verify", :complete)
+
+  defp dispatch_pipeline_update(_, stages, _signal), do: stages
+
+  defp apply_decision_to_pipeline(stages, decision) when decision in [:approved, "approved"],
+    do: stages |> set_stage("review", :complete) |> set_stage("fix", :active)
+
+  defp apply_decision_to_pipeline(stages, _decision),
+    do: set_stage(stages, "review", :error)
+
+  defp update_pipeline_for_stage(stages, stage_name) when is_atom(stage_name),
+    do: update_pipeline_for_stage(stages, to_string(stage_name))
+
+  defp update_pipeline_for_stage(stages, "detect"),
+    do: set_stage(stages, "detect", :active)
+
+  defp update_pipeline_for_stage(stages, "diagnose"),
+    do: stages |> set_stage("detect", :complete) |> set_stage("diagnose", :active)
+
+  defp update_pipeline_for_stage(stages, "propose"),
+    do: stages |> set_stage("diagnose", :complete) |> set_stage("propose", :active)
+
+  defp update_pipeline_for_stage(stages, "review"),
+    do: stages |> set_stage("propose", :complete) |> set_stage("review", :active)
+
+  defp update_pipeline_for_stage(stages, "fix"),
+    do: stages |> set_stage("review", :complete) |> set_stage("fix", :active)
+
+  defp update_pipeline_for_stage(stages, "verify"),
+    do: stages |> set_stage("fix", :complete) |> set_stage("verify", :active)
+
+  defp update_pipeline_for_stage(stages, "rejected"),
+    do: set_stage(stages, "review", :error)
+
+  defp update_pipeline_for_stage(_stages, "idle"),
+    do: build_pipeline(:idle)
 
   defp update_pipeline_for_stage(stages, _), do: stages
 
   defp update_consensus_state(socket, signal) do
     category = get_in(signal, [:data, :category]) || signal[:category]
     type = get_in(signal, [:data, :type]) || signal[:type]
+    key = {normalize_category(category), normalize_signal_type(type)}
+    dispatch_consensus_update(key, socket, signal)
+  end
+
+  defp dispatch_consensus_update({:consensus, :proposal_submitted}, socket, signal) do
+    data = extract_signal_data(signal)
+    proposal = data[:proposal] || data["proposal"] || data
+    assign(socket, current_proposal: proposal)
+  end
+
+  defp dispatch_consensus_update({:consensus, :evaluation_completed}, socket, signal) do
+    data = extract_signal_data(signal)
+    evaluation = data[:evaluation] || data["evaluation"] || data
+    evaluations = [normalize_evaluation(evaluation) | socket.assigns.evaluations]
+    assign(socket, evaluations: evaluations)
+  end
+
+  defp dispatch_consensus_update({:consensus, :decision_made}, socket, signal) do
     data = extract_signal_data(signal)
 
-    cond do
-      match_signal?(category, type, :consensus, :proposal_submitted) ->
-        proposal = data[:proposal] || data["proposal"] || data
-        assign(socket, current_proposal: proposal)
+    decision = %{
+      outcome: data[:decision] || data["decision"],
+      reason: data[:reason] || data["reason"],
+      decided_at: System.system_time(:millisecond)
+    }
 
-      match_signal?(category, type, :consensus, :evaluation_completed) ->
-        evaluation = data[:evaluation] || data["evaluation"] || data
-        evaluations = [normalize_evaluation(evaluation) | socket.assigns.evaluations]
-        assign(socket, evaluations: evaluations)
-
-      match_signal?(category, type, :consensus, :decision_made) ->
-        decision = %{
-          outcome: data[:decision] || data["decision"],
-          reason: data[:reason] || data["reason"],
-          decided_at: System.system_time(:millisecond)
-        }
-
-        assign(socket, decision: decision)
-
-      true ->
-        socket
-    end
+    assign(socket, decision: decision)
   end
+
+  defp dispatch_consensus_update(_, socket, _signal), do: socket
 
   defp normalize_evaluation(eval) when is_map(eval) do
     %{
-      perspective: eval[:perspective] || eval["perspective"] || :unknown,
-      vote: eval[:vote] || eval["vote"] || :abstain,
-      reasoning: eval[:reasoning] || eval["reasoning"] || "",
-      concerns: eval[:concerns] || eval["concerns"] || [],
-      confidence: eval[:confidence] || eval["confidence"] || 0.0
+      perspective: get_field(eval, :perspective, :unknown),
+      vote: get_field(eval, :vote, :abstain),
+      reasoning: get_field(eval, :reasoning, ""),
+      concerns: get_field(eval, :concerns, []),
+      confidence: get_field(eval, :confidence, 0.0)
     }
   end
 
   defp normalize_evaluation(_),
     do: %{perspective: :unknown, vote: :abstain, reasoning: "", concerns: [], confidence: 0.0}
 
-  defp match_signal?(cat, type, expected_cat, expected_type) do
-    (cat == expected_cat or cat == to_string(expected_cat)) and
-      (type == expected_type or type == to_string(expected_type))
+  defp get_field(map, key, default) do
+    map[key] || map[to_string(key)] || default
   end
 
   defp set_stage(stages, target_id, status) do
@@ -531,26 +802,105 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   defp format_signal(signal) do
     type = get_in(signal, [:data, :type]) || signal[:type] || :unknown
     category = get_in(signal, [:data, :category]) || signal[:category] || :unknown
-
-    icon =
-      case type do
-        t when t in [:fault_injected, "fault_injected"] -> "💥"
-        t when t in [:fault_cleared, "fault_cleared"] -> "🩹"
-        t when t in [:anomaly_detected, "anomaly_detected"] -> "🚨"
-        t when t in [:proposal_submitted, "proposal_submitted"] -> "📝"
-        t when t in [:evaluation_started, "evaluation_started"] -> "🗳"
-        t when t in [:evaluation_completed, "evaluation_completed"] -> "✓"
-        t when t in [:decision_made, "decision_made"] -> "⚖️"
-        t when t in [:hot_loaded, "hot_loaded"] -> "🔧"
-        t when t in [:pipeline_stage_changed, "pipeline_stage_changed"] -> "➡️"
-        _ -> "📡"
-      end
+    data = extract_signal_data(signal)
+    {icon, message, details} = format_signal_content(normalize_type(type), data, category)
 
     %{
+      id: System.unique_integer([:positive]),
       icon: icon,
-      message: "#{category}.#{type}",
-      time: format_time(System.system_time(:millisecond))
+      message: message,
+      time: format_time(System.system_time(:millisecond)),
+      details: details
     }
+  end
+
+  defp normalize_type(t) when t in [:fault_injected, "fault_injected"], do: :fault_injected
+  defp normalize_type(t) when t in [:fault_cleared, "fault_cleared"], do: :fault_cleared
+  defp normalize_type(t) when t in [:anomaly_detected, "anomaly_detected"], do: :anomaly_detected
+
+  defp normalize_type(t) when t in [:proposal_submitted, "proposal_submitted"],
+    do: :proposal_submitted
+
+  defp normalize_type(t) when t in [:evaluation_started, "evaluation_started"],
+    do: :evaluation_started
+
+  defp normalize_type(t) when t in [:evaluation_completed, "evaluation_completed"],
+    do: :evaluation_completed
+
+  defp normalize_type(t) when t in [:decision_made, "decision_made"], do: :decision_made
+  defp normalize_type(t) when t in [:hot_loaded, "hot_loaded"], do: :hot_loaded
+
+  defp normalize_type(t) when t in [:pipeline_stage_changed, "pipeline_stage_changed"],
+    do: :pipeline_stage_changed
+
+  defp normalize_type(t), do: t
+
+  defp format_signal_content(:fault_injected, data, _cat) do
+    fault_type = data[:fault_type] || data["fault_type"] || "unknown"
+    {"💥", "Fault injected: #{fault_type}", nil}
+  end
+
+  defp format_signal_content(:fault_cleared, data, _cat) do
+    fault_type = data[:fault_type] || data["fault_type"] || "unknown"
+    {"🩹", "Fault cleared: #{fault_type}", nil}
+  end
+
+  defp format_signal_content(:anomaly_detected, data, _cat) do
+    anomaly_type = data[:type] || data["type"] || "unknown"
+    severity = data[:severity] || data["severity"] || "medium"
+    {"🚨", "Anomaly detected: #{anomaly_type}", "Severity: #{severity}"}
+  end
+
+  defp format_signal_content(:proposal_submitted, data, _cat) do
+    proposal = data[:proposal] || data["proposal"] || %{}
+    desc = proposal[:description] || proposal["description"] || "No description"
+    target = get_in(proposal, [:context, :target_module]) || "N/A"
+    {"📝", "Proposal submitted", "#{desc}\nTarget: #{inspect(target)}"}
+  end
+
+  defp format_signal_content(:evaluation_started, _data, _cat) do
+    {"🗳", "Council evaluation started", nil}
+  end
+
+  defp format_signal_content(:evaluation_completed, data, _cat) do
+    eval = data[:evaluation] || data["evaluation"] || %{}
+    perspective = eval[:perspective] || eval["perspective"] || "unknown"
+    vote = eval[:vote] || eval["vote"] || "abstain"
+    reasoning = eval[:reasoning] || eval["reasoning"] || ""
+    {"✓", "#{perspective}: #{vote}", truncate_string(reasoning, 150)}
+  end
+
+  defp format_signal_content(:decision_made, data, _cat) do
+    decision = data[:decision] || data["decision"] || "unknown"
+    reason = data[:reason] || data["reason"]
+    {"⚖️", "Decision: #{decision}", reason}
+  end
+
+  defp format_signal_content(:hot_loaded, data, _cat) do
+    module = data[:module] || data["module"] || "unknown"
+    elapsed = data[:elapsed_ms] || data["elapsed_ms"]
+    timing = if elapsed, do: " (#{elapsed}ms)", else: ""
+    {"🔧", "Hot-loaded: #{inspect(module)}#{timing}", nil}
+  end
+
+  defp format_signal_content(:pipeline_stage_changed, data, _cat) do
+    stage = data[:stage] || data["stage"] || "unknown"
+    {"➡️", "Stage: #{stage}", nil}
+  end
+
+  defp format_signal_content(type, _data, category) do
+    {"📡", "#{category}.#{type}", nil}
+  end
+
+  defp truncate_string(nil, _max), do: nil
+  defp truncate_string("", _max), do: nil
+
+  defp truncate_string(str, max) when is_binary(str) do
+    if String.length(str) > max do
+      String.slice(str, 0, max) <> "..."
+    else
+      str
+    end
   end
 
   defp format_time(ms) when is_integer(ms) do
@@ -562,12 +912,6 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   defp format_time(_), do: "--:--:--"
 
   # ── Vote styling helpers ────────────────────────────────────────────
-
-  defp vote_color(:approve), do: "var(--aw-accent-green)"
-  defp vote_color("approve"), do: "var(--aw-accent-green)"
-  defp vote_color(:reject), do: "var(--aw-accent-red)"
-  defp vote_color("reject"), do: "var(--aw-accent-red)"
-  defp vote_color(_), do: "var(--aw-accent-yellow)"
 
   defp vote_badge_color(:approve), do: :success
   defp vote_badge_color("approve"), do: :success
@@ -661,23 +1005,27 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   defp subscribe_to_signals do
     pid = self()
-
     patterns = ["demo.*", "monitor.*", "consensus.*", "code.*"]
 
-    Enum.map(patterns, fn pattern ->
-      case Arbor.Signals.subscribe(pattern, fn signal ->
-             send(pid, {:signal_received, signal})
-             :ok
-           end) do
-        {:ok, id} -> id
-        _ -> nil
-      end
-    end)
+    patterns
+    |> Enum.map(&subscribe_pattern(&1, pid))
     |> Enum.reject(&is_nil/1)
   rescue
     _ -> []
   catch
     :exit, _ -> []
+  end
+
+  defp subscribe_pattern(pattern, pid) do
+    callback = fn signal ->
+      send(pid, {:signal_received, signal})
+      :ok
+    end
+
+    case Arbor.Signals.subscribe(pattern, callback) do
+      {:ok, id} -> id
+      _ -> nil
+    end
   end
 
   defp safe_unsubscribe(nil), do: :ok
@@ -689,4 +1037,221 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   catch
     :exit, _ -> :ok
   end
+
+  # ── Phase 4: Thinking state updates ───────────────────────────────
+
+  defp update_thinking_state(socket, signal) do
+    category = get_in(signal, [:data, :category]) || signal[:category]
+    type = get_in(signal, [:data, :type]) || signal[:type]
+    key = {normalize_category(category), normalize_signal_type(type)}
+    thinking = determine_thinking(key, signal, socket.assigns.system_thinking)
+    assign(socket, system_thinking: thinking)
+  end
+
+  defp determine_thinking({:demo, :fault_injected}, _signal, _current),
+    do: @thinking_messages["detect"]
+
+  defp determine_thinking({:monitor, :anomaly_detected}, _signal, _current),
+    do: @thinking_messages["diagnose"]
+
+  defp determine_thinking({:consensus, :proposal_submitted}, _signal, _current),
+    do: @thinking_messages["propose"]
+
+  defp determine_thinking({:consensus, :evaluation_started}, _signal, _current),
+    do: @thinking_messages["review"]
+
+  defp determine_thinking({:consensus, :decision_made}, signal, _current) do
+    data = extract_signal_data(signal)
+    decision = data[:decision] || data["decision"]
+    if decision in [:approved, "approved"], do: @thinking_messages["fix"], else: nil
+  end
+
+  defp determine_thinking({:code, :hot_loaded}, _signal, _current),
+    do: @thinking_messages["verify"]
+
+  defp determine_thinking({:demo, :fault_cleared}, _signal, _current), do: nil
+
+  defp determine_thinking({:demo, :pipeline_stage_changed}, signal, _current) do
+    data = extract_signal_data(signal)
+    stage = data[:stage] || data["stage"]
+    Map.get(@thinking_messages, to_string(stage))
+  end
+
+  defp determine_thinking(_, _, current), do: current
+
+  defp normalize_category(cat) when cat in [:demo, "demo"], do: :demo
+  defp normalize_category(cat) when cat in [:monitor, "monitor"], do: :monitor
+  defp normalize_category(cat) when cat in [:consensus, "consensus"], do: :consensus
+  defp normalize_category(cat) when cat in [:code, "code"], do: :code
+  defp normalize_category(_), do: :unknown
+
+  defp normalize_signal_type(t) when t in [:fault_injected, "fault_injected"], do: :fault_injected
+
+  defp normalize_signal_type(t) when t in [:anomaly_detected, "anomaly_detected"],
+    do: :anomaly_detected
+
+  defp normalize_signal_type(t) when t in [:proposal_submitted, "proposal_submitted"],
+    do: :proposal_submitted
+
+  defp normalize_signal_type(t) when t in [:evaluation_started, "evaluation_started"],
+    do: :evaluation_started
+
+  defp normalize_signal_type(t) when t in [:decision_made, "decision_made"], do: :decision_made
+  defp normalize_signal_type(t) when t in [:hot_loaded, "hot_loaded"], do: :hot_loaded
+  defp normalize_signal_type(t) when t in [:fault_cleared, "fault_cleared"], do: :fault_cleared
+
+  defp normalize_signal_type(t) when t in [:pipeline_stage_changed, "pipeline_stage_changed"],
+    do: :pipeline_stage_changed
+
+  defp normalize_signal_type(t) when t in [:evaluation_completed, "evaluation_completed"],
+    do: :evaluation_completed
+
+  defp normalize_signal_type(_), do: :unknown
+
+  # ── Phase 4: Timing state updates ─────────────────────────────────
+
+  defp update_timing_state(socket, _signal, new_pipeline) do
+    now = System.monotonic_time(:millisecond)
+
+    # Find active stage
+    active_stage = Enum.find(new_pipeline, &(&1.status in [:active, :processing]))
+
+    socket =
+      if active_stage do
+        # Record start time for newly active stage if not already recorded
+        stage_start_times =
+          if Map.has_key?(socket.assigns.stage_start_times, active_stage.id) do
+            socket.assigns.stage_start_times
+          else
+            Map.put(socket.assigns.stage_start_times, active_stage.id, now)
+          end
+
+        assign(socket, stage_start_times: stage_start_times)
+      else
+        socket
+      end
+
+    # Check if pipeline completed (verify stage is complete)
+    verify_stage = Enum.find(new_pipeline, &(&1.id == "verify"))
+
+    if verify_stage && verify_stage.status == :complete do
+      stop_timer(socket.assigns.timer_ref)
+      assign(socket, timer_ref: nil, system_thinking: nil)
+    else
+      socket
+    end
+  end
+
+  # ── Phase 4: Timer helpers ────────────────────────────────────────
+
+  defp start_timer(nil) do
+    {:ok, ref} = :timer.send_interval(@timer_interval_ms, :tick_timer)
+    ref
+  end
+
+  defp start_timer(existing_ref), do: existing_ref
+
+  defp stop_timer(nil), do: :ok
+  defp stop_timer(ref), do: :timer.cancel(ref)
+
+  defp update_stage_elapsed(stage_start_times, stage_elapsed, pipeline_stages, now) do
+    Enum.reduce(stage_start_times, stage_elapsed, fn {stage_id, start}, acc ->
+      stage = Enum.find(pipeline_stages, &(&1.id == stage_id))
+
+      if stage && stage.status in [:active, :processing] do
+        Map.put(acc, stage_id, now - start)
+      else
+        acc
+      end
+    end)
+  end
+
+  # ── Phase 4: Formatting helpers ───────────────────────────────────
+
+  defp format_elapsed(nil), do: "0.0s"
+
+  defp format_elapsed(ms) when is_integer(ms) do
+    seconds = ms / 1000
+    "#{Float.round(seconds, 1)}s"
+  end
+
+  defp timing_budget_class(total_elapsed) when is_integer(total_elapsed) do
+    seconds = total_elapsed / 1000
+
+    cond do
+      seconds < 20 -> "aw-timing-budget-green"
+      seconds < 30 -> "aw-timing-budget-yellow"
+      true -> "aw-timing-budget-red"
+    end
+  end
+
+  defp timing_budget_class(_), do: "aw-timing-budget-green"
+
+  # ── Phase 4: Vote helpers ─────────────────────────────────────────
+
+  defp vote_is?(eval, expected_vote) do
+    vote = eval.vote
+    vote == expected_vote or vote == to_string(expected_vote)
+  end
+
+  defp vote_class(:approve), do: "approve"
+  defp vote_class("approve"), do: "approve"
+  defp vote_class(:reject), do: "reject"
+  defp vote_class("reject"), do: "reject"
+  defp vote_class(:abstain), do: "abstain"
+  defp vote_class("abstain"), do: "abstain"
+  defp vote_class(_), do: "pending"
+
+  defp format_vote(:approve), do: "Approve"
+  defp format_vote("approve"), do: "Approve"
+  defp format_vote(:reject), do: "Reject"
+  defp format_vote("reject"), do: "Reject"
+  defp format_vote(:abstain), do: "Abstain"
+  defp format_vote("abstain"), do: "Abstain"
+  defp format_vote(v) when is_atom(v), do: v |> to_string() |> String.capitalize()
+  defp format_vote(v) when is_binary(v), do: String.capitalize(v)
+  defp format_vote(_), do: "Unknown"
+
+  # ── Phase 4: Evaluator display helpers ────────────────────────────
+
+  @evaluator_icons [
+    {"security", "🔒"},
+    {"performance", "⚡"},
+    {"deterministic", "📋"},
+    {"safety", "🛡️"},
+    {"stability", "⚙️"},
+    {"vision", "🔮"},
+    {"design", "✏️"},
+    {"risk", "⚠️"},
+    {"feasibility", "🎯"},
+    {"brainstorm", "💡"}
+  ]
+
+  defp evaluator_icon(perspective) do
+    perspective_str = to_string(perspective)
+    find_icon(perspective_str, @evaluator_icons)
+  end
+
+  defp find_icon(_str, []), do: "🧠"
+
+  defp find_icon(str, [{key, icon} | rest]) do
+    if String.contains?(str, key), do: icon, else: find_icon(str, rest)
+  end
+
+  defp format_perspective(perspective) when is_atom(perspective) do
+    perspective
+    |> to_string()
+    |> String.replace("_", " ")
+    |> String.split()
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
+
+  defp format_perspective(perspective) when is_binary(perspective) do
+    perspective
+    |> String.replace("_", " ")
+    |> String.split()
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
+
+  defp format_perspective(_), do: "Unknown"
 end
