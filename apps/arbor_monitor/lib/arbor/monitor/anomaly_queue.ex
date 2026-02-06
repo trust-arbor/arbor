@@ -20,6 +20,7 @@ defmodule Arbor.Monitor.AnomalyQueue do
   - `:lease_timeout_ms` - Lease expiration time (default: 60 seconds)
   - `:check_interval_ms` - How often to check for expired leases (default: 15 seconds)
   - `:max_attempts` - Maximum retry attempts before escalation (default: 3)
+  - `:suppression_window_ms` - How long to suppress escalated fingerprints (default: 30 minutes)
   """
 
   use GenServer
@@ -38,6 +39,7 @@ defmodule Arbor.Monitor.AnomalyQueue do
   @default_lease_timeout_ms :timer.seconds(60)
   @default_check_interval_ms :timer.seconds(15)
   @default_max_attempts 3
+  @default_suppression_window_ms :timer.minutes(30)
 
   # ============================================================================
   # Client API (implements AnomalyQueue behaviour)
@@ -188,10 +190,11 @@ defmodule Arbor.Monitor.AnomalyQueue do
     create_or_recover_tables()
 
     config = %{
-      dedup_window_ms: Keyword.get(opts, :dedup_window_ms, @default_dedup_window_ms),
-      lease_timeout_ms: Keyword.get(opts, :lease_timeout_ms, @default_lease_timeout_ms),
-      check_interval_ms: Keyword.get(opts, :check_interval_ms, @default_check_interval_ms),
-      max_attempts: Keyword.get(opts, :max_attempts, @default_max_attempts)
+      dedup_window_ms: get_config(opts, :dedup_window_ms, @default_dedup_window_ms),
+      lease_timeout_ms: get_config(opts, :lease_timeout_ms, @default_lease_timeout_ms),
+      check_interval_ms: get_config(opts, :check_interval_ms, @default_check_interval_ms),
+      max_attempts: get_config(opts, :max_attempts, @default_max_attempts),
+      suppression_window_ms: get_config(opts, :suppression_window_ms, @default_suppression_window_ms)
     }
 
     # Schedule periodic lease checking
@@ -388,14 +391,14 @@ defmodule Arbor.Monitor.AnomalyQueue do
     :ok
   end
 
-  defp handle_outcome(anomaly_id, queued, :escalated, _config) do
+  defp handle_outcome(anomaly_id, queued, :escalated, config) do
     updated = %{queued | state: :escalated, claimed_by: nil, lease_expires: nil}
     :ets.insert(@queue_table, {anomaly_id, updated})
 
     # Add to suppression list
     family = Fingerprint.family_hash(queued.fingerprint)
     now = System.monotonic_time(:millisecond)
-    expires = now + :timer.minutes(30)
+    expires = now + config.suppression_window_ms
     :ets.insert(@suppressed_table, {family, "Exceeded retry limit", expires})
 
     Logger.warning("[AnomalyQueue] Escalated: #{Fingerprint.to_string(queued.fingerprint)}")
@@ -530,5 +533,16 @@ defmodule Arbor.Monitor.AnomalyQueue do
     else
       false
     end
+  end
+
+  # ============================================================================
+  # Configuration Helpers
+  # ============================================================================
+
+  # Get config value: opts > Application env > default
+  defp get_config(opts, key, default) do
+    Keyword.get(opts, key) ||
+      Application.get_env(:arbor_monitor, key) ||
+      default
   end
 end
