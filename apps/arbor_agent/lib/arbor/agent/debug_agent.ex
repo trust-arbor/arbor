@@ -382,6 +382,22 @@ defmodule Arbor.Agent.DebugAgent do
       {:ok, :rejected} ->
         handle_rejection(state, "Council rejected the proposal")
 
+      {:ok, :deadlock} ->
+        Logger.warning("[DebugAgent] Council deadlocked on proposal")
+        safe_complete(state.current_lease, :rejected)
+        reset_to_idle(state)
+
+      {:ok, :pending} ->
+        # Still pending, keep polling
+        if state.decision_polls < @max_decision_polls do
+          schedule_decision_poll()
+          %{state | decision_polls: state.decision_polls + 1}
+        else
+          Logger.warning("[DebugAgent] Decision timeout after #{@max_decision_polls} polls")
+          safe_complete(state.current_lease, :failed)
+          reset_to_idle(state)
+        end
+
       {:ok, :evaluating} ->
         # Still evaluating, keep polling
         if state.decision_polls < @max_decision_polls do
@@ -640,7 +656,8 @@ defmodule Arbor.Agent.DebugAgent do
     3. Confidence level (0.0 to 1.0)
     """
 
-    case Arbor.AI.generate_text(prompt, max_tokens: 500) do
+    # Force API backend for speed (uses configured OpenRouter model)
+    case Arbor.AI.generate_text(prompt, backend: :api, max_tokens: 500) do
       {:ok, response} ->
         # Parse response into analysis data
         analysis = %{
