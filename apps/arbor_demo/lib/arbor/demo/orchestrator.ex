@@ -34,7 +34,8 @@ defmodule Arbor.Demo.Orchestrator do
           subscription_ids: [String.t()],
           debug_agent_id: String.t() | nil,
           current_proposal_id: String.t() | nil,
-          pipeline_stage: atom()
+          pipeline_stage: atom(),
+          bus_monitor_ref: reference() | nil
         }
 
   # ============================================================================
@@ -82,7 +83,8 @@ defmodule Arbor.Demo.Orchestrator do
       subscription_ids: [],
       debug_agent_id: nil,
       current_proposal_id: nil,
-      pipeline_stage: :idle
+      pipeline_stage: :idle,
+      bus_monitor_ref: nil
     }
 
     # Subscribe to relevant signals
@@ -91,6 +93,11 @@ defmodule Arbor.Demo.Orchestrator do
 
   @impl true
   def handle_continue(:subscribe, state) do
+    state = do_subscribe(state)
+    {:noreply, state}
+  end
+
+  defp do_subscribe(state) do
     subscription_ids =
       [
         subscribe_pattern("demo.*"),
@@ -101,7 +108,17 @@ defmodule Arbor.Demo.Orchestrator do
       ]
       |> Enum.reject(&is_nil/1)
 
-    {:noreply, %{state | subscription_ids: subscription_ids}}
+    # Monitor the Bus so we can re-subscribe if it restarts
+    bus_ref = monitor_bus()
+
+    %{state | subscription_ids: subscription_ids, bus_monitor_ref: bus_ref}
+  end
+
+  defp monitor_bus do
+    case Process.whereis(Arbor.Signals.Bus) do
+      nil -> nil
+      pid -> Process.monitor(pid)
+    end
   end
 
   @impl true
@@ -134,6 +151,20 @@ defmodule Arbor.Demo.Orchestrator do
   @impl true
   def handle_info({:signal_received, signal}, state) do
     new_state = handle_signal(signal, state)
+    {:noreply, new_state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{bus_monitor_ref: ref} = state)
+      when not is_nil(ref) do
+    # Bus process went down, wait a moment and re-subscribe
+    Logger.info("[Orchestrator] Signal Bus restarted, re-subscribing...")
+    Process.send_after(self(), :resubscribe, 100)
+    {:noreply, %{state | bus_monitor_ref: nil, subscription_ids: []}}
+  end
+
+  def handle_info(:resubscribe, state) do
+    new_state = do_subscribe(state)
+    Logger.info("[Orchestrator] Re-subscribed to #{length(new_state.subscription_ids)} patterns")
     {:noreply, new_state}
   end
 
@@ -381,19 +412,22 @@ defmodule Arbor.Demo.Orchestrator do
   end
 
   defp extract_category(signal) do
-    cat = get_in(signal, [:data, :category]) || signal[:category] || Map.get(signal, "category")
+    # Signal is a struct - use Map.get for safe access
+    cat = Map.get(signal, :category) || Map.get(signal, "category")
     to_atom_safe(cat)
   end
 
   defp extract_type(signal) do
-    type = get_in(signal, [:data, :type]) || signal[:type] || Map.get(signal, "type")
+    # Signal is a struct - use Map.get for safe access
+    type = Map.get(signal, :type) || Map.get(signal, "type")
     to_atom_safe(type)
   end
 
   defp extract_data(signal) do
-    case signal do
-      %{data: data} when is_map(data) -> data
+    # Signal struct has .data field
+    case Map.get(signal, :data) do
       data when is_map(data) -> data
+      data when is_list(data) -> Map.new(data)
       _ -> %{}
     end
   end

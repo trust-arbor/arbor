@@ -86,9 +86,20 @@ defmodule Arbor.Agent.ReasoningLoop do
     }
 
     # Subscribe to percepts for this agent (non-fatal if unavailable)
+    # Capture the ReasoningLoop's PID - the handler runs in a spawned async process
+    # so self() inside the handler would return the wrong PID
+    loop_pid = self()
+
     safe_call(fn ->
-      Arbor.Memory.subscribe_to_percepts(agent_id, fn percept ->
-        GenServer.cast(self(), {:percept, percept})
+      Arbor.Memory.subscribe_to_percepts(agent_id, fn signal ->
+        # Signal.data contains %{percept: %Percept{}, ...}
+        data = Map.get(signal, :data) || %{}
+        percept = data[:percept] || data["percept"]
+
+        if percept do
+          GenServer.cast(loop_pid, {:percept, percept})
+        end
+
         :ok
       end)
     end)
@@ -197,12 +208,17 @@ defmodule Arbor.Agent.ReasoningLoop do
       GenServer.reply(reply_to, {:ok, %{iteration: iteration, intent: intent}})
     end
 
-    # In continuous/bounded mode, schedule next cycle immediately
-    # (percepts will interrupt if they arrive)
-    case state.mode do
-      :continuous -> send(self(), :run_cycle)
-      {:bounded, _} -> send(self(), :run_cycle)
-      :stepped -> :ok
+    # For action intents, wait for percept before next cycle
+    # For think/wait/reflect, continue immediately (no percept expected)
+    case {state.mode, intent.type} do
+      # Action intents wait for percept (next cycle triggered by handle_cast({:percept, ...}))
+      {:continuous, :act} -> :ok
+      {{:bounded, _}, :act} -> :ok
+      # Non-action intents continue immediately
+      {:continuous, _} -> send(self(), :run_cycle)
+      {{:bounded, _}, _} -> send(self(), :run_cycle)
+      # Stepped mode always waits for explicit step call
+      {:stepped, _} -> :ok
     end
 
     %{state | iteration: iteration, last_intent: intent, status: :awaiting_percept}
