@@ -6,7 +6,22 @@ defmodule Arbor.Contracts.Security.TrustBounds do
   It bridges the arbor_trust scoring system with the arbor_sandbox execution
   environment and arbor_security capability checks.
 
-  ## Trust Tiers (from arbor_trust)
+  ## Configuration
+
+  Tier policies can be configured via application config. If no config is set,
+  hardcoded defaults are used. Configure via `:arbor_trust` application:
+
+      config :arbor_trust, :tier_definitions, %{
+        untrusted: %{
+          display_name: "New",
+          description: "Just getting started together",
+          sandbox: :strict,
+          actions: [:read, :search, :think]
+        },
+        # ... other tiers
+      }
+
+  ## Trust Tiers (Default Configuration)
 
   - `:untrusted` - New agent, no track record (score 0-20)
   - `:probationary` - Some positive signals (score 20-50)
@@ -44,6 +59,42 @@ defmodule Arbor.Contracts.Security.TrustBounds do
       TrustBounds.action_allowed?(:trusted, :execute_safe)  # => true
   """
 
+  # Hardcoded defaults (used when no config is set)
+  @default_tier_definitions %{
+    untrusted: %{
+      display_name: "New",
+      description: "Just getting started together",
+      sandbox: :strict,
+      actions: [:read, :search, :think]
+    },
+    probationary: %{
+      display_name: "Guided",
+      description: "Building our working relationship",
+      sandbox: :strict,
+      actions: [:read, :search, :think, :write_sandbox]
+    },
+    trusted: %{
+      display_name: "Established",
+      description: "Demonstrated reliability",
+      sandbox: :standard,
+      actions: [:read, :search, :think, :write, :execute_safe]
+    },
+    veteran: %{
+      display_name: "Trusted Partner",
+      description: "Proven track record",
+      sandbox: :permissive,
+      actions: [:read, :search, :think, :write, :execute, :network]
+    },
+    autonomous: %{
+      display_name: "Full Partner",
+      description: "Complete partnership",
+      sandbox: :none,
+      actions: :all
+    }
+  }
+
+  @default_tiers [:untrusted, :probationary, :trusted, :veteran, :autonomous]
+
   @typedoc "Sandbox isolation level"
   @type sandbox_level :: :strict | :standard | :permissive | :none
 
@@ -59,25 +110,33 @@ defmodule Arbor.Contracts.Security.TrustBounds do
   Returns the sandbox level for a given trust tier.
 
   Higher trust tiers get less restrictive sandboxes.
+  Reads from config with hardcoded defaults as fallback.
   """
   @spec sandbox_for_tier(trust_tier()) :: sandbox_level()
-  def sandbox_for_tier(:untrusted), do: :strict
-  def sandbox_for_tier(:probationary), do: :strict
-  def sandbox_for_tier(:trusted), do: :standard
-  def sandbox_for_tier(:veteran), do: :permissive
-  def sandbox_for_tier(:autonomous), do: :none
+  def sandbox_for_tier(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{sandbox: sandbox} -> sandbox
+      nil -> :strict
+    end
+  end
 
   @doc """
   Returns the list of allowed actions for a given trust tier.
 
   Returns `:all` for autonomous tier (no restrictions).
+  Reads from config with hardcoded defaults as fallback.
   """
   @spec allowed_actions(trust_tier()) :: [action_category()] | :all
-  def allowed_actions(:untrusted), do: [:read, :search, :think]
-  def allowed_actions(:probationary), do: [:read, :search, :think, :write_sandbox]
-  def allowed_actions(:trusted), do: [:read, :search, :think, :write, :execute_safe]
-  def allowed_actions(:veteran), do: [:read, :search, :think, :write, :execute, :network]
-  def allowed_actions(:autonomous), do: :all
+  def allowed_actions(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{actions: actions} -> actions
+      nil -> [:read, :search, :think]
+    end
+  end
 
   @doc """
   Checks if an action is allowed at a given trust tier.
@@ -92,9 +151,12 @@ defmodule Arbor.Contracts.Security.TrustBounds do
 
   @doc """
   Returns all trust tiers in order from least to most trusted.
+  Reads from config with hardcoded defaults as fallback.
   """
   @spec tiers() :: [trust_tier()]
-  def tiers, do: [:untrusted, :probationary, :trusted, :veteran, :autonomous]
+  def tiers do
+    Application.get_env(:arbor_trust, :tiers, @default_tiers)
+  end
 
   @doc """
   Returns all sandbox levels in order from most to least restrictive.
@@ -119,28 +181,74 @@ defmodule Arbor.Contracts.Security.TrustBounds do
 
   @doc """
   Returns the minimum tier required for an action.
+
+  Searches through tiers in order (lowest to highest) and returns
+  the first tier that allows the action. Reads from config.
   """
   @spec minimum_tier_for_action(action_category()) :: trust_tier()
-  def minimum_tier_for_action(:read), do: :untrusted
-  def minimum_tier_for_action(:search), do: :untrusted
-  def minimum_tier_for_action(:think), do: :untrusted
-  def minimum_tier_for_action(:write_sandbox), do: :probationary
-  def minimum_tier_for_action(:write), do: :trusted
-  def minimum_tier_for_action(:execute_safe), do: :trusted
-  def minimum_tier_for_action(:execute), do: :veteran
-  def minimum_tier_for_action(:network), do: :veteran
+  def minimum_tier_for_action(action) do
+    # Find the first tier that allows this action
+    Enum.find(tiers(), List.first(tiers()), fn tier ->
+      action_allowed?(tier, action)
+    end)
+  end
 
   @doc """
   Returns the minimum sandbox level required for an action to succeed.
   Actions that require less restriction need a more permissive sandbox.
   """
   @spec sandbox_required_for_action(action_category()) :: sandbox_level()
-  def sandbox_required_for_action(:read), do: :strict
-  def sandbox_required_for_action(:search), do: :strict
-  def sandbox_required_for_action(:think), do: :strict
-  def sandbox_required_for_action(:write_sandbox), do: :strict
-  def sandbox_required_for_action(:write), do: :standard
-  def sandbox_required_for_action(:execute_safe), do: :standard
-  def sandbox_required_for_action(:execute), do: :permissive
-  def sandbox_required_for_action(:network), do: :permissive
+  def sandbox_required_for_action(action) do
+    # Find the first tier that allows this action and return its sandbox
+    tier = minimum_tier_for_action(action)
+    sandbox_for_tier(tier)
+  end
+
+  @doc """
+  Returns the user-facing display name for a tier.
+
+  Falls back to capitalizing the tier atom if no definition exists.
+
+  ## Examples
+
+      TrustBounds.display_name(:untrusted)
+      #=> "New"
+
+      TrustBounds.display_name(:trusted)
+      #=> "Established"
+  """
+  @spec display_name(trust_tier()) :: String.t()
+  def display_name(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{display_name: name} -> name
+      nil -> tier |> Atom.to_string() |> String.capitalize()
+    end
+  end
+
+  @doc """
+  Returns the description for a tier.
+
+  Returns nil if no definition exists.
+
+  ## Examples
+
+      TrustBounds.tier_description(:untrusted)
+      #=> "Just getting started together"
+  """
+  @spec tier_description(trust_tier()) :: String.t() | nil
+  def tier_description(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{description: desc} -> desc
+      nil -> nil
+    end
+  end
+
+  # Private helper to get tier definitions from config with fallback
+  defp tier_definitions do
+    Application.get_env(:arbor_trust, :tier_definitions, @default_tier_definitions)
+  end
 end

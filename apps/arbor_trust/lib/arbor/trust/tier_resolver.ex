@@ -280,11 +280,43 @@ defmodule Arbor.Trust.TierResolver do
 
   @doc """
   Human-readable description of a tier.
+
+  Combines display name and description from config.
+  Falls back to hardcoded descriptions for backwards compatibility.
   """
   @spec describe(trust_tier()) :: String.t()
-  def describe(:untrusted), do: "Untrusted - Read own code only"
-  def describe(:probationary), do: "Probationary - Sandbox modifications"
-  def describe(:trusted), do: "Trusted - Self-modify with approval"
-  def describe(:veteran), do: "Veteran - Self-modify auto-approved"
-  def describe(:autonomous), do: "Autonomous - Can modify own capabilities"
+  def describe(tier) do
+    name = display_name(tier)
+    desc = Config.tier_description(tier)
+
+    if desc do
+      "#{name} - #{desc}"
+    else
+      # Fallback for backwards compatibility
+      fallback_describe(tier)
+    end
+  end
+
+  defp fallback_describe(:untrusted), do: "Untrusted - Read own code only"
+  defp fallback_describe(:probationary), do: "Probationary - Sandbox modifications"
+  defp fallback_describe(:trusted), do: "Trusted - Self-modify with approval"
+  defp fallback_describe(:veteran), do: "Veteran - Self-modify auto-approved"
+  defp fallback_describe(:autonomous), do: "Autonomous - Can modify own capabilities"
+  defp fallback_describe(tier), do: "#{Atom.to_string(tier) |> String.capitalize()}"
+
+  @doc """
+  Get the user-facing display name for a tier.
+
+  Reads from config with capitalized atom name as fallback.
+
+  ## Examples
+
+      TierResolver.display_name(:untrusted)
+      #=> "New"
+
+      TierResolver.display_name(:probationary)
+      #=> "Guided"
+  """
+  @spec display_name(trust_tier()) :: String.t()
+  def display_name(tier), do: Config.display_name(tier)
 end
