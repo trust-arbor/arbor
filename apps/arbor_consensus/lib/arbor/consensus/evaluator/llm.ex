@@ -1,6 +1,6 @@
-defmodule Arbor.Consensus.EvaluatorBackend.LLM do
+defmodule Arbor.Consensus.Evaluator.LLM do
   @moduledoc """
-  LLM-based evaluator backend.
+  LLM-based evaluator.
 
   Uses an LLM to evaluate proposals from various perspectives
   (security, performance, architecture, etc.). Complements deterministic
@@ -19,7 +19,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
   The evaluator uses `Arbor.AI` by default, configurable via opts:
 
       Arbor.Consensus.submit(proposal,
-        evaluator_backend: Arbor.Consensus.EvaluatorBackend.LLM,
+        evaluator_backend: Arbor.Consensus.Evaluator.LLM,
         perspectives: [:security_llm],
         ai_module: MyCustomAI
       )
@@ -97,7 +97,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
   end
 
   @doc """
-  List supported perspectives for this backend.
+  List supported perspectives for this evaluator.
 
   Deprecated: Use `perspectives/0` instead.
   """
@@ -412,10 +412,10 @@ defmodule Arbor.Consensus.EvaluatorBackend.LLM do
            vote: :abstain,
            reasoning:
              "Unsupported LLM perspective: #{perspective}. " <>
-               "LLM backend supports: #{supported}",
+               "LLM evaluator supports: #{supported}",
            confidence: 0.0,
            concerns: ["Unsupported evaluation perspective"],
-           recommendations: ["Use a supported LLM perspective or the Deterministic backend"],
+           recommendations: ["Use a supported LLM perspective or the Deterministic evaluator"],
            risk_score: 0.5,
            benefit_score: 0.0
          }) do

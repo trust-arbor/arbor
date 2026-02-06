@@ -82,7 +82,7 @@ defmodule Arbor.Consensus.Coordinator do
   ## Options
 
     * `:config` - `Config.t()` or keyword opts for `Config.new/1`
-    * `:evaluator_backend` - Module implementing `EvaluatorBackend` behaviour
+    * `:evaluator_backend` - Module implementing `Evaluator` behaviour
     * `:authorizer` - Module implementing `Authorizer` behaviour (optional)
     * `:executor` - Module implementing `Executor` behaviour (optional)
     * `:event_sink` - Module implementing `EventSink` behaviour (optional)
@@ -271,7 +271,7 @@ defmodule Arbor.Consensus.Coordinator do
         Keyword.get(
           opts,
           :evaluator_backend,
-          Arbor.Consensus.EvaluatorBackend.RuleBased
+          Arbor.Consensus.Evaluator.RuleBased
         ),
       authorizer: Keyword.get(opts, :authorizer),
       executor: Keyword.get(opts, :executor),

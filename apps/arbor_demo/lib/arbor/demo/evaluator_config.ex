@@ -94,7 +94,7 @@ defmodule Arbor.Demo.EvaluatorConfig do
         perspectives: [:safety_check, :policy_compliance, :rollback_verification]
       },
       %{
-        module: Arbor.Consensus.EvaluatorBackend.LLM,
+        module: Arbor.Consensus.Evaluator.LLM,
         name: :security_llm,
         perspectives: [:vulnerability_scan],
         config: %{
@@ -103,7 +103,7 @@ defmodule Arbor.Demo.EvaluatorConfig do
         }
       },
       %{
-        module: Arbor.Consensus.EvaluatorBackend.LLM,
+        module: Arbor.Consensus.Evaluator.LLM,
         name: :performance_llm,
         perspectives: [:performance_impact],
         config: %{

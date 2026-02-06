@@ -1,8 +1,8 @@
-defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
+defmodule Arbor.Consensus.Evaluator.Deterministic do
   @moduledoc """
-  Deterministic evaluator backend that runs actual shell commands.
+  Deterministic evaluator that runs actual shell commands.
 
-  Unlike the `RuleBased` backend which analyzes code heuristically, this backend
+  Unlike the `RuleBased` evaluator which analyzes code heuristically, this evaluator
   executes real commands (mix test, mix credo, etc.) and votes based on pass/fail.
 
   ## Perspectives
@@ -26,7 +26,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   ## Example
 
       Arbor.Consensus.submit(proposal,
-        evaluator_backend: Arbor.Consensus.EvaluatorBackend.Deterministic,
+        evaluator_backend: Arbor.Consensus.Evaluator.Deterministic,
         perspectives: [:mix_test, :mix_credo]
       )
   """
@@ -89,7 +89,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
   end
 
   @doc """
-  List supported perspectives for this backend.
+  List supported perspectives for this evaluator.
 
   Deprecated: Use `perspectives/0` instead.
   """
@@ -330,10 +330,10 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
            vote: :abstain,
            reasoning:
              "Unsupported perspective: #{perspective}. " <>
-               "Deterministic backend supports: #{supported}",
+               "Deterministic evaluator supports: #{supported}",
            confidence: 0.0,
            concerns: ["Unsupported evaluation perspective"],
-           recommendations: ["Use a supported perspective or the RuleBased backend"],
+           recommendations: ["Use a supported perspective or the RuleBased evaluator"],
            risk_score: 0.5,
            benefit_score: 0.0
          }) do
@@ -358,7 +358,7 @@ defmodule Arbor.Consensus.EvaluatorBackend.Deterministic do
            concerns: ["Missing project_path in proposal metadata"],
            recommendations: [
              "Include project_path in proposal metadata",
-             "Use RuleBased backend for proposals without project context"
+             "Use RuleBased evaluator for proposals without project context"
            ],
            risk_score: 0.5,
            benefit_score: 0.0
