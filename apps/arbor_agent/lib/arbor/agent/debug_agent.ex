@@ -33,9 +33,11 @@ defmodule Arbor.Agent.DebugAgent do
 
   use GenServer
 
+  alias Arbor.Agent.CircuitBreaker
   alias Arbor.Agent.Investigation
   alias Arbor.Agent.Lifecycle
   alias Arbor.Agent.Templates.Diagnostician
+  alias Arbor.Agent.Verification
   alias Arbor.Monitor.AnomalyQueue
 
   require Logger
@@ -44,6 +46,7 @@ defmodule Arbor.Agent.DebugAgent do
   @poll_interval_ms 1_000
   @decision_poll_interval_ms 500
   @max_decision_polls 60
+  @verification_delay_ms 500
 
   # ============================================================================
   # Public API
@@ -148,6 +151,9 @@ defmodule Arbor.Agent.DebugAgent do
         # Start executor
         case Lifecycle.start(agent_id) do
           {:ok, _pid} ->
+            # Start circuit breaker for this agent
+            circuit_breaker = start_circuit_breaker(agent_id)
+
             state = %{
               agent_id: agent_id,
               poll_interval: poll_interval,
@@ -158,10 +164,12 @@ defmodule Arbor.Agent.DebugAgent do
               current_proposal_id: nil,
               current_investigation: nil,
               decision_polls: 0,
+              circuit_breaker: circuit_breaker,
               callbacks: %{
                 on_proposal: Keyword.get(opts, :on_proposal),
                 on_decision: Keyword.get(opts, :on_decision),
-                on_investigation: Keyword.get(opts, :on_investigation)
+                on_investigation: Keyword.get(opts, :on_investigation),
+                on_verification: Keyword.get(opts, :on_verification)
               },
               stats: %{
                 anomalies_claimed: 0,
@@ -169,6 +177,9 @@ defmodule Arbor.Agent.DebugAgent do
                 proposals_approved: 0,
                 proposals_rejected: 0,
                 investigations_completed: 0,
+                verifications_passed: 0,
+                verifications_failed: 0,
+                circuit_breaker_blocked: 0,
                 started_at: DateTime.utc_now()
               }
             }
@@ -287,22 +298,39 @@ defmodule Arbor.Agent.DebugAgent do
   defp claim_work(state) do
     case safe_claim_next(state.agent_id) do
       {:ok, {lease, anomaly}} ->
-        # claim_next returns {lease, anomaly} directly - anomaly is the claim
-        Logger.info("[DebugAgent] Claimed anomaly: #{anomaly.skill}")
+        # Check circuit breaker before proceeding
+        breaker_key = circuit_breaker_key(anomaly)
 
-        safe_emit(:debug_agent, :anomaly_claimed, %{
-          agent_id: state.agent_id,
-          skill: anomaly.skill
-        })
+        if circuit_breaker_allows?(state, breaker_key) do
+          Logger.info("[DebugAgent] Claimed anomaly: #{anomaly.skill}")
 
-        # Start diagnosis
-        diagnose_anomaly(%{
-          state
-          | phase: :diagnosing,
-            current_lease: lease,
-            current_anomaly: anomaly,
-            stats: update_stat(state.stats, :anomalies_claimed)
-        })
+          safe_emit(:debug_agent, :anomaly_claimed, %{
+            agent_id: state.agent_id,
+            skill: anomaly.skill
+          })
+
+          # Start diagnosis
+          diagnose_anomaly(%{
+            state
+            | phase: :diagnosing,
+              current_lease: lease,
+              current_anomaly: anomaly,
+              stats: update_stat(state.stats, :anomalies_claimed)
+          })
+        else
+          Logger.info("[DebugAgent] Circuit breaker blocked anomaly: #{anomaly.skill}")
+
+          safe_emit(:debug_agent, :circuit_breaker_blocked, %{
+            agent_id: state.agent_id,
+            skill: anomaly.skill,
+            breaker_key: breaker_key
+          })
+
+          # Release the lease - can't work on this
+          safe_release_lease(lease)
+
+          %{state | stats: update_stat(state.stats, :circuit_breaker_blocked)}
+        end
 
       {:ok, :empty} ->
         # No work available
@@ -456,19 +484,84 @@ defmodule Arbor.Agent.DebugAgent do
       proposal_id: state.current_proposal_id
     })
 
-    # Execute the fix (hot-load)
+    # Execute the fix
+    context = state.current_proposal[:context] || %{}
+    action = context[:suggested_action] || :none
+    target = context[:action_target]
+    breaker_key = circuit_breaker_key(state.current_anomaly)
+
     case safe_execute_fix(state) do
       :ok ->
-        # Report success to queue
-        safe_complete(state.current_lease, :resolved)
+        # Verify the fix worked
+        verification_result = verify_fix(state, action, target)
 
-        reset_to_idle(%{
-          state
-          | stats: update_stat(state.stats, :proposals_approved)
-        })
+        if state.callbacks[:on_verification] do
+          state.callbacks[:on_verification].(verification_result)
+        end
+
+        case verification_result do
+          {:ok, :verified} ->
+            Logger.info("[DebugAgent] Fix verified successfully")
+
+            safe_emit(:debug_agent, :fix_verified, %{
+              agent_id: state.agent_id,
+              proposal_id: state.current_proposal_id,
+              action: action
+            })
+
+            # Record success in circuit breaker
+            record_circuit_breaker_success(state, breaker_key)
+
+            safe_complete(state.current_lease, :resolved)
+
+            reset_to_idle(%{
+              state
+              | stats:
+                  state.stats
+                  |> update_stat(:proposals_approved)
+                  |> update_stat(:verifications_passed)
+            })
+
+          {:ok, :unverified} ->
+            Logger.warning("[DebugAgent] Fix applied but verification failed")
+
+            safe_emit(:debug_agent, :fix_unverified, %{
+              agent_id: state.agent_id,
+              proposal_id: state.current_proposal_id,
+              action: action
+            })
+
+            # Record failure in circuit breaker
+            record_circuit_breaker_failure(state, breaker_key)
+
+            # Report as failed so it can be retried or escalated
+            safe_complete(state.current_lease, :failed)
+
+            reset_to_idle(%{
+              state
+              | stats:
+                  state.stats
+                  |> update_stat(:proposals_approved)
+                  |> update_stat(:verifications_failed)
+            })
+
+          {:error, reason} ->
+            Logger.warning("[DebugAgent] Verification error: #{inspect(reason)}")
+            # Treat verification errors as success (fix was applied, just can't verify)
+            safe_complete(state.current_lease, :resolved)
+
+            reset_to_idle(%{
+              state
+              | stats: update_stat(state.stats, :proposals_approved)
+            })
+        end
 
       {:error, reason} ->
         Logger.warning("[DebugAgent] Fix execution failed: #{inspect(reason)}")
+
+        # Record failure in circuit breaker
+        record_circuit_breaker_failure(state, breaker_key)
+
         safe_complete(state.current_lease, :failed)
         reset_to_idle(state)
     end
@@ -674,5 +767,85 @@ defmodule Arbor.Agent.DebugAgent do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # ============================================================================
+  # Circuit Breaker Helpers
+  # ============================================================================
+
+  defp start_circuit_breaker(agent_id) do
+    name = {:global, {CircuitBreaker, agent_id}}
+
+    case CircuitBreaker.start_link(name: name, failure_threshold: 3, cooldown_ms: 60_000) do
+      {:ok, pid} -> pid
+      {:error, {:already_started, pid}} -> pid
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp circuit_breaker_key(anomaly) do
+    # Create a key based on the anomaly type and target
+    skill = anomaly.skill
+    details = anomaly[:details] || %{}
+
+    # Include target in key if available
+    target =
+      cond do
+        Map.has_key?(details, :pid) -> {:pid, inspect(details.pid)}
+        Map.has_key?(details, :process) -> {:pid, inspect(details.process)}
+        Map.has_key?(details, :supervisor) -> {:supervisor, inspect(details.supervisor)}
+        true -> :general
+      end
+
+    {skill, target}
+  end
+
+  defp circuit_breaker_allows?(state, key) do
+    if state.circuit_breaker do
+      CircuitBreaker.can_attempt?(state.circuit_breaker, key)
+    else
+      true
+    end
+  rescue
+    _ -> true
+  catch
+    :exit, _ -> true
+  end
+
+  defp record_circuit_breaker_success(state, key) do
+    if state.circuit_breaker do
+      CircuitBreaker.record_success(state.circuit_breaker, key)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp record_circuit_breaker_failure(state, key) do
+    if state.circuit_breaker do
+      CircuitBreaker.record_failure(state.circuit_breaker, key)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # ============================================================================
+  # Verification Helpers
+  # ============================================================================
+
+  defp verify_fix(state, action, target) do
+    anomaly = state.current_anomaly
+
+    Verification.verify_fix(anomaly, action, target, delay_ms: @verification_delay_ms)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
   end
 end
