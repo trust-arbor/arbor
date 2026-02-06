@@ -17,6 +17,14 @@ defmodule Arbor.AI.Backends.ClaudeCli do
   - `sonnet` / `claude-sonnet-4` - Balanced performance (default)
   - `haiku` / `claude-haiku` - Fast, efficient
 
+  ## Streaming Mode
+
+  When `streaming: true` is passed, uses NDJSON streaming output format which
+  captures real-time content including thinking blocks (when available).
+
+      {:ok, response} = ClaudeCli.generate_text("Analyze this", streaming: true)
+      response.thinking  #=> [%{text: "...", signature: "..."}]
+
   ## Usage
 
       # Basic generation
@@ -27,9 +35,14 @@ defmodule Arbor.AI.Backends.ClaudeCli do
 
       # Force new session
       {:ok, response} = ClaudeCli.generate_text("New project", new_session: true)
+
+      # Streaming mode (captures thinking)
+      {:ok, response} = ClaudeCli.generate_text("Think about this", streaming: true)
   """
 
   use Arbor.AI.Backends.CliBackend, provider: :anthropic
+
+  alias Arbor.AI.StreamParser
 
   # Model mappings - atom shortcuts and full names
   # Claude CLI accepts short aliases like "sonnet", "opus", "haiku"
@@ -53,10 +66,23 @@ defmodule Arbor.AI.Backends.ClaudeCli do
   # ============================================================================
 
   @impl true
+  def generate_text(prompt, opts) do
+    streaming = Keyword.get(opts, :streaming, false)
+
+    if streaming do
+      generate_text_streaming(prompt, opts)
+    else
+      # Use default implementation from CliBackend
+      CliBackend.do_generate_text(__MODULE__, @provider, prompt, opts)
+    end
+  end
+
+  @impl true
   def build_command(prompt, opts) do
     model = resolve_model(Keyword.get(opts, :model, @default_model))
     session_mode = CliBackend.session_mode(session_dir(), opts)
     session_id = Keyword.get(opts, :session_id)
+    streaming = Keyword.get(opts, :streaming, false)
 
     args = []
 
@@ -84,8 +110,13 @@ defmodule Arbor.AI.Backends.ClaudeCli do
           args
       end
 
-    # Output format - always use JSON for parsing
-    args = args ++ ["--output-format", "json"]
+    # Output format - streaming vs JSON
+    args =
+      if streaming do
+        args ++ ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+      else
+        args ++ ["--output-format", "json"]
+      end
 
     # Skip permission prompts for non-interactive use
     args = args ++ ["--dangerously-skip-permissions"]
@@ -134,6 +165,74 @@ defmodule Arbor.AI.Backends.ClaudeCli do
   # ============================================================================
   # Private Functions
   # ============================================================================
+
+  # Generate text using streaming mode with StreamParser
+  defp generate_text_streaming(prompt, opts) do
+    {cmd, args} = build_command(prompt, opts)
+    model = Keyword.get(opts, :model, @default_model)
+
+    Logger.info("Claude CLI streaming generation", model: model, prompt_length: String.length(prompt))
+
+    start_time = System.monotonic_time(:millisecond)
+
+    case CliBackend.execute_command(cmd, args, opts) do
+      {:ok, output} ->
+        duration = System.monotonic_time(:millisecond) - start_time
+
+        # Parse streaming output
+        state = StreamParser.new()
+        state = StreamParser.process_lines(state, output)
+        result = StreamParser.finalize(state)
+
+        # Build response from parsed result
+        response = build_streaming_response(result, model, duration)
+
+        Logger.info("Claude CLI streaming response received",
+          duration_ms: duration,
+          response_length: String.length(response.text || ""),
+          thinking_blocks: length(response.thinking || [])
+        )
+
+        {:ok, response}
+
+      {:error, {:exit_code, _code, output}} = error ->
+        # Check for quota exhaustion in error output
+        Arbor.AI.QuotaTracker.check_and_mark(@provider, output)
+        Logger.warning("Claude CLI streaming execution error", error: inspect(error))
+        error
+
+      {:error, reason} ->
+        Logger.warning("Claude CLI streaming execution error", error: inspect(reason))
+        {:error, reason}
+    end
+  end
+
+  # Build Response from StreamParser result
+  defp build_streaming_response(result, model, duration_ms) do
+    # Convert thinking blocks to expected format
+    thinking =
+      case result.thinking do
+        nil -> nil
+        [] -> nil
+        blocks ->
+          Enum.map(blocks, fn block ->
+            %{
+              text: block.text,
+              signature: block[:signature]
+            }
+          end)
+      end
+
+    Response.new(
+      text: result.text,
+      thinking: thinking,
+      provider: @provider,
+      model: result.model || resolve_model(model),
+      session_id: result.session_id,
+      usage: result.usage,
+      timing: %{duration_ms: duration_ms}
+    )
+  end
 
   defp resolve_model(model) when is_atom(model) do
     Map.get(@models, model, @models[@default_model])
