@@ -33,11 +33,9 @@ defmodule Arbor.Agent.DebugAgent do
 
   use GenServer
 
+  alias Arbor.Agent.Investigation
   alias Arbor.Agent.Lifecycle
   alias Arbor.Agent.Templates.Diagnostician
-  alias Arbor.Historian
-  alias Arbor.Historian.Timeline.Span
-  alias Arbor.Historian.TaintQuery
   alias Arbor.Monitor.AnomalyQueue
 
   require Logger
@@ -158,16 +156,19 @@ defmodule Arbor.Agent.DebugAgent do
               current_anomaly: nil,
               current_proposal: nil,
               current_proposal_id: nil,
+              current_investigation: nil,
               decision_polls: 0,
               callbacks: %{
                 on_proposal: Keyword.get(opts, :on_proposal),
-                on_decision: Keyword.get(opts, :on_decision)
+                on_decision: Keyword.get(opts, :on_decision),
+                on_investigation: Keyword.get(opts, :on_investigation)
               },
               stats: %{
                 anomalies_claimed: 0,
                 proposals_submitted: 0,
                 proposals_approved: 0,
                 proposals_rejected: 0,
+                investigations_completed: 0,
                 started_at: DateTime.utc_now()
               }
             }
@@ -319,25 +320,43 @@ defmodule Arbor.Agent.DebugAgent do
 
   defp diagnose_anomaly(state) do
     anomaly = state.current_anomaly
-    context = build_analysis_context(anomaly)
 
-    # Call AI analysis action
-    case safe_ai_analyze(state.agent_id, anomaly, context) do
-      {:ok, analysis} ->
-        # Build proposal from analysis
-        proposal = build_proposal(anomaly, analysis)
+    # Use structured investigation flow
+    investigation =
+      anomaly
+      |> Investigation.start()
+      |> Investigation.gather_symptoms()
+      |> Investigation.generate_hypotheses()
+      |> maybe_enhance_with_ai()
 
-        if state.callbacks[:on_proposal] do
-          state.callbacks[:on_proposal].(proposal)
-        end
+    # Log investigation summary
+    summary = Investigation.summary(investigation)
+    Logger.info("[DebugAgent] Investigation complete: #{summary.hypothesis_count} hypotheses, confidence: #{Float.round(summary.confidence * 100, 1)}%")
 
-        submit_proposal(%{state | current_proposal: proposal})
+    safe_emit(:debug_agent, :investigation_complete, %{
+      agent_id: state.agent_id,
+      investigation_id: investigation.id,
+      hypothesis_count: summary.hypothesis_count,
+      confidence: summary.confidence,
+      suggested_action: summary.suggested_action
+    })
 
-      {:error, reason} ->
-        Logger.warning("[DebugAgent] AI analysis failed: #{inspect(reason)}")
-        # Report failure and return to idle
-        safe_complete(state.current_lease, :failed)
-        reset_to_idle(state)
+    # Build proposal from investigation
+    proposal = Investigation.to_proposal(investigation)
+
+    if state.callbacks[:on_proposal] do
+      state.callbacks[:on_proposal].(proposal)
+    end
+
+    submit_proposal(%{state | current_proposal: proposal, current_investigation: investigation})
+  end
+
+  defp maybe_enhance_with_ai(investigation) do
+    # Only call AI if we have low confidence or no hypotheses
+    if investigation.confidence < 0.7 || length(investigation.hypotheses) == 0 do
+      Investigation.enhance_with_ai(investigation)
+    else
+      investigation
     end
   end
 
@@ -493,6 +512,7 @@ defmodule Arbor.Agent.DebugAgent do
         current_anomaly: nil,
         current_proposal: nil,
         current_proposal_id: nil,
+        current_investigation: nil,
         decision_polls: 0
     }
   end
@@ -507,155 +527,6 @@ defmodule Arbor.Agent.DebugAgent do
 
   defp update_stat(stats, key) do
     Map.update(stats, key, 1, &(&1 + 1))
-  end
-
-  defp build_analysis_context(anomaly) do
-    metrics = safe_get_metrics(anomaly.skill)
-
-    # Get recent events from historian (30 seconds before anomaly)
-    recent_events = fetch_recent_events(anomaly.timestamp)
-
-    # Trace causal chain if anomaly has a signal/correlation ID
-    causal_chain = fetch_causal_chain(anomaly)
-
-    %{
-      skill: anomaly.skill,
-      severity: anomaly.severity,
-      details: anomaly.details,
-      timestamp: anomaly.timestamp,
-      related_metrics: metrics,
-      recent_events: recent_events,
-      causal_chain: causal_chain
-    }
-  end
-
-  defp fetch_recent_events(timestamp) do
-    # Look back 30 seconds before the anomaly
-    from = DateTime.add(timestamp, -30, :second)
-
-    span = Span.new(from: from, to: timestamp)
-
-    case Historian.reconstruct(span, max_results: 20) do
-      {:ok, events} ->
-        # Extract key info for AI analysis
-        Enum.map(events, fn entry ->
-          %{
-            type: entry.type,
-            category: entry.category,
-            timestamp: entry.timestamp,
-            summary: Map.get(entry.data, :description) || Map.get(entry.data, :summary)
-          }
-        end)
-
-      {:error, _} ->
-        []
-    end
-  rescue
-    _ -> []
-  catch
-    :exit, _ -> []
-  end
-
-  defp fetch_causal_chain(anomaly) do
-    # Check for signal_id or correlation_id
-    signal_id =
-      cond do
-        Map.has_key?(anomaly, :signal_id) -> anomaly.signal_id
-        Map.has_key?(anomaly, :correlation_id) -> anomaly.correlation_id
-        is_map(anomaly.details) && Map.has_key?(anomaly.details, :signal_id) -> anomaly.details.signal_id
-        true -> nil
-      end
-
-    if signal_id do
-      case TaintQuery.trace_backward(signal_id, max_depth: 5) do
-        {:ok, chain} ->
-          Enum.map(chain, fn entry ->
-            %{
-              type: entry.type,
-              timestamp: entry.timestamp,
-              data: Map.take(entry.data, [:source, :action, :taint_level])
-            }
-          end)
-
-        {:error, _} ->
-          []
-      end
-    else
-      []
-    end
-  rescue
-    _ -> []
-  catch
-    :exit, _ -> []
-  end
-
-  defp build_proposal(anomaly, analysis_data) do
-    details = anomaly.details || %{}
-
-    %{
-      topic: :runtime_fix,
-      proposer: "debug-agent",
-      description: "Fix for #{anomaly.skill} #{anomaly.severity} anomaly",
-      target_module: analysis_data[:target_module] || infer_target_module(anomaly),
-      fix_code: analysis_data[:suggested_fix] || "",
-      root_cause: analysis_data[:root_cause] || "Unknown",
-      confidence: analysis_data[:confidence] || 0.5,
-      # Flatten context for RuntimeFix evaluator
-      context: %{
-        proposer: "debug-agent",
-        skill: anomaly.skill,
-        severity: anomaly.severity,
-        metric: Map.get(details, :metric, :unknown),
-        value: Map.get(details, :value, 0),
-        threshold: Map.get(details, :threshold, 0),
-        root_cause: analysis_data[:root_cause] || "Unknown",
-        recommended_fix: analysis_data[:suggested_fix] || "",
-        # Keep full data for reference
-        anomaly: anomaly,
-        analysis: analysis_data
-      }
-    }
-  end
-
-  defp infer_target_module(%{skill: skill, details: details}) do
-    cond do
-      is_map(details) && Map.has_key?(details, :module) ->
-        details.module
-
-      is_map(details) && Map.has_key?(details, :process) ->
-        case details.process do
-          pid when is_pid(pid) -> extract_module_from_pid(pid)
-          _ -> nil
-        end
-
-      true ->
-        skill_to_module(skill)
-    end
-  end
-
-  defp extract_module_from_pid(pid) do
-    case Process.info(pid, :dictionary) do
-      {:dictionary, dict} ->
-        case List.keyfind(dict, :"$initial_call", 0) do
-          {_, {mod, _, _}} -> mod
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp skill_to_module(skill) do
-    case skill do
-      :beam -> Arbor.Monitor.Skills.Beam
-      :processes -> Arbor.Monitor.Skills.Processes
-      :memory -> Arbor.Monitor.Skills.Memory
-      :scheduler -> Arbor.Monitor.Skills.Scheduler
-      _ -> nil
-    end
   end
 
   # ============================================================================
@@ -698,128 +569,6 @@ defmodule Arbor.Agent.DebugAgent do
     Process.whereis(AnomalyQueue) != nil
   end
 
-  defp safe_get_metrics(skill) do
-    case Arbor.Monitor.metrics(skill) do
-      {:ok, metrics} -> metrics
-      _ -> %{}
-    end
-  rescue
-    _ -> %{}
-  catch
-    :exit, _ -> %{}
-  end
-
-  defp safe_ai_analyze(_agent_id, anomaly, context) do
-    # Build prompt with historian data for root cause analysis
-    recent_events_text = format_recent_events(context[:recent_events] || [])
-    causal_chain_text = format_causal_chain(context[:causal_chain] || [])
-
-    prompt = """
-    Analyze this BEAM runtime anomaly and suggest a fix:
-
-    ## Anomaly
-    Skill: #{anomaly.skill}
-    Severity: #{anomaly.severity}
-    Details: #{inspect(anomaly.details)}
-
-    ## Current Metrics
-    #{inspect(context[:related_metrics])}
-
-    ## Recent Events (30 seconds before anomaly)
-    #{recent_events_text}
-
-    ## Causal Chain (if traced)
-    #{causal_chain_text}
-
-    Based on the above context, respond with:
-    1. Root cause analysis (consider the timeline and causal chain)
-    2. Suggested fix (if code change needed)
-    3. Confidence level (0.0 to 1.0)
-    """
-
-    # Force API backend for speed (uses configured OpenRouter model)
-    case Arbor.AI.generate_text(prompt, backend: :api, max_tokens: 500) do
-      {:ok, response} ->
-        # Parse response into analysis data
-        analysis = %{
-          root_cause: extract_section(response, "Root cause"),
-          suggested_fix: extract_section(response, "Suggested fix"),
-          confidence: extract_confidence(response),
-          raw_response: response
-        }
-
-        {:ok, analysis}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    :exit, reason -> {:error, reason}
-  end
-
-  defp format_recent_events([]), do: "(No recent events found)"
-
-  defp format_recent_events(events) do
-    events
-    |> Enum.map(fn event ->
-      timestamp = format_timestamp(event[:timestamp])
-      "- [#{timestamp}] #{event[:category]}/#{event[:type]}: #{event[:summary] || "(no summary)"}"
-    end)
-    |> Enum.join("\n")
-  end
-
-  defp format_causal_chain([]), do: "(No causal chain available)"
-
-  defp format_causal_chain(chain) do
-    chain
-    |> Enum.with_index(1)
-    |> Enum.map(fn {event, idx} ->
-      timestamp = format_timestamp(event[:timestamp])
-      data = event[:data] || %{}
-      "#{idx}. [#{timestamp}] #{event[:type]} - source: #{data[:source]}, taint: #{data[:taint_level]}"
-    end)
-    |> Enum.join("\n")
-  end
-
-  defp format_timestamp(nil), do: "?"
-  defp format_timestamp(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
-  defp format_timestamp(_), do: "?"
-
-  defp extract_section(text, section_name) when is_binary(text) do
-    # Simple extraction - look for section header and take content until next section or end
-    pattern = ~r/#{Regex.escape(section_name)}[:\s]*(.+?)(?=\d+\.|$)/si
-
-    case Regex.run(pattern, text) do
-      [_, content] -> String.trim(content)
-      _ -> ""
-    end
-  rescue
-    _ -> ""
-  end
-
-  defp extract_section(_, _), do: ""
-
-  defp extract_confidence(text) when is_binary(text) do
-    case Regex.run(~r/(\d+\.?\d*)\s*(?:confidence|%)?/i, text) do
-      [_, num] -> parse_confidence_value(num)
-      _ -> 0.5
-    end
-  rescue
-    _ -> 0.5
-  end
-
-  defp extract_confidence(_), do: 0.5
-
-  defp parse_confidence_value(num) do
-    case Float.parse(num) do
-      {parsed, _} when parsed > 1.0 -> parsed / 100
-      {parsed, _} -> parsed
-      :error -> 0.5
-    end
-  end
-
   defp safe_submit_proposal(proposal) do
     case Arbor.Consensus.submit(proposal, []) do
       {:ok, proposal_id} -> {:ok, proposal_id}
@@ -848,18 +597,23 @@ defmodule Arbor.Agent.DebugAgent do
 
   defp safe_execute_fix(state) do
     proposal = state.current_proposal
-    anomaly = state.current_anomaly
+    investigation = state.current_investigation
+    context = proposal[:context] || %{}
 
-    # Execute real remediation based on anomaly type
-    result = execute_remediation(anomaly)
+    # Get action from investigation or proposal context
+    action = context[:suggested_action] || :none
+    target = context[:action_target]
+
+    # Execute remediation using the new Remediation actions
+    result = execute_remediation_action(action, target)
 
     # Emit signal that fix was applied
     safe_emit(:code, :fix_applied, %{
       agent_id: state.agent_id,
       proposal_id: state.current_proposal_id,
-      target_module: proposal[:target_module],
-      skill: anomaly.skill,
-      action: result.action,
+      investigation_id: investigation && investigation.id,
+      action: action,
+      target: inspect(target),
       success: result.success
     })
 
@@ -870,59 +624,47 @@ defmodule Arbor.Agent.DebugAgent do
     :exit, reason -> {:error, reason}
   end
 
-  # Execute actual remediation based on anomaly type
-  defp execute_remediation(%{skill: :processes, details: details}) do
-    # Message queue issue - kill the problematic process
-    case Map.get(details, :pid) || Map.get(details, :process) do
-      pid when is_pid(pid) ->
-        Logger.info("[DebugAgent] Killing process #{inspect(pid)} with bloated message queue")
-        Process.exit(pid, :kill)
-        %{success: true, action: :kill_process, reason: nil}
+  # Execute remediation using Arbor.Actions.Remediation
+  defp execute_remediation_action(:kill_process, pid) when is_pid(pid) do
+    Logger.info("[DebugAgent] Killing process #{inspect(pid)}")
+    pid_string = inspect(pid)
 
-      _ ->
-        Logger.warning("[DebugAgent] No PID found in anomaly details, cannot remediate")
-        %{success: false, action: :none, reason: :no_pid}
+    case Arbor.Actions.Remediation.KillProcess.run(%{pid: pid_string, reason: :kill}, %{}) do
+      {:ok, %{killed: true}} -> %{success: true, action: :kill_process, reason: nil}
+      {:ok, %{killed: false}} -> %{success: false, action: :kill_process, reason: :not_alive}
+      {:error, reason} -> %{success: false, action: :kill_process, reason: reason}
     end
   end
 
-  defp execute_remediation(%{skill: :memory, details: details}) do
-    # Memory issue - force GC on the problematic process
-    case Map.get(details, :pid) || Map.get(details, :process) do
-      pid when is_pid(pid) ->
-        Logger.info("[DebugAgent] Forcing GC on process #{inspect(pid)}")
-        :erlang.garbage_collect(pid)
-        %{success: true, action: :force_gc, reason: nil}
+  defp execute_remediation_action(:force_gc, pid) when is_pid(pid) do
+    Logger.info("[DebugAgent] Forcing GC on #{inspect(pid)}")
+    pid_string = inspect(pid)
 
-      _ ->
-        # Force GC on all processes as fallback
-        Logger.info("[DebugAgent] Forcing global GC")
-        :erlang.garbage_collect()
-        %{success: true, action: :global_gc, reason: nil}
+    case Arbor.Actions.Remediation.ForceGC.run(%{pid: pid_string}, %{}) do
+      {:ok, %{collected: true}} -> %{success: true, action: :force_gc, reason: nil}
+      {:ok, %{collected: false}} -> %{success: false, action: :force_gc, reason: :not_alive}
+      {:error, reason} -> %{success: false, action: :force_gc, reason: reason}
     end
   end
 
-  defp execute_remediation(%{skill: :beam, details: details}) do
-    # Process count issue - attempt to identify and kill leaked processes
-    # This is tricky without more context; log for now
-    process_count = Map.get(details, :value, 0)
+  defp execute_remediation_action(:stop_supervisor, pid) when is_pid(pid) do
+    Logger.info("[DebugAgent] Stopping supervisor #{inspect(pid)}")
+    pid_string = inspect(pid)
 
-    Logger.warning(
-      "[DebugAgent] High process count (#{process_count}), manual intervention may be needed"
-    )
+    case Arbor.Actions.Remediation.StopSupervisor.run(%{pid: pid_string}, %{}) do
+      {:ok, %{stopped: true}} -> %{success: true, action: :stop_supervisor, reason: nil}
+      {:ok, %{stopped: false, result: reason}} -> %{success: false, action: :stop_supervisor, reason: reason}
+      {:error, reason} -> %{success: false, action: :stop_supervisor, reason: reason}
+    end
+  end
 
+  defp execute_remediation_action(:logged_warning, _target) do
+    Logger.warning("[DebugAgent] Manual intervention may be needed")
     %{success: true, action: :logged_warning, reason: nil}
   end
 
-  defp execute_remediation(%{skill: :supervisor, details: details}) do
-    # Supervisor issue - log details for manual review
-    # Restarting supervisors automatically is risky
-    supervisor = Map.get(details, :supervisor)
-    Logger.warning("[DebugAgent] Supervisor issue detected: #{inspect(supervisor)}")
-    %{success: true, action: :logged_warning, reason: nil}
-  end
-
-  defp execute_remediation(%{skill: skill}) do
-    Logger.info("[DebugAgent] No specific remediation for skill #{skill}")
+  defp execute_remediation_action(action, target) do
+    Logger.info("[DebugAgent] No handler for action #{action} on #{inspect(target)}")
     %{success: true, action: :none, reason: nil}
   end
 
