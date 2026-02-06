@@ -9,6 +9,8 @@ defmodule Arbor.Agent.Claude do
   - Thinking extraction from session files
   - Full memory system integration (recall, index, working memory)
   - Signal emission for agent activities
+  - Heartbeat loop for autonomous background processing
+  - Context window management with persistence
 
   ## Architecture
 
@@ -21,6 +23,7 @@ defmodule Arbor.Agent.Claude do
   4. Indexing important facts from responses
   5. Maintaining working memory across the conversation
   6. Emitting signals for significant events
+  7. Running periodic heartbeats for background checks and reflection
 
   ## Usage
 
@@ -38,10 +41,11 @@ defmodule Arbor.Agent.Claude do
   """
 
   use GenServer
+  use Arbor.Agent.HeartbeatLoop
 
   require Logger
 
-  alias Arbor.Agent.TimingContext
+  alias Arbor.Agent.{CognitivePrompts, ContextManager, TimingContext}
   alias Arbor.AI.AgentSDK
   alias Arbor.AI.SessionReader
 
@@ -62,9 +66,6 @@ defmodule Arbor.Agent.Claude do
   # Consolidation check interval (every N queries)
   @consolidation_check_interval 10
 
-  # Heartbeat interval for background checks (30 seconds)
-  @heartbeat_interval 30_000
-
   # ============================================================================
   # Public API
   # ============================================================================
@@ -78,6 +79,8 @@ defmodule Arbor.Agent.Claude do
   - `:model` - Default model to use (default: :sonnet)
   - `:capture_thinking` - Enable thinking capture (default: true)
   - `:memory_enabled` - Enable memory system (default: true)
+  - `:heartbeat_enabled` - Enable heartbeat loop (default: true)
+  - `:heartbeat_interval_ms` - Heartbeat interval in ms (default: 30_000)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -251,7 +254,6 @@ defmodule Arbor.Agent.Claude do
     default_model = Keyword.get(opts, :model, :sonnet)
     capture_thinking = Keyword.get(opts, :capture_thinking, true)
     memory_enabled = Keyword.get(opts, :memory_enabled, true)
-    heartbeat_enabled = Keyword.get(opts, :heartbeat_enabled, true)
 
     # Initialize memory system for this agent
     memory_initialized =
@@ -272,14 +274,8 @@ defmodule Arbor.Agent.Claude do
     # Grant capabilities from template (non-fatal if security unavailable)
     grant_template_capabilities(id)
 
-    # Start heartbeat timer for background checks if enabled
-    heartbeat_ref =
-      if heartbeat_enabled and memory_initialized do
-        {:ok, ref} = :timer.send_interval(@heartbeat_interval, :heartbeat)
-        ref
-      else
-        nil
-      end
+    # Initialize context window via ContextManager
+    {:ok, context_window} = ContextManager.init_context(id, opts)
 
     state = %{
       id: id,
@@ -292,27 +288,34 @@ defmodule Arbor.Agent.Claude do
       thinking_cache: [],
       recalled_memories: [],
       query_count: 0,
-      heartbeat_ref: heartbeat_ref,
-      last_heartbeat: nil,
       # Temporal awareness
       last_user_message_at: nil,
       last_assistant_output_at: nil,
       responded_to_last_user_message: true
     }
 
+    # Initialize heartbeat loop (adds heartbeat fields, schedules first tick)
+    heartbeat_opts =
+      Keyword.merge(opts,
+        heartbeat_enabled: Keyword.get(opts, :heartbeat_enabled, true) and memory_initialized,
+        context_window: context_window
+      )
+
+    state = init_heartbeat(state, heartbeat_opts)
+
     Logger.info("Claude agent started",
       id: id,
       model: default_model,
       memory_enabled: memory_enabled,
       memory_initialized: memory_initialized,
-      heartbeat_enabled: heartbeat_ref != nil
+      heartbeat_enabled: state.heartbeat_enabled
     )
 
     emit_signal(:agent_started, %{
       id: id,
       memory_enabled: memory_enabled,
       memory_initialized: memory_initialized,
-      heartbeat_enabled: heartbeat_ref != nil
+      heartbeat_enabled: state.heartbeat_enabled
     })
 
     {:ok, state}
@@ -320,87 +323,21 @@ defmodule Arbor.Agent.Claude do
 
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
-    # Track user message timing
-    state = TimingContext.on_user_message(state)
-
-    model = Keyword.get(opts, :model, state.default_model)
-    capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
-    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
-    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
-
-    # Recall relevant memories before the query
-    recalled =
-      if recall do
-        recall_memories(state.id, prompt)
-      else
-        []
-      end
-
-    case execute_query(prompt, model, capture, state, opts) do
-      {:ok, response, new_state} ->
-        # Track agent output timing
-        new_state = TimingContext.on_agent_output(new_state)
-
-        # Index important facts from the response
-        if index do
-          index_response(state.id, prompt, response.text)
-        end
-
-        # Update working memory
-        new_state = update_working_memory(new_state, prompt, response.text)
-
-        # Check if consolidation is needed
-        new_state = maybe_consolidate(new_state)
-
-        # Add recalled memories to response
-        enhanced_response = Map.put(response, :recalled_memories, recalled)
-        new_state = %{new_state | recalled_memories: recalled}
-
-        {:reply, {:ok, enhanced_response}, new_state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
+    # If busy with heartbeat, queue the message and respond when done
+    if state.busy do
+      state = queue_message(state, prompt, opts)
+      {:reply, {:error, :busy}, state}
+    else
+      handle_query(prompt, opts, state)
     end
   end
 
   def handle_call({:stream, prompt, callback, opts}, _from, state) do
-    # Track user message timing
-    state = TimingContext.on_user_message(state)
-
-    model = Keyword.get(opts, :model, state.default_model)
-    capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
-    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
-    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
-
-    # Recall and notify
-    recalled =
-      if recall do
-        memories = recall_memories(state.id, prompt)
-        if memories != [], do: callback.({:memories, memories})
-        memories
-      else
-        []
-      end
-
-    case execute_stream(prompt, callback, model, capture, state, opts) do
-      {:ok, response, new_state} ->
-        # Track agent output timing
-        new_state = TimingContext.on_agent_output(new_state)
-
-        if index do
-          index_response(state.id, prompt, response.text)
-        end
-
-        new_state = update_working_memory(new_state, prompt, response.text)
-        new_state = maybe_consolidate(new_state)
-
-        enhanced_response = Map.put(response, :recalled_memories, recalled)
-        new_state = %{new_state | recalled_memories: recalled}
-
-        {:reply, {:ok, enhanced_response}, new_state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
+    if state.busy do
+      state = queue_message(state, prompt, opts)
+      {:reply, {:error, :busy}, state}
+    else
+      handle_stream(prompt, callback, opts, state)
     end
   end
 
@@ -440,35 +377,39 @@ defmodule Arbor.Agent.Claude do
 
     result =
       if bypass_auth do
-        # Direct execution (for trusted system calls)
         execute_action_direct(action_module, params)
       else
-        # Authorized execution (checks capabilities)
         execute_action_authorized(state.id, action_module, params)
       end
 
-    # Emit signal for action execution
     emit_action_signal(state.id, action_module, result)
 
     {:reply, result, state}
   end
 
   @impl true
-  def handle_info(:heartbeat, state) do
-    if state.memory_initialized do
-      run_background_checks(state)
+  def handle_info(msg, state) do
+    case handle_heartbeat_info(msg, state) do
+      {:noreply, new_state} ->
+        {:noreply, new_state}
+
+      {:heartbeat_triggered, new_state} ->
+        run_heartbeat_async(new_state)
+        {:noreply, new_state}
+
+      :not_handled ->
+        handle_other_info(msg, state)
     end
-
-    {:noreply, %{state | last_heartbeat: DateTime.utc_now()}}
   end
-
-  def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do
-    # Cancel heartbeat timer if running
-    if state.heartbeat_ref do
-      :timer.cancel(state.heartbeat_ref)
+    # Cancel heartbeat timer
+    cancel_heartbeat(state)
+
+    # Save context window before shutdown
+    if state[:context_window] do
+      ContextManager.save_context(state.id, state.context_window)
     end
 
     # Save working memory before shutdown
@@ -479,6 +420,194 @@ defmodule Arbor.Agent.Claude do
     Logger.info("Claude agent stopping", id: state.id, reason: inspect(reason))
     emit_signal(:agent_stopped, %{id: state.id, query_count: state.query_count})
     :ok
+  end
+
+  # ============================================================================
+  # HeartbeatLoop Callback
+  # ============================================================================
+
+  @impl Arbor.Agent.HeartbeatLoop
+  def run_heartbeat_cycle(state, _body) do
+    # Determine cognitive mode for this heartbeat
+    mode = determine_cognitive_mode(state)
+
+    # Run background checks (memory health, consolidation)
+    background_result = run_background_checks(state)
+
+    actions =
+      if is_map(background_result) do
+        Map.get(background_result, :actions, [])
+      else
+        []
+      end
+
+    # Build metadata with cognitive mode info
+    metadata = %{
+      cognitive_mode: mode,
+      background_actions: length(actions)
+    }
+
+    {:ok, actions, %{}, state[:context_window], nil, metadata}
+  end
+
+  # ============================================================================
+  # Private: Heartbeat Helpers
+  # ============================================================================
+
+  defp run_heartbeat_async(state) do
+    host_pid = self()
+    body = Map.get(state, :body, %{})
+
+    Task.start(fn ->
+      result =
+        try do
+          run_heartbeat_cycle(state, body)
+        rescue
+          e ->
+            Logger.warning("Heartbeat cycle error: #{Exception.message(e)}")
+            {:error, {:heartbeat_exception, Exception.message(e)}}
+        catch
+          :exit, reason ->
+            Logger.warning("Heartbeat cycle exit: #{inspect(reason)}")
+            {:error, {:heartbeat_exit, reason}}
+        end
+
+      send(host_pid, {:heartbeat_complete, result})
+    end)
+  end
+
+  defp determine_cognitive_mode(state) do
+    cond do
+      # If user is waiting, stay in conversation mode
+      user_waiting?(state) ->
+        :conversation
+
+      # Roll for idle reflection
+      idle_reflection_enabled?() and :rand.uniform() < idle_reflection_chance() ->
+        Enum.random([:introspection, :reflection, :pattern_analysis, :insight_detection])
+
+      # Default: consolidation during background time
+      true ->
+        :consolidation
+    end
+  end
+
+  defp user_waiting?(state) do
+    timing = TimingContext.compute(state)
+    timing.user_waiting
+  end
+
+  defp idle_reflection_enabled? do
+    Application.get_env(:arbor_agent, :idle_reflection_enabled, true)
+  end
+
+  defp idle_reflection_chance do
+    Application.get_env(:arbor_agent, :idle_reflection_chance, 0.3)
+  end
+
+  defp handle_other_info(_msg, state) do
+    {:noreply, state}
+  end
+
+  # ============================================================================
+  # Private: Query Handling (extracted from handle_call)
+  # ============================================================================
+
+  defp handle_query(prompt, opts, state) do
+    # Track user message timing
+    state = TimingContext.on_user_message(state)
+
+    model = Keyword.get(opts, :model, state.default_model)
+    capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
+    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
+    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
+
+    recalled =
+      if recall do
+        recall_memories(state.id, prompt)
+      else
+        []
+      end
+
+    case execute_query(prompt, model, capture, state, opts) do
+      {:ok, response, new_state} ->
+        new_state = TimingContext.on_agent_output(new_state)
+
+        if index do
+          index_response(state.id, prompt, response.text)
+        end
+
+        new_state = update_working_memory(new_state, prompt, response.text)
+        new_state = maybe_consolidate(new_state)
+
+        # Add to context window
+        new_state = add_to_context_window(new_state, prompt, response.text)
+
+        enhanced_response = Map.put(response, :recalled_memories, recalled)
+        new_state = %{new_state | recalled_memories: recalled}
+
+        {:reply, {:ok, enhanced_response}, new_state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp handle_stream(prompt, callback, opts, state) do
+    state = TimingContext.on_user_message(state)
+
+    model = Keyword.get(opts, :model, state.default_model)
+    capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
+    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
+    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
+
+    recalled =
+      if recall do
+        memories = recall_memories(state.id, prompt)
+        if memories != [], do: callback.({:memories, memories})
+        memories
+      else
+        []
+      end
+
+    case execute_stream(prompt, callback, model, capture, state, opts) do
+      {:ok, response, new_state} ->
+        new_state = TimingContext.on_agent_output(new_state)
+
+        if index do
+          index_response(state.id, prompt, response.text)
+        end
+
+        new_state = update_working_memory(new_state, prompt, response.text)
+        new_state = maybe_consolidate(new_state)
+        new_state = add_to_context_window(new_state, prompt, response.text)
+
+        enhanced_response = Map.put(response, :recalled_memories, recalled)
+        new_state = %{new_state | recalled_memories: recalled}
+
+        {:reply, {:ok, enhanced_response}, new_state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp add_to_context_window(%{context_window: nil} = state, _prompt, _response), do: state
+
+  defp add_to_context_window(%{context_window: window} = state, prompt, response) do
+    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
+         function_exported?(Arbor.Memory.ContextWindow, :add_entry, 3) do
+      window =
+        window
+        |> Arbor.Memory.ContextWindow.add_entry(:message, "Human: #{prompt}")
+        |> Arbor.Memory.ContextWindow.add_entry(:message, "Assistant: #{response}")
+
+      %{state | context_window: window}
+    else
+      state
+    end
+  rescue
+    _ -> state
   end
 
   # ============================================================================
@@ -550,7 +679,6 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp memory_registry_running? do
-    # Check if the Memory Registry is running (indicates full app started)
     Process.whereis(Arbor.Memory.Registry) != nil or
       Process.whereis(Arbor.Memory.IndexSupervisor) != nil
   rescue
@@ -558,7 +686,6 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp load_working_memory(agent_id) do
-    # load_working_memory returns WorkingMemory struct directly (creates if not exists)
     wm = Arbor.Memory.load_working_memory(agent_id)
     Logger.debug("Loaded working memory", agent_id: agent_id)
     wm
@@ -569,7 +696,6 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp save_working_memory(agent_id, working_memory) do
-    # save_working_memory returns :ok directly
     Arbor.Memory.save_working_memory(agent_id, working_memory)
     Logger.debug("Saved working memory", agent_id: agent_id)
     :ok
@@ -608,7 +734,6 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp index_response(agent_id, prompt, response_text) do
-    # Index the exchange as a memory
     content = "Q: #{String.slice(prompt, 0..200)}\nA: #{String.slice(response_text, 0..500)}"
 
     metadata = %{
@@ -639,12 +764,10 @@ defmodule Arbor.Agent.Claude do
 
   defp update_working_memory(state, prompt, response) do
     if state.memory_initialized and state.working_memory do
-      # Add conversation as a thought to working memory
       thought =
         "User asked: #{String.slice(prompt, 0..100)}... " <>
           "I responded: #{String.slice(response, 0..200)}..."
 
-      # Use WorkingMemory API to add thought
       working_memory =
         Arbor.Memory.WorkingMemory.add_thought(
           state.working_memory,
@@ -663,7 +786,6 @@ defmodule Arbor.Agent.Claude do
   defp maybe_consolidate(state) do
     if state.memory_initialized and
          rem(state.query_count + 1, @consolidation_check_interval) == 0 do
-      # Check if consolidation is needed
       case Arbor.Memory.should_consolidate?(state.id) do
         true ->
           Logger.info("Running memory consolidation", agent_id: state.id)
@@ -686,7 +808,6 @@ defmodule Arbor.Agent.Claude do
     if background_checks_available?() do
       result = Arbor.Memory.BackgroundChecks.run(state.id, skip_patterns: true)
 
-      # Log any warnings
       Enum.each(result.warnings, fn warning ->
         Logger.info("Background check warning: #{warning.message}",
           agent_id: state.id,
@@ -695,7 +816,6 @@ defmodule Arbor.Agent.Claude do
         )
       end)
 
-      # Handle actions
       Enum.each(result.actions, fn action ->
         case action.type do
           :run_consolidation ->
@@ -706,7 +826,6 @@ defmodule Arbor.Agent.Claude do
         end
       end)
 
-      # Emit signal with results summary
       emit_signal(:heartbeat_complete, %{
         id: state.id,
         action_count: length(result.actions),
@@ -811,7 +930,20 @@ defmodule Arbor.Agent.Claude do
         |> TimingContext.compute()
         |> TimingContext.to_markdown()
 
-      prompt <> "\n\n" <> timing_markdown
+      # Add cognitive mode prompt if in non-conversation mode
+      mode = determine_cognitive_mode(state)
+
+      mode_prompt =
+        if function_exported?(CognitivePrompts, :prompt_for, 1) do
+          CognitivePrompts.prompt_for(mode)
+        else
+          ""
+        end
+
+      parts = [prompt, timing_markdown]
+      parts = if mode_prompt != "", do: parts ++ [mode_prompt], else: parts
+
+      Enum.join(parts, "\n\n")
     else
       prompt
     end
