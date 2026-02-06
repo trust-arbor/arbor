@@ -40,14 +40,30 @@ defmodule Arbor.Monitor.Skills.Processes do
     mq_threshold = get_in(config, [:message_queue_len, :threshold]) || 10_000
 
     if metrics[:max_message_queue_len] > mq_threshold do
+      # Get the actual PID of the worst offender
+      worst_process = get_worst_message_queue_process()
+
       {:anomaly, :warning,
        %{
          metric: :message_queue_len,
          value: metrics[:max_message_queue_len],
-         threshold: mq_threshold
+         threshold: mq_threshold,
+         pid: worst_process.pid,
+         process_info: worst_process.info
        }}
     else
       :normal
+    end
+  end
+
+  # Find the process with the highest message queue length
+  defp get_worst_message_queue_process do
+    case safe_proc_count(:message_queue_len, 1) do
+      [{pid, count, info}] ->
+        %{pid: pid, count: count, info: sanitize_info(info)}
+
+      _ ->
+        %{pid: nil, count: 0, info: %{}}
     end
   end
 
