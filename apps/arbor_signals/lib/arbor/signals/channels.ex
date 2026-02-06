@@ -267,12 +267,17 @@ defmodule Arbor.Signals.Channels do
     key = :crypto.strong_rand_bytes(32)
     channel = Channel.new(channel_id, name, creator_id, opts)
 
+    # Generate authority keypair for sealing keys during redistribution
+    crypto = crypto_module()
+    {authority_public, authority_private} = crypto.generate_encryption_keypair()
+
     entry = %{
       channel: channel,
       key: key,
       key_history: [],
       pending_invitations: %{},
-      rotation_timer: nil
+      rotation_timer: nil,
+      authority_keypair: %{public: authority_public, private: authority_private}
     }
 
     state = put_in(state, [:channels, channel_id], entry)
@@ -745,25 +750,23 @@ defmodule Arbor.Signals.Channels do
   end
 
   # Seal and distribute new key to all members
-  defp redistribute_key(channel_id, _new_key, members, entry) do
-    # Get the channel creator's encryption keypair for sealing
-    # In production, this would use a system authority key or the channel's key
-    # For now, we emit redistribution signals that members can process
+  defp redistribute_key(channel_id, new_key, members, entry) do
     new_version = entry.channel.key_version + 1
+    authority_keypair = entry.authority_keypair
 
     Enum.each(members, fn member_id ->
       case lookup_encryption_key(member_id) do
-        {:ok, enc_pub} ->
-          # Use a system key for sealing (simplified - in production would use authority key)
-          # For now, we just emit the signal with member info
+        {:ok, member_enc_pub} ->
+          # Seal the new key for this member using the channel's authority keypair
+          sealed_key = seal_key(new_key, member_enc_pub, authority_keypair.private)
+
           signal =
             Signal.new(:channel, :key_redistributed, %{
               channel_id: channel_id,
               recipient_id: member_id,
               key_version: new_version,
-              # Note: In production, this would include the sealed key
-              # sealed_key would be: seal_key(new_key, enc_pub, authority_private_key)
-              encryption_public_key: enc_pub
+              sealed_key: sealed_key,
+              authority_public_key: authority_keypair.public
             })
 
           Bus.publish(signal)

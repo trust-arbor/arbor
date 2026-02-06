@@ -10,9 +10,16 @@ defmodule Arbor.Signals.ChannelsTest do
   defmodule MockCrypto do
     @moduledoc false
 
+    def generate_encryption_keypair do
+      :crypto.generate_key(:ecdh, :x25519)
+    end
+
     def encrypt(plaintext, key) when byte_size(key) == 32 do
       iv = :crypto.strong_rand_bytes(12)
-      {ciphertext, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
+
+      {ciphertext, tag} =
+        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
+
       {ciphertext, iv, tag}
     end
 
@@ -123,7 +130,8 @@ defmodule Arbor.Signals.ChannelsTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      assert {:error, :not_a_member} = Channels.invite(channel.id, "agent_target", non_member_keychain)
+      assert {:error, :not_a_member} =
+               Channels.invite(channel.id, "agent_target", non_member_keychain)
     end
 
     test "fails for non-existent channel" do
@@ -132,7 +140,8 @@ defmodule Arbor.Signals.ChannelsTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      assert {:error, :not_found} = Channels.invite("chan_nonexistent", "agent_target", sender_keychain)
+      assert {:error, :not_found} =
+               Channels.invite("chan_nonexistent", "agent_target", sender_keychain)
     end
   end
 
@@ -269,7 +278,9 @@ defmodule Arbor.Signals.ChannelsTest do
       }
 
       sealed_key = %{invitation.sealed_key | ciphertext: key}
-      {:ok, _, _} = Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
+
+      {:ok, _, _} =
+        Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
 
       assert {:error, :not_creator} = Channels.rotate_key(channel.id, "agent_member")
     end
@@ -290,7 +301,9 @@ defmodule Arbor.Signals.ChannelsTest do
       }
 
       sealed_key = %{invitation.sealed_key | ciphertext: key}
-      {:ok, _, _} = Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
+
+      {:ok, _, _} =
+        Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
 
       {:ok, _, members_to_reinvite} = Channels.rotate_key(channel.id, "agent_owner")
 
