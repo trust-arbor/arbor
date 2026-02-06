@@ -33,3 +33,6 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres
+
+# Agent — start DebugAgent for self-healing demo
+config :arbor_agent, start_debug_agent: true

@@ -83,8 +83,7 @@ defmodule Arbor.Actions.Schemas.Historian do
   def taint_trace_params do
     Zoi.map(
       %{
-        "query_type" =>
-          Zoi.enum(["trace_backward", "trace_forward", "events", "summary"]),
+        "query_type" => Zoi.enum(["trace_backward", "trace_forward", "events", "summary"]),
         "signal_id" => Zoi.string() |> Zoi.optional(),
         "agent_id" => Zoi.string() |> Zoi.optional(),
         "taint_level" =>

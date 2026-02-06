@@ -25,7 +25,9 @@ defmodule Arbor.Gateway.Bridge.Router do
       {:ok, validated} ->
         tool_input = validated["tool_input"] || %{}
         cwd = validated["cwd"] || "."
-        result = authorize_tool_call(validated["session_id"], validated["tool_name"], tool_input, cwd)
+
+        result =
+          authorize_tool_call(validated["session_id"], validated["tool_name"], tool_input, cwd)
 
         # Emit signal for observability
         emit_bridge_signal(validated["session_id"], validated["tool_name"], result)
