@@ -66,6 +66,7 @@ defmodule Arbor.Consensus.MixProject do
       # Core dependencies
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
+      {:zoi, "~> 0.17"},
 
       # Dev/test
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
