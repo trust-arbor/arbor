@@ -796,7 +796,11 @@ defmodule Arbor.Agent.DebugAgent do
     # Process count issue - attempt to identify and kill leaked processes
     # This is tricky without more context; log for now
     process_count = Map.get(details, :value, 0)
-    Logger.warning("[DebugAgent] High process count (#{process_count}), manual intervention may be needed")
+
+    Logger.warning(
+      "[DebugAgent] High process count (#{process_count}), manual intervention may be needed"
+    )
+
     %{success: true, action: :logged_warning, reason: nil}
   end
 
