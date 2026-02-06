@@ -114,4 +114,76 @@ defmodule Arbor.AI.AgentSDK.ToolServerTest do
       refute ToolServer.has_tool?("echo", server)
     end
   end
+
+  describe "register_handler/4" do
+    test "registers a handler-based tool", %{server: server} do
+      schema = %{
+        "name" => "custom_tool",
+        "description" => "A custom tool",
+        "input_schema" => %{"type" => "object", "properties" => %{}}
+      }
+
+      handler = fn _args -> {:ok, "handler result"} end
+
+      assert :ok = ToolServer.register_handler("custom_tool", schema, handler, server)
+      assert ToolServer.has_tool?("custom_tool", server)
+    end
+
+    test "calls handler-based tool", %{server: server} do
+      schema = %{
+        "name" => "add",
+        "description" => "Add two numbers",
+        "input_schema" => %{
+          "type" => "object",
+          "properties" => %{"a" => %{"type" => "integer"}, "b" => %{"type" => "integer"}}
+        }
+      }
+
+      handler = fn %{a: a, b: b} -> {:ok, a + b} end
+
+      :ok = ToolServer.register_handler("add", schema, handler, server)
+      assert {:ok, "3"} = ToolServer.call_tool("add", %{a: 1, b: 2}, server)
+    end
+
+    test "handler returns map as JSON", %{server: server} do
+      schema = %{"name" => "get_data", "description" => "Get data", "input_schema" => %{}}
+      handler = fn _args -> {:ok, %{key: "value"}} end
+
+      :ok = ToolServer.register_handler("get_data", schema, handler, server)
+      {:ok, result} = ToolServer.call_tool("get_data", %{}, server)
+      assert result =~ "key"
+      assert result =~ "value"
+    end
+
+    test "list_tools includes handler-based tools", %{server: server} do
+      schema = %{"name" => "handler_tool", "description" => "Test", "input_schema" => %{}}
+      handler = fn _args -> {:ok, "ok"} end
+
+      :ok = ToolServer.register_handler("handler_tool", schema, handler, server)
+      tools = ToolServer.list_tools(server)
+
+      assert Enum.any?(tools, &(&1["name"] == "handler_tool"))
+    end
+
+    test "handler errors are propagated", %{server: server} do
+      schema = %{"name" => "failing", "description" => "Fails", "input_schema" => %{}}
+      handler = fn _args -> {:error, "intentional failure"} end
+
+      :ok = ToolServer.register_handler("failing", schema, handler, server)
+      assert {:error, "intentional failure"} = ToolServer.call_tool("failing", %{}, server)
+    end
+  end
+
+  describe "unregister_handler/2" do
+    test "removes handler-based tool", %{server: server} do
+      schema = %{"name" => "temp_tool", "description" => "Temp", "input_schema" => %{}}
+      handler = fn _args -> {:ok, "temp"} end
+
+      :ok = ToolServer.register_handler("temp_tool", schema, handler, server)
+      assert ToolServer.has_tool?("temp_tool", server)
+
+      :ok = ToolServer.unregister_handler("temp_tool", server)
+      refute ToolServer.has_tool?("temp_tool", server)
+    end
+  end
 end
