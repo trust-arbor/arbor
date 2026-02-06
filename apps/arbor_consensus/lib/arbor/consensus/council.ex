@@ -24,28 +24,39 @@ defmodule Arbor.Consensus.Council do
   Returns a list of sealed evaluations. Terminates early if quorum
   can be determined before all evaluators complete.
 
-  ## Options
+  ## Parameters
 
-    * `:timeout` - Per-evaluator timeout in ms (default: from config)
-    * `:evaluator_opts` - Extra opts passed to each evaluator
+    * `proposal` - The proposal to evaluate
+    * `evaluators` - Either:
+      - A map of `%{perspective => evaluator_module}` for per-perspective routing
+      - A list of evaluator modules (perspectives extracted via `perspectives/0`)
+      - A single module (same evaluator for all perspectives)
+    * `opts` - Options including:
+      * `:timeout` - Per-evaluator timeout in ms (default: 90_000)
+      * `:evaluator_opts` - Extra opts passed to each evaluator
+      * `:quorum` - Required quorum for early termination
+
+  See also: `evaluate/4` for the legacy API that accepts explicit perspectives.
   """
   @spec evaluate(
           proposal :: Proposal.t(),
-          perspectives :: [atom()],
-          evaluator_backend :: module(),
+          evaluators :: map() | [module()] | module(),
           opts :: keyword()
         ) :: {:ok, [Evaluation.t()]} | {:error, term()}
-  def evaluate(%Proposal{} = proposal, perspectives, evaluator_backend, opts \\ []) do
+  def evaluate(proposal, evaluators, opts \\ [])
+
+  # Map of perspective => evaluator_module (preferred)
+  def evaluate(%Proposal{} = proposal, evaluators, opts) when is_map(evaluators) do
     timeout = Keyword.get(opts, :timeout, 90_000)
     evaluator_opts = Keyword.get(opts, :evaluator_opts, [])
     quorum = Keyword.get(opts, :quorum)
 
-    # Spawn one task per perspective
+    # Spawn one task per perspective, routing to the correct evaluator
     tasks =
-      Enum.map(perspectives, fn perspective ->
+      Enum.map(evaluators, fn {perspective, evaluator_module} ->
         task =
           Task.async(fn ->
-            evaluator_backend.evaluate(proposal, perspective, evaluator_opts)
+            evaluator_module.evaluate(proposal, perspective, evaluator_opts)
           end)
 
         {perspective, task}
@@ -59,6 +70,61 @@ defmodule Arbor.Consensus.Council do
       {:error, :no_evaluations}
     else
       {:ok, evaluations}
+    end
+  end
+
+  # List of evaluator modules — build perspective map from each module's perspectives/0
+  def evaluate(%Proposal{} = proposal, evaluators, opts) when is_list(evaluators) do
+    evaluator_map = build_evaluator_map(evaluators)
+    evaluate(proposal, evaluator_map, opts)
+  end
+
+  # Single evaluator module (legacy) — get perspectives and build map
+  def evaluate(%Proposal{} = proposal, evaluator_backend, opts) when is_atom(evaluator_backend) do
+    perspectives = get_evaluator_perspectives(evaluator_backend)
+    evaluator_map = Map.new(perspectives, fn p -> {p, evaluator_backend} end)
+    evaluate(proposal, evaluator_map, opts)
+  end
+
+  @doc """
+  Legacy 4-arity API for backwards compatibility.
+
+  `evaluate(proposal, perspectives, evaluator_backend, opts)`
+
+  * `perspectives` - List of perspective atoms (e.g., `[:security, :stability]`)
+  * `evaluator_backend` - Single module to use for all perspectives
+  """
+  def evaluate(%Proposal{} = proposal, perspectives, evaluator_backend, opts)
+      when is_list(perspectives) and is_atom(hd(perspectives)) and is_atom(evaluator_backend) do
+    evaluator_map = Map.new(perspectives, fn p -> {p, evaluator_backend} end)
+    evaluate(proposal, evaluator_map, opts)
+  end
+
+  @doc """
+  Build a map from perspective to evaluator module.
+
+  Each evaluator declares its perspectives via `perspectives/0`.
+  If multiple evaluators declare the same perspective, the first wins.
+  """
+  @spec build_evaluator_map([module()]) :: %{atom() => module()}
+  def build_evaluator_map(evaluators) do
+    evaluators
+    |> Enum.flat_map(fn evaluator ->
+      perspectives = get_evaluator_perspectives(evaluator)
+      Enum.map(perspectives, fn p -> {p, evaluator} end)
+    end)
+    |> Map.new()
+  end
+
+  defp get_evaluator_perspectives(evaluator) do
+    try do
+      if function_exported?(evaluator, :perspectives, 0) do
+        evaluator.perspectives()
+      else
+        []
+      end
+    rescue
+      _ -> []
     end
   end
 
