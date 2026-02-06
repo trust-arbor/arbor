@@ -43,6 +43,7 @@ defmodule ArborCommon.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end

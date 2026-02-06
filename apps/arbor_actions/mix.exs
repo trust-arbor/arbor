@@ -40,6 +40,7 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_historian, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
       {:jido_action, path: "../../../jido_action", override: true},
+      {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end

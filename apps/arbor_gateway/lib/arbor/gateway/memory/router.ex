@@ -113,6 +113,7 @@ defmodule Arbor.Gateway.Memory.Router do
   use Plug.Router
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Gateway.Schemas
   alias Arbor.Memory
   alias Arbor.Memory.WorkingMemory
 
@@ -124,49 +125,52 @@ defmodule Arbor.Gateway.Memory.Router do
 
   # POST /api/memory/recall — Semantic recall for an agent
   post "/recall" do
-    agent_id = conn.body_params["agent_id"]
-    query = conn.body_params["query"]
+    case Schemas.Memory.validate(Schemas.Memory.recall_request(), conn.body_params) do
+      {:ok, validated} ->
+        opts = build_recall_opts(validated)
 
-    if is_nil(agent_id) or is_nil(query) do
-      json_response(conn, 400, %{status: "error", reason: "agent_id and query are required"})
-    else
-      opts = build_recall_opts(conn.body_params)
+        case Memory.recall(validated["agent_id"], validated["query"], opts) do
+          {:ok, results} ->
+            json_response(conn, 200, %{status: "ok", results: format_results(results)})
 
-      case Memory.recall(agent_id, query, opts) do
-        {:ok, results} ->
-          json_response(conn, 200, %{status: "ok", results: format_results(results)})
+          {:error, :index_not_initialized} ->
+            json_response(conn, 404, %{
+              status: "error",
+              reason: "Memory not initialized for agent"
+            })
 
-        {:error, :index_not_initialized} ->
-          json_response(conn, 404, %{status: "error", reason: "Memory not initialized for agent"})
+          {:error, reason} ->
+            json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+        end
 
-        {:error, reason} ->
-          json_response(conn, 500, %{status: "error", reason: inspect(reason)})
-      end
+      {:error, errors} ->
+        json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
     end
   end
 
   # POST /api/memory/index — Index new content for an agent
   post "/index" do
-    agent_id = conn.body_params["agent_id"]
-    content = conn.body_params["content"]
-    metadata = conn.body_params["metadata"] || %{}
+    case Schemas.Memory.validate(Schemas.Memory.index_request(), conn.body_params) do
+      {:ok, validated} ->
+        # Convert string keys to atoms for type/source
+        safe_metadata = atomize_metadata(validated["metadata"] || %{})
 
-    if is_nil(agent_id) or is_nil(content) do
-      json_response(conn, 400, %{status: "error", reason: "agent_id and content are required"})
-    else
-      # Convert string keys to atoms for type/source
-      safe_metadata = atomize_metadata(metadata)
+        case Memory.index(validated["agent_id"], validated["content"], safe_metadata) do
+          {:ok, entry_id} ->
+            json_response(conn, 200, %{status: "ok", entry_id: entry_id})
 
-      case Memory.index(agent_id, content, safe_metadata) do
-        {:ok, entry_id} ->
-          json_response(conn, 200, %{status: "ok", entry_id: entry_id})
+          {:error, :index_not_initialized} ->
+            json_response(conn, 404, %{
+              status: "error",
+              reason: "Memory not initialized for agent"
+            })
 
-        {:error, :index_not_initialized} ->
-          json_response(conn, 404, %{status: "error", reason: "Memory not initialized for agent"})
+          {:error, reason} ->
+            json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+        end
 
-        {:error, reason} ->
-          json_response(conn, 500, %{status: "error", reason: inspect(reason)})
-      end
+      {:error, errors} ->
+        json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
     end
   end
 
@@ -183,49 +187,48 @@ defmodule Arbor.Gateway.Memory.Router do
 
   # PUT /api/memory/working/:agent_id — Save working memory for an agent
   put "/working/:agent_id" do
-    wm_data = conn.body_params["working_memory"]
+    case Schemas.Memory.validate(Schemas.Memory.working_memory_request(), conn.body_params) do
+      {:ok, validated} ->
+        # Ensure agent_id in data matches the URL
+        wm_data = Map.put(validated["working_memory"], "agent_id", agent_id)
+        wm = WorkingMemory.deserialize(wm_data)
+        Memory.save_working_memory(agent_id, wm)
+        json_response(conn, 200, %{status: "ok"})
 
-    if is_nil(wm_data) do
-      json_response(conn, 400, %{status: "error", reason: "working_memory is required"})
-    else
-      # Ensure agent_id in data matches the URL
-      wm_data = Map.put(wm_data, "agent_id", agent_id)
-      wm = WorkingMemory.deserialize(wm_data)
-      Memory.save_working_memory(agent_id, wm)
-      json_response(conn, 200, %{status: "ok"})
+      {:error, errors} ->
+        json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
     end
   end
 
   # POST /api/memory/summarize — Summarize text
   post "/summarize" do
-    agent_id = conn.body_params["agent_id"]
-    text = conn.body_params["text"]
+    case Schemas.Memory.validate(Schemas.Memory.summarize_request(), conn.body_params) do
+      {:ok, validated} ->
+        opts = build_summarize_opts(validated)
 
-    if is_nil(agent_id) or is_nil(text) do
-      json_response(conn, 400, %{status: "error", reason: "agent_id and text are required"})
-    else
-      opts = build_summarize_opts(conn.body_params)
+        case Memory.summarize(validated["agent_id"], validated["text"], opts) do
+          {:ok, result} ->
+            json_response(conn, 200, %{
+              status: "ok",
+              summary: result.summary,
+              complexity: result.complexity,
+              model_used: result.model_used
+            })
 
-      case Memory.summarize(agent_id, text, opts) do
-        {:ok, result} ->
-          json_response(conn, 200, %{
-            status: "ok",
-            summary: result.summary,
-            complexity: result.complexity,
-            model_used: result.model_used
-          })
+          {:error, {:llm_not_configured, info}} ->
+            json_response(conn, 503, %{
+              status: "error",
+              reason: "LLM not configured",
+              complexity: info[:complexity],
+              model_needed: info[:model_needed]
+            })
 
-        {:error, {:llm_not_configured, info}} ->
-          json_response(conn, 503, %{
-            status: "error",
-            reason: "LLM not configured",
-            complexity: info[:complexity],
-            model_needed: info[:model_needed]
-          })
+          {:error, reason} ->
+            json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+        end
 
-        {:error, reason} ->
-          json_response(conn, 500, %{status: "error", reason: inspect(reason)})
-      end
+      {:error, errors} ->
+        json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
     end
   end
 
