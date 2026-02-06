@@ -61,6 +61,9 @@ defmodule Arbor.Agent.Claude do
   # Consolidation check interval (every N queries)
   @consolidation_check_interval 10
 
+  # Heartbeat interval for background checks (30 seconds)
+  @heartbeat_interval 30_000
+
   # ============================================================================
   # Public API
   # ============================================================================
@@ -247,6 +250,7 @@ defmodule Arbor.Agent.Claude do
     default_model = Keyword.get(opts, :model, :sonnet)
     capture_thinking = Keyword.get(opts, :capture_thinking, true)
     memory_enabled = Keyword.get(opts, :memory_enabled, true)
+    heartbeat_enabled = Keyword.get(opts, :heartbeat_enabled, true)
 
     # Initialize memory system for this agent
     memory_initialized =
@@ -267,6 +271,15 @@ defmodule Arbor.Agent.Claude do
     # Grant capabilities from template (non-fatal if security unavailable)
     grant_template_capabilities(id)
 
+    # Start heartbeat timer for background checks if enabled
+    heartbeat_ref =
+      if heartbeat_enabled and memory_initialized do
+        {:ok, ref} = :timer.send_interval(@heartbeat_interval, :heartbeat)
+        ref
+      else
+        nil
+      end
+
     state = %{
       id: id,
       default_model: default_model,
@@ -277,20 +290,24 @@ defmodule Arbor.Agent.Claude do
       last_session_id: nil,
       thinking_cache: [],
       recalled_memories: [],
-      query_count: 0
+      query_count: 0,
+      heartbeat_ref: heartbeat_ref,
+      last_heartbeat: nil
     }
 
     Logger.info("Claude agent started",
       id: id,
       model: default_model,
       memory_enabled: memory_enabled,
-      memory_initialized: memory_initialized
+      memory_initialized: memory_initialized,
+      heartbeat_enabled: heartbeat_ref != nil
     )
 
     emit_signal(:agent_started, %{
       id: id,
       memory_enabled: memory_enabled,
-      memory_initialized: memory_initialized
+      memory_initialized: memory_initialized,
+      heartbeat_enabled: heartbeat_ref != nil
     })
 
     {:ok, state}
@@ -420,7 +437,23 @@ defmodule Arbor.Agent.Claude do
   end
 
   @impl true
+  def handle_info(:heartbeat, state) do
+    if state.memory_initialized do
+      run_background_checks(state)
+    end
+
+    {:noreply, %{state | last_heartbeat: DateTime.utc_now()}}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
   def terminate(reason, state) do
+    # Cancel heartbeat timer if running
+    if state.heartbeat_ref do
+      :timer.cancel(state.heartbeat_ref)
+    end
+
     # Save working memory before shutdown
     if state.memory_initialized and state.working_memory do
       save_working_memory(state.id, state.working_memory)
@@ -630,6 +663,57 @@ defmodule Arbor.Agent.Claude do
     state
   rescue
     _ -> state
+  end
+
+  defp run_background_checks(state) do
+    if background_checks_available?() do
+      result = Arbor.Memory.BackgroundChecks.run(state.id, skip_patterns: true)
+
+      # Log any warnings
+      Enum.each(result.warnings, fn warning ->
+        Logger.info("Background check warning: #{warning.message}",
+          agent_id: state.id,
+          type: warning.type,
+          severity: warning.severity
+        )
+      end)
+
+      # Handle actions
+      Enum.each(result.actions, fn action ->
+        case action.type do
+          :run_consolidation ->
+            spawn(fn -> Arbor.Memory.run_consolidation(state.id) end)
+
+          other ->
+            Logger.debug("Background check action: #{other}", agent_id: state.id)
+        end
+      end)
+
+      # Emit signal with results summary
+      emit_signal(:heartbeat_complete, %{
+        id: state.id,
+        action_count: length(result.actions),
+        warning_count: length(result.warnings),
+        suggestion_count: length(result.suggestions)
+      })
+
+      result
+    else
+      %{actions: [], warnings: [], suggestions: []}
+    end
+  rescue
+    e ->
+      Logger.warning("Background checks failed: #{Exception.message(e)}")
+      %{actions: [], warnings: [], suggestions: []}
+  catch
+    :exit, reason ->
+      Logger.warning("Background checks timeout: #{inspect(reason)}")
+      %{actions: [], warnings: [], suggestions: []}
+  end
+
+  defp background_checks_available? do
+    Code.ensure_loaded?(Arbor.Memory.BackgroundChecks) and
+      function_exported?(Arbor.Memory.BackgroundChecks, :run, 2)
   end
 
   defp get_memory_stats(agent_id) do
