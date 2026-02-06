@@ -28,6 +28,13 @@ defmodule Arbor.Consensus.Application do
       end
 
     opts = [strategy: :one_for_one, name: Arbor.Consensus.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+
+    # Register default topics after supervisor is up
+    if Application.get_env(:arbor_consensus, :start_children, true) do
+      Arbor.Consensus.TopicRegistry.register_default_topics()
+    end
+
+    result
   end
 end

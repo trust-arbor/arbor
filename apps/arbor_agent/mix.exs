@@ -35,6 +35,7 @@ defmodule ArborAgent.MixProject do
       {:arbor_checkpoint, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:arbor_monitor, in_umbrella: true},
+      {:arbor_consensus, in_umbrella: true},
       {:jido, override: true},
       {:jido_action, override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

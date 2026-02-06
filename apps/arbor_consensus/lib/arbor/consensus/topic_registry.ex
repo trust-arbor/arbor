@@ -133,6 +133,38 @@ defmodule Arbor.Consensus.TopicRegistry do
   @spec bootstrap_topics() :: map()
   def bootstrap_topics, do: @bootstrap_topics
 
+  @doc """
+  Register default well-known topics.
+
+  Called after startup to ensure topics like `:runtime_fix` exist.
+  Idempotent — skips already-registered topics.
+  """
+  @spec register_default_topics(GenServer.server()) :: :ok
+  def register_default_topics(server \\ __MODULE__) do
+    default_topics = [
+      %TopicRule{
+        topic: :runtime_fix,
+        required_evaluators: [Arbor.Consensus.Evaluator.RuntimeFix],
+        min_quorum: :majority,
+        allowed_proposers: :any,
+        allowed_modes: [:decision],
+        match_patterns: ["runtime", "fix", "heal", "anomaly", "process"],
+        registered_by: "system",
+        registered_at: DateTime.utc_now()
+      }
+    ]
+
+    Enum.each(default_topics, fn rule ->
+      case register_topic(rule, server) do
+        {:ok, _} -> :ok
+        {:error, :already_exists} -> :ok
+        {:error, reason} -> Logger.warning("[TopicRegistry] Failed to register #{rule.topic}: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
+  end
+
   # ============================================================================
   # Client API - Writes (GenServer calls)
   # ============================================================================
