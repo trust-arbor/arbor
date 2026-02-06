@@ -162,7 +162,22 @@ config :arbor_agent,
   default_preset: :balanced,
   # Idle reflection — cognitive exploration during quiet time
   idle_reflection_enabled: true,
-  idle_reflection_chance: 0.3
+  idle_reflection_chance: 0.3,
+  # Context summarization — dual-model approach (Phase 3)
+  context_summarization_enabled: true,
+  summarizer_model: "claude-haiku",
+  summarizer_provider: :anthropic,
+  context_max_tokens: 100_000,
+  context_min_tokens: 20_000,
+  context_recent_ratio: 0.7,
+  context_min_recent_messages: 10,
+  # Summary tiers
+  summary_tiers_enabled: true,
+  summary_tier_1_age_hours: 1,
+  summary_tier_2_age_hours: 24,
+  # Summary cache
+  summary_cache_enabled: true,
+  summary_cache_ttl_minutes: 60
 
 # Memory system defaults
 config :arbor_memory,
