@@ -225,7 +225,8 @@ defmodule Arbor.AI.StreamParser do
   end
 
   # Process final assistant message (contains complete content)
-  defp process_assistant_message(state, %{"content" => content} = message) when is_list(content) do
+  defp process_assistant_message(state, %{"content" => content} = message)
+       when is_list(content) do
     session_id = message["id"]
 
     # Extract model from message or nested model info

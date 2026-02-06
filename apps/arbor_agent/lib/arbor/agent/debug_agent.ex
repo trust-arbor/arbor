@@ -359,7 +359,10 @@ defmodule Arbor.Agent.DebugAgent do
 
     # Log investigation summary
     summary = Investigation.summary(investigation)
-    Logger.info("[DebugAgent] Investigation complete: #{summary.hypothesis_count} hypotheses, confidence: #{Float.round(summary.confidence * 100, 1)}%")
+
+    Logger.info(
+      "[DebugAgent] Investigation complete: #{summary.hypothesis_count} hypotheses, confidence: #{Float.round(summary.confidence * 100, 1)}%"
+    )
 
     safe_emit(:debug_agent, :investigation_complete, %{
       agent_id: state.agent_id,
@@ -745,9 +748,14 @@ defmodule Arbor.Agent.DebugAgent do
     pid_string = inspect(pid)
 
     case Arbor.Actions.Remediation.StopSupervisor.run(%{pid: pid_string}, %{}) do
-      {:ok, %{stopped: true}} -> %{success: true, action: :stop_supervisor, reason: nil}
-      {:ok, %{stopped: false, result: reason}} -> %{success: false, action: :stop_supervisor, reason: reason}
-      {:error, reason} -> %{success: false, action: :stop_supervisor, reason: reason}
+      {:ok, %{stopped: true}} ->
+        %{success: true, action: :stop_supervisor, reason: nil}
+
+      {:ok, %{stopped: false, result: reason}} ->
+        %{success: false, action: :stop_supervisor, reason: reason}
+
+      {:error, reason} ->
+        %{success: false, action: :stop_supervisor, reason: reason}
     end
   end
 

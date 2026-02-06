@@ -22,6 +22,7 @@ config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
 config :arbor_demo, start_children: false
+
 config :arbor_monitor,
   start_children: false,
   signal_emission_enabled: false,
