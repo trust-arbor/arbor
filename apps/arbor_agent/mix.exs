@@ -38,6 +38,7 @@ defmodule ArborAgent.MixProject do
       {:arbor_consensus, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       {:arbor_actions, in_umbrella: true},
+      {:arbor_ai, in_umbrella: true},
       {:jido, override: true},
       {:jido_action, override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
