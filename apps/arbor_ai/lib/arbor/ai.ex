@@ -194,7 +194,9 @@ defmodule Arbor.AI do
       |> maybe_add_api_key(provider)
       |> maybe_add_thinking(thinking_enabled, thinking_budget)
 
-    Logger.debug("Arbor.AI API generating with #{provider}:#{model}, thinking: #{thinking_enabled}")
+    Logger.debug(
+      "Arbor.AI API generating with #{provider}:#{model}, thinking: #{thinking_enabled}"
+    )
 
     case ReqLLM.generate_text(model_spec, messages, req_opts) do
       {:ok, response} ->
@@ -394,6 +396,98 @@ defmodule Arbor.AI do
   end
 
   def record_thinking(_agent_id, _response, _opts), do: :ok
+
+  @doc """
+  Read thinking blocks from a Claude Code session file.
+
+  Session files are stored in `~/.claude/projects/` as JSONL files.
+  Each line is a JSON event, and thinking blocks appear in assistant messages.
+
+  ## Options
+
+  - `:base_dir` — custom session directory (default: `~/.claude/projects`)
+
+  ## Examples
+
+      {:ok, blocks} = Arbor.AI.read_session_thinking("abc-123-session-id")
+      Enum.each(blocks, fn block ->
+        IO.puts(block.text)
+        IO.puts("Signature: \#{block.signature}")
+      end)
+  """
+  @spec read_session_thinking(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate read_session_thinking(session_id, opts \\ []),
+    to: Arbor.AI.SessionReader,
+    as: :read_thinking
+
+  @doc """
+  Read thinking blocks from the most recently modified session.
+
+  ## Options
+
+  - `:project_path` — filter to sessions for a specific project path
+  - `:base_dir` — custom session directory
+
+  ## Examples
+
+      # Get thinking from latest session
+      {:ok, blocks} = Arbor.AI.latest_session_thinking()
+
+      # Get thinking from latest session for a specific project
+      {:ok, blocks} = Arbor.AI.latest_session_thinking(project_path: "~/code/my-project")
+  """
+  @spec latest_session_thinking(keyword()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate latest_session_thinking(opts \\ []),
+    to: Arbor.AI.SessionReader,
+    as: :latest_thinking
+
+  @doc """
+  Import thinking blocks from a session into the memory system.
+
+  Reads thinking blocks from a session file and records them to
+  `Arbor.Memory.Thinking` for the given agent.
+
+  ## Options
+
+  - `:significant` — flag all as significant (default: false)
+  - `:session_id` — specific session to import (otherwise uses latest)
+  - `:base_dir` — custom session directory
+
+  ## Examples
+
+      # Import from latest session
+      {:ok, entries} = Arbor.AI.import_session_thinking("my_agent")
+
+      # Import from specific session
+      {:ok, entries} = Arbor.AI.import_session_thinking("my_agent", session_id: "abc-123")
+  """
+  @spec import_session_thinking(String.t(), keyword()) :: :ok | {:ok, [map()]} | {:error, term()}
+  def import_session_thinking(agent_id, opts \\ []) do
+    session_id = Keyword.get(opts, :session_id)
+
+    reading_result =
+      if session_id do
+        Arbor.AI.SessionReader.read_thinking(session_id, opts)
+      else
+        Arbor.AI.SessionReader.latest_thinking(opts)
+      end
+
+    case reading_result do
+      {:ok, []} ->
+        :ok
+
+      {:ok, blocks} ->
+        # Convert SessionReader format to Response.thinking format
+        response = %{
+          thinking: Enum.map(blocks, fn b -> %{text: b.text, signature: b.signature} end)
+        }
+
+        record_thinking(agent_id, response, opts)
+
+      {:error, _} = error ->
+        error
+    end
+  end
 
   # ── Stats & Observability ──
 
@@ -647,9 +741,11 @@ defmodule Arbor.AI do
 
   defp thinking_block?(%{type: :thinking}), do: true
   defp thinking_block?(%{type: "thinking"}), do: true
+
   defp thinking_block?(part) when is_struct(part) do
     part |> Map.from_struct() |> thinking_block?()
   end
+
   defp thinking_block?(_), do: false
 
   defp normalize_thinking_block(part) when is_struct(part) do
