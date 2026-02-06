@@ -56,24 +56,49 @@ defmodule Arbor.Demo.EvaluatorConfig do
   # ============================================================================
 
   @impl true
-  def name, do: :demo_deterministic
+  def name, do: :demo_evaluator
 
   @impl true
-  def perspectives, do: [:safety_check, :policy_compliance, :rollback_verification]
+  def perspectives do
+    # Deterministic + LLM perspectives
+    [:safety_check, :policy_compliance, :rollback_verification, :vulnerability_scan, :performance_impact]
+  end
 
   @impl true
-  def strategy, do: :rule_based
+  def strategy, do: :hybrid
 
   @impl true
   def evaluate(%Proposal{} = proposal, perspective, opts) do
     evaluator_id = Keyword.get(opts, :evaluator_id, generate_evaluator_id(perspective))
 
     case perspective do
+      # Deterministic perspectives (fast, rule-based)
       :safety_check -> check_safety(proposal, evaluator_id)
       :policy_compliance -> check_policy(proposal, evaluator_id)
       :rollback_verification -> check_rollback(proposal, evaluator_id)
+
+      # LLM perspectives (use configured model)
+      :vulnerability_scan -> evaluate_with_llm(proposal, perspective, evaluator_id, security_system_prompt())
+      :performance_impact -> evaluate_with_llm(proposal, perspective, evaluator_id, performance_system_prompt())
+
       _ -> unsupported_perspective(proposal, perspective, evaluator_id)
     end
+  end
+
+  # LLM-based evaluation using configured model
+  defp evaluate_with_llm(proposal, perspective, evaluator_id, system_prompt) do
+    llm_config = get_llm_config()
+
+    # Build options for LLM evaluator
+    llm_opts = [
+      evaluator_id: evaluator_id,
+      model: Map.get(llm_config, :model),
+      provider: Map.get(llm_config, :provider),
+      system_prompt: system_prompt
+    ] |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+    # Delegate to LLM evaluator
+    Arbor.Consensus.Evaluator.LLM.evaluate(proposal, perspective, llm_opts)
   end
 
   # ============================================================================
@@ -84,34 +109,71 @@ defmodule Arbor.Demo.EvaluatorConfig do
   Get evaluator specifications for the demo.
 
   Returns a list of evaluator specs suitable for passing to the Coordinator.
+  Model configuration is read from Application env, allowing runtime changes.
+
+  ## Configuration
+
+  Set via `Arbor.Demo.configure_evaluator_models/1`:
+
+      Arbor.Demo.configure_evaluator_models(%{
+        provider: :openrouter,
+        model: "meta-llama/llama-3.3-70b-instruct"
+      })
   """
   @spec evaluator_specs() :: [map()]
   def evaluator_specs do
+    # Single evaluator for demo: handles deterministic + LLM perspectives
+    # Use configure_evaluator_models/1 to change the LLM model used
     [
       %{
         module: __MODULE__,
-        name: :demo_deterministic,
-        perspectives: [:safety_check, :policy_compliance, :rollback_verification]
-      },
-      %{
-        module: Arbor.Consensus.Evaluator.LLM,
-        name: :security_llm,
-        perspectives: [:vulnerability_scan],
-        config: %{
-          system_prompt: security_system_prompt(),
-          model: "claude-sonnet-4-20250514"
-        }
-      },
-      %{
-        module: Arbor.Consensus.Evaluator.LLM,
-        name: :performance_llm,
-        perspectives: [:performance_impact],
-        config: %{
-          system_prompt: performance_system_prompt(),
-          model: "claude-sonnet-4-20250514"
-        }
+        name: :demo_evaluator,
+        perspectives: perspectives()
       }
     ]
+  end
+
+  @doc """
+  Get the current LLM configuration for evaluators.
+  """
+  @spec get_llm_config() :: map()
+  def get_llm_config do
+    Application.get_env(:arbor_demo, :evaluator_llm_config, default_llm_config())
+  end
+
+  @doc """
+  Set the LLM configuration for evaluators.
+
+  ## Options
+
+    * `:provider` - LLM provider (`:openrouter`, `:anthropic`, `:openai`, etc.)
+    * `:model` - Model name/ID
+    * `:api_key` - Optional API key override
+
+  ## Examples
+
+      # Use OpenRouter with a free model
+      EvaluatorConfig.set_llm_config(%{
+        provider: :openrouter,
+        model: "meta-llama/llama-3.3-70b-instruct"
+      })
+
+      # Use Anthropic API
+      EvaluatorConfig.set_llm_config(%{
+        provider: :anthropic,
+        model: "claude-sonnet-4-20250514"
+      })
+  """
+  @spec set_llm_config(map()) :: :ok
+  def set_llm_config(config) when is_map(config) do
+    Application.put_env(:arbor_demo, :evaluator_llm_config, config)
+  end
+
+  defp default_llm_config do
+    %{
+      provider: :anthropic,
+      model: "claude-sonnet-4-20250514"
+    }
   end
 
   @doc """
