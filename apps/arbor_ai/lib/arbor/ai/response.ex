@@ -73,8 +73,14 @@ defmodule Arbor.AI.Response do
           optional(:duration_ms) => non_neg_integer()
         }
 
+  @type thinking_block :: %{
+          text: String.t(),
+          signature: String.t() | nil
+        }
+
   @type t :: %__MODULE__{
           text: String.t(),
+          thinking: [thinking_block()] | nil,
           provider: provider(),
           model: String.t() | nil,
           requested_model: String.t() | nil,
@@ -88,6 +94,7 @@ defmodule Arbor.AI.Response do
 
   defstruct [
     :text,
+    :thinking,
     :provider,
     :model,
     :requested_model,
@@ -119,6 +126,7 @@ defmodule Arbor.AI.Response do
   def from_map(map) when is_map(map) do
     %__MODULE__{
       text: map[:text] || map["text"] || "",
+      thinking: normalize_thinking(map[:thinking] || map["thinking"]),
       provider: normalize_provider(map[:provider] || map["provider"]),
       model: map[:model] || map["model"],
       requested_model: map[:requested_model] || map["requested_model"],
@@ -185,4 +193,59 @@ defmodule Arbor.AI.Response do
   defp normalize_finish_reason("tool_use"), do: :tool_use
   defp normalize_finish_reason("tool_calls"), do: :tool_use
   defp normalize_finish_reason(_), do: nil
+
+  # Normalize thinking blocks from extended thinking responses
+  # Handles both list format and individual block format
+  defp normalize_thinking(nil), do: nil
+  defp normalize_thinking([]), do: nil
+
+  defp normalize_thinking(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.map(&normalize_thinking_block/1)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_thinking(block) when is_map(block) do
+    case normalize_thinking_block(block) do
+      nil -> nil
+      normalized -> [normalized]
+    end
+  end
+
+  defp normalize_thinking(_), do: nil
+
+  defp normalize_thinking_block(%{type: "thinking"} = block) do
+    %{
+      text: block[:thinking] || block["thinking"] || "",
+      signature: block[:signature] || block["signature"]
+    }
+  end
+
+  defp normalize_thinking_block(%{"type" => "thinking"} = block) do
+    %{
+      text: block["thinking"] || "",
+      signature: block["signature"]
+    }
+  end
+
+  # Also handle already-normalized format (text/signature keys directly)
+  defp normalize_thinking_block(%{text: text} = block) when is_binary(text) do
+    %{
+      text: text,
+      signature: block[:signature] || block["signature"]
+    }
+  end
+
+  defp normalize_thinking_block(%{"text" => text} = block) when is_binary(text) do
+    %{
+      text: text,
+      signature: block["signature"]
+    }
+  end
+
+  defp normalize_thinking_block(_), do: nil
 end

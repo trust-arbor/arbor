@@ -384,6 +384,7 @@ defmodule Arbor.AI.Backends.CliBackend do
   def build_response(data, provider) do
     Response.new(
       text: data[:text] || data["text"] || "",
+      thinking: data[:thinking] || data["thinking"],
       provider: provider,
       model: data[:model] || data["model"],
       session_id: data[:session_id] || data["session_id"],
