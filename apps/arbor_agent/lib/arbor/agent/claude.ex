@@ -7,7 +7,7 @@ defmodule Arbor.Agent.Claude do
 
   - Query execution via AgentSDK
   - Thinking extraction from session files
-  - Memory integration for thinking persistence
+  - Full memory system integration (recall, index, working memory)
   - Signal emission for agent activities
 
   ## Architecture
@@ -17,22 +17,21 @@ defmodule Arbor.Agent.Claude do
 
   1. Wrapping queries through `Arbor.AI.AgentSDK`
   2. Extracting thinking blocks from session files after each query
-  3. Recording thinking to `Arbor.Memory.Thinking`
-  4. Emitting signals for significant events
+  3. Recalling relevant memories before each query
+  4. Indexing important facts from responses
+  5. Maintaining working memory across the conversation
+  6. Emitting signals for significant events
 
   ## Usage
 
       # Start the agent
       {:ok, agent} = Arbor.Agent.Claude.start_link(id: "claude-main")
 
-      # Send a query
+      # Send a query (automatically recalls relevant memories)
       {:ok, response} = Arbor.Agent.Claude.query(agent, "What is 2+2?")
 
-      # Query with thinking capture
-      {:ok, response} = Arbor.Agent.Claude.query(agent, "Analyze this code",
-        capture_thinking: true,
-        model: :opus
-      )
+      # Get memories recalled for the last query
+      {:ok, memories} = Arbor.Agent.Claude.get_recalled_memories(agent)
 
       # Get captured thinking
       {:ok, blocks} = Arbor.Agent.Claude.get_thinking(agent)
@@ -49,11 +48,18 @@ defmodule Arbor.Agent.Claude do
           {:id, String.t()}
           | {:model, atom()}
           | {:capture_thinking, boolean()}
+          | {:memory_enabled, boolean()}
 
   @type t :: GenServer.server()
 
   # Agent ID used for memory operations
   @default_id "claude-code"
+
+  # How many memories to recall per query
+  @default_recall_limit 5
+
+  # Consolidation check interval (every N queries)
+  @consolidation_check_interval 10
 
   # ============================================================================
   # Public API
@@ -61,6 +67,13 @@ defmodule Arbor.Agent.Claude do
 
   @doc """
   Start the Claude agent.
+
+  ## Options
+
+  - `:id` - Agent identifier (default: "claude-code")
+  - `:model` - Default model to use (default: :sonnet)
+  - `:capture_thinking` - Enable thinking capture (default: true)
+  - `:memory_enabled` - Enable memory system (default: true)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -71,11 +84,17 @@ defmodule Arbor.Agent.Claude do
   @doc """
   Send a query to Claude and get a response.
 
+  Before sending the query, relevant memories are recalled and can be
+  included in the context. After receiving the response, important facts
+  are indexed to memory.
+
   ## Options
 
   - `:model` - Model to use (`:opus`, `:sonnet`, `:haiku`)
   - `:capture_thinking` - Extract thinking from session file (default: true for opus)
   - `:timeout` - Response timeout in ms
+  - `:recall_memories` - Whether to recall memories (default: true)
+  - `:index_response` - Whether to index response facts (default: true)
 
   ## Returns
 
@@ -83,6 +102,7 @@ defmodule Arbor.Agent.Claude do
   - `:text` - The text response
   - `:thinking` - Captured thinking blocks (if any)
   - `:session_id` - Session ID for reference
+  - `:recalled_memories` - Memories that were recalled for context
   """
   @spec query(t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def query(agent, prompt, opts \\ []) do
@@ -95,6 +115,7 @@ defmodule Arbor.Agent.Claude do
   Callbacks receive events:
   - `{:text, chunk}` - Text chunk
   - `{:thinking, block}` - Thinking block (if captured)
+  - `{:memories, list}` - Recalled memories
   - `{:complete, response}` - Final response
   """
   @spec stream(t(), String.t(), (term() -> any()), keyword()) ::
@@ -109,6 +130,22 @@ defmodule Arbor.Agent.Claude do
   @spec get_thinking(t()) :: {:ok, [map()]} | {:error, term()}
   def get_thinking(agent) do
     GenServer.call(agent, :get_thinking)
+  end
+
+  @doc """
+  Get memories recalled for the last query.
+  """
+  @spec get_recalled_memories(t()) :: {:ok, [map()]} | {:error, term()}
+  def get_recalled_memories(agent) do
+    GenServer.call(agent, :get_recalled_memories)
+  end
+
+  @doc """
+  Get the current working memory.
+  """
+  @spec get_working_memory(t()) :: {:ok, map() | nil} | {:error, term()}
+  def get_working_memory(agent) do
+    GenServer.call(agent, :get_working_memory)
   end
 
   @doc """
@@ -127,6 +164,79 @@ defmodule Arbor.Agent.Claude do
     GenServer.call(agent, :session_id)
   end
 
+  @doc """
+  Get memory statistics for this agent.
+  """
+  @spec memory_stats(t()) :: {:ok, map()} | {:error, term()}
+  def memory_stats(agent) do
+    GenServer.call(agent, :memory_stats)
+  end
+
+  @doc """
+  Execute an Arbor action through the capability-based authorization system.
+
+  Routes action execution through `Arbor.Actions.authorize_and_execute/4`,
+  which checks capabilities before running. The agent must have the appropriate
+  `arbor://actions/execute/{action_name}` capability granted.
+
+  ## Parameters
+
+  - `agent` - The agent process
+  - `action_module` - The action module (e.g., `Arbor.Actions.File.Read`)
+  - `params` - Parameters to pass to the action
+  - `opts` - Options (default: [])
+    - `:bypass_auth` - Skip authorization (for trusted system calls)
+
+  ## Returns
+
+  - `{:ok, result}` - Action executed successfully
+  - `{:error, :unauthorized}` - Agent lacks required capability
+  - `{:ok, :pending_approval, proposal_id}` - Requires escalation
+  - `{:error, reason}` - Action failed
+
+  ## Examples
+
+      {:ok, result} = Claude.execute_action(agent, Arbor.Actions.File.Read, %{path: "/tmp/test.txt"})
+      {:ok, result} = Claude.execute_action(agent, Arbor.Actions.Shell.Execute, %{command: "ls -la"})
+  """
+  @spec execute_action(t(), module(), map(), keyword()) ::
+          {:ok, any()} | {:ok, :pending_approval, String.t()} | {:error, term()}
+  def execute_action(agent, action_module, params, opts \\ []) do
+    GenServer.call(agent, {:execute_action, action_module, params, opts}, 60_000)
+  end
+
+  @doc """
+  List available actions the agent can execute.
+
+  Returns a map of action categories to action modules.
+  """
+  @spec list_actions() :: %{atom() => [module()]}
+  def list_actions do
+    if actions_available?() do
+      Arbor.Actions.list_actions()
+    else
+      %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  @doc """
+  Get all actions as LLM tool schemas.
+
+  Useful for providing available tools to the Claude CLI.
+  """
+  @spec get_tools() :: [map()]
+  def get_tools do
+    if actions_available?() do
+      Arbor.Actions.all_tools()
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
   # ============================================================================
   # GenServer Callbacks
   # ============================================================================
@@ -136,18 +246,52 @@ defmodule Arbor.Agent.Claude do
     id = Keyword.get(opts, :id, @default_id)
     default_model = Keyword.get(opts, :model, :sonnet)
     capture_thinking = Keyword.get(opts, :capture_thinking, true)
+    memory_enabled = Keyword.get(opts, :memory_enabled, true)
+
+    # Initialize memory system for this agent
+    memory_initialized =
+      if memory_enabled do
+        init_memory_system(id)
+      else
+        false
+      end
+
+    # Load working memory if available
+    working_memory =
+      if memory_initialized do
+        load_working_memory(id)
+      else
+        nil
+      end
+
+    # Grant capabilities from template (non-fatal if security unavailable)
+    grant_template_capabilities(id)
 
     state = %{
       id: id,
       default_model: default_model,
       capture_thinking: capture_thinking,
+      memory_enabled: memory_enabled,
+      memory_initialized: memory_initialized,
+      working_memory: working_memory,
       last_session_id: nil,
       thinking_cache: [],
+      recalled_memories: [],
       query_count: 0
     }
 
-    Logger.info("Claude agent started", id: id, model: default_model)
-    emit_signal(:agent_started, %{id: id})
+    Logger.info("Claude agent started",
+      id: id,
+      model: default_model,
+      memory_enabled: memory_enabled,
+      memory_initialized: memory_initialized
+    )
+
+    emit_signal(:agent_started, %{
+      id: id,
+      memory_enabled: memory_enabled,
+      memory_initialized: memory_initialized
+    })
 
     {:ok, state}
   end
@@ -156,10 +300,35 @@ defmodule Arbor.Agent.Claude do
   def handle_call({:query, prompt, opts}, _from, state) do
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
+    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
+    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
+
+    # Recall relevant memories before the query
+    recalled =
+      if recall do
+        recall_memories(state.id, prompt)
+      else
+        []
+      end
 
     case execute_query(prompt, model, capture, state, opts) do
       {:ok, response, new_state} ->
-        {:reply, {:ok, response}, new_state}
+        # Index important facts from the response
+        if index do
+          index_response(state.id, prompt, response.text)
+        end
+
+        # Update working memory
+        new_state = update_working_memory(new_state, prompt, response.text)
+
+        # Check if consolidation is needed
+        new_state = maybe_consolidate(new_state)
+
+        # Add recalled memories to response
+        enhanced_response = Map.put(response, :recalled_memories, recalled)
+        new_state = %{new_state | recalled_memories: recalled}
+
+        {:reply, {:ok, enhanced_response}, new_state}
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -169,10 +338,32 @@ defmodule Arbor.Agent.Claude do
   def handle_call({:stream, prompt, callback, opts}, _from, state) do
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
+    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
+    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
+
+    # Recall and notify
+    recalled =
+      if recall do
+        memories = recall_memories(state.id, prompt)
+        if memories != [], do: callback.({:memories, memories})
+        memories
+      else
+        []
+      end
 
     case execute_stream(prompt, callback, model, capture, state, opts) do
       {:ok, response, new_state} ->
-        {:reply, {:ok, response}, new_state}
+        if index do
+          index_response(state.id, prompt, response.text)
+        end
+
+        new_state = update_working_memory(new_state, prompt, response.text)
+        new_state = maybe_consolidate(new_state)
+
+        enhanced_response = Map.put(response, :recalled_memories, recalled)
+        new_state = %{new_state | recalled_memories: recalled}
+
+        {:reply, {:ok, enhanced_response}, new_state}
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -183,6 +374,14 @@ defmodule Arbor.Agent.Claude do
     {:reply, {:ok, state.thinking_cache}, state}
   end
 
+  def handle_call(:get_recalled_memories, _from, state) do
+    {:reply, {:ok, state.recalled_memories}, state}
+  end
+
+  def handle_call(:get_working_memory, _from, state) do
+    {:reply, {:ok, state.working_memory}, state}
+  end
+
   def handle_call(:agent_id, _from, state) do
     {:reply, state.id, state}
   end
@@ -191,19 +390,264 @@ defmodule Arbor.Agent.Claude do
     {:reply, state.last_session_id, state}
   end
 
+  def handle_call(:memory_stats, _from, state) do
+    stats =
+      if state.memory_initialized do
+        get_memory_stats(state.id)
+      else
+        %{enabled: false}
+      end
+
+    {:reply, {:ok, stats}, state}
+  end
+
+  def handle_call({:execute_action, action_module, params, opts}, _from, state) do
+    bypass_auth = Keyword.get(opts, :bypass_auth, false)
+
+    result =
+      if bypass_auth do
+        # Direct execution (for trusted system calls)
+        execute_action_direct(action_module, params)
+      else
+        # Authorized execution (checks capabilities)
+        execute_action_authorized(state.id, action_module, params)
+      end
+
+    # Emit signal for action execution
+    emit_action_signal(state.id, action_module, result)
+
+    {:reply, result, state}
+  end
+
   @impl true
   def terminate(reason, state) do
+    # Save working memory before shutdown
+    if state.memory_initialized and state.working_memory do
+      save_working_memory(state.id, state.working_memory)
+    end
+
     Logger.info("Claude agent stopping", id: state.id, reason: inspect(reason))
     emit_signal(:agent_stopped, %{id: state.id, query_count: state.query_count})
     :ok
   end
 
   # ============================================================================
-  # Private Functions
+  # Memory System Integration
+  # ============================================================================
+
+  defp init_memory_system(agent_id) do
+    if memory_available?() and memory_registry_running?() do
+      case Arbor.Memory.init_for_agent(agent_id) do
+        {:ok, _pid} ->
+          Logger.info("Memory system initialized", agent_id: agent_id)
+          true
+
+        {:error, {:already_started, _pid}} ->
+          Logger.debug("Memory system already running", agent_id: agent_id)
+          true
+
+        {:error, reason} ->
+          Logger.warning("Failed to initialize memory: #{inspect(reason)}")
+          false
+      end
+    else
+      Logger.debug("Memory system not available or not running")
+      false
+    end
+  rescue
+    e ->
+      Logger.debug("Memory system initialization failed: #{Exception.message(e)}")
+      false
+  end
+
+  defp grant_template_capabilities(agent_id) do
+    if security_available?() do
+      alias Arbor.Agent.Templates.ClaudeCode
+
+      capabilities = ClaudeCode.required_capabilities()
+
+      Enum.each(capabilities, fn cap ->
+        grant_single_capability(agent_id, cap.resource)
+      end)
+
+      Logger.info("Granted #{length(capabilities)} capabilities", agent_id: agent_id)
+    else
+      Logger.debug("Security system not available, skipping capability grants")
+    end
+  rescue
+    e ->
+      Logger.debug("Capability grant failed: #{Exception.message(e)}")
+  end
+
+  defp grant_single_capability(agent_id, resource) do
+    case Arbor.Security.grant(principal: agent_id, resource: resource) do
+      {:ok, _cap} ->
+        Logger.debug("Granted capability", agent_id: agent_id, resource: resource)
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to grant capability: #{inspect(reason)}")
+        :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp security_available? do
+    Code.ensure_loaded?(Arbor.Security) and
+      function_exported?(Arbor.Security, :grant, 1) and
+      Process.whereis(Arbor.Security.SystemAuthority) != nil
+  end
+
+  defp memory_registry_running? do
+    # Check if the Memory Registry is running (indicates full app started)
+    Process.whereis(Arbor.Memory.Registry) != nil or
+      Process.whereis(Arbor.Memory.IndexSupervisor) != nil
+  rescue
+    _ -> false
+  end
+
+  defp load_working_memory(agent_id) do
+    # load_working_memory returns WorkingMemory struct directly (creates if not exists)
+    wm = Arbor.Memory.load_working_memory(agent_id)
+    Logger.debug("Loaded working memory", agent_id: agent_id)
+    wm
+  rescue
+    e ->
+      Logger.warning("Error loading working memory: #{Exception.message(e)}")
+      nil
+  end
+
+  defp save_working_memory(agent_id, working_memory) do
+    # save_working_memory returns :ok directly
+    Arbor.Memory.save_working_memory(agent_id, working_memory)
+    Logger.debug("Saved working memory", agent_id: agent_id)
+    :ok
+  rescue
+    e ->
+      Logger.warning("Error saving working memory: #{Exception.message(e)}")
+      :error
+  end
+
+  defp recall_memories(agent_id, query) do
+    case Arbor.Memory.recall(agent_id, query, limit: @default_recall_limit) do
+      {:ok, memories} ->
+        Logger.debug("Recalled #{length(memories)} memories",
+          agent_id: agent_id,
+          query_preview: String.slice(query, 0..50)
+        )
+        memories
+
+      {:error, reason} ->
+        Logger.debug("Memory recall failed: #{inspect(reason)}")
+        []
+    end
+  rescue
+    e ->
+      Logger.warning("Error recalling memories: #{Exception.message(e)}")
+      []
+  end
+
+  defp index_response(agent_id, prompt, response_text) do
+    # Index the exchange as a memory
+    content = "Q: #{String.slice(prompt, 0..200)}\nA: #{String.slice(response_text, 0..500)}"
+
+    metadata = %{
+      type: :conversation,
+      timestamp: DateTime.utc_now(),
+      prompt_length: String.length(prompt),
+      response_length: String.length(response_text)
+    }
+
+    case Arbor.Memory.index(agent_id, content, metadata) do
+      {:ok, entry_id} ->
+        Logger.debug("Indexed conversation", agent_id: agent_id, entry_id: entry_id)
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to index response: #{inspect(reason)}")
+        :error
+    end
+  rescue
+    e ->
+      Logger.warning("Error indexing response: #{Exception.message(e)}")
+      :error
+  end
+
+  defp update_working_memory(state, prompt, response) do
+    if state.memory_initialized and state.working_memory do
+      # Add conversation as a thought to working memory
+      thought = "User asked: #{String.slice(prompt, 0..100)}... " <>
+                "I responded: #{String.slice(response, 0..200)}..."
+
+      # Use WorkingMemory API to add thought
+      working_memory = Arbor.Memory.WorkingMemory.add_thought(
+        state.working_memory,
+        thought,
+        priority: :medium
+      )
+
+      %{state | working_memory: working_memory}
+    else
+      state
+    end
+  rescue
+    _ -> state
+  end
+
+  defp maybe_consolidate(state) do
+    if state.memory_initialized and
+       rem(state.query_count + 1, @consolidation_check_interval) == 0 do
+      # Check if consolidation is needed
+      case Arbor.Memory.should_consolidate?(state.id) do
+        true ->
+          Logger.info("Running memory consolidation", agent_id: state.id)
+          spawn(fn ->
+            Arbor.Memory.run_consolidation(state.id)
+          end)
+
+        false ->
+          :ok
+      end
+    end
+
+    state
+  rescue
+    _ -> state
+  end
+
+  defp get_memory_stats(agent_id) do
+    index_stats =
+      case Arbor.Memory.index_stats(agent_id) do
+        {:ok, stats} -> stats
+        _ -> %{}
+      end
+
+    knowledge_stats =
+      case Arbor.Memory.knowledge_stats(agent_id) do
+        {:ok, stats} -> stats
+        _ -> %{}
+      end
+
+    %{
+      enabled: true,
+      index: index_stats,
+      knowledge: knowledge_stats
+    }
+  rescue
+    _ -> %{enabled: true, error: "Failed to get stats"}
+  end
+
+  defp memory_available? do
+    Code.ensure_loaded?(Arbor.Memory) and
+      function_exported?(Arbor.Memory, :init_for_agent, 1)
+  end
+
+  # ============================================================================
+  # Query Execution
   # ============================================================================
 
   defp should_capture_thinking?(model, state) do
-    # Always capture for Opus, respect setting for others
     model == :opus or state.capture_thinking
   end
 
@@ -320,6 +764,61 @@ defmodule Arbor.Agent.Claude do
       {:error, reason} -> Logger.warning("Failed to record thinking: #{inspect(reason)}")
     end
   end
+
+  # ============================================================================
+  # Action Execution
+  # ============================================================================
+
+  defp actions_available? do
+    Code.ensure_loaded?(Arbor.Actions) and
+      function_exported?(Arbor.Actions, :authorize_and_execute, 4)
+  end
+
+  defp execute_action_authorized(agent_id, action_module, params) do
+    if actions_available?() do
+      Arbor.Actions.authorize_and_execute(agent_id, action_module, params)
+    else
+      {:error, :actions_unavailable}
+    end
+  rescue
+    e -> {:error, {:action_exception, Exception.message(e)}}
+  end
+
+  defp execute_action_direct(action_module, params) do
+    if actions_available?() do
+      Arbor.Actions.execute_action(action_module, params)
+    else
+      {:error, :actions_unavailable}
+    end
+  rescue
+    e -> {:error, {:action_exception, Exception.message(e)}}
+  end
+
+  defp emit_action_signal(agent_id, action_module, result) do
+    outcome =
+      case result do
+        {:ok, _} -> :success
+        {:ok, :pending_approval, _} -> :pending
+        {:error, :unauthorized} -> :unauthorized
+        {:error, _} -> :failure
+      end
+
+    emit_signal(:action_executed, %{
+      agent_id: agent_id,
+      action: action_module_name(action_module),
+      outcome: outcome
+    })
+  end
+
+  defp action_module_name(module) when is_atom(module) do
+    module |> Module.split() |> Enum.take(-2) |> Enum.join(".")
+  end
+
+  defp action_module_name(module), do: inspect(module)
+
+  # ============================================================================
+  # Signal Emission
+  # ============================================================================
 
   defp emit_signal(event, data) do
     if signals_available?() do

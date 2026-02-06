@@ -486,7 +486,10 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
           <%!-- Verification Status --%>
           <%= if @verification_status do %>
-            <div class={"aw-verification-status #{verification_class(@verification_status)}"} style="margin-top: 1rem;">
+            <div
+              class={"aw-verification-status #{verification_class(@verification_status)}"}
+              style="margin-top: 1rem;"
+            >
               <span>{verification_icon(@verification_status)}</span>
               <span>{verification_label(@verification_status)}</span>
             </div>
@@ -822,7 +825,10 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         evidence_chain: []
       },
       confidence: data[:confidence] || 0.0,
-      thinking_log: ["Investigation started", "Gathered #{data[:hypothesis_count] || 0} hypotheses"]
+      thinking_log: [
+        "Investigation started",
+        "Gathered #{data[:hypothesis_count] || 0} hypotheses"
+      ]
     }
 
     assign(socket, current_investigation: investigation)
