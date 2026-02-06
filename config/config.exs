@@ -138,7 +138,7 @@ config :arbor_ai,
   enable_reliability_routing: false,
   reliability_alert_threshold: 0.8
 
-# Agent autonomy: temporal awareness + cognitive modes
+# Agent autonomy: temporal awareness + cognitive modes + heartbeat loop
 config :arbor_agent,
   # Timing context — inject conversational timing into agent prompts
   timing_context_enabled: true,
@@ -148,7 +148,21 @@ config :arbor_agent,
   cognitive_prompts_enabled: true,
   cognitive_mode_models: %{
     consolidation: "haiku"
-  }
+  },
+  # Heartbeat loop — periodic autonomous processing
+  heartbeat_enabled: true,
+  heartbeat_interval_ms: 30_000,
+  heartbeat_skip_when_busy: true,
+  # Message queueing during busy heartbeats
+  message_queue_max_size: 100,
+  # Context window persistence
+  context_persistence_enabled: true,
+  context_compression_enabled: true,
+  context_window_dir: "~/.arbor/context_windows",
+  default_preset: :balanced,
+  # Idle reflection — cognitive exploration during quiet time
+  idle_reflection_enabled: true,
+  idle_reflection_chance: 0.3
 
 # Memory system defaults
 config :arbor_memory,
