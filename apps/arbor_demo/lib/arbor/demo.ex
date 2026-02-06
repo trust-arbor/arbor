@@ -3,8 +3,9 @@ defmodule Arbor.Demo do
   Facade for the Arbor Demo system.
 
   Provides controllable BEAM-native fault injection for demonstrating
-  Arbor's self-healing capabilities. The actual healing pipeline is handled
-  by `arbor_monitor` — this module just provides fault injection controls.
+  Arbor's self-healing capabilities. Faults are "dumb chaos generators" —
+  they create problems but don't know how to fix them. The DebugAgent must
+  discover the fix through genuine investigation.
 
   ## Available Faults
 
@@ -17,17 +18,18 @@ defmodule Arbor.Demo do
       # Configure for demo (fast polling, low thresholds)
       Arbor.Demo.configure_demo_mode()
 
-      # Inject a fault
-      {:ok, :message_queue_flood} = Arbor.Demo.inject_fault(:message_queue_flood)
+      # Inject a fault - returns correlation_id for tracing
+      {:ok, correlation_id} = Arbor.Demo.inject_fault(:message_queue_flood)
 
       # Check what's active
       Arbor.Demo.active_faults()
 
-      # Clear a specific fault
-      :ok = Arbor.Demo.clear_fault(:message_queue_flood)
+      # Stop a fault by type (terminates process but doesn't "fix" the problem)
+      # Note: The DebugAgent should discover which process to kill through investigation
+      :ok = Arbor.Demo.stop_fault(:message_queue_flood)
 
-      # Clear everything
-      {:ok, count} = Arbor.Demo.clear_all()
+      # Stop all faults
+      {:ok, count} = Arbor.Demo.stop_all()
 
   ## Healing Pipeline
 
@@ -47,16 +49,29 @@ defmodule Arbor.Demo do
   # Fault Injection
   # ============================================================================
 
-  @doc "Inject a fault of the given type. Returns `{:ok, type}` or `{:error, reason}`."
+  @doc """
+  Inject a fault of the given type.
+
+  Returns `{:ok, correlation_id}` where correlation_id can be used to trace
+  the fault through the Historian, or `{:error, reason}`.
+  """
   defdelegate inject_fault(type, opts \\ []), to: Arbor.Demo.FaultInjector
 
-  @doc "Clear a specific active fault. Returns `:ok` or `{:error, :not_active}`."
-  defdelegate clear_fault(type), to: Arbor.Demo.FaultInjector
+  @doc """
+  Stop an active fault by type or correlation_id.
 
-  @doc "Clear all active faults. Returns `{:ok, count_cleared}`."
-  defdelegate clear_all(), to: Arbor.Demo.FaultInjector
+  This terminates the fault's process but does NOT "fix" the problem in the
+  way the DebugAgent would. The DebugAgent should discover which process
+  to kill through BEAM inspection, not by calling this function.
 
-  @doc "Returns a map of currently active faults with their metadata."
+  Returns `:ok` or `{:error, :not_active}`.
+  """
+  defdelegate stop_fault(type_or_correlation_id), to: Arbor.Demo.FaultInjector
+
+  @doc "Stop all active faults. Returns `{:ok, count_stopped}`."
+  defdelegate stop_all(), to: Arbor.Demo.FaultInjector
+
+  @doc "Returns a map of currently active faults keyed by correlation_id."
   defdelegate active_faults(), to: Arbor.Demo.FaultInjector
 
   @doc "Returns status for a specific fault type (`:inactive` or status map)."
@@ -64,6 +79,9 @@ defmodule Arbor.Demo do
 
   @doc "Returns list of all available fault types with descriptions."
   defdelegate available_faults(), to: Arbor.Demo.FaultInjector
+
+  @doc "Get the correlation_id for an active fault by type."
+  defdelegate get_correlation_id(type), to: Arbor.Demo.FaultInjector
 
   # ============================================================================
   # Demo Mode Configuration
