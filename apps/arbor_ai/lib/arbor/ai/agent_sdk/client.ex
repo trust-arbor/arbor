@@ -3,27 +3,12 @@ defmodule Arbor.AI.AgentSDK.Client do
   Claude Agent SDK Client for Elixir.
 
   Provides a high-level interface for building agentic applications with Claude,
-  including support for:
-
-  - Extended thinking (reasoning traces with cryptographic signatures)
-  - Tool use and custom tools
-  - Multi-turn conversations with state
-  - Streaming responses
-
-  ## Architecture
-
-  This is an Elixir implementation inspired by the official Claude Agent SDKs
-  for Python and TypeScript. It communicates with the Claude Code CLI via
-  a subprocess transport layer.
+  including support for extended thinking (reasoning traces with signatures).
 
   ## Usage
 
       # Start a client
-      {:ok, client} = Client.start_link(
-        cwd: "/path/to/project",
-        model: :opus,
-        system_prompt: "You are a helpful coding assistant."
-      )
+      {:ok, client} = Client.start_link(model: :opus)
 
       # Send a query and collect responses
       {:ok, response} = Client.query(client, "What is 2 + 2?")
@@ -34,22 +19,13 @@ defmodule Arbor.AI.AgentSDK.Client do
       Client.stream(client, "Explain recursion", fn event ->
         case event do
           {:text, chunk} -> IO.write(chunk)
-          {:thinking, block} -> IO.puts("[Thinking: \#{block.text}]")
-          {:complete, response} -> IO.puts("\\nDone!")
+          {:thinking, block} -> IO.puts("[Thinking]")
+          {:complete, response} -> IO.puts("Done!")
         end
       end)
 
       # Close the client
       :ok = Client.close(client)
-
-  ## Configuration Options
-
-  - `:cwd` - Working directory for the Claude CLI
-  - `:model` - Model to use (`:opus`, `:sonnet`, `:haiku`)
-  - `:system_prompt` - System prompt for the conversation
-  - `:max_turns` - Maximum conversation turns
-  - `:allowed_tools` - List of allowed tool names
-  - `:timeout` - Response timeout in milliseconds (default: 120_000)
   """
 
   use GenServer
@@ -63,7 +39,6 @@ defmodule Arbor.AI.AgentSDK.Client do
           | {:model, atom() | String.t()}
           | {:system_prompt, String.t()}
           | {:max_turns, pos_integer()}
-          | {:allowed_tools, [String.t()]}
           | {:timeout, pos_integer()}
 
   @type t :: GenServer.server()
@@ -100,9 +75,6 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @doc """
   Send a query and wait for the complete response.
-
-  This is a blocking call that waits until Claude has finished
-  responding, including any tool use and thinking.
   """
   @spec query(t(), String.t(), keyword()) :: {:ok, query_result()} | {:error, term()}
   def query(client, prompt, opts \\ []) do
@@ -112,14 +84,6 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @doc """
   Stream responses from Claude, calling the callback for each event.
-
-  Events include:
-  - `{:text, chunk}` - Text chunk received
-  - `{:thinking, block}` - Thinking block completed
-  - `{:tool_use, tool_call}` - Tool use requested
-  - `{:complete, response}` - Response complete
-
-  Returns the final response after streaming completes.
   """
   @spec stream(t(), String.t(), (term() -> any()), keyword()) ::
           {:ok, query_result()} | {:error, term()}
@@ -129,46 +93,11 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   @doc """
-  Continue the conversation with a follow-up message.
-
-  This maintains the conversation context from previous exchanges.
-  """
-  @spec continue(t(), String.t(), keyword()) :: {:ok, query_result()} | {:error, term()}
-  def continue(client, message, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
-    GenServer.call(client, {:continue, message, opts}, timeout)
-  end
-
-  @doc """
-  Get the current conversation history.
-  """
-  @spec history(t()) :: [map()]
-  def history(client) do
-    GenServer.call(client, :history)
-  end
-
-  @doc """
-  Clear the conversation history and start fresh.
-  """
-  @spec clear_history(t()) :: :ok
-  def clear_history(client) do
-    GenServer.call(client, :clear_history)
-  end
-
-  @doc """
-  Close the client and terminate the transport.
+  Close the client.
   """
   @spec close(t()) :: :ok
   def close(client) do
-    GenServer.call(client, :close)
-  end
-
-  @doc """
-  Check if the client is connected.
-  """
-  @spec connected?(t()) :: boolean()
-  def connected?(client) do
-    GenServer.call(client, :connected?)
+    GenServer.stop(client)
   end
 
   # ============================================================================
@@ -177,99 +106,58 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @impl true
   def init(opts) do
-    # Start transport with this process as receiver
-    transport_opts = Keyword.put(opts, :receiver, self())
+    state = %{
+      opts: opts,
+      transport: nil,
+      pending_query: nil,
+      current_response: new_response_acc(),
+      stream_callback: nil
+    }
 
-    case Transport.start_link(transport_opts) do
-      {:ok, transport} ->
-        state = %{
-          transport: transport,
-          opts: opts,
-          history: [],
-          pending_query: nil,
-          current_response: new_response_acc(),
-          stream_callback: nil
-        }
-
-        {:ok, state}
-
-      {:error, reason} ->
-        {:stop, reason}
-    end
+    {:ok, state}
   end
 
   @impl true
   def handle_call({:query, prompt, query_opts}, from, state) do
-    # Merge options
-    _opts = Keyword.merge(state.opts, query_opts)
+    opts = Keyword.merge(state.opts, query_opts)
+    transport_opts = Keyword.put(opts, :prompt, prompt) |> Keyword.put(:receiver, self())
 
-    case Transport.send_prompt(state.transport, prompt) do
-      :ok ->
+    case Transport.start_link(transport_opts) do
+      {:ok, transport} ->
         new_state = %{
           state
-          | pending_query: from,
+          | transport: transport,
+            pending_query: from,
             current_response: new_response_acc(),
             stream_callback: nil
         }
 
         {:noreply, new_state}
 
-      {:error, _} = error ->
-        {:reply, error, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:stream, prompt, callback, query_opts}, from, state) do
-    _opts = Keyword.merge(state.opts, query_opts)
+    opts = Keyword.merge(state.opts, query_opts)
+    transport_opts = Keyword.put(opts, :prompt, prompt) |> Keyword.put(:receiver, self())
 
-    case Transport.send_prompt(state.transport, prompt) do
-      :ok ->
+    case Transport.start_link(transport_opts) do
+      {:ok, transport} ->
         new_state = %{
           state
-          | pending_query: from,
+          | transport: transport,
+            pending_query: from,
             current_response: new_response_acc(),
             stream_callback: callback
         }
 
         {:noreply, new_state}
 
-      {:error, _} = error ->
-        {:reply, error, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
-  end
-
-  def handle_call({:continue, message, _opts}, from, state) do
-    case Transport.send_prompt(state.transport, message) do
-      :ok ->
-        new_state = %{
-          state
-          | pending_query: from,
-            current_response: new_response_acc()
-        }
-
-        {:noreply, new_state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  def handle_call(:history, _from, state) do
-    {:reply, state.history, state}
-  end
-
-  def handle_call(:clear_history, _from, state) do
-    {:reply, :ok, %{state | history: []}}
-  end
-
-  def handle_call(:close, _from, state) do
-    Transport.close(state.transport)
-    {:reply, :ok, state}
-  end
-
-  def handle_call(:connected?, _from, state) do
-    connected = Transport.connected?(state.transport)
-    {:reply, connected, state}
   end
 
   @impl true
@@ -278,15 +166,21 @@ defmodule Arbor.AI.AgentSDK.Client do
     {:noreply, new_state}
   end
 
-  def handle_info({:transport_closed, reason}, state) do
-    Logger.info("Transport closed: #{inspect(reason)}")
+  def handle_info({:transport_closed, status}, state) do
+    Logger.debug("Transport closed with status #{status}")
 
-    # If we have a pending query, reply with error
     if state.pending_query do
-      GenServer.reply(state.pending_query, {:error, {:transport_closed, reason}})
+      # If we haven't sent a response yet, build one from accumulated data
+      response = build_response(state.current_response)
+
+      if response.text != "" or response.thinking != nil do
+        GenServer.reply(state.pending_query, {:ok, response})
+      else
+        GenServer.reply(state.pending_query, {:error, {:transport_closed, status}})
+      end
     end
 
-    {:noreply, %{state | pending_query: nil}}
+    {:noreply, %{state | transport: nil, pending_query: nil}}
   end
 
   def handle_info({:transport_error, error}, state) do
@@ -324,7 +218,6 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   defp process_message(state, %{"type" => "assistant", "message" => message}) do
-    # Extract content from assistant message
     content = message["content"] || []
 
     acc =
@@ -333,7 +226,6 @@ defmodule Arbor.AI.AgentSDK.Client do
           "text" ->
             text = block["text"] || ""
 
-            # Stream callback for text
             if state.stream_callback do
               state.stream_callback.({:text, text})
             end
@@ -346,7 +238,6 @@ defmodule Arbor.AI.AgentSDK.Client do
               signature: block["signature"]
             }
 
-            # Stream callback for thinking
             if state.stream_callback do
               state.stream_callback.({:thinking, thinking})
             end
@@ -360,7 +251,6 @@ defmodule Arbor.AI.AgentSDK.Client do
               input: block["input"]
             }
 
-            # Stream callback for tool use
             if state.stream_callback do
               state.stream_callback.({:tool_use, tool_use})
             end
@@ -372,7 +262,6 @@ defmodule Arbor.AI.AgentSDK.Client do
         end
       end)
 
-    # Update model if present
     acc =
       if message["model"] do
         %{acc | model: message["model"]}
@@ -384,40 +273,26 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   defp process_message(state, %{"type" => "result"} = result) do
-    # Result message signals completion
-    acc = state.current_response
-
-    # Extract usage and session info
     acc = %{
-      acc
+      state.current_response
       | usage: result["usage"],
         session_id: result["session_id"]
     }
 
-    # Build final response
     response = build_response(acc)
 
-    # Add to history
-    new_history = [
-      %{role: :assistant, content: response.text, thinking: response.thinking}
-      | state.history
-    ]
-
-    # Stream callback for completion
     if state.stream_callback do
       state.stream_callback.({:complete, response})
     end
 
-    # Reply to pending query
     if state.pending_query do
       GenServer.reply(state.pending_query, {:ok, response})
     end
 
-    %{state | pending_query: nil, current_response: new_response_acc(), history: new_history}
+    %{state | pending_query: nil, current_response: new_response_acc()}
   end
 
   defp process_message(state, %{type: :thinking_complete, thinking: thinking}) do
-    # Thinking block completed from streaming
     if state.stream_callback do
       Enum.each(thinking, fn block ->
         state.stream_callback.({:thinking, block})
@@ -433,7 +308,6 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   defp process_message(state, _message) do
-    # Ignore other message types
     state
   end
 
