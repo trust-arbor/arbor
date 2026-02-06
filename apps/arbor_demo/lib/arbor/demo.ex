@@ -41,6 +41,8 @@ defmodule Arbor.Demo do
 
   alias Arbor.Signals
 
+  require Logger
+
   # ============================================================================
   # Fault Injection
   # ============================================================================
@@ -93,13 +95,61 @@ defmodule Arbor.Demo do
   defdelegate timing_mode(), to: Arbor.Demo.Timing, as: :current_mode
 
   # ============================================================================
+  # Evaluator Configuration
+  # ============================================================================
+
+  @doc """
+  Get the current evaluator LLM configuration.
+  """
+  @spec evaluator_llm_config() :: map()
+  defdelegate evaluator_llm_config(), to: Arbor.Demo.EvaluatorConfig, as: :get_llm_config
+
+  @doc """
+  Configure the LLM models used by council evaluators.
+
+  The demo uses 3 evaluators (per council recommendation):
+  - `:demo_deterministic` — Rule-based, always uses local logic
+  - `:security_llm` — LLM-based security review
+  - `:performance_llm` — LLM-based performance review
+
+  ## Options
+
+    * `:provider` - LLM provider (`:openrouter`, `:anthropic`, `:openai`, etc.)
+    * `:model` - Model name/ID
+
+  ## Examples
+
+      # Use OpenRouter with a free model (good for demos)
+      Arbor.Demo.configure_evaluator_models(%{
+        provider: :openrouter,
+        model: "meta-llama/llama-3.3-70b-instruct"
+      })
+
+      # Use Anthropic (requires API key)
+      Arbor.Demo.configure_evaluator_models(%{
+        provider: :anthropic,
+        model: "claude-sonnet-4-20250514"
+      })
+
+      # Use local Ollama
+      Arbor.Demo.configure_evaluator_models(%{
+        provider: :ollama,
+        model: "llama3.3:70b"
+      })
+  """
+  @spec configure_evaluator_models(map()) :: :ok
+  defdelegate configure_evaluator_models(config), to: Arbor.Demo.EvaluatorConfig, as: :set_llm_config
+
+  # ============================================================================
   # Demo Mode Configuration
   # ============================================================================
 
   @doc """
   Configure the system for demo mode.
 
-  Sets fast polling (500ms), low thresholds (100 messages), and enables signals.
+  Sets fast polling (500ms), low thresholds (100 messages), enables signals,
+  and registers the demo topic with the consensus system.
+
   Call this before injecting faults for reliable demo detection.
   """
   @spec configure_demo_mode() :: :ok
@@ -124,7 +174,46 @@ defmodule Arbor.Demo do
     # Enable signal emission
     Application.put_env(:arbor_monitor, :signal_emission_enabled, true)
 
+    # Register demo topic with TopicRegistry
+    register_demo_topic()
+
     :ok
+  end
+
+  # Register the :runtime_fix topic used by demo proposals
+  defp register_demo_topic do
+    alias Arbor.Consensus.TopicRule
+
+    topic_rule = %TopicRule{
+      topic: :runtime_fix,
+      required_evaluators: [],
+      min_quorum: :majority,
+      allowed_proposers: :any,
+      allowed_modes: [:decision],
+      match_patterns: ["runtime", "fix", "heal", "hot-load", "patch"],
+      is_bootstrap: false
+    }
+
+    case Arbor.Consensus.TopicRegistry.register_topic(topic_rule) do
+      {:ok, _} ->
+        Logger.info("[Demo] Registered :runtime_fix topic")
+        :ok
+
+      {:error, :already_exists} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[Demo] Failed to register :runtime_fix topic: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[Demo] TopicRegistry not available: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ ->
+      Logger.warning("[Demo] TopicRegistry not running")
+      :ok
   end
 
   @doc """

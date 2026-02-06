@@ -22,10 +22,13 @@ defmodule Arbor.Demo.OrchestratorTest do
     test "returns evaluator specs" do
       specs = EvaluatorConfig.evaluator_specs()
 
-      assert length(specs) == 3
-      assert Enum.any?(specs, &(&1.name == :demo_deterministic))
-      assert Enum.any?(specs, &(&1.name == :security_llm))
-      assert Enum.any?(specs, &(&1.name == :performance_llm))
+      # Single unified evaluator for demo
+      assert length(specs) == 1
+      [spec] = specs
+      assert spec.name == :demo_evaluator
+      assert :safety_check in spec.perspectives
+      assert :vulnerability_scan in spec.perspectives
+      assert :performance_impact in spec.perspectives
     end
 
     test "identifies protected modules" do

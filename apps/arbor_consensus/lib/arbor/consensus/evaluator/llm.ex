@@ -50,7 +50,10 @@ defmodule Arbor.Consensus.Evaluator.LLM do
     :security_llm,
     :architecture_llm,
     :code_quality_llm,
-    :performance_llm
+    :performance_llm,
+    # Demo-specific perspectives
+    :vulnerability_scan,
+    :performance_impact
   ]
 
   # ===========================================================================
@@ -90,7 +93,7 @@ defmodule Arbor.Consensus.Evaluator.LLM do
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
 
     if perspective in @supported_perspectives do
-      do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout)
+      do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout, opts)
     else
       unsupported_perspective(proposal, perspective, evaluator_id)
     end
@@ -108,19 +111,26 @@ defmodule Arbor.Consensus.Evaluator.LLM do
   # Evaluation Logic
   # ===========================================================================
 
-  defp do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout) do
-    system_prompt = system_prompt_for(perspective)
+  defp do_evaluate(proposal, perspective, evaluator_id, ai_module, timeout, opts) do
+    system_prompt = Keyword.get(opts, :system_prompt) || system_prompt_for(perspective)
     user_prompt = format_proposal(proposal)
+    model = Keyword.get(opts, :model)
+    provider = Keyword.get(opts, :provider)
 
-    Logger.debug("LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms)")
+    Logger.debug("LLM evaluator running for perspective: #{perspective} (timeout: #{timeout}ms, model: #{model || "default"})")
+
+    # Build options for AI call
+    ai_opts = [
+      system_prompt: system_prompt,
+      max_tokens: 2048,
+      temperature: 0.3
+    ]
+    ai_opts = if model, do: Keyword.put(ai_opts, :model, model), else: ai_opts
+    ai_opts = if provider, do: Keyword.put(ai_opts, :provider, provider), else: ai_opts
 
     task =
       Task.async(fn ->
-        ai_module.generate_text(user_prompt,
-          system_prompt: system_prompt,
-          max_tokens: 2048,
-          temperature: 0.3
-        )
+        ai_module.generate_text(user_prompt, ai_opts)
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
@@ -210,6 +220,15 @@ defmodule Arbor.Consensus.Evaluator.LLM do
     Vote "approve" if no significant performance issues.
     Vote "reject" if performance problems are likely.
     """
+  end
+
+  # Demo-specific perspectives (used when custom system_prompt not provided)
+  defp system_prompt_for(:vulnerability_scan) do
+    system_prompt_for(:security_llm)
+  end
+
+  defp system_prompt_for(:performance_impact) do
+    system_prompt_for(:performance_llm)
   end
 
   defp system_prompt_for(perspective) do
