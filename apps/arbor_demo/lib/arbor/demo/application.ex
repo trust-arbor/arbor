@@ -7,10 +7,8 @@ defmodule Arbor.Demo.Application do
     children =
       if Application.get_env(:arbor_demo, :start_children, true) do
         [
-          {Arbor.Demo.Timing, []},
           {Arbor.Demo.Supervisor, []},
-          {Arbor.Demo.FaultInjector, []},
-          {Arbor.Demo.Orchestrator, []}
+          {Arbor.Demo.FaultInjector, []}
         ]
       else
         []

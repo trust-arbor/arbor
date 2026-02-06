@@ -27,7 +27,7 @@ defmodule Arbor.Security.Reflex.Builtin do
   """
   @spec all() :: [Reflex.t()]
   def all do
-    shell_reflexes() ++ file_reflexes() ++ network_reflexes()
+    shell_reflexes() ++ file_reflexes() ++ network_reflexes() ++ infrastructure_reflexes()
   end
 
   @doc """
@@ -237,12 +237,72 @@ defmodule Arbor.Security.Reflex.Builtin do
   end
 
   @doc """
+  Infrastructure protection reflexes.
+
+  These block hot-loading of critical healing infrastructure modules.
+  If an attacker could hot-load replacement code for the healing system,
+  they could disable safety checks or inject malicious fixes.
+  """
+  @spec infrastructure_reflexes() :: [Reflex.t()]
+  def infrastructure_reflexes do
+    # Modules protected from hot-load by agents
+    protected_modules = [
+      Arbor.Monitor,
+      Arbor.Monitor.Poller,
+      Arbor.Monitor.AnomalyQueue,
+      Arbor.Monitor.Verification,
+      Arbor.Monitor.CascadeDetector,
+      Arbor.Monitor.RejectionTracker,
+      Arbor.Monitor.Fingerprint,
+      Arbor.Monitor.MetricsStore,
+      Arbor.Monitor.AnomalyDetector,
+      Arbor.Monitor.HealingSupervisor,
+      Arbor.Agent.DebugAgent,
+      Arbor.Security.Reflex,
+      Arbor.Security.Reflex.Registry,
+      Arbor.Security.Reflex.Builtin
+    ]
+
+    [
+      # Block hot-loading of healing infrastructure modules
+      Reflex.custom(
+        "no_self_healing",
+        fn context ->
+          module = Map.get(context, :module)
+          action = Map.get(context, :action)
+
+          action == :code_hot_load and module in protected_modules
+        end,
+        id: "no_self_healing",
+        response: :block,
+        message: "Blocked: cannot hot-load healing infrastructure modules",
+        priority: 100
+      ),
+      # Block code_eval on protected modules
+      Reflex.custom(
+        "no_healing_eval",
+        fn context ->
+          module = Map.get(context, :module)
+          action = Map.get(context, :action)
+
+          action == :code_eval and module in protected_modules
+        end,
+        id: "no_healing_eval",
+        response: :block,
+        message: "Blocked: cannot eval code in healing infrastructure context",
+        priority: 100
+      )
+    ]
+  end
+
+  @doc """
   Get built-in reflexes by category.
   """
   @spec by_category(atom()) :: [Reflex.t()]
   def by_category(:shell), do: shell_reflexes()
   def by_category(:file), do: file_reflexes()
   def by_category(:network), do: network_reflexes()
+  def by_category(:infrastructure), do: infrastructure_reflexes()
   def by_category(_), do: []
 
   @doc """

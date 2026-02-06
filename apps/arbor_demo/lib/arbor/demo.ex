@@ -3,7 +3,8 @@ defmodule Arbor.Demo do
   Facade for the Arbor Demo system.
 
   Provides controllable BEAM-native fault injection for demonstrating
-  Arbor's self-healing pipeline: Detect -> Diagnose -> Propose -> Review -> Fix -> Verify.
+  Arbor's self-healing capabilities. The actual healing pipeline is handled
+  by `arbor_monitor` — this module just provides fault injection controls.
 
   ## Available Faults
 
@@ -12,6 +13,9 @@ defmodule Arbor.Demo do
   - `:supervisor_crash` — Creates a supervisor with a crashing child (detected by `:supervisor` skill)
 
   ## Usage
+
+      # Configure for demo (fast polling, low thresholds)
+      Arbor.Demo.configure_demo_mode()
 
       # Inject a fault
       {:ok, :message_queue_flood} = Arbor.Demo.inject_fault(:message_queue_flood)
@@ -25,23 +29,19 @@ defmodule Arbor.Demo do
       # Clear everything
       {:ok, count} = Arbor.Demo.clear_all()
 
-  ## Demo Scenarios
+  ## Healing Pipeline
 
-      # Run a pre-scripted scenario
-      {:ok, result} = Arbor.Demo.run_scenario(:successful_heal)
+  The healing pipeline is handled by `arbor_monitor`:
 
-      # Run full rehearsal
-      {:ok, results} = Arbor.Demo.rehearsal()
-
-  ## Timing Control
-
-      # Set demo timing mode
-      Arbor.Demo.set_timing(:fast)  # :fast | :normal | :slow
+  - `Arbor.Monitor.AnomalyQueue` — Queues detected anomalies
+  - `Arbor.Monitor.CascadeDetector` — Detects cascade failures
+  - `Arbor.Monitor.Verification` — Tracks fix verification (soak period)
+  - `Arbor.Monitor.RejectionTracker` — Three-strike escalation
   """
 
-  alias Arbor.Signals
-
   require Logger
+
+  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, RejectionTracker, Verification}
 
   # ============================================================================
   # Fault Injection
@@ -66,97 +66,17 @@ defmodule Arbor.Demo do
   defdelegate available_faults(), to: Arbor.Demo.FaultInjector
 
   # ============================================================================
-  # Scenarios
-  # ============================================================================
-
-  @doc "Run a pre-scripted demo scenario."
-  defdelegate run_scenario(name, opts \\ []), to: Arbor.Demo.Scenarios, as: :run
-
-  @doc "Run full demo rehearsal (all scenarios)."
-  defdelegate rehearsal(opts \\ []), to: Arbor.Demo.Scenarios
-
-  @doc "Get scenario definition by name."
-  defdelegate scenario(name), to: Arbor.Demo.Scenarios
-
-  @doc "List available scenario names."
-  defdelegate available_scenarios(), to: Arbor.Demo.Scenarios
-
-  # ============================================================================
-  # Timing
-  # ============================================================================
-
-  @doc "Set demo timing mode (:fast, :normal, :slow)."
-  defdelegate set_timing(mode), to: Arbor.Demo.Timing, as: :set
-
-  @doc "Get current timing configuration."
-  defdelegate timing_config(), to: Arbor.Demo.Timing, as: :config
-
-  @doc "Get current timing mode."
-  defdelegate timing_mode(), to: Arbor.Demo.Timing, as: :current_mode
-
-  # ============================================================================
-  # Evaluator Configuration
-  # ============================================================================
-
-  @doc """
-  Get the current evaluator LLM configuration.
-  """
-  @spec evaluator_llm_config() :: map()
-  defdelegate evaluator_llm_config(), to: Arbor.Demo.EvaluatorConfig, as: :get_llm_config
-
-  @doc """
-  Configure the LLM models used by council evaluators.
-
-  The demo uses 3 evaluators (per council recommendation):
-  - `:demo_deterministic` — Rule-based, always uses local logic
-  - `:security_llm` — LLM-based security review
-  - `:performance_llm` — LLM-based performance review
-
-  ## Options
-
-    * `:provider` - LLM provider (`:openrouter`, `:anthropic`, `:openai`, etc.)
-    * `:model` - Model name/ID
-
-  ## Examples
-
-      # Use OpenRouter with a free model (good for demos)
-      Arbor.Demo.configure_evaluator_models(%{
-        provider: :openrouter,
-        model: "meta-llama/llama-3.3-70b-instruct"
-      })
-
-      # Use Anthropic (requires API key)
-      Arbor.Demo.configure_evaluator_models(%{
-        provider: :anthropic,
-        model: "claude-sonnet-4-20250514"
-      })
-
-      # Use local Ollama
-      Arbor.Demo.configure_evaluator_models(%{
-        provider: :ollama,
-        model: "llama3.3:70b"
-      })
-  """
-  @spec configure_evaluator_models(map()) :: :ok
-  defdelegate configure_evaluator_models(config), to: Arbor.Demo.EvaluatorConfig, as: :set_llm_config
-
-  # ============================================================================
   # Demo Mode Configuration
   # ============================================================================
 
   @doc """
   Configure the system for demo mode.
 
-  Sets fast polling (500ms), low thresholds (100 messages), enables signals,
-  and registers the demo topic with the consensus system.
-
+  Sets fast polling (500ms), low thresholds (100 messages), and enables signals.
   Call this before injecting faults for reliable demo detection.
   """
   @spec configure_demo_mode() :: :ok
   def configure_demo_mode do
-    # Enable demo mode (bypasses capability checks in Executor)
-    Application.put_env(:arbor_demo, :demo_mode, true)
-
     # Fast polling for demo
     Application.put_env(:arbor_monitor, :polling_interval_ms, 500)
 
@@ -174,46 +94,8 @@ defmodule Arbor.Demo do
     # Enable signal emission
     Application.put_env(:arbor_monitor, :signal_emission_enabled, true)
 
-    # Register demo topic with TopicRegistry
-    register_demo_topic()
-
+    Logger.info("[Demo] Demo mode configured (fast polling, low thresholds)")
     :ok
-  end
-
-  # Register the :runtime_fix topic used by demo proposals
-  defp register_demo_topic do
-    alias Arbor.Consensus.TopicRule
-
-    topic_rule = %TopicRule{
-      topic: :runtime_fix,
-      required_evaluators: [],
-      min_quorum: :majority,
-      allowed_proposers: :any,
-      allowed_modes: [:decision],
-      match_patterns: ["runtime", "fix", "heal", "hot-load", "patch"],
-      is_bootstrap: false
-    }
-
-    case Arbor.Consensus.TopicRegistry.register_topic(topic_rule) do
-      {:ok, _} ->
-        Logger.info("[Demo] Registered :runtime_fix topic")
-        :ok
-
-      {:error, :already_exists} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[Demo] Failed to register :runtime_fix topic: #{inspect(reason)}")
-        :ok
-    end
-  rescue
-    e ->
-      Logger.warning("[Demo] TopicRegistry not available: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, _ ->
-      Logger.warning("[Demo] TopicRegistry not running")
-      :ok
   end
 
   @doc """
@@ -221,9 +103,6 @@ defmodule Arbor.Demo do
   """
   @spec configure_production_mode() :: :ok
   def configure_production_mode do
-    # Disable demo mode
-    Application.put_env(:arbor_demo, :demo_mode, false)
-
     Application.put_env(:arbor_monitor, :polling_interval_ms, 5_000)
 
     Application.put_env(:arbor_monitor, :anomaly_config, %{
@@ -236,46 +115,34 @@ defmodule Arbor.Demo do
       ewma_stddev_threshold: 3.0
     })
 
+    Logger.info("[Demo] Production mode configured")
     :ok
   end
 
   # ============================================================================
-  # Recovery Helpers
+  # Healing Pipeline Status (delegates to arbor_monitor)
   # ============================================================================
 
   @doc """
-  Force detection signal emission.
+  Get the current healing pipeline status.
 
-  Use this when the monitor isn't detecting an injected fault.
-  Manually emits a monitor.anomaly_detected signal.
+  Returns a map with queue, cascade, verification, and rejection stats.
   """
-  @spec force_detect() :: :ok
-  def force_detect do
-    faults = active_faults()
-
-    if map_size(faults) == 0 do
-      # No active faults, emit generic anomaly
-      emit_anomaly(:unknown, %{source: :manual_trigger})
-    else
-      # Emit for first active fault
-      {fault_type, fault_data} = Enum.at(faults, 0)
-      emit_anomaly(fault_type, fault_data)
-    end
-
-    :ok
+  @spec healing_status() :: map()
+  def healing_status do
+    %{
+      queue: safe_call(fn -> AnomalyQueue.stats() end, %{}),
+      cascade: safe_call(fn -> CascadeDetector.status() end, %{}),
+      verification: safe_call(fn -> Verification.stats() end, %{}),
+      rejections: safe_call(fn -> RejectionTracker.stats() end, %{})
+    }
   end
 
-  defp emit_anomaly(fault_type, data) do
-    Signals.emit(:monitor, :anomaly_detected, %{
-      type: fault_type,
-      severity: :high,
-      timestamp: System.system_time(:millisecond),
-      source: :demo_force_detect,
-      data: data
-    })
+  defp safe_call(fun, default) do
+    fun.()
   rescue
-    _ -> :ok
+    _ -> default
   catch
-    :exit, _ -> :ok
+    :exit, _ -> default
   end
 end
