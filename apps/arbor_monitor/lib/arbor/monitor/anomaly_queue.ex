@@ -428,6 +428,23 @@ defmodule Arbor.Monitor.AnomalyQueue do
     :ok
   end
 
+  # Resolved = fix was successful and verified
+  defp handle_outcome(anomaly_id, queued, :resolved, _config) do
+    :ets.delete(@queue_table, anomaly_id)
+    Logger.info("[AnomalyQueue] Resolved: #{Fingerprint.to_string(queued.fingerprint)}")
+    :ok
+  end
+
+  # Failed = diagnosis or proposal failed, retry if attempts remain
+  defp handle_outcome(anomaly_id, queued, :failed, config) do
+    handle_outcome(anomaly_id, queued, {:retry, "diagnosis failed"}, config)
+  end
+
+  # Rejected = proposal was rejected by council, retry if attempts remain
+  defp handle_outcome(anomaly_id, queued, :rejected, config) do
+    handle_outcome(anomaly_id, queued, {:retry, "proposal rejected"}, config)
+  end
+
   defp expire_stale_leases do
     now = System.monotonic_time(:millisecond)
 
