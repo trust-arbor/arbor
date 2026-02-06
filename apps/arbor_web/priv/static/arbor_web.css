@@ -1461,3 +1461,182 @@
   font-family: var(--aw-font-mono);
   font-size: 0.75rem;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   INVESTIGATION PANEL
+   ══════════════════════════════════════════════════════════════════════ */
+
+.aw-investigation-panel {
+  background: var(--aw-surface);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  padding: 1rem;
+}
+
+.aw-investigation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-investigation-section {
+  margin-bottom: 1rem;
+}
+
+.aw-investigation-section:last-child {
+  margin-bottom: 0;
+}
+
+.aw-investigation-section-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--aw-text-secondary);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.aw-hypothesis-card {
+  background: var(--aw-surface-secondary);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius-sm);
+  padding: 0.75rem;
+}
+
+.aw-symptoms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.5rem;
+}
+
+.aw-symptom-card {
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.aw-symptom-type {
+  font-size: 0.7rem;
+  color: var(--aw-text-secondary);
+  text-transform: capitalize;
+}
+
+.aw-symptom-value {
+  font-family: var(--aw-font-mono);
+  font-size: 0.8rem;
+  color: var(--aw-text-primary);
+  font-weight: 600;
+}
+
+.aw-thinking-log {
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  padding: 0.75rem;
+  font-family: var(--aw-font-mono);
+  font-size: 0.75rem;
+}
+
+.aw-thinking-entry {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  color: var(--aw-text-secondary);
+}
+
+.aw-thinking-step {
+  color: var(--aw-accent-blue);
+  font-weight: 600;
+  min-width: 1.5rem;
+}
+
+.aw-thinking-toggle {
+  background: none;
+  border: none;
+  color: var(--aw-accent-blue);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0.25rem 0;
+  margin-top: 0.5rem;
+}
+
+.aw-thinking-toggle:hover {
+  text-decoration: underline;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   VERIFICATION STATUS
+   ══════════════════════════════════════════════════════════════════════ */
+
+.aw-verification-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--aw-radius-sm);
+  font-size: 0.85rem;
+}
+
+.aw-verification-verified {
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid var(--aw-accent-green);
+  color: var(--aw-accent-green);
+}
+
+.aw-verification-unverified {
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--aw-accent-red);
+  color: var(--aw-accent-red);
+}
+
+.aw-verification-pending {
+  background: rgba(201, 165, 96, 0.1);
+  border: 1px solid var(--aw-accent-yellow);
+  color: var(--aw-accent-yellow);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   CIRCUIT BREAKER STATUS
+   ══════════════════════════════════════════════════════════════════════ */
+
+.aw-circuit-breaker {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--aw-radius-sm);
+  font-size: 0.8rem;
+}
+
+.aw-circuit-closed {
+  background: rgba(63, 185, 80, 0.1);
+  color: var(--aw-accent-green);
+}
+
+.aw-circuit-open {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--aw-accent-red);
+}
+
+.aw-circuit-half-open {
+  background: rgba(201, 165, 96, 0.1);
+  color: var(--aw-accent-yellow);
+}
+
+.aw-circuit-icon {
+  font-size: 1rem;
+}
+
+.aw-circuit-label {
+  font-weight: 500;
+}
+
+.aw-circuit-stats {
+  font-family: var(--aw-font-mono);
+  font-size: 0.7rem;
+  color: var(--aw-text-secondary);
+}
