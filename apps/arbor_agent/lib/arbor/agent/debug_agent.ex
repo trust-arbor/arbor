@@ -65,11 +65,61 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   @doc """
+  Start a debug agent (convenience wrapper around start_link).
+
+  Returns `{:ok, agent_id}` on success.
+  """
+  @spec start() :: {:ok, String.t()} | {:error, term()}
+  def start, do: start([])
+
+  @spec start(keyword()) :: {:ok, String.t()} | {:error, term()}
+  def start(opts) do
+    agent_id = Keyword.get(opts, :agent_id, @default_agent_id)
+
+    case start_link(opts) do
+      {:ok, _pid} -> {:ok, agent_id}
+      {:error, {:already_started, _pid}} -> {:ok, agent_id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Stop a debug agent.
+
+  Returns `:ok` whether or not the agent was running (idempotent).
+  """
+  @spec stop(String.t()) :: :ok
+  def stop(agent_id) do
+    GenServer.stop(via_name(agent_id))
+    :ok
+  catch
+    :exit, {:noproc, _} -> :ok
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Run a bounded number of healing cycles.
+
+  Useful for testing — runs up to `max_cycles` work cycles, then returns.
+  """
+  @spec run_bounded(String.t(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  def run_bounded(agent_id, max_cycles) when is_integer(max_cycles) and max_cycles > 0 do
+    GenServer.call(via_name(agent_id), {:run_bounded, max_cycles}, :infinity)
+  catch
+    :exit, {:noproc, _} -> {:error, :not_running}
+  end
+
+  @doc """
   Get the current state of the debug agent.
   """
+  @spec get_state(String.t()) :: {:ok, map()} | {:error, :not_found | :not_running}
   def get_state(agent_id) do
-    GenServer.call(via_name(agent_id), :get_state)
+    case GenServer.call(via_name(agent_id), :get_state) do
+      {:ok, state} -> {:ok, state}
+      state when is_map(state) -> {:ok, state}
+    end
   catch
+    :exit, {:noproc, _} -> {:error, :not_found}
     :exit, _ -> {:error, :not_running}
   end
 
@@ -153,6 +203,12 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   @impl true
+  def handle_call({:run_bounded, max_cycles}, _from, state) do
+    final_state = run_bounded_cycles(state, max_cycles)
+    {:reply, {:ok, final_state.stats}, final_state}
+  end
+
+  @impl true
   def handle_cast(:check_now, state) do
     new_state = do_work_cycle(state)
     {:noreply, new_state}
@@ -191,6 +247,34 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   defp do_work_cycle(state), do: state
+
+  defp run_bounded_cycles(state, 0), do: state
+
+  defp run_bounded_cycles(state, remaining) do
+    new_state = do_work_cycle(state)
+
+    # If still working on something, wait a bit and check decision
+    new_state =
+      if new_state.phase in [:diagnosing, :awaiting_decision] do
+        Process.sleep(100)
+
+        if new_state.phase == :awaiting_decision do
+          poll_decision(new_state)
+        else
+          new_state
+        end
+      else
+        new_state
+      end
+
+    # Continue if we're back to idle and have cycles remaining
+    if new_state.phase == :idle do
+      run_bounded_cycles(new_state, remaining - 1)
+    else
+      # Still working, recurse without decrementing (work in progress)
+      run_bounded_cycles(new_state, remaining)
+    end
+  end
 
   # ============================================================================
   # Phase: Claim Work
@@ -419,6 +503,8 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   defp build_proposal(anomaly, analysis_data) do
+    details = anomaly.details || %{}
+
     %{
       topic: :runtime_fix,
       proposer: "debug-agent",
@@ -427,7 +513,17 @@ defmodule Arbor.Agent.DebugAgent do
       fix_code: analysis_data[:suggested_fix] || "",
       root_cause: analysis_data[:root_cause] || "Unknown",
       confidence: analysis_data[:confidence] || 0.5,
+      # Flatten context for RuntimeFix evaluator
       context: %{
+        proposer: "debug-agent",
+        skill: anomaly.skill,
+        severity: anomaly.severity,
+        metric: Map.get(details, :metric, :unknown),
+        value: Map.get(details, :value, 0),
+        threshold: Map.get(details, :threshold, 0),
+        root_cause: analysis_data[:root_cause] || "Unknown",
+        recommended_fix: analysis_data[:suggested_fix] || "",
+        # Keep full data for reference
         anomaly: anomaly,
         analysis: analysis_data
       }
@@ -581,20 +677,22 @@ defmodule Arbor.Agent.DebugAgent do
 
   defp extract_confidence(text) when is_binary(text) do
     case Regex.run(~r/(\d+\.?\d*)\s*(?:confidence|%)?/i, text) do
-      [_, num] ->
-        case Float.parse(num) do
-          {parsed, _} -> if parsed > 1.0, do: parsed / 100, else: parsed
-          :error -> 0.5
-        end
-
-      _ ->
-        0.5
+      [_, num] -> parse_confidence_value(num)
+      _ -> 0.5
     end
   rescue
     _ -> 0.5
   end
 
   defp extract_confidence(_), do: 0.5
+
+  defp parse_confidence_value(num) do
+    case Float.parse(num) do
+      {parsed, _} when parsed > 1.0 -> parsed / 100
+      {parsed, _} -> parsed
+      :error -> 0.5
+    end
+  end
 
   defp safe_submit_proposal(proposal) do
     case Arbor.Consensus.submit(proposal, []) do
