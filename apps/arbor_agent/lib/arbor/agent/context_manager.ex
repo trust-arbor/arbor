@@ -169,6 +169,22 @@ defmodule Arbor.Agent.ContextManager do
     end
   end
 
+  @doc """
+  Compress context using intelligent summarization if enabled,
+  falling back to simple truncation.
+
+  Uses `Arbor.Agent.ContextSummarizer` for dual-model summarization
+  when `context_summarization_enabled` is true.
+  """
+  @spec maybe_compress(map()) :: {:ok, map()} | {:error, term()}
+  def maybe_compress(window) do
+    if config(:context_summarization_enabled, false) do
+      Arbor.Agent.ContextSummarizer.maybe_summarize(window)
+    else
+      {:ok, window}
+    end
+  end
+
   # ============================================================================
   # Private
   # ============================================================================
