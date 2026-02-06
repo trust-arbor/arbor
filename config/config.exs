@@ -138,6 +138,18 @@ config :arbor_ai,
   enable_reliability_routing: false,
   reliability_alert_threshold: 0.8
 
+# Agent autonomy: temporal awareness + cognitive modes
+config :arbor_agent,
+  # Timing context — inject conversational timing into agent prompts
+  timing_context_enabled: true,
+  timing_format: :human,
+  response_urgency_threshold_ms: 120_000,
+  # Cognitive mode prompts — specialized framing for background tasks
+  cognitive_prompts_enabled: true,
+  cognitive_mode_models: %{
+    consolidation: "haiku"
+  }
+
 # Memory system defaults
 config :arbor_memory,
   index_max_entries: 10_000,
