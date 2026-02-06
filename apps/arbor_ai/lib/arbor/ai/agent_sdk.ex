@@ -7,6 +7,9 @@ defmodule Arbor.AI.AgentSDK do
 
   - **Extended Thinking**: Access Claude's reasoning process with cryptographic signatures
   - **Tool Use**: Define and use custom tools with Claude
+  - **In-Process Tools**: Define Elixir functions as tools (no subprocess overhead)
+  - **Hook Callbacks**: Intercept tool calls programmatically
+  - **Permission Modes**: Control file edit and dangerous operation permissions
   - **Conversations**: Multi-turn conversations with maintained state
   - **Streaming**: Real-time streaming of responses
 
@@ -24,32 +27,34 @@ defmodule Arbor.AI.AgentSDK do
         cwd: "/path/to/project"
       )
 
-  ## Stateful Conversations
+  ## In-Process Tools
 
-      # Start a client for multi-turn conversations
-      {:ok, client} = Arbor.AI.AgentSDK.start_client(
-        model: :sonnet,
-        system_prompt: "You are a helpful coding assistant."
+      defmodule MyTools do
+        use Arbor.AI.AgentSDK.Tool
+
+        deftool :greet, "Greet a user" do
+          param :name, :string, required: true
+          def execute(%{name: name}), do: {:ok, "Hello, \#{name}!"}
+        end
+      end
+
+      # Register tools
+      Arbor.AI.AgentSDK.ToolServer.register_tools(MyTools)
+
+  ## Hook Callbacks
+
+      {:ok, response} = Arbor.AI.AgentSDK.query("...",
+        hooks: %{
+          pre_tool_use: fn name, input, _ctx -> :allow end,
+          post_tool_use: fn name, _input, result, _ctx -> :ok end
+        }
       )
 
-      # First message
-      {:ok, r1} = Arbor.AI.AgentSDK.Client.query(client, "What's a GenServer?")
+  ## Permission Modes
 
-      # Follow-up (maintains context)
-      {:ok, r2} = Arbor.AI.AgentSDK.Client.continue(client, "Show me an example")
-
-      # Close when done
-      :ok = Arbor.AI.AgentSDK.Client.close(client)
-
-  ## Streaming
-
-      Arbor.AI.AgentSDK.stream("Explain recursion", fn event ->
-        case event do
-          {:text, chunk} -> IO.write(chunk)
-          {:thinking, block} -> IO.puts("[Thinking...]")
-          {:complete, _} -> IO.puts("\\nDone!")
-        end
-      end)
+      {:ok, response} = Arbor.AI.AgentSDK.query("Edit the file",
+        permission_mode: :accept_edits
+      )
 
   ## Architecture
 
@@ -60,6 +65,7 @@ defmodule Arbor.AI.AgentSDK do
   - Transport layer using Elixir Ports
   - GenServer-based client for state management
   - Async-friendly streaming with callbacks
+  - In-process tool server for zero-overhead tool calls
   """
 
   alias Arbor.AI.AgentSDK.Client
@@ -70,6 +76,10 @@ defmodule Arbor.AI.AgentSDK do
           | {:system_prompt, String.t()}
           | {:max_turns, pos_integer()}
           | {:timeout, pos_integer()}
+          | {:hooks, Arbor.AI.AgentSDK.Hooks.hooks()}
+          | {:permission_mode, Arbor.AI.AgentSDK.Permissions.permission_mode()}
+          | {:allowed_tools, [String.t() | atom()]}
+          | {:disallowed_tools, [String.t() | atom()]}
         ]
 
   @type response :: %{
@@ -93,6 +103,10 @@ defmodule Arbor.AI.AgentSDK do
   - `:system_prompt` - System prompt to set context
   - `:max_turns` - Maximum conversation turns
   - `:timeout` - Response timeout in ms (default: 120_000)
+  - `:hooks` - Hook callbacks map (see `Arbor.AI.AgentSDK.Hooks`)
+  - `:permission_mode` - Permission mode (`:default`, `:accept_edits`, `:plan`, `:bypass`)
+  - `:allowed_tools` - List of allowed tool names
+  - `:disallowed_tools` - List of disallowed tool names
 
   ## Examples
 
@@ -101,7 +115,8 @@ defmodule Arbor.AI.AgentSDK do
       {:ok, response} = Arbor.AI.AgentSDK.query(
         "Analyze this code",
         model: :opus,
-        cwd: "/path/to/project"
+        cwd: "/path/to/project",
+        permission_mode: :accept_edits
       )
   """
   @spec query(String.t(), query_opts()) :: {:ok, response()} | {:error, term()}
@@ -127,6 +142,8 @@ defmodule Arbor.AI.AgentSDK do
   - `{:thinking, %{text: ..., signature: ...}}` - Thinking block completed
   - `{:tool_use, %{id: ..., name: ..., input: ...}}` - Tool use requested
   - `{:complete, response}` - Response complete
+
+  Accepts the same options as `query/2`.
 
   ## Examples
 
@@ -159,11 +176,14 @@ defmodule Arbor.AI.AgentSDK do
   Start a client for multi-turn conversations.
 
   The client maintains conversation state and allows multiple queries
-  in a single session.
+  in a single session. Accepts the same options as `query/2`.
 
   ## Examples
 
-      {:ok, client} = Arbor.AI.AgentSDK.start_client(model: :opus)
+      {:ok, client} = Arbor.AI.AgentSDK.start_client(
+        model: :opus,
+        hooks: %{pre_tool_use: fn _, _, _ -> :allow end}
+      )
       {:ok, r1} = Arbor.AI.AgentSDK.Client.query(client, "Hello")
       {:ok, r2} = Arbor.AI.AgentSDK.Client.continue(client, "Tell me more")
       :ok = Arbor.AI.AgentSDK.Client.close(client)

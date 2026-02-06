@@ -37,5 +37,25 @@ defmodule Arbor.AI.AgentSDKTest do
     test "Transport module exists" do
       assert Code.ensure_loaded?(Arbor.AI.AgentSDK.Transport)
     end
+
+    test "Tool module exists" do
+      assert Code.ensure_loaded?(Arbor.AI.AgentSDK.Tool)
+    end
+
+    test "ToolServer module exists" do
+      assert Code.ensure_loaded?(Arbor.AI.AgentSDK.ToolServer)
+    end
+
+    test "Hooks module exists" do
+      assert Code.ensure_loaded?(Arbor.AI.AgentSDK.Hooks)
+    end
+
+    test "Permissions module exists" do
+      assert Code.ensure_loaded?(Arbor.AI.AgentSDK.Permissions)
+    end
+
+    test "Error module exists" do
+      assert Code.ensure_loaded?(Arbor.AI.AgentSDK.Error)
+    end
   end
 end
