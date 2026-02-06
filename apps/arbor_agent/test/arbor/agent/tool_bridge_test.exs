@@ -43,9 +43,10 @@ defmodule Arbor.Agent.ToolBridgeTest do
     end
 
     test "excludes specified actions", %{server: server} do
-      :ok = ToolBridge.register_actions(server, "test_agent", %{},
-        exclude: ["shell_execute", "shell_execute_script"]
-      )
+      :ok =
+        ToolBridge.register_actions(server, "test_agent", %{},
+          exclude: ["shell_execute", "shell_execute_script"]
+        )
 
       tools = ToolServer.list_tools(server)
       names = Enum.map(tools, & &1["name"])
@@ -85,12 +86,13 @@ defmodule Arbor.Agent.ToolBridgeTest do
 
   describe "register_action/4" do
     test "registers a single action", %{server: server} do
-      :ok = ToolBridge.register_action(
-        server,
-        Arbor.Actions.File.Read,
-        "test_agent",
-        %{}
-      )
+      :ok =
+        ToolBridge.register_action(
+          server,
+          Arbor.Actions.File.Read,
+          "test_agent",
+          %{}
+        )
 
       assert ToolServer.has_tool?("file_read", server)
       refute ToolServer.has_tool?("file_write", server)
@@ -114,12 +116,13 @@ defmodule Arbor.Agent.ToolBridgeTest do
 
   describe "handler construction" do
     test "builds handler that wraps action", %{server: server} do
-      :ok = ToolBridge.register_action(
-        server,
-        Arbor.Actions.File.Read,
-        "test_agent",
-        %{}
-      )
+      :ok =
+        ToolBridge.register_action(
+          server,
+          Arbor.Actions.File.Read,
+          "test_agent",
+          %{}
+        )
 
       # Verify the handler is registered
       assert ToolServer.has_tool?("file_read", server)
