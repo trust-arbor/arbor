@@ -32,6 +32,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
   require Logger
 
+  alias Arbor.AI.AgentSDK.Permissions
   alias Arbor.AI.StreamParser
 
   @type option ::
@@ -41,6 +42,9 @@ defmodule Arbor.AI.AgentSDK.Transport do
           | {:system_prompt, String.t()}
           | {:max_turns, pos_integer()}
           | {:receiver, pid()}
+          | {:permission_mode, Permissions.permission_mode()}
+          | {:allowed_tools, [String.t() | atom()]}
+          | {:disallowed_tools, [String.t() | atom()]}
 
   @type t :: GenServer.server()
 
@@ -236,35 +240,42 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
   defp build_args(opts) do
     prompt = Keyword.get(opts, :prompt, "")
+    permission_mode = Permissions.resolve_mode(opts)
 
     # Base args for streaming with thinking
     args = [
       "--output-format",
       "stream-json",
       "--verbose",
-      "--print",
-      "--dangerously-skip-permissions"
+      "--print"
     ]
+
+    # Permission mode flags
+    args = args ++ Permissions.cli_flags(permission_mode)
+
+    # Tool restriction flags (override permission mode tool flags if present)
+    tool_flags = Permissions.tool_restriction_flags(opts)
+    args = if tool_flags != [], do: args ++ tool_flags, else: args
 
     # Model selection
     args =
       case Keyword.get(opts, :model) do
         nil -> args
-        model -> ["--model", to_string(model) | args]
+        model -> args ++ ["--model", to_string(model)]
       end
 
     # System prompt
     args =
       case Keyword.get(opts, :system_prompt) do
         nil -> args
-        sys_prompt -> ["--system-prompt", sys_prompt | args]
+        sys_prompt -> args ++ ["--system-prompt", sys_prompt]
       end
 
     # Max turns
     args =
       case Keyword.get(opts, :max_turns) do
         nil -> args
-        turns -> ["--max-turns", to_string(turns) | args]
+        turns -> args ++ ["--max-turns", to_string(turns)]
       end
 
     # Add prompt at the end
