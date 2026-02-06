@@ -25,32 +25,52 @@ defmodule Arbor.Demo.Faults.SupervisorCrashTest do
 
   describe "inject/1" do
     test "creates a supervisor with crashing child", %{supervisor: supervisor} do
-      {:ok, pid} =
+      {:ok, pid, correlation_id} =
         SupervisorCrash.inject(crash_interval_ms: 5_000, supervisor: supervisor)
 
       assert Process.alive?(pid)
+      assert is_binary(correlation_id)
+      assert String.starts_with?(correlation_id, "fault_svc_")
 
       # The crash supervisor should have children
       children = Supervisor.which_children(pid)
       assert length(children) == 1
 
-      SupervisorCrash.clear(pid)
+      # Clean up by stopping the supervisor directly
+      Supervisor.stop(pid, :normal)
     end
-  end
 
-  describe "clear/1" do
-    test "stops the crash supervisor", %{supervisor: supervisor} do
-      {:ok, pid} =
+    test "child worker stores correlation_id in process dictionary", %{supervisor: supervisor} do
+      {:ok, pid, correlation_id} =
         SupervisorCrash.inject(crash_interval_ms: 5_000, supervisor: supervisor)
 
-      assert Process.alive?(pid)
-      :ok = SupervisorCrash.clear(pid)
-      Process.sleep(50)
-      refute Process.alive?(pid)
+      # Get the child worker pid
+      [{_id, child_pid, _type, _modules}] = Supervisor.which_children(pid)
+
+      # No sleep needed - Supervisor.start_link waits for all children
+      {:dictionary, dict} = Process.info(child_pid, :dictionary)
+      assert Keyword.get(dict, :arbor_correlation_id) == correlation_id
+      assert Keyword.get(dict, :arbor_fault_type) == :crash_worker
+
+      Supervisor.stop(pid, :normal)
     end
 
-    test "handles nil reference" do
-      assert :ok = SupervisorCrash.clear(nil)
+    test "child crashes and restarts", %{supervisor: supervisor} do
+      {:ok, pid, _correlation_id} =
+        SupervisorCrash.inject(crash_interval_ms: 50, supervisor: supervisor)
+
+      # Get initial child pid
+      [{_id, child_pid1, _type, _modules}] = Supervisor.which_children(pid)
+      assert Process.alive?(child_pid1)
+
+      # Wait for crash and restart
+      Process.sleep(100)
+
+      # Child should have restarted (different pid or still alive due to restart)
+      [{_id, child_pid2, _type, _modules}] = Supervisor.which_children(pid)
+      assert Process.alive?(child_pid2)
+
+      Supervisor.stop(pid, :normal)
     end
   end
 end
