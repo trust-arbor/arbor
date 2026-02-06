@@ -2,8 +2,21 @@ defmodule Arbor.Demo.FaultInjector do
   @moduledoc """
   Core GenServer that manages fault injection lifecycle.
 
-  Tracks active faults, coordinates with the DynamicSupervisor for
-  fault worker processes, and emits signals on inject/clear events.
+  Tracks active faults by correlation_id, coordinates with the DynamicSupervisor
+  for fault worker processes, and emits signals on inject/stop events.
+
+  ## Philosophy
+
+  Faults are "dumb chaos generators" — they create problems but don't know
+  how to fix them. The FaultInjector can stop faults by terminating their
+  processes, but the DebugAgent must discover which process to terminate
+  through investigation.
+
+  ## Tracking
+
+  Faults are tracked by both:
+  - `type` (e.g., :message_queue_flood) for API convenience
+  - `correlation_id` for Historian tracing
   """
   use GenServer
 
@@ -15,7 +28,10 @@ defmodule Arbor.Demo.FaultInjector do
     supervisor_crash: Arbor.Demo.Faults.SupervisorCrash
   }
 
-  defstruct active_faults: %{}, fault_modules: @fault_modules, supervisor: Arbor.Demo.Supervisor
+  defstruct active_faults: %{},
+            faults_by_type: %{},
+            fault_modules: @fault_modules,
+            supervisor: Arbor.Demo.Supervisor
 
   # Client API
 
@@ -29,9 +45,8 @@ defmodule Arbor.Demo.FaultInjector do
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
-  # Public API
-  # When server is a PID or registered name, it's the first arg.
-  # When called with just type/opts, uses __MODULE__ as server.
+  # Public API - Inject fault
+  # Returns {:ok, correlation_id} or {:error, reason}
 
   def inject_fault(server, type, opts) when is_pid(server) or is_atom(server) do
     GenServer.call(server, {:inject, type, opts})
@@ -49,21 +64,26 @@ defmodule Arbor.Demo.FaultInjector do
     GenServer.call(__MODULE__, {:inject, type, []})
   end
 
-  def clear_fault(server, type) when is_pid(server) or is_atom(server) do
-    GenServer.call(server, {:clear, type})
+  # Stop fault - terminates the process but doesn't "fix" the problem
+  # The DebugAgent should use generic BEAM operations, not this API
+
+  def stop_fault(server, type_or_correlation_id) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:stop, type_or_correlation_id})
   end
 
-  def clear_fault(type) when is_atom(type) do
-    GenServer.call(__MODULE__, {:clear, type})
+  def stop_fault(type_or_correlation_id) do
+    GenServer.call(__MODULE__, {:stop, type_or_correlation_id})
   end
 
-  def clear_all(server) when is_pid(server) or is_atom(server) do
-    GenServer.call(server, :clear_all)
+  def stop_all(server) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, :stop_all)
   end
 
-  def clear_all do
-    GenServer.call(__MODULE__, :clear_all)
+  def stop_all do
+    GenServer.call(__MODULE__, :stop_all)
   end
+
+  # Query API
 
   def active_faults(server) when is_pid(server) or is_atom(server) do
     GenServer.call(server, :active_faults)
@@ -89,6 +109,14 @@ defmodule Arbor.Demo.FaultInjector do
     GenServer.call(__MODULE__, :available_faults)
   end
 
+  def get_correlation_id(server, type) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:get_correlation_id, type})
+  end
+
+  def get_correlation_id(type) when is_atom(type) do
+    GenServer.call(__MODULE__, {:get_correlation_id, type})
+  end
+
   # Server callbacks
 
   @impl GenServer
@@ -106,57 +134,90 @@ defmodule Arbor.Demo.FaultInjector do
 
     with {:ok, module} <- find_fault_module(state, type),
          :ok <- check_not_active(state, type),
-         {:ok, ref} <- module.inject(inject_opts) do
+         {:ok, ref, correlation_id} <- module.inject(inject_opts) do
       fault_info = %{
+        type: type,
         module: module,
         ref: ref,
+        correlation_id: correlation_id,
         injected_at: System.system_time(:millisecond),
         opts: opts
       }
 
-      new_state = %{state | active_faults: Map.put(state.active_faults, type, fault_info)}
-      emit_signal(:fault_injected, %{type: type, description: module.description()})
-      Logger.warning("[Demo] Fault injected: #{type}")
-      {:reply, {:ok, type}, new_state}
+      new_state = %{
+        state
+        | active_faults: Map.put(state.active_faults, correlation_id, fault_info),
+          faults_by_type: Map.put(state.faults_by_type, type, correlation_id)
+      }
+
+      Logger.warning("[Demo] Fault injected: #{type} (#{correlation_id})")
+      {:reply, {:ok, correlation_id}, new_state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_call({:clear, type}, _from, state) do
-    case Map.pop(state.active_faults, type) do
+  def handle_call({:stop, type_or_correlation_id}, _from, state) do
+    # Try to find by type first, then by correlation_id
+    correlation_id =
+      if is_atom(type_or_correlation_id) do
+        Map.get(state.faults_by_type, type_or_correlation_id)
+      else
+        type_or_correlation_id
+      end
+
+    case correlation_id && Map.pop(state.active_faults, correlation_id) do
       {nil, _} ->
         {:reply, {:error, :not_active}, state}
 
-      {fault_info, remaining} ->
-        safe_clear(fault_info)
-        new_state = %{state | active_faults: remaining}
-        emit_signal(:fault_cleared, %{type: type})
-        Logger.info("[Demo] Fault cleared: #{type}")
+      nil ->
+        {:reply, {:error, :not_active}, state}
+
+      {fault_info, remaining_faults} ->
+        terminate_fault_process(fault_info.ref)
+
+        new_state = %{
+          state
+          | active_faults: remaining_faults,
+            faults_by_type: Map.delete(state.faults_by_type, fault_info.type)
+        }
+
+        emit_signal(:fault_stopped, %{
+          type: fault_info.type,
+          correlation_id: correlation_id
+        })
+
+        Logger.info("[Demo] Fault stopped: #{fault_info.type} (#{correlation_id})")
         {:reply, :ok, new_state}
     end
   end
 
-  def handle_call(:clear_all, _from, state) do
-    Enum.each(state.active_faults, fn {type, fault_info} ->
-      safe_clear(fault_info)
-      emit_signal(:fault_cleared, %{type: type})
+  def handle_call(:stop_all, _from, state) do
+    Enum.each(state.active_faults, fn {correlation_id, fault_info} ->
+      terminate_fault_process(fault_info.ref)
+
+      emit_signal(:fault_stopped, %{
+        type: fault_info.type,
+        correlation_id: correlation_id
+      })
     end)
 
     count = map_size(state.active_faults)
-    Logger.info("[Demo] All faults cleared (#{count})")
-    {:reply, {:ok, count}, %{state | active_faults: %{}}}
+    Logger.info("[Demo] All faults stopped (#{count})")
+    {:reply, {:ok, count}, %{state | active_faults: %{}, faults_by_type: %{}}}
   end
 
   def handle_call(:active_faults, _from, state) do
     faults =
-      Map.new(state.active_faults, fn {type, info} ->
-        {type,
+      Map.new(state.active_faults, fn {correlation_id, info} ->
+        {correlation_id,
          %{
-           type: type,
+           type: info.type,
+           correlation_id: correlation_id,
            description: info.module.description(),
            injected_at: info.injected_at,
-           detectable_by: info.module.detectable_by()
+           detectable_by: info.module.detectable_by(),
+           ref: info.ref
          }}
       end)
 
@@ -164,19 +225,26 @@ defmodule Arbor.Demo.FaultInjector do
   end
 
   def handle_call({:status, type}, _from, state) do
-    case Map.get(state.active_faults, type) do
+    case Map.get(state.faults_by_type, type) do
       nil ->
         {:reply, :inactive, state}
 
-      info ->
+      correlation_id ->
+        info = Map.get(state.active_faults, correlation_id)
+
         {:reply,
          %{
            status: :active,
+           correlation_id: correlation_id,
            injected_at: info.injected_at,
            description: info.module.description(),
            detectable_by: info.module.detectable_by()
          }, state}
     end
+  end
+
+  def handle_call({:get_correlation_id, type}, _from, state) do
+    {:reply, Map.get(state.faults_by_type, type), state}
   end
 
   def handle_call(:available_faults, _from, state) do
@@ -186,7 +254,7 @@ defmodule Arbor.Demo.FaultInjector do
           type: type,
           description: module.description(),
           detectable_by: module.detectable_by(),
-          active: Map.has_key?(state.active_faults, type)
+          active: Map.has_key?(state.faults_by_type, type)
         }
       end)
 
@@ -194,15 +262,31 @@ defmodule Arbor.Demo.FaultInjector do
   end
 
   @impl GenServer
-  def handle_info({:EXIT, _pid, _reason}, state) do
-    # Fault worker processes may die — we trap exits and ignore them
-    {:noreply, state}
+  def handle_info({:EXIT, pid, _reason}, state) do
+    # Fault worker processes may die — find and remove from tracking
+    {correlation_id, fault_info} =
+      Enum.find(state.active_faults, {nil, nil}, fn {_cid, info} ->
+        info.ref == pid
+      end)
+
+    if correlation_id do
+      new_state = %{
+        state
+        | active_faults: Map.delete(state.active_faults, correlation_id),
+          faults_by_type: Map.delete(state.faults_by_type, fault_info.type)
+      }
+
+      Logger.debug("[Demo] Fault process exited: #{fault_info.type}")
+      {:noreply, new_state}
+    else
+      {:noreply, state}
+    end
   end
 
   @impl GenServer
   def terminate(_reason, state) do
-    Enum.each(state.active_faults, fn {_type, info} ->
-      safe_clear(info)
+    Enum.each(state.active_faults, fn {_correlation_id, info} ->
+      terminate_fault_process(info.ref)
     end)
 
     :ok
@@ -216,18 +300,22 @@ defmodule Arbor.Demo.FaultInjector do
   end
 
   defp check_not_active(state, type) do
-    if Map.has_key?(state.active_faults, type),
+    if Map.has_key?(state.faults_by_type, type),
       do: {:error, :already_active},
       else: :ok
   end
 
-  defp safe_clear(%{module: module, ref: ref}) do
-    module.clear(ref)
+  defp terminate_fault_process(ref) when is_pid(ref) do
+    if Process.alive?(ref) do
+      Process.exit(ref, :shutdown)
+    end
   rescue
-    e -> Logger.error("[Demo] Error clearing fault: #{inspect(e)}")
+    _ -> :ok
   catch
-    :exit, reason -> Logger.error("[Demo] Exit clearing fault: #{inspect(reason)}")
+    :exit, _ -> :ok
   end
+
+  defp terminate_fault_process(_ref), do: :ok
 
   defp emit_signal(type, data) do
     if signal_emission_enabled?() do

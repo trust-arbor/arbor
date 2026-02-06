@@ -982,7 +982,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp safe_clear_fault(type) do
-    FaultInjector.clear_fault(type)
+    FaultInjector.stop_fault(type)
   rescue
     _ -> {:error, :rescue}
   catch
@@ -990,7 +990,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp safe_clear_all do
-    FaultInjector.clear_all()
+    FaultInjector.stop_all()
   rescue
     _ -> {:ok, 0}
   catch
