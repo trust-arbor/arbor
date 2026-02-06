@@ -16,7 +16,10 @@ defmodule Arbor.Signals.BusTest do
           fn signal ->
             send(test_pid, {:wildcard, signal})
             :ok
-          end, async: false, principal_id: "agent_test_wildcard")
+          end,
+          async: false,
+          principal_id: "agent_test_wildcard"
+        )
 
       Bus.publish(Signal.new(:activity, :wildcard_test, %{}))
       assert_receive {:wildcard, %Signal{type: :wildcard_test}}, 500
@@ -33,7 +36,10 @@ defmodule Arbor.Signals.BusTest do
           fn signal ->
             send(test_pid, {:cat_wild, signal})
             :ok
-          end, async: false, principal_id: "agent_test_security")
+          end,
+          async: false,
+          principal_id: "agent_test_security"
+        )
 
       Bus.publish(Signal.new(:security, :auth_check, %{}))
       assert_receive {:cat_wild, %Signal{type: :auth_check}}, 500
@@ -53,7 +59,10 @@ defmodule Arbor.Signals.BusTest do
           fn signal ->
             send(test_pid, {:type_wild, signal})
             :ok
-          end, async: false, principal_id: "agent_test_type_wild")
+          end,
+          async: false,
+          principal_id: "agent_test_type_wild"
+        )
 
       Bus.publish(Signal.new(:activity, :type_wild_test, %{}))
       assert_receive {:type_wild, %Signal{category: :activity}}, 500
@@ -73,7 +82,9 @@ defmodule Arbor.Signals.BusTest do
           fn signal ->
             send(test_pid, {:exact, signal})
             :ok
-          end, async: false)
+          end,
+          async: false
+        )
 
       Bus.publish(Signal.new(:metrics, :latency, %{ms: 42}))
       assert_receive {:exact, %Signal{data: %{ms: 42}}}, 500
@@ -128,7 +139,9 @@ defmodule Arbor.Signals.BusTest do
           "activity.error_test",
           fn _signal ->
             raise "handler error"
-          end, async: false)
+          end,
+          async: false
+        )
 
       # Should not crash
       Bus.publish(Signal.new(:activity, :error_test, %{}))
@@ -156,7 +169,9 @@ defmodule Arbor.Signals.BusTest do
           fn signal ->
             send(test_pid, {:unsub, signal})
             :ok
-          end, async: false)
+          end,
+          async: false
+        )
 
       Bus.unsubscribe(sub_id)
       Bus.publish(Signal.new(:activity, :unsub_bus_test, %{}))
@@ -401,7 +416,10 @@ defmodule Arbor.Signals.BusTest do
                  fn signal ->
                    send(test_pid, {:received, signal.category})
                    :ok
-                 end, async: false, principal_id: "agent_partial")
+                 end,
+                 async: false,
+                 principal_id: "agent_partial"
+               )
     end
 
     test "open authorizer allows restricted topic with principal_id" do
