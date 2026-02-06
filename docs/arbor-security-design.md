@@ -531,7 +531,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 - Integration with `arbor_shell` / `arbor_sandbox` for isolated execution
 
 **Implemented:**
-- `Arbor.Consensus.EvaluatorBackend.Deterministic` — runs actual shell commands via `Arbor.Shell`
+- `Arbor.Consensus.Evaluator.Deterministic` — runs actual shell commands via `Arbor.Shell`
 - Supported perspectives: `:mix_test`, `:mix_credo`, `:mix_compile`, `:mix_format_check`, `:mix_dialyzer`
 - Config: `deterministic_evaluator_timeout`, `deterministic_evaluator_sandbox`, `deterministic_evaluator_default_cwd`
 - Requires `project_path` in proposal metadata
@@ -571,7 +571,7 @@ Ordered by foundational dependency and security impact. Each phase compiles and 
 **Implemented:**
 - `Arbor.Contracts.API.AI` — behaviour for LLM providers
 - `arbor_ai` umbrella app — facade over ReqLLM
-- `Arbor.Consensus.EvaluatorBackend.LLM` — four perspectives:
+- `Arbor.Consensus.Evaluator.LLM` — four perspectives:
   - `:security_llm` — vulnerability analysis
   - `:architecture_llm` — design pattern review
   - `:code_quality_llm` — code style assessment

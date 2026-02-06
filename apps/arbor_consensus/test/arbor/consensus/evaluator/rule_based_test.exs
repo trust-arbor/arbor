@@ -1,7 +1,7 @@
-defmodule Arbor.Consensus.EvaluatorBackend.RuleBasedTest do
+defmodule Arbor.Consensus.Evaluator.RuleBasedTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Consensus.EvaluatorBackend.RuleBased
+  alias Arbor.Consensus.Evaluator.RuleBased
   alias Arbor.Consensus.TestHelpers
   alias Arbor.Contracts.Consensus.Evaluation
 

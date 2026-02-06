@@ -8,7 +8,7 @@ defmodule Arbor.Consensus.Council do
   ## Flow
 
   1. Determine required perspectives from config based on `topic`
-  2. For each perspective, spawn a Task calling `EvaluatorBackend.evaluate/3`
+  2. For each perspective, spawn a Task calling `Evaluator.evaluate/3`
   3. Collect with early termination: return as soon as quorum is reached
   4. All evaluations are sealed before returning
   5. Kill remaining evaluator tasks on quorum
