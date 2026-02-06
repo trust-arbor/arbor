@@ -16,6 +16,7 @@ defmodule Arbor.Dashboard.Nav do
     DemoLive,
     EvalLive,
     LandingLive,
+    MonitorLive,
     RoadmapLive,
     SignalsLive
   }
@@ -27,6 +28,7 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/consensus", label: "Consensus", icon: "\u{1F5F3}", view: ConsensusLive},
     %{href: "/activity", label: "Activity", icon: "\u{1F4CA}", view: ActivityLive},
     %{href: "/agents", label: "Agents", icon: "\u{1F916}", view: AgentsLive},
+    %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},
     %{href: "/demo", label: "Demo", icon: "\u{1F52C}", view: DemoLive}
   ]

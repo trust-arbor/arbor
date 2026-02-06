@@ -1225,3 +1225,239 @@
   border-top: 1px solid var(--aw-border);
   animation: aw-fade-in 0.2s ease-out;
 }
+
+/* ── Monitor Dashboard ───────────────────────────────────────────── */
+
+.aw-monitor-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  margin-top: 1rem;
+}
+
+.aw-monitor-health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.aw-health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  animation: aw-pulse 2s infinite;
+}
+
+.aw-health-healthy .aw-health-dot {
+  background: var(--aw-accent-green);
+}
+
+.aw-health-healthy .aw-health-label {
+  color: var(--aw-accent-green);
+}
+
+.aw-health-warning .aw-health-dot {
+  background: var(--aw-accent-yellow);
+}
+
+.aw-health-warning .aw-health-label {
+  color: var(--aw-accent-yellow);
+}
+
+.aw-health-critical .aw-health-dot,
+.aw-health-emergency .aw-health-dot {
+  background: var(--aw-accent-red);
+  animation: aw-pulse 0.5s infinite;
+}
+
+.aw-health-critical .aw-health-label,
+.aw-health-emergency .aw-health-label {
+  color: var(--aw-accent-red);
+}
+
+.aw-health-unknown .aw-health-dot {
+  background: var(--aw-text-secondary);
+}
+
+.aw-health-unknown .aw-health-label {
+  color: var(--aw-text-secondary);
+}
+
+.aw-monitor-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.aw-monitor-stat {
+  font-size: 0.875rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-monitor-stat strong {
+  color: var(--aw-text-primary);
+}
+
+/* Skill Cards */
+.aw-skill-card {
+  background: var(--aw-bg-card);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  padding: 1rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.aw-skill-card:hover {
+  background: var(--aw-bg-card-hover);
+  border-color: var(--aw-accent-blue);
+}
+
+.aw-skill-card-selected {
+  border-color: var(--aw-accent-blue);
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.aw-skill-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.aw-skill-icon {
+  font-size: 1.25rem;
+}
+
+.aw-skill-name {
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.aw-skill-summary {
+  font-size: 0.8rem;
+  color: var(--aw-text-secondary);
+  font-family: var(--aw-font-mono);
+}
+
+/* Anomaly Cards */
+.aw-anomaly-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.aw-anomaly-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: var(--aw-bg-dark);
+  border-radius: var(--aw-radius-sm);
+  border-left: 3px solid var(--aw-border);
+}
+
+.aw-severity-info {
+  border-left-color: var(--aw-accent-blue);
+}
+
+.aw-severity-warning {
+  border-left-color: var(--aw-accent-yellow);
+}
+
+.aw-severity-critical {
+  border-left-color: var(--aw-accent-red);
+}
+
+.aw-severity-emergency {
+  border-left-color: var(--aw-accent-red);
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.aw-anomaly-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.aw-anomaly-severity {
+  font-size: 1rem;
+}
+
+.aw-anomaly-metric {
+  font-weight: 500;
+  font-family: var(--aw-font-mono);
+  font-size: 0.875rem;
+}
+
+.aw-anomaly-body {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-anomaly-value strong {
+  color: var(--aw-text-primary);
+}
+
+.aw-anomaly-deviation {
+  color: var(--aw-accent-yellow);
+  font-weight: 500;
+}
+
+.aw-anomaly-time {
+  font-size: 0.75rem;
+  color: var(--aw-text-secondary);
+  font-family: var(--aw-font-mono);
+}
+
+/* Skill Detail Panel */
+.aw-skill-detail {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.aw-skill-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.aw-metric-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.375rem 0;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-metric-key {
+  font-family: var(--aw-font-mono);
+  font-size: 0.8rem;
+  color: var(--aw-text-secondary);
+}
+
+.aw-metric-value {
+  font-family: var(--aw-font-mono);
+  font-size: 0.8rem;
+  color: var(--aw-text-primary);
+}
+
+.aw-history-values {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.aw-history-value {
+  background: var(--aw-bg-dark);
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--aw-radius-sm);
+  font-family: var(--aw-font-mono);
+  font-size: 0.75rem;
+}
