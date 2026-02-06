@@ -41,6 +41,7 @@ defmodule Arbor.Agent.Claude do
 
   require Logger
 
+  alias Arbor.Agent.TimingContext
   alias Arbor.AI.AgentSDK
   alias Arbor.AI.SessionReader
 
@@ -292,7 +293,11 @@ defmodule Arbor.Agent.Claude do
       recalled_memories: [],
       query_count: 0,
       heartbeat_ref: heartbeat_ref,
-      last_heartbeat: nil
+      last_heartbeat: nil,
+      # Temporal awareness
+      last_user_message_at: nil,
+      last_assistant_output_at: nil,
+      responded_to_last_user_message: true
     }
 
     Logger.info("Claude agent started",
@@ -315,6 +320,9 @@ defmodule Arbor.Agent.Claude do
 
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
+    # Track user message timing
+    state = TimingContext.on_user_message(state)
+
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
@@ -330,6 +338,9 @@ defmodule Arbor.Agent.Claude do
 
     case execute_query(prompt, model, capture, state, opts) do
       {:ok, response, new_state} ->
+        # Track agent output timing
+        new_state = TimingContext.on_agent_output(new_state)
+
         # Index important facts from the response
         if index do
           index_response(state.id, prompt, response.text)
@@ -353,6 +364,9 @@ defmodule Arbor.Agent.Claude do
   end
 
   def handle_call({:stream, prompt, callback, opts}, _from, state) do
+    # Track user message timing
+    state = TimingContext.on_user_message(state)
+
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
@@ -370,6 +384,9 @@ defmodule Arbor.Agent.Claude do
 
     case execute_stream(prompt, callback, model, capture, state, opts) do
       {:ok, response, new_state} ->
+        # Track agent output timing
+        new_state = TimingContext.on_agent_output(new_state)
+
         if index do
           index_response(state.id, prompt, response.text)
         end
@@ -752,7 +769,9 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp execute_query(prompt, model, capture, state, opts) do
-    case AgentSDK.query(prompt, Keyword.merge(opts, model: model)) do
+    enhanced_prompt = maybe_add_timing_context(prompt, state)
+
+    case AgentSDK.query(enhanced_prompt, Keyword.merge(opts, model: model)) do
       {:ok, response} ->
         {thinking, session_id} = resolve_thinking(response, capture, state)
         maybe_record_thinking(state.id, thinking)
@@ -768,7 +787,9 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp execute_stream(prompt, callback, model, capture, state, opts) do
-    case AgentSDK.stream(prompt, callback, Keyword.merge(opts, model: model)) do
+    enhanced_prompt = maybe_add_timing_context(prompt, state)
+
+    case AgentSDK.stream(enhanced_prompt, callback, Keyword.merge(opts, model: model)) do
       {:ok, response} ->
         {thinking, session_id} = resolve_thinking(response, capture, state)
         maybe_record_thinking(state.id, thinking)
@@ -780,6 +801,19 @@ defmodule Arbor.Agent.Claude do
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp maybe_add_timing_context(prompt, state) do
+    if Application.get_env(:arbor_agent, :timing_context_enabled, true) do
+      timing_markdown =
+        state
+        |> TimingContext.compute()
+        |> TimingContext.to_markdown()
+
+      prompt <> "\n\n" <> timing_markdown
+    else
+      prompt
     end
   end
 
