@@ -14,6 +14,8 @@ defmodule Arbor.Consensus.Application do
       if Application.get_env(:arbor_consensus, :start_children, true) do
         [
           Arbor.Consensus.EventStore,
+          # TopicRegistry for topic routing configuration
+          Arbor.Consensus.TopicRegistry,
           # Registry for EvaluatorAgent name lookups
           {Registry, keys: :unique, name: Arbor.Consensus.EvaluatorAgent.Registry},
           # DynamicSupervisor for persistent EvaluatorAgents
