@@ -31,6 +31,7 @@ defmodule Arbor.Agent.ClaudeTest do
       assert "arbor://fs/**" in resources
       assert "arbor://memory/**" in resources
       assert "arbor://ai/**" in resources
+      assert "arbor://actions/execute/**" in resources
     end
 
     test "provides metadata" do
@@ -62,6 +63,28 @@ defmodule Arbor.Agent.ClaudeTest do
       {:ok, agent} = Claude.start_link()
       assert {:ok, []} = Claude.get_thinking(agent)
       GenServer.stop(agent)
+    end
+
+    test "list_actions returns available action categories" do
+      actions = Claude.list_actions()
+
+      # Should have action categories if arbor_actions is available
+      if map_size(actions) > 0 do
+        assert Map.has_key?(actions, :file) or Map.has_key?(actions, :shell)
+      end
+    end
+
+    test "get_tools returns LLM tool schemas" do
+      tools = Claude.get_tools()
+
+      # Should return a list of tool schemas if arbor_actions is available
+      assert is_list(tools)
+
+      if length(tools) > 0 do
+        [first | _] = tools
+        assert is_map(first)
+        assert Map.has_key?(first, "name") or Map.has_key?(first, :name)
+      end
     end
   end
 

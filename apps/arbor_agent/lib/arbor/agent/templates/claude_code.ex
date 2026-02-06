@@ -96,7 +96,9 @@ defmodule Arbor.Agent.Templates.ClaudeCode do
       %{resource: "arbor://signals/**", description: "Signal emission and subscription"},
       # Consensus proposals
       %{resource: "arbor://consensus/propose", description: "Submit proposals"},
-      %{resource: "arbor://consensus/evaluate", description: "Participate in evaluation"}
+      %{resource: "arbor://consensus/evaluate", description: "Participate in evaluation"},
+      # Actions - full access to all action categories
+      %{resource: "arbor://actions/execute/**", description: "Execute all actions"}
     ]
   end
 
