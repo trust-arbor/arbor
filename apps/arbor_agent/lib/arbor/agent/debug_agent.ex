@@ -35,6 +35,9 @@ defmodule Arbor.Agent.DebugAgent do
 
   alias Arbor.Agent.Lifecycle
   alias Arbor.Agent.Templates.Diagnostician
+  alias Arbor.Historian
+  alias Arbor.Historian.Timeline.Span
+  alias Arbor.Historian.TaintQuery
   alias Arbor.Monitor.AnomalyQueue
 
   require Logger
@@ -509,13 +512,81 @@ defmodule Arbor.Agent.DebugAgent do
   defp build_analysis_context(anomaly) do
     metrics = safe_get_metrics(anomaly.skill)
 
+    # Get recent events from historian (30 seconds before anomaly)
+    recent_events = fetch_recent_events(anomaly.timestamp)
+
+    # Trace causal chain if anomaly has a signal/correlation ID
+    causal_chain = fetch_causal_chain(anomaly)
+
     %{
       skill: anomaly.skill,
       severity: anomaly.severity,
       details: anomaly.details,
       timestamp: anomaly.timestamp,
-      related_metrics: metrics
+      related_metrics: metrics,
+      recent_events: recent_events,
+      causal_chain: causal_chain
     }
+  end
+
+  defp fetch_recent_events(timestamp) do
+    # Look back 30 seconds before the anomaly
+    from = DateTime.add(timestamp, -30, :second)
+
+    span = Span.new(from: from, to: timestamp)
+
+    case Historian.reconstruct(span, max_results: 20) do
+      {:ok, events} ->
+        # Extract key info for AI analysis
+        Enum.map(events, fn entry ->
+          %{
+            type: entry.type,
+            category: entry.category,
+            timestamp: entry.timestamp,
+            summary: Map.get(entry.data, :description) || Map.get(entry.data, :summary)
+          }
+        end)
+
+      {:error, _} ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp fetch_causal_chain(anomaly) do
+    # Check for signal_id or correlation_id
+    signal_id =
+      cond do
+        Map.has_key?(anomaly, :signal_id) -> anomaly.signal_id
+        Map.has_key?(anomaly, :correlation_id) -> anomaly.correlation_id
+        is_map(anomaly.details) && Map.has_key?(anomaly.details, :signal_id) -> anomaly.details.signal_id
+        true -> nil
+      end
+
+    if signal_id do
+      case TaintQuery.trace_backward(signal_id, max_depth: 5) do
+        {:ok, chain} ->
+          Enum.map(chain, fn entry ->
+            %{
+              type: entry.type,
+              timestamp: entry.timestamp,
+              data: Map.take(entry.data, [:source, :action, :taint_level])
+            }
+          end)
+
+        {:error, _} ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp build_proposal(anomaly, analysis_data) do
@@ -639,19 +710,29 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   defp safe_ai_analyze(_agent_id, anomaly, context) do
-    # Call AI directly for analysis (simpler than async Executor flow)
+    # Build prompt with historian data for root cause analysis
+    recent_events_text = format_recent_events(context[:recent_events] || [])
+    causal_chain_text = format_causal_chain(context[:causal_chain] || [])
+
     prompt = """
     Analyze this BEAM runtime anomaly and suggest a fix:
 
+    ## Anomaly
     Skill: #{anomaly.skill}
     Severity: #{anomaly.severity}
     Details: #{inspect(anomaly.details)}
 
-    Context:
-    #{inspect(context)}
+    ## Current Metrics
+    #{inspect(context[:related_metrics])}
 
-    Respond with:
-    1. Root cause analysis
+    ## Recent Events (30 seconds before anomaly)
+    #{recent_events_text}
+
+    ## Causal Chain (if traced)
+    #{causal_chain_text}
+
+    Based on the above context, respond with:
+    1. Root cause analysis (consider the timeline and causal chain)
     2. Suggested fix (if code change needed)
     3. Confidence level (0.0 to 1.0)
     """
@@ -677,6 +758,34 @@ defmodule Arbor.Agent.DebugAgent do
   catch
     :exit, reason -> {:error, reason}
   end
+
+  defp format_recent_events([]), do: "(No recent events found)"
+
+  defp format_recent_events(events) do
+    events
+    |> Enum.map(fn event ->
+      timestamp = format_timestamp(event[:timestamp])
+      "- [#{timestamp}] #{event[:category]}/#{event[:type]}: #{event[:summary] || "(no summary)"}"
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp format_causal_chain([]), do: "(No causal chain available)"
+
+  defp format_causal_chain(chain) do
+    chain
+    |> Enum.with_index(1)
+    |> Enum.map(fn {event, idx} ->
+      timestamp = format_timestamp(event[:timestamp])
+      data = event[:data] || %{}
+      "#{idx}. [#{timestamp}] #{event[:type]} - source: #{data[:source]}, taint: #{data[:taint_level]}"
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp format_timestamp(nil), do: "?"
+  defp format_timestamp(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
+  defp format_timestamp(_), do: "?"
 
   defp extract_section(text, section_name) when is_binary(text) do
     # Simple extraction - look for section header and take content until next section or end
