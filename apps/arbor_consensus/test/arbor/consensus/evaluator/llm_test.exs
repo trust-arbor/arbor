@@ -1,8 +1,8 @@
-defmodule Arbor.Consensus.EvaluatorBackend.LLMTest do
+defmodule Arbor.Consensus.Evaluator.LLMTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Consensus.Config
-  alias Arbor.Consensus.EvaluatorBackend.LLM
+  alias Arbor.Consensus.Evaluator.LLM
   alias Arbor.Contracts.Consensus.Evaluation
   alias Arbor.Contracts.Consensus.Proposal
 

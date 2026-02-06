@@ -83,11 +83,8 @@ defmodule Arbor.SDLC.Evaluator do
   def strategy, do: :llm
 
   # =============================================================================
-  # Evaluate Callback (shared by both behaviours)
+  # Evaluate Callback
   # =============================================================================
-
-  # Note: Both EvaluatorBackend and Evaluator define evaluate/3. The @impl is
-  # for the Evaluator behaviour since EvaluatorBackend is being deprecated.
   @impl Arbor.Contracts.Consensus.Evaluator
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
   def evaluate(%Proposal{} = proposal, perspective, opts \\ []) do

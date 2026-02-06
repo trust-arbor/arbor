@@ -2,10 +2,9 @@ defmodule Arbor.Contracts.Consensus.Evaluator do
   @moduledoc """
   Behaviour for self-describing evaluator agents.
 
-  Unlike `EvaluatorBackend` (which is a stateless callback module routed
-  by the Coordinator), an `Evaluator` declares its own identity, perspectives,
-  and strategy. This enables evaluators to be consulted directly without
-  needing routing infrastructure.
+  Self-describing evaluator agents that can be consulted directly without
+  needing routing infrastructure. Each evaluator declares its own identity,
+  perspectives, and strategy.
 
   ## Callbacks
 
