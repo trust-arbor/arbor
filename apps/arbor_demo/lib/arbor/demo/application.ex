@@ -9,7 +9,8 @@ defmodule Arbor.Demo.Application do
         [
           {Arbor.Demo.Timing, []},
           {Arbor.Demo.Supervisor, []},
-          {Arbor.Demo.FaultInjector, []}
+          {Arbor.Demo.FaultInjector, []},
+          {Arbor.Demo.Orchestrator, []}
         ]
       else
         []

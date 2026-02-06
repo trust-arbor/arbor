@@ -280,8 +280,8 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp do_execute(%Intent{type: :act, action: action, params: params}, _sandbox_level) do
-    Logger.debug("Executor: action=#{inspect(action)} params=#{inspect(params)}")
-    {:ok, %{action: action, status: :executed}}
+    Logger.info("Executor: dispatching action=#{inspect(action)}")
+    dispatch_action(action, params)
   end
 
   defp do_execute(%Intent{type: :wait}, _sandbox_level) do
@@ -298,6 +298,201 @@ defmodule Arbor.Agent.Executor do
 
   defp do_execute(%Intent{}, _sandbox_level) do
     {:error, :unknown_intent_type}
+  end
+
+  # ============================================================================
+  # Action Dispatch
+  # ============================================================================
+
+  # AI analysis — construct prompt from anomaly context and call LLM
+  defp dispatch_action(:ai_analyze, params) do
+    anomaly = params[:anomaly] || params["anomaly"]
+    context = params[:context] || params["context"] || %{}
+
+    prompt = build_analysis_prompt(anomaly, context)
+
+    case safe_call(fn -> Arbor.AI.generate_text(prompt, max_tokens: 2000) end) do
+      {:ok, %{text: text}} ->
+        # Parse the AI response to extract fix suggestion
+        {:ok, %{analysis: text, raw_response: text}}
+
+      {:ok, response} when is_map(response) ->
+        text = response[:text] || response["text"] || inspect(response)
+        {:ok, %{analysis: text, raw_response: response}}
+
+      {:error, reason} ->
+        {:error, {:ai_analysis_failed, reason}}
+
+      nil ->
+        {:error, :ai_service_unavailable}
+    end
+  end
+
+  # Proposal submission — map to Proposal.Submit action (runtime call to avoid Level 2 cycle)
+  defp dispatch_action(:proposal_submit, params) do
+    proposal = params[:proposal] || params["proposal"] || %{}
+
+    # Transform DebugAgent proposal format to Submit action format
+    submit_params = %{
+      title: proposal[:title] || "Fix for detected anomaly",
+      description: proposal[:description] || proposal[:rationale] || "Auto-generated fix",
+      branch: proposal[:branch] || "main",
+      evidence: proposal[:evidence] || [],
+      urgency: proposal[:urgency] || "high",
+      change_type: proposal[:change_type] || "code_modification"
+    }
+
+    # Runtime call to avoid compile-time dependency on arbor_actions
+    action_mod = Module.concat([Arbor, Actions, Proposal, Submit])
+
+    case safe_call(fn -> apply(action_mod, :run, [submit_params, %{}]) end) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, {:proposal_submit_failed, reason}}
+      nil -> {:error, :consensus_unavailable}
+    end
+  end
+
+  # Code hot-load — map to Code.HotLoad action (runtime call to avoid Level 2 cycle)
+  defp dispatch_action(:code_hot_load, params) do
+    module = params[:module] || params["module"]
+    code = params[:code] || params[:source] || params["code"] || params["source"]
+
+    if is_nil(module) or is_nil(code) do
+      {:error, :missing_module_or_code}
+    else
+      hot_load_params = %{
+        module: to_string(module),
+        source: code,
+        verify_fn: params[:verify_fn],
+        rollback_timeout_ms: params[:timeout] || 30_000
+      }
+
+      # Runtime call to avoid compile-time dependency on arbor_actions
+      action_mod = Module.concat([Arbor, Actions, Code, HotLoad])
+
+      case safe_call(fn -> apply(action_mod, :run, [hot_load_params, %{}]) end) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, {:hot_load_failed, reason}}
+        nil -> {:error, :code_service_unavailable}
+      end
+    end
+  end
+
+  # Generic action dispatch — try to find a matching action module
+  defp dispatch_action(action, params) when is_atom(action) do
+    # Try to find an action module by name convention
+    action_module = find_action_module(action)
+
+    if action_module && function_exported?(action_module, :run, 2) do
+      case safe_call(fn -> action_module.run(params, %{}) end) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, {action, reason}}
+        nil -> {:error, {:action_failed, action}}
+      end
+    else
+      Logger.warning("Executor: unknown action #{inspect(action)}, returning stub result")
+      {:ok, %{action: action, status: :no_handler, params: params}}
+    end
+  end
+
+  defp dispatch_action(action, params) do
+    Logger.warning("Executor: invalid action type #{inspect(action)}")
+    {:ok, %{action: action, status: :invalid_action_type, params: params}}
+  end
+
+  # Build a prompt for AI analysis of an anomaly
+  defp build_analysis_prompt(anomaly, context) do
+    """
+    You are a BEAM runtime diagnostic expert. Analyze this anomaly and suggest a fix.
+
+    ## Anomaly Details
+    #{format_anomaly(anomaly)}
+
+    ## System Context
+    #{format_context(context)}
+
+    ## Your Task
+    1. Identify the root cause of this anomaly
+    2. Suggest a specific code fix
+    3. Explain why this fix will resolve the issue
+
+    Respond with:
+    - ROOT_CAUSE: <one sentence>
+    - FIX_MODULE: <module name to modify>
+    - FIX_CODE: <the actual code change>
+    - EXPLANATION: <why this works>
+    """
+  end
+
+  defp format_anomaly(nil), do: "No anomaly data"
+
+  defp format_anomaly(anomaly) when is_map(anomaly) do
+    """
+    - Skill: #{anomaly[:skill] || "unknown"}
+    - Severity: #{anomaly[:severity] || "unknown"}
+    - Metric: #{anomaly[:metric] || "unknown"}
+    - Value: #{anomaly[:value] || "unknown"}
+    - Threshold: #{anomaly[:threshold] || "unknown"}
+    - Details: #{inspect(anomaly[:details] || %{})}
+    """
+  end
+
+  defp format_anomaly(anomaly), do: inspect(anomaly)
+
+  defp format_context(context) when is_map(context) do
+    context
+    |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
+    |> Enum.join("\n")
+  end
+
+  defp format_context(_), do: "No additional context"
+
+  # Try to find an action module by naming convention
+  # e.g., :file_read -> Arbor.Actions.File.Read
+  defp find_action_module(action) do
+    action_str = Atom.to_string(action)
+
+    # Try common patterns
+    candidates = [
+      # Direct module name: ai_generate_text -> Arbor.Actions.AI.GenerateText
+      build_action_module_name(action_str),
+      # With category prefix: file.read -> Arbor.Actions.File.Read
+      build_action_module_from_dotted(action_str)
+    ]
+
+    Enum.find(candidates, fn mod ->
+      mod && Code.ensure_loaded?(mod) && function_exported?(mod, :run, 2)
+    end)
+  end
+
+  defp build_action_module_name(action_str) do
+    parts = action_str |> String.split("_")
+
+    case parts do
+      [category | rest] when rest != [] ->
+        category_mod = category |> String.capitalize()
+        action_mod = rest |> Enum.map(&String.capitalize/1) |> Enum.join("")
+        Module.concat([Arbor.Actions, String.to_atom(category_mod), String.to_atom(action_mod)])
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp build_action_module_from_dotted(action_str) do
+    case String.split(action_str, ".") do
+      [category, action_name] ->
+        category_mod = category |> String.capitalize()
+        action_mod = action_name |> Macro.camelize()
+        Module.concat([Arbor.Actions, String.to_atom(category_mod), String.to_atom(action_mod)])
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp build_reflex_context(%Intent{action: action, params: params}) do
