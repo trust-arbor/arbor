@@ -314,7 +314,24 @@ defmodule Arbor.Agent.Executor do
 
     prompt = build_analysis_prompt(anomaly, context)
 
-    case safe_call(fn -> Arbor.AI.generate_text(prompt, max_tokens: 2000) end) do
+    # In demo mode, use the configured demo LLM model (OpenRouter with free model)
+    # Otherwise, fall back to default routing
+    ai_opts =
+      if demo_mode?() do
+        case get_demo_llm_config() do
+          %{provider: provider, model: model} ->
+            [max_tokens: 2000, backend: :api, provider: provider, model: model]
+
+          _ ->
+            [max_tokens: 2000]
+        end
+      else
+        [max_tokens: 2000]
+      end
+
+    Logger.debug("[Executor] AI analyze with opts: #{inspect(ai_opts)}")
+
+    case safe_call(fn -> Arbor.AI.generate_text(prompt, ai_opts) end) do
       {:ok, %{text: text}} ->
         # Parse the AI response to extract fix suggestion
         {:ok, %{analysis: text, raw_response: text}}
@@ -381,6 +398,29 @@ defmodule Arbor.Agent.Executor do
     end
   end
 
+  # Proposal status — query the status of a submitted proposal
+  defp dispatch_action(:proposal_status, params) do
+    proposal_id = params[:proposal_id] || params["proposal_id"]
+
+    if is_nil(proposal_id) do
+      {:error, :missing_proposal_id}
+    else
+      # Runtime call to avoid compile-time dependency on arbor_consensus
+      consensus_mod = Module.concat([Arbor, Consensus])
+
+      case safe_call(fn -> apply(consensus_mod, :get_status, [proposal_id]) end) do
+        {:ok, status} ->
+          {:ok, %{proposal_id: proposal_id, status: status}}
+
+        {:error, reason} ->
+          {:error, {:status_query_failed, reason}}
+
+        nil ->
+          {:error, :consensus_unavailable}
+      end
+    end
+  end
+
   # Generic action dispatch — try to find a matching action module
   defp dispatch_action(action, params) when is_atom(action) do
     # Try to find an action module by name convention
@@ -401,6 +441,11 @@ defmodule Arbor.Agent.Executor do
   defp dispatch_action(action, params) do
     Logger.warning("Executor: invalid action type #{inspect(action)}")
     {:ok, %{action: action, status: :invalid_action_type, params: params}}
+  end
+
+  # Get the demo LLM configuration (runtime call to avoid dependency cycle)
+  defp get_demo_llm_config do
+    Application.get_env(:arbor_demo, :evaluator_llm_config, %{})
   end
 
   # Build a prompt for AI analysis of an anomaly
@@ -514,19 +559,14 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp check_capabilities(%Intent{action: action}, state) do
-    # Demo mode bypass: skip capability checks for demo agents
-    if demo_mode?() do
-      Logger.debug("[Executor] Demo mode: bypassing capability check for #{action}")
-      :authorized
-    else
-      resource = "arbor://agent/action/#{action}"
+    # Check agent has capability to execute this action
+    resource = "arbor://agent/action/#{action}"
 
-      case safe_call(fn -> Arbor.Security.can?(state.agent_id, resource, :execute) end) do
-        true -> :authorized
-        false -> {:blocked, :unauthorized}
-        # If security service unavailable, block by default
-        _ -> {:blocked, :security_unavailable}
-      end
+    case safe_call(fn -> Arbor.Security.can?(state.agent_id, resource, :execute) end) do
+      true -> :authorized
+      false -> {:blocked, :unauthorized}
+      # If security service unavailable, block by default
+      _ -> {:blocked, :security_unavailable}
     end
   end
 

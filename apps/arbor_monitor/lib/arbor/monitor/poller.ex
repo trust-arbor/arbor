@@ -10,7 +10,7 @@ defmodule Arbor.Monitor.Poller do
 
   require Logger
 
-  alias Arbor.Monitor.{AnomalyDetector, Config, MetricsStore}
+  alias Arbor.Monitor.{AnomalyDetector, AnomalyQueue, CascadeDetector, Config, MetricsStore}
 
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -66,7 +66,18 @@ defmodule Arbor.Monitor.Poller do
       )
     end
 
+    # Notify CascadeDetector that a polling cycle completed (for settling countdown)
+    notify_polling_complete()
+
     %{state | poll_count: state.poll_count + 1}
+  end
+
+  defp notify_polling_complete do
+    if Process.whereis(CascadeDetector) do
+      CascadeDetector.polling_cycle_completed()
+    end
+  rescue
+    _ -> :ok
   end
 
   defp collect_skill(skill_mod) do
@@ -126,21 +137,73 @@ defmodule Arbor.Monitor.Poller do
   end
 
   defp safe_emit_signal(skill_name, severity, details) do
+    anomaly = %{
+      skill: skill_name,
+      severity: severity,
+      details: details,
+      timestamp: DateTime.utc_now()
+    }
+
+    # Forward to healing queue if running
+    forward_to_healing_queue(anomaly)
+
+    # Emit external signal if configured
     if Config.signal_emission_enabled?() do
-      do_emit_signal(skill_name, severity, details)
+      do_emit_signal(anomaly)
     end
   end
 
-  defp do_emit_signal(skill_name, severity, details) do
+  defp forward_to_healing_queue(anomaly) do
+    # Only forward if AnomalyQueue is running (optional integration)
+    if Process.whereis(AnomalyQueue) do
+      # Ensure details has required fields for fingerprinting
+      details = anomaly.details
+      enriched_details = ensure_fingerprint_fields(details)
+      enriched_anomaly = %{anomaly | details: enriched_details}
+
+      case AnomalyQueue.enqueue(enriched_anomaly) do
+        {:ok, :enqueued} ->
+          Logger.debug("[Poller] Anomaly enqueued: #{anomaly.skill}")
+
+        {:ok, :deduplicated} ->
+          Logger.debug("[Poller] Anomaly deduplicated: #{anomaly.skill}")
+
+        {:error, reason} ->
+          Logger.warning("[Poller] Failed to enqueue anomaly: #{inspect(reason)}")
+      end
+    end
+  rescue
+    error ->
+      Logger.debug("[Poller] Healing queue forward failed: #{Exception.message(error)}")
+  end
+
+  defp ensure_fingerprint_fields(details) do
+    # Fingerprint needs :metric, :value, and :ewma fields
+    details
+    |> Map.put_new(:metric, Map.get(details, :metric, :unknown))
+    |> Map.put_new(:ewma, Map.get(details, :threshold, 0) * 0.8)
+    |> Map.put_new(:stddev, 1.0)
+    |> Map.put_new(:deviation_stddevs, calculate_deviation(details))
+  end
+
+  defp calculate_deviation(details) do
+    value = Map.get(details, :value, 0)
+    threshold = Map.get(details, :threshold, 1)
+    ewma = Map.get(details, :ewma, threshold * 0.8)
+    stddev = Map.get(details, :stddev, 1.0)
+
+    if stddev > 0 do
+      abs(value - ewma) / stddev
+    else
+      0.0
+    end
+  end
+
+  defp do_emit_signal(anomaly) do
     signal_mod = Application.get_env(:arbor_monitor, :signal_module)
 
     if signal_mod && function_exported?(signal_mod, :emit, 4) do
-      signal_mod.emit(:monitor, :anomaly_detected, %{
-        skill: skill_name,
-        severity: severity,
-        details: details,
-        timestamp: DateTime.utc_now()
-      })
+      signal_mod.emit(:monitor, :anomaly_detected, anomaly)
     end
   rescue
     error ->
