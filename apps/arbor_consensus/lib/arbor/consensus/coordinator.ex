@@ -324,10 +324,25 @@ defmodule Arbor.Consensus.Coordinator do
       })
 
       # Get council configuration from TopicRegistry
-      {perspectives, quorum} = resolve_council_config(proposal, state.config)
+      {evaluators, quorum} = resolve_council_config(proposal, state.config)
 
-      # Spawn council asynchronously
-      evaluator_backend = Keyword.get(opts, :evaluator_backend, state.evaluator_backend)
+      # Allow override via opts (for testing), otherwise use resolved evaluators
+      # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
+      evaluators =
+        case {Keyword.get(opts, :evaluators), Keyword.get(opts, :evaluator_backend)} do
+          {override, _} when override != nil -> override
+          {nil, backend} when backend != nil -> [backend]
+          {nil, nil} ->
+            # Use state.evaluator_backend if different from default, otherwise use resolved
+            if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
+              [state.evaluator_backend]
+            else
+              evaluators
+            end
+        end
+
+      # Extract perspectives from evaluators for event emission
+      perspectives = resolve_perspectives_from_evaluators(evaluators)
 
       # Emit evaluation started event
       EventEmitter.evaluation_started(
@@ -337,7 +352,7 @@ defmodule Arbor.Consensus.Coordinator do
         quorum
       )
 
-      state = spawn_council(state, proposal, evaluator_backend, perspectives, quorum)
+      state = spawn_council(state, proposal, evaluators, quorum)
 
       {:reply, {:ok, proposal.id}, state}
     else
@@ -673,25 +688,29 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   # Try agent delivery first, fall back to direct council spawning
-  defp spawn_council(state, proposal, evaluator_backend, perspectives, quorum) do
+  # evaluators is a list of evaluator modules, each declaring its perspectives via perspectives/0
+  defp spawn_council(state, proposal, evaluators, quorum) do
+    perspectives = resolve_perspectives_from_evaluators(evaluators)
+
     case resolve_evaluator_agents(perspectives) do
       {:ok, agent_mapping} when map_size(agent_mapping) > 0 ->
-        deliver_to_agents(state, proposal, agent_mapping, quorum)
+        deliver_to_agents(state, proposal, agent_mapping, evaluators, quorum)
 
       _ ->
         # Direct path: spawn temporary council tasks
-        spawn_council_direct(state, proposal, evaluator_backend, perspectives, quorum)
+        spawn_council_direct(state, proposal, evaluators, quorum)
     end
   end
 
   # Direct council spawning: temporary tasks for each perspective
-  defp spawn_council_direct(state, proposal, evaluator_backend, perspectives, quorum) do
+  # Council.evaluate accepts a list of evaluators and builds the perspective->evaluator map
+  defp spawn_council_direct(state, proposal, evaluators, quorum) do
     config = state.config
 
     task =
       Task.async(fn ->
         result =
-          Council.evaluate(proposal, perspectives, evaluator_backend,
+          Council.evaluate(proposal, evaluators,
             timeout: config.evaluation_timeout_ms,
             quorum: quorum
           )
@@ -703,7 +722,7 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   # Deliver proposal to persistent evaluator agents
-  defp deliver_to_agents(state, proposal, agent_mapping, quorum) do
+  defp deliver_to_agents(state, proposal, agent_mapping, evaluators, quorum) do
     config = state.config
     deadline = DateTime.add(DateTime.utc_now(), config.evaluation_timeout_ms, :millisecond)
 
@@ -739,13 +758,7 @@ defmodule Arbor.Consensus.Coordinator do
       # No agents accepted the delivery, fall back to direct council
       Logger.warning("No agents accepted proposal #{proposal.id}, falling back to direct council")
 
-      spawn_council_direct(
-        state,
-        proposal,
-        state.evaluator_backend,
-        Map.values(agent_mapping) |> Enum.flat_map(&elem(&1, 1)) |> Enum.uniq(),
-        quorum
-      )
+      spawn_council_direct(state, proposal, evaluators, quorum)
     else
       # Track pending evaluations
       pending_entry = %{
@@ -1230,6 +1243,8 @@ defmodule Arbor.Consensus.Coordinator do
 
   # Resolve council configuration from TopicRegistry.
   # Advisory mode proposals get quorum of nil (collect all perspectives).
+  # Returns {evaluators, quorum} where evaluators is a list of modules.
+  # Council.evaluate will extract perspectives from each evaluator's perspectives/0 callback.
   defp resolve_council_config(proposal, _config) do
     topic = proposal.topic
 
@@ -1238,42 +1253,44 @@ defmodule Arbor.Consensus.Coordinator do
         resolve_from_topic_rule(proposal, rule)
 
       {:error, :not_found} ->
-        # Topic not in registry — use default perspectives (all non-human)
+        # Topic not in registry — use default evaluator (RuleBased)
         Logger.warning("Topic #{inspect(topic)} not found in TopicRegistry, using defaults")
-        default_perspectives_and_quorum(proposal)
+        default_evaluators_and_quorum(proposal)
     end
   rescue
-    # TopicRegistry not running — fall back to default perspectives
+    # TopicRegistry not running — fall back to defaults
     _ ->
-      default_perspectives_and_quorum(proposal)
+      default_evaluators_and_quorum(proposal)
   end
 
-  defp default_perspectives_and_quorum(proposal) do
-    perspectives = Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
+  defp default_evaluators_and_quorum(proposal) do
+    # Use RuleBased as the default evaluator (preserves existing behavior)
+    evaluators = [Arbor.Consensus.Evaluator.RuleBased]
 
     quorum =
       if proposal.mode == :advisory,
         do: nil,
         else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
 
-    {perspectives, quorum}
+    {evaluators, quorum}
   end
 
   # Resolve council config from TopicRule
   defp resolve_from_topic_rule(proposal, rule) do
-    # Get perspectives from required_evaluators if present, otherwise use defaults
-    perspectives =
+    # Get evaluators from the rule, or fall back to RuleBased
+    evaluators =
       case rule.required_evaluators do
         [] ->
-          # No evaluators specified in rule, use default perspectives
-          Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
+          # No evaluators specified in rule, use default
+          [Arbor.Consensus.Evaluator.RuleBased]
 
-        evaluators ->
-          # Resolve perspectives from evaluator modules
-          resolve_perspectives_from_evaluators(evaluators)
+        required ->
+          required
       end
 
-    # Calculate quorum - advisory mode gets nil (no early termination, collect all)
+    # Calculate quorum based on the total perspectives from all evaluators
+    perspectives = resolve_perspectives_from_evaluators(evaluators)
+
     quorum =
       if proposal.mode == :advisory do
         nil
@@ -1282,7 +1299,7 @@ defmodule Arbor.Consensus.Coordinator do
         TopicRule.quorum_to_number(rule.min_quorum, council_size)
       end
 
-    {perspectives, quorum}
+    {evaluators, quorum}
   end
 
   # Get quorum for a proposal by recalculating from its topic
@@ -1292,7 +1309,7 @@ defmodule Arbor.Consensus.Coordinator do
         nil
 
       proposal ->
-        {_perspectives, quorum} = resolve_council_config(proposal, state.config)
+        {_evaluators, quorum} = resolve_council_config(proposal, state.config)
         quorum
     end
   end
@@ -1588,23 +1605,35 @@ defmodule Arbor.Consensus.Coordinator do
 
       proposal ->
         Logger.info("Coordinator: restarting full evaluation for #{info.proposal_id}")
-        {perspectives, quorum} = resolve_council_config(proposal, state.config)
-        spawn_council(state, proposal, state.evaluator_backend, perspectives, quorum)
+        {evaluators, quorum} = resolve_council_config(proposal, state.config)
+        spawn_council(state, proposal, evaluators, quorum)
     end
   end
 
-  defp spawn_council_for_perspectives(state, proposal, perspectives) do
+  defp spawn_council_for_perspectives(state, proposal, missing_perspectives) do
     # Similar to spawn_council but with specific perspectives (used for recovery)
+    # Get evaluators from TopicRegistry and filter to only the missing perspectives
     config = state.config
 
-    # Resolve quorum from TopicRegistry or Protocol default
+    # Resolve evaluators and quorum from TopicRegistry
+    {evaluators, _full_quorum} = resolve_council_config(proposal, state.config)
+
+    # Build evaluator map and filter to only missing perspectives
+    evaluator_map = Council.build_evaluator_map(evaluators)
+
+    filtered_evaluator_map =
+      evaluator_map
+      |> Enum.filter(fn {perspective, _} -> perspective in missing_perspectives end)
+      |> Map.new()
+
+    # Calculate quorum for the missing perspectives
     quorum =
       if proposal.mode == :advisory do
         nil
       else
         case TopicRegistry.get(proposal.topic) do
           {:ok, rule} ->
-            TopicRule.quorum_to_number(rule.min_quorum, length(perspectives))
+            TopicRule.quorum_to_number(rule.min_quorum, length(missing_perspectives))
 
           _ ->
             Arbor.Contracts.Consensus.Protocol.standard_quorum()
@@ -1614,7 +1643,7 @@ defmodule Arbor.Consensus.Coordinator do
     task =
       Task.async(fn ->
         result =
-          Council.evaluate(proposal, perspectives, state.evaluator_backend,
+          Council.evaluate(proposal, filtered_evaluator_map,
             timeout: config.evaluation_timeout_ms,
             quorum: quorum
           )
