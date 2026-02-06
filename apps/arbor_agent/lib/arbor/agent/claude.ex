@@ -157,46 +157,8 @@ defmodule Arbor.Agent.Claude do
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
 
-    # Execute query
-    result =
-      case AgentSDK.query(prompt, Keyword.merge(opts, model: model)) do
-        {:ok, response} ->
-          # Capture thinking from session file if enabled
-          {thinking, session_id} =
-            if capture do
-              capture_thinking_from_session(response.session_id, state)
-            else
-              {response.thinking, response.session_id}
-            end
-
-          # Record thinking to memory
-          if thinking && thinking != [] do
-            record_thinking_to_memory(state.id, thinking)
-          end
-
-          # Emit signal
-          emit_signal(:query_completed, %{
-            id: state.id,
-            model: model,
-            thinking_count: length(thinking || [])
-          })
-
-          enhanced_response = %{response | thinking: thinking}
-          {:ok, enhanced_response, session_id, thinking}
-
-        {:error, _} = error ->
-          error
-      end
-
-    case result do
-      {:ok, response, session_id, thinking} ->
-        new_state = %{
-          state
-          | last_session_id: session_id,
-            thinking_cache: thinking || [],
-            query_count: state.query_count + 1
-        }
-
+    case execute_query(prompt, model, capture, state, opts) do
+      {:ok, response, new_state} ->
         {:reply, {:ok, response}, new_state}
 
       {:error, _} = error ->
@@ -208,41 +170,8 @@ defmodule Arbor.Agent.Claude do
     model = Keyword.get(opts, :model, state.default_model)
     capture = Keyword.get(opts, :capture_thinking, should_capture_thinking?(model, state))
 
-    result =
-      case AgentSDK.stream(prompt, callback, Keyword.merge(opts, model: model)) do
-        {:ok, response} ->
-          {thinking, session_id} =
-            if capture do
-              capture_thinking_from_session(response.session_id, state)
-            else
-              {response.thinking, response.session_id}
-            end
-
-          if thinking && thinking != [] do
-            record_thinking_to_memory(state.id, thinking)
-
-            # Emit thinking events to callback
-            Enum.each(thinking, fn block ->
-              callback.({:thinking, block})
-            end)
-          end
-
-          enhanced_response = %{response | thinking: thinking}
-          {:ok, enhanced_response, session_id, thinking}
-
-        {:error, _} = error ->
-          error
-      end
-
-    case result do
-      {:ok, response, session_id, thinking} ->
-        new_state = %{
-          state
-          | last_session_id: session_id,
-            thinking_cache: thinking || [],
-            query_count: state.query_count + 1
-        }
-
+    case execute_stream(prompt, callback, model, capture, state, opts) do
+      {:ok, response, new_state} ->
         {:reply, {:ok, response}, new_state}
 
       {:error, _} = error ->
@@ -278,8 +207,47 @@ defmodule Arbor.Agent.Claude do
     model == :opus or state.capture_thinking
   end
 
-  defp capture_thinking_from_session(session_id, _state) when is_nil(session_id) do
-    # No session ID, try to get latest
+  defp execute_query(prompt, model, capture, state, opts) do
+    case AgentSDK.query(prompt, Keyword.merge(opts, model: model)) do
+      {:ok, response} ->
+        {thinking, session_id} = resolve_thinking(response, capture, state)
+        maybe_record_thinking(state.id, thinking)
+        emit_query_completed(state.id, model, thinking)
+
+        enhanced_response = %{response | thinking: thinking}
+        new_state = update_state_after_query(state, session_id, thinking)
+        {:ok, enhanced_response, new_state}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp execute_stream(prompt, callback, model, capture, state, opts) do
+    case AgentSDK.stream(prompt, callback, Keyword.merge(opts, model: model)) do
+      {:ok, response} ->
+        {thinking, session_id} = resolve_thinking(response, capture, state)
+        maybe_record_thinking(state.id, thinking)
+        notify_thinking_callback(thinking, callback)
+
+        enhanced_response = %{response | thinking: thinking}
+        new_state = update_state_after_query(state, session_id, thinking)
+        {:ok, enhanced_response, new_state}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp resolve_thinking(response, true, state) do
+    capture_thinking_from_session(response.session_id, state)
+  end
+
+  defp resolve_thinking(response, false, _state) do
+    {response.thinking, response.session_id}
+  end
+
+  defp capture_thinking_from_session(nil, _state) do
     case SessionReader.latest_thinking() do
       {:ok, blocks} -> {blocks, nil}
       {:error, _} -> {nil, nil}
@@ -292,7 +260,6 @@ defmodule Arbor.Agent.Claude do
         {blocks, session_id}
 
       {:error, _} ->
-        # Fall back to latest session
         case SessionReader.latest_thinking() do
           {:ok, blocks} -> {blocks, session_id}
           {:error, _} -> {nil, session_id}
@@ -300,43 +267,70 @@ defmodule Arbor.Agent.Claude do
     end
   end
 
-  defp record_thinking_to_memory(agent_id, thinking_blocks) do
-    # Use runtime check since arbor_agent might not have arbor_memory started
-    if Code.ensure_loaded?(Arbor.Memory.Thinking) do
-      case Process.whereis(Arbor.Memory.Thinking) do
-        nil ->
-          Logger.debug("Memory.Thinking not running, skipping thinking record")
+  defp update_state_after_query(state, session_id, thinking) do
+    %{
+      state
+      | last_session_id: session_id,
+        thinking_cache: thinking || [],
+        query_count: state.query_count + 1
+    }
+  end
 
-        _pid ->
-          Enum.each(thinking_blocks, fn block ->
-            text = block.text || block[:text] || ""
-            opts = if block.signature, do: [metadata: %{signature: block.signature}], else: []
+  defp emit_query_completed(agent_id, model, thinking) do
+    emit_signal(:query_completed, %{
+      id: agent_id,
+      model: model,
+      thinking_count: length(thinking || [])
+    })
+  end
 
-            case apply(Arbor.Memory.Thinking, :record_thinking, [agent_id, text, opts]) do
-              {:ok, _entry} ->
-                :ok
+  defp notify_thinking_callback(nil, _callback), do: :ok
+  defp notify_thinking_callback([], _callback), do: :ok
 
-              {:error, reason} ->
-                Logger.warning("Failed to record thinking: #{inspect(reason)}")
-            end
-          end)
-      end
+  defp notify_thinking_callback(thinking, callback) do
+    Enum.each(thinking, fn block ->
+      callback.({:thinking, block})
+    end)
+  end
+
+  defp maybe_record_thinking(_agent_id, nil), do: :ok
+  defp maybe_record_thinking(_agent_id, []), do: :ok
+
+  defp maybe_record_thinking(agent_id, thinking_blocks) do
+    if memory_thinking_available?() do
+      Enum.each(thinking_blocks, &record_single_thinking(agent_id, &1))
     else
-      Logger.debug("Arbor.Memory.Thinking not loaded, skipping thinking record")
+      Logger.debug("Memory.Thinking not available, skipping thinking record")
+    end
+  end
+
+  defp memory_thinking_available? do
+    Code.ensure_loaded?(Arbor.Memory.Thinking) and
+      Process.whereis(Arbor.Memory.Thinking) != nil
+  end
+
+  defp record_single_thinking(agent_id, block) do
+    text = block.text || block[:text] || ""
+    opts = if block.signature, do: [metadata: %{signature: block.signature}], else: []
+
+    result = Arbor.Memory.Thinking.record_thinking(agent_id, text, opts)
+
+    case result do
+      {:ok, _entry} -> :ok
+      {:error, reason} -> Logger.warning("Failed to record thinking: #{inspect(reason)}")
     end
   end
 
   defp emit_signal(event, data) do
-    if Code.ensure_loaded?(Arbor.Signals) do
-      case Process.whereis(Arbor.Signals.Bus) do
-        nil ->
-          :ok
-
-        _pid ->
-          apply(Arbor.Signals, :emit, [:agent, event, data])
-      end
+    if signals_available?() do
+      Arbor.Signals.emit(:agent, event, data)
     end
   rescue
     _ -> :ok
+  end
+
+  defp signals_available? do
+    Code.ensure_loaded?(Arbor.Signals) and
+      Process.whereis(Arbor.Signals.Bus) != nil
   end
 end
