@@ -280,8 +280,101 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     ~H"""
     <.dashboard_header title="Agent Chat" subtitle="Interactive conversation with Claude + Memory" />
 
-    <div style="display: grid; grid-template-columns: 1fr 320px; gap: 1rem; margin-top: 1rem; height: calc(100vh - 180px);">
-      <%!-- Main chat area --%>
+    <%!-- Stats bar when agent is active --%>
+    <div
+      :if={@agent}
+      style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem 1rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;"
+    >
+      <.badge label={"Agent: #{@agent_id}"} color={:green} />
+      <.badge :if={@session_id} label={"Session: #{String.slice(@session_id || "", 0..7)}..."} color={:blue} />
+      <.badge :if={@memory_stats && @memory_stats[:enabled]} label="Memory: ON" color={:purple} />
+      <.badge :if={@memory_stats && !@memory_stats[:enabled]} label="Memory: OFF" color={:gray} />
+      <.badge label={"Queries: #{@query_count}"} color={:blue} />
+      <.badge :if={@memory_stats && @memory_stats[:enabled]} label={"Index: #{get_in(@memory_stats, [:index, :count]) || 0}"} color={:purple} />
+      <.badge :if={@memory_stats && @memory_stats[:enabled]} label={"Knowledge: #{get_in(@memory_stats, [:knowledge, :node_count]) || 0}"} color={:green} />
+    </div>
+
+    <%!-- 3-column layout: left (signals+actions) | center (chat) | right (thinking+memory) --%>
+    <div style="display: grid; grid-template-columns: 280px 1fr 320px; gap: 1rem; margin-top: 0.75rem; height: calc(100vh - 200px);">
+
+      <%!-- LEFT PANEL: Signals + Actions --%>
+      <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
+        <%!-- Signal Stream --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden; flex: 1; min-height: 200px;">
+          <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; justify-content: space-between; align-items: center;">
+            <strong>📡 Signal Stream</strong>
+            <span style="color: #22c55e; font-size: 0.75em;">● LIVE</span>
+          </div>
+          <div
+            id="signals-container"
+            phx-update="stream"
+            style="max-height: 300px; overflow-y: auto; padding: 0.5rem;"
+          >
+            <div
+              :for={{dom_id, sig} <- @streams.signals}
+              id={dom_id}
+              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(74, 255, 158, 0.1); font-size: 0.85em;"
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem;">
+                <span style="font-size: 1em;">{signal_icon(sig.category)}</span>
+                <span style="font-weight: 500; flex: 1;">{sig.event}</span>
+                <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                  {format_time(sig.timestamp)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div style="padding: 0.5rem; text-align: center;">
+            <.empty_state
+              :if={stream_empty?(@streams.signals)}
+              icon="📡"
+              title="Waiting for signals..."
+              hint=""
+            />
+          </div>
+        </div>
+
+        <%!-- Recent Actions --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
+          <div
+            phx-click="toggle-actions"
+            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong>⚡ Recent Actions</strong>
+            <span style="color: var(--aw-text-muted, #888);">
+              {if @show_actions, do: "▼", else: "▶"}
+            </span>
+          </div>
+          <div
+            :if={@show_actions}
+            id="actions-container"
+            phx-update="stream"
+            style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
+          >
+            <div
+              :for={{dom_id, action} <- @streams.actions}
+              id={dom_id}
+              style={"margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; font-size: 0.85em; " <> action_style(action.outcome)}
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem;">
+                <span>⚡</span>
+                <span style="font-weight: 500; flex: 1;">{action.name}</span>
+                <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
+              </div>
+            </div>
+          </div>
+          <div :if={@show_actions} style="padding: 0.5rem; text-align: center;">
+            <.empty_state
+              :if={stream_empty?(@streams.actions)}
+              icon="⚡"
+              title="No actions yet..."
+              hint=""
+            />
+          </div>
+        </div>
+      </div>
+
+      <%!-- CENTER: Chat Panel --%>
       <div style="display: flex; flex-direction: column; border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
         <%!-- Agent controls --%>
         <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 1rem;">
@@ -303,32 +396,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </button>
             </form>
           </div>
-          <div
-            :if={@agent != nil}
-            style="display: flex; align-items: center; gap: 0.5rem; width: 100%; flex-wrap: wrap;"
-          >
-            <.badge label={"Agent: #{@agent_id}"} color={:green} />
-            <.badge
-              :if={@session_id}
-              label={"Session: #{String.slice(@session_id || "", 0..7)}..."}
-              color={:blue}
-            />
-            <.badge
-              :if={@memory_stats && @memory_stats[:enabled]}
-              label="Memory: ON"
-              color={:purple}
-            />
-            <.badge
-              :if={@memory_stats && !@memory_stats[:enabled]}
-              label="Memory: OFF"
-              color={:gray}
-            />
+          <div :if={@agent != nil} style="display: flex; align-items: center; gap: 0.5rem; width: 100%;">
+            <span style="color: var(--aw-text-muted, #888);">Chat with Claude</span>
             <div style="flex: 1;"></div>
             <button
               phx-click="stop-agent"
               style="padding: 0.5rem 1rem; background: var(--aw-error, #ff4a4a); border: none; border-radius: 4px; color: white; cursor: pointer;"
             >
-              Stop
+              Stop Agent
             </button>
           </div>
         </div>
@@ -403,146 +478,45 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </form>
       </div>
 
-      <%!-- Side panel --%>
+      <%!-- RIGHT PANEL: Thinking + Memory --%>
       <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
-        <%!-- Stats bar --%>
-        <div
-          :if={@agent}
-          style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;"
-        >
-          <.badge label={"Queries: #{@query_count}"} color={:blue} />
-          <.badge
-            :if={@memory_stats && @memory_stats[:enabled]}
-            label={"Index: #{get_in(@memory_stats, [:index, :count]) || 0}"}
-            color={:purple}
-          />
-          <.badge
-            :if={@memory_stats && @memory_stats[:enabled]}
-            label={"Knowledge: #{get_in(@memory_stats, [:knowledge, :node_count]) || 0}"}
-            color={:green}
-          />
-        </div>
-
-        <%!-- Actions panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
-          <div
-            phx-click="toggle-actions"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong>⚡ Actions</strong>
-            <span style="color: var(--aw-text-muted, #888);">
-              {if @show_actions, do: "▼", else: "▶"}
-            </span>
-          </div>
-          <div
-            :if={@show_actions}
-            id="actions-container"
-            phx-update="stream"
-            style="max-height: 150px; overflow-y: auto; padding: 0.5rem;"
-          >
-            <div
-              :for={{dom_id, action} <- @streams.actions}
-              id={dom_id}
-              style={"margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; font-size: 0.85em; " <> action_style(action.outcome)}
-            >
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-weight: 500;">{action.name}</span>
-                <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
-              </div>
-              <div style="color: var(--aw-text-muted, #888); font-size: 0.85em; margin-top: 0.25rem;">
-                {format_time(action.timestamp)}
-              </div>
-            </div>
-          </div>
-          <div :if={@show_actions} style="padding: 0.5rem; text-align: center;">
-            <.empty_state
-              :if={stream_empty?(@streams.actions)}
-              icon="⚡"
-              title="No actions"
-              hint="Tool calls appear here"
-            />
-          </div>
-        </div>
-
         <%!-- Working Thoughts panel --%>
         <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
           <div
             phx-click="toggle-thoughts"
             style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
           >
-            <strong>💭 Working Memory</strong>
+            <strong>💭 Recent Thinking</strong>
             <span style="color: var(--aw-text-muted, #888);">
               {if @show_thoughts, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_thoughts} style="max-height: 150px; overflow-y: auto; padding: 0.5rem;">
+          <div :if={@show_thoughts} style="max-height: 180px; overflow-y: auto; padding: 0.5rem;">
             <div
               :for={thought <- @working_thoughts}
               style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.85em;"
             >
-              <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
+              <span>💭</span>
+              <span style="color: var(--aw-text-muted, #888); white-space: pre-wrap;">
                 {Helpers.truncate(thought.content, 120)}
-              </p>
-              <div style="color: var(--aw-text-muted, #666); font-size: 0.8em; margin-top: 0.25rem;">
-                {format_time(thought.timestamp)}
-              </div>
+              </span>
             </div>
             <.empty_state
               :if={@working_thoughts == []}
               icon="💭"
-              title="No thoughts"
-              hint="Agent thoughts appear here"
+              title="Waiting for activity..."
+              hint=""
             />
           </div>
         </div>
 
-        <%!-- Recalled Memories --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
-          <div
-            phx-click="toggle-memories"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong>💭 Recalled Memories</strong>
-            <span style="color: var(--aw-text-muted, #888);">
-              {if @show_memories, do: "▼", else: "▶"}
-            </span>
-          </div>
-          <div
-            :if={@show_memories}
-            id="memories-container"
-            phx-update="stream"
-            style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
-          >
-            <div
-              :for={{dom_id, memory} <- @streams.memories}
-              id={dom_id}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(138, 43, 226, 0.1); font-size: 0.85em;"
-            >
-              <div :if={memory.score} style="margin-bottom: 0.25rem;">
-                <.badge label={"score: #{Float.round(memory.score, 2)}"} color={:purple} />
-              </div>
-              <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
-                {Helpers.truncate(memory.content, 150)}
-              </p>
-            </div>
-          </div>
-          <div :if={@show_memories} style="padding: 0.5rem; text-align: center;">
-            <.empty_state
-              :if={stream_empty?(@streams.memories)}
-              icon="💭"
-              title="No memories recalled"
-              hint="Relevant memories appear here"
-            />
-          </div>
-        </div>
-
-        <%!-- Thinking blocks --%>
+        <%!-- Extended Thinking blocks --%>
         <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
           <div
             phx-click="toggle-thinking"
             style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
           >
-            <strong>🧠 Thinking</strong>
+            <strong>🧠 Extended Thinking</strong>
             <span style="color: var(--aw-text-muted, #888);">
               {if @show_thinking, do: "▼", else: "▶"}
             </span>
@@ -579,36 +553,43 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
         </div>
 
-        <%!-- Signals --%>
+        <%!-- Recalled Memories --%>
         <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden; flex: 1; min-height: 150px;">
-          <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333);">
-            <strong>📡 Signals</strong>
+          <div
+            phx-click="toggle-memories"
+            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong>📝 Memory Notes</strong>
+            <span style="color: var(--aw-text-muted, #888);">
+              {if @show_memories, do: "▼", else: "▶"}
+            </span>
           </div>
           <div
-            id="signals-container"
+            :if={@show_memories}
+            id="memories-container"
             phx-update="stream"
             style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
           >
             <div
-              :for={{dom_id, sig} <- @streams.signals}
+              :for={{dom_id, memory} <- @streams.memories}
               id={dom_id}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(74, 255, 158, 0.1); font-size: 0.85em;"
+              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(138, 43, 226, 0.1); font-size: 0.85em;"
             >
-              <div style="display: flex; align-items: center; gap: 0.25rem;">
-                <.badge label={to_string(sig.category)} color={:green} />
-                <span style="font-weight: 500;">{sig.event}</span>
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.25rem;">
+                <span>📝</span>
+                <.badge :if={memory.score} label={"score: #{Float.round(memory.score, 2)}"} color={:purple} />
               </div>
-              <div style="color: var(--aw-text-muted, #888); font-size: 0.85em; margin-top: 0.25rem;">
-                {format_time(sig.timestamp)}
-              </div>
+              <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
+                {Helpers.truncate(memory.content, 150)}
+              </p>
             </div>
           </div>
-          <div style="padding: 0.5rem; text-align: center;">
+          <div :if={@show_memories} style="padding: 0.5rem; text-align: center;">
             <.empty_state
-              :if={stream_empty?(@streams.signals)}
-              icon="📡"
-              title="No signals"
-              hint="Agent signals appear here"
+              :if={stream_empty?(@streams.memories)}
+              icon="📝"
+              title="No memories recalled"
+              hint="Relevant memories appear here"
             />
           </div>
         </div>
@@ -650,6 +631,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp outcome_color(:failure), do: :red
   defp outcome_color(:blocked), do: :yellow
   defp outcome_color(_), do: :gray
+
+  defp signal_icon(:agent), do: "🤖"
+  defp signal_icon(:memory), do: "📝"
+  defp signal_icon(:action), do: "⚡"
+  defp signal_icon(:security), do: "🔒"
+  defp signal_icon(:consensus), do: "🗳️"
+  defp signal_icon(:monitor), do: "📊"
+  defp signal_icon(_), do: "▶"
 
   defp get_memory_stats(agent) do
     case Claude.memory_stats(agent) do
