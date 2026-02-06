@@ -286,17 +286,28 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem 1rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;"
     >
       <.badge label={"Agent: #{@agent_id}"} color={:green} />
-      <.badge :if={@session_id} label={"Session: #{String.slice(@session_id || "", 0..7)}..."} color={:blue} />
+      <.badge
+        :if={@session_id}
+        label={"Session: #{String.slice(@session_id || "", 0..7)}..."}
+        color={:blue}
+      />
       <.badge :if={@memory_stats && @memory_stats[:enabled]} label="Memory: ON" color={:purple} />
       <.badge :if={@memory_stats && !@memory_stats[:enabled]} label="Memory: OFF" color={:gray} />
       <.badge label={"Queries: #{@query_count}"} color={:blue} />
-      <.badge :if={@memory_stats && @memory_stats[:enabled]} label={"Index: #{get_in(@memory_stats, [:index, :count]) || 0}"} color={:purple} />
-      <.badge :if={@memory_stats && @memory_stats[:enabled]} label={"Knowledge: #{get_in(@memory_stats, [:knowledge, :node_count]) || 0}"} color={:green} />
+      <.badge
+        :if={@memory_stats && @memory_stats[:enabled]}
+        label={"Index: #{get_in(@memory_stats, [:index, :count]) || 0}"}
+        color={:purple}
+      />
+      <.badge
+        :if={@memory_stats && @memory_stats[:enabled]}
+        label={"Knowledge: #{get_in(@memory_stats, [:knowledge, :node_count]) || 0}"}
+        color={:green}
+      />
     </div>
 
     <%!-- 3-column layout: left (signals+actions) | center (chat) | right (thinking+memory) --%>
     <div style="display: grid; grid-template-columns: 280px 1fr 320px; gap: 1rem; margin-top: 0.75rem; height: calc(100vh - 200px);">
-
       <%!-- LEFT PANEL: Signals + Actions --%>
       <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
         <%!-- Signal Stream --%>
@@ -396,7 +407,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </button>
             </form>
           </div>
-          <div :if={@agent != nil} style="display: flex; align-items: center; gap: 0.5rem; width: 100%;">
+          <div
+            :if={@agent != nil}
+            style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
+          >
             <span style="color: var(--aw-text-muted, #888);">Chat with Claude</span>
             <div style="flex: 1;"></div>
             <button
@@ -577,7 +591,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.25rem;">
                 <span>📝</span>
-                <.badge :if={memory.score} label={"score: #{Float.round(memory.score, 2)}"} color={:purple} />
+                <.badge
+                  :if={memory.score}
+                  label={"score: #{Float.round(memory.score, 2)}"}
+                  color={:purple}
+                />
               </div>
               <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
                 {Helpers.truncate(memory.content, 150)}
