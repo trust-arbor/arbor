@@ -172,7 +172,8 @@ defmodule Arbor.Signals.TaintTest do
     end
 
     test "verified_pipeline CANNOT reduce untrusted to trusted" do
-      assert Taint.reduce(:untrusted, :trusted, :verified_pipeline) == {:error, :reduction_not_allowed}
+      assert Taint.reduce(:untrusted, :trusted, :verified_pipeline) ==
+               {:error, :reduction_not_allowed}
     end
 
     test "reduction to same level always succeeds" do

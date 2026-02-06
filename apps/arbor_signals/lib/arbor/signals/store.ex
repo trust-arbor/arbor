@@ -339,7 +339,11 @@ defmodule Arbor.Signals.Store do
 
     if checkpoint_mod && checkpoint_available?(checkpoint_mod) do
       interval =
-        Application.get_env(:arbor_signals, :checkpoint_interval_ms, @default_checkpoint_interval_ms)
+        Application.get_env(
+          :arbor_signals,
+          :checkpoint_interval_ms,
+          @default_checkpoint_interval_ms
+        )
 
       Process.send_after(self(), :save_checkpoint, interval)
     end
