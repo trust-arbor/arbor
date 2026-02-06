@@ -50,7 +50,9 @@ defmodule Arbor.AI.StreamParserTest do
     test "extracts session_id from result event" do
       state = StreamParser.new()
 
-      event = ~s({"type":"result","session_id":"abc-123","usage":{"input_tokens":10,"output_tokens":20}})
+      event =
+        ~s({"type":"result","session_id":"abc-123","usage":{"input_tokens":10,"output_tokens":20}})
+
       state = StreamParser.process_line(state, event)
       result = StreamParser.finalize(state)
 
@@ -97,7 +99,8 @@ defmodule Arbor.AI.StreamParserTest do
       state = StreamParser.new()
 
       # Simulated assistant message with thinking content block
-      event = ~s({"type":"assistant","message":{"id":"msg-123","model":"claude-sonnet-4","content":[{"type":"thinking","thinking":"Deep analysis here","signature":"sig_abc"},{"type":"text","text":"Final answer"}]}})
+      event =
+        ~s({"type":"assistant","message":{"id":"msg-123","model":"claude-sonnet-4","content":[{"type":"thinking","thinking":"Deep analysis here","signature":"sig_abc"},{"type":"text","text":"Final answer"}]}})
 
       state = StreamParser.process_line(state, event)
       result = StreamParser.finalize(state)

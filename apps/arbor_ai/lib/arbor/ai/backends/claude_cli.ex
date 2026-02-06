@@ -171,7 +171,10 @@ defmodule Arbor.AI.Backends.ClaudeCli do
     {cmd, args} = build_command(prompt, opts)
     model = Keyword.get(opts, :model, @default_model)
 
-    Logger.info("Claude CLI streaming generation", model: model, prompt_length: String.length(prompt))
+    Logger.info("Claude CLI streaming generation",
+      model: model,
+      prompt_length: String.length(prompt)
+    )
 
     start_time = System.monotonic_time(:millisecond)
 
@@ -212,8 +215,12 @@ defmodule Arbor.AI.Backends.ClaudeCli do
     # Convert thinking blocks to expected format
     thinking =
       case result.thinking do
-        nil -> nil
-        [] -> nil
+        nil ->
+          nil
+
+        [] ->
+          nil
+
         blocks ->
           Enum.map(blocks, fn block ->
             %{

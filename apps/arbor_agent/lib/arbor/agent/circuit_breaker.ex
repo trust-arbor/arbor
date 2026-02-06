@@ -130,7 +130,8 @@ defmodule Arbor.Agent.CircuitBreaker do
       config: %{
         failure_threshold: Keyword.get(opts, :failure_threshold, @default_failure_threshold),
         cooldown_ms: Keyword.get(opts, :cooldown_ms, @default_cooldown_ms),
-        half_open_max_attempts: Keyword.get(opts, :half_open_max_attempts, @default_half_open_max_attempts)
+        half_open_max_attempts:
+          Keyword.get(opts, :half_open_max_attempts, @default_half_open_max_attempts)
       },
       stats: %{
         total_attempts: 0,
@@ -193,7 +194,9 @@ defmodule Arbor.Agent.CircuitBreaker do
 
     updated_circuit =
       if new_failures >= config.failure_threshold do
-        Logger.warning("[CircuitBreaker] Circuit opened for #{inspect(key)} after #{new_failures} failures")
+        Logger.warning(
+          "[CircuitBreaker] Circuit opened for #{inspect(key)} after #{new_failures} failures"
+        )
 
         %{
           circuit
@@ -242,7 +245,10 @@ defmodule Arbor.Agent.CircuitBreaker do
 
         :open ->
           if cooldown_expired?(circuit, config, now) do
-            Logger.debug("[CircuitBreaker] Cooldown expired for #{inspect(key)}, entering half-open")
+            Logger.debug(
+              "[CircuitBreaker] Cooldown expired for #{inspect(key)}, entering half-open"
+            )
+
             {true, %{circuit | state: :half_open, half_open_attempts: 1}}
           else
             {false, circuit}

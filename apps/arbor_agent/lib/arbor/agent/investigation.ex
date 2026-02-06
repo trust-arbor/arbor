@@ -134,7 +134,12 @@ defmodule Arbor.Agent.Investigation do
           }
         ]
 
-    log = log ++ ["Memory usage: #{format_memory(memory)}", "Scheduler: #{Float.round(scheduler * 100, 1)}%"]
+    log =
+      log ++
+        [
+          "Memory usage: #{format_memory(memory)}",
+          "Scheduler: #{Float.round(scheduler * 100, 1)}%"
+        ]
 
     # Skill-specific symptoms
     {skill_symptoms, skill_log} = gather_skill_symptoms(anomaly)
@@ -334,7 +339,8 @@ defmodule Arbor.Agent.Investigation do
                  severity: :high,
                  timestamp: DateTime.utc_now()
                }
-             ], ["Process #{inspect(pid)}: queue=#{info.message_queue_len}, memory=#{info.memory}"]}
+             ],
+             ["Process #{inspect(pid)}: queue=#{info.message_queue_len}, memory=#{info.memory}"]}
         end
       else
         {[], []}
@@ -434,7 +440,11 @@ defmodule Arbor.Agent.Investigation do
       }
     ]
 
-    log = ["Process count: #{process_count}", "Top reductions: #{inspect(Enum.map(top_red, & &1.value))}"]
+    log = [
+      "Process count: #{process_count}",
+      "Top reductions: #{inspect(Enum.map(top_red, & &1.value))}"
+    ]
+
     {symptoms, log}
   end
 
