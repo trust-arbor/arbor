@@ -560,7 +560,9 @@ defmodule Arbor.Consensus.Coordinator do
 
     case result do
       {:ok, evaluations} ->
-        state = process_evaluations(state, proposal_id, evaluations)
+        # Recalculate quorum from topic for this proposal
+        quorum = get_proposal_quorum(state, proposal_id)
+        state = process_evaluations(state, proposal_id, evaluations, quorum)
         {:noreply, state}
 
       {:error, reason} ->
@@ -891,11 +893,11 @@ defmodule Arbor.Consensus.Coordinator do
     # Clean up pending tracking
     state = %{state | pending_evaluations: Map.delete(state.pending_evaluations, proposal_id)}
 
-    # Process evaluations (same as direct council path)
-    process_evaluations(state, proposal_id, evaluations)
+    # Process evaluations with topic-specific quorum
+    process_evaluations(state, proposal_id, evaluations, pending.quorum)
   end
 
-  defp process_evaluations(state, proposal_id, evaluations) do
+  defp process_evaluations(state, proposal_id, evaluations, quorum) do
     case Map.get(state.proposals, proposal_id) do
       nil ->
         Logger.warning("Received evaluations for unknown proposal #{proposal_id}")
@@ -903,7 +905,7 @@ defmodule Arbor.Consensus.Coordinator do
 
       proposal ->
         record_evaluation_events(state, proposal_id, evaluations)
-        render_and_apply_decision(state, proposal_id, proposal, evaluations)
+        render_and_apply_decision(state, proposal_id, proposal, evaluations, quorum)
     end
   end
 
@@ -928,8 +930,10 @@ defmodule Arbor.Consensus.Coordinator do
     })
   end
 
-  defp render_and_apply_decision(state, proposal_id, proposal, evaluations) do
-    case CouncilDecision.from_evaluations(proposal, evaluations) do
+  defp render_and_apply_decision(state, proposal_id, proposal, evaluations, quorum) do
+    opts = if quorum, do: [quorum: quorum], else: []
+
+    case CouncilDecision.from_evaluations(proposal, evaluations, opts) do
       {:ok, decision} ->
         apply_decision(state, proposal_id, proposal, decision)
 
@@ -1279,6 +1283,18 @@ defmodule Arbor.Consensus.Coordinator do
       end
 
     {perspectives, quorum}
+  end
+
+  # Get quorum for a proposal by recalculating from its topic
+  defp get_proposal_quorum(state, proposal_id) do
+    case Map.get(state.proposals, proposal_id) do
+      nil ->
+        nil
+
+      proposal ->
+        {_perspectives, quorum} = resolve_council_config(proposal, state.config)
+        quorum
+    end
   end
 
   # Resolve perspectives from evaluator modules.

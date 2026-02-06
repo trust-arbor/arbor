@@ -78,7 +78,8 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
 
     task =
       Task.async(fn ->
-        ai_module.generate_text(prompt, model: :fast)
+        # Force API backend for speed (uses configured OpenRouter model)
+        ai_module.generate_text(prompt, backend: :api, max_tokens: 500)
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do

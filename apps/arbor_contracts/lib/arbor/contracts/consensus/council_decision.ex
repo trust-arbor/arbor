@@ -50,9 +50,16 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
 
   @doc """
   Create a decision from a proposal and its evaluations.
+
+  ## Options
+
+    * `:quorum` - Override the required quorum (default: from Proposal)
   """
-  @spec from_evaluations(Proposal.t(), [Evaluation.t()]) :: {:ok, t()} | {:error, term()}
-  def from_evaluations(proposal, evaluations)
+  @spec from_evaluations(Proposal.t(), [Evaluation.t()], keyword()) ::
+          {:ok, t()} | {:error, term()}
+  def from_evaluations(proposal, evaluations, opts \\ [])
+
+  def from_evaluations(proposal, evaluations, opts)
       when is_struct(proposal, Proposal) and is_list(evaluations) do
     now = DateTime.utc_now()
     id = "decision_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
@@ -61,7 +68,8 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
     case verify_all_sealed(evaluations) do
       :ok ->
         counts = count_votes(evaluations)
-        required_quorum = Proposal.required_quorum(proposal)
+        # Use provided quorum or fall back to Proposal default
+        required_quorum = Keyword.get(opts, :quorum) || Proposal.required_quorum(proposal)
         quorum_met = counts.approve >= required_quorum
 
         decision = determine_decision(counts, required_quorum)
