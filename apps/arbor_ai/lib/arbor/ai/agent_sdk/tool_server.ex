@@ -83,8 +83,14 @@ defmodule Arbor.AI.AgentSDK.ToolServer do
 
       ToolServer.register_handler("file_read", schema, handler)
   """
-  @spec register_handler(String.t(), map(), (map() -> {:ok, term()} | {:error, term()}), GenServer.server()) :: :ok
-  def register_handler(name, schema, handler, server \\ __MODULE__) when is_function(handler, 1) do
+  @spec register_handler(
+          String.t(),
+          map(),
+          (map() -> {:ok, term()} | {:error, term()}),
+          GenServer.server()
+        ) :: :ok
+  def register_handler(name, schema, handler, server \\ __MODULE__)
+      when is_function(handler, 1) do
     GenServer.call(server, {:register_handler, name, schema, handler})
   end
 
