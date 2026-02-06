@@ -27,6 +27,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   import Arbor.Web.Components
   import Arbor.Dashboard.Components.ProposalDiff
+  import Arbor.Dashboard.Components.InvestigationPanel
 
   alias Arbor.Demo.FaultInjector
 
@@ -77,6 +78,11 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         current_proposal: nil,
         evaluations: [],
         decision: nil,
+        # Investigation tracking
+        current_investigation: nil,
+        investigation_expanded: false,
+        # Verification tracking
+        verification_status: nil,
         # Phase 4: UI state
         system_thinking: nil,
         diff_expanded: false,
@@ -295,6 +301,10 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     {:noreply, assign(socket, expanded_feed_entries: expanded)}
   end
 
+  def handle_event("toggle_investigation", _params, socket) do
+    {:noreply, assign(socket, investigation_expanded: !socket.assigns.investigation_expanded)}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -406,6 +416,19 @@ defmodule Arbor.Dashboard.Live.DemoLive do
       </.card>
     </div>
 
+    <%!-- Investigation Panel (shows after diagnosis) --%>
+    <%= if @current_investigation do %>
+      <div style="margin-top: 1.5rem;">
+        <.card title="Investigation">
+          <.investigation_panel
+            investigation={@current_investigation}
+            expanded={@investigation_expanded}
+            on_toggle="toggle_investigation"
+          />
+        </.card>
+      </div>
+    <% end %>
+
     <%!-- Proposal Diff (shows in Propose/Review stages) --%>
     <%= if @current_proposal do %>
       <div style="margin-top: 1.5rem;">
@@ -458,6 +481,14 @@ defmodule Arbor.Dashboard.Live.DemoLive do
                   {Map.get(@decision, :reason)}
                 </div>
               <% end %>
+            </div>
+          <% end %>
+
+          <%!-- Verification Status --%>
+          <%= if @verification_status do %>
+            <div class={"aw-verification-status #{verification_class(@verification_status)}"} style="margin-top: 1rem;">
+              <span>{verification_icon(@verification_status)}</span>
+              <span>{verification_label(@verification_status)}</span>
             </div>
           <% end %>
         </.card>
@@ -776,6 +807,35 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     assign(socket, decision: decision)
   end
 
+  defp dispatch_consensus_update({:debug_agent, :investigation_complete}, socket, signal) do
+    data = extract_signal_data(signal)
+
+    investigation = %{
+      id: data[:investigation_id] || data["investigation_id"] || "inv_unknown",
+      anomaly: socket.assigns.current_anomaly || %{skill: :unknown},
+      symptoms: [],
+      hypotheses: [],
+      selected_hypothesis: %{
+        cause: data[:suggested_action] || :unknown,
+        confidence: data[:confidence] || 0.0,
+        suggested_action: data[:suggested_action] || :investigate,
+        evidence_chain: []
+      },
+      confidence: data[:confidence] || 0.0,
+      thinking_log: ["Investigation started", "Gathered #{data[:hypothesis_count] || 0} hypotheses"]
+    }
+
+    assign(socket, current_investigation: investigation)
+  end
+
+  defp dispatch_consensus_update({:debug_agent, :fix_verified}, socket, _signal) do
+    assign(socket, verification_status: :verified)
+  end
+
+  defp dispatch_consensus_update({:debug_agent, :fix_unverified}, socket, _signal) do
+    assign(socket, verification_status: :unverified)
+  end
+
   defp dispatch_consensus_update(_, socket, _signal), do: socket
 
   defp normalize_evaluation(eval) when is_map(eval) do
@@ -1015,7 +1075,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   defp subscribe_to_signals do
     pid = self()
-    patterns = ["demo.*", "monitor.*", "consensus.*", "code.*"]
+    patterns = ["demo.*", "monitor.*", "consensus.*", "code.*", "debug_agent.*"]
 
     patterns
     |> Enum.map(&subscribe_pattern(&1, pid))
@@ -1093,6 +1153,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   defp normalize_category(cat) when cat in [:monitor, "monitor"], do: :monitor
   defp normalize_category(cat) when cat in [:consensus, "consensus"], do: :consensus
   defp normalize_category(cat) when cat in [:code, "code"], do: :code
+  defp normalize_category(cat) when cat in [:debug_agent, "debug_agent"], do: :debug_agent
   defp normalize_category(_), do: :unknown
 
   defp normalize_signal_type(t) when t in [:fault_injected, "fault_injected"], do: :fault_injected
@@ -1115,6 +1176,18 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   defp normalize_signal_type(t) when t in [:evaluation_completed, "evaluation_completed"],
     do: :evaluation_completed
+
+  defp normalize_signal_type(t) when t in [:investigation_complete, "investigation_complete"],
+    do: :investigation_complete
+
+  defp normalize_signal_type(t) when t in [:fix_verified, "fix_verified"],
+    do: :fix_verified
+
+  defp normalize_signal_type(t) when t in [:fix_unverified, "fix_unverified"],
+    do: :fix_unverified
+
+  defp normalize_signal_type(t) when t in [:circuit_breaker_blocked, "circuit_breaker_blocked"],
+    do: :circuit_breaker_blocked
 
   defp normalize_signal_type(_), do: :unknown
 
@@ -1264,4 +1337,18 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   end
 
   defp format_perspective(_), do: "Unknown"
+
+  # ── Phase 6: Verification helpers ────────────────────────────────
+
+  defp verification_class(:verified), do: "aw-verification-verified"
+  defp verification_class(:unverified), do: "aw-verification-unverified"
+  defp verification_class(_), do: "aw-verification-pending"
+
+  defp verification_icon(:verified), do: "✅"
+  defp verification_icon(:unverified), do: "❌"
+  defp verification_icon(_), do: "⏳"
+
+  defp verification_label(:verified), do: "Fix verified successfully"
+  defp verification_label(:unverified), do: "Fix verification failed"
+  defp verification_label(_), do: "Verification pending"
 end
