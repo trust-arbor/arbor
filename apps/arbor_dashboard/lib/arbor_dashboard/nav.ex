@@ -12,6 +12,7 @@ defmodule Arbor.Dashboard.Nav do
   alias Arbor.Dashboard.Live.{
     ActivityLive,
     AgentsLive,
+    ChatLive,
     ConsensusLive,
     DemoLive,
     EvalLive,
@@ -30,7 +31,8 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/agents", label: "Agents", icon: "\u{1F916}", view: AgentsLive},
     %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},
-    %{href: "/demo", label: "Demo", icon: "\u{1F52C}", view: DemoLive}
+    %{href: "/demo", label: "Demo", icon: "\u{1F52C}", view: DemoLive},
+    %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive}
   ]
 
   def on_mount(:default, _params, _session, socket) do

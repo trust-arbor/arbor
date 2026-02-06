@@ -18,6 +18,7 @@ defmodule Arbor.Dashboard.Router do
       live "/monitor", MonitorLive
       live "/roadmap", RoadmapLive
       live "/demo", DemoLive
+      live "/chat", ChatLive
     end
   end
 end
