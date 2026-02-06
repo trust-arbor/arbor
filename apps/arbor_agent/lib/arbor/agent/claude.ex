@@ -536,6 +536,7 @@ defmodule Arbor.Agent.Claude do
           agent_id: agent_id,
           query_preview: String.slice(query, 0..50)
         )
+
         memories
 
       {:error, reason} ->
@@ -577,15 +578,17 @@ defmodule Arbor.Agent.Claude do
   defp update_working_memory(state, prompt, response) do
     if state.memory_initialized and state.working_memory do
       # Add conversation as a thought to working memory
-      thought = "User asked: #{String.slice(prompt, 0..100)}... " <>
-                "I responded: #{String.slice(response, 0..200)}..."
+      thought =
+        "User asked: #{String.slice(prompt, 0..100)}... " <>
+          "I responded: #{String.slice(response, 0..200)}..."
 
       # Use WorkingMemory API to add thought
-      working_memory = Arbor.Memory.WorkingMemory.add_thought(
-        state.working_memory,
-        thought,
-        priority: :medium
-      )
+      working_memory =
+        Arbor.Memory.WorkingMemory.add_thought(
+          state.working_memory,
+          thought,
+          priority: :medium
+        )
 
       %{state | working_memory: working_memory}
     else
@@ -597,11 +600,12 @@ defmodule Arbor.Agent.Claude do
 
   defp maybe_consolidate(state) do
     if state.memory_initialized and
-       rem(state.query_count + 1, @consolidation_check_interval) == 0 do
+         rem(state.query_count + 1, @consolidation_check_interval) == 0 do
       # Check if consolidation is needed
       case Arbor.Memory.should_consolidate?(state.id) do
         true ->
           Logger.info("Running memory consolidation", agent_id: state.id)
+
           spawn(fn ->
             Arbor.Memory.run_consolidation(state.id)
           end)

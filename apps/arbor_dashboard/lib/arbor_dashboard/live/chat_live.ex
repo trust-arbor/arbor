@@ -303,7 +303,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </button>
             </form>
           </div>
-          <div :if={@agent != nil} style="display: flex; align-items: center; gap: 0.5rem; width: 100%; flex-wrap: wrap;">
+          <div
+            :if={@agent != nil}
+            style="display: flex; align-items: center; gap: 0.5rem; width: 100%; flex-wrap: wrap;"
+          >
             <.badge label={"Agent: #{@agent_id}"} color={:green} />
             <.badge
               :if={@session_id}
@@ -348,9 +351,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
             <div style="white-space: pre-wrap;">{msg.content}</div>
-            <div :if={msg[:model] || msg[:memory_count]} style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+            <div
+              :if={msg[:model] || msg[:memory_count]}
+              style="margin-top: 0.5rem; display: flex; gap: 0.5rem;"
+            >
               <.badge :if={msg[:model]} label={to_string(msg.model)} color={:gray} />
-              <.badge :if={msg[:memory_count] && msg[:memory_count] > 0} label={"#{msg.memory_count} memories"} color={:purple} />
+              <.badge
+                :if={msg[:memory_count] && msg[:memory_count] > 0}
+                label={"#{msg.memory_count} memories"}
+                color={:purple}
+              />
             </div>
           </div>
         </div>
@@ -396,7 +406,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       <%!-- Side panel --%>
       <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
         <%!-- Stats bar --%>
-        <div :if={@agent} style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;">
+        <div
+          :if={@agent}
+          style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;"
+        >
           <.badge label={"Queries: #{@query_count}"} color={:blue} />
           <.badge
             :if={@memory_stats && @memory_stats[:enabled]}

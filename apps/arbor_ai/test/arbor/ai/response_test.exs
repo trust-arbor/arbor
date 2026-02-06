@@ -10,14 +10,15 @@ defmodule Arbor.AI.ResponseTest do
     end
 
     test "from_map/1 normalizes thinking blocks with type: thinking" do
-      response = Response.from_map(%{
-        text: "Result",
-        thinking: [
-          %{"type" => "thinking", "thinking" => "First thought", "signature" => "sig1"},
-          %{"type" => "thinking", "thinking" => "Second thought"}
-        ],
-        provider: :anthropic
-      })
+      response =
+        Response.from_map(%{
+          text: "Result",
+          thinking: [
+            %{"type" => "thinking", "thinking" => "First thought", "signature" => "sig1"},
+            %{"type" => "thinking", "thinking" => "Second thought"}
+          ],
+          provider: :anthropic
+        })
 
       assert length(response.thinking) == 2
       [first, second] = response.thinking
@@ -28,13 +29,14 @@ defmodule Arbor.AI.ResponseTest do
     end
 
     test "from_map/1 normalizes already-normalized thinking blocks" do
-      response = Response.from_map(%{
-        text: "Result",
-        thinking: [
-          %{text: "Already normalized", signature: "sig"}
-        ],
-        provider: :anthropic
-      })
+      response =
+        Response.from_map(%{
+          text: "Result",
+          thinking: [
+            %{text: "Already normalized", signature: "sig"}
+          ],
+          provider: :anthropic
+        })
 
       assert length(response.thinking) == 1
       assert hd(response.thinking).text == "Already normalized"
@@ -52,11 +54,12 @@ defmodule Arbor.AI.ResponseTest do
     end
 
     test "from_map/1 handles single thinking block" do
-      response = Response.from_map(%{
-        text: "Result",
-        thinking: %{"type" => "thinking", "thinking" => "Single thought"},
-        provider: :anthropic
-      })
+      response =
+        Response.from_map(%{
+          text: "Result",
+          thinking: %{"type" => "thinking", "thinking" => "Single thought"},
+          provider: :anthropic
+        })
 
       assert length(response.thinking) == 1
       assert hd(response.thinking).text == "Single thought"
