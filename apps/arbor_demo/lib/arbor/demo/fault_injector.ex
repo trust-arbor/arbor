@@ -29,24 +29,60 @@ defmodule Arbor.Demo.FaultInjector do
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
-  def inject_fault(type, opts \\ []) do
+  # Public API
+  # When server is a PID or registered name, it's the first arg.
+  # When called with just type/opts, uses __MODULE__ as server.
+
+  def inject_fault(server, type, opts) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:inject, type, opts})
+  end
+
+  def inject_fault(server, type) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:inject, type, []})
+  end
+
+  def inject_fault(type, opts) when is_atom(type) and is_list(opts) do
     GenServer.call(__MODULE__, {:inject, type, opts})
   end
 
-  def clear_fault(type) do
+  def inject_fault(type) when is_atom(type) do
+    GenServer.call(__MODULE__, {:inject, type, []})
+  end
+
+  def clear_fault(server, type) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:clear, type})
+  end
+
+  def clear_fault(type) when is_atom(type) do
     GenServer.call(__MODULE__, {:clear, type})
+  end
+
+  def clear_all(server) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, :clear_all)
   end
 
   def clear_all do
     GenServer.call(__MODULE__, :clear_all)
   end
 
+  def active_faults(server) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, :active_faults)
+  end
+
   def active_faults do
     GenServer.call(__MODULE__, :active_faults)
   end
 
-  def fault_status(type) do
+  def fault_status(server, type) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, {:status, type})
+  end
+
+  def fault_status(type) when is_atom(type) do
     GenServer.call(__MODULE__, {:status, type})
+  end
+
+  def available_faults(server) when is_pid(server) or is_atom(server) do
+    GenServer.call(server, :available_faults)
   end
 
   def available_faults do
