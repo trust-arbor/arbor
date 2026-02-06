@@ -194,11 +194,10 @@ defmodule Arbor.Common.ConfigValidator do
 
   defp format_config_errors(app, errors) do
     error_lines =
-      Enum.map(errors, fn error ->
+      Enum.map_join(errors, "\n", fn error ->
         field = Enum.join(error.path, ".")
         "  - #{field}: #{error.message}"
       end)
-      |> Enum.join("\n")
 
     """
     Invalid configuration for #{app}:
