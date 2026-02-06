@@ -87,8 +87,12 @@ config :arbor_signals,
 
 # AI routing defaults
 config :arbor_ai,
+  # Default provider/model for API calls
+  default_provider: :openrouter,
+  default_model: "arcee-ai/trinity-large-preview:free",
+  timeout: 120_000,
   enable_task_routing: true,
-  default_backend: :auto,
+  default_backend: :api,
   routing_strategy: :cost_optimized,
   tier_routing: %{
     critical: [{:anthropic, :opus}, {:anthropic, :sonnet}],

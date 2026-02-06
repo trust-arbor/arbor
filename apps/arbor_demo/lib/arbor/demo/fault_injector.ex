@@ -29,28 +29,28 @@ defmodule Arbor.Demo.FaultInjector do
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
-  def inject_fault(server \\ __MODULE__, type, opts \\ []) do
-    GenServer.call(server, {:inject, type, opts})
+  def inject_fault(type, opts \\ []) do
+    GenServer.call(__MODULE__, {:inject, type, opts})
   end
 
-  def clear_fault(server \\ __MODULE__, type) do
-    GenServer.call(server, {:clear, type})
+  def clear_fault(type) do
+    GenServer.call(__MODULE__, {:clear, type})
   end
 
-  def clear_all(server \\ __MODULE__) do
-    GenServer.call(server, :clear_all)
+  def clear_all do
+    GenServer.call(__MODULE__, :clear_all)
   end
 
-  def active_faults(server \\ __MODULE__) do
-    GenServer.call(server, :active_faults)
+  def active_faults do
+    GenServer.call(__MODULE__, :active_faults)
   end
 
-  def fault_status(server \\ __MODULE__, type) do
-    GenServer.call(server, {:status, type})
+  def fault_status(type) do
+    GenServer.call(__MODULE__, {:status, type})
   end
 
-  def available_faults(server \\ __MODULE__) do
-    GenServer.call(server, :available_faults)
+  def available_faults do
+    GenServer.call(__MODULE__, :available_faults)
   end
 
   # Server callbacks
