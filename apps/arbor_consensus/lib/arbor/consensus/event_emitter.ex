@@ -169,7 +169,7 @@ defmodule Arbor.Consensus.EventEmitter do
         topic: proposal.topic,
         proposer: proposal.proposer,
         target_module: target_module,
-        context: proposal.context
+        context: Map.get(proposal, :context, %{})
       }
     })
 

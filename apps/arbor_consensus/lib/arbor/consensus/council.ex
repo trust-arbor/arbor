@@ -118,6 +118,9 @@ defmodule Arbor.Consensus.Council do
 
   defp get_evaluator_perspectives(evaluator) do
     try do
+      # Ensure module is loaded (important when running in spawned Task context)
+      Code.ensure_loaded(evaluator)
+
       if function_exported?(evaluator, :perspectives, 0) do
         evaluator.perspectives()
       else
@@ -216,16 +219,22 @@ defmodule Arbor.Consensus.Council do
   end
 
   defp quorum_determinable?(evaluations, remaining_tasks, quorum) do
-    approve_count = Enum.count(evaluations, &(&1.vote == :approve))
-    reject_count = Enum.count(evaluations, &(&1.vote == :reject))
-    remaining_count = length(remaining_tasks)
+    # Don't short-circuit if we have no evaluations yet - wait for at least one
+    # Otherwise we'd terminate before any evaluator has a chance to respond
+    if Enum.empty?(evaluations) do
+      false
+    else
+      approve_count = Enum.count(evaluations, &(&1.vote == :approve))
+      reject_count = Enum.count(evaluations, &(&1.vote == :reject))
+      remaining_count = length(remaining_tasks)
 
-    # Quorum reached for approval
-    # Quorum reached for rejection
-    # Even if all remaining approve, can't reach quorum (guaranteed rejection/deadlock)
-    approve_count >= quorum or
-      reject_count >= quorum or
-      approve_count + remaining_count < quorum
+      # Quorum reached for approval
+      # Quorum reached for rejection
+      # Even if all remaining approve, can't reach quorum (guaranteed rejection/deadlock)
+      approve_count >= quorum or
+        reject_count >= quorum or
+        approve_count + remaining_count < quorum
+    end
   end
 
   defp kill_tasks(tasks) do

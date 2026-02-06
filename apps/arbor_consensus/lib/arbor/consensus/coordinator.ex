@@ -324,7 +324,7 @@ defmodule Arbor.Consensus.Coordinator do
       })
 
       # Get council configuration from TopicRegistry
-      {evaluators, quorum} = resolve_council_config(proposal, state.config)
+      {resolved_evaluators, resolved_quorum} = resolve_council_config(proposal, state.config)
 
       # Allow override via opts (for testing), otherwise use resolved evaluators
       # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
@@ -337,12 +337,24 @@ defmodule Arbor.Consensus.Coordinator do
             if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
               [state.evaluator_backend]
             else
-              evaluators
+              resolved_evaluators
             end
         end
 
-      # Extract perspectives from evaluators for event emission
+      # Extract perspectives from evaluators
       perspectives = resolve_perspectives_from_evaluators(evaluators)
+
+      # Recalculate quorum based on actual perspectives available
+      # This prevents mismatches where resolved quorum exceeds available perspectives
+      quorum =
+        if proposal.mode == :advisory do
+          nil
+        else
+          council_size = length(perspectives)
+          # Use the minimum of resolved quorum or simple majority of actual perspectives
+          # This ensures quorum is achievable while respecting topic rules when possible
+          min(resolved_quorum, div(council_size, 2) + 1)
+        end
 
       # Emit evaluation started event
       EventEmitter.evaluation_started(
