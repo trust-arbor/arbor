@@ -68,7 +68,7 @@ defmodule Arbor.Consensus.CouncilTest do
     test "uses the rule-based backend by default" do
       proposal = TestHelpers.build_proposal()
       perspectives = [:security]
-      backend = Arbor.Consensus.EvaluatorBackend.RuleBased
+      backend = Arbor.Consensus.Evaluator.RuleBased
 
       {:ok, [eval]} = Council.evaluate(proposal, perspectives, backend, timeout: 5_000)
 
@@ -89,7 +89,7 @@ defmodule Arbor.Consensus.CouncilTest do
         :random
       ]
 
-      backend = Arbor.Consensus.EvaluatorBackend.RuleBased
+      backend = Arbor.Consensus.Evaluator.RuleBased
 
       {:ok, evaluations} = Council.evaluate(proposal, perspectives, backend, timeout: 10_000)
 

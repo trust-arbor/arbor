@@ -19,7 +19,7 @@ defmodule Arbor.Consensus do
   ## Pluggable Behaviours
 
     * `Evaluator` — Required. Evaluates proposals from a perspective.
-      Default: `EvaluatorBackend.RuleBased`
+      Default: `Evaluator.RuleBased`
     * `Authorizer` — Optional. Pre-submit and pre-execution authorization.
     * `Executor` — Optional. Executes approved proposals.
     * `EventSink` — Optional. Persists events to external storage.

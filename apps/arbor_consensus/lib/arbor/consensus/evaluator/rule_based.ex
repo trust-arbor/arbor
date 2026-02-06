@@ -1,6 +1,6 @@
-defmodule Arbor.Consensus.EvaluatorBackend.RuleBased do
+defmodule Arbor.Consensus.Evaluator.RuleBased do
   @moduledoc """
-  Default rule-based evaluator backend.
+  Default rule-based evaluator.
 
   Evaluates proposals using heuristic rules for each perspective.
   No LLM or external service required — pure code analysis.

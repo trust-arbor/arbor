@@ -26,7 +26,7 @@ API.Consensus, API.Historian, API.Persistence
 **Library-specific behaviours stay in their library.** If a behaviour is named after the library's domain concept, it belongs there — not in contracts.
 
 ```
-arbor_consensus owns: EvaluatorBackend, Authorizer, Executor, EventSink
+arbor_consensus owns: Evaluator, Authorizer, Executor, EventSink
 arbor_persistence owns: Store, QueryableStore, EventLog
 arbor_historian owns: EventLog (its own internal backend interface)
 ```
