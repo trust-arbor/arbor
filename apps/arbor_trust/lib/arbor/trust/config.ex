@@ -76,6 +76,40 @@ defmodule Arbor.Trust.Config do
     autonomous: 90
   }
 
+  # Partnership-framed display names from council consultation (2026-02-04)
+  @default_tier_definitions %{
+    untrusted: %{
+      display_name: "New",
+      description: "Just getting started together",
+      sandbox: :strict,
+      actions: [:read, :search, :think]
+    },
+    probationary: %{
+      display_name: "Guided",
+      description: "Building our working relationship",
+      sandbox: :strict,
+      actions: [:read, :search, :think, :write_sandbox]
+    },
+    trusted: %{
+      display_name: "Established",
+      description: "Demonstrated reliability",
+      sandbox: :standard,
+      actions: [:read, :search, :think, :write, :execute_safe]
+    },
+    veteran: %{
+      display_name: "Trusted Partner",
+      description: "Proven track record",
+      sandbox: :permissive,
+      actions: [:read, :search, :think, :write, :execute, :network]
+    },
+    autonomous: %{
+      display_name: "Full Partner",
+      description: "Complete partnership",
+      sandbox: :none,
+      actions: :all
+    }
+  }
+
   @default_score_weights %{
     success_rate: 0.30,
     uptime: 0.15,
@@ -168,6 +202,112 @@ defmodule Arbor.Trust.Config do
   @doc "Get circuit breaker configuration."
   @spec circuit_breaker_config() :: map()
   def circuit_breaker_config, do: get(:circuit_breaker, @default_circuit_breaker)
+
+  @doc """
+  Get tier definitions with display names, descriptions, sandbox levels, and actions.
+
+  Returns a map of tier ID to definition. Each definition includes:
+  - `:display_name` - User-facing name (e.g., "New", "Guided", "Established")
+  - `:description` - Brief description of the tier
+  - `:sandbox` - Sandbox level (:strict, :standard, :permissive, :none)
+  - `:actions` - List of allowed action categories, or `:all`
+
+  ## Example
+
+      Config.tier_definitions()
+      #=> %{
+      #     untrusted: %{display_name: "New", description: "Just getting started together", ...},
+      #     ...
+      #   }
+  """
+  @spec tier_definitions() :: map()
+  def tier_definitions, do: get(:tier_definitions, @default_tier_definitions)
+
+  @doc """
+  Get the display name for a tier.
+
+  Falls back to capitalizing the tier atom if no definition exists.
+
+  ## Examples
+
+      Config.display_name(:untrusted)
+      #=> "New"
+
+      Config.display_name(:probationary)
+      #=> "Guided"
+  """
+  @spec display_name(atom()) :: String.t()
+  def display_name(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{display_name: name} -> name
+      nil -> tier |> Atom.to_string() |> String.capitalize()
+    end
+  end
+
+  @doc """
+  Get the description for a tier.
+
+  Returns nil if no definition exists.
+
+  ## Examples
+
+      Config.tier_description(:untrusted)
+      #=> "Just getting started together"
+  """
+  @spec tier_description(atom()) :: String.t() | nil
+  def tier_description(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{description: desc} -> desc
+      nil -> nil
+    end
+  end
+
+  @doc """
+  Get the sandbox level for a tier.
+
+  Falls back to `:strict` if no definition exists.
+
+  ## Examples
+
+      Config.sandbox_for_tier(:trusted)
+      #=> :standard
+  """
+  @spec sandbox_for_tier(atom()) :: atom()
+  def sandbox_for_tier(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{sandbox: sandbox} -> sandbox
+      nil -> :strict
+    end
+  end
+
+  @doc """
+  Get the allowed actions for a tier.
+
+  Falls back to `[:read, :search, :think]` if no definition exists.
+
+  ## Examples
+
+      Config.actions_for_tier(:trusted)
+      #=> [:read, :search, :think, :write, :execute_safe]
+
+      Config.actions_for_tier(:autonomous)
+      #=> :all
+  """
+  @spec actions_for_tier(atom()) :: [atom()] | :all
+  def actions_for_tier(tier) do
+    definitions = tier_definitions()
+
+    case Map.get(definitions, tier) do
+      %{actions: actions} -> actions
+      nil -> [:read, :search, :think]
+    end
+  end
 
   defp get(key, default), do: Application.get_env(:arbor_trust, key, default)
 end

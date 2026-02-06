@@ -381,4 +381,132 @@ defmodule Arbor.Trust.ConfigTest do
       assert Config.circuit_breaker_config() == custom
     end
   end
+
+  describe "tier_definitions/0" do
+    test "returns default tier definitions when no app env set" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+      Application.delete_env(:arbor_trust, :tier_definitions)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      definitions = Config.tier_definitions()
+      assert is_map(definitions)
+      assert Map.has_key?(definitions, :untrusted)
+      assert Map.has_key?(definitions, :autonomous)
+
+      # Check structure of one tier
+      untrusted = definitions[:untrusted]
+      assert untrusted.display_name == "New"
+      assert untrusted.description == "Just getting started together"
+      assert untrusted.sandbox == :strict
+      assert untrusted.actions == [:read, :search, :think]
+    end
+
+    test "returns overridden tier definitions from app env" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+
+      custom = %{
+        low: %{display_name: "Low Trust", sandbox: :strict, actions: [:read]}
+      }
+
+      Application.put_env(:arbor_trust, :tier_definitions, custom)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      assert Config.tier_definitions() == custom
+    end
+  end
+
+  describe "display_name/1" do
+    test "returns display name from default config" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+      Application.delete_env(:arbor_trust, :tier_definitions)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      assert Config.display_name(:untrusted) == "New"
+      assert Config.display_name(:probationary) == "Guided"
+      assert Config.display_name(:trusted) == "Established"
+      assert Config.display_name(:veteran) == "Trusted Partner"
+      assert Config.display_name(:autonomous) == "Full Partner"
+    end
+
+    test "falls back to capitalized atom for unknown tier" do
+      assert Config.display_name(:unknown_tier) == "Unknown_tier"
+    end
+  end
+
+  describe "tier_description/1" do
+    test "returns description from default config" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+      Application.delete_env(:arbor_trust, :tier_definitions)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      assert Config.tier_description(:untrusted) == "Just getting started together"
+      assert Config.tier_description(:autonomous) == "Complete partnership"
+    end
+
+    test "returns nil for unknown tier" do
+      assert Config.tier_description(:unknown_tier) == nil
+    end
+  end
+
+  describe "sandbox_for_tier/1" do
+    test "returns sandbox level from default config" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+      Application.delete_env(:arbor_trust, :tier_definitions)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      assert Config.sandbox_for_tier(:untrusted) == :strict
+      assert Config.sandbox_for_tier(:trusted) == :standard
+      assert Config.sandbox_for_tier(:veteran) == :permissive
+      assert Config.sandbox_for_tier(:autonomous) == :none
+    end
+
+    test "falls back to :strict for unknown tier" do
+      assert Config.sandbox_for_tier(:unknown_tier) == :strict
+    end
+  end
+
+  describe "actions_for_tier/1" do
+    test "returns actions from default config" do
+      original = Application.get_env(:arbor_trust, :tier_definitions)
+      Application.delete_env(:arbor_trust, :tier_definitions)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_trust, :tier_definitions, original),
+          else: Application.delete_env(:arbor_trust, :tier_definitions)
+      end)
+
+      assert Config.actions_for_tier(:untrusted) == [:read, :search, :think]
+      assert Config.actions_for_tier(:autonomous) == :all
+    end
+
+    test "falls back to basic actions for unknown tier" do
+      assert Config.actions_for_tier(:unknown_tier) == [:read, :search, :think]
+    end
+  end
 end
