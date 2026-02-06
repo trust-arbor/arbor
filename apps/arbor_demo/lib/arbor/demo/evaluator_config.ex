@@ -170,9 +170,10 @@ defmodule Arbor.Demo.EvaluatorConfig do
   end
 
   defp default_llm_config do
+    # Default to free OpenRouter model for demos (no API key cost)
     %{
-      provider: :anthropic,
-      model: "claude-sonnet-4-20250514"
+      provider: :openrouter,
+      model: "arcee-ai/trinity-large-preview:free"
     }
   end
 
