@@ -1,13 +1,13 @@
-defmodule Arbor.Consensus.EvaluatorBackend.DeterministicTest do
+defmodule Arbor.Consensus.Evaluator.DeterministicTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Consensus.Config
-  alias Arbor.Consensus.EvaluatorBackend.Deterministic
+  alias Arbor.Consensus.Evaluator.Deterministic
   alias Arbor.Contracts.Consensus.Evaluation
   alias Arbor.Contracts.Consensus.Proposal
 
   # Use the arbor project itself for testing (6 levels up from test file)
-  # apps/arbor_consensus/test/arbor/consensus/evaluator_backend/ → arbor/
+  # apps/arbor_consensus/test/arbor/consensus/evaluator/ → arbor/
   @project_path Path.expand("../../../../../..", __DIR__)
 
   setup do
