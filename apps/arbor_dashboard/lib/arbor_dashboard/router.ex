@@ -15,6 +15,7 @@ defmodule Arbor.Dashboard.Router do
       live "/consensus", ConsensusLive
       live "/activity", ActivityLive
       live "/agents", AgentsLive
+      live "/monitor", MonitorLive
       live "/roadmap", RoadmapLive
       live "/demo", DemoLive
     end
