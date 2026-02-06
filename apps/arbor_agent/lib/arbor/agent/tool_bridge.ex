@@ -128,7 +128,8 @@ defmodule Arbor.Agent.ToolBridge do
     %{
       "name" => action_schema[:name] || action_schema.name,
       "description" => action_schema[:description] || action_schema.description,
-      "input_schema" => action_schema[:parameters_schema] || action_schema.parameters_schema || %{}
+      "input_schema" =>
+        action_schema[:parameters_schema] || action_schema.parameters_schema || %{}
     }
   end
 
