@@ -99,6 +99,8 @@ defmodule Arbor.Agent.Executor do
   def init({agent_id, opts}) do
     trust_tier = Keyword.get(opts, :trust_tier, :untrusted)
 
+    Logger.info("[Executor] Starting for agent #{agent_id}, trust_tier=#{trust_tier}")
+
     state = %{
       agent_id: agent_id,
       status: :running,
@@ -117,6 +119,7 @@ defmodule Arbor.Agent.Executor do
 
     # Subscribe to intents via Bridge (non-fatal if unavailable)
     state = subscribe_to_intents(state)
+    Logger.debug("[Executor] Subscription result: #{inspect(state.intent_subscription)}")
 
     safe_emit(:agent, :executor_started, %{
       agent_id: agent_id,
@@ -511,14 +514,24 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp check_capabilities(%Intent{action: action}, state) do
-    resource = "arbor://agent/action/#{action}"
+    # Demo mode bypass: skip capability checks for demo agents
+    if demo_mode?() do
+      Logger.debug("[Executor] Demo mode: bypassing capability check for #{action}")
+      :authorized
+    else
+      resource = "arbor://agent/action/#{action}"
 
-    case safe_call(fn -> Arbor.Security.can?(state.agent_id, resource, :execute) end) do
-      true -> :authorized
-      false -> {:blocked, :unauthorized}
-      # If security service unavailable, block by default
-      _ -> {:blocked, :security_unavailable}
+      case safe_call(fn -> Arbor.Security.can?(state.agent_id, resource, :execute) end) do
+        true -> :authorized
+        false -> {:blocked, :unauthorized}
+        # If security service unavailable, block by default
+        _ -> {:blocked, :security_unavailable}
+      end
     end
+  end
+
+  defp demo_mode? do
+    Application.get_env(:arbor_demo, :demo_mode, false)
   end
 
   defp drain_pending(state) do
@@ -538,6 +551,8 @@ defmodule Arbor.Agent.Executor do
     # so self() inside the handler would return the wrong PID
     executor_pid = self()
 
+    Logger.debug("[Executor] Subscribing to intents for #{state.agent_id}")
+
     result =
       safe_call(fn ->
         Arbor.Memory.subscribe_to_intents(state.agent_id, fn signal ->
@@ -545,12 +560,15 @@ defmodule Arbor.Agent.Executor do
           intent = extract_intent_from_signal(signal)
 
           if intent do
+            Logger.debug("[Executor] Received intent signal: #{intent.id}")
             GenServer.cast(executor_pid, {:intent, intent})
           end
 
           :ok
         end)
       end)
+
+    Logger.debug("[Executor] Subscription result: #{inspect(result)}")
 
     case result do
       {:ok, sub_id} -> %{state | intent_subscription: sub_id}
@@ -575,9 +593,13 @@ defmodule Arbor.Agent.Executor do
   defp safe_call(fun) do
     fun.()
   rescue
-    _ -> nil
+    e ->
+      Logger.debug("Executor safe_call rescued: #{Exception.message(e)}")
+      nil
   catch
-    :exit, _ -> nil
+    :exit, reason ->
+      Logger.debug("Executor safe_call caught exit: #{inspect(reason)}")
+      nil
   end
 
   defp via(agent_id) do

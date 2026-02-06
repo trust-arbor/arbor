@@ -87,7 +87,8 @@ config :arbor_signals,
 
 # AI routing defaults
 config :arbor_ai,
-  # Default provider/model for API calls
+  # Default provider/model for API calls (via OpenRouter)
+  # Using free Trinity model for cost-effective agent operations
   default_provider: :openrouter,
   default_model: "arcee-ai/trinity-large-preview:free",
   timeout: 120_000,

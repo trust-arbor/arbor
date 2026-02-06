@@ -5,6 +5,9 @@ defmodule Arbor.AI.Application do
 
   @impl true
   def start(_type, _args) do
+    # Propagate API keys from environment to ReqLLM
+    propagate_api_keys()
+
     children =
       if Application.get_env(:arbor_ai, :start_children, true) do
         [
@@ -18,6 +21,25 @@ defmodule Arbor.AI.Application do
 
     opts = [strategy: :one_for_one, name: Arbor.AI.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # Propagate API keys from environment variables to ReqLLM
+  defp propagate_api_keys do
+    key_mappings = [
+      {"OPENROUTER_API_KEY", :openrouter_api_key},
+      {"ANTHROPIC_API_KEY", :anthropic_api_key},
+      {"OPENAI_API_KEY", :openai_api_key},
+      {"GOOGLE_API_KEY", :google_api_key},
+      {"GEMINI_API_KEY", :google_api_key}
+    ]
+
+    Enum.each(key_mappings, fn {env_var, config_key} ->
+      case System.get_env(env_var) do
+        nil -> :ok
+        "" -> :ok
+        value -> ReqLLM.put_key(config_key, value)
+      end
+    end)
   end
 
   # Conditionally add BudgetTracker based on config
