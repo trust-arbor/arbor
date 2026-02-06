@@ -10,6 +10,7 @@ defmodule Arbor.Agent.Application do
         [
           {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
           {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
+          {Registry, keys: :unique, name: Arbor.Agent.MonitorLoopRegistry},
           Arbor.Agent.Registry,
           Arbor.Agent.Supervisor
         ]
