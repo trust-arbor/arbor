@@ -321,6 +321,13 @@ defmodule Arbor.Agent.DebugAgent do
         update_state(agent_id, %{state | phase: :check_anomalies})
         Intent.think("Failed to get decision: #{inspect(reason)}. Will retry.")
 
+      {:success, other} ->
+        # Unexpected success structure (e.g., got AI analysis result in decision phase)
+        # This can happen due to phase/percept mismatch — reset and continue
+        Logger.warning("[DebugAgent] Unexpected percept in decision phase: #{inspect(Map.keys(other))}")
+        update_state(agent_id, %{state | phase: :check_anomalies})
+        Intent.think("Unexpected response format. Returning to monitoring.")
+
       :no_percept ->
         Intent.wait(reasoning: "Waiting for council decision...")
     end

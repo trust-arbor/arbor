@@ -93,6 +93,64 @@ defmodule Arbor.Demo do
   defdelegate timing_mode(), to: Arbor.Demo.Timing, as: :current_mode
 
   # ============================================================================
+  # Demo Mode Configuration
+  # ============================================================================
+
+  @doc """
+  Configure the system for demo mode.
+
+  Sets fast polling (500ms), low thresholds (100 messages), and enables signals.
+  Call this before injecting faults for reliable demo detection.
+  """
+  @spec configure_demo_mode() :: :ok
+  def configure_demo_mode do
+    # Enable demo mode (bypasses capability checks in Executor)
+    Application.put_env(:arbor_demo, :demo_mode, true)
+
+    # Fast polling for demo
+    Application.put_env(:arbor_monitor, :polling_interval_ms, 500)
+
+    # Low thresholds for quick detection
+    Application.put_env(:arbor_monitor, :anomaly_config, %{
+      scheduler_utilization: %{threshold: 0.90},
+      process_count_ratio: %{threshold: 0.50},
+      message_queue_len: %{threshold: 100},
+      memory_total: %{threshold: 0.85},
+      ets_table_count: %{threshold: 500},
+      ewma_alpha: 0.3,
+      ewma_stddev_threshold: 2.0
+    })
+
+    # Enable signal emission
+    Application.put_env(:arbor_monitor, :signal_emission_enabled, true)
+
+    :ok
+  end
+
+  @doc """
+  Reset to normal production configuration.
+  """
+  @spec configure_production_mode() :: :ok
+  def configure_production_mode do
+    # Disable demo mode
+    Application.put_env(:arbor_demo, :demo_mode, false)
+
+    Application.put_env(:arbor_monitor, :polling_interval_ms, 5_000)
+
+    Application.put_env(:arbor_monitor, :anomaly_config, %{
+      scheduler_utilization: %{threshold: 0.90},
+      process_count_ratio: %{threshold: 0.80},
+      message_queue_len: %{threshold: 10_000},
+      memory_total: %{threshold: 0.85},
+      ets_table_count: %{threshold: 500},
+      ewma_alpha: 0.3,
+      ewma_stddev_threshold: 3.0
+    })
+
+    :ok
+  end
+
+  # ============================================================================
   # Recovery Helpers
   # ============================================================================
 
