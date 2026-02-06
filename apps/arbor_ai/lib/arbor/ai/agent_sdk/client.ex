@@ -32,6 +32,7 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   require Logger
 
+  alias Arbor.AI.AgentSDK.Hooks
   alias Arbor.AI.AgentSDK.Transport
 
   @type option ::
@@ -40,6 +41,10 @@ defmodule Arbor.AI.AgentSDK.Client do
           | {:system_prompt, String.t()}
           | {:max_turns, pos_integer()}
           | {:timeout, pos_integer()}
+          | {:hooks, Hooks.hooks()}
+          | {:permission_mode, atom()}
+          | {:allowed_tools, [String.t() | atom()]}
+          | {:disallowed_tools, [String.t() | atom()]}
 
   @type t :: GenServer.server()
 
@@ -106,12 +111,16 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @impl true
   def init(opts) do
+    hooks = Keyword.get(opts, :hooks, %{})
+
     state = %{
       opts: opts,
       transport: nil,
       pending_query: nil,
       current_response: new_response_acc(),
-      stream_callback: nil
+      stream_callback: nil,
+      hooks: hooks,
+      hook_context: Hooks.build_context(opts)
     }
 
     {:ok, state}
@@ -162,6 +171,11 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @impl true
   def handle_info({:claude_message, message}, state) do
+    # Run on_message hooks
+    if state.hooks != %{} do
+      Hooks.run_message_hooks(state.hooks, message, state.hook_context)
+    end
+
     new_state = process_message(state, message)
     {:noreply, new_state}
   end
@@ -222,44 +236,7 @@ defmodule Arbor.AI.AgentSDK.Client do
 
     acc =
       Enum.reduce(content, state.current_response, fn block, acc ->
-        case block["type"] do
-          "text" ->
-            text = block["text"] || ""
-
-            if state.stream_callback do
-              state.stream_callback.({:text, text})
-            end
-
-            %{acc | text_chunks: [text | acc.text_chunks]}
-
-          "thinking" ->
-            thinking = %{
-              text: block["thinking"] || "",
-              signature: block["signature"]
-            }
-
-            if state.stream_callback do
-              state.stream_callback.({:thinking, thinking})
-            end
-
-            %{acc | thinking_blocks: [thinking | acc.thinking_blocks]}
-
-          "tool_use" ->
-            tool_use = %{
-              id: block["id"],
-              name: block["name"],
-              input: block["input"]
-            }
-
-            if state.stream_callback do
-              state.stream_callback.({:tool_use, tool_use})
-            end
-
-            %{acc | tool_uses: [tool_use | acc.tool_uses]}
-
-          _ ->
-            acc
-        end
+        process_content_block(state, block, acc)
       end)
 
     acc =
@@ -310,6 +287,58 @@ defmodule Arbor.AI.AgentSDK.Client do
   defp process_message(state, _message) do
     state
   end
+
+  defp process_content_block(state, %{"type" => "text"} = block, acc) do
+    text = block["text"] || ""
+
+    if state.stream_callback do
+      state.stream_callback.({:text, text})
+    end
+
+    %{acc | text_chunks: [text | acc.text_chunks]}
+  end
+
+  defp process_content_block(state, %{"type" => "thinking"} = block, acc) do
+    thinking = %{
+      text: block["thinking"] || "",
+      signature: block["signature"]
+    }
+
+    if state.stream_callback do
+      state.stream_callback.({:thinking, thinking})
+    end
+
+    %{acc | thinking_blocks: [thinking | acc.thinking_blocks]}
+  end
+
+  defp process_content_block(state, %{"type" => "tool_use"} = block, acc) do
+    tool_name = block["name"]
+    tool_input = block["input"] || %{}
+
+    {hook_result, final_input} = run_pre_hooks(state, tool_name, tool_input)
+
+    tool_use = %{
+      id: block["id"],
+      name: tool_name,
+      input: final_input,
+      hook_result: hook_result
+    }
+
+    if state.stream_callback do
+      state.stream_callback.({:tool_use, tool_use})
+    end
+
+    %{acc | tool_uses: [tool_use | acc.tool_uses]}
+  end
+
+  defp process_content_block(_state, _block, acc), do: acc
+
+  defp run_pre_hooks(%{hooks: hooks, hook_context: ctx}, tool_name, tool_input)
+       when hooks != %{} do
+    Hooks.run_pre_hooks(hooks, tool_name, tool_input, ctx)
+  end
+
+  defp run_pre_hooks(_state, _tool_name, tool_input), do: {:allow, tool_input}
 
   defp build_response(acc) do
     %{
