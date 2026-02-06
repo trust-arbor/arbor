@@ -252,7 +252,28 @@ defmodule Arbor.Demo.Orchestrator do
     Logger.info("[Orchestrator] Anomaly detected, transitioning to diagnose")
     data = extract_data(signal)
     emit_stage_change(:diagnose, data)
-    %{state | pipeline_stage: :diagnose}
+
+    # Restart DebugAgent if not running (it may have completed before anomaly was detected)
+    new_state =
+      if state.debug_agent_id == nil or not debug_agent_running?(state.debug_agent_id) do
+        Logger.info("[Orchestrator] Starting DebugAgent for diagnosis")
+
+        case start_debug_agent() do
+          {:ok, agent_id} -> %{state | debug_agent_id: agent_id}
+          {:error, _} -> state
+        end
+      else
+        state
+      end
+
+    %{new_state | pipeline_stage: :diagnose}
+  end
+
+  defp debug_agent_running?(agent_id) do
+    case Arbor.Agent.DebugAgent.get_state(agent_id) do
+      {:ok, _} -> true
+      _ -> false
+    end
   end
 
   defp handle_proposal_submitted(signal, state) do
