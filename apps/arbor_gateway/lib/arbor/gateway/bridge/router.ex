@@ -9,6 +9,7 @@ defmodule Arbor.Gateway.Bridge.Router do
   use Plug.Router
 
   alias Arbor.Gateway.Bridge.ClaudeSession
+  alias Arbor.Gateway.Schemas
 
   require Logger
 
@@ -20,37 +21,28 @@ defmodule Arbor.Gateway.Bridge.Router do
   # Request body: {session_id, tool_name, tool_use_id, tool_input, cwd}
   # Response: {decision: allow|deny|ask|passthrough, reason?, updated_input?, system_message?}
   post "/authorize_tool" do
-    with {:ok, session_id} <- get_required(conn.body_params, "session_id"),
-         {:ok, tool_name} <- get_required(conn.body_params, "tool_name") do
-      tool_input = Map.get(conn.body_params, "tool_input", %{})
-      cwd = Map.get(conn.body_params, "cwd", ".")
-      result = authorize_tool_call(session_id, tool_name, tool_input, cwd)
+    case Schemas.Bridge.validate(Schemas.Bridge.authorize_tool_request(), conn.body_params) do
+      {:ok, validated} ->
+        tool_input = validated["tool_input"] || %{}
+        cwd = validated["cwd"] || "."
+        result = authorize_tool_call(validated["session_id"], validated["tool_name"], tool_input, cwd)
 
-      # Emit signal for observability
-      emit_bridge_signal(session_id, tool_name, result)
+        # Emit signal for observability
+        emit_bridge_signal(validated["session_id"], validated["tool_name"], result)
 
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(200, Jason.encode!(result))
-    else
-      {:error, missing_field} ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "Missing required field: #{missing_field}"}))
+        |> send_resp(200, Jason.encode!(result))
+
+      {:error, errors} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(400, Jason.encode!(%{error: "invalid_params", details: errors}))
     end
   end
 
   match _ do
     send_resp(conn, 404, "Not found")
-  end
-
-  # Private helpers
-
-  defp get_required(params, field) do
-    case Map.get(params, field) do
-      nil -> {:error, field}
-      value -> {:ok, value}
-    end
   end
 
   defp authorize_tool_call(session_id, tool_name, tool_input, cwd) do
