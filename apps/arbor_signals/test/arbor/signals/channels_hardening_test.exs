@@ -8,6 +8,10 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
   # Mock crypto module for testing
   defmodule MockCrypto do
+    def generate_encryption_keypair do
+      :crypto.generate_key(:ecdh, :x25519)
+    end
+
     def seal(plaintext, _recipient_pub, _sender_priv) do
       %{ciphertext: plaintext, iv: <<0::96>>, tag: <<0::128>>, sender_public: <<0::256>>}
     end
@@ -247,8 +251,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member1_id, inv1.sealed_key, member1_keychain)
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member2_id, inv2.sealed_key, member2_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member1_id, inv1.sealed_key, member1_keychain)
+
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member2_id, inv2.sealed_key, member2_keychain)
 
       # Member1 tries to revoke member2 (should fail)
       result = Channels.revoke(channel_id, member2_id, member1_id)
@@ -334,9 +341,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end, principal_id: "test_principal")
 
       creator_id = "agent_creator"
       {:ok, channel, _key} = Channels.create("audit-test", creator_id)
@@ -355,9 +364,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end, principal_id: "test_principal")
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -377,7 +388,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
 
       # Wait for the specific signals we expect
       signals = await_signals([:channel_created, :channel_member_invited, :channel_member_joined])
@@ -394,9 +406,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end, principal_id: "test_principal")
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -416,7 +430,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
 
       # Clear previous signals
       flush_messages()
@@ -437,9 +452,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       test_pid = self()
 
       {:ok, sub_id} =
-        Bus.subscribe("security.*", fn signal ->
-          send(test_pid, {:signal, signal})
-        end, principal_id: "test_principal")
+        Bus.subscribe(
+          "security.*",
+          fn signal ->
+            send(test_pid, {:signal, signal})
+          end, principal_id: "test_principal")
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -459,7 +476,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
         encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
-      {:ok, _, _} = Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+
       flush_messages()
 
       # Revoke triggers rotation with reason :member_revoked
