@@ -24,7 +24,7 @@ defmodule Arbor.Agent.Claude do
   require Logger
 
   alias Arbor.Agent.{
-    ClaudeCheckpoint,
+    CheckpointManager,
     HeartbeatLLM,
     HeartbeatResponse,
     TimingContext
@@ -190,9 +190,9 @@ defmodule Arbor.Agent.Claude do
     # Attempt checkpoint restore
     state =
       if checkpoint_enabled?() do
-        case ClaudeCheckpoint.restore_state(id) do
+        case CheckpointManager.load_checkpoint(id) do
           {:ok, checkpoint_data} ->
-            ClaudeCheckpoint.apply_checkpoint(state, checkpoint_data)
+            CheckpointManager.apply_checkpoint(state, checkpoint_data)
 
           {:error, _} ->
             state
@@ -214,7 +214,7 @@ defmodule Arbor.Agent.Claude do
     # Schedule auto-checkpoint
     state =
       if checkpoint_enabled?() do
-        ref = ClaudeCheckpoint.schedule_checkpoint()
+        ref = CheckpointManager.schedule_checkpoint()
         %{state | checkpoint_timer_ref: ref}
       else
         state
@@ -320,7 +320,7 @@ defmodule Arbor.Agent.Claude do
 
     # Final checkpoint save
     if checkpoint_enabled?() do
-      ClaudeCheckpoint.save_state(state)
+      CheckpointManager.save_checkpoint(state)
     end
 
     # Seed cleanup (save WM, context, stop executor)
@@ -342,12 +342,10 @@ defmodule Arbor.Agent.Claude do
 
   defp handle_host_info(:checkpoint, state) do
     if checkpoint_enabled?() do
-      Task.start(fn ->
-        ClaudeCheckpoint.save_state(state)
-      end)
+      CheckpointManager.save_checkpoint(state, async: true)
     end
 
-    ref = ClaudeCheckpoint.schedule_checkpoint()
+    ref = CheckpointManager.schedule_checkpoint()
 
     {:noreply,
      %{state | checkpoint_timer_ref: ref, last_checkpoint_query_count: state.query_count}}
