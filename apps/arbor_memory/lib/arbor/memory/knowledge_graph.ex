@@ -85,7 +85,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
           target_id: node_id(),
           relationship: atom(),
           strength: float(),
-          created_at: DateTime.t()
+          created_at: DateTime.t(),
+          metadata: map()
         }
 
   @type pending_item :: %{
@@ -200,7 +201,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
          :ok <- check_quota(graph, type) do
       skip_dedup = Map.get(node_data, :skip_dedup, false)
       metadata = Map.get(node_data, :metadata, %{})
-      text = node_to_text(content, metadata)
+      text = node_to_text(content, metadata, type)
       embedding = compute_node_embedding(text)
 
       # Check for duplicates unless skipped
@@ -211,7 +212,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
           {:ok, boosted, existing_id}
 
         :no_duplicate ->
-          node_id = generate_node_id()
+          node_id = generate_node_id(type)
           now = DateTime.utc_now()
 
           node = %{
@@ -308,6 +309,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   ## Options
 
   - `:strength` - Edge strength (default: 1.0)
+  - `:metadata` - Arbitrary metadata map (default: %{}). Merged on duplicate edges.
 
   ## Relationship Types
 
@@ -330,6 +332,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
          {:ok, _target} <- get_node(graph, target_id) do
       existing_edges = Map.get(graph.edges, source_id, [])
       strength = Keyword.get(opts, :strength, 1.0)
+      edge_metadata = Keyword.get(opts, :metadata, %{})
 
       # Check for existing edge with same source/target/relationship
       case Enum.find_index(existing_edges, fn e ->
@@ -343,16 +346,18 @@ defmodule Arbor.Memory.KnowledgeGraph do
             target_id: target_id,
             relationship: relationship,
             strength: strength,
-            created_at: DateTime.utc_now()
+            created_at: DateTime.utc_now(),
+            metadata: edge_metadata
           }
 
           new_edges = Map.put(graph.edges, source_id, [edge | existing_edges])
           {:ok, %{graph | edges: new_edges}}
 
         idx ->
-          # Existing edge — increment strength
+          # Existing edge — increment strength and merge metadata
           existing_edge = Enum.at(existing_edges, idx)
-          updated_edge = %{existing_edge | strength: min(10.0, existing_edge.strength + 0.5)}
+          merged_meta = Map.merge(Map.get(existing_edge, :metadata, %{}), edge_metadata)
+          updated_edge = %{existing_edge | strength: min(10.0, existing_edge.strength + 0.5), metadata: merged_meta}
 
           updated_list = List.replace_at(existing_edges, idx, updated_edge)
           new_edges = Map.put(graph.edges, source_id, updated_list)
@@ -976,12 +981,15 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
   - `:pinned_ids` - Set of node IDs to skip (in addition to pinned nodes)
   - `:decay_rate_override` - Override the graph's decay rate for this call
+  - `:auto_prune` - Prune low-relevance nodes after decay (default: true)
   """
   @spec apply_decay(t(), keyword()) :: t()
   def apply_decay(graph, opts \\ []) do
     now = DateTime.utc_now()
     lambda = Keyword.get(opts, :decay_rate_override, Map.get(graph.config, :decay_rate, @default_decay_rate))
     pinned_ids = normalize_pinned_ids(Keyword.get(opts, :pinned_ids))
+
+    auto_prune = Keyword.get(opts, :auto_prune, true)
 
     new_nodes =
       Map.new(graph.nodes, fn {id, node} ->
@@ -995,8 +1003,14 @@ defmodule Arbor.Memory.KnowledgeGraph do
         end
       end)
 
-    %{graph | nodes: new_nodes, last_decay_at: now}
-    |> refresh_active_set()
+    decayed = %{graph | nodes: new_nodes, last_decay_at: now}
+
+    if auto_prune do
+      {pruned, _count} = prune(decayed)
+      refresh_active_set(pruned)
+    else
+      refresh_active_set(decayed)
+    end
   end
 
   @doc """
@@ -1055,7 +1069,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
     if not force and map_size(graph.nodes) < total_capacity * 0.8 do
       {graph, 0}
     else
-      graph = apply_decay(graph, opts)
+      # Disable auto_prune in apply_decay since prune_and_archive handles pruning with signal emission
+      graph = apply_decay(graph, Keyword.put(opts, :auto_prune, false))
       prune_and_archive(graph, opts)
     end
   end
@@ -1349,10 +1364,16 @@ defmodule Arbor.Memory.KnowledgeGraph do
         {id, ensure_node_fields(node)}
       end)
 
+    edges =
+      (data[:edges] || data["edges"] || %{})
+      |> Map.new(fn {source_id, edge_list} ->
+        {source_id, Enum.map(edge_list, &ensure_edge_fields/1)}
+      end)
+
     %__MODULE__{
       agent_id: data[:agent_id] || data["agent_id"],
       nodes: nodes,
-      edges: data[:edges] || data["edges"] || %{},
+      edges: edges,
       pending_facts: data[:pending_facts] || data["pending_facts"] || [],
       pending_learnings: data[:pending_learnings] || data["pending_learnings"] || [],
       config: data[:config] || data["config"] || %{},
@@ -1406,8 +1427,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
-  defp generate_node_id do
-    "node_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  defp generate_node_id(type) do
+    "node_#{type}_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
   end
 
   defp generate_edge_id do
@@ -1503,21 +1524,35 @@ defmodule Arbor.Memory.KnowledgeGraph do
   end
 
   # Build text representation for token estimation and embedding
-  defp node_to_text(content, metadata) when is_binary(content) do
+  defp node_to_text(content, metadata, type) when is_binary(content) do
+    parts = []
+
+    # Include type for richer semantic signal
+    parts = if type, do: ["[#{type}]" | parts], else: parts
+
+    # Include name from metadata if present (e.g., entity names, labels)
+    name = Map.get(metadata, :name) || Map.get(metadata, "name")
+    parts = if name && is_binary(name) && name != content, do: [name | parts], else: parts
+
+    # Main content
+    parts = [content | parts]
+
+    # Include other string metadata values (description, context, etc.)
+    skip_keys = [:name, "name", :tool_name, "tool_name"]
+
     metadata_text =
       metadata
+      |> Map.drop(skip_keys)
       |> Map.values()
       |> Enum.filter(&is_binary/1)
       |> Enum.join(" ")
 
-    if metadata_text == "" do
-      content
-    else
-      content <> " " <> metadata_text
-    end
+    parts = if metadata_text != "", do: [metadata_text | parts], else: parts
+
+    parts |> Enum.reverse() |> Enum.join(" ")
   end
 
-  defp node_to_text(content, _metadata), do: to_string(content)
+  defp node_to_text(content, _metadata, _type), do: to_string(content)
 
   # Ensure deserialized nodes have all fields with defaults
   defp ensure_node_fields(node) when is_map(node) do
@@ -1528,6 +1563,11 @@ defmodule Arbor.Memory.KnowledgeGraph do
     |> Map.put_new(:pinned, false)
     |> Map.put_new(:access_count, 0)
     |> Map.put_new(:metadata, %{})
+  end
+
+  # Ensure deserialized edges have all fields with defaults
+  defp ensure_edge_fields(edge) when is_map(edge) do
+    Map.put_new(edge, :metadata, %{})
   end
 
   # BFS traversal for find_related — bidirectional with optional relationship filter
