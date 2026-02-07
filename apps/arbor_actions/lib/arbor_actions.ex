@@ -221,6 +221,34 @@ defmodule Arbor.Actions do
       council: [
         Arbor.Actions.Council.Consult,
         Arbor.Actions.Council.ConsultOne
+      ],
+      memory: [
+        Arbor.Actions.Memory.Remember,
+        Arbor.Actions.Memory.Recall,
+        Arbor.Actions.Memory.Connect,
+        Arbor.Actions.Memory.Reflect
+      ],
+      memory_identity: [
+        Arbor.Actions.MemoryIdentity.AddInsight,
+        Arbor.Actions.MemoryIdentity.ReadSelf,
+        Arbor.Actions.MemoryIdentity.IntrospectMemory
+      ],
+      memory_cognitive: [
+        Arbor.Actions.MemoryCognitive.AdjustPreference,
+        Arbor.Actions.MemoryCognitive.PinMemory,
+        Arbor.Actions.MemoryCognitive.UnpinMemory
+      ],
+      memory_review: [
+        Arbor.Actions.MemoryReview.ReviewQueue,
+        Arbor.Actions.MemoryReview.ReviewSuggestions,
+        Arbor.Actions.MemoryReview.AcceptSuggestion,
+        Arbor.Actions.MemoryReview.RejectSuggestion
+      ],
+      memory_code: [
+        Arbor.Actions.MemoryCode.StoreCode,
+        Arbor.Actions.MemoryCode.ListCode,
+        Arbor.Actions.MemoryCode.DeleteCode,
+        Arbor.Actions.MemoryCode.ViewCode
       ]
     }
   end
