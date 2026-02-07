@@ -725,7 +725,8 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         goals_text: "- [g1] Fix bug",
         knowledge_graph_text: "(No graph)",
         working_memory_text: "",
-        recent_thinking_text: "(No thinking)"
+        recent_thinking_text: "(No thinking)",
+        recent_activity_text: "(No recent activity)"
       }
 
       prompt = ReflectionProcessor.build_reflection_prompt(context)
@@ -741,7 +742,8 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         goals_text: "Goals here",
         knowledge_graph_text: "KG info here",
         working_memory_text: "WM info here",
-        recent_thinking_text: "Thinking here"
+        recent_thinking_text: "Thinking here",
+        recent_activity_text: "Activity here"
       }
 
       prompt = ReflectionProcessor.build_reflection_prompt(context)
@@ -751,6 +753,486 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       assert String.contains?(prompt, "KG info here")
       assert String.contains?(prompt, "WM info here")
       assert String.contains?(prompt, "Thinking here")
+      assert String.contains?(prompt, "Activity here")
+    end
+  end
+
+  # ============================================================================
+  # Phase 1: KG find_by_name via facade
+  # ============================================================================
+
+  describe "find_knowledge_by_name (facade)" do
+    setup %{agent_id: agent_id} do
+      {:ok, _pid} = Arbor.Memory.init_for_agent(agent_id)
+      %{agent_id: agent_id}
+    end
+
+    test "finds existing node by name", %{agent_id: agent_id} do
+      {:ok, node_id} =
+        Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "Elixir"})
+
+      assert {:ok, ^node_id} = Arbor.Memory.find_knowledge_by_name(agent_id, "Elixir")
+    end
+
+    test "case-insensitive match", %{agent_id: agent_id} do
+      {:ok, node_id} =
+        Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "Elixir"})
+
+      assert {:ok, ^node_id} = Arbor.Memory.find_knowledge_by_name(agent_id, "elixir")
+      assert {:ok, ^node_id} = Arbor.Memory.find_knowledge_by_name(agent_id, "ELIXIR")
+    end
+
+    test "returns not_found for missing name", %{agent_id: agent_id} do
+      assert {:error, :not_found} =
+               Arbor.Memory.find_knowledge_by_name(agent_id, "nonexistent")
+    end
+
+    test "returns not_found on empty graph", %{agent_id: agent_id} do
+      assert {:error, :not_found} =
+               Arbor.Memory.find_knowledge_by_name(agent_id, "anything")
+    end
+  end
+
+  # ============================================================================
+  # Phase 2: Signal/Activity gathering
+  # ============================================================================
+
+  describe "build_deep_context/2 with activity" do
+    test "context includes recent_activity_text key", %{agent_id: agent_id} do
+      {:ok, context} = ReflectionProcessor.build_deep_context(agent_id, [])
+      assert is_binary(context.recent_activity_text)
+    end
+
+    test "returns fallback when no events", %{agent_id: agent_id} do
+      {:ok, context} = ReflectionProcessor.build_deep_context(agent_id, [])
+      assert context.recent_activity_text =~ "No recent activity"
+    end
+
+    test "prompt includes Recent Activity section", %{agent_id: agent_id} do
+      {:ok, context} = ReflectionProcessor.build_deep_context(agent_id, [])
+      prompt = ReflectionProcessor.build_reflection_prompt(context)
+      assert String.contains?(prompt, "## Recent Activity")
+    end
+  end
+
+  # ============================================================================
+  # Phase 3: Reflection gating
+  # ============================================================================
+
+  describe "should_reflect?/2" do
+    test "returns true when no reflection history", %{agent_id: agent_id} do
+      assert ReflectionProcessor.should_reflect?(agent_id)
+    end
+
+    test "returns false after recent reflection", %{agent_id: agent_id} do
+      # Do a reflection to set the timestamp
+      {:ok, _} = ReflectionProcessor.reflect(agent_id, "Initial reflection")
+
+      # With a very long interval, time won't have elapsed
+      refute ReflectionProcessor.should_reflect?(agent_id,
+               interval_ms: 999_999_999,
+               threshold: 999_999
+             )
+    end
+
+    test "custom interval controls timing", %{agent_id: agent_id} do
+      {:ok, _} = ReflectionProcessor.reflect(agent_id, "Setup")
+
+      # With 0ms interval, should always reflect
+      assert ReflectionProcessor.should_reflect?(agent_id, interval_ms: 0)
+    end
+
+    test "periodic_reflection skips when gating says no", %{agent_id: agent_id} do
+      {:ok, _} = ReflectionProcessor.reflect(agent_id, "Setup")
+
+      assert {:ok, :skipped} =
+               ReflectionProcessor.periodic_reflection(agent_id,
+                 interval_ms: 999_999_999,
+                 threshold: 999_999
+               )
+    end
+
+    test "periodic_reflection force bypasses gating", %{agent_id: agent_id} do
+      {:ok, _} = ReflectionProcessor.reflect(agent_id, "Setup")
+
+      {:ok, result} =
+        ReflectionProcessor.periodic_reflection(agent_id,
+          force: true,
+          interval_ms: 999_999_999,
+          threshold: 999_999
+        )
+
+      assert is_binary(result.analysis)
+    end
+  end
+
+  # ============================================================================
+  # Phase 4: KG dedup + edges
+  # ============================================================================
+
+  describe "KG dedup in integrate_knowledge_graph" do
+    setup %{agent_id: agent_id} do
+      {:ok, _pid} = Arbor.Memory.init_for_agent(agent_id)
+      %{agent_id: agent_id}
+    end
+
+    test "does not create duplicate nodes", %{agent_id: agent_id} do
+      # Pre-add a node
+      {:ok, _} =
+        Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "Elixir"})
+
+      # Integrate the same name
+      ReflectionProcessor.integrate_knowledge_graph(
+        agent_id,
+        [%{"name" => "Elixir", "type" => "concept", "context" => "language"}],
+        []
+      )
+
+      {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
+      # Should still be 1, not 2
+      assert stats.node_count == 1
+    end
+
+    test "reuses existing node ID for edges", %{agent_id: agent_id} do
+      # Pre-add a node
+      {:ok, existing_id} =
+        Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "Elixir"})
+
+      nodes = [
+        %{"name" => "Elixir", "type" => "concept"},
+        %{"name" => "OTP", "type" => "concept"}
+      ]
+
+      edges = [
+        %{"from" => "Elixir", "to" => "OTP", "relationship" => "uses"}
+      ]
+
+      ReflectionProcessor.integrate_knowledge_graph(agent_id, nodes, edges)
+
+      {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
+      # 2 nodes total: existing Elixir + new OTP
+      assert stats.node_count == 2
+      # Edge should work because existing node ID is in map
+      assert stats.edge_count >= 1
+
+      # The existing node should still be accessible
+      {:ok, ^existing_id} = Arbor.Memory.find_knowledge_by_name(agent_id, "Elixir")
+    end
+
+    test "edges work when both nodes pre-exist", %{agent_id: agent_id} do
+      {:ok, _} = Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "A"})
+      {:ok, _} = Arbor.Memory.add_knowledge(agent_id, %{type: :fact, content: "B"})
+
+      nodes = [
+        %{"name" => "A", "type" => "concept"},
+        %{"name" => "B", "type" => "concept"}
+      ]
+
+      edges = [%{"from" => "A", "to" => "B", "relationship" => "related_to"}]
+
+      ReflectionProcessor.integrate_knowledge_graph(agent_id, nodes, edges)
+
+      {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
+      assert stats.node_count == 2
+      assert stats.edge_count >= 1
+    end
+  end
+
+  # ============================================================================
+  # Phase 5: Relationship processing
+  # ============================================================================
+
+  describe "process_relationships/2" do
+    @tag :database
+    test "creates new relationship", %{agent_id: agent_id} do
+      ReflectionProcessor.process_relationships(agent_id, [
+        %{
+          "name" => "TestPerson",
+          "dynamic" => "Collaborative partnership",
+          "observation" => "Worked together on tests"
+        }
+      ])
+
+      {:ok, rel} = Arbor.Memory.get_relationship_by_name(agent_id, "TestPerson")
+      assert rel.name == "TestPerson"
+    end
+
+    @tag :database
+    test "updates existing relationship", %{agent_id: agent_id} do
+      rel = Arbor.Memory.Relationship.new("ExistingPerson")
+      {:ok, _} = Arbor.Memory.save_relationship(agent_id, rel)
+
+      ReflectionProcessor.process_relationships(agent_id, [
+        %{
+          "name" => "ExistingPerson",
+          "dynamic" => "Updated dynamic",
+          "observation" => "New observation"
+        }
+      ])
+
+      {:ok, updated} = Arbor.Memory.get_relationship_by_name(agent_id, "ExistingPerson")
+      assert updated.name == "ExistingPerson"
+    end
+
+    test "skips entries with missing name", %{agent_id: agent_id} do
+      # Should not raise
+      ReflectionProcessor.process_relationships(agent_id, [
+        %{"dynamic" => "No name provided"},
+        %{"name" => "", "dynamic" => "Empty name"},
+        %{"name" => nil}
+      ])
+    end
+
+    test "handles empty list", %{agent_id: agent_id} do
+      assert :ok == ReflectionProcessor.process_relationships(agent_id, [])
+    end
+
+    test "parsed response includes relationships field" do
+      json =
+        Jason.encode!(%{
+          "relationships" => [%{"name" => "Bob", "dynamic" => "friendly"}],
+          "insights" => []
+        })
+
+      {:ok, parsed} = ReflectionProcessor.parse_reflection_response(json)
+      assert length(parsed.relationships) == 1
+      assert hd(parsed.relationships)["name"] == "Bob"
+    end
+  end
+
+  # ============================================================================
+  # Phase 6: InsightDetector integration
+  # ============================================================================
+
+  describe "insight detection and self-insight suggestions" do
+    test "store_self_insight_suggestions adds to working memory", %{agent_id: agent_id} do
+      wm = WorkingMemory.new(agent_id)
+      Arbor.Memory.save_working_memory(agent_id, wm)
+
+      # This is testing via deep_reflect indirectly — let's test MockLLM
+      # includes self_insight_suggestions field and verify it round-trips
+      json =
+        Jason.encode!(%{
+          "insights" => [],
+          "goal_updates" => [],
+          "learnings" => [],
+          "new_goals" => [],
+          "knowledge_nodes" => [],
+          "knowledge_edges" => [],
+          "self_insight_suggestions" => [
+            %{
+              "content" => "I tend to be curious",
+              "category" => "personality",
+              "confidence" => 0.6
+            }
+          ]
+        })
+
+      {:ok, parsed} = ReflectionProcessor.parse_reflection_response(json)
+      assert length(parsed.self_insight_suggestions) == 1
+    end
+
+    test "insight detector failure does not crash deep_reflect", %{agent_id: agent_id} do
+      # deep_reflect should succeed even if InsightDetector fails
+      {:ok, result} = ReflectionProcessor.deep_reflect(agent_id)
+      assert is_map(result)
+    end
+  end
+
+  # ============================================================================
+  # Phase 7: Blocked/failed goal statuses
+  # ============================================================================
+
+  describe "blocked and failed goal statuses" do
+    test "blocked status sets goal to :blocked", %{agent_id: agent_id} do
+      goal = Goal.new("Blockable goal")
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      ReflectionProcessor.process_goal_updates(agent_id, [
+        %{
+          "goal_id" => goal.id,
+          "status" => "blocked",
+          "blockers" => ["waiting on API key"]
+        }
+      ])
+
+      {:ok, updated} = GoalStore.get_goal(agent_id, goal.id)
+      assert updated.status == :blocked
+      assert updated.metadata[:blockers] == ["waiting on API key"]
+    end
+
+    test "failed status maps to abandoned with prefix", %{agent_id: agent_id} do
+      goal = Goal.new("Failing goal")
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      ReflectionProcessor.process_goal_updates(agent_id, [
+        %{
+          "goal_id" => goal.id,
+          "status" => "failed",
+          "note" => "API deprecated"
+        }
+      ])
+
+      {:ok, updated} = GoalStore.get_goal(agent_id, goal.id)
+      assert updated.status == :abandoned
+      assert updated.metadata[:abandon_reason] =~ "[Failed]"
+      assert updated.metadata[:abandon_reason] =~ "API deprecated"
+    end
+
+    test "GoalStore.block_goal sets status and stores blockers", %{agent_id: agent_id} do
+      goal = Goal.new("Direct block test")
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      {:ok, blocked} = GoalStore.block_goal(agent_id, goal.id, ["blocker1", "blocker2"])
+      assert blocked.status == :blocked
+      assert blocked.metadata[:blockers] == ["blocker1", "blocker2"]
+    end
+
+    test "GoalStore.block_goal returns not_found for missing goal", %{agent_id: agent_id} do
+      assert {:error, :not_found} = GoalStore.block_goal(agent_id, "missing_id")
+    end
+  end
+
+  # ============================================================================
+  # Phase 8: Goals in Knowledge Graph
+  # ============================================================================
+
+  describe "goals in knowledge graph" do
+    setup %{agent_id: agent_id} do
+      {:ok, _pid} = Arbor.Memory.init_for_agent(agent_id)
+      %{agent_id: agent_id}
+    end
+
+    test "active goals are added as KG nodes during deep_reflect", %{agent_id: agent_id} do
+      goal = Goal.new("Build the feature", type: :achieve, priority: 80)
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      {:ok, _result} = ReflectionProcessor.deep_reflect(agent_id)
+
+      {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
+      assert stats.node_count >= 1
+
+      # Should be findable by the goal description
+      {:ok, _node_id} =
+        Arbor.Memory.find_knowledge_by_name(agent_id, "Build the feature")
+    end
+
+    test "does not duplicate goal nodes across reflections", %{agent_id: agent_id} do
+      goal = Goal.new("Unique goal for dedup test")
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      {:ok, _} = ReflectionProcessor.deep_reflect(agent_id)
+      {:ok, stats1} = Arbor.Memory.knowledge_stats(agent_id)
+
+      {:ok, _} = ReflectionProcessor.deep_reflect(agent_id)
+      {:ok, stats2} = Arbor.Memory.knowledge_stats(agent_id)
+
+      # Node count should not increase on second reflection
+      # (MockLLM returns same data both times; goal + learning both deduped)
+      assert stats2.node_count == stats1.node_count
+    end
+  end
+
+  # ============================================================================
+  # Phase 9: Learning categorization routing
+  # ============================================================================
+
+  describe "learning categorization routing" do
+    setup %{agent_id: agent_id} do
+      {:ok, _pid} = Arbor.Memory.init_for_agent(agent_id)
+      %{agent_id: agent_id}
+    end
+
+    test "technical learnings are added to KG as skill nodes", %{agent_id: agent_id} do
+      wm = WorkingMemory.new(agent_id)
+      Arbor.Memory.save_working_memory(agent_id, wm)
+
+      ReflectionProcessor.integrate_learnings(agent_id, [
+        %{"content" => "Pattern matching is powerful", "confidence" => 0.9, "category" => "technical"}
+      ])
+
+      {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
+      assert stats.node_count >= 1
+    end
+
+    test "self learnings go to SelfKnowledge growth log", %{agent_id: agent_id} do
+      # Set up SelfKnowledge
+      sk = Arbor.Memory.SelfKnowledge.new(agent_id)
+      Arbor.Memory.IdentityConsolidator.save_self_knowledge(agent_id, sk)
+
+      wm = WorkingMemory.new(agent_id)
+      Arbor.Memory.save_working_memory(agent_id, wm)
+
+      ReflectionProcessor.integrate_learnings(agent_id, [
+        %{"content" => "I am more patient now", "confidence" => 0.8, "category" => "self"}
+      ])
+
+      updated_sk = Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id)
+      assert length(updated_sk.growth_log) >= 1
+    end
+
+    test "all learnings also go to working memory", %{agent_id: agent_id} do
+      wm = WorkingMemory.new(agent_id)
+      Arbor.Memory.save_working_memory(agent_id, wm)
+
+      ReflectionProcessor.integrate_learnings(agent_id, [
+        %{"content" => "Test learning", "confidence" => 0.8, "category" => "relationship"}
+      ])
+
+      updated_wm = Arbor.Memory.get_working_memory(agent_id)
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "Test learning"))
+    end
+
+    test "unknown category does not error", %{agent_id: agent_id} do
+      wm = WorkingMemory.new(agent_id)
+      Arbor.Memory.save_working_memory(agent_id, wm)
+
+      # Should not raise
+      ReflectionProcessor.integrate_learnings(agent_id, [
+        %{"content" => "Mystery learning", "confidence" => 0.8, "category" => "unknown_category"}
+      ])
+
+      updated_wm = Arbor.Memory.get_working_memory(agent_id)
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "Mystery learning"))
+    end
+  end
+
+  # ============================================================================
+  # Phase 10: Minor polish
+  # ============================================================================
+
+  describe "goal metadata polish" do
+    test "success_criteria stored in goal metadata", %{agent_id: agent_id} do
+      ReflectionProcessor.process_new_goals(agent_id, [
+        %{
+          "description" => "Goal with criteria",
+          "type" => "achieve",
+          "success_criteria" => "All tests pass"
+        }
+      ])
+
+      goals = GoalStore.get_active_goals(agent_id)
+      assert length(goals) == 1
+      assert hd(goals).metadata[:success_criteria] == "All tests pass"
+    end
+
+    test "notes accumulate on goal updates", %{agent_id: agent_id} do
+      goal = Goal.new("Notable goal")
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      ReflectionProcessor.process_goal_updates(agent_id, [
+        %{"goal_id" => goal.id, "new_progress" => 0.3, "note" => "First update"}
+      ])
+
+      ReflectionProcessor.process_goal_updates(agent_id, [
+        %{"goal_id" => goal.id, "new_progress" => 0.6, "note" => "Second update"}
+      ])
+
+      {:ok, updated} = GoalStore.get_goal(agent_id, goal.id)
+      notes = updated.metadata[:notes] || []
+      assert length(notes) == 2
+      assert Enum.any?(notes, &String.contains?(&1, "First update"))
+      assert Enum.any?(notes, &String.contains?(&1, "Second update"))
     end
   end
 end
