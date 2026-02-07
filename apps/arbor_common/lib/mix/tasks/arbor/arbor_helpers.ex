@@ -45,6 +45,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
   """
   def ensure_distribution do
     unless Node.alive?() do
+      ensure_epmd()
       suffix = :rand.uniform(99_999)
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"arbor_mix_#{suffix}@localhost"
@@ -53,6 +54,18 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
 
     :ok
+  end
+
+  defp ensure_epmd do
+    case System.cmd("epmd", ["-names"], stderr_to_stdout: true) do
+      {_output, 0} ->
+        :ok
+
+      _ ->
+        System.cmd("epmd", ["-daemon"])
+        Process.sleep(500)
+        :ok
+    end
   end
 
   @doc "Makes an RPC call, returning nil on badrpc."
