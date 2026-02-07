@@ -215,7 +215,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
     with {:ok, context} <- build_deep_context(agent_id, opts),
          {:ok, prompt} <- {:ok, build_reflection_prompt(context)},
-         {:ok, response_text} <- call_llm(prompt, opts),
+         {:ok, response_text} <- call_llm(prompt, Keyword.put(opts, :agent_id, agent_id)),
          {:ok, parsed} <- parse_reflection_response(response_text) do
       # Integrate results into subsystems
       process_goal_updates(agent_id, parsed.goal_updates)
@@ -227,7 +227,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
       trigger_insight_detection(agent_id)
       store_self_insight_suggestions(agent_id, parsed.self_insight_suggestions)
       add_goals_to_knowledge_graph(agent_id, Map.get(context, :goals, []))
-      run_post_reflection_decay(agent_id)
+      archived_count = run_post_reflection_decay(agent_id)
 
       duration = System.monotonic_time(:millisecond) - start_time
 
@@ -239,6 +239,9 @@ defmodule Arbor.Memory.ReflectionProcessor do
         knowledge_nodes_added: length(parsed.knowledge_nodes),
         knowledge_edges_added: length(parsed.knowledge_edges),
         self_insight_suggestions: parsed.self_insight_suggestions,
+        insight_suggestions: parsed.self_insight_suggestions,
+        knowledge_archived: archived_count,
+        relationship_updates: length(parsed.relationships),
         duration_ms: duration
       }
 
@@ -309,6 +312,61 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   @doc """
+  Convenience wrapper that checks `should_reflect?/2` and runs `deep_reflect/2`
+  only when reflection is needed.
+
+  ## Options
+
+  - `:force` - Force reflection regardless of gating (default: false)
+  - All options from `deep_reflect/2` and `should_reflect?/2`
+
+  ## Examples
+
+      {:ok, result} = ReflectionProcessor.maybe_reflect("agent_001")
+      {:ok, :skipped} = ReflectionProcessor.maybe_reflect("agent_001")
+  """
+  @spec maybe_reflect(String.t(), keyword()) :: {:ok, map()} | {:ok, :skipped} | {:error, term()}
+  def maybe_reflect(agent_id, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
+
+    if force or should_reflect?(agent_id, opts) do
+      deep_reflect(agent_id, opts)
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  @doc """
+  Force an immediate deep reflection, bypassing gating checks.
+
+  This is an alias for `deep_reflect/2` matching arbor_seed's `reflect_now/2` API.
+
+  ## Examples
+
+      {:ok, result} = ReflectionProcessor.reflect_now("agent_001")
+  """
+  @spec reflect_now(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def reflect_now(agent_id, opts \\ []), do: deep_reflect(agent_id, opts)
+
+  @doc """
+  Returns the default reflection configuration.
+
+  ## Examples
+
+      config = ReflectionProcessor.default_config()
+      # => %{min_reflection_interval: 600_000, signal_threshold: 50, ...}
+  """
+  @spec default_config() :: map()
+  def default_config do
+    %{
+      min_reflection_interval: @default_reflection_interval_ms,
+      signal_threshold: @default_signal_threshold,
+      llm_provider: Application.get_env(:arbor_memory, :reflection_provider),
+      reflection_model: Application.get_env(:arbor_memory, :reflection_model)
+    }
+  end
+
+  @doc """
   Check whether a reflection should be triggered based on time and activity.
 
   Returns `true` if enough time has passed since the last reflection OR
@@ -355,7 +413,11 @@ defmodule Arbor.Memory.ReflectionProcessor do
   @doc false
   def build_deep_context(agent_id, _opts) do
     sk = IdentityConsolidator.get_self_knowledge(agent_id)
-    goals = GoalStore.get_active_goals(agent_id)
+
+    # Include active + blocked goals (not achieved/abandoned)
+    goals =
+      GoalStore.get_all_goals(agent_id)
+      |> Enum.filter(&(&1.status in [:active, :blocked]))
 
     {:ok,
      %{
@@ -422,7 +484,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
         data when is_map(data) and map_size(data) > 0 ->
           data
           |> Enum.take(4)
-          |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
+          |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{truncate(inspect(v), 100)}" end)
 
         _ ->
           ""
@@ -562,6 +624,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
   defp call_arbor_ai(prompt, opts) do
     if Code.ensure_loaded?(Arbor.AI) do
       start_time = System.monotonic_time(:millisecond)
+      agent_id = opts[:agent_id] || "unknown"
 
       provider =
         opts[:provider] ||
@@ -602,7 +665,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
       success = match?({:ok, _}, result)
 
-      Signals.emit_reflection_llm_call("unknown", %{
+      Signals.emit_reflection_llm_call(agent_id, %{
         provider: provider,
         model: model,
         prompt_chars: String.length(prompt),
@@ -1034,13 +1097,32 @@ defmodule Arbor.Memory.ReflectionProcessor do
   defp store_self_insight_suggestions(_agent_id, []), do: :ok
 
   defp store_self_insight_suggestions(agent_id, suggestions) do
-    Enum.each(suggestions, fn suggestion ->
-      content = suggestion["content"]
+    # Dedup against existing suggestions in working memory
+    existing_suggestions = get_existing_suggestion_contents(agent_id)
 
-      if content && content != "" do
-        add_thought_to_working_memory(agent_id, "[Insight Suggestion] #{content}")
-      end
+    suggestions
+    |> Enum.map(fn s -> if is_map(s), do: s["content"] || to_string(s), else: to_string(s) end)
+    |> Enum.filter(&(&1 != "" and &1 != nil))
+    |> Enum.reject(&MapSet.member?(existing_suggestions, &1))
+    |> Enum.take(max(0, 10 - MapSet.size(existing_suggestions)))
+    |> Enum.each(fn content ->
+      add_thought_to_working_memory(agent_id, "[Insight Suggestion] #{content}")
     end)
+  end
+
+  defp get_existing_suggestion_contents(agent_id) do
+    prefix = "[Insight Suggestion] "
+
+    case Arbor.Memory.get_working_memory(agent_id) do
+      nil ->
+        MapSet.new()
+
+      wm ->
+        wm.recent_thoughts
+        |> Enum.filter(&String.starts_with?(&1, prefix))
+        |> Enum.map(&String.replace_leading(&1, prefix, ""))
+        |> MapSet.new()
+    end
   end
 
   # ============================================================================
@@ -1078,9 +1160,22 @@ defmodule Arbor.Memory.ReflectionProcessor do
   defp run_post_reflection_decay(agent_id) do
     if Arbor.Memory.should_consolidate?(agent_id) do
       case Arbor.Memory.run_consolidation(agent_id) do
-        {:ok, _graph, _metrics} -> :ok
-        _ -> :ok
+        {:ok, graph, metrics} ->
+          archived = Map.get(metrics, :pruned_count, 0)
+          remaining = map_size(Map.get(graph, :nodes, %{}))
+
+          Signals.emit_reflection_knowledge_decay(agent_id, %{
+            archived_count: archived,
+            remaining_nodes: remaining
+          })
+
+          archived
+
+        _ ->
+          0
       end
+    else
+      0
     end
   end
 
@@ -1289,16 +1384,147 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp format_goals_for_prompt(goals) do
-    Enum.map_join(goals, "\n", fn goal ->
-      progress_pct = Float.round(goal.progress * 100, 0)
-      bar_filled = round(goal.progress * 20)
-      bar_empty = 20 - bar_filled
-      bar = String.duplicate("█", bar_filled) <> String.duplicate("░", bar_empty)
+    {blocked, active} = Enum.split_with(goals, &(&1.status == :blocked))
 
-      "- [#{goal.id}] #{goal.description}\n" <>
+    sorted_active =
+      active
+      |> Enum.sort_by(&goal_urgency/1, :desc)
+
+    active_text =
+      if sorted_active == [] do
+        ""
+      else
+        Enum.map_join(sorted_active, "\n\n", &format_single_goal/1)
+      end
+
+    blocked_text =
+      if blocked == [] do
+        ""
+      else
+        header = "\n\n### Blocked Goals\n"
+        items = Enum.map_join(blocked, "\n\n", &format_blocked_goal/1)
+        header <> items
+      end
+
+    (active_text <> blocked_text)
+    |> String.trim()
+    |> case do
+      "" -> "(No active goals)"
+      text -> text
+    end
+  end
+
+  defp format_single_goal(goal) do
+    emoji = priority_emoji(goal.priority)
+    progress_pct = Float.round(goal.progress * 100, 0)
+    bar_filled = round(goal.progress * 20)
+    bar_empty = 20 - bar_filled
+    bar = String.duplicate("█", bar_filled) <> String.duplicate("░", bar_empty)
+    deadline = deadline_text(goal)
+
+    base =
+      "- #{emoji} [#{goal.id}] #{goal.description}#{deadline}\n" <>
         "  Priority: #{goal.priority} | Type: #{goal.type} | " <>
         "Progress: #{bar} #{progress_pct}%"
-    end)
+
+    base
+    |> maybe_append_criteria(goal)
+    |> maybe_append_notes(goal)
+  end
+
+  defp format_blocked_goal(goal) do
+    emoji = priority_emoji(goal.priority)
+    blockers = get_in(goal.metadata || %{}, [:blockers]) || []
+
+    blockers_text =
+      if blockers == [] do
+        ""
+      else
+        "\n  Blocked by: " <> Enum.join(blockers, ", ")
+      end
+
+    "- #{emoji} [BLOCKED] [#{goal.id}] #{goal.description}#{blockers_text}"
+  end
+
+  defp maybe_append_criteria(text, goal) do
+    case get_in(goal.metadata || %{}, [:success_criteria]) do
+      nil -> text
+      "" -> text
+      criteria -> text <> "\n  Success criteria: #{criteria}"
+    end
+  end
+
+  defp maybe_append_notes(text, goal) do
+    case get_in(goal.metadata || %{}, [:notes]) do
+      nil -> text
+      [] -> text
+      notes ->
+        recent = Enum.take(notes, -3)
+        notes_text = Enum.map_join(recent, "\n", &("    - " <> &1))
+        text <> "\n  Recent notes:\n#{notes_text}"
+    end
+  end
+
+  defp goal_urgency(goal) do
+    overdue_factor =
+      case get_in(goal.metadata || %{}, [:deadline]) do
+        nil -> 0.0
+        deadline when is_binary(deadline) ->
+          case DateTime.from_iso8601(deadline) do
+            {:ok, dt, _} -> deadline_urgency_factor(dt)
+            _ -> 0.0
+          end
+        %DateTime{} = dt -> deadline_urgency_factor(dt)
+        _ -> 0.0
+      end
+
+    goal.priority * (1.0 + overdue_factor)
+  end
+
+  defp deadline_urgency_factor(deadline) do
+    hours = DateTime.diff(deadline, DateTime.utc_now(), :hour)
+
+    cond do
+      hours < 0 -> 2.0
+      hours < 24 -> 1.0
+      hours < 168 -> 0.5
+      true -> 0.0
+    end
+  end
+
+  defp priority_emoji(priority) when is_integer(priority) do
+    cond do
+      priority >= 80 -> "🔴"
+      priority >= 60 -> "🟠"
+      priority >= 40 -> "🟡"
+      true -> "🟢"
+    end
+  end
+
+  defp priority_emoji(_), do: "🟡"
+
+  defp deadline_text(goal) do
+    case get_in(goal.metadata || %{}, [:deadline]) do
+      nil -> ""
+      deadline when is_binary(deadline) ->
+        case DateTime.from_iso8601(deadline) do
+          {:ok, dt, _} -> format_deadline(dt)
+          _ -> ""
+        end
+      %DateTime{} = dt -> format_deadline(dt)
+      _ -> ""
+    end
+  end
+
+  defp format_deadline(deadline) do
+    hours = DateTime.diff(deadline, DateTime.utc_now(), :hour)
+
+    cond do
+      hours < 0 -> " ⚠️ OVERDUE"
+      hours < 24 -> " ⏰ Due in #{hours}h"
+      hours < 168 -> " Due in #{div(hours, 24)}d"
+      true -> ""
+    end
   end
 
   defp get_knowledge_summary(agent_id) do
@@ -1343,6 +1569,14 @@ defmodule Arbor.Memory.ReflectionProcessor do
   defp safe_node_type("tool"), do: :skill
   defp safe_node_type("goal"), do: :insight
   defp safe_node_type(_), do: :fact
+
+  # String truncation for signal data
+  defp truncate(str, max_len) when is_binary(str) and byte_size(str) > max_len do
+    String.slice(str, 0, max_len) <> "..."
+  end
+
+  defp truncate(str, _max_len) when is_binary(str), do: str
+  defp truncate(_, _max_len), do: ""
 
   # Safe atom conversion with fallback
   defp safe_atom(nil, default), do: default
