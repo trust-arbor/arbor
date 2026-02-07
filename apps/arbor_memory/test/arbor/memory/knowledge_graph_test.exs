@@ -890,7 +890,8 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
       old_node = %{graph.nodes[node_id] | last_accessed: hundred_days_ago}
       graph = %{graph | nodes: Map.put(graph.nodes, node_id, old_node)}
 
-      decayed = KnowledgeGraph.apply_decay(graph)
+      # Disable auto-prune so we can verify the floor behavior
+      decayed = KnowledgeGraph.apply_decay(graph, auto_prune: false)
       {:ok, node} = KnowledgeGraph.get_node(decayed, node_id)
       assert node.relevance == 0.01
     end
@@ -1703,6 +1704,150 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
 
       # Lower decay = less spread to neighbors
       assert b1_relevance > b2_relevance
+    end
+  end
+
+  # ============================================================================
+  # Final Polish Tests — 5 Changes
+  # ============================================================================
+
+  describe "edge metadata (polish)" do
+    test "new edge stores metadata" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Edge meta source", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Edge meta target", skip_dedup: true})
+
+      meta = %{source: "conversation_123", confidence: 0.9}
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to, metadata: meta)
+
+      [edge] = KnowledgeGraph.get_edges(graph, a_id)
+      assert edge.metadata == meta
+    end
+
+    test "duplicate edge merges metadata" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Merge meta src", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Merge meta tgt", skip_dedup: true})
+
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to, metadata: %{source: "conv_1"})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to, metadata: %{updated_at: "later"})
+
+      [edge] = KnowledgeGraph.get_edges(graph, a_id)
+      assert edge.metadata.source == "conv_1"
+      assert edge.metadata.updated_at == "later"
+    end
+
+    test "edge metadata defaults to empty map" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Default meta src", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Default meta tgt", skip_dedup: true})
+
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+
+      [edge] = KnowledgeGraph.get_edges(graph, a_id)
+      assert edge.metadata == %{}
+    end
+  end
+
+  describe "node ID type prefix (polish)" do
+    test "node IDs include the type" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, _, fact_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Fact ID prefix", skip_dedup: true})
+      assert String.starts_with?(fact_id, "node_fact_")
+    end
+
+    test "different types produce different prefixes" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, fact_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Fact prefix test", skip_dedup: true})
+      {:ok, _, skill_id} = KnowledgeGraph.add_node(graph, %{type: :skill, content: "Skill prefix test", skip_dedup: true})
+
+      assert String.starts_with?(fact_id, "node_fact_")
+      assert String.starts_with?(skill_id, "node_skill_")
+    end
+  end
+
+  describe "node_to_text richness (polish)" do
+    test "includes type prefix in token estimation" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Short", skip_dedup: true})
+
+      {:ok, node} = KnowledgeGraph.get_node(graph, node_id)
+      # Token count should reflect "[fact] Short" not just "Short"
+      # "[fact] Short" = 13 chars / 4 = ~3 tokens; "Short" alone = 5/4 = 1
+      assert node.cached_tokens >= 2
+    end
+
+    test "includes metadata name in text for embedding" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{
+        type: :fact,
+        content: "Is a programming language",
+        metadata: %{name: "Elixir", description: "functional and concurrent"},
+        skip_dedup: true
+      })
+
+      {:ok, node} = KnowledgeGraph.get_node(graph, node_id)
+      # Tokens should reflect the richer text including name, content, and description
+      # "[fact] Elixir Is a programming language functional and concurrent"
+      assert node.cached_tokens > 5
+    end
+  end
+
+  describe "apply_decay auto_prune (polish)" do
+    test "auto-prune removes low-relevance nodes after decay" do
+      graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Will be pruned", relevance: 0.2, skip_dedup: true})
+
+      # Set access time far in the past so decay pushes below prune threshold
+      old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
+      old_node = %{graph.nodes[node_id] | last_accessed: old}
+      graph = %{graph | nodes: Map.put(graph.nodes, node_id, old_node)}
+
+      decayed = KnowledgeGraph.apply_decay(graph)
+      assert {:error, :not_found} = KnowledgeGraph.get_node(decayed, node_id)
+    end
+
+    test "auto_prune: false preserves low-relevance nodes" do
+      graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Preserved node", relevance: 0.2, skip_dedup: true})
+
+      old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
+      old_node = %{graph.nodes[node_id] | last_accessed: old}
+      graph = %{graph | nodes: Map.put(graph.nodes, node_id, old_node)}
+
+      decayed = KnowledgeGraph.apply_decay(graph, auto_prune: false)
+      assert {:ok, _} = KnowledgeGraph.get_node(decayed, node_id)
+    end
+
+    test "pinned nodes survive auto-prune" do
+      graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Pinned survives", relevance: 0.2, pinned: true, skip_dedup: true})
+
+      old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
+      old_node = %{graph.nodes[node_id] | last_accessed: old}
+      graph = %{graph | nodes: Map.put(graph.nodes, node_id, old_node)}
+
+      decayed = KnowledgeGraph.apply_decay(graph)
+      assert {:ok, _} = KnowledgeGraph.get_node(decayed, node_id)
+    end
+  end
+
+  describe "serialization edge metadata backward compat (polish)" do
+    test "from_map adds metadata to edges missing the field" do
+      # Simulate old serialized data without edge metadata
+      data = %{
+        agent_id: "agent_001",
+        nodes: %{},
+        edges: %{
+          "node_1" => [
+            %{id: "edge_1", source_id: "node_1", target_id: "node_2", relationship: :relates_to, strength: 1.0, created_at: DateTime.utc_now()}
+          ]
+        }
+      }
+
+      graph = KnowledgeGraph.from_map(data)
+      [edge] = KnowledgeGraph.get_edges(graph, "node_1")
+      assert edge.metadata == %{}
     end
   end
 end
