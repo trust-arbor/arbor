@@ -34,7 +34,7 @@ defmodule Arbor.Agent.Server do
 
   use GenServer
 
-  alias Arbor.Agent.{ActionRunner, Registry}
+  alias Arbor.Agent.{ActionRunner, CheckpointManager, Registry}
   alias Arbor.Signals
 
   require Logger
@@ -179,10 +179,31 @@ defmodule Arbor.Agent.Server do
     end
 
     # Attempt checkpoint restore
-    state = maybe_restore_from_checkpoint(state)
+    state =
+      if state.checkpoint_storage do
+        case CheckpointManager.load_checkpoint(state.agent_id,
+               store: state.checkpoint_storage,
+               retries: 0
+             ) do
+          {:ok, checkpoint_data} ->
+            CheckpointManager.apply_checkpoint(state, checkpoint_data)
+
+          {:error, _} ->
+            state
+        end
+      else
+        state
+      end
 
     # Schedule auto-checkpoint if configured
-    state = maybe_schedule_checkpoint(state)
+    state =
+      if state.auto_checkpoint_interval && state.auto_checkpoint_interval > 0 do
+        if state.checkpoint_timer, do: Process.cancel_timer(state.checkpoint_timer)
+        timer = CheckpointManager.schedule_checkpoint(interval_ms: state.auto_checkpoint_interval)
+        %{state | checkpoint_timer: timer}
+      else
+        state
+      end
 
     # Emit agent started signal
     emit_started(state)
@@ -221,20 +242,32 @@ defmodule Arbor.Agent.Server do
   end
 
   def handle_call(:extract_state, _from, state) do
-    extracted = extract_checkpoint_data(state)
+    extracted = %{
+      agent_id: state.agent_id,
+      agent_module: state.agent_module,
+      jido_state: Map.get(state.jido_agent, :state, %{}),
+      metadata: state.metadata,
+      extracted_at: System.system_time(:millisecond)
+    }
+
     {:reply, {:ok, extracted}, state}
   end
 
   def handle_call(:save_checkpoint, _from, state) do
-    result = do_save_checkpoint(state)
+    result = CheckpointManager.save_checkpoint(state)
     {:reply, result, state}
   end
 
   @impl GenServer
   def handle_info(:checkpoint, state) do
-    do_save_checkpoint(state)
-    state = maybe_schedule_checkpoint(state)
-    {:noreply, state}
+    CheckpointManager.save_checkpoint(state)
+
+    timer =
+      if state.auto_checkpoint_interval do
+        CheckpointManager.schedule_checkpoint(interval_ms: state.auto_checkpoint_interval)
+      end
+
+    {:noreply, %{state | checkpoint_timer: timer}}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -247,7 +280,7 @@ defmodule Arbor.Agent.Server do
     emit_stopped(state, reason)
 
     # Save final checkpoint before dying
-    do_save_checkpoint(state)
+    CheckpointManager.save_checkpoint(state)
 
     # Unregister from registry
     Registry.unregister(state.agent_id)
@@ -286,79 +319,6 @@ defmodule Arbor.Agent.Server do
     Registry.register(state.agent_id, self(), metadata)
   end
 
-  defp extract_checkpoint_data(state) do
-    %{
-      agent_id: state.agent_id,
-      agent_module: state.agent_module,
-      jido_state: get_jido_agent_state(state.jido_agent),
-      metadata: state.metadata,
-      extracted_at: System.system_time(:millisecond)
-    }
-  end
-
-  defp do_save_checkpoint(%{checkpoint_storage: nil}), do: :ok
-
-  defp do_save_checkpoint(state) do
-    data = extract_checkpoint_data(state)
-
-    case Arbor.Checkpoint.save(state.agent_id, data, state.checkpoint_storage) do
-      :ok ->
-        Logger.debug("Checkpoint saved for agent #{state.agent_id}")
-        :ok
-
-      {:error, reason} = error ->
-        Logger.warning("Failed to save checkpoint for #{state.agent_id}: #{inspect(reason)}")
-        error
-    end
-  end
-
-  defp maybe_restore_from_checkpoint(%{checkpoint_storage: nil} = state), do: state
-
-  defp maybe_restore_from_checkpoint(state) do
-    case Arbor.Checkpoint.load(state.agent_id, state.checkpoint_storage, retries: 0) do
-      {:ok, checkpoint_data} ->
-        Logger.info("Restoring agent #{state.agent_id} from checkpoint")
-        restore_from_checkpoint(state, checkpoint_data)
-
-      {:error, :not_found} ->
-        state
-
-      {:error, reason} ->
-        Logger.warning("Failed to restore checkpoint for #{state.agent_id}: #{inspect(reason)}")
-
-        state
-    end
-  end
-
-  defp restore_from_checkpoint(state, checkpoint_data) do
-    jido_state = Map.get(checkpoint_data, :jido_state, %{})
-
-    case create_jido_agent(state.agent_module, state.agent_id, jido_state) do
-      {:ok, restored_agent} ->
-        %{
-          state
-          | jido_agent: restored_agent,
-            metadata: Map.put(state.metadata, :restored_at, System.system_time(:millisecond))
-        }
-
-      {:error, reason} ->
-        Logger.warning("Failed to restore agent from checkpoint: #{inspect(reason)}")
-        state
-    end
-  end
-
-  defp maybe_schedule_checkpoint(%{auto_checkpoint_interval: nil} = state), do: state
-
-  defp maybe_schedule_checkpoint(%{auto_checkpoint_interval: interval} = state)
-       when is_integer(interval) and interval > 0 do
-    # Cancel existing timer if any
-    if state.checkpoint_timer, do: Process.cancel_timer(state.checkpoint_timer)
-
-    timer = Process.send_after(self(), :checkpoint, interval)
-    %{state | checkpoint_timer: timer}
-  end
-
-  defp maybe_schedule_checkpoint(state), do: state
 
   # ============================================================================
   # Signal Emissions
