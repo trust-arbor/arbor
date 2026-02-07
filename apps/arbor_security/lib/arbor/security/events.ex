@@ -330,9 +330,14 @@ defmodule Arbor.Security.Events do
       event
     ])
   rescue
-    # EventLog backend not started — log and continue
-    _ -> :ok
+    e ->
+      require Logger
+      Logger.error("Security audit event persistence failed: #{Exception.message(e)}")
+      {:error, :audit_persistence_failed}
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      require Logger
+      Logger.error("Security audit event persistence crashed: #{inspect(reason)}")
+      {:error, :audit_persistence_failed}
   end
 end

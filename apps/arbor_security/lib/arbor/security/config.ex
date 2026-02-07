@@ -45,12 +45,12 @@ defmodule Arbor.Security.Config do
   @doc """
   Whether capability signing is required for authorization.
 
-  When `false` (default), unsigned capabilities from before Phase 2 are accepted.
-  When `true`, all capabilities must have a valid issuer signature to authorize.
+  When `true` (default), all capabilities must have a valid issuer signature.
+  When `false`, unsigned capabilities are accepted (backward compatibility only).
   """
   @spec capability_signing_required?() :: boolean()
   def capability_signing_required? do
-    Application.get_env(@app, :capability_signing_required, false)
+    Application.get_env(@app, :capability_signing_required, true)
   end
 
   @doc """
