@@ -329,8 +329,20 @@ defmodule Arbor.Security do
     end
   end
 
+  # WARNING: This function ONLY checks capability existence.
+  # It does NOT verify identity, enforce constraints, check rate limits,
+  # evaluate escalation, or run reflexes. Use authorize/4 for actual
+  # security decisions. This is suitable ONLY for UI hints (e.g., showing
+  # or hiding buttons) where a false positive is acceptable.
   @impl Arbor.Contracts.API.Security
   def check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, _action) do
+    require Logger
+
+    Logger.warning(
+      "can?/3 called for #{principal_id} on #{resource_uri} — " <>
+        "this skips identity, constraints, and reflexes. Use authorize/4 for security decisions."
+    )
+
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
       {:ok, _cap} -> true
       {:error, _} -> false
