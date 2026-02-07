@@ -630,12 +630,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp format_time(_), do: ""
 
   defp signal_matches_agent?(signal, agent_id) do
-    case signal.metadata do
-      %{agent_id: ^agent_id} -> true
-      %{"agent_id" => ^agent_id} -> true
-      _ -> false
-    end
+    matches_in?(signal.metadata, agent_id) or matches_in?(signal.data, agent_id)
   end
+
+  defp matches_in?(%{agent_id: id}, agent_id) when id == agent_id, do: true
+  defp matches_in?(%{"agent_id" => id}, agent_id) when id == agent_id, do: true
+  defp matches_in?(%{id: id}, agent_id) when id == agent_id, do: true
+  defp matches_in?(%{"id" => id}, agent_id) when id == agent_id, do: true
+  defp matches_in?(_, _), do: false
 
   defp stream_empty?(%Phoenix.LiveView.LiveStream{inserts: []}), do: true
   defp stream_empty?(_), do: false
