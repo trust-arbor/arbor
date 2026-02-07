@@ -21,6 +21,7 @@ defmodule Arbor.AI.AgentSDK.ToolServer do
 
   require Logger
 
+  alias Arbor.AI.AgentSDK.Error
   alias Arbor.AI.AgentSDK.Tool
 
   @type tool_entry ::
@@ -189,7 +190,7 @@ defmodule Arbor.AI.AgentSDK.ToolServer do
   def handle_call({:call, name, args}, _from, state) do
     case Map.get(state.tools, name) do
       nil ->
-        {:reply, {:error, {:unknown_tool, name}}, state}
+        {:reply, {:error, Error.tool_error(name, :unknown_tool)}, state}
 
       %{module: module} ->
         # Module-based tool (from deftool macro)
@@ -199,7 +200,7 @@ defmodule Arbor.AI.AgentSDK.ToolServer do
           try do
             module.__call_tool__(name, normalized_args)
           rescue
-            e -> {:error, Exception.message(e)}
+            e -> {:error, Error.tool_error(name, Exception.message(e))}
           end
 
         {:reply, result, state}
@@ -216,7 +217,7 @@ defmodule Arbor.AI.AgentSDK.ToolServer do
               other -> {:ok, to_string_result(other)}
             end
           rescue
-            e -> {:error, Exception.message(e)}
+            e -> {:error, Error.tool_error(name, Exception.message(e))}
           end
 
         {:reply, result, state}

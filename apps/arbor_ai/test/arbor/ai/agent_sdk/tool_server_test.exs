@@ -59,14 +59,15 @@ defmodule Arbor.AI.AgentSDK.ToolServerTest do
       assert {:ok, "HELLO"} = ToolServer.call_tool("upper", %{"text" => "hello"}, server)
     end
 
-    test "returns error for unknown tool", %{server: server} do
-      assert {:error, {:unknown_tool, "unknown"}} =
+    test "returns Error struct for unknown tool", %{server: server} do
+      assert {:error, %Arbor.AI.AgentSDK.Error{type: :tool_error}} =
                ToolServer.call_tool("unknown", %{}, server)
     end
 
-    test "catches exceptions from tool execution", %{server: server} do
+    test "catches exceptions and returns Error struct", %{server: server} do
       # echo tool requires :message key - will raise on missing key
-      assert {:error, _msg} = ToolServer.call_tool("echo", %{}, server)
+      assert {:error, %Arbor.AI.AgentSDK.Error{type: :tool_error}} =
+               ToolServer.call_tool("echo", %{}, server)
     end
   end
 

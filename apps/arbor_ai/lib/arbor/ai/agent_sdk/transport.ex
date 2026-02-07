@@ -32,6 +32,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
   require Logger
 
+  alias Arbor.AI.AgentSDK.Error
   alias Arbor.AI.AgentSDK.Permissions
   alias Arbor.AI.StreamParser
 
@@ -100,7 +101,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
     prompt = Keyword.get(opts, :prompt, "")
 
     if prompt == "" do
-      {:stop, :prompt_required}
+      {:stop, Error.prompt_required()}
     else
       state = %{
         port: nil,
@@ -220,7 +221,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
     case cli_path do
       nil ->
-        {:error, :cli_not_found}
+        {:error, Error.cli_not_found()}
 
       path ->
         args = build_args(opts)
@@ -287,7 +288,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
     if byte_size(buffer) > @buffer_limit do
       Logger.warning("Transport buffer exceeded limit, truncating")
-      notify_receiver(state.receiver, {:transport_error, :buffer_overflow})
+      notify_receiver(state.receiver, {:transport_error, Error.buffer_overflow()})
       %{state | buffer: ""}
     else
       {messages, remaining_buffer, new_parser_state} = parse_buffer(buffer, state.parser_state)

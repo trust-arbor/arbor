@@ -87,4 +87,59 @@ defmodule Arbor.AI.AgentSDK.Permissions do
   def resolve_mode(opts) do
     Keyword.get(opts, :permission_mode, default_mode())
   end
+
+  @plan_allowed_tools ~w(Read Glob Grep WebFetch WebSearch)
+
+  @doc """
+  Check if a tool is allowed under the current permission and restriction settings.
+
+  For in-process tools executed via ToolServer, CLI flags don't apply.
+  This function provides equivalent local enforcement.
+
+  Returns `:ok` if allowed, `{:error, reason}` if denied.
+  """
+  @spec check_tool_allowed?(String.t(), keyword()) :: :ok | {:error, String.t()}
+  def check_tool_allowed?(tool_name, opts) do
+    mode = resolve_mode(opts)
+    check_mode_restriction(tool_name, mode, opts)
+  end
+
+  defp check_mode_restriction(tool_name, :plan, opts) do
+    plan_tools = Keyword.get(opts, :plan_allowed_tools, @plan_allowed_tools)
+
+    if tool_name in plan_tools do
+      check_tool_lists(tool_name, opts)
+    else
+      {:error, "Tool #{tool_name} not allowed in plan mode"}
+    end
+  end
+
+  defp check_mode_restriction(tool_name, _mode, opts) do
+    check_tool_lists(tool_name, opts)
+  end
+
+  defp check_tool_lists(tool_name, opts) do
+    cond do
+      allowed = Keyword.get(opts, :allowed_tools) ->
+        allowed_strings = Enum.map(allowed, &to_string/1)
+
+        if tool_name in allowed_strings do
+          :ok
+        else
+          {:error, "Tool #{tool_name} not in allowed tools list"}
+        end
+
+      disallowed = Keyword.get(opts, :disallowed_tools) ->
+        disallowed_strings = Enum.map(disallowed, &to_string/1)
+
+        if tool_name in disallowed_strings do
+          {:error, "Tool #{tool_name} is in disallowed tools list"}
+        else
+          :ok
+        end
+
+      true ->
+        :ok
+    end
+  end
 end
