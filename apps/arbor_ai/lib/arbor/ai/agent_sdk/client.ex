@@ -32,7 +32,10 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   require Logger
 
+  alias Arbor.AI.AgentSDK.Error
   alias Arbor.AI.AgentSDK.Hooks
+  alias Arbor.AI.AgentSDK.Permissions
+  alias Arbor.AI.AgentSDK.ToolServer
   alias Arbor.AI.AgentSDK.Transport
 
   @type option ::
@@ -120,7 +123,8 @@ defmodule Arbor.AI.AgentSDK.Client do
       current_response: new_response_acc(),
       stream_callback: nil,
       hooks: hooks,
-      hook_context: Hooks.build_context(opts)
+      hook_context: Hooks.build_context(opts),
+      tool_server: Keyword.get(opts, :tool_server)
     }
 
     {:ok, state}
@@ -184,17 +188,29 @@ defmodule Arbor.AI.AgentSDK.Client do
     Logger.debug("Transport closed with status #{status}")
 
     if state.pending_query do
-      # If we haven't sent a response yet, build one from accumulated data
       response = build_response(state.current_response)
 
       if response.text != "" or response.thinking != nil do
         GenServer.reply(state.pending_query, {:ok, response})
       else
-        GenServer.reply(state.pending_query, {:error, {:transport_closed, status}})
+        GenServer.reply(
+          state.pending_query,
+          {:error, Error.process_error(status, "")}
+        )
       end
     end
 
     {:noreply, %{state | transport: nil, pending_query: nil}}
+  end
+
+  def handle_info({:transport_error, %Error{} = error}, state) do
+    Logger.warning("Transport error: #{error.message}")
+
+    if state.pending_query do
+      GenServer.reply(state.pending_query, {:error, error})
+    end
+
+    {:noreply, %{state | pending_query: nil}}
   end
 
   def handle_info({:transport_error, error}, state) do
@@ -315,20 +331,62 @@ defmodule Arbor.AI.AgentSDK.Client do
     tool_name = block["name"]
     tool_input = block["input"] || %{}
 
-    {hook_result, final_input} = run_pre_hooks(state, tool_name, tool_input)
+    # Step 1: Run pre-hooks
+    case run_pre_hooks(state, tool_name, tool_input) do
+      {:deny, reason} ->
+        tool_use = %{
+          id: block["id"],
+          name: tool_name,
+          input: tool_input,
+          hook_result: :deny,
+          result: {:error, Error.hook_denied(tool_name, to_string(reason))}
+        }
 
-    tool_use = %{
-      id: block["id"],
-      name: tool_name,
-      input: final_input,
-      hook_result: hook_result
-    }
+        notify_stream(state, {:tool_use, tool_use})
+        %{acc | tool_uses: [tool_use | acc.tool_uses]}
 
-    if state.stream_callback do
-      state.stream_callback.({:tool_use, tool_use})
+      {:allow, final_input} ->
+        # Step 2: Try in-process execution or record CLI-handled
+        case maybe_execute_tool(state, tool_name, final_input) do
+          {:executed, result} ->
+            run_post_hooks_for_tool(state, tool_name, final_input, result)
+
+            tool_use = %{
+              id: block["id"],
+              name: tool_name,
+              input: final_input,
+              hook_result: :allow,
+              result: result
+            }
+
+            notify_stream(state, {:tool_use, tool_use})
+            %{acc | tool_uses: [tool_use | acc.tool_uses]}
+
+          {:permission_denied, reason} ->
+            tool_use = %{
+              id: block["id"],
+              name: tool_name,
+              input: final_input,
+              hook_result: :allow,
+              result: {:error, Error.permission_denied(tool_name, reason)}
+            }
+
+            notify_stream(state, {:tool_use, tool_use})
+            %{acc | tool_uses: [tool_use | acc.tool_uses]}
+
+          :not_registered ->
+            tool_use = %{
+              id: block["id"],
+              name: tool_name,
+              input: final_input,
+              hook_result: :allow,
+              result: nil
+            }
+
+            notify_stream(state, {:tool_use, tool_use})
+            %{acc | tool_uses: [tool_use | acc.tool_uses]}
+        end
     end
-
-    %{acc | tool_uses: [tool_use | acc.tool_uses]}
   end
 
   defp process_content_block(_state, _block, acc), do: acc
@@ -339,6 +397,33 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   defp run_pre_hooks(_state, _tool_name, tool_input), do: {:allow, tool_input}
+
+  defp maybe_execute_tool(%{tool_server: nil}, _name, _input), do: :not_registered
+
+  defp maybe_execute_tool(%{tool_server: server, opts: opts}, tool_name, tool_input) do
+    if ToolServer.has_tool?(tool_name, server) do
+      case Permissions.check_tool_allowed?(tool_name, opts) do
+        :ok ->
+          result = ToolServer.call_tool(tool_name, tool_input, server)
+          {:executed, result}
+
+        {:error, reason} ->
+          {:permission_denied, reason}
+      end
+    else
+      :not_registered
+    end
+  end
+
+  defp run_post_hooks_for_tool(%{hooks: hooks, hook_context: ctx}, name, input, result)
+       when hooks != %{} do
+    Hooks.run_post_hooks(hooks, name, input, result, ctx)
+  end
+
+  defp run_post_hooks_for_tool(_state, _name, _input, _result), do: :ok
+
+  defp notify_stream(%{stream_callback: nil}, _event), do: :ok
+  defp notify_stream(%{stream_callback: cb}, event), do: cb.(event)
 
   defp build_response(acc) do
     %{
