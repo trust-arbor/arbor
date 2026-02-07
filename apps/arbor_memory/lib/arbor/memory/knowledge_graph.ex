@@ -391,6 +391,32 @@ defmodule Arbor.Memory.KnowledgeGraph do
     {:ok, results}
   end
 
+  @doc """
+  Find a node by its content (exact match, case-insensitive).
+
+  Useful for deduplication — check if a node with this name already exists
+  before adding a new one.
+
+  ## Examples
+
+      {:ok, node_id} = KnowledgeGraph.find_by_name(graph, "Elixir")
+      {:error, :not_found} = KnowledgeGraph.find_by_name(graph, "nonexistent")
+  """
+  @spec find_by_name(t(), String.t()) :: {:ok, node_id()} | {:error, :not_found}
+  def find_by_name(graph, name) do
+    name_lower = String.downcase(name)
+
+    result =
+      Enum.find(graph.nodes, fn {_id, node} ->
+        String.downcase(node.content) == name_lower
+      end)
+
+    case result do
+      {node_id, _node} -> {:ok, node_id}
+      nil -> {:error, :not_found}
+    end
+  end
+
   # ============================================================================
   # Decay and Pruning
   # ============================================================================

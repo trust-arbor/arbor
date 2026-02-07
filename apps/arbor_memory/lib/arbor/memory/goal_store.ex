@@ -145,6 +145,32 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   @doc """
+  Mark a goal as blocked with optional blocker descriptions.
+
+  Sets status to `:blocked` and stores blockers in `metadata.blockers`.
+
+  ## Examples
+
+      {:ok, goal} = GoalStore.block_goal("agent_001", goal_id, ["waiting on API key"])
+  """
+  @spec block_goal(String.t(), String.t(), [String.t()] | nil) ::
+          {:ok, Goal.t()} | {:error, :not_found}
+  def block_goal(agent_id, goal_id, blockers \\ nil) do
+    case get_goal(agent_id, goal_id) do
+      {:ok, goal} ->
+        updated_metadata = Map.put(goal.metadata || %{}, :blockers, blockers || [])
+        updated = %{goal | status: :blocked, metadata: updated_metadata}
+        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+
+        Signals.emit_goal_abandoned(agent_id, goal_id, "blocked")
+        {:ok, updated}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
   Get all active goals for an agent, sorted by priority (highest first).
   """
   @spec get_active_goals(String.t()) :: [Goal.t()]
