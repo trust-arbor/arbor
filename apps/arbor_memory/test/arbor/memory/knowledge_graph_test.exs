@@ -1374,4 +1374,335 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
       assert hd(git_learnings).content == "Git trick"
     end
   end
+
+  # ============================================================================
+  # Gap Fill Tests — Changes 1-6
+  # ============================================================================
+
+  describe "find_related/3 (Change 1)" do
+    test "returns direct neighbors at depth 1" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node A", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node B", skip_dedup: true})
+      {:ok, graph, _c_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node C", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 1)
+      assert length(related) == 1
+      assert hd(related).id == b_id
+    end
+
+    test "returns multi-hop neighbors at depth 2" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node A", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node B", skip_dedup: true})
+      {:ok, graph, c_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Node C", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, b_id, c_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 2)
+      ids = Enum.map(related, & &1.id)
+      assert b_id in ids
+      assert c_id in ids
+    end
+
+    test "returns deep chain at depth 3" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "A deep", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "B deep", skip_dedup: true})
+      {:ok, graph, c_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "C deep", skip_dedup: true})
+      {:ok, graph, d_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "D deep", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, b_id, c_id, :relates_to)
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, c_id, d_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 3)
+      ids = Enum.map(related, & &1.id)
+      assert b_id in ids
+      assert c_id in ids
+      assert d_id in ids
+    end
+
+    test "filters by relationship type" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Center node", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Related node", skip_dedup: true})
+      {:ok, graph, c_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Other node", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :causes)
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, c_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 1, relationship: :causes)
+      assert length(related) == 1
+      assert hd(related).id == b_id
+    end
+
+    test "returns empty list for isolated node" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Isolated", skip_dedup: true})
+
+      assert KnowledgeGraph.find_related(graph, a_id) == []
+    end
+
+    test "returns empty list for unknown node" do
+      graph = KnowledgeGraph.new("agent_001")
+      assert KnowledgeGraph.find_related(graph, "nonexistent") == []
+    end
+
+    test "results are sorted by relevance descending" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Center sorted", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Low relevance", relevance: 0.3, skip_dedup: true})
+      {:ok, graph, c_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "High relevance", relevance: 0.9, skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, c_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 1)
+      assert length(related) == 2
+      [first, second] = related
+      assert first.relevance >= second.relevance
+    end
+
+    test "excludes starting node from results" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Start node", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Neighbor", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+
+      related = KnowledgeGraph.find_related(graph, a_id, depth: 1)
+      ids = Enum.map(related, & &1.id)
+      refute a_id in ids
+    end
+
+    test "get_connected_nodes/2 delegates to find_related depth 1" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Compat center", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Compat neighbor", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+
+      assert KnowledgeGraph.get_connected_nodes(graph, a_id) == KnowledgeGraph.find_related(graph, a_id, depth: 1)
+    end
+  end
+
+  describe "cognitive preferences in active_set (Change 2)" do
+    test "active_set without preferences works unchanged" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "No prefs test", skip_dedup: true})
+
+      nodes = KnowledgeGraph.active_set(graph)
+      assert length(nodes) == 1
+    end
+
+    test "cognitive preferences override type quotas" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Fact for prefs override test content", skip_dedup: true})
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :insight, content: "Insight for prefs override test content", skip_dedup: true})
+
+      # Without preferences — both types present
+      all_nodes = KnowledgeGraph.active_set(graph, model_context: {:fixed, 5000})
+      all_types = Enum.map(all_nodes, & &1.type)
+      assert :fact in all_types
+      assert :insight in all_types
+
+      # With cognitive preferences that give 0% to facts — facts excluded
+      prefs = %{type_quotas: %{fact: 0.0, insight: 1.0}}
+      nodes = KnowledgeGraph.active_set(graph, model_context: {:fixed, 5000}, cognitive_preferences: prefs)
+      types = Enum.map(nodes, & &1.type)
+      refute :fact in types
+      assert :insight in types
+    end
+
+    test "nil cognitive preferences leaves quotas unchanged" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Nil prefs test", skip_dedup: true})
+
+      nodes = KnowledgeGraph.active_set(graph, cognitive_preferences: nil)
+      assert length(nodes) == 1
+    end
+
+    test "empty preferences map leaves quotas unchanged" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Empty prefs test", skip_dedup: true})
+
+      nodes = KnowledgeGraph.active_set(graph, cognitive_preferences: %{})
+      assert length(nodes) == 1
+    end
+  end
+
+  describe "batch approval and pending getters (Change 3)" do
+    test "get_pending_facts returns only facts" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_pending_fact(graph, %{content: "Test fact for getter"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_learning(graph, %{content: "Test learning for getter"})
+
+      facts = KnowledgeGraph.get_pending_facts(graph)
+      assert length(facts) == 1
+      assert hd(facts).content == "Test fact for getter"
+    end
+
+    test "get_pending_learnings returns only learnings" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_pending_fact(graph, %{content: "Fact for learning getter"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_learning(graph, %{content: "Learning for getter"})
+
+      learnings = KnowledgeGraph.get_pending_learnings(graph)
+      assert length(learnings) == 1
+      assert hd(learnings).content == "Learning for getter"
+    end
+
+    test "approve_all_facts approves all pending facts" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_pending_fact(graph, %{content: "Batch fact 1"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_fact(graph, %{content: "Batch fact 2"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_learning(graph, %{content: "Should remain learning"})
+
+      {:ok, graph, ids} = KnowledgeGraph.approve_all_facts(graph)
+      assert length(ids) == 2
+      assert graph.pending_facts == []
+      # Learning should still be pending
+      assert length(graph.pending_learnings) == 1
+    end
+
+    test "approve_all_learnings approves all pending learnings" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_pending_learning(graph, %{content: "Batch learning 1"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_learning(graph, %{content: "Batch learning 2"})
+      {:ok, graph, _} = KnowledgeGraph.add_pending_fact(graph, %{content: "Should remain fact"})
+
+      {:ok, graph, ids} = KnowledgeGraph.approve_all_learnings(graph)
+      assert length(ids) == 2
+      assert graph.pending_learnings == []
+      # Fact should still be pending
+      assert length(graph.pending_facts) == 1
+    end
+
+    test "approve_all_facts on empty queue returns empty" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, ids} = KnowledgeGraph.approve_all_facts(graph)
+      assert ids == []
+      assert graph == KnowledgeGraph.new("agent_001")
+    end
+
+    test "approve_all_learnings on empty queue returns empty" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, ids} = KnowledgeGraph.approve_all_learnings(graph)
+      assert ids == []
+      assert graph == KnowledgeGraph.new("agent_001")
+    end
+  end
+
+  describe "search_by_name/2 (Change 4)" do
+    test "finds nodes by substring match" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Elixir is great", skip_dedup: true})
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Elixir patterns", skip_dedup: true})
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Rust is fast", skip_dedup: true})
+
+      results = KnowledgeGraph.search_by_name(graph, "Elixir")
+      assert length(results) == 2
+      assert Enum.all?(results, fn n -> String.contains?(n.content, "Elixir") end)
+    end
+
+    test "search is case-insensitive" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "UPPERCASE content", skip_dedup: true})
+
+      results = KnowledgeGraph.search_by_name(graph, "uppercase")
+      assert length(results) == 1
+    end
+
+    test "results sorted by relevance descending" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "search target low", relevance: 0.3, skip_dedup: true})
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "search target high", relevance: 0.9, skip_dedup: true})
+
+      results = KnowledgeGraph.search_by_name(graph, "search target")
+      assert length(results) == 2
+      [first, second] = results
+      assert first.relevance >= second.relevance
+    end
+
+    test "returns empty list when no matches" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Something else", skip_dedup: true})
+
+      assert KnowledgeGraph.search_by_name(graph, "nonexistent") == []
+    end
+  end
+
+  describe "to_prompt_text enhancements (Change 5)" do
+    test "includes markdown header when nodes exist" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Header test node", skip_dedup: true})
+
+      text = KnowledgeGraph.to_prompt_text(graph)
+      assert String.starts_with?(text, "## Knowledge Graph (Active Context)")
+    end
+
+    test "returns empty string for empty graph" do
+      graph = KnowledgeGraph.new("agent_001")
+      assert KnowledgeGraph.to_prompt_text(graph) == ""
+    end
+
+    test "uses 4-space indentation for nodes" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Indented node", skip_dedup: true})
+
+      text = KnowledgeGraph.to_prompt_text(graph, include_relationships: false)
+      assert text =~ "    - [fact] Indented node"
+    end
+
+    test "includes incoming edges with arrow prefix" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Source node", skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Target node", skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :causes)
+
+      text = KnowledgeGraph.to_prompt_text(graph)
+      # Target should show incoming edge from source
+      assert text =~ "← causes: Source node"
+      # Source should show outgoing edge to target
+      assert text =~ "→ causes: Target node"
+    end
+  end
+
+  describe "cascade_recall decay factor (Change 6)" do
+    test "default decay factor (0.5) works as before" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Cascade center default", relevance: 0.5, skip_dedup: true})
+      {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Cascade neighbor default", relevance: 0.3, skip_dedup: true})
+      {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+
+      original_b = Map.get(graph.nodes, b_id)
+      graph = KnowledgeGraph.cascade_recall(graph, a_id, 0.2, max_depth: 2)
+      updated_b = Map.get(graph.nodes, b_id)
+
+      # Neighbor should be boosted by 0.2 * 0.5 = 0.1
+      assert_in_delta updated_b.relevance, original_b.relevance + 0.1, 0.01
+    end
+
+    test "custom decay factor produces different spread" do
+      # Build identical graphs
+      build_graph = fn ->
+        graph = KnowledgeGraph.new("agent_001")
+        {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Decay center custom", relevance: 0.3, skip_dedup: true})
+        {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Decay neighbor custom", relevance: 0.3, skip_dedup: true})
+        {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
+        {graph, a_id, b_id}
+      end
+
+      {graph1, a1, b1} = build_graph.()
+      {graph2, a2, b2} = build_graph.()
+
+      # Default decay (0.5): neighbor gets 0.2 * 0.5 = 0.1
+      graph1 = KnowledgeGraph.cascade_recall(graph1, a1, 0.2, max_depth: 2)
+      # Lower decay (0.3): neighbor gets 0.2 * 0.3 = 0.06
+      graph2 = KnowledgeGraph.cascade_recall(graph2, a2, 0.2, max_depth: 2, decay_factor: 0.3)
+
+      b1_relevance = Map.get(graph1.nodes, b1).relevance
+      b2_relevance = Map.get(graph2.nodes, b2).relevance
+
+      # Lower decay = less spread to neighbors
+      assert b1_relevance > b2_relevance
+    end
+  end
 end
