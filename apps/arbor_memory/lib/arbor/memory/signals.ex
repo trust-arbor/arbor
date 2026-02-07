@@ -573,6 +573,122 @@ defmodule Arbor.Memory.Signals do
   end
 
   # ============================================================================
+  # Reflection Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a deep reflection starts.
+  """
+  @spec emit_reflection_started(String.t(), map()) :: :ok
+  def emit_reflection_started(agent_id, metadata) do
+    Arbor.Signals.emit(:memory, :reflection_started, %{
+      agent_id: agent_id,
+      started_at: DateTime.utc_now(),
+      metadata: metadata
+    })
+  end
+
+  @doc """
+  Emit a signal when a deep reflection completes.
+  """
+  @spec emit_reflection_completed(String.t(), map()) :: :ok
+  def emit_reflection_completed(agent_id, metadata) do
+    Arbor.Signals.emit(:memory, :reflection_completed, %{
+      agent_id: agent_id,
+      duration_ms: metadata[:duration_ms],
+      insight_count: metadata[:insight_count],
+      goal_updates: metadata[:goal_update_count],
+      completed_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an insight is discovered during reflection.
+  """
+  @spec emit_reflection_insight(String.t(), map()) :: :ok
+  def emit_reflection_insight(agent_id, insight) do
+    Arbor.Signals.emit(:memory, :reflection_insight, %{
+      agent_id: agent_id,
+      content: insight[:content],
+      importance: insight[:importance],
+      related_goal_id: insight[:related_goal_id],
+      detected_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a learning is integrated during reflection.
+  """
+  @spec emit_reflection_learning(String.t(), map()) :: :ok
+  def emit_reflection_learning(agent_id, learning) do
+    Arbor.Signals.emit(:memory, :reflection_learning, %{
+      agent_id: agent_id,
+      content: learning[:content],
+      confidence: learning[:confidence],
+      category: learning[:category],
+      integrated_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a goal is updated during reflection.
+  """
+  @spec emit_reflection_goal_update(String.t(), String.t(), map()) :: :ok
+  def emit_reflection_goal_update(agent_id, goal_id, update) do
+    Arbor.Signals.emit(:memory, :reflection_goal_update, %{
+      agent_id: agent_id,
+      goal_id: goal_id,
+      new_progress: update["new_progress"],
+      status: update["status"],
+      updated_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a new goal is created during reflection.
+  """
+  @spec emit_reflection_goal_created(String.t(), String.t(), map()) :: :ok
+  def emit_reflection_goal_created(agent_id, goal_id, data) do
+    Arbor.Signals.emit(:memory, :reflection_goal_created, %{
+      agent_id: agent_id,
+      goal_id: goal_id,
+      description: data["description"],
+      priority: data["priority"],
+      created_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when knowledge graph is updated during reflection.
+  """
+  @spec emit_reflection_knowledge_graph(String.t(), map()) :: :ok
+  def emit_reflection_knowledge_graph(agent_id, stats) do
+    Arbor.Signals.emit(:memory, :reflection_knowledge_graph, %{
+      agent_id: agent_id,
+      nodes_added: stats[:nodes_added],
+      edges_added: stats[:edges_added],
+      updated_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal for LLM call metrics during reflection.
+  """
+  @spec emit_reflection_llm_call(String.t(), map()) :: :ok
+  def emit_reflection_llm_call(agent_id, metrics) do
+    Arbor.Signals.emit(:memory, :reflection_llm_call, %{
+      agent_id: agent_id,
+      provider: metrics[:provider],
+      model: metrics[:model],
+      prompt_chars: metrics[:prompt_chars],
+      input_tokens: metrics[:input_tokens],
+      output_tokens: metrics[:output_tokens],
+      duration_ms: metrics[:duration_ms],
+      success: metrics[:success]
+    })
+  end
+
+  # ============================================================================
   # Seed/Host Phase 3 Signals (Goals, Intents, Percepts, Thinking)
   # ============================================================================
 

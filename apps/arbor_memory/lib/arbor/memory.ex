@@ -1488,6 +1488,22 @@ defmodule Arbor.Memory do
   defdelegate reflect(agent_id, prompt, opts \\ []), to: ReflectionProcessor
 
   @doc """
+  Perform a deep reflection with full goal evaluation, knowledge graph
+  integration, and insight detection.
+
+  ## Options
+
+  - `:provider` - LLM provider override
+  - `:model` - LLM model override
+
+  ## Examples
+
+      {:ok, result} = Arbor.Memory.deep_reflect("agent_001")
+  """
+  @spec deep_reflect(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  defdelegate deep_reflect(agent_id, opts \\ []), to: ReflectionProcessor
+
+  @doc """
   Get reflection history for an agent.
 
   ## Options
