@@ -80,7 +80,7 @@ defmodule Arbor.Agent.Claude do
   - `:capture_thinking` - Enable thinking capture (default: true)
   - `:memory_enabled` - Enable memory system (default: true)
   - `:heartbeat_enabled` - Enable heartbeat loop (default: true)
-  - `:heartbeat_interval_ms` - Heartbeat interval in ms (default: 30_000)
+  - `:heartbeat_interval_ms` - Heartbeat interval in ms (default: 10_000)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -1088,7 +1088,9 @@ defmodule Arbor.Agent.Claude do
 
   defp emit_signal(event, data) do
     if signals_available?() do
-      Arbor.Signals.emit(:agent, event, data)
+      agent_id = data[:id] || data["id"]
+      metadata = if agent_id, do: %{agent_id: agent_id}, else: %{}
+      Arbor.Signals.emit(:agent, event, data, metadata: metadata)
     end
   rescue
     _ -> :ok

@@ -151,7 +151,7 @@ config :arbor_agent,
   },
   # Heartbeat loop — periodic autonomous processing
   heartbeat_enabled: true,
-  heartbeat_interval_ms: 30_000,
+  heartbeat_interval_ms: 10_000,
   heartbeat_skip_when_busy: true,
   # Message queueing during busy heartbeats
   message_queue_max_size: 100,

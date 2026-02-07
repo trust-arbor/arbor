@@ -83,7 +83,7 @@ defmodule Arbor.Agent.HeartbeatLoop do
       Keyword.get(opts, :heartbeat_enabled, config(:heartbeat_enabled, true))
 
     heartbeat_interval =
-      Keyword.get(opts, :heartbeat_interval_ms, config(:heartbeat_interval_ms, 30_000))
+      Keyword.get(opts, :heartbeat_interval_ms, config(:heartbeat_interval_ms, 10_000))
 
     state =
       Map.merge(state, %{
@@ -287,9 +287,11 @@ defmodule Arbor.Agent.HeartbeatLoop do
       end
 
     if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) and
+         function_exported?(Arbor.Signals, :emit, 4) and
          Process.whereis(Arbor.Signals.Bus) != nil do
-      Arbor.Signals.emit(:agent, :heartbeat_complete, signal_data)
+      agent_id = signal_data[:agent_id]
+      meta = if agent_id, do: %{agent_id: agent_id}, else: %{}
+      Arbor.Signals.emit(:agent, :heartbeat_complete, signal_data, metadata: meta)
     end
   rescue
     _ -> :ok

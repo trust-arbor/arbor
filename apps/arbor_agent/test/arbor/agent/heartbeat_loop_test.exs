@@ -79,7 +79,7 @@ defmodule Arbor.Agent.HeartbeatLoopTest do
       result = HeartbeatLoop.init_heartbeat(state, [])
 
       assert result.heartbeat_enabled == true
-      assert result.heartbeat_interval == 30_000
+      assert result.heartbeat_interval == 10_000
       assert result.busy == false
       assert result.last_heartbeat_at == nil
       assert result.pending_messages == []
