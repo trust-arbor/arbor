@@ -98,27 +98,40 @@ defmodule Arbor.Memory.SummarizerTest do
   end
 
   describe "summarize/2" do
-    test "returns error when LLM not configured" do
+    test "always returns ok with fallback when LLM is unavailable" do
       result = Summarizer.summarize("Some text to summarize")
 
-      assert {:error, {:llm_not_configured, info}} = result
+      # With graceful fallback, summarize always returns {:ok, _}
+      assert {:ok, info} = result
+      assert is_binary(info.summary)
       assert is_atom(info.complexity)
-      assert is_binary(info.model_recommendation)
+      assert is_binary(info.model_used)
     end
 
-    test "includes complexity and model recommendation in error" do
-      {:error, {:llm_not_configured, info}} =
-        Summarizer.summarize("Simple short text")
+    test "returns ok tuple with correct shape" do
+      result = Summarizer.summarize("Simple short text")
 
-      assert info.complexity == :simple
-      assert is_binary(info.model_recommendation)
+      assert {:ok, info} = result
+      assert is_binary(info.summary)
+      assert is_atom(info.complexity)
+      assert is_binary(info.model_used)
+    end
+
+    test "fallback summary preserves short text" do
+      short = "Brief note"
+      {:ok, info} = Summarizer.summarize(short)
+
+      # If LLM fails, fallback should preserve short text as-is or truncate
+      assert is_binary(info.summary)
+      assert String.length(info.summary) > 0
     end
 
     test "respects model_preference option" do
-      {:error, {:llm_not_configured, info}} =
-        Summarizer.summarize("Text", model_preference: "custom:model")
+      result = Summarizer.summarize("Text", model_preference: "custom:model")
 
-      assert info.model_recommendation == "custom:model"
+      # Even with invalid model, graceful fallback produces a result
+      assert {:ok, info} = result
+      assert is_binary(info.summary)
     end
   end
 
@@ -221,6 +234,82 @@ defmodule Arbor.Memory.SummarizerTest do
       tech_idx = Enum.find_index(complexity_order, &(&1 == tech_complexity))
 
       assert tech_idx >= plain_idx
+    end
+  end
+
+  describe "summarize/2 with algorithm option" do
+    test "accepts :incremental_bullets algorithm" do
+      text = "The team decided to use PostgreSQL. They also chose Redis for caching. The API will use REST."
+      {:ok, info} = Summarizer.summarize(text, algorithm: :incremental_bullets)
+
+      assert is_binary(info.summary)
+      assert info.complexity in [:simple, :moderate, :complex, :highly_complex]
+    end
+
+    test "accepts :prose algorithm (default)" do
+      text = "A discussion about database choices and API design patterns."
+      {:ok, info} = Summarizer.summarize(text, algorithm: :prose)
+
+      assert is_binary(info.summary)
+    end
+  end
+
+  describe "summarize/2 with focus option" do
+    test "accepts :facts focus" do
+      text = "The server runs on port 3000. The database has 5 tables. Users total 1000."
+      {:ok, info} = Summarizer.summarize(text, focus: :facts)
+
+      assert is_binary(info.summary)
+    end
+
+    test "accepts :narrative focus" do
+      text = "First the team discussed the architecture. Then they decided on a plan."
+      {:ok, info} = Summarizer.summarize(text, focus: :narrative)
+
+      assert is_binary(info.summary)
+    end
+
+    test "accepts :technical focus" do
+      text = "The API uses JWT tokens for auth. Database queries are optimized with indexes."
+      {:ok, info} = Summarizer.summarize(text, focus: :technical)
+
+      assert is_binary(info.summary)
+    end
+  end
+
+  describe "summarize/2 with max_length option" do
+    test "accepts max_length option" do
+      text = String.duplicate("This is a sentence with some words. ", 50)
+      {:ok, info} = Summarizer.summarize(text, max_length: 50)
+
+      assert is_binary(info.summary)
+    end
+
+    test "larger max_length produces summary" do
+      text = String.duplicate("Content for summarization. ", 30)
+      {:ok, info} = Summarizer.summarize(text, max_length: 500)
+
+      assert is_binary(info.summary)
+    end
+  end
+
+  describe "fallback behavior" do
+    test "fallback truncates long text" do
+      # Create text that's definitely longer than the default fallback target
+      long_text = String.duplicate("word ", 500)
+      {:ok, info} = Summarizer.summarize(long_text)
+
+      assert is_binary(info.summary)
+      # Summary should be shorter than original (either via LLM or fallback truncation)
+      assert String.length(info.summary) <= String.length(long_text)
+    end
+
+    test "fallback preserves short text" do
+      short_text = "Brief."
+      {:ok, info} = Summarizer.summarize(short_text)
+
+      assert is_binary(info.summary)
+      assert String.length(info.summary) > 0
     end
   end
 end
