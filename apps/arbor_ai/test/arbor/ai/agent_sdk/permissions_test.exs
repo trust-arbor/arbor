@@ -82,4 +82,58 @@ defmodule Arbor.AI.AgentSDK.PermissionsTest do
       assert :default = Permissions.resolve_mode([])
     end
   end
+
+  describe "check_tool_allowed?/2" do
+    test "allows all tools in default mode with no restrictions" do
+      assert :ok = Permissions.check_tool_allowed?("Bash", [])
+    end
+
+    test "denies non-read tools in plan mode" do
+      assert {:error, msg} = Permissions.check_tool_allowed?("Bash", permission_mode: :plan)
+      assert msg =~ "plan mode"
+    end
+
+    test "allows read tools in plan mode" do
+      assert :ok = Permissions.check_tool_allowed?("Read", permission_mode: :plan)
+      assert :ok = Permissions.check_tool_allowed?("Grep", permission_mode: :plan)
+      assert :ok = Permissions.check_tool_allowed?("Glob", permission_mode: :plan)
+      assert :ok = Permissions.check_tool_allowed?("WebFetch", permission_mode: :plan)
+      assert :ok = Permissions.check_tool_allowed?("WebSearch", permission_mode: :plan)
+    end
+
+    test "respects allowed_tools list" do
+      opts = [allowed_tools: ["Read", "Write"]]
+      assert :ok = Permissions.check_tool_allowed?("Read", opts)
+      assert {:error, _} = Permissions.check_tool_allowed?("Bash", opts)
+    end
+
+    test "respects disallowed_tools list" do
+      opts = [disallowed_tools: ["Bash"]]
+      assert :ok = Permissions.check_tool_allowed?("Read", opts)
+      assert {:error, _} = Permissions.check_tool_allowed?("Bash", opts)
+    end
+
+    test "plan mode + allowed_tools combines both filters" do
+      opts = [permission_mode: :plan, allowed_tools: ["Read"]]
+      assert :ok = Permissions.check_tool_allowed?("Read", opts)
+      # Grep is plan-allowed but not in allowed_tools list
+      assert {:error, _} = Permissions.check_tool_allowed?("Grep", opts)
+      # Bash is denied by plan mode before allowed_tools check
+      assert {:error, _} = Permissions.check_tool_allowed?("Bash", opts)
+    end
+
+    test "handles atom tool names in restriction lists" do
+      opts = [allowed_tools: [:Read, :Write]]
+      assert :ok = Permissions.check_tool_allowed?("Read", opts)
+    end
+
+    test "bypass mode allows everything" do
+      assert :ok = Permissions.check_tool_allowed?("Bash", permission_mode: :bypass)
+    end
+
+    test "accept_edits mode allows all tools (restrictions via lists only)" do
+      assert :ok = Permissions.check_tool_allowed?("Bash", permission_mode: :accept_edits)
+      assert :ok = Permissions.check_tool_allowed?("Write", permission_mode: :accept_edits)
+    end
+  end
 end
