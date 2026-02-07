@@ -1827,4 +1827,40 @@ defmodule Arbor.Memory do
       [] -> false
     end
   end
+
+  # ============================================================================
+  # Export / Import (for Seed capture & restore)
+  # ============================================================================
+
+  @doc """
+  Export the full knowledge graph for an agent as a serializable map.
+
+  Used by `Arbor.Agent.Seed.capture/2` to snapshot graph state.
+  """
+  @spec export_knowledge_graph(String.t()) :: {:ok, map()} | {:error, :graph_not_initialized}
+  def export_knowledge_graph(agent_id) do
+    case get_graph(agent_id) do
+      {:ok, graph} -> {:ok, KnowledgeGraph.to_map(graph)}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Import a knowledge graph from a serializable map.
+
+  Used by `Arbor.Agent.Seed.restore/2` to restore graph state.
+  """
+  @spec import_knowledge_graph(String.t(), map()) :: :ok
+  def import_knowledge_graph(agent_id, graph_map) do
+    graph = KnowledgeGraph.from_map(graph_map)
+    save_graph(agent_id, graph)
+  end
+
+  @doc """
+  Save preferences for an agent (public wrapper for Seed restore).
+  """
+  @spec save_preferences_for_agent(String.t(), Preferences.t()) :: :ok
+  def save_preferences_for_agent(agent_id, prefs) do
+    save_preferences(agent_id, prefs)
+  end
 end
