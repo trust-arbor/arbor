@@ -279,6 +279,13 @@ defmodule Arbor.AI.AgentSDK.Transport do
         turns -> args ++ ["--max-turns", to_string(turns)]
       end
 
+    # Resume existing session
+    args =
+      case Keyword.get(opts, :resume) do
+        nil -> args
+        session_id -> args ++ ["--resume", to_string(session_id)]
+      end
+
     # Add prompt at the end
     args ++ ["-p", prompt]
   end

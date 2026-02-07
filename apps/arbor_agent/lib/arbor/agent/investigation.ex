@@ -248,7 +248,8 @@ defmodule Arbor.Agent.Investigation do
       {:ok, response} ->
         # Parse AI response and update confidence/evidence
         enhanced = parse_ai_response(investigation, response)
-        log = ["AI analysis complete: #{String.slice(response, 0, 100)}..."]
+        text = if is_map(response), do: response[:text] || response.text, else: to_string(response)
+        log = ["AI analysis complete: #{String.slice(text, 0, 100)}..."]
         %{enhanced | thinking_log: investigation.thinking_log ++ log}
 
       {:error, reason} ->
@@ -766,8 +767,11 @@ defmodule Arbor.Agent.Investigation do
   end
 
   defp parse_ai_response(investigation, response) do
+    # Extract text from response map (Arbor.AI returns %{text: ..., usage: ...})
+    text = if is_map(response), do: response[:text] || response.text, else: to_string(response)
+
     # Extract confidence adjustment from AI response
-    confidence_match = Regex.run(~r/confidence[:\s]+(\d+\.?\d*)/i, response)
+    confidence_match = Regex.run(~r/confidence[:\s]+(\d+\.?\d*)/i, text)
 
     new_confidence =
       case confidence_match do
@@ -789,7 +793,7 @@ defmodule Arbor.Agent.Investigation do
           %{
             type: :ai_analysis,
             description: "AI refinement of hypothesis",
-            data: %{response: String.slice(response, 0, 500)},
+            data: %{response: String.slice(text, 0, 500)},
             timestamp: DateTime.utc_now()
           }
         ]

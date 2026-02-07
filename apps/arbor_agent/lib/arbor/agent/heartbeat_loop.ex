@@ -280,7 +280,11 @@ defmodule Arbor.Agent.HeartbeatLoop do
       if metadata do
         Map.merge(signal_data, %{
           agent_output: metadata[:output],
-          agent_thinking: metadata[:thinking]
+          agent_thinking: metadata[:thinking],
+          cognitive_mode: metadata[:cognitive_mode],
+          llm_actions: metadata[:llm_actions],
+          memory_notes_count: metadata[:memory_notes_count],
+          goal_updates_count: metadata[:goal_updates_count]
         })
       else
         signal_data

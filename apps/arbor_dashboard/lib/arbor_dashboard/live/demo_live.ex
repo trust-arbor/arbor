@@ -352,7 +352,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
       <% end %>
     </.card>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.5rem;">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 1rem; margin-top: 1rem;">
       <%!-- Fault Controls --%>
       <.card title="Fault Injection">
         <div class="aw-demo-controls" style="flex-direction: column;">

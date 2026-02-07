@@ -58,7 +58,9 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
     %{resource_uri: "arbor://agent/spawn", constraints: %{rate_limit: 10}},
     # Network access - limited
     %{resource_uri: "arbor://net/http/", constraints: %{rate_limit: 30}},
-    %{resource_uri: "arbor://net/search", constraints: %{rate_limit: 20}}
+    %{resource_uri: "arbor://net/search", constraints: %{rate_limit: 20}},
+    # Generic tool access (MCP tools, etc.)
+    %{resource_uri: "arbor://tool/use/", constraints: %{rate_limit: 50}}
   ]
 
   # Dangerous commands that require elevated trust
@@ -260,8 +262,8 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   end
 
   defp do_authorize(agent_id, tool_name, tool_input, _cwd) do
-    # Generic tool - use fallback capability
-    resource_uri = "arbor://tool/#{String.downcase(tool_name)}"
+    # Generic tool - use fallback capability with 3-segment URI for prefix matching
+    resource_uri = "arbor://tool/use/#{String.downcase(tool_name)}"
     authorize_resource(agent_id, resource_uri, :use, tool_input)
   end
 
