@@ -147,6 +147,25 @@ defmodule Arbor.Agent.Seed do
     }
   end
 
+  @doc """
+  Load a Seed from file, or create a new one if the file doesn't exist.
+
+  Convenience for CLI agents that need persistent identity across sessions.
+
+  ## Options
+
+  - `:agent_id` — Agent identifier for new seeds (default: "cli_agent")
+  - All other options are passed to `new/2`
+  """
+  @spec load_or_new(String.t(), keyword()) :: {:ok, t()}
+  def load_or_new(path, opts \\ []) do
+    case load_from_file(path) do
+      {:ok, seed} -> {:ok, seed}
+      {:error, :enoent} -> {:ok, new(opts[:agent_id] || "cli_agent", opts)}
+      {:error, _} -> {:ok, new(opts[:agent_id] || "cli_agent", opts)}
+    end
+  end
+
   # ============================================================================
   # Capture
   # ============================================================================
