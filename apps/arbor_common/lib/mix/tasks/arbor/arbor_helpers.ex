@@ -8,13 +8,30 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   @node_name :arbor_dev
   @full_node_name :arbor_dev@localhost
-  @cookie :arbor_dev
   @pid_file "/tmp/arbor-dev.pid"
   @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
 
   def node_name, do: @node_name
   def full_node_name, do: @full_node_name
-  def cookie, do: @cookie
+
+  def cookie do
+    case System.get_env("ARBOR_COOKIE") do
+      nil ->
+        Mix.raise("""
+        ARBOR_COOKIE environment variable is required but not set.
+
+        Set it to a random secret value:
+
+            export ARBOR_COOKIE="$(openssl rand -hex 32)"
+
+        Or add it to your shell profile for persistence.
+        """)
+
+      value ->
+        String.to_atom(value)
+    end
+  end
+
   def pid_file, do: @pid_file
   def log_file, do: @log_file
 

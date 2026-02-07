@@ -4,7 +4,13 @@ defmodule Arbor.Shell.Executor do
 
   Handles the actual execution of shell commands with timeout handling,
   output capture, and process management.
+
+  Uses `{:spawn_executable, path}` with explicit args to avoid shell
+  metacharacter interpretation. Commands are resolved to full paths and
+  arguments are passed directly to the executable.
   """
+
+  alias Arbor.Shell.Sandbox
 
   @default_timeout 30_000
 
@@ -36,11 +42,12 @@ defmodule Arbor.Shell.Executor do
 
     start_time = System.monotonic_time(:millisecond)
 
-    with :ok <- validate_cwd(cwd) do
-      port_opts = build_port_opts(cwd, env)
+    with :ok <- validate_cwd(cwd),
+         {:ok, executable, args} <- resolve_command(command) do
+      port_opts = build_port_opts(executable, args, cwd, env)
 
       try do
-        port = Port.open({:spawn, command}, port_opts)
+        port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
 
         if stdin do
           Port.command(port, stdin)
@@ -67,8 +74,23 @@ defmodule Arbor.Shell.Executor do
 
   # Private functions
 
-  defp build_port_opts(cwd, env) do
-    opts = [:binary, :exit_status, :use_stdio, :stderr_to_stdout]
+  defp resolve_command(command) do
+    {cmd, args} = Sandbox.parse_command(command)
+
+    case Sandbox.resolve_executable(cmd) do
+      {:ok, path} -> {:ok, path, args}
+      {:error, :executable_not_found} -> {:error, {:executable_not_found, cmd}}
+    end
+  end
+
+  defp build_port_opts(executable, args, cwd, env) do
+    opts = [
+      :binary,
+      :exit_status,
+      :use_stdio,
+      :stderr_to_stdout,
+      args: Enum.map(args, &to_charlist/1)
+    ]
 
     opts =
       if cwd do

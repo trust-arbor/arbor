@@ -16,6 +16,7 @@ defmodule Arbor.Gateway.Router do
   plug(Plug.Logger)
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+  plug(:require_auth_unless_health)
   plug(:dispatch)
 
   get "/health" do
@@ -32,4 +33,8 @@ defmodule Arbor.Gateway.Router do
   match _ do
     send_resp(conn, 404, "Not found")
   end
+
+  # Skip auth for health check, require it for everything else
+  defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+  defp require_auth_unless_health(conn, _opts), do: Arbor.Gateway.Auth.call(conn, [])
 end
