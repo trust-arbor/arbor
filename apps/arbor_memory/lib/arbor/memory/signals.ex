@@ -28,6 +28,20 @@ defmodule Arbor.Memory.Signals do
   | `:context_summarized` | Context was summarized (Phase 2) |
   | `:preconscious_check` | Preconscious anticipation check started (Phase 7) |
   | `:preconscious_surfaced` | Preconscious surfaced relevant memories (Phase 7) |
+  | `:identity_change` | Identity traits evolved |
+  | `:identity_rollback` | Identity change reverted |
+  | `:self_insight_created` | Self-insight first discovered |
+  | `:self_insight_reinforced` | Existing self-insight confirmed |
+  | `:insight_promoted` | Pending insight promoted to active |
+  | `:insight_deferred` | Insight review deferred |
+  | `:insight_blocked` | Insight blocked from integration |
+  | `:episode_archived` | Complete episode archived |
+  | `:lesson_extracted` | Lesson extracted from episode |
+  | `:memory_promoted` | Memory promoted in relevance |
+  | `:memory_demoted` | Memory demoted in relevance |
+  | `:memory_corrected` | Memory content corrected |
+  | `:bridge_interrupt` | Interrupt sent via Bridge |
+  | `:bridge_interrupt_cleared` | Interrupt cleared via Bridge |
 
   ## Examples
 
@@ -815,6 +829,218 @@ defmodule Arbor.Memory.Signals do
       relevance: node_data[:relevance],
       reason: reason,
       archived_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Identity Evolution Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when identity traits evolve (name, personality, etc.).
+  """
+  @spec emit_identity_change(String.t(), atom(), map()) :: :ok
+  def emit_identity_change(agent_id, change_type, details) do
+    Arbor.Signals.emit(:memory, :identity_change, %{
+      agent_id: agent_id,
+      change_type: change_type,
+      details: details,
+      changed_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an identity change is reverted.
+  """
+  @spec emit_identity_rollback(String.t(), atom(), map()) :: :ok
+  def emit_identity_rollback(agent_id, change_type, details) do
+    Arbor.Signals.emit(:memory, :identity_rollback, %{
+      agent_id: agent_id,
+      change_type: change_type,
+      details: details,
+      rolled_back_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a self-insight is first discovered.
+  """
+  @spec emit_self_insight_created(String.t(), map()) :: :ok
+  def emit_self_insight_created(agent_id, insight) do
+    Arbor.Signals.emit(:memory, :self_insight_created, %{
+      agent_id: agent_id,
+      category: insight[:category],
+      content_preview: String.slice(insight[:content] || "", 0, 100),
+      confidence: insight[:confidence],
+      created_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an existing self-insight is confirmed/reinforced.
+  """
+  @spec emit_self_insight_reinforced(String.t(), map()) :: :ok
+  def emit_self_insight_reinforced(agent_id, insight) do
+    Arbor.Signals.emit(:memory, :self_insight_reinforced, %{
+      agent_id: agent_id,
+      category: insight[:category],
+      content_preview: String.slice(insight[:content] || "", 0, 100),
+      new_confidence: insight[:confidence],
+      reinforced_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Insight Lifecycle Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a pending insight is promoted to active knowledge.
+  """
+  @spec emit_insight_promoted(String.t(), String.t(), map()) :: :ok
+  def emit_insight_promoted(agent_id, insight_id, details) do
+    Arbor.Signals.emit(:memory, :insight_promoted, %{
+      agent_id: agent_id,
+      insight_id: insight_id,
+      content_preview: String.slice(details[:content] || "", 0, 100),
+      promoted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an insight review is deferred.
+  """
+  @spec emit_insight_deferred(String.t(), String.t(), String.t() | nil) :: :ok
+  def emit_insight_deferred(agent_id, insight_id, reason \\ nil) do
+    Arbor.Signals.emit(:memory, :insight_deferred, %{
+      agent_id: agent_id,
+      insight_id: insight_id,
+      reason: reason,
+      deferred_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an insight is blocked from integration.
+  """
+  @spec emit_insight_blocked(String.t(), String.t(), String.t() | nil) :: :ok
+  def emit_insight_blocked(agent_id, insight_id, reason \\ nil) do
+    Arbor.Signals.emit(:memory, :insight_blocked, %{
+      agent_id: agent_id,
+      insight_id: insight_id,
+      reason: reason,
+      blocked_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Episodic Memory Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a complete episode is archived.
+  """
+  @spec emit_episode_archived(String.t(), map()) :: :ok
+  def emit_episode_archived(agent_id, episode) do
+    Arbor.Signals.emit(:memory, :episode_archived, %{
+      agent_id: agent_id,
+      episode_id: episode[:id],
+      description: episode[:description],
+      outcome: episode[:outcome],
+      importance: episode[:importance],
+      archived_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a lesson is extracted from an episode.
+  """
+  @spec emit_lesson_extracted(String.t(), String.t(), map()) :: :ok
+  def emit_lesson_extracted(agent_id, lesson, details) do
+    Arbor.Signals.emit(:memory, :lesson_extracted, %{
+      agent_id: agent_id,
+      lesson_preview: String.slice(lesson, 0, 100),
+      source_episode_id: details[:episode_id],
+      importance: details[:importance],
+      extracted_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Memory Operation Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when a memory is promoted in relevance or layer.
+  """
+  @spec emit_memory_promoted(String.t(), String.t(), map()) :: :ok
+  def emit_memory_promoted(agent_id, node_id, details) do
+    Arbor.Signals.emit(:memory, :memory_promoted, %{
+      agent_id: agent_id,
+      node_id: node_id,
+      old_relevance: details[:old_relevance],
+      new_relevance: details[:new_relevance],
+      reason: details[:reason],
+      promoted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a memory is demoted in relevance or layer.
+  """
+  @spec emit_memory_demoted(String.t(), String.t(), map()) :: :ok
+  def emit_memory_demoted(agent_id, node_id, details) do
+    Arbor.Signals.emit(:memory, :memory_demoted, %{
+      agent_id: agent_id,
+      node_id: node_id,
+      old_relevance: details[:old_relevance],
+      new_relevance: details[:new_relevance],
+      reason: details[:reason],
+      demoted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a memory's content is corrected.
+  """
+  @spec emit_memory_corrected(String.t(), String.t(), map()) :: :ok
+  def emit_memory_corrected(agent_id, node_id, details) do
+    Arbor.Signals.emit(:memory, :memory_corrected, %{
+      agent_id: agent_id,
+      node_id: node_id,
+      field: details[:field],
+      old_preview: String.slice(to_string(details[:old_value] || ""), 0, 80),
+      new_preview: String.slice(to_string(details[:new_value] || ""), 0, 80),
+      corrected_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Bridge Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when an interrupt is sent via Bridge.
+  """
+  @spec emit_bridge_interrupt(String.t(), String.t(), atom()) :: :ok
+  def emit_bridge_interrupt(agent_id, target_id, reason) do
+    Arbor.Signals.emit(:memory, :bridge_interrupt, %{
+      agent_id: agent_id,
+      target_id: target_id,
+      reason: reason,
+      interrupted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when an interrupt is cleared via Bridge.
+  """
+  @spec emit_bridge_interrupt_cleared(String.t(), String.t()) :: :ok
+  def emit_bridge_interrupt_cleared(agent_id, target_id) do
+    Arbor.Signals.emit(:memory, :bridge_interrupt_cleared, %{
+      agent_id: agent_id,
+      target_id: target_id,
+      cleared_at: DateTime.utc_now()
     })
   end
 end
