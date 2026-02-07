@@ -156,10 +156,11 @@ defmodule Arbor.Shell.PortSession do
         pids when is_list(pids) -> MapSet.new(pids)
       end
 
-    port_opts = build_port_opts(cwd, env)
+    port_opts = build_port_opts(command, cwd, env)
 
     try do
-      port = Port.open({:spawn, command}, port_opts)
+      {executable, _args} = resolve_command(command)
+      port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
 
       # Set up timeout timer
       timer_ref =
@@ -318,8 +319,25 @@ defmodule Arbor.Shell.PortSession do
   # Private
   # ===========================================================================
 
-  defp build_port_opts(cwd, env) do
-    opts = [:binary, :exit_status, :use_stdio, :stderr_to_stdout]
+  defp resolve_command(command) do
+    {cmd, args} = Arbor.Shell.Sandbox.parse_command(command)
+
+    case Arbor.Shell.Sandbox.resolve_executable(cmd) do
+      {:ok, path} -> {path, args}
+      {:error, :executable_not_found} -> raise "Executable not found: #{cmd}"
+    end
+  end
+
+  defp build_port_opts(command, cwd, env) do
+    {_cmd, args} = Arbor.Shell.Sandbox.parse_command(command)
+
+    opts = [
+      :binary,
+      :exit_status,
+      :use_stdio,
+      :stderr_to_stdout,
+      args: Enum.map(args, &to_charlist/1)
+    ]
 
     opts =
       if cwd do

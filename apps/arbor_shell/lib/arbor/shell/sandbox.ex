@@ -10,9 +10,18 @@ defmodule Arbor.Shell.Sandbox do
   - `:basic` - Blocks dangerous commands (rm -rf, sudo, etc.)
   - `:strict` - Allowlist only, very limited commands
   - `:container` - Execute in isolated container (future)
+
+  ## Shell Metacharacter Protection
+
+  At `:basic` and `:strict` levels, commands containing shell metacharacters
+  are rejected to prevent command injection via chaining (`;`, `&&`, `||`),
+  subshells (`$()`, backticks), pipes (`|`), or redirections (`>`, `<`).
   """
 
   @type level :: :none | :basic | :strict | :container
+
+  # Shell metacharacters that enable command injection
+  @shell_metacharacters [";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r"]
 
   # Commands blocked at :basic level
   @dangerous_commands ~w[
@@ -58,27 +67,31 @@ defmodule Arbor.Shell.Sandbox do
   def check(_command, :none), do: {:ok, :allowed}
 
   def check(command, :basic) do
-    {cmd, args} = parse_command(command)
+    with :ok <- check_metacharacters(command) do
+      {cmd, args} = parse_command(command)
 
-    cond do
-      cmd in @dangerous_commands ->
-        {:error, {:blocked_command, cmd}}
+      cond do
+        cmd in @dangerous_commands ->
+          {:error, {:blocked_command, cmd}}
 
-      has_dangerous_flags?(args) ->
-        {:error, {:dangerous_flags, find_dangerous_flags(args)}}
+        has_dangerous_flags?(args) ->
+          {:error, {:dangerous_flags, find_dangerous_flags(args)}}
 
-      true ->
-        {:ok, :allowed}
+        true ->
+          {:ok, :allowed}
+      end
     end
   end
 
   def check(command, :strict) do
-    {cmd, _args} = parse_command(command)
+    with :ok <- check_metacharacters(command) do
+      {cmd, _args} = parse_command(command)
 
-    if cmd in @strict_allowlist do
-      {:ok, :allowed}
-    else
-      {:error, {:not_in_allowlist, cmd}}
+      if cmd in @strict_allowlist do
+        {:ok, :allowed}
+      else
+        {:error, {:not_in_allowlist, cmd}}
+      end
     end
   end
 
@@ -86,6 +99,36 @@ defmodule Arbor.Shell.Sandbox do
     # Container mode would delegate to container execution
     # For now, treat as :basic until container support is added
     {:error, :container_not_implemented}
+  end
+
+  @doc """
+  Parse a command string into executable and arguments list.
+
+  Used by the executor to split commands for `{:spawn_executable, path}`.
+  Returns `{executable, [arg1, arg2, ...]}`.
+  """
+  @spec parse_command(String.t()) :: {String.t(), [String.t()]}
+  def parse_command(command) do
+    parts = String.split(command, ~r/\s+/, parts: 2)
+
+    case parts do
+      [cmd] -> {cmd, []}
+      [cmd, rest] -> {cmd, String.split(rest)}
+    end
+  end
+
+  @doc """
+  Resolve a command name to its full executable path.
+
+  Uses `System.find_executable/1` to locate the binary.
+  Returns `{:ok, path}` or `{:error, :executable_not_found}`.
+  """
+  @spec resolve_executable(String.t()) :: {:ok, String.t()} | {:error, :executable_not_found}
+  def resolve_executable(cmd) do
+    case System.find_executable(cmd) do
+      nil -> {:error, :executable_not_found}
+      path -> {:ok, path}
+    end
   end
 
   @doc """
@@ -134,12 +177,15 @@ defmodule Arbor.Shell.Sandbox do
 
   # Private functions
 
-  defp parse_command(command) do
-    parts = String.split(command, ~r/\s+/, parts: 2)
+  defp check_metacharacters(command) do
+    found =
+      Enum.filter(@shell_metacharacters, fn meta ->
+        String.contains?(command, meta)
+      end)
 
-    case parts do
-      [cmd] -> {cmd, []}
-      [cmd, rest] -> {cmd, String.split(rest)}
+    case found do
+      [] -> :ok
+      chars -> {:error, {:shell_metacharacters, chars}}
     end
   end
 

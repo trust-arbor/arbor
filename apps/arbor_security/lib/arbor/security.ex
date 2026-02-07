@@ -606,9 +606,10 @@ defmodule Arbor.Security do
       :ok
     end
   rescue
-    # If reflex registry isn't started yet, allow request to proceed
-    # This prevents startup ordering issues from blocking authorization
-    _ -> :ok
+    _ ->
+      require Logger
+      Logger.error("Reflex check failed due to exception — failing closed for safety")
+      {:error, {:reflex_check_failed, :exception}}
   end
 
   defp build_reflex_context(resource_uri, action, opts) do
