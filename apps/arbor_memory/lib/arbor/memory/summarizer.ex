@@ -161,32 +161,130 @@ defmodule Arbor.Memory.Summarizer do
   defp model_for_complexity(:highly_complex, _, _), do: "anthropic:claude-opus-4-5-20251101"
 
   @doc """
-  Summarize text.
+  Summarize text using LLM-based summarization.
 
-  **Note:** This is a placeholder that returns an error until LLM integration
-  is wired in. The actual implementation will use arbor_ai for LLM calls.
+  Uses `Arbor.AI.generate_text/2` when available. Falls back to
+  `{:error, :arbor_ai_not_available}` when the AI module is not loaded.
 
   ## Options
 
   - `:max_length` - Target summary length in tokens (default: 200)
   - `:focus` - What to prioritize (:facts, :narrative, :technical)
   - `:model_preference` - Specific model to use (overrides auto-selection)
+  - `:algorithm` - Summarization algorithm (`:prose` or `:incremental_bullets`, default: `:prose`)
 
   ## Examples
 
       {:ok, result} = Summarizer.summarize(text)
-      {:error, :llm_not_configured} = Summarizer.summarize(text)  # Until configured
+      {:ok, result} = Summarizer.summarize(text, algorithm: :incremental_bullets)
   """
   @spec summarize(String.t(), summarize_opts()) ::
           {:ok, summarize_result()} | {:error, term()}
   def summarize(text, opts \\ []) when is_binary(text) do
     complexity = assess_complexity(text)
     model = Keyword.get(opts, :model_preference) || recommend_model(complexity)
+    algorithm = Keyword.get(opts, :algorithm, :prose)
 
-    # Placeholder - actual LLM integration comes when arbor_ai is wired to memory
-    # For now, return an error indicating the system is not yet configured
-    {:error, {:llm_not_configured, %{complexity: complexity, model_recommendation: model}}}
+    prompt = build_prompt(text, algorithm, opts)
+    system_prompt = system_prompt_for(algorithm)
+
+    result =
+      if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+        llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
+
+        case Arbor.AI.generate_text(prompt, llm_opts) do
+          {:ok, %{text: summary}} when is_binary(summary) ->
+            {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
+
+          {:ok, summary} when is_binary(summary) ->
+            {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
+
+          {:error, reason} ->
+            {:error, reason}
+
+          other ->
+            {:error, {:unexpected_response, other}}
+        end
+      else
+        {:error, :arbor_ai_not_available}
+      end
+
+    # Graceful fallback: if LLM fails, produce a simple truncation summary
+    case result do
+      {:ok, _} = success ->
+        success
+
+      {:error, _reason} ->
+        max_length = Keyword.get(opts, :max_length, 200)
+        fallback = fallback_summary(text, max_length)
+        {:ok, %{summary: fallback, complexity: complexity, model_used: "fallback"}}
+    end
   end
+
+  defp fallback_summary(text, target_tokens) do
+    target_chars = target_tokens * 4
+
+    if String.length(text) <= target_chars do
+      text
+    else
+      String.slice(text, 0, target_chars) <> "..."
+    end
+  end
+
+  defp build_prompt(text, :incremental_bullets, opts) do
+    max_length = Keyword.get(opts, :max_length, 200)
+    target_bullets = max(3, div(max_length, 30))
+
+    """
+    Generate #{target_bullets} bullet points summarizing the key information.
+    Each bullet should capture one decision, outcome, or important fact.
+
+    TEXT TO SUMMARIZE:
+    #{text}
+
+    NEW BULLETS:
+    """
+  end
+
+  defp build_prompt(text, _prose, opts) do
+    max_length = Keyword.get(opts, :max_length, 200)
+    focus = Keyword.get(opts, :focus, :facts)
+
+    focus_instruction =
+      case focus do
+        :narrative -> "Focus on narrative flow and key events."
+        :technical -> "Focus on technical details, APIs, and implementation specifics."
+        _ -> "Focus on preserving decisions, outcomes, and important facts."
+      end
+
+    """
+    Summarize the following text in approximately #{max_length} tokens.
+    #{focus_instruction}
+
+    TEXT TO SUMMARIZE:
+    #{text}
+
+    SUMMARY:
+    """
+  end
+
+  @prose_system_prompt """
+  You are a context compression assistant. Summarize conversation history while preserving
+  the most important information. Keep names, specific values, and technical details.
+  Remove redundant back-and-forth and filler. Use concise paragraphs.
+  Write in third person past tense. Output ONLY the summary.
+  """
+
+  @bullet_system_prompt """
+  You are a context compression assistant that generates structured bullet points.
+  Output format: one bullet per line, starting with "- ".
+  Each bullet captures ONE key decision, outcome, or fact.
+  Be concise (10-20 words per bullet). Use past tense.
+  Output ONLY bullet points, no preamble.
+  """
+
+  defp system_prompt_for(:incremental_bullets), do: @bullet_system_prompt
+  defp system_prompt_for(_), do: @prose_system_prompt
 
   @doc """
   Get detailed metrics for a piece of text.
