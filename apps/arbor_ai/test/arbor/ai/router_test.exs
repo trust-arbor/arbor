@@ -156,13 +156,14 @@ defmodule Arbor.AI.RouterTest do
 
   describe "prefer_cli?/1 (legacy)" do
     @tag :fast
-    test "returns true for cost_optimized strategy" do
-      assert Router.prefer_cli?(strategy: :cost_optimized) == true
+    test "returns true for cost_optimized strategy with auto backend" do
+      # Must specify backend: :auto since default_backend is :api in config
+      assert Router.prefer_cli?(backend: :auto, strategy: :cost_optimized) == true
     end
 
     @tag :fast
-    test "returns false for api_only strategy" do
-      assert Router.prefer_cli?(strategy: :api_only) == false
+    test "returns false for api_only strategy with auto backend" do
+      assert Router.prefer_cli?(backend: :auto, strategy: :api_only) == false
     end
   end
 
