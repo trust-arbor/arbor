@@ -204,6 +204,87 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   # ============================================================================
+  # Export / Import (for Seed capture & restore)
+  # ============================================================================
+
+  @doc """
+  Export all goals for an agent as serializable maps.
+
+  Used by `Arbor.Agent.Seed.capture/2` to snapshot goal state.
+  """
+  @spec export_all_goals(String.t()) :: [map()]
+  def export_all_goals(agent_id) do
+    get_all_goals(agent_id)
+    |> Enum.map(fn goal ->
+      goal
+      |> Map.from_struct()
+      |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
+      |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
+    end)
+  end
+
+  @doc """
+  Import goals from serializable maps.
+
+  Used by `Arbor.Agent.Seed.restore/2` to restore goal state.
+  """
+  @spec import_goals(String.t(), [map()]) :: :ok
+  def import_goals(agent_id, goal_maps) do
+    Enum.each(goal_maps, fn goal_map ->
+      goal = goal_from_map(goal_map)
+      :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+    end)
+
+    :ok
+  end
+
+  defp maybe_to_iso8601(nil), do: nil
+  defp maybe_to_iso8601(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp maybe_to_iso8601(other), do: other
+
+  defp goal_from_map(map) do
+    map = atomize_keys(map)
+
+    %Goal{
+      id: map[:id],
+      description: map[:description],
+      type: safe_atom(map[:type], :achieve),
+      status: safe_atom(map[:status], :active),
+      priority: map[:priority] || 50,
+      parent_id: map[:parent_id],
+      progress: map[:progress] || 0.0,
+      created_at: parse_datetime(map[:created_at]),
+      achieved_at: parse_datetime(map[:achieved_at]),
+      metadata: map[:metadata] || %{}
+    }
+  end
+
+  defp atomize_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_binary(k) -> {String.to_existing_atom(k), v}
+      {k, v} when is_atom(k) -> {k, v}
+    end)
+  end
+
+  defp safe_atom(val, _default) when is_atom(val), do: val
+  defp safe_atom(val, default) when is_binary(val) do
+    String.to_existing_atom(val)
+  rescue
+    ArgumentError -> default
+  end
+  defp safe_atom(_, default), do: default
+
+  defp parse_datetime(nil), do: nil
+  defp parse_datetime(%DateTime{} = dt), do: dt
+  defp parse_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+  defp parse_datetime(_), do: nil
+
+  # ============================================================================
   # GenServer Callbacks
   # ============================================================================
 
