@@ -55,6 +55,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Memory.TokenBudget
+
+  require Logger
 
   @type node_id :: String.t()
   @type edge_id :: String.t()
@@ -66,11 +69,14 @@ defmodule Arbor.Memory.KnowledgeGraph do
           type: node_type(),
           content: String.t(),
           relevance: float(),
+          confidence: float(),
           access_count: non_neg_integer(),
           created_at: DateTime.t(),
           last_accessed: DateTime.t(),
           metadata: map(),
-          pinned: boolean()
+          pinned: boolean(),
+          embedding: [float()] | nil,
+          cached_tokens: non_neg_integer()
         }
 
   @type edge :: %{
@@ -98,7 +104,13 @@ defmodule Arbor.Memory.KnowledgeGraph do
           edges: %{node_id() => [edge()]},
           pending_facts: [pending_item()],
           pending_learnings: [pending_item()],
-          config: map()
+          config: map(),
+          active_set: [node_id()],
+          max_active: non_neg_integer(),
+          dedup_threshold: float(),
+          max_tokens: TokenBudget.budget() | nil,
+          type_quotas: map(),
+          last_decay_at: DateTime.t() | nil
         }
 
   defstruct [
@@ -107,7 +119,13 @@ defmodule Arbor.Memory.KnowledgeGraph do
     edges: %{},
     pending_facts: [],
     pending_learnings: [],
-    config: %{}
+    config: %{},
+    active_set: [],
+    max_active: 50,
+    dedup_threshold: 0.85,
+    max_tokens: nil,
+    type_quotas: %{},
+    last_decay_at: nil
   ]
 
   @allowed_node_types [:fact, :experience, :skill, :insight, :relationship, :custom]
@@ -115,6 +133,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @default_reinforce_amount 0.15
   @default_max_nodes_per_type 500
   @default_prune_threshold 0.1
+  @min_relevance 0.01
 
   # ============================================================================
   # Construction
@@ -144,7 +163,11 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
     %__MODULE__{
       agent_id: agent_id,
-      config: config
+      config: config,
+      max_active: Keyword.get(opts, :max_active, 50),
+      dedup_threshold: Keyword.get(opts, :dedup_threshold, 0.85),
+      max_tokens: Keyword.get(opts, :max_tokens),
+      type_quotas: Keyword.get(opts, :type_quotas, %{})
     }
   end
 
@@ -175,23 +198,43 @@ defmodule Arbor.Memory.KnowledgeGraph do
     with {:ok, type} <- validate_node_type(node_data),
          {:ok, content} <- validate_content(node_data),
          :ok <- check_quota(graph, type) do
-      node_id = generate_node_id()
-      now = DateTime.utc_now()
+      skip_dedup = Map.get(node_data, :skip_dedup, false)
+      metadata = Map.get(node_data, :metadata, %{})
+      text = node_to_text(content, metadata)
+      embedding = compute_node_embedding(text)
 
-      node = %{
-        id: node_id,
-        type: type,
-        content: content,
-        relevance: Map.get(node_data, :relevance, 1.0),
-        access_count: 0,
-        created_at: now,
-        last_accessed: now,
-        metadata: Map.get(node_data, :metadata, %{}),
-        pinned: Map.get(node_data, :pinned, false)
-      }
+      # Check for duplicates unless skipped
+      case maybe_find_duplicate(graph, type, content, embedding, skip_dedup) do
+        {:duplicate, existing_id} ->
+          # Boost existing node instead of creating duplicate
+          boosted = boost_node(graph, existing_id, 0.1)
+          {:ok, boosted, existing_id}
 
-      new_graph = %{graph | nodes: Map.put(graph.nodes, node_id, node)}
-      {:ok, new_graph, node_id}
+        :no_duplicate ->
+          node_id = generate_node_id()
+          now = DateTime.utc_now()
+
+          node = %{
+            id: node_id,
+            type: type,
+            content: content,
+            relevance: Map.get(node_data, :relevance, 1.0),
+            confidence: Map.get(node_data, :confidence, 0.5),
+            access_count: 0,
+            created_at: now,
+            last_accessed: now,
+            metadata: metadata,
+            pinned: Map.get(node_data, :pinned, false),
+            embedding: embedding,
+            cached_tokens: TokenBudget.estimate_tokens(text)
+          }
+
+          new_graph =
+            %{graph | nodes: Map.put(graph.nodes, node_id, node)}
+            |> maybe_add_to_active_set(node)
+
+          {:ok, new_graph, node_id}
+      end
     end
   end
 
@@ -247,7 +290,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
             {source, Enum.reject(edges, &(&1.target_id == node_id))}
           end)
 
-        {:ok, %{graph | nodes: new_nodes, edges: new_edges}}
+        new_active_set = List.delete(graph.active_set, node_id)
+        {:ok, %{graph | nodes: new_nodes, edges: new_edges, active_set: new_active_set}}
 
       :error ->
         {:error, :not_found}
@@ -284,22 +328,36 @@ defmodule Arbor.Memory.KnowledgeGraph do
   def add_edge(graph, source_id, target_id, relationship, opts \\ []) do
     with {:ok, _source} <- get_node(graph, source_id),
          {:ok, _target} <- get_node(graph, target_id) do
-      edge_id = generate_edge_id()
+      existing_edges = Map.get(graph.edges, source_id, [])
       strength = Keyword.get(opts, :strength, 1.0)
 
-      edge = %{
-        id: edge_id,
-        source_id: source_id,
-        target_id: target_id,
-        relationship: relationship,
-        strength: strength,
-        created_at: DateTime.utc_now()
-      }
+      # Check for existing edge with same source/target/relationship
+      case Enum.find_index(existing_edges, fn e ->
+             e.target_id == target_id and e.relationship == relationship
+           end) do
+        nil ->
+          # New edge
+          edge = %{
+            id: generate_edge_id(),
+            source_id: source_id,
+            target_id: target_id,
+            relationship: relationship,
+            strength: strength,
+            created_at: DateTime.utc_now()
+          }
 
-      existing_edges = Map.get(graph.edges, source_id, [])
-      new_edges = Map.put(graph.edges, source_id, [edge | existing_edges])
+          new_edges = Map.put(graph.edges, source_id, [edge | existing_edges])
+          {:ok, %{graph | edges: new_edges}}
 
-      {:ok, %{graph | edges: new_edges}}
+        idx ->
+          # Existing edge — increment strength
+          existing_edge = Enum.at(existing_edges, idx)
+          updated_edge = %{existing_edge | strength: min(10.0, existing_edge.strength + 0.5)}
+
+          updated_list = List.replace_at(existing_edges, idx, updated_edge)
+          new_edges = Map.put(graph.edges, source_id, updated_list)
+          {:ok, %{graph | edges: new_edges}}
+      end
     end
   end
 
@@ -309,6 +367,37 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @spec get_edges(t(), node_id()) :: [edge()]
   def get_edges(graph, node_id) do
     Map.get(graph.edges, node_id, [])
+  end
+
+  @doc """
+  Get all incoming edges to a node (scans all edge lists).
+  """
+  @spec edges_to(t(), node_id()) :: [edge()]
+  def edges_to(graph, target_id) do
+    graph.edges
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.filter(&(&1.target_id == target_id))
+  end
+
+  @doc """
+  Remove an edge matching source, target, and relationship.
+  """
+  @spec unlink(t(), node_id(), node_id(), atom()) :: {:ok, t()} | {:error, :not_found}
+  def unlink(graph, source_id, target_id, relationship) do
+    existing_edges = Map.get(graph.edges, source_id, [])
+
+    case Enum.find_index(existing_edges, fn e ->
+           e.target_id == target_id and e.relationship == relationship
+         end) do
+      nil ->
+        {:error, :not_found}
+
+      idx ->
+        updated_list = List.delete_at(existing_edges, idx)
+        new_edges = Map.put(graph.edges, source_id, updated_list)
+        {:ok, %{graph | edges: new_edges}}
+    end
   end
 
   @doc """
@@ -347,11 +436,169 @@ defmodule Arbor.Memory.KnowledgeGraph do
             last_accessed: now
         }
 
-        new_graph = %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
+        new_graph =
+          %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
+          |> maybe_add_to_active_set(updated_node)
+
         {:ok, new_graph, updated_node}
 
       :error ->
         {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Boost a node's relevance by a specific amount.
+
+  The relevance is capped at 1.0. This is a manual boost, unlike `reinforce/2`
+  which uses a fixed increment.
+
+  ## Parameters
+
+  - `graph` - The knowledge graph
+  - `node_id` - ID of the node to boost
+  - `boost_amount` - Amount to add to relevance (capped at 1.0)
+  """
+  @spec boost_node(t(), node_id(), float()) :: t()
+  def boost_node(graph, node_id, boost_amount) when is_float(boost_amount) do
+    case Map.get(graph.nodes, node_id) do
+      nil ->
+        graph
+
+      node ->
+        new_relevance = max(@min_relevance, min(1.0, node.relevance + boost_amount))
+
+        updated_node = %{
+          node
+          | relevance: new_relevance,
+            last_accessed: DateTime.utc_now()
+        }
+
+        %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
+        |> maybe_add_to_active_set(updated_node)
+    end
+  end
+
+  @doc """
+  Get total token count across all nodes in the graph.
+  """
+  @spec total_tokens(t()) :: non_neg_integer()
+  def total_tokens(graph) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.reduce(0, fn node, acc -> acc + (node[:cached_tokens] || 0) end)
+  end
+
+  @doc """
+  Get total token count for nodes in the active set.
+  """
+  @spec active_set_tokens(t()) :: non_neg_integer()
+  def active_set_tokens(graph) do
+    graph.active_set
+    |> Enum.map(&Map.get(graph.nodes, &1))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce(0, fn node, acc -> acc + (node[:cached_tokens] || 0) end)
+  end
+
+  @doc """
+  Get nodes in the active set, sorted by relevance descending.
+
+  When `max_tokens` is configured on the graph, delegates to `select_by_token_budget/4`
+  to fit within the token budget.
+
+  ## Options
+
+  - `:model_context` - Override the token budget for this call
+  """
+  @spec active_set(t(), keyword()) :: [knowledge_node()]
+  def active_set(graph, opts \\ []) do
+    budget = Keyword.get(opts, :model_context, graph.max_tokens)
+
+    nodes =
+      graph.active_set
+      |> Enum.map(&Map.get(graph.nodes, &1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.sort_by(& &1.relevance, :desc)
+
+    case budget do
+      nil ->
+        nodes
+
+      budget ->
+        max_tokens = TokenBudget.resolve(budget, TokenBudget.default_context_size())
+        select_by_token_budget(nodes, max_tokens, graph.type_quotas)
+    end
+  end
+
+  @doc """
+  Select nodes that fit within a token budget, respecting per-type quotas.
+
+  Fills the budget greedily with highest-relevance nodes. When `type_quotas`
+  is provided (e.g., `%{fact: 0.4, skill: 0.3}`), each type gets at most
+  that fraction of the total budget.
+
+  Returns the selected nodes in relevance order.
+  """
+  @spec select_by_token_budget([knowledge_node()], non_neg_integer(), map()) :: [knowledge_node()]
+  def select_by_token_budget(nodes, max_tokens, type_quotas \\ %{}) do
+    sorted = Enum.sort_by(nodes, & &1.relevance, :desc)
+
+    type_limits =
+      Map.new(type_quotas, fn {type, fraction} ->
+        {type, round(max_tokens * fraction)}
+      end)
+
+    {selected, _used, _type_used} =
+      Enum.reduce(sorted, {[], 0, %{}}, fn node, {acc, total_used, type_used} ->
+        tokens = node[:cached_tokens] || 0
+        new_total = total_used + tokens
+
+        if new_total > max_tokens do
+          {acc, total_used, type_used}
+        else
+          type_budget = Map.get(type_limits, node.type)
+          current_type_used = Map.get(type_used, node.type, 0)
+
+          if type_budget && current_type_used + tokens > type_budget do
+            {acc, total_used, type_used}
+          else
+            new_type_used = Map.put(type_used, node.type, current_type_used + tokens)
+            {[node | acc], new_total, new_type_used}
+          end
+        end
+      end)
+
+    Enum.reverse(selected)
+  end
+
+  @doc """
+  Recompute the active set from all nodes in the graph.
+
+  Selects the top `max_active` nodes by relevance (minimum `@min_relevance`).
+  """
+  @spec refresh_active_set(t()) :: t()
+  def refresh_active_set(graph) do
+    new_active =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(&(&1.relevance >= @min_relevance))
+      |> Enum.sort_by(& &1.relevance, :desc)
+      |> Enum.take(graph.max_active)
+      |> Enum.map(& &1.id)
+
+    %{graph | active_set: new_active}
+  end
+
+  @doc """
+  Manually promote a node to the active set.
+
+  If the active set is at capacity, the lowest-relevance node is evicted.
+  """
+  @spec promote_to_active(t(), node_id()) :: t()
+  def promote_to_active(graph, node_id) do
+    case Map.get(graph.nodes, node_id) do
+      nil -> graph
+      node -> maybe_add_to_active_set(graph, node)
     end
   end
 
@@ -417,6 +664,192 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
+  @doc """
+  Hybrid semantic + keyword search across knowledge nodes.
+
+  When embeddings are available, combines embedding similarity (70% weight)
+  with keyword score (30% weight). Falls back to pure keyword search when
+  the embedding service is unavailable.
+
+  ## Options
+
+  - `:limit` - Max results (default 10)
+  - `:types` - Filter by node types (list of atoms)
+  - `:min_relevance` - Minimum node relevance threshold (default 0.0)
+  """
+  @spec semantic_search(t(), String.t(), keyword()) :: {:ok, [knowledge_node()]}
+  def semantic_search(graph, query, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 10)
+    types = Keyword.get(opts, :types)
+    min_relevance = Keyword.get(opts, :min_relevance, 0.0)
+
+    query_embedding = compute_node_embedding(query)
+
+    candidates =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(fn node ->
+        node.relevance >= min_relevance and
+          (is_nil(types) or node.type in types)
+      end)
+
+    scored =
+      Enum.map(candidates, fn node ->
+        score = compute_search_score(query, query_embedding, node)
+        {node, score}
+      end)
+
+    results =
+      scored
+      |> Enum.filter(fn {_, score} -> score > 0.0 end)
+      |> Enum.sort_by(fn {_, score} -> score end, :desc)
+      |> Enum.take(limit)
+      |> Enum.map(fn {node, _score} -> node end)
+
+    {:ok, results}
+  end
+
+  # ============================================================================
+  # Cascade Recall + Context Generation + Query Helpers
+  # ============================================================================
+
+  @doc """
+  Spreading activation: boosts a starting node and its neighbors recursively
+  with a decaying boost factor.
+
+  Starting from `node_id`, applies `boost_amount` to that node, then
+  `boost_amount * 0.5` to its immediate neighbors, and so on up to `max_depth`.
+
+  ## Options
+
+  - `:max_depth` - Maximum recursion depth (default 3)
+  - `:min_boost` - Stop spreading when boost falls below this (default 0.05)
+  """
+  @spec cascade_recall(t(), node_id(), float(), keyword()) :: t()
+  def cascade_recall(graph, node_id, boost_amount, opts \\ []) do
+    max_depth = Keyword.get(opts, :max_depth, 3)
+    min_boost = Keyword.get(opts, :min_boost, 0.05)
+
+    spread_activation(graph, [node_id], boost_amount, max_depth, min_boost, MapSet.new())
+  end
+
+  @doc """
+  Generate LLM context text from the active set.
+
+  Formats each node as `- [type] content (N% relevance)` and optionally
+  includes relationship lines `  → relationship: target_content`.
+
+  ## Options
+
+  - `:include_relationships` - Include edge info (default true)
+  - `:model_context` - Override token budget
+  """
+  @spec to_prompt_text(t(), keyword()) :: String.t()
+  def to_prompt_text(graph, opts \\ []) do
+    include_rels = Keyword.get(opts, :include_relationships, true)
+    nodes = active_set(graph, opts)
+
+    nodes
+    |> Enum.map(fn node ->
+      pct = round(node.relevance * 100)
+      line = "- [#{node.type}] #{node.content} (#{pct}% relevance)"
+
+      if include_rels do
+        rels = format_node_relationships(graph, node.id)
+
+        if rels == "" do
+          line
+        else
+          line <> "\n" <> rels
+        end
+      else
+        line
+      end
+    end)
+    |> Enum.join("\n")
+  end
+
+  @doc """
+  Alias for `list_by_type/2` (API compatibility).
+  """
+  @spec find_by_type(t(), node_type()) :: [knowledge_node()]
+  def find_by_type(graph, type), do: list_by_type(graph, type)
+
+  @doc """
+  Filter nodes by type and a custom criteria function, with options.
+
+  ## Options
+
+  - `:limit` - Max results
+  - `:sort_by` - Sort field (`:relevance`, `:created_at`, `:last_accessed`)
+  """
+  @spec find_by_type_and_criteria(t(), node_type(), (knowledge_node() -> boolean()), keyword()) ::
+          [knowledge_node()]
+  def find_by_type_and_criteria(graph, type, criteria_fn, opts \\ []) do
+    limit = Keyword.get(opts, :limit)
+    sort_by = Keyword.get(opts, :sort_by, :relevance)
+
+    results =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(fn node -> node.type == type and criteria_fn.(node) end)
+      |> Enum.sort_by(&Map.get(&1, sort_by, 0), :desc)
+
+    if limit, do: Enum.take(results, limit), else: results
+  end
+
+  @doc """
+  Get recently accessed or created nodes.
+
+  ## Options
+
+  - `:types` - Filter by node types
+  - `:since` - Only nodes accessed/created after this DateTime
+  - `:limit` - Max results (default 20)
+  - `:sort_by` - `:last_accessed` (default) or `:created_at`
+  """
+  @spec recent_nodes(t(), keyword()) :: [knowledge_node()]
+  def recent_nodes(graph, opts \\ []) do
+    types = Keyword.get(opts, :types)
+    since = Keyword.get(opts, :since)
+    limit = Keyword.get(opts, :limit, 20)
+    sort_by = Keyword.get(opts, :sort_by, :last_accessed)
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      type_ok = is_nil(types) or node.type in types
+      since_ok = is_nil(since) or DateTime.compare(Map.get(node, sort_by), since) == :gt
+      type_ok and since_ok
+    end)
+    |> Enum.sort_by(&Map.get(&1, sort_by), {:desc, DateTime})
+    |> Enum.take(limit)
+  end
+
+  @doc """
+  Get all skill nodes grouped by tool_name metadata.
+  """
+  @spec get_tool_learnings(t()) :: map()
+  def get_tool_learnings(graph) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(&(&1.type == :skill))
+    |> Enum.group_by(fn node -> Map.get(node.metadata, :tool_name, "unknown") end)
+  end
+
+  @doc """
+  Get skill nodes for a specific tool.
+  """
+  @spec get_tool_learnings(t(), String.t()) :: [knowledge_node()]
+  def get_tool_learnings(graph, tool_name) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      node.type == :skill and Map.get(node.metadata, :tool_name) == tool_name
+    end)
+    |> Enum.sort_by(& &1.relevance, :desc)
+  end
+
   # ============================================================================
   # Decay and Pruning
   # ============================================================================
@@ -473,7 +906,103 @@ defmodule Arbor.Memory.KnowledgeGraph do
         {source_id, Enum.reject(edges, &(&1.target_id in pruned_ids))}
       end)
 
-    {%{graph | nodes: new_nodes, edges: new_edges}, pruned_count}
+    new_active_set = Enum.reject(graph.active_set, &(&1 in pruned_ids))
+    {%{graph | nodes: new_nodes, edges: new_edges, active_set: new_active_set}, pruned_count}
+  end
+
+  @doc """
+  Apply exponential time-based decay to all non-pinned nodes.
+
+  Uses the formula: `relevance * e^(-λ * days_since_access)` where λ is the
+  decay rate. This produces a smooth exponential curve that decays faster
+  initially and slows down over time, unlike the linear `decay/1`.
+
+  ## Options
+
+  - `:pinned_ids` - Set of node IDs to skip (in addition to pinned nodes)
+  - `:decay_rate_override` - Override the graph's decay rate for this call
+  """
+  @spec apply_decay(t(), keyword()) :: t()
+  def apply_decay(graph, opts \\ []) do
+    now = DateTime.utc_now()
+    lambda = Keyword.get(opts, :decay_rate_override, Map.get(graph.config, :decay_rate, @default_decay_rate))
+    pinned_ids = normalize_pinned_ids(Keyword.get(opts, :pinned_ids))
+
+    new_nodes =
+      Map.new(graph.nodes, fn {id, node} ->
+        if node.pinned or id in pinned_ids do
+          {id, node}
+        else
+          days = DateTime.diff(now, node.last_accessed, :second) / 86_400.0
+          decay_factor = :math.exp(-lambda * days)
+          new_relevance = max(@min_relevance, node.relevance * decay_factor)
+          {id, %{node | relevance: new_relevance}}
+        end
+      end)
+
+    %{graph | nodes: new_nodes, last_decay_at: now}
+    |> refresh_active_set()
+  end
+
+  @doc """
+  Prune nodes below threshold and emit archival signals for each removed node.
+
+  Returns `{updated_graph, archived_count}`.
+  """
+  @spec prune_and_archive(t(), keyword()) :: {t(), non_neg_integer()}
+  def prune_and_archive(graph, opts \\ []) do
+    threshold = Keyword.get(opts, :threshold, Map.get(graph.config, :prune_threshold, @default_prune_threshold))
+
+    {to_keep, to_archive} =
+      graph.nodes
+      |> Map.values()
+      |> Enum.split_with(fn node ->
+        node.pinned or node.relevance >= threshold
+      end)
+
+    # Emit signals for archived nodes
+    Enum.each(to_archive, fn node ->
+      Arbor.Memory.Signals.emit_knowledge_archived(graph.agent_id, node, :low_relevance)
+    end)
+
+    archived_ids = MapSet.new(to_archive, & &1.id)
+    new_nodes = Map.new(to_keep, &{&1.id, &1})
+
+    new_edges =
+      graph.edges
+      |> Enum.reject(fn {source_id, _} -> source_id in archived_ids end)
+      |> Map.new(fn {source_id, edges} ->
+        {source_id, Enum.reject(edges, &(&1.target_id in archived_ids))}
+      end)
+
+    new_active_set = Enum.reject(graph.active_set, &(&1 in archived_ids))
+    archived_count = length(to_archive)
+
+    {%{graph | nodes: new_nodes, edges: new_edges, active_set: new_active_set}, archived_count}
+  end
+
+  @doc """
+  Combined operation: decay → prune/archive → refresh active set.
+
+  Skips processing when the graph is under capacity unless `:force` is set.
+
+  ## Options
+
+  - `:force` - Run even when under capacity
+  - `:threshold` - Override prune threshold
+  - All options from `apply_decay/2`
+  """
+  @spec decay_and_archive(t(), keyword()) :: {t(), non_neg_integer()}
+  def decay_and_archive(graph, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
+    total_capacity = Map.get(graph.config, :max_nodes_per_type, @default_max_nodes_per_type) * length(@allowed_node_types)
+
+    if not force and map_size(graph.nodes) < total_capacity * 0.8 do
+      {graph, 0}
+    else
+      graph = apply_decay(graph, opts)
+      prune_and_archive(graph, opts)
+    end
   end
 
   # ============================================================================
@@ -581,15 +1110,30 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
   @spec stats(t()) :: map()
   def stats(graph) do
+    node_values = Map.values(graph.nodes)
+
     nodes_by_type =
-      graph.nodes
-      |> Map.values()
+      node_values
       |> Enum.group_by(& &1.type)
       |> Map.new(fn {type, nodes} -> {type, length(nodes)} end)
 
+    tokens_by_type =
+      node_values
+      |> Enum.group_by(& &1.type)
+      |> Map.new(fn {type, nodes} ->
+        {type, Enum.reduce(nodes, 0, fn n, acc -> acc + (n[:cached_tokens] || 0) end)}
+      end)
+
+    edges_by_relationship =
+      graph.edges
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.group_by(& &1.relationship)
+      |> Map.new(fn {rel, edges} -> {rel, length(edges)} end)
+
     avg_relevance =
       if map_size(graph.nodes) > 0 do
-        total = Enum.sum(Enum.map(Map.values(graph.nodes), & &1.relevance))
+        total = Enum.sum(Enum.map(node_values, & &1.relevance))
         total / map_size(graph.nodes)
       else
         0.0
@@ -605,10 +1149,18 @@ defmodule Arbor.Memory.KnowledgeGraph do
       agent_id: graph.agent_id,
       node_count: map_size(graph.nodes),
       nodes_by_type: nodes_by_type,
+      tokens_by_type: tokens_by_type,
       edge_count: edge_count,
+      edges_by_relationship: edges_by_relationship,
       average_relevance: Float.round(avg_relevance, 3),
+      total_tokens: total_tokens(graph),
+      active_set_size: length(graph.active_set),
+      active_set_tokens: active_set_tokens(graph),
       pending_facts: length(graph.pending_facts),
       pending_learnings: length(graph.pending_learnings),
+      max_active: graph.max_active,
+      max_tokens: graph.max_tokens,
+      last_decay_at: graph.last_decay_at,
       config: graph.config
     }
   end
@@ -660,13 +1212,25 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
   @spec to_map(t()) :: map()
   def to_map(graph) do
+    # Strip embeddings from nodes for serialization (recompute on load)
+    serialized_nodes =
+      Map.new(graph.nodes, fn {id, node} ->
+        {id, Map.drop(node, [:embedding])}
+      end)
+
     %{
       agent_id: graph.agent_id,
-      nodes: graph.nodes,
+      nodes: serialized_nodes,
       edges: graph.edges,
       pending_facts: graph.pending_facts,
       pending_learnings: graph.pending_learnings,
-      config: graph.config
+      config: graph.config,
+      active_set: graph.active_set,
+      max_active: graph.max_active,
+      dedup_threshold: graph.dedup_threshold,
+      max_tokens: graph.max_tokens,
+      type_quotas: graph.type_quotas,
+      last_decay_at: graph.last_decay_at
     }
   end
 
@@ -675,13 +1239,26 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
   @spec from_map(map()) :: t()
   def from_map(data) do
+    # Ensure nodes have all expected fields (backward compat)
+    nodes =
+      (data[:nodes] || data["nodes"] || %{})
+      |> Map.new(fn {id, node} ->
+        {id, ensure_node_fields(node)}
+      end)
+
     %__MODULE__{
-      agent_id: data.agent_id,
-      nodes: data.nodes || %{},
-      edges: data.edges || %{},
-      pending_facts: data.pending_facts || [],
-      pending_learnings: data.pending_learnings || [],
-      config: data.config || %{}
+      agent_id: data[:agent_id] || data["agent_id"],
+      nodes: nodes,
+      edges: data[:edges] || data["edges"] || %{},
+      pending_facts: data[:pending_facts] || data["pending_facts"] || [],
+      pending_learnings: data[:pending_learnings] || data["pending_learnings"] || [],
+      config: data[:config] || data["config"] || %{},
+      active_set: data[:active_set] || data["active_set"] || [],
+      max_active: data[:max_active] || data["max_active"] || 50,
+      dedup_threshold: data[:dedup_threshold] || data["dedup_threshold"] || 0.85,
+      max_tokens: data[:max_tokens] || data["max_tokens"],
+      type_quotas: data[:type_quotas] || data["type_quotas"] || %{},
+      last_decay_at: data[:last_decay_at] || data["last_decay_at"]
     }
   end
 
@@ -777,4 +1354,218 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
   defp pending_type_to_node_type(:fact), do: :fact
   defp pending_type_to_node_type(:learning), do: :skill
+
+  defp normalize_pinned_ids(nil), do: MapSet.new()
+  defp normalize_pinned_ids(%MapSet{} = set), do: set
+  defp normalize_pinned_ids(list) when is_list(list), do: MapSet.new(list)
+
+  # Active set management: add node if relevant, evict lowest if at capacity
+  defp maybe_add_to_active_set(graph, node) do
+    if node.relevance >= @min_relevance do
+      # Remove existing entry if present (to update position)
+      active = List.delete(graph.active_set, node.id)
+      new_active = [node.id | active]
+
+      if length(new_active) > graph.max_active do
+        # Evict the lowest-relevance node
+        {_worst_id, trimmed} =
+          new_active
+          |> Enum.map(fn id ->
+            n = Map.get(graph.nodes, id)
+            relevance = if n, do: n.relevance, else: 0.0
+            {id, relevance}
+          end)
+          |> Enum.sort_by(fn {_id, rel} -> rel end, :asc)
+          |> then(fn [{worst_id, _} | rest] ->
+            {worst_id, Enum.map(rest, fn {id, _} -> id end)}
+          end)
+
+        %{graph | active_set: trimmed}
+      else
+        %{graph | active_set: new_active}
+      end
+    else
+      graph
+    end
+  end
+
+  # Build text representation for token estimation and embedding
+  defp node_to_text(content, metadata) when is_binary(content) do
+    metadata_text =
+      metadata
+      |> Map.values()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join(" ")
+
+    if metadata_text == "" do
+      content
+    else
+      content <> " " <> metadata_text
+    end
+  end
+
+  defp node_to_text(content, _metadata), do: to_string(content)
+
+  # Ensure deserialized nodes have all fields with defaults
+  defp ensure_node_fields(node) when is_map(node) do
+    node
+    |> Map.put_new(:confidence, 0.5)
+    |> Map.put_new(:embedding, nil)
+    |> Map.put_new(:cached_tokens, 0)
+    |> Map.put_new(:pinned, false)
+    |> Map.put_new(:access_count, 0)
+    |> Map.put_new(:metadata, %{})
+  end
+
+  # Spreading activation — recursive frontier-based
+  defp spread_activation(graph, _frontier, _boost, 0, _min_boost, _visited), do: graph
+  defp spread_activation(graph, [], _boost, _depth, _min_boost, _visited), do: graph
+
+  defp spread_activation(graph, frontier, boost, depth, min_boost, visited) do
+    if boost < min_boost do
+      graph
+    else
+      {graph, next_frontier} =
+        Enum.reduce(frontier, {graph, []}, fn node_id, {g, next} ->
+          if node_id in visited do
+            {g, next}
+          else
+            g = boost_node(g, node_id, boost)
+            neighbors = get_neighbor_ids(g, node_id) -- MapSet.to_list(visited)
+            {g, neighbors ++ next}
+          end
+        end)
+
+      new_visited = Enum.reduce(frontier, visited, &MapSet.put(&2, &1))
+      spread_activation(graph, Enum.uniq(next_frontier), boost * 0.5, depth - 1, min_boost, new_visited)
+    end
+  end
+
+  defp get_neighbor_ids(graph, node_id) do
+    # Outgoing targets
+    outgoing =
+      graph.edges
+      |> Map.get(node_id, [])
+      |> Enum.map(& &1.target_id)
+
+    # Incoming sources
+    incoming =
+      graph.edges
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.filter(&(&1.target_id == node_id))
+      |> Enum.map(& &1.source_id)
+
+    Enum.uniq(outgoing ++ incoming)
+  end
+
+  defp format_node_relationships(graph, node_id) do
+    outgoing = Map.get(graph.edges, node_id, [])
+
+    outgoing
+    |> Enum.map(fn edge ->
+      target = Map.get(graph.nodes, edge.target_id)
+      target_text = if target, do: target.content, else: edge.target_id
+      "  → #{edge.relationship}: #{target_text}"
+    end)
+    |> Enum.join("\n")
+  end
+
+  # Embedding service helpers
+  defp embedding_service_available? do
+    Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :embed, 2)
+  end
+
+  defp compute_node_embedding(text) when is_binary(text) do
+    if embedding_service_available?() do
+      case Arbor.AI.embed(text, []) do
+        {:ok, embedding} when is_list(embedding) -> embedding
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp compute_node_embedding(_), do: nil
+
+  defp cosine_similarity([], _), do: 0.0
+  defp cosine_similarity(_, []), do: 0.0
+
+  defp cosine_similarity(a, b) when length(a) == length(b) do
+    dot = Enum.zip(a, b) |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+    mag_a = :math.sqrt(Enum.reduce(a, 0.0, fn x, acc -> acc + x * x end))
+    mag_b = :math.sqrt(Enum.reduce(b, 0.0, fn x, acc -> acc + x * x end))
+
+    if mag_a == 0.0 or mag_b == 0.0, do: 0.0, else: dot / (mag_a * mag_b)
+  end
+
+  defp cosine_similarity(_, _), do: 0.0
+
+  defp maybe_find_duplicate(_graph, _type, _content, _embedding, true), do: :no_duplicate
+
+  defp maybe_find_duplicate(graph, type, content, embedding, _skip) do
+    same_type_nodes =
+      graph.nodes
+      |> Map.values()
+      |> Enum.filter(&(&1.type == type))
+
+    # Try semantic dedup first if embeddings available
+    if embedding && length(embedding) > 0 do
+      case Enum.find(same_type_nodes, fn node ->
+             node.embedding && length(node.embedding) > 0 &&
+               cosine_similarity(embedding, node.embedding) >= graph.dedup_threshold
+           end) do
+        nil -> check_exact_duplicate(same_type_nodes, content)
+        node -> {:duplicate, node.id}
+      end
+    else
+      check_exact_duplicate(same_type_nodes, content)
+    end
+  end
+
+  defp check_exact_duplicate(nodes, content) do
+    content_lower = String.downcase(content)
+
+    case Enum.find(nodes, fn node ->
+           String.downcase(node.content) == content_lower
+         end) do
+      nil -> :no_duplicate
+      node -> {:duplicate, node.id}
+    end
+  end
+
+  defp compute_search_score(query, query_embedding, node) do
+    keyword_score = compute_keyword_score(query, node)
+
+    semantic_score =
+      if query_embedding && node.embedding do
+        cosine_similarity(query_embedding, node.embedding)
+      else
+        0.0
+      end
+
+    if semantic_score > 0.0 do
+      # Hybrid: 70% semantic + 30% keyword
+      0.7 * semantic_score + 0.3 * keyword_score
+    else
+      keyword_score
+    end
+  end
+
+  defp compute_keyword_score(query, node) do
+    query_terms =
+      query
+      |> String.downcase()
+      |> String.split(~r/\s+/, trim: true)
+
+    content_lower = String.downcase(node.content)
+    matching = Enum.count(query_terms, &String.contains?(content_lower, &1))
+
+    if length(query_terms) > 0 do
+      matching / length(query_terms)
+    else
+      0.0
+    end
+  end
 end
