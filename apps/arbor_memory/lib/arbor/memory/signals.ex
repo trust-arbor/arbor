@@ -802,4 +802,19 @@ defmodule Arbor.Memory.Signals do
       recorded_at: DateTime.utc_now()
     })
   end
+
+  @doc """
+  Emit when a knowledge node is archived (removed during decay/prune).
+  """
+  def emit_knowledge_archived(agent_id, node_data, reason) do
+    Arbor.Signals.emit(:memory, :knowledge_archived, %{
+      agent_id: agent_id,
+      node_id: node_data[:id],
+      node_type: node_data[:type],
+      content_preview: String.slice(node_data[:content] || "", 0, 100),
+      relevance: node_data[:relevance],
+      reason: reason,
+      archived_at: DateTime.utc_now()
+    })
+  end
 end
