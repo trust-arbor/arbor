@@ -401,15 +401,39 @@ defmodule Arbor.Memory.KnowledgeGraph do
   end
 
   @doc """
-  Get nodes connected to a given node (outgoing edges).
+  Find nodes related to a given node via multi-hop BFS traversal.
+
+  Traverses both outgoing and incoming edges. Returns related nodes
+  sorted by relevance, excluding the starting node.
+
+  ## Options
+
+  - `:depth` - Maximum hops to traverse (default 1)
+  - `:relationship` - Only follow edges with this relationship type
+  """
+  @spec find_related(t(), node_id(), keyword()) :: [knowledge_node()]
+  def find_related(graph, node_id, opts \\ []) do
+    depth = Keyword.get(opts, :depth, 1)
+    relationship = Keyword.get(opts, :relationship)
+
+    visited = find_related_recursive(graph, [node_id], MapSet.new([node_id]), depth, relationship)
+
+    visited
+    |> MapSet.delete(node_id)
+    |> MapSet.to_list()
+    |> Enum.map(&Map.get(graph.nodes, &1))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(& &1.relevance, :desc)
+  end
+
+  @doc """
+  Get nodes connected to a given node (1-hop outgoing + incoming).
+
+  Convenience wrapper around `find_related/3` with depth 1.
   """
   @spec get_connected_nodes(t(), node_id()) :: [knowledge_node()]
   def get_connected_nodes(graph, node_id) do
-    graph
-    |> get_edges(node_id)
-    |> Enum.map(& &1.target_id)
-    |> Enum.map(&Map.get(graph.nodes, &1))
-    |> Enum.reject(&is_nil/1)
+    find_related(graph, node_id, depth: 1)
   end
 
   # ============================================================================
@@ -526,7 +550,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
       budget ->
         max_tokens = TokenBudget.resolve(budget, TokenBudget.default_context_size())
-        select_by_token_budget(nodes, max_tokens, graph.type_quotas)
+        cognitive_prefs = Keyword.get(opts, :cognitive_preferences)
+        effective_quotas = merge_quotas_with_preferences(graph.type_quotas, cognitive_prefs)
+        select_by_token_budget(nodes, max_tokens, effective_quotas)
     end
   end
 
@@ -665,6 +691,26 @@ defmodule Arbor.Memory.KnowledgeGraph do
   end
 
   @doc """
+  Substring search across node content (case-insensitive).
+
+  Unlike `find_by_name/2` which requires an exact match and returns a single ID,
+  this returns all nodes whose content contains the query string.
+
+  Results are sorted by relevance (descending).
+  """
+  @spec search_by_name(t(), String.t()) :: [knowledge_node()]
+  def search_by_name(graph, query) do
+    query_lower = String.downcase(query)
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      String.contains?(String.downcase(node.content), query_lower)
+    end)
+    |> Enum.sort_by(& &1.relevance, :desc)
+  end
+
+  @doc """
   Hybrid semantic + keyword search across knowledge nodes.
 
   When embeddings are available, combines embedding similarity (70% weight)
@@ -718,19 +764,21 @@ defmodule Arbor.Memory.KnowledgeGraph do
   with a decaying boost factor.
 
   Starting from `node_id`, applies `boost_amount` to that node, then
-  `boost_amount * 0.5` to its immediate neighbors, and so on up to `max_depth`.
+  `boost_amount * decay_factor` to its immediate neighbors, and so on up to `max_depth`.
 
   ## Options
 
   - `:max_depth` - Maximum recursion depth (default 3)
   - `:min_boost` - Stop spreading when boost falls below this (default 0.05)
+  - `:decay_factor` - Multiplier for boost at each hop (default 0.5)
   """
   @spec cascade_recall(t(), node_id(), float(), keyword()) :: t()
   def cascade_recall(graph, node_id, boost_amount, opts \\ []) do
     max_depth = Keyword.get(opts, :max_depth, 3)
     min_boost = Keyword.get(opts, :min_boost, 0.05)
+    decay_factor = Keyword.get(opts, :decay_factor, 0.5)
 
-    spread_activation(graph, [node_id], boost_amount, max_depth, min_boost, MapSet.new())
+    spread_activation(graph, [node_id], boost_amount, max_depth, min_boost, decay_factor, MapSet.new())
   end
 
   @doc """
@@ -749,24 +797,31 @@ defmodule Arbor.Memory.KnowledgeGraph do
     include_rels = Keyword.get(opts, :include_relationships, true)
     nodes = active_set(graph, opts)
 
-    nodes
-    |> Enum.map(fn node ->
-      pct = round(node.relevance * 100)
-      line = "- [#{node.type}] #{node.content} (#{pct}% relevance)"
+    if nodes == [] do
+      ""
+    else
+      body =
+        nodes
+        |> Enum.map(fn node ->
+          pct = round(node.relevance * 100)
+          line = "    - [#{node.type}] #{node.content} (#{pct}% relevance)"
 
-      if include_rels do
-        rels = format_node_relationships(graph, node.id)
+          if include_rels do
+            rels = format_node_relationships(graph, node.id)
 
-        if rels == "" do
-          line
-        else
-          line <> "\n" <> rels
-        end
-      else
-        line
-      end
-    end)
-    |> Enum.join("\n")
+            if rels == "" do
+              line
+            else
+              line <> "\n" <> rels
+            end
+          else
+            line
+          end
+        end)
+        |> Enum.join("\n")
+
+      "## Knowledge Graph (Active Context)\n\n" <> body
+    end
   end
 
   @doc """
@@ -1101,6 +1156,54 @@ defmodule Arbor.Memory.KnowledgeGraph do
     graph.pending_facts ++ graph.pending_learnings
   end
 
+  @doc """
+  Get pending facts only.
+  """
+  @spec get_pending_facts(t()) :: [pending_item()]
+  def get_pending_facts(graph), do: graph.pending_facts
+
+  @doc """
+  Get pending learnings only.
+  """
+  @spec get_pending_learnings(t()) :: [pending_item()]
+  def get_pending_learnings(graph), do: graph.pending_learnings
+
+  @doc """
+  Approve all pending facts at once, creating nodes for each.
+
+  Returns `{:ok, graph, node_ids}` with the IDs of all created nodes.
+  """
+  @spec approve_all_facts(t()) :: {:ok, t(), [node_id()]}
+  def approve_all_facts(%{pending_facts: []} = graph), do: {:ok, graph, []}
+
+  def approve_all_facts(graph) do
+    {updated_graph, ids} =
+      Enum.reduce(graph.pending_facts, {graph, []}, fn pending, {g, acc} ->
+        {:ok, g, node_id} = approve_pending(g, pending.id)
+        {g, [node_id | acc]}
+      end)
+
+    {:ok, updated_graph, Enum.reverse(ids)}
+  end
+
+  @doc """
+  Approve all pending learnings at once, creating nodes for each.
+
+  Returns `{:ok, graph, node_ids}` with the IDs of all created nodes.
+  """
+  @spec approve_all_learnings(t()) :: {:ok, t(), [node_id()]}
+  def approve_all_learnings(%{pending_learnings: []} = graph), do: {:ok, graph, []}
+
+  def approve_all_learnings(graph) do
+    {updated_graph, ids} =
+      Enum.reduce(graph.pending_learnings, {graph, []}, fn pending, {g, acc} ->
+        {:ok, g, node_id} = approve_pending(g, pending.id)
+        {g, [node_id | acc]}
+      end)
+
+    {:ok, updated_graph, Enum.reverse(ids)}
+  end
+
   # ============================================================================
   # Statistics and Queries
   # ============================================================================
@@ -1355,6 +1458,16 @@ defmodule Arbor.Memory.KnowledgeGraph do
   defp pending_type_to_node_type(:fact), do: :fact
   defp pending_type_to_node_type(:learning), do: :skill
 
+  defp merge_quotas_with_preferences(system_quotas, nil), do: system_quotas
+  defp merge_quotas_with_preferences(system_quotas, %{type_quotas: nil}), do: system_quotas
+
+  defp merge_quotas_with_preferences(system_quotas, %{type_quotas: agent_quotas})
+       when is_map(agent_quotas) do
+    Map.merge(system_quotas, agent_quotas)
+  end
+
+  defp merge_quotas_with_preferences(system_quotas, _), do: system_quotas
+
   defp normalize_pinned_ids(nil), do: MapSet.new()
   defp normalize_pinned_ids(%MapSet{} = set), do: set
   defp normalize_pinned_ids(list) when is_list(list), do: MapSet.new(list)
@@ -1417,11 +1530,51 @@ defmodule Arbor.Memory.KnowledgeGraph do
     |> Map.put_new(:metadata, %{})
   end
 
-  # Spreading activation — recursive frontier-based
-  defp spread_activation(graph, _frontier, _boost, 0, _min_boost, _visited), do: graph
-  defp spread_activation(graph, [], _boost, _depth, _min_boost, _visited), do: graph
+  # BFS traversal for find_related — bidirectional with optional relationship filter
+  defp find_related_recursive(_graph, _frontier, visited, 0, _relationship), do: visited
+  defp find_related_recursive(_graph, [], visited, _depth, _relationship), do: visited
 
-  defp spread_activation(graph, frontier, boost, depth, min_boost, visited) do
+  defp find_related_recursive(graph, frontier, visited, depth, relationship) do
+    neighbors =
+      frontier
+      |> Enum.flat_map(&get_neighbor_ids_filtered(graph, &1, relationship))
+      |> Enum.reject(&MapSet.member?(visited, &1))
+      |> Enum.uniq()
+
+    if neighbors == [] do
+      visited
+    else
+      new_visited = Enum.reduce(neighbors, visited, &MapSet.put(&2, &1))
+      find_related_recursive(graph, neighbors, new_visited, depth - 1, relationship)
+    end
+  end
+
+  defp get_neighbor_ids_filtered(graph, node_id, nil) do
+    get_neighbor_ids(graph, node_id)
+  end
+
+  defp get_neighbor_ids_filtered(graph, node_id, relationship) do
+    outgoing =
+      graph.edges
+      |> Map.get(node_id, [])
+      |> Enum.filter(&(&1.relationship == relationship))
+      |> Enum.map(& &1.target_id)
+
+    incoming =
+      graph.edges
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.filter(&(&1.target_id == node_id and &1.relationship == relationship))
+      |> Enum.map(& &1.source_id)
+
+    Enum.uniq(outgoing ++ incoming)
+  end
+
+  # Spreading activation — recursive frontier-based
+  defp spread_activation(graph, _frontier, _boost, 0, _min_boost, _decay, _visited), do: graph
+  defp spread_activation(graph, [], _boost, _depth, _min_boost, _decay, _visited), do: graph
+
+  defp spread_activation(graph, frontier, boost, depth, min_boost, decay_factor, visited) do
     if boost < min_boost do
       graph
     else
@@ -1437,7 +1590,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
         end)
 
       new_visited = Enum.reduce(frontier, visited, &MapSet.put(&2, &1))
-      spread_activation(graph, Enum.uniq(next_frontier), boost * 0.5, depth - 1, min_boost, new_visited)
+      spread_activation(graph, Enum.uniq(next_frontier), boost * decay_factor, depth - 1, min_boost, decay_factor, new_visited)
     end
   end
 
@@ -1462,13 +1615,26 @@ defmodule Arbor.Memory.KnowledgeGraph do
   defp format_node_relationships(graph, node_id) do
     outgoing = Map.get(graph.edges, node_id, [])
 
-    outgoing
-    |> Enum.map(fn edge ->
-      target = Map.get(graph.nodes, edge.target_id)
-      target_text = if target, do: target.content, else: edge.target_id
-      "  → #{edge.relationship}: #{target_text}"
-    end)
-    |> Enum.join("\n")
+    outgoing_lines =
+      Enum.map(outgoing, fn edge ->
+        target = Map.get(graph.nodes, edge.target_id)
+        target_text = if target, do: target.content, else: edge.target_id
+        "        → #{edge.relationship}: #{target_text}"
+      end)
+
+    # Incoming edges (other nodes pointing to this one)
+    incoming_lines =
+      graph.edges
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.filter(&(&1.target_id == node_id))
+      |> Enum.map(fn edge ->
+        source = Map.get(graph.nodes, edge.source_id)
+        source_text = if source, do: source.content, else: edge.source_id
+        "        ← #{edge.relationship}: #{source_text}"
+      end)
+
+    (outgoing_lines ++ incoming_lines) |> Enum.join("\n")
   end
 
   # Embedding service helpers
