@@ -339,6 +339,7 @@ defmodule Arbor.Actions.Code do
 
       with {:ok, module} <- parse_module(module_str),
            :ok <- check_not_protected(module),
+           :ok <- validate_source_safety(source),
            {:ok, original_binary} <- save_original(module),
            {:ok, compiled_module} <- compile_source(source) do
         # Load the new module
@@ -393,6 +394,16 @@ defmodule Arbor.Actions.Code do
         :error ->
           # Module doesn't exist yet - that's okay for new modules
           {:ok, nil}
+      end
+    end
+
+    defp validate_source_safety(source) do
+      case Code.string_to_quoted(source) do
+        {:ok, ast} ->
+          Arbor.Sandbox.Code.validate(ast, :limited)
+
+        {:error, {_meta, message, _token}} ->
+          {:error, {:parse_error, message}}
       end
     end
 
