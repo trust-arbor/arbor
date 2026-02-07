@@ -163,11 +163,20 @@ config :arbor_agent,
   # Idle reflection — cognitive exploration during quiet time
   idle_reflection_enabled: true,
   idle_reflection_chance: 0.3,
+  # LLM heartbeat think cycle (via OpenRouter API — fast, free)
+  heartbeat_model: "arcee-ai/trinity-large-preview:free",
+  idle_heartbeat_model: "arcee-ai/trinity-large-preview:free",
+  heartbeat_provider: :openrouter,
+  # Checkpoint — periodic state persistence
+  checkpoint_enabled: true,
+  checkpoint_interval_ms: 300_000,
+  checkpoint_query_threshold: 5,
+  checkpoint_store: Arbor.Checkpoint.Store.ETS,
   # Context summarization — dual-model approach (Phase 3)
   context_summarization_enabled: true,
   summarizer_model: "claude-haiku",
   summarizer_provider: :anthropic,
-  context_max_tokens: 100_000,
+  context_max_tokens: 180_000,
   context_min_tokens: 20_000,
   context_recent_ratio: 0.7,
   context_min_recent_messages: 10,
