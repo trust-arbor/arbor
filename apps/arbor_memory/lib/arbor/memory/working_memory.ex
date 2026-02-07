@@ -7,52 +7,113 @@ defmodule Arbor.Memory.WorkingMemory do
   and aware: recent thoughts, active goals, relationship context, concerns,
   curiosity, and engagement level.
 
+  ## Structured Data
+
+  Thoughts are stored as maps with metadata:
+
+      %{content: "User seems interested", timestamp: ~U[...], cached_tokens: 12}
+
+  Goals are stored as maps with tracking fields:
+
+      %{id: "goal_abc", description: "Explain GenServer", type: :task,
+        priority: :normal, progress: 0, added_at: ~U[...]}
+
+  Both `add_thought/3` and `add_goal/3` accept plain strings for convenience —
+  they are automatically wrapped in the structured format.
+
+  ## Token-Based Trimming
+
+  When `max_tokens` is set, thoughts are trimmed by token count rather than
+  a fixed count limit. This works with the `model` field to determine context
+  budgets.
+
+  ## Hybrid Memory Model
+
+  ```
+  ┌──────────────────────────────────────────────────────────────┐
+  │                           Mind                                │
+  │  ┌────────────────────────────────────────────────────────┐  │
+  │  │           Working Memory (in-process)                  │  │
+  │  │                                                        │  │
+  │  │  - Recent thoughts (with timestamps + token counts)    │  │
+  │  │  - Active goals (with progress tracking)               │  │
+  │  │  - Identity (name, agent_id)                           │  │
+  │  │  - Relationship (current_human, context)               │  │
+  │  │  - Emotional state (engagement, curiosity, concerns)   │  │
+  │  └────────────────────────────────────────────────────────┘  │
+  │                           │                                   │
+  │                           │ consolidate periodically          │
+  │                           ▼                                   │
+  │  ┌────────────────────────────────────────────────────────┐  │
+  │  │         Long-term Memory (Signals events)              │  │
+  │  │  - Past conversations and facts                        │  │
+  │  │  - Relationship history                                │  │
+  │  │  - Decisions and outcomes                              │  │
+  │  └────────────────────────────────────────────────────────┘  │
+  └──────────────────────────────────────────────────────────────┘
+  ```
+
   ## Dual-Agent Support
 
   - **Native agents:** Hold in process state, auto-persisted on shutdown
   - **Bridged agents:** Serialized to/from JSON for gateway transport
-
-  ## Examples
-
-      # Create working memory for an agent
-      wm = WorkingMemory.new("agent_001")
-
-      # Add a thought
-      wm = WorkingMemory.add_thought(wm, "User seems curious about Elixir")
-
-      # Set goals
-      wm = WorkingMemory.set_goals(wm, ["Explain GenServer basics", "Show examples"])
-
-      # Render for LLM context
-      text = WorkingMemory.to_prompt_text(wm)
-
-      # Serialize for gateway transport
-      json_map = WorkingMemory.serialize(wm)
-      restored_wm = WorkingMemory.deserialize(json_map)
   """
 
   alias Arbor.Memory.TokenBudget
 
+  require Logger
+
+  @version 2
+
+  @type thought :: %{
+          content: String.t(),
+          timestamp: DateTime.t(),
+          cached_tokens: non_neg_integer()
+        }
+
+  @type goal :: %{
+          id: String.t(),
+          description: String.t(),
+          type: atom(),
+          priority: atom(),
+          progress: number(),
+          added_at: DateTime.t()
+        }
+
   @type t :: %__MODULE__{
           agent_id: String.t(),
-          recent_thoughts: [String.t()],
-          active_goals: [String.t()],
-          relationship_context: String.t() | nil,
+          name: String.t() | nil,
+          current_human: String.t() | nil,
+          recent_thoughts: [thought()],
+          active_goals: [goal()],
+          relationship_context: String.t() | map() | nil,
           concerns: [String.t()],
           curiosity: [String.t()],
           engagement_level: float(),
+          max_tokens: TokenBudget.spec() | nil,
+          model: String.t() | nil,
+          last_consolidated_at: DateTime.t() | nil,
+          started_at: DateTime.t(),
+          thought_count: non_neg_integer(),
           version: pos_integer()
         }
 
   defstruct [
     :agent_id,
+    :name,
+    :current_human,
     recent_thoughts: [],
     active_goals: [],
     relationship_context: nil,
     concerns: [],
     curiosity: [],
     engagement_level: 0.5,
-    version: 1
+    max_tokens: nil,
+    model: nil,
+    last_consolidated_at: nil,
+    started_at: nil,
+    thought_count: 0,
+    version: @version
   ]
 
   @default_max_thoughts 20
@@ -69,23 +130,37 @@ defmodule Arbor.Memory.WorkingMemory do
 
   ## Options
 
-  - `:max_thoughts` - Maximum recent thoughts to retain (default: 20)
-  - `:max_goals` - Maximum active goals (default: 10)
-  - `:max_concerns` - Maximum concerns (default: 5)
-  - `:max_curiosity` - Maximum curiosity items (default: 5)
+  - `:name` - Agent name (default: nil)
+  - `:max_tokens` - Token budget for thought trimming (default: nil, uses count)
+  - `:model` - Model ID for context size lookup (default: nil)
   - `:engagement_level` - Initial engagement level (default: 0.5)
+  - `:rebuild_from_signals` - Whether to rebuild from long-term memory (default: false)
 
   ## Examples
 
       wm = WorkingMemory.new("agent_001")
-      wm = WorkingMemory.new("agent_001", max_thoughts: 50)
+      wm = WorkingMemory.new("agent_001", name: "Atlas", max_tokens: 5000)
   """
   @spec new(String.t(), keyword()) :: t()
   def new(agent_id, opts \\ []) do
-    %__MODULE__{
+    base = %__MODULE__{
       agent_id: agent_id,
-      engagement_level: Keyword.get(opts, :engagement_level, 0.5)
+      name: Keyword.get(opts, :name),
+      engagement_level: Keyword.get(opts, :engagement_level, 0.5),
+      max_tokens: Keyword.get(opts, :max_tokens),
+      model: Keyword.get(opts, :model),
+      started_at: DateTime.utc_now(),
+      thought_count: 0
     }
+
+    if Keyword.get(opts, :rebuild_from_signals, false) do
+      case rebuild_from_long_term(base) do
+        {:ok, rebuilt} -> rebuilt
+        {:error, _reason} -> base
+      end
+    else
+      base
+    end
   end
 
   # ============================================================================
@@ -95,13 +170,28 @@ defmodule Arbor.Memory.WorkingMemory do
   @doc """
   Add a thought to working memory.
 
-  Thoughts are prepended (newest first) and bounded by max_thoughts.
+  Accepts either a plain string or a structured map. Strings are automatically
+  wrapped with timestamp and token count metadata.
+
+  Thoughts are prepended (newest first) and bounded by `max_thoughts` (count-based)
+  or `max_tokens` (token-based).
+
+  ## Examples
+
+      wm = WorkingMemory.add_thought(wm, "User seems curious about Elixir")
+
+      wm = WorkingMemory.add_thought(wm, %{
+        content: "Important insight",
+        timestamp: DateTime.utc_now(),
+        cached_tokens: 10
+      })
   """
-  @spec add_thought(t(), String.t(), keyword()) :: t()
+  @spec add_thought(t(), String.t() | map(), keyword()) :: t()
   def add_thought(wm, thought, opts \\ []) do
-    max = Keyword.get(opts, :max_thoughts, @default_max_thoughts)
-    new_thoughts = [thought | wm.recent_thoughts] |> Enum.take(max)
-    %{wm | recent_thoughts: new_thoughts}
+    thought_record = normalize_thought(thought)
+    new_thoughts = trim_thoughts([thought_record | wm.recent_thoughts], wm, opts)
+
+    %{wm | recent_thoughts: new_thoughts, thought_count: wm.thought_count + 1}
   end
 
   @doc """
@@ -112,45 +202,128 @@ defmodule Arbor.Memory.WorkingMemory do
     %{wm | recent_thoughts: []}
   end
 
+  @doc """
+  Get total token count of recent thoughts.
+  """
+  @spec thought_tokens(t()) :: non_neg_integer()
+  def thought_tokens(%__MODULE__{recent_thoughts: thoughts}) do
+    Enum.reduce(thoughts, 0, fn thought, acc ->
+      acc + (thought[:cached_tokens] || TokenBudget.estimate_tokens(thought_content(thought)))
+    end)
+  end
+
   # ============================================================================
   # Goal Management
   # ============================================================================
 
   @doc """
   Set active goals, replacing any existing goals.
+
+  Accepts plain strings or structured goal maps. Strings are automatically
+  wrapped with id, type, priority, and progress metadata.
   """
-  @spec set_goals(t(), [String.t()], keyword()) :: t()
+  @spec set_goals(t(), [String.t() | map()], keyword()) :: t()
   def set_goals(wm, goals, opts \\ []) do
     max = Keyword.get(opts, :max_goals, @default_max_goals)
-    %{wm | active_goals: Enum.take(goals, max)}
+    normalized = Enum.map(goals, &normalize_goal/1)
+    %{wm | active_goals: Enum.take(normalized, max)}
   end
 
   @doc """
   Add a goal to the active goals list.
+
+  Accepts a plain string or a structured goal map. If a goal with the same `id`
+  already exists, it is replaced.
+
+  ## Examples
+
+      wm = WorkingMemory.add_goal(wm, "Explain GenServer basics")
+
+      wm = WorkingMemory.add_goal(wm, %{
+        id: "goal_001",
+        description: "Explain GenServer basics",
+        type: :task,
+        priority: :high,
+        progress: 0
+      })
   """
-  @spec add_goal(t(), String.t(), keyword()) :: t()
+  @spec add_goal(t(), String.t() | map(), keyword()) :: t()
   def add_goal(wm, goal, opts \\ []) do
     max = Keyword.get(opts, :max_goals, @default_max_goals)
-    new_goals = [goal | wm.active_goals] |> Enum.uniq() |> Enum.take(max)
+    goal_record = normalize_goal(goal)
+
+    # Replace existing goal with same id, or add new
+    new_goals =
+      case Enum.find_index(wm.active_goals, &(&1.id == goal_record.id)) do
+        nil -> [goal_record | wm.active_goals]
+        idx -> List.replace_at(wm.active_goals, idx, goal_record)
+      end
+      |> Enum.take(max)
+
     %{wm | active_goals: new_goals}
   end
 
   @doc """
-  Remove a completed goal.
+  Remove a completed goal by description string or goal id.
   """
   @spec complete_goal(t(), String.t()) :: t()
-  def complete_goal(wm, goal) do
-    %{wm | active_goals: Enum.reject(wm.active_goals, &(&1 == goal))}
+  def complete_goal(wm, goal_or_id) do
+    %{wm | active_goals: Enum.reject(wm.active_goals, fn g ->
+      g.id == goal_or_id or g.description == goal_or_id
+    end)}
+  end
+
+  @doc """
+  Remove a goal by id.
+  """
+  @spec remove_goal(t(), String.t()) :: t()
+  def remove_goal(wm, goal_id) do
+    %{wm | active_goals: Enum.reject(wm.active_goals, &(&1.id == goal_id))}
+  end
+
+  @doc """
+  Update progress on a goal (0-100).
+  """
+  @spec update_goal_progress(t(), String.t(), number()) :: t()
+  def update_goal_progress(wm, goal_id, progress) when is_number(progress) do
+    progress = max(0, min(100, progress))
+
+    new_goals =
+      Enum.map(wm.active_goals, fn goal ->
+        if goal.id == goal_id do
+          %{goal | progress: progress}
+        else
+          goal
+        end
+      end)
+
+    %{wm | active_goals: new_goals}
   end
 
   # ============================================================================
-  # Relationship Context
+  # Identity and Relationship
   # ============================================================================
+
+  @doc """
+  Set the agent's name.
+  """
+  @spec set_name(t(), String.t() | nil) :: t()
+  def set_name(wm, name) do
+    %{wm | name: name}
+  end
+
+  @doc """
+  Set the current human the agent is interacting with.
+  """
+  @spec set_current_human(t(), String.t() | nil) :: t()
+  def set_current_human(wm, human_name) do
+    %{wm | current_human: human_name}
+  end
 
   @doc """
   Set the relationship context (summary of current relationship).
   """
-  @spec set_relationship_context(t(), String.t() | nil) :: t()
+  @spec set_relationship_context(t(), String.t() | map() | nil) :: t()
   def set_relationship_context(wm, context) do
     %{wm | relationship_context: context}
   end
@@ -218,6 +391,51 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   # ============================================================================
+  # Consolidation and Lifecycle
+  # ============================================================================
+
+  @doc """
+  Mark consolidation timestamp.
+  """
+  @spec mark_consolidated(t()) :: t()
+  def mark_consolidated(wm) do
+    %{wm | last_consolidated_at: DateTime.utc_now()}
+  end
+
+  @doc """
+  Get uptime in seconds since working memory was created.
+  """
+  @spec uptime(t()) :: non_neg_integer()
+  def uptime(%__MODULE__{started_at: nil}), do: 0
+  def uptime(%__MODULE__{started_at: started_at}) do
+    DateTime.diff(DateTime.utc_now(), started_at, :second)
+  end
+
+  @doc """
+  Rebuild working memory from long-term Signals events.
+
+  Queries recent memory events and replays them to reconstruct state.
+  """
+  @spec rebuild_from_long_term(t()) :: {:ok, t()} | {:error, term()}
+  def rebuild_from_long_term(%__MODULE__{} = wm) do
+    signals_mod = Arbor.Memory.Signals
+    if Code.ensure_loaded?(signals_mod) and
+         function_exported?(signals_mod, :query_recent, 2) do
+      case apply(signals_mod, :query_recent, [wm.agent_id, [limit: 100]]) do
+        {:ok, signals} ->
+          rebuilt = Enum.reduce(signals, wm, &apply_memory_event/2)
+          Logger.info("Rebuilt working memory for #{wm.agent_id} from #{length(signals)} signals")
+          {:ok, rebuilt}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:error, :signals_not_available}
+    end
+  end
+
+  # ============================================================================
   # Rendering for LLM Context
   # ============================================================================
 
@@ -247,35 +465,8 @@ defmodule Arbor.Memory.WorkingMemory do
     |> Enum.join("\n\n")
   end
 
-  defp maybe_add_section(sections, opts, key, nil, _formatter) do
-    _ = Keyword.get(opts, key, true)
-    sections
-  end
-
-  defp maybe_add_section(sections, opts, key, data, formatter) do
-    enabled = Keyword.get(opts, key, true)
-    has_data = (is_list(data) and data != []) or (not is_list(data) and data != nil)
-
-    if enabled and has_data do
-      [formatter.(data) | sections]
-    else
-      sections
-    end
-  end
-
-  defp maybe_add_thoughts(sections, opts, thoughts, max_thoughts) do
-    if Keyword.get(opts, :include_thoughts, true) and thoughts != [] do
-      [format_thoughts(Enum.take(thoughts, max_thoughts)) | sections]
-    else
-      sections
-    end
-  end
-
   @doc """
   Return working memory as a structured map for prompt context.
-
-  This format is useful for structured prompt templates that prefer
-  machine-readable data over prose.
   """
   @spec to_prompt_context(t(), keyword()) :: map()
   def to_prompt_context(wm, opts \\ []) do
@@ -283,8 +474,10 @@ defmodule Arbor.Memory.WorkingMemory do
 
     %{
       agent_id: wm.agent_id,
-      recent_thoughts: Enum.take(wm.recent_thoughts, max_thoughts),
-      active_goals: wm.active_goals,
+      name: wm.name,
+      current_human: wm.current_human,
+      recent_thoughts: wm.recent_thoughts |> Enum.take(max_thoughts) |> Enum.map(&thought_content/1),
+      active_goals: Enum.map(wm.active_goals, &goal_description/1),
       relationship_context: wm.relationship_context,
       concerns: wm.concerns,
       curiosity: wm.curiosity,
@@ -298,21 +491,24 @@ defmodule Arbor.Memory.WorkingMemory do
 
   @doc """
   Serialize working memory to a JSON-safe map.
-
-  This format is suitable for:
-  - Persistence to Postgres
-  - Transport to/from bridged agents via gateway
   """
   @spec serialize(t()) :: map()
   def serialize(wm) do
     %{
       "agent_id" => wm.agent_id,
-      "recent_thoughts" => wm.recent_thoughts,
-      "active_goals" => wm.active_goals,
+      "name" => wm.name,
+      "current_human" => wm.current_human,
+      "recent_thoughts" => Enum.map(wm.recent_thoughts, &serialize_thought/1),
+      "active_goals" => Enum.map(wm.active_goals, &serialize_goal/1),
       "relationship_context" => wm.relationship_context,
       "concerns" => wm.concerns,
       "curiosity" => wm.curiosity,
       "engagement_level" => wm.engagement_level,
+      "max_tokens" => serialize_token_spec(wm.max_tokens),
+      "model" => wm.model,
+      "last_consolidated_at" => serialize_datetime(wm.last_consolidated_at),
+      "started_at" => serialize_datetime(wm.started_at),
+      "thought_count" => wm.thought_count,
       "version" => wm.version
     }
   end
@@ -320,24 +516,33 @@ defmodule Arbor.Memory.WorkingMemory do
   @doc """
   Deserialize a JSON-safe map back to a WorkingMemory struct.
 
-  Handles version migration if needed.
+  Handles both v1 (plain strings) and v2 (structured maps) formats.
   """
   @spec deserialize(map()) :: t()
   def deserialize(data) when is_map(data) do
-    # Handle both string and atom keys for flexibility
     get_field = fn key ->
       Map.get(data, key) || Map.get(data, to_string(key))
     end
 
+    raw_thoughts = get_field.(:recent_thoughts) || []
+    raw_goals = get_field.(:active_goals) || []
+
     %__MODULE__{
       agent_id: get_field.(:agent_id),
-      recent_thoughts: get_field.(:recent_thoughts) || [],
-      active_goals: get_field.(:active_goals) || [],
+      name: get_field.(:name),
+      current_human: get_field.(:current_human),
+      recent_thoughts: Enum.map(raw_thoughts, &deserialize_thought/1),
+      active_goals: Enum.map(raw_goals, &deserialize_goal/1),
       relationship_context: get_field.(:relationship_context),
       concerns: get_field.(:concerns) || [],
       curiosity: get_field.(:curiosity) || [],
       engagement_level: get_field.(:engagement_level) || 0.5,
-      version: get_field.(:version) || 1
+      max_tokens: deserialize_token_spec(get_field.(:max_tokens)),
+      model: get_field.(:model),
+      last_consolidated_at: parse_datetime(get_field.(:last_consolidated_at)),
+      started_at: parse_datetime(get_field.(:started_at)),
+      thought_count: get_field.(:thought_count) || 0,
+      version: get_field.(:version) || @version
     }
   end
 
@@ -367,7 +572,6 @@ defmodule Arbor.Memory.WorkingMemory do
     if current_tokens <= max_tokens do
       wm
     else
-      # Trim progressively: thoughts first, then other lists
       wm
       |> trim_list(:recent_thoughts, max_tokens)
       |> trim_list(:concerns, max_tokens)
@@ -389,72 +593,177 @@ defmodule Arbor.Memory.WorkingMemory do
 
     %{
       agent_id: wm.agent_id,
-      thought_count: length(wm.recent_thoughts),
+      name: wm.name,
+      current_human: wm.current_human,
+      thought_count: wm.thought_count,
+      recent_thought_count: length(wm.recent_thoughts),
+      thought_tokens: thought_tokens(wm),
       goal_count: length(wm.active_goals),
       concern_count: length(wm.concerns),
       curiosity_count: length(wm.curiosity),
       engagement_level: wm.engagement_level,
       has_relationship_context: wm.relationship_context != nil,
       estimated_tokens: TokenBudget.estimate_tokens(text),
+      max_tokens: wm.max_tokens,
+      model: wm.model,
+      uptime_seconds: uptime(wm),
+      last_consolidated: wm.last_consolidated_at,
       version: wm.version
     }
   end
 
   # ============================================================================
-  # Private Helpers
+  # Private Helpers — Normalization
   # ============================================================================
 
-  defp format_relationship(context) do
-    """
-    ## Relationship Context
+  defp normalize_thought(thought) when is_binary(thought) do
+    %{
+      content: thought,
+      timestamp: DateTime.utc_now(),
+      cached_tokens: TokenBudget.estimate_tokens(thought)
+    }
+  end
 
-    #{context}
-    """
-    |> String.trim()
+  defp normalize_thought(%{content: _} = thought) do
+    Map.merge(%{
+      timestamp: DateTime.utc_now(),
+      cached_tokens: TokenBudget.estimate_tokens(thought[:content] || "")
+    }, thought)
+  end
+
+  defp normalize_thought(%{"content" => content} = thought) do
+    %{
+      content: content,
+      timestamp: parse_datetime(thought["timestamp"]) || DateTime.utc_now(),
+      cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(content)
+    }
+  end
+
+  defp normalize_goal(goal) when is_binary(goal) do
+    %{
+      id: generate_id(),
+      description: goal,
+      type: :general,
+      priority: :normal,
+      progress: 0,
+      added_at: DateTime.utc_now()
+    }
+  end
+
+  defp normalize_goal(%{description: _} = goal) do
+    Map.merge(%{
+      id: generate_id(),
+      type: :general,
+      priority: :normal,
+      progress: 0,
+      added_at: DateTime.utc_now()
+    }, goal)
+  end
+
+  defp normalize_goal(%{"description" => desc} = goal) do
+    %{
+      id: goal["id"] || generate_id(),
+      description: desc,
+      type: atomize(goal["type"]) || :general,
+      priority: atomize(goal["priority"]) || :normal,
+      progress: goal["progress"] || 0,
+      added_at: parse_datetime(goal["added_at"]) || DateTime.utc_now()
+    }
+  end
+
+  defp thought_content(%{content: content}), do: content
+  defp thought_content(content) when is_binary(content), do: content
+
+  defp goal_description(%{description: desc}), do: desc
+  defp goal_description(desc) when is_binary(desc), do: desc
+
+  # ============================================================================
+  # Private Helpers — Thought Trimming
+  # ============================================================================
+
+  defp trim_thoughts(thoughts, %__MODULE__{max_tokens: nil}, opts) do
+    max = Keyword.get(opts, :max_thoughts, @default_max_thoughts)
+    Enum.take(thoughts, max)
+  end
+
+  defp trim_thoughts(thoughts, %__MODULE__{max_tokens: budget_spec, model: model}, _opts) do
+    budget =
+      cond do
+        is_integer(budget_spec) -> budget_spec
+        model -> TokenBudget.resolve_for_model(budget_spec, model)
+        true -> TokenBudget.resolve(budget_spec, TokenBudget.default_context_size())
+      end
+
+    {kept, _tokens} =
+      Enum.reduce_while(thoughts, {[], 0}, fn thought, {acc, total} ->
+        tokens = thought[:cached_tokens] || TokenBudget.estimate_tokens(thought_content(thought))
+        new_total = total + tokens
+
+        if new_total <= budget do
+          {:cont, {[thought | acc], new_total}}
+        else
+          {:halt, {acc, total}}
+        end
+      end)
+
+    Enum.reverse(kept)
+  end
+
+  # ============================================================================
+  # Private Helpers — Rendering
+  # ============================================================================
+
+  defp maybe_add_section(sections, opts, key, nil, _formatter) do
+    _ = Keyword.get(opts, key, true)
+    sections
+  end
+
+  defp maybe_add_section(sections, opts, key, data, formatter) do
+    enabled = Keyword.get(opts, key, true)
+    has_data = (is_list(data) and data != []) or (not is_list(data) and data != nil)
+
+    if enabled and has_data do
+      [formatter.(data) | sections]
+    else
+      sections
+    end
+  end
+
+  defp maybe_add_thoughts(sections, opts, thoughts, max_thoughts) do
+    if Keyword.get(opts, :include_thoughts, true) and thoughts != [] do
+      [format_thoughts(Enum.take(thoughts, max_thoughts)) | sections]
+    else
+      sections
+    end
+  end
+
+  defp format_relationship(context) when is_binary(context) do
+    "## Relationship Context\n\n#{context}" |> String.trim()
+  end
+
+  defp format_relationship(context) when is_map(context) do
+    lines = Enum.map_join(context, "\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
+    "## Relationship Context\n\n#{lines}" |> String.trim()
   end
 
   defp format_goals(goals) do
-    goal_list = Enum.map_join(goals, "\n", &"- #{&1}")
-
-    """
-    ## Active Goals
-
-    #{goal_list}
-    """
-    |> String.trim()
+    goal_list = Enum.map_join(goals, "\n", fn g -> "- #{goal_description(g)}" end)
+    "## Active Goals\n\n#{goal_list}" |> String.trim()
   end
 
   defp format_thoughts(thoughts) do
-    thought_list = Enum.map_join(thoughts, "\n", &"- #{&1}")
-
-    """
-    ## Recent Thoughts
-
-    #{thought_list}
-    """
-    |> String.trim()
+    thought_list = Enum.map_join(thoughts, "\n", fn t -> "- #{thought_content(t)}" end)
+    "## Recent Thoughts\n\n#{thought_list}" |> String.trim()
   end
 
   defp format_concerns(concerns) do
     concern_list = Enum.map_join(concerns, "\n", &"- #{&1}")
-
-    """
-    ## Current Concerns
-
-    #{concern_list}
-    """
-    |> String.trim()
+    "## Current Concerns\n\n#{concern_list}" |> String.trim()
   end
 
   defp format_curiosity(items) do
     curiosity_list = Enum.map_join(items, "\n", &"- #{&1}")
-
-    """
-    ## Things I'm Curious About
-
-    #{curiosity_list}
-    """
-    |> String.trim()
+    "## Things I'm Curious About\n\n#{curiosity_list}" |> String.trim()
   end
 
   defp trim_list(wm, field, max_tokens) do
@@ -463,7 +772,6 @@ defmodule Arbor.Memory.WorkingMemory do
     if length(list) <= 1 do
       wm
     else
-      # Try removing one item at a time from the end
       trimmed = Enum.take(list, length(list) - 1)
       new_wm = Map.put(wm, field, trimmed)
       current_tokens = TokenBudget.estimate_tokens(to_prompt_text(new_wm))
@@ -475,4 +783,157 @@ defmodule Arbor.Memory.WorkingMemory do
       end
     end
   end
+
+  # ============================================================================
+  # Private Helpers — Serialization
+  # ============================================================================
+
+  defp serialize_thought(%{content: content, timestamp: ts, cached_tokens: tokens}) do
+    %{
+      "content" => content,
+      "timestamp" => serialize_datetime(ts),
+      "cached_tokens" => tokens
+    }
+  end
+
+  defp serialize_thought(str) when is_binary(str) do
+    %{"content" => str, "timestamp" => nil, "cached_tokens" => 0}
+  end
+
+  defp serialize_goal(%{id: id, description: desc, type: type, priority: priority, progress: progress, added_at: added_at}) do
+    %{
+      "id" => id,
+      "description" => desc,
+      "type" => to_string(type),
+      "priority" => to_string(priority),
+      "progress" => progress,
+      "added_at" => serialize_datetime(added_at)
+    }
+  end
+
+  defp serialize_goal(str) when is_binary(str) do
+    %{"description" => str, "type" => "general", "priority" => "normal", "progress" => 0}
+  end
+
+  defp deserialize_thought(str) when is_binary(str) do
+    # v1 format: plain string
+    %{
+      content: str,
+      timestamp: DateTime.utc_now(),
+      cached_tokens: TokenBudget.estimate_tokens(str)
+    }
+  end
+
+  defp deserialize_thought(%{"content" => content} = data) do
+    %{
+      content: content,
+      timestamp: parse_datetime(data["timestamp"]) || DateTime.utc_now(),
+      cached_tokens: data["cached_tokens"] || TokenBudget.estimate_tokens(content)
+    }
+  end
+
+  defp deserialize_thought(%{content: _} = thought), do: thought
+
+  defp deserialize_goal(str) when is_binary(str) do
+    # v1 format: plain string
+    %{
+      id: generate_id(),
+      description: str,
+      type: :general,
+      priority: :normal,
+      progress: 0,
+      added_at: DateTime.utc_now()
+    }
+  end
+
+  defp deserialize_goal(%{"description" => desc} = data) do
+    %{
+      id: data["id"] || generate_id(),
+      description: desc,
+      type: atomize(data["type"]) || :general,
+      priority: atomize(data["priority"]) || :normal,
+      progress: data["progress"] || 0,
+      added_at: parse_datetime(data["added_at"]) || DateTime.utc_now()
+    }
+  end
+
+  defp deserialize_goal(%{description: _} = goal), do: goal
+
+  defp serialize_token_spec(nil), do: nil
+  defp serialize_token_spec(n) when is_integer(n), do: n
+  defp serialize_token_spec({:percentage, pct}), do: %{"type" => "percentage", "value" => pct}
+  defp serialize_token_spec({:fixed, n}), do: %{"type" => "fixed", "value" => n}
+  defp serialize_token_spec({:min_max, min, max, pct}), do: %{"type" => "min_max", "min" => min, "max" => max, "value" => pct}
+  defp serialize_token_spec(other), do: other
+
+  defp deserialize_token_spec(nil), do: nil
+  defp deserialize_token_spec(n) when is_integer(n), do: n
+  defp deserialize_token_spec(%{"type" => "percentage", "value" => pct}), do: {:percentage, pct}
+  defp deserialize_token_spec(%{"type" => "fixed", "value" => n}), do: {:fixed, n}
+  defp deserialize_token_spec(%{"type" => "min_max", "min" => min, "max" => max, "value" => pct}), do: {:min_max, min, max, pct}
+  defp deserialize_token_spec(other), do: other
+
+  defp serialize_datetime(nil), do: nil
+  defp serialize_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp parse_datetime(nil), do: nil
+  defp parse_datetime(%DateTime{} = dt), do: dt
+  defp parse_datetime(iso_string) when is_binary(iso_string) do
+    case DateTime.from_iso8601(iso_string) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+  defp parse_datetime(_), do: nil
+
+  defp atomize(nil), do: nil
+  defp atomize(a) when is_atom(a), do: a
+  defp atomize(s) when is_binary(s) do
+    try do
+      String.to_existing_atom(s)
+    rescue
+      ArgumentError -> String.to_atom(s)
+    end
+  end
+
+  defp generate_id do
+    "goal_" <> (:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false))
+  end
+
+  # ============================================================================
+  # Private Helpers — Signal Replay
+  # ============================================================================
+
+  defp apply_memory_event(%{data: data}, wm) do
+    type = data[:type] || data["type"]
+
+    case type do
+      t when t in [:identity, "identity"] ->
+        %{wm | name: data[:name] || data["name"]}
+
+      t when t in [:relationship, "relationship"] ->
+        human = data[:human_name] || data["human_name"]
+        context = data[:context] || data["context"]
+        %{wm | current_human: human, relationship_context: context}
+
+      t when t in [:goal, "goal"] ->
+        goal = data[:goal] || data["goal"]
+        event_type = data[:event_type] || data["event_type"]
+
+        case event_type do
+          et when et in [:added, "added"] -> add_goal(wm, goal)
+          et when et in [:achieved, "achieved", :failed, "failed"] -> remove_goal(wm, goal[:id] || goal["id"])
+          _ -> add_goal(wm, goal)
+        end
+
+      t when t in [:thought, "thought"] ->
+        content = data[:content] || data["content"]
+        add_thought(wm, content)
+
+      _ ->
+        wm
+    end
+  end
+
+  defp apply_memory_event(_signal, wm), do: wm
 end
