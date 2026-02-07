@@ -443,6 +443,49 @@ defmodule Arbor.Memory do
     end
   end
 
+  @doc """
+  Trigger spreading activation from a node, boosting related nodes.
+
+  Performs a breadth-first traversal from `node_id`, boosting each
+  connected node's relevance with exponential decay per hop.
+
+  ## Options
+
+  - `:max_depth` - Maximum hops from starting node (default: 3)
+  - `:min_boost` - Stop spreading when boost drops below this (default: 0.05)
+  - `:decay_factor` - Multiply boost by this per hop (default: 0.5)
+
+  ## Examples
+
+      {:ok, graph} = Arbor.Memory.cascade_recall("agent_001", node_id, 0.3)
+  """
+  @spec cascade_recall(String.t(), String.t(), float(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def cascade_recall(agent_id, node_id, boost_amount, opts \\ []) do
+    with {:ok, graph} <- get_graph(agent_id) do
+      updated_graph = KnowledgeGraph.cascade_recall(graph, node_id, boost_amount, opts)
+      save_graph(agent_id, updated_graph)
+      {:ok, KnowledgeGraph.stats(updated_graph)}
+    end
+  end
+
+  @doc """
+  Get the lowest-relevance nodes approaching decay threshold.
+
+  Useful for inspecting which memories are at risk of being pruned.
+
+  ## Examples
+
+      {:ok, nodes} = Arbor.Memory.near_threshold_nodes("agent_001", 10)
+  """
+  @spec near_threshold_nodes(String.t(), non_neg_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def near_threshold_nodes(agent_id, count \\ 10) do
+    with {:ok, graph} <- get_graph(agent_id) do
+      {:ok, KnowledgeGraph.lowest_relevance(graph, count)}
+    end
+  end
+
   # ============================================================================
   # Consolidation (Decay and Pruning)
   # ============================================================================

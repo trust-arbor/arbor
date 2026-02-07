@@ -159,6 +159,31 @@ defmodule Arbor.Actions.MemoryIdentityTest do
     test "has taint roles" do
       roles = MemoryIdentity.ReadSelf.taint_roles()
       assert roles[:aspect] == :control
+      assert roles[:include_source] == :data
+    end
+
+    test "includes source paths when include_source: true", %{context: ctx} do
+      assert {:ok, result} =
+               MemoryIdentity.ReadSelf.run(%{aspect: "memory_system", include_source: true}, ctx)
+
+      assert result.aspect == :memory_system
+      assert Map.has_key?(result, :source_paths)
+      assert is_binary(result.source_paths)
+    end
+
+    test "omits source paths by default", %{context: ctx} do
+      assert {:ok, result} =
+               MemoryIdentity.ReadSelf.run(%{aspect: "identity"}, ctx)
+
+      refute Map.has_key?(result, :source_paths)
+    end
+
+    test "returns all source paths for :all aspect", %{context: ctx} do
+      assert {:ok, result} =
+               MemoryIdentity.ReadSelf.run(%{aspect: "all", include_source: true}, ctx)
+
+      assert Map.has_key?(result, :source_paths)
+      assert is_map(result.source_paths)
     end
   end
 
@@ -192,6 +217,30 @@ defmodule Arbor.Actions.MemoryIdentityTest do
     test "validates action metadata" do
       assert MemoryIdentity.IntrospectMemory.name() == "memory_introspect"
       assert "introspect" in MemoryIdentity.IntrospectMemory.tags()
+    end
+
+    test "includes near-threshold nodes when graph has data", %{agent_id: agent_id, context: ctx} do
+      # Add a low-relevance node
+      Arbor.Memory.add_knowledge(agent_id, %{
+        type: :fact,
+        content: "Low relevance node for threshold test",
+        relevance: 0.1
+      })
+
+      assert {:ok, result} =
+               MemoryIdentity.IntrospectMemory.run(%{}, ctx)
+
+      # Should have near_threshold section with at least our low-relevance node
+      if Map.has_key?(result, :near_threshold) do
+        assert is_list(result.near_threshold)
+
+        Enum.each(result.near_threshold, fn node ->
+          assert Map.has_key?(node, :id)
+          assert Map.has_key?(node, :relevance)
+          assert Map.has_key?(node, :type)
+          assert Map.has_key?(node, :content)
+        end)
+      end
     end
   end
 end

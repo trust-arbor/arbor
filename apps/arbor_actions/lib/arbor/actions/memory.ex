@@ -163,13 +163,14 @@ defmodule Arbor.Actions.Memory do
     use Jido.Action,
       name: "memory_recall",
       description:
-        "Search memory using semantic search. Required: query. Optional: limit (default 10), types filter list.",
+        "Search memory using semantic search. Required: query. Optional: limit (default 10), types filter list, cascade (spreading activation).",
       category: "memory",
       tags: ["memory", "knowledge", "search", "recall"],
       schema: [
         query: [type: :string, required: true, doc: "The search query"],
         limit: [type: :non_neg_integer, default: 10, doc: "Maximum results to return"],
-        types: [type: {:list, :string}, doc: "Filter by memory types"]
+        types: [type: {:list, :string}, doc: "Filter by memory types"],
+        cascade: [type: :boolean, default: false, doc: "Enable spreading activation to boost related nodes"]
       ]
 
     alias Arbor.Actions
@@ -177,7 +178,7 @@ defmodule Arbor.Actions.Memory do
 
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles do
-      %{query: :data, limit: :data, types: :data}
+      %{query: :data, limit: :data, types: :data, cascade: :data}
     end
 
     @impl true
@@ -192,6 +193,14 @@ defmodule Arbor.Actions.Memory do
 
         case Arbor.Memory.recall(agent_id, params.query, opts) do
           {:ok, results} ->
+            # Trigger spreading activation on top results if cascade enabled
+            cascade_applied =
+              if params[:cascade] == true and results != [] do
+                apply_cascade(agent_id, results)
+              else
+                false
+              end
+
             formatted =
               Enum.map(results, fn r ->
                 %{
@@ -203,7 +212,14 @@ defmodule Arbor.Actions.Memory do
               end)
 
             Actions.emit_completed(__MODULE__, %{count: length(formatted)})
-            {:ok, %{results: formatted, count: length(formatted), query: params.query}}
+
+            {:ok,
+             %{
+               results: formatted,
+               count: length(formatted),
+               query: params.query,
+               cascade_applied: cascade_applied
+             }}
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
@@ -213,6 +229,21 @@ defmodule Arbor.Actions.Memory do
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, reason}
+      end
+    end
+
+    # Trigger spreading activation from the top recall result
+    defp apply_cascade(agent_id, results) do
+      top_result = hd(results)
+      node_id = top_result[:id] || top_result[:entry_id]
+
+      if node_id do
+        case Arbor.Memory.cascade_recall(agent_id, node_id, 0.2) do
+          {:ok, _stats} -> true
+          _ -> false
+        end
+      else
+        false
       end
     end
 
