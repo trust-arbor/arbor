@@ -36,19 +36,30 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_memories: true,
         show_actions: true,
         show_thoughts: true,
+        show_goals: true,
+        show_llm_panel: false,
         # Memory state
         memory_stats: nil,
         # Working memory thoughts
         working_thoughts: [],
-        # Token tracking (when available)
+        # Token tracking
         total_tokens: 0,
-        query_count: 0
+        query_count: 0,
+        # Goals
+        agent_goals: [],
+        # LLM heartbeat tracking
+        llm_call_count: 0,
+        last_llm_mode: nil,
+        last_llm_thinking: nil,
+        heartbeat_count: 0,
+        memory_notes_total: 0
       )
       |> stream(:messages, [])
       |> stream(:signals, [])
       |> stream(:thinking, [])
       |> stream(:memories, [])
       |> stream(:actions, [])
+      |> stream(:llm_interactions, [])
 
     {:ok, socket}
   end
@@ -91,12 +102,22 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         socket =
           socket
           |> assign(agent: agent, agent_id: agent_id, error: nil, memory_stats: memory_stats)
-          |> assign(query_count: 0, working_thoughts: [])
+          |> assign(
+            query_count: 0,
+            working_thoughts: [],
+            agent_goals: fetch_goals(agent_id),
+            llm_call_count: 0,
+            last_llm_mode: nil,
+            last_llm_thinking: nil,
+            heartbeat_count: 0,
+            memory_notes_total: 0
+          )
           |> stream(:messages, [], reset: true)
           |> stream(:signals, [], reset: true)
           |> stream(:thinking, [], reset: true)
           |> stream(:memories, [], reset: true)
           |> stream(:actions, [], reset: true)
+          |> stream(:llm_interactions, [], reset: true)
 
         {:noreply, socket}
 
@@ -119,7 +140,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       end
     end
 
-    {:noreply, assign(socket, agent: nil, agent_id: nil, session_id: nil, memory_stats: nil)}
+    {:noreply,
+     assign(socket,
+       agent: nil,
+       agent_id: nil,
+       session_id: nil,
+       memory_stats: nil,
+       agent_goals: [],
+       llm_call_count: 0,
+       heartbeat_count: 0
+     )}
   end
 
   def handle_event("update-input", %{"message" => value}, socket) do
@@ -173,6 +203,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, show_thoughts: !socket.assigns.show_thoughts)}
   end
 
+  def handle_event("toggle-goals", _params, socket) do
+    {:noreply, assign(socket, show_goals: !socket.assigns.show_goals)}
+  end
+
+  def handle_event("toggle-llm-panel", _params, socket) do
+    {:noreply, assign(socket, show_llm_panel: !socket.assigns.show_llm_panel)}
+  end
+
   @impl true
   def handle_info({:query, agent, prompt}, socket) do
     case Claude.query(agent, prompt, timeout: 180_000) do
@@ -193,15 +231,24 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       signal_entry = %{
         id: "sig-#{System.unique_integer([:positive])}",
         category: signal.category,
-        event: signal.event,
+        event: signal.type,
         timestamp: signal.timestamp,
         metadata: signal.metadata
       }
 
       socket = stream_insert(socket, :signals, signal_entry)
 
-      # Also process action signals
+      # Process action signals
       socket = maybe_add_action(socket, signal)
+
+      # Track heartbeat LLM data
+      socket = maybe_track_heartbeat(socket, signal)
+
+      # Track goal changes
+      socket = maybe_refresh_goals(socket, signal)
+
+      # Track memory note signals
+      socket = maybe_track_memory_note(socket, signal)
 
       {:noreply, socket}
     else
@@ -280,12 +327,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     ~H"""
     <.dashboard_header title="Agent Chat" subtitle="Interactive conversation with Claude + Memory" />
 
-    <%!-- Stats bar when agent is active --%>
-    <div
-      :if={@agent}
-      style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem 1rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 8px;"
-    >
-      <.badge label={"Agent: #{@agent_id}"} color={:green} />
+    <%!-- Stats bar --%>
+    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.4rem 0.75rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; font-size: 0.85em;">
+      <.badge :if={@agent} label={"Agent: #{@agent_id}"} color={:green} />
+      <.badge :if={!@agent} label="No Agent" color={:gray} />
       <.badge
         :if={@session_id}
         label={"Session: #{String.slice(@session_id || "", 0..7)}..."}
@@ -304,38 +349,59 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         label={"Knowledge: #{get_in(@memory_stats, [:knowledge, :node_count]) || 0}"}
         color={:green}
       />
+      <.badge
+        :if={@heartbeat_count > 0}
+        label={"Heartbeats: #{@heartbeat_count}"}
+        color={:yellow}
+      />
+      <.badge
+        :if={@llm_call_count > 0}
+        label={"LLM Calls: #{@llm_call_count}"}
+        color={:blue}
+      />
+      <.badge
+        :if={@memory_notes_total > 0}
+        label={"Notes: #{@memory_notes_total}"}
+        color={:purple}
+      />
+      <.badge
+        :if={@last_llm_mode}
+        label={"Mode: #{@last_llm_mode}"}
+        color={:yellow}
+      />
     </div>
 
-    <%!-- 3-column layout: left (signals+actions) | center (chat) | right (thinking+memory) --%>
-    <div style="display: grid; grid-template-columns: 280px 1fr 320px; gap: 1rem; margin-top: 0.75rem; height: calc(100vh - 200px);">
+    <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
+    <div style="display: grid; grid-template-columns: 20% 1fr 30%; gap: 0.75rem; margin-top: 0.5rem; height: calc(100vh - 160px); min-height: 400px;">
+
       <%!-- LEFT PANEL: Signals + Actions --%>
-      <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
-        <%!-- Signal Stream --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden; flex: 1; min-height: 200px;">
-          <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; justify-content: space-between; align-items: center;">
-            <strong>📡 Signal Stream</strong>
-            <span style="color: #22c55e; font-size: 0.75em;">● LIVE</span>
+      <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden;">
+        <%!-- Signal Stream — grows to fill --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; flex: 1; min-height: 0;">
+          <div style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
+            <strong style="font-size: 0.85em;">📡 Signals</strong>
+            <span style="color: #22c55e; font-size: 0.7em;">● LIVE</span>
           </div>
           <div
             id="signals-container"
             phx-update="stream"
-            style="max-height: 300px; overflow-y: auto; padding: 0.5rem;"
+            style="flex: 1; overflow-y: auto; padding: 0.4rem; min-height: 0;"
           >
             <div
               :for={{dom_id, sig} <- @streams.signals}
               id={dom_id}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(74, 255, 158, 0.1); font-size: 0.85em;"
+              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(74, 255, 158, 0.1); font-size: 0.8em;"
             >
               <div style="display: flex; align-items: center; gap: 0.25rem;">
-                <span style="font-size: 1em;">{signal_icon(sig.category)}</span>
-                <span style="font-weight: 500; flex: 1;">{sig.event}</span>
-                <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                <span>{signal_icon(sig.category)}</span>
+                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{sig.event}</span>
+                <span style="color: var(--aw-text-muted, #888); font-size: 0.75em; flex-shrink: 0;">
                   {format_time(sig.timestamp)}
                 </span>
               </div>
             </div>
           </div>
-          <div style="padding: 0.5rem; text-align: center;">
+          <div style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
             <.empty_state
               :if={stream_empty?(@streams.signals)}
               icon="📡"
@@ -345,14 +411,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
         </div>
 
-        <%!-- Recent Actions --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
+        <%!-- Recent Actions — collapsible --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
           <div
             phx-click="toggle-actions"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
           >
-            <strong>⚡ Recent Actions</strong>
-            <span style="color: var(--aw-text-muted, #888);">
+            <strong style="font-size: 0.85em;">⚡ Actions</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
               {if @show_actions, do: "▼", else: "▶"}
             </span>
           </div>
@@ -360,25 +426,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@show_actions}
             id="actions-container"
             phx-update="stream"
-            style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
+            style="max-height: 30vh; overflow-y: auto; padding: 0.4rem;"
           >
             <div
               :for={{dom_id, action} <- @streams.actions}
               id={dom_id}
-              style={"margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; font-size: 0.85em; " <> action_style(action.outcome)}
+              style={"margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; font-size: 0.8em; " <> action_style(action.outcome)}
             >
               <div style="display: flex; align-items: center; gap: 0.25rem;">
                 <span>⚡</span>
-                <span style="font-weight: 500; flex: 1;">{action.name}</span>
+                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{action.name}</span>
                 <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
               </div>
             </div>
           </div>
-          <div :if={@show_actions} style="padding: 0.5rem; text-align: center;">
+          <div :if={@show_actions} style="padding: 0.4rem; text-align: center;">
             <.empty_state
               :if={stream_empty?(@streams.actions)}
               icon="⚡"
-              title="No actions yet..."
+              title="No actions yet"
               hint=""
             />
           </div>
@@ -386,14 +452,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       </div>
 
       <%!-- CENTER: Chat Panel --%>
-      <div style="display: flex; flex-direction: column; border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0;">
         <%!-- Agent controls --%>
-        <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 1rem;">
+        <div style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0;">
           <div :if={@agent == nil}>
             <form phx-submit="start-agent" style="display: flex; gap: 0.5rem;">
               <select
                 name="model"
-                style="padding: 0.5rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit;"
+                style="padding: 0.4rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
               >
                 <option value="haiku">Haiku (fast)</option>
                 <option value="sonnet">Sonnet (balanced)</option>
@@ -401,7 +467,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </select>
               <button
                 type="submit"
-                style="padding: 0.5rem 1rem; background: var(--aw-accent, #4a9eff); border: none; border-radius: 4px; color: white; cursor: pointer;"
+                style="padding: 0.4rem 0.75rem; background: var(--aw-accent, #4a9eff); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
               >
                 Start Agent
               </button>
@@ -411,11 +477,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@agent != nil}
             style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
           >
-            <span style="color: var(--aw-text-muted, #888);">Chat with Claude</span>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">Chat with Claude</span>
             <div style="flex: 1;"></div>
             <button
               phx-click="stop-agent"
-              style="padding: 0.5rem 1rem; background: var(--aw-error, #ff4a4a); border: none; border-radius: 4px; color: white; cursor: pointer;"
+              style="padding: 0.4rem 0.75rem; background: var(--aw-error, #ff4a4a); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
             >
               Stop Agent
             </button>
@@ -426,23 +492,23 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         <div
           id="messages-container"
           phx-update="stream"
-          style="flex: 1; overflow-y: auto; padding: 1rem;"
+          style="flex: 1; overflow-y: auto; padding: 0.75rem; min-height: 0;"
         >
           <div
             :for={{dom_id, msg} <- @streams.messages}
             id={dom_id}
-            style={"margin-bottom: 1rem; padding: 0.75rem; border-radius: 8px; " <> message_style(msg.role)}
+            style={"margin-bottom: 0.75rem; padding: 0.6rem; border-radius: 6px; " <> message_style(msg.role)}
           >
-            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-              <strong>{role_label(msg.role)}</strong>
-              <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
+              <strong style="font-size: 0.9em;">{role_label(msg.role)}</strong>
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
                 {format_time(msg.timestamp)}
               </span>
             </div>
-            <div style="white-space: pre-wrap;">{msg.content}</div>
+            <div style="white-space: pre-wrap; font-size: 0.9em;">{msg.content}</div>
             <div
               :if={msg[:model] || msg[:memory_count]}
-              style="margin-top: 0.5rem; display: flex; gap: 0.5rem;"
+              style="margin-top: 0.4rem; display: flex; gap: 0.5rem;"
             >
               <.badge :if={msg[:model]} label={to_string(msg.model)} color={:gray} />
               <.badge
@@ -455,14 +521,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Loading indicator --%>
-        <div :if={@loading} style="padding: 1rem; border-top: 1px solid var(--aw-border, #333);">
+        <div :if={@loading} style="padding: 0.75rem; border-top: 1px solid var(--aw-border, #333); flex-shrink: 0;">
           <span style="color: var(--aw-text-muted, #888);">🤔 Thinking...</span>
         </div>
 
         <%!-- Error display --%>
         <div
           :if={@error}
-          style="padding: 0.75rem 1rem; background: rgba(255, 74, 74, 0.1); color: var(--aw-error, #ff4a4a); border-top: 1px solid var(--aw-error, #ff4a4a);"
+          style="padding: 0.5rem 0.75rem; background: rgba(255, 74, 74, 0.1); color: var(--aw-error, #ff4a4a); border-top: 1px solid var(--aw-error, #ff4a4a); flex-shrink: 0; font-size: 0.85em;"
         >
           {@error}
         </div>
@@ -471,7 +537,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         <form
           phx-submit="send-message"
           phx-change="update-input"
-          style="padding: 0.75rem 1rem; border-top: 1px solid var(--aw-border, #333); display: flex; gap: 0.5rem;"
+          style="padding: 0.5rem 0.75rem; border-top: 1px solid var(--aw-border, #333); display: flex; gap: 0.5rem; flex-shrink: 0;"
         >
           <input
             type="text"
@@ -479,40 +545,125 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             value={@input}
             placeholder={if @agent, do: "Type a message...", else: "Start an agent first"}
             disabled={@agent == nil or @loading}
-            style="flex: 1; padding: 0.5rem 0.75rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit;"
+            style="flex: 1; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
             autocomplete="off"
           />
           <button
             type="submit"
             disabled={@agent == nil or @loading or @input == ""}
-            style={"padding: 0.5rem 1rem; border: none; border-radius: 4px; color: white; cursor: " <> if(@agent && !@loading, do: "pointer", else: "not-allowed") <> "; background: " <> if(@agent && !@loading, do: "var(--aw-accent, #4a9eff)", else: "var(--aw-text-muted, #888)") <> ";"}
+            style={"padding: 0.4rem 0.75rem; border: none; border-radius: 4px; color: white; font-size: 0.9em; cursor: " <> if(@agent && !@loading, do: "pointer", else: "not-allowed") <> "; background: " <> if(@agent && !@loading, do: "var(--aw-accent, #4a9eff)", else: "var(--aw-text-muted, #888)") <> ";"}
           >
             Send
           </button>
         </form>
       </div>
 
-      <%!-- RIGHT PANEL: Thinking + Memory --%>
-      <div style="display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto;">
-        <%!-- Working Thoughts panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
+      <%!-- RIGHT PANEL: Goals + Thinking + Memory + LLM --%>
+      <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; min-height: 0;">
+
+        <%!-- Goals panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-goals"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">🎯 Goals</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+              {if @show_goals, do: "▼", else: "▶"}
+            </span>
+          </div>
+          <div :if={@show_goals} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+            <div
+              :for={goal <- @agent_goals}
+              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(74, 255, 158, 0.05); font-size: 0.8em;"
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                <span style="flex: 1;">{goal.description}</span>
+                <.badge label={to_string(goal.status)} color={goal_status_color(goal.status)} />
+              </div>
+              <div style="background: rgba(128,128,128,0.2); height: 3px; border-radius: 2px; overflow: hidden;">
+                <div style={"background: #{goal_progress_color(goal.progress)}; height: 100%; width: #{round(goal.progress * 100)}%; transition: width 0.3s ease;"}></div>
+              </div>
+              <div style="display: flex; justify-content: space-between; margin-top: 2px;">
+                <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
+                  Priority: {goal.priority}
+                </span>
+                <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
+                  {round(goal.progress * 100)}%
+                </span>
+              </div>
+            </div>
+            <.empty_state
+              :if={@agent_goals == []}
+              icon="🎯"
+              title="No active goals"
+              hint="Goals appear as the agent works"
+            />
+          </div>
+        </div>
+
+        <%!-- Extended Thinking blocks — takes most space --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; flex: 1; min-height: 0;">
+          <div
+            phx-click="toggle-thinking"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;"
+          >
+            <strong style="font-size: 0.85em;">🧠 Thinking</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+              {if @show_thinking, do: "▼", else: "▶"}
+            </span>
+          </div>
+          <div
+            :if={@show_thinking}
+            id="thinking-container"
+            phx-update="stream"
+            style="flex: 1; overflow-y: auto; padding: 0.4rem; min-height: 0;"
+          >
+            <div
+              :for={{dom_id, block} <- @streams.thinking}
+              id={dom_id}
+              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(74, 158, 255, 0.1); font-size: 0.8em;"
+            >
+              <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
+                <.badge :if={block.has_signature} label="signed" color={:blue} />
+                <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                  {format_time(block.timestamp)}
+                </span>
+              </div>
+              <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
+                {Helpers.truncate(block.text, 300)}
+              </p>
+            </div>
+          </div>
+          <div :if={@show_thinking} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
+            <.empty_state
+              :if={stream_empty?(@streams.thinking)}
+              icon="🧠"
+              title="No thinking yet"
+              hint="Thinking blocks appear after queries"
+            />
+          </div>
+        </div>
+
+        <%!-- Working Thoughts --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
           <div
             phx-click="toggle-thoughts"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
           >
-            <strong>💭 Recent Thinking</strong>
-            <span style="color: var(--aw-text-muted, #888);">
+            <strong style="font-size: 0.85em;">💭 Working Thoughts</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
               {if @show_thoughts, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_thoughts} style="max-height: 180px; overflow-y: auto; padding: 0.5rem;">
+          <div :if={@show_thoughts} style="max-height: 15vh; overflow-y: auto; padding: 0.4rem;">
             <div
               :for={thought <- @working_thoughts}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.85em;"
+              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.8em;"
             >
               <span>💭</span>
               <span style="color: var(--aw-text-muted, #888); white-space: pre-wrap;">
-                {Helpers.truncate(thought.content, 120)}
+                {Helpers.truncate(thought.content, 200)}
               </span>
             </div>
             <.empty_state
@@ -524,57 +675,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
         </div>
 
-        <%!-- Extended Thinking blocks --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden;">
-          <div
-            phx-click="toggle-thinking"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong>🧠 Extended Thinking</strong>
-            <span style="color: var(--aw-text-muted, #888);">
-              {if @show_thinking, do: "▼", else: "▶"}
-            </span>
-          </div>
-          <div
-            :if={@show_thinking}
-            id="thinking-container"
-            phx-update="stream"
-            style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
-          >
-            <div
-              :for={{dom_id, block} <- @streams.thinking}
-              id={dom_id}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(74, 158, 255, 0.1); font-size: 0.85em;"
-            >
-              <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                <.badge :if={block.has_signature} label="signed" color={:blue} />
-                <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
-                  {format_time(block.timestamp)}
-                </span>
-              </div>
-              <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
-                {Helpers.truncate(block.text, 150)}
-              </p>
-            </div>
-          </div>
-          <div :if={@show_thinking} style="padding: 0.5rem; text-align: center;">
-            <.empty_state
-              :if={stream_empty?(@streams.thinking)}
-              icon="🧠"
-              title="No thinking yet"
-              hint="Thinking blocks appear after queries"
-            />
-          </div>
-        </div>
-
-        <%!-- Recalled Memories --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 8px; overflow: hidden; flex: 1; min-height: 150px;">
+        <%!-- Memory Notes --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
           <div
             phx-click="toggle-memories"
-            style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
           >
-            <strong>📝 Memory Notes</strong>
-            <span style="color: var(--aw-text-muted, #888);">
+            <strong style="font-size: 0.85em;">📝 Memory Notes</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
               {if @show_memories, do: "▼", else: "▶"}
             </span>
           </div>
@@ -582,14 +690,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@show_memories}
             id="memories-container"
             phx-update="stream"
-            style="max-height: 200px; overflow-y: auto; padding: 0.5rem;"
+            style="max-height: 15vh; overflow-y: auto; padding: 0.4rem;"
           >
             <div
               :for={{dom_id, memory} <- @streams.memories}
               id={dom_id}
-              style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 4px; background: rgba(138, 43, 226, 0.1); font-size: 0.85em;"
+              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(138, 43, 226, 0.1); font-size: 0.8em;"
             >
-              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.25rem;">
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
                 <span>📝</span>
                 <.badge
                   :if={memory.score}
@@ -598,11 +706,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 />
               </div>
               <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
-                {Helpers.truncate(memory.content, 150)}
+                {Helpers.truncate(memory.content, 200)}
               </p>
             </div>
           </div>
-          <div :if={@show_memories} style="padding: 0.5rem; text-align: center;">
+          <div :if={@show_memories} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
             <.empty_state
               :if={stream_empty?(@streams.memories)}
               icon="📝"
@@ -611,6 +719,68 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             />
           </div>
         </div>
+
+        <%!-- LLM Heartbeat --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-llm-panel"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">🔄 Heartbeat LLM</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@llm_call_count > 0} label={"#{@llm_call_count}"} color={:blue} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_llm_panel, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_llm_panel} style="max-height: 25vh; overflow-y: auto;">
+            <%!-- Last heartbeat thinking --%>
+            <div :if={@last_llm_thinking} style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);">
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
+                Last heartbeat ({@last_llm_mode || "unknown"} mode):
+              </div>
+              <p style="color: var(--aw-text, #ccc); font-size: 0.8em; white-space: pre-wrap; margin: 0;">
+                {Helpers.truncate(@last_llm_thinking, 500)}
+              </p>
+            </div>
+            <%!-- LLM interaction stream --%>
+            <div
+              id="llm-interactions-container"
+              phx-update="stream"
+              style="padding: 0.4rem;"
+            >
+              <div
+                :for={{dom_id, interaction} <- @streams.llm_interactions}
+                id={dom_id}
+                style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
+              >
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                  <.badge label={to_string(interaction.mode)} color={:yellow} />
+                  <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
+                    {format_time(interaction.timestamp)}
+                  </span>
+                </div>
+                <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
+                  {Helpers.truncate(interaction.thinking, 250)}
+                </p>
+                <div :if={interaction.actions > 0 || interaction.notes > 0} style="margin-top: 0.2rem; display: flex; gap: 0.25rem;">
+                  <.badge :if={interaction.actions > 0} label={"#{interaction.actions} actions"} color={:green} />
+                  <.badge :if={interaction.notes > 0} label={"#{interaction.notes} notes"} color={:purple} />
+                </div>
+              </div>
+            </div>
+            <div style="padding: 0.4rem; text-align: center;">
+              <.empty_state
+                :if={stream_empty?(@streams.llm_interactions)}
+                icon="🔄"
+                title="No LLM heartbeats yet"
+                hint="LLM calls happen during heartbeat cycles"
+              />
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
     """
@@ -726,7 +896,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp maybe_add_action(socket, signal) do
     # Check if signal contains action data
-    event = to_string(signal.event)
+    event = to_string(signal.type)
 
     if String.contains?(event, "action") or String.contains?(event, "tool") do
       action_entry = %{
@@ -751,7 +921,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       %{"tool" => name} -> to_string(name)
       %{name: name} -> to_string(name)
       %{"name" => name} -> to_string(name)
-      _ -> to_string(signal.event)
+      _ -> to_string(signal.type)
     end
   end
 
@@ -782,5 +952,97 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp get_error_outcome(meta) do
     if Map.has_key?(meta, :error) or Map.has_key?(meta, "error"), do: :failure
+  end
+
+  # ── Goals ──────────────────────────────────────────────────────────
+
+  defp fetch_goals(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory) and
+         function_exported?(Arbor.Memory, :get_active_goals, 1) do
+      Arbor.Memory.get_active_goals(agent_id)
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp goal_status_color(:active), do: :green
+  defp goal_status_color(:achieved), do: :blue
+  defp goal_status_color(:abandoned), do: :red
+  defp goal_status_color(_), do: :gray
+
+  defp goal_progress_color(p) when p >= 0.8, do: "#22c55e"
+  defp goal_progress_color(p) when p >= 0.5, do: "#4a9eff"
+  defp goal_progress_color(p) when p >= 0.2, do: "#eab308"
+  defp goal_progress_color(_), do: "#888"
+
+  # ── Heartbeat / LLM Tracking ───────────────────────────────────────
+
+  defp maybe_track_heartbeat(socket, signal) do
+    event = to_string(signal.type)
+
+    if event == "heartbeat_complete" do
+      data = signal.data || %{}
+
+      mode = data[:cognitive_mode] || data["cognitive_mode"]
+      thinking = data[:agent_thinking] || data["agent_thinking"]
+      llm_actions = data[:llm_actions] || data["llm_actions"] || 0
+      notes_count = data[:memory_notes_count] || data["memory_notes_count"] || 0
+
+      # Count heartbeat and LLM calls
+      heartbeat_count = socket.assigns.heartbeat_count + 1
+      llm_call_count = if llm_actions > 0 or thinking, do: socket.assigns.llm_call_count + 1, else: socket.assigns.llm_call_count
+
+      socket =
+        assign(socket,
+          heartbeat_count: heartbeat_count,
+          llm_call_count: llm_call_count,
+          last_llm_mode: mode,
+          last_llm_thinking: thinking,
+          memory_notes_total: socket.assigns.memory_notes_total + notes_count
+        )
+
+      # Add to LLM interactions stream if there was thinking
+      if thinking && thinking != "" do
+        interaction = %{
+          id: "llm-#{System.unique_integer([:positive])}",
+          mode: mode || :unknown,
+          thinking: thinking,
+          actions: llm_actions,
+          notes: notes_count,
+          timestamp: signal.timestamp
+        }
+
+        stream_insert(socket, :llm_interactions, interaction)
+      else
+        socket
+      end
+    else
+      socket
+    end
+  end
+
+  defp maybe_refresh_goals(socket, signal) do
+    event = to_string(signal.type)
+
+    if String.contains?(event, "goal") do
+      agent_id = socket.assigns.agent_id
+      assign(socket, agent_goals: fetch_goals(agent_id))
+    else
+      socket
+    end
+  end
+
+  defp maybe_track_memory_note(socket, signal) do
+    event = to_string(signal.type)
+
+    if event == "agent_memory_note" do
+      assign(socket, memory_notes_total: socket.assigns.memory_notes_total + 1)
+    else
+      socket
+    end
   end
 end

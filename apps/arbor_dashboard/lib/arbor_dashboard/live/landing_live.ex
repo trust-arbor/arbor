@@ -40,7 +40,7 @@ defmodule Arbor.Dashboard.Live.LandingLive do
       <.stat_card value={@app_count} label="OTP apps" color={:gray} />
     </div>
 
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; margin-top: 1.5rem;">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 1rem; margin-top: 1rem;">
       <.card title="Signals">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
           Real-time signal stream monitoring.

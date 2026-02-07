@@ -116,10 +116,10 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
       />
     </div>
 
-    <div style="display: flex; overflow-x: auto; gap: 1rem; margin-top: 1.5rem; padding-bottom: 1rem;">
+    <div style="display: flex; overflow-x: auto; gap: 1rem; margin-top: 1rem; padding-bottom: 1rem;">
       <div
         :for={stage <- @stages}
-        style="min-width: 260px; max-width: 320px; flex-shrink: 0;"
+        style="min-width: 200px; width: 16%; flex-shrink: 0;"
       >
         <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem; background: var(--aw-bg-secondary, #1a1a1a); border-radius: 4px;">
           <strong>{stage_label(stage)}</strong>
