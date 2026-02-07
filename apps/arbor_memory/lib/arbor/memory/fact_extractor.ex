@@ -1,9 +1,13 @@
 defmodule Arbor.Memory.FactExtractor do
   @moduledoc """
-  Regex-based fact extraction from conversation content.
+  Fact extraction from conversation content using LLM analysis with regex fallback.
 
-  FactExtractor identifies structured facts from natural language text using
-  pattern matching. This is a core subconscious capability — the blog describes
+  FactExtractor identifies structured facts from natural language text. By default,
+  it uses LLM-based extraction (via `Arbor.AI.generate_text/2`) for richer, more
+  contextual results. If the LLM is unavailable, it falls back to regex pattern
+  matching automatically.
+
+  This is a core subconscious capability — the blog describes
   fact extraction as one of the three things the subconscious notices.
 
   ## Fact Categories
@@ -31,7 +35,14 @@ defmodule Arbor.Memory.FactExtractor do
 
       # Batch extraction
       facts = FactExtractor.extract_batch([text1, text2, text3])
+
+      # Force specific method
+      facts = FactExtractor.extract(text, method: :regex)    # regex only
+      facts = FactExtractor.extract(text, method: :llm)      # LLM only
+      facts = FactExtractor.extract(text, method: :auto)     # LLM with regex fallback (default)
   """
+
+  require Logger
 
   @type fact :: %{
           content: String.t(),
@@ -44,8 +55,47 @@ defmodule Arbor.Memory.FactExtractor do
   @type extract_opts :: [
           categories: [:person | :project | :technical | :preference | :relationship],
           min_confidence: float(),
-          source: String.t()
+          source: String.t(),
+          method: :auto | :llm | :regex,
+          model: String.t(),
+          provider: atom()
         ]
+
+  # ============================================================================
+  # LLM Extraction
+  # ============================================================================
+
+  @extraction_system_prompt """
+  You are a fact extraction assistant. Your job is to identify important factual information
+  from conversation excerpts that should be preserved in long-term memory.
+
+  Output a JSON array of facts. Each fact should have:
+  - "content": A clear, standalone statement of the fact
+  - "category": One of "person", "project", "technical", "preference", "relationship"
+  - "entities": Array of entity names mentioned (people, projects, tools, etc.)
+  - "confidence": Your confidence this is worth remembering (0.0-1.0)
+
+  Guidelines:
+  - Focus on: user preferences, technical decisions, important observations, named entities
+  - Ignore: transient discussion, questions without answers, greetings, filler
+  - Make facts standalone - they should make sense without the original context
+  - Be selective - only extract truly important information
+  - Higher confidence for explicit statements, lower for inferences
+  - "person" category: names, roles, locations, employers
+  - "project" category: project names, what's being built, goals
+  - "technical" category: languages, frameworks, tools, databases, dependencies
+  - "preference" category: likes, dislikes, habits, opinions
+  - "relationship" category: connections between people, collaboration patterns
+
+  Example output:
+  [
+    {"content": "User prefers Elixir over Python for backend services", "category": "preference", "entities": ["Elixir", "Python"], "confidence": 0.9},
+    {"content": "The Arbor project uses capability-based security", "category": "technical", "entities": ["Arbor"], "confidence": 0.85}
+  ]
+
+  Output ONLY valid JSON array, no preamble or explanation.
+  If no facts worth extracting, output: []
+  """
 
   # ============================================================================
   # Pattern Definitions
@@ -124,30 +174,29 @@ defmodule Arbor.Memory.FactExtractor do
 
   ## Options
 
+  - `:method` - Extraction method: `:auto` (default), `:llm`, or `:regex`
   - `:categories` - List of categories to extract (default: all)
   - `:min_confidence` - Minimum confidence threshold (default: 0.0)
   - `:source` - Source identifier for extracted facts
+  - `:model` - LLM model to use (for `:llm`/`:auto` methods)
+  - `:provider` - LLM provider to use (for `:llm`/`:auto` methods)
 
   ## Examples
 
       facts = FactExtractor.extract("My name is Alice and I work at Acme")
       facts = FactExtractor.extract(text, min_confidence: 0.7)
       facts = FactExtractor.extract(text, categories: [:person, :technical])
+      facts = FactExtractor.extract(text, method: :regex)
   """
   @spec extract(String.t(), extract_opts()) :: [fact()]
   def extract(text, opts \\ []) when is_binary(text) do
-    categories =
-      Keyword.get(opts, :categories, [:person, :project, :technical, :preference, :relationship])
+    method = Keyword.get(opts, :method, :auto)
 
-    min_confidence = Keyword.get(opts, :min_confidence, 0.0)
-    source = Keyword.get(opts, :source, "conversation")
-
-    patterns = get_patterns_for_categories(categories)
-
-    patterns
-    |> Enum.flat_map(&extract_with_pattern(text, &1, source))
-    |> Enum.filter(&(&1.confidence >= min_confidence))
-    |> deduplicate_facts()
+    case method do
+      :llm -> extract_llm(text, opts)
+      :regex -> extract_regex(text, opts)
+      :auto -> extract_auto(text, opts)
+    end
   end
 
   @doc """
@@ -351,4 +400,178 @@ defmodule Arbor.Memory.FactExtractor do
       String.downcase(fact.content)
     end)
   end
+
+  # ============================================================================
+  # LLM Extraction Implementation
+  # ============================================================================
+
+  defp extract_auto(text, opts) do
+    if llm_available?() do
+      extract_llm_with_fallback(text, opts)
+    else
+      extract_regex(text, opts)
+    end
+  end
+
+  defp extract_regex(text, opts) do
+    categories =
+      Keyword.get(opts, :categories, [:person, :project, :technical, :preference, :relationship])
+
+    min_confidence = Keyword.get(opts, :min_confidence, 0.0)
+    source = Keyword.get(opts, :source, "conversation")
+
+    patterns = get_patterns_for_categories(categories)
+
+    patterns
+    |> Enum.flat_map(&extract_with_pattern(text, &1, source))
+    |> Enum.filter(&(&1.confidence >= min_confidence))
+    |> deduplicate_facts()
+  end
+
+  defp extract_llm_with_fallback(text, opts) do
+    case extract_llm(text, opts) do
+      [] ->
+        # LLM returned nothing, try regex as supplement
+        extract_regex(text, opts)
+
+      {:error, _reason} ->
+        extract_regex(text, opts)
+
+      facts when is_list(facts) ->
+        facts
+    end
+  end
+
+  defp extract_llm(text, opts) do
+    min_confidence = Keyword.get(opts, :min_confidence, 0.0)
+    source = Keyword.get(opts, :source, "conversation")
+
+    prompt = """
+    Extract important facts from this text:
+
+    #{truncate_text(text, 2000)}
+
+    OUTPUT (JSON array only):
+    """
+
+    llm_opts =
+      opts
+      |> Keyword.take([:model, :provider])
+      |> Keyword.put_new(:max_tokens, 1000)
+      |> Keyword.put(:system_prompt, @extraction_system_prompt)
+
+    case call_llm(prompt, llm_opts) do
+      {:ok, raw_json} ->
+        raw_json
+        |> parse_llm_facts(source)
+        |> Enum.filter(&(&1.confidence >= min_confidence))
+        |> deduplicate_facts()
+
+      {:error, reason} ->
+        Logger.debug("LLM fact extraction failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp call_llm(prompt, opts) do
+    case Arbor.AI.generate_text(prompt, opts) do
+      {:ok, %{text: text}} when is_binary(text) ->
+        {:ok, String.trim(text)}
+
+      {:ok, response} when is_binary(response) ->
+        {:ok, String.trim(response)}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:unexpected_response, other}}
+    end
+  end
+
+  @doc false
+  def parse_llm_facts(raw_json, source \\ "conversation") do
+    cleaned =
+      raw_json
+      |> String.trim()
+      |> String.replace(~r/^```json\s*/i, "")
+      |> String.replace(~r/\s*```$/, "")
+      |> String.trim()
+
+    case Jason.decode(cleaned) do
+      {:ok, facts} when is_list(facts) ->
+        facts
+        |> Enum.map(fn fact ->
+          %{
+            content: fact["content"] || "",
+            category: parse_category(fact["category"]),
+            entities: parse_entities(fact["entities"]),
+            confidence: parse_confidence(fact["confidence"]),
+            source: source,
+            subtype: :llm_extracted
+          }
+        end)
+        |> Enum.filter(&valid_fact?/1)
+
+      {:ok, _} ->
+        Logger.debug("LLM fact extraction returned non-array JSON")
+        []
+
+      {:error, reason} ->
+        Logger.debug("Failed to parse LLM facts JSON: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp parse_category("person"), do: :person
+  defp parse_category("project"), do: :project
+  defp parse_category("technical"), do: :technical
+  defp parse_category("preference"), do: :preference
+  defp parse_category("relationship"), do: :relationship
+  defp parse_category(_), do: :technical
+
+  defp parse_entities(nil), do: []
+  defp parse_entities(entities) when is_list(entities), do: Enum.map(entities, &to_string/1)
+  defp parse_entities(_), do: []
+
+  defp parse_confidence(nil), do: 0.5
+  defp parse_confidence(c) when is_number(c), do: max(0.0, min(1.0, c))
+  defp parse_confidence(_), do: 0.5
+
+  defp valid_fact?(%{content: content}) when is_binary(content) and byte_size(content) > 10, do: true
+  defp valid_fact?(_), do: false
+
+  @doc false
+  def llm_available? do
+    Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2)
+  end
+
+  @doc """
+  Format a list of message maps for LLM extraction.
+
+  Each message should have `:role` and `:content` keys.
+  """
+  @spec format_messages_for_extraction([map()]) :: String.t()
+  def format_messages_for_extraction(messages) when is_list(messages) do
+    Enum.map_join(messages, "\n", fn msg ->
+      role = msg[:role] || msg["role"] || "unknown"
+      content = msg[:content] || msg["content"] || ""
+      speaker = msg[:speaker] || msg["speaker"]
+
+      speaker_label =
+        case role do
+          r when r in [:user, "user"] -> speaker || "Human"
+          r when r in [:assistant, "assistant"] -> "Assistant"
+          _ -> to_string(role)
+        end
+
+      "#{speaker_label}: #{truncate_text(content, 1000)}"
+    end)
+  end
+
+  defp truncate_text(text, max_length) when byte_size(text) > max_length do
+    String.slice(text, 0, max_length) <> "..."
+  end
+
+  defp truncate_text(text, _max_length), do: text
 end

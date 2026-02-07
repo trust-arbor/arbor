@@ -32,6 +32,8 @@ defmodule Arbor.Memory.ActionPatterns do
       # => [%{type: :repeated_sequence, tools: ["Read", "Edit"], occurrences: 2, confidence: 0.6}]
   """
 
+  require Logger
+
   alias Arbor.Memory.{KnowledgeGraph, Proposal, Signals}
 
   @type action :: %{
@@ -271,9 +273,15 @@ defmodule Arbor.Memory.ActionPatterns do
   @doc """
   Synthesize human-readable learnings from detected patterns.
 
+  Uses LLM-based synthesis when available for richer, more contextual learnings.
+  Falls back to template-based synthesis when LLM is unavailable.
+
   ## Options
 
-  - `:use_llm` - Whether to use LLM for synthesis (default: false, falls back to templates)
+  - `:use_llm` - Force LLM usage (default: :auto — uses LLM if available)
+  - `:max_learnings` - Maximum number of learnings to generate (default: 5)
+  - `:model` - LLM model to use
+  - `:provider` - LLM provider to use
 
   ## Examples
 
@@ -282,12 +290,23 @@ defmodule Arbor.Memory.ActionPatterns do
   """
   @spec synthesize_learnings([pattern()], keyword()) :: [String.t()]
   def synthesize_learnings(patterns, opts \\ []) do
-    use_llm = Keyword.get(opts, :use_llm, false)
+    use_llm = Keyword.get(opts, :use_llm, :auto)
 
-    if use_llm do
-      synthesize_with_llm(patterns)
-    else
-      synthesize_with_templates(patterns)
+    case use_llm do
+      false ->
+        synthesize_with_templates(patterns)
+
+      true ->
+        case get_llm_client() do
+          nil -> synthesize_with_templates(patterns)
+          client -> synthesize_with_llm(patterns, client, opts)
+        end
+
+      :auto ->
+        case get_llm_client() do
+          nil -> synthesize_with_templates(patterns)
+          client -> synthesize_with_llm(patterns, client, opts)
+        end
     end
   end
 
@@ -312,10 +331,107 @@ defmodule Arbor.Memory.ActionPatterns do
       "This may indicate an exploratory or debugging session."
   end
 
-  defp synthesize_with_llm(_patterns) do
-    # Placeholder for LLM integration
-    # In Phase 5+, this would call arbor_ai to generate more nuanced learnings
-    []
+  defp synthesize_with_llm(patterns, llm_client, opts) do
+    prompt = build_synthesis_prompt(patterns)
+    max_learnings = Keyword.get(opts, :max_learnings, 5)
+
+    llm_opts =
+      opts
+      |> Keyword.take([:model, :provider])
+      |> Keyword.put_new(:max_tokens, 1000)
+
+    case llm_client.generate_text(prompt, llm_opts) do
+      {:ok, response} ->
+        parse_llm_learnings(response, patterns, max_learnings)
+
+      {:error, reason} ->
+        Logger.warning("LLM synthesis failed, falling back to template learnings: #{inspect(reason)}")
+        synthesize_with_templates(patterns)
+    end
+  end
+
+  @doc false
+  def build_synthesis_prompt(patterns) do
+    pattern_descriptions =
+      [
+        format_pattern_group("Repeated sequences", Enum.filter(patterns, &(&1.type == :repeated_sequence))),
+        format_pattern_group("Failure-then-success recoveries", Enum.filter(patterns, &(&1.type == :failure_then_success))),
+        format_pattern_group("Long action sequences", Enum.filter(patterns, &(&1.type == :long_sequence)))
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n\n")
+
+    """
+    Analyze these action patterns from an AI agent and synthesize actionable learnings:
+
+    #{pattern_descriptions}
+
+    Generate learnings that would help the agent work more effectively.
+    Focus on:
+    - What worked vs what didn't
+    - Better approaches discovered through trial
+    - Tool-specific tips and gotchas
+    - Workflow optimizations
+
+    Output JSON array of learnings (max 5):
+    [{"content": "learning text", "tool_name": "tool_name or null", "confidence": 0.8}]
+
+    Keep learnings concise (1-2 sentences) and actionable.
+    """
+  end
+
+  defp format_pattern_group(_title, []), do: nil
+
+  defp format_pattern_group(title, patterns) do
+    formatted =
+      patterns
+      |> Enum.take(3)
+      |> Enum.map_join("\n", fn p -> "- #{p.description}" end)
+
+    "#{title}:\n#{formatted}"
+  end
+
+  @doc false
+  def parse_llm_learnings(response, patterns, max_learnings) do
+    text =
+      cond do
+        is_map(response) and is_binary(response[:text]) -> response[:text]
+        is_map(response) and is_binary(response["text"]) -> response["text"]
+        is_binary(response) -> response
+        true -> ""
+      end
+
+    json_text = extract_json(text)
+
+    case Jason.decode(json_text) do
+      {:ok, learnings} when is_list(learnings) ->
+        learnings
+        |> Enum.take(max_learnings)
+        |> Enum.map(fn l ->
+          l["content"] || ""
+        end)
+        |> Enum.filter(fn content -> content != "" end)
+
+      {:error, _} ->
+        Logger.debug("Could not parse LLM learnings JSON, using template learnings")
+        synthesize_with_templates(patterns)
+    end
+  end
+
+  @doc false
+  def extract_json(text) do
+    case Regex.run(~r/\[[\s\S]*\]/, text) do
+      [json] -> json
+      nil -> "[]"
+    end
+  end
+
+  defp get_llm_client do
+    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+      Arbor.AI
+    else
+      nil
+    end
   end
 
   # ============================================================================
