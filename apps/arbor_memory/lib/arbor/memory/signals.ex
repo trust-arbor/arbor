@@ -672,6 +672,19 @@ defmodule Arbor.Memory.Signals do
   end
 
   @doc """
+  Emit a signal when knowledge graph decay occurs during post-reflection consolidation.
+  """
+  @spec emit_reflection_knowledge_decay(String.t(), map()) :: :ok
+  def emit_reflection_knowledge_decay(agent_id, data) do
+    Arbor.Signals.emit(:memory, :reflection_knowledge_decay, %{
+      agent_id: agent_id,
+      archived_count: data[:archived_count],
+      remaining_nodes: data[:remaining_nodes],
+      decayed_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
   Emit a signal for LLM call metrics during reflection.
   """
   @spec emit_reflection_llm_call(String.t(), map()) :: :ok
