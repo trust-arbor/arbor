@@ -373,6 +373,24 @@ defmodule Arbor.Memory do
   end
 
   @doc """
+  Find a knowledge node by name (case-insensitive exact match).
+
+  Useful for deduplication — check if a node with this name exists
+  before creating a new one.
+
+  ## Examples
+
+      {:ok, node_id} = Arbor.Memory.find_knowledge_by_name("agent_001", "Elixir")
+      {:error, :not_found} = Arbor.Memory.find_knowledge_by_name("agent_001", "nonexistent")
+  """
+  @spec find_knowledge_by_name(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def find_knowledge_by_name(agent_id, name) do
+    with {:ok, graph} <- get_graph(agent_id) do
+      KnowledgeGraph.find_by_name(graph, name)
+    end
+  end
+
+  @doc """
   Get all pending proposals (facts and learnings awaiting approval).
   """
   @spec get_pending_proposals(String.t()) :: {:ok, [map()]} | {:error, term()}

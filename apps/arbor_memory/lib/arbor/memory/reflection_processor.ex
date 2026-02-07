@@ -36,7 +36,18 @@ defmodule Arbor.Memory.ReflectionProcessor do
   """
 
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{Events, GoalStore, IdentityConsolidator, Signals, Thinking, WorkingMemory}
+
+  alias Arbor.Memory.{
+    Events,
+    GoalStore,
+    IdentityConsolidator,
+    InsightDetector,
+    Relationship,
+    SelfKnowledge,
+    Signals,
+    Thinking,
+    WorkingMemory
+  }
 
   require Logger
 
@@ -61,6 +72,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
   # Maximum reflections to store per agent
   @max_reflections 100
+
+  # Default minimum interval between reflections (10 minutes)
+  @default_reflection_interval_ms 600_000
+
+  # Default event count threshold to trigger reflection
+  @default_signal_threshold 50
 
   # ============================================================================
   # Main API
@@ -146,17 +163,24 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
       {:ok, reflection} = ReflectionProcessor.periodic_reflection("agent_001")
   """
-  @spec periodic_reflection(String.t()) :: {:ok, reflection()} | {:error, term()}
-  def periodic_reflection(agent_id) do
-    prompt = """
-    Reflect on my recent activity and patterns. Consider:
-    - What tasks have I been focused on?
-    - What patterns do I notice in my approach?
-    - What have I learned or improved?
-    - Are there areas where I could do better?
-    """
+  @spec periodic_reflection(String.t(), keyword()) ::
+          {:ok, reflection()} | {:ok, :skipped} | {:error, term()}
+  def periodic_reflection(agent_id, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
 
-    reflect(agent_id, prompt)
+    if force or should_reflect?(agent_id, opts) do
+      prompt = """
+      Reflect on my recent activity and patterns. Consider:
+      - What tasks have I been focused on?
+      - What patterns do I notice in my approach?
+      - What have I learned or improved?
+      - Are there areas where I could do better?
+      """
+
+      reflect(agent_id, prompt)
+    else
+      {:ok, :skipped}
+    end
   end
 
   @doc """
@@ -199,6 +223,10 @@ defmodule Arbor.Memory.ReflectionProcessor do
       integrate_insights(agent_id, parsed.insights)
       integrate_learnings(agent_id, parsed.learnings)
       integrate_knowledge_graph(agent_id, parsed.knowledge_nodes, parsed.knowledge_edges)
+      process_relationships(agent_id, parsed.relationships)
+      trigger_insight_detection(agent_id)
+      store_self_insight_suggestions(agent_id, parsed.self_insight_suggestions)
+      add_goals_to_knowledge_graph(agent_id, Map.get(context, :goals, []))
       run_post_reflection_decay(agent_id)
 
       duration = System.monotonic_time(:millisecond) - start_time
@@ -280,6 +308,46 @@ defmodule Arbor.Memory.ReflectionProcessor do
     {:ok, filtered}
   end
 
+  @doc """
+  Check whether a reflection should be triggered based on time and activity.
+
+  Returns `true` if enough time has passed since the last reflection OR
+  enough events have occurred since the last reflection.
+
+  ## Options
+
+  - `:interval_ms` - Minimum ms between reflections (default: from config or 600_000)
+  - `:threshold` - Event count threshold (default: from config or 50)
+
+  ## Examples
+
+      true = ReflectionProcessor.should_reflect?("agent_001")
+      false = ReflectionProcessor.should_reflect?("agent_001", interval_ms: 3_600_000)
+  """
+  @spec should_reflect?(String.t(), keyword()) :: boolean()
+  def should_reflect?(agent_id, opts \\ []) do
+    min_interval =
+      Keyword.get(
+        opts,
+        :interval_ms,
+        Application.get_env(:arbor_memory, :reflection_interval_ms, @default_reflection_interval_ms)
+      )
+
+    threshold =
+      Keyword.get(
+        opts,
+        :threshold,
+        Application.get_env(:arbor_memory, :reflection_signal_threshold, @default_signal_threshold)
+      )
+
+    time_elapsed = time_since_last_reflection(agent_id)
+    time_triggered = time_elapsed == :infinity or time_elapsed >= min_interval
+
+    event_triggered = event_count_since_last_reflection(agent_id) >= threshold
+
+    time_triggered or event_triggered
+  end
+
   # ============================================================================
   # Deep Context Building
   # ============================================================================
@@ -298,7 +366,8 @@ defmodule Arbor.Memory.ReflectionProcessor do
        goals_text: format_goals_for_prompt(goals),
        knowledge_graph_text: get_knowledge_text(agent_id),
        working_memory_text: get_working_memory_text(agent_id),
-       recent_thinking_text: format_recent_thinking(agent_id)
+       recent_thinking_text: format_recent_thinking(agent_id),
+       recent_activity_text: get_recent_activity_text(agent_id)
      }}
   end
 
@@ -334,6 +403,34 @@ defmodule Arbor.Memory.ReflectionProcessor do
     "- #{entry.text}#{sig}"
   end
 
+  defp get_recent_activity_text(agent_id) do
+    case Events.get_recent(agent_id, 50) do
+      {:ok, []} ->
+        "(No recent activity)"
+
+      {:ok, events} ->
+        Enum.map_join(events, "\n", &format_event_for_context/1)
+
+      {:error, _} ->
+        "(No recent activity)"
+    end
+  end
+
+  defp format_event_for_context(event) do
+    data_text =
+      case event.data do
+        data when is_map(data) and map_size(data) > 0 ->
+          data
+          |> Enum.take(4)
+          |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
+
+        _ ->
+          ""
+      end
+
+    "- [#{event.type}] #{data_text}"
+  end
+
   # ============================================================================
   # LLM Prompt Building (ported from arbor_seed)
   # ============================================================================
@@ -362,6 +459,9 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
     ## Recent Thinking
     #{context.recent_thinking_text}
+
+    ## Recent Activity
+    #{context.recent_activity_text}
 
     ## Instructions
 
@@ -483,32 +583,32 @@ defmodule Arbor.Memory.ReflectionProcessor do
         model: model
       ]
 
-      result =
+      {result, usage} =
         case Arbor.AI.generate_text(prompt, llm_opts) do
+          {:ok, %{text: text, usage: usage}} ->
+            {{:ok, text}, usage}
+
           {:ok, %{text: text}} ->
-            {:ok, text}
+            {{:ok, text}, nil}
 
           {:ok, text} when is_binary(text) ->
-            {:ok, text}
+            {{:ok, text}, nil}
 
           {:error, reason} ->
-            {:error, reason}
+            {{:error, reason}, nil}
         end
 
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
-      {success, _} =
-        case result do
-          {:ok, _} -> {true, %{}}
-          {:error, _} -> {false, %{}}
-        end
+      success = match?({:ok, _}, result)
 
       Signals.emit_reflection_llm_call("unknown", %{
         provider: provider,
         model: model,
         prompt_chars: String.length(prompt),
         duration_ms: duration_ms,
-        success: success
+        success: success,
+        usage: usage
       })
 
       result
@@ -554,6 +654,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
       knowledge_nodes: parsed["knowledge_nodes"] || [],
       knowledge_edges: parsed["knowledge_edges"] || [],
       self_insight_suggestions: parsed["self_insight_suggestions"] || [],
+      relationships: parsed["relationships"] || [],
       thinking: parsed["thinking"]
     }
   end
@@ -567,6 +668,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
       knowledge_nodes: [],
       knowledge_edges: [],
       self_insight_suggestions: [],
+      relationships: [],
       thinking: nil
     }
   end
@@ -601,8 +703,20 @@ defmodule Arbor.Memory.ReflectionProcessor do
       "abandoned" ->
         GoalStore.abandon_goal(agent_id, goal_id, update["note"])
 
+      "blocked" ->
+        GoalStore.block_goal(agent_id, goal_id, update["blockers"])
+
+      "failed" ->
+        reason = "[Failed] #{update["note"] || "No reason given"}"
+        GoalStore.abandon_goal(agent_id, goal_id, reason)
+
       _ ->
         :ok
+    end
+
+    # Store notes in goal metadata if present
+    if update["note"] do
+      accumulate_goal_note(agent_id, goal_id, update["note"])
     end
 
     Signals.emit_reflection_goal_update(agent_id, goal_id, update)
@@ -634,10 +748,18 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp create_goal_from_data(agent_id, goal_data) do
+    metadata =
+      if goal_data["success_criteria"] do
+        %{success_criteria: goal_data["success_criteria"]}
+      else
+        %{}
+      end
+
     goal =
       Goal.new(goal_data["description"],
         type: atomize_type(goal_data["type"]),
-        priority: atomize_priority_to_int(goal_data["priority"])
+        priority: atomize_priority_to_int(goal_data["priority"]),
+        metadata: metadata
       )
 
     goal = maybe_set_parent(goal, goal_data["parent_goal_id"])
@@ -651,6 +773,20 @@ defmodule Arbor.Memory.ReflectionProcessor do
           goal_id: saved_goal.id,
           description: goal_data["description"]
         )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp accumulate_goal_note(agent_id, goal_id, note) do
+    case GoalStore.get_goal(agent_id, goal_id) do
+      {:ok, goal} ->
+        existing_notes = Map.get(goal.metadata || %{}, :notes, [])
+        timestamped_note = "#{DateTime.utc_now() |> DateTime.to_iso8601()}: #{note}"
+        updated_metadata = Map.put(goal.metadata || %{}, :notes, existing_notes ++ [timestamped_note])
+        updated_goal = %{goal | metadata: updated_metadata}
+        :ets.insert(:arbor_memory_goals, {{agent_id, goal_id}, updated_goal})
 
       _ ->
         :ok
@@ -714,10 +850,42 @@ defmodule Arbor.Memory.ReflectionProcessor do
     })
 
     if confidence >= 0.5 do
+      # Route by category to appropriate subsystem
+      route_learning_by_category(agent_id, category, content)
+
+      # Always add to working memory for immediate context
       prefix = learning_category_prefix(category)
       add_thought_to_working_memory(agent_id, "#{prefix} #{content}")
     end
   end
+
+  defp route_learning_by_category(agent_id, "self", content) do
+    case IdentityConsolidator.get_self_knowledge(agent_id) do
+      nil -> :ok
+      sk ->
+        updated = SelfKnowledge.record_growth(sk, :self_learning, content)
+        IdentityConsolidator.save_self_knowledge(agent_id, updated)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp route_learning_by_category(agent_id, "technical", content) do
+    # Dedup: check if this learning already exists as a KG node
+    case Arbor.Memory.find_knowledge_by_name(agent_id, content) do
+      {:ok, _existing_id} -> :ok
+      {:error, _} ->
+        Arbor.Memory.add_knowledge(agent_id, %{
+          type: :skill,
+          content: content,
+          metadata: %{source: :reflection_learning}
+        })
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp route_learning_by_category(_agent_id, _category, _content), do: :ok
 
   defp learning_category_prefix("technical"), do: "[Technical Learning]"
   defp learning_category_prefix("relationship"), do: "[Relationship Learning]"
@@ -760,11 +928,20 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp add_single_knowledge_node(agent_id, node_data) do
-    Arbor.Memory.add_knowledge(agent_id, %{
-      type: safe_node_type(node_data["type"]),
-      content: node_data["name"],
-      metadata: %{context: node_data["context"], source: :reflection}
-    })
+    name = node_data["name"]
+
+    # Dedup: check if a node with this name already exists
+    case Arbor.Memory.find_knowledge_by_name(agent_id, name) do
+      {:ok, existing_id} ->
+        {:ok, existing_id}
+
+      {:error, _} ->
+        Arbor.Memory.add_knowledge(agent_id, %{
+          type: safe_node_type(node_data["type"]),
+          content: name,
+          metadata: %{context: node_data["context"], source: :reflection}
+        })
+    end
   end
 
   defp add_knowledge_edges(agent_id, edges, node_map) do
@@ -780,6 +957,117 @@ defmodule Arbor.Memory.ReflectionProcessor do
       Arbor.Memory.link_knowledge(agent_id, from_id, to_id, relationship) == :ok
     else
       false
+    end
+  end
+
+  # ============================================================================
+  # Relationship Processing
+  # ============================================================================
+
+  @doc false
+  def process_relationships(_agent_id, []), do: :ok
+
+  def process_relationships(agent_id, relationships) do
+    Enum.each(relationships, &process_single_relationship(agent_id, &1))
+  end
+
+  defp process_single_relationship(_agent_id, %{"name" => name})
+       when is_nil(name) or name == "",
+       do: :ok
+
+  defp process_single_relationship(_agent_id, rel_data)
+       when not is_map_key(rel_data, "name"),
+       do: :ok
+
+  defp process_single_relationship(agent_id, rel_data) do
+    name = rel_data["name"]
+    observation_default = "Observed during reflection"
+    markers = parse_emotional_markers(rel_data["tone"])
+
+    case Arbor.Memory.get_relationship_by_name(agent_id, name) do
+      {:ok, existing} ->
+        updated = maybe_update_dynamic(existing, rel_data["dynamic"])
+        Arbor.Memory.save_relationship(agent_id, updated)
+        observation = rel_data["observation"] || observation_default
+        Arbor.Memory.add_moment(agent_id, updated.id, observation, emotional_markers: markers)
+
+      {:error, :not_found} ->
+        rel = Relationship.new(name, relationship_dynamic: rel_data["dynamic"])
+        Arbor.Memory.save_relationship(agent_id, rel)
+        observation = rel_data["observation"] || "First encountered during reflection"
+        Arbor.Memory.add_moment(agent_id, rel.id, observation, emotional_markers: markers)
+    end
+  rescue
+    e ->
+      Logger.warning("Failed to process relationship: #{inspect(e)}",
+        agent_id: agent_id,
+        name: rel_data["name"]
+      )
+  end
+
+  defp maybe_update_dynamic(rel, nil), do: rel
+  defp maybe_update_dynamic(rel, dynamic), do: Relationship.update_dynamic(rel, dynamic)
+
+  defp parse_emotional_markers(nil), do: []
+
+  defp parse_emotional_markers(tone) when is_binary(tone) do
+    tone
+    |> String.split(~r/[,\s]+/, trim: true)
+    |> Enum.map(&safe_atom(&1, :neutral))
+  end
+
+  defp parse_emotional_markers(_), do: []
+
+  # ============================================================================
+  # Insight Detection Integration
+  # ============================================================================
+
+  defp trigger_insight_detection(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory.InsightDetector) do
+      InsightDetector.detect_and_queue(agent_id)
+    end
+  rescue
+    e ->
+      Logger.debug("InsightDetector unavailable: #{inspect(e)}")
+  end
+
+  defp store_self_insight_suggestions(_agent_id, []), do: :ok
+
+  defp store_self_insight_suggestions(agent_id, suggestions) do
+    Enum.each(suggestions, fn suggestion ->
+      content = suggestion["content"]
+
+      if content && content != "" do
+        add_thought_to_working_memory(agent_id, "[Insight Suggestion] #{content}")
+      end
+    end)
+  end
+
+  # ============================================================================
+  # Goals in Knowledge Graph
+  # ============================================================================
+
+  defp add_goals_to_knowledge_graph(_agent_id, []), do: :ok
+
+  defp add_goals_to_knowledge_graph(agent_id, goals) do
+    goals
+    |> Enum.filter(&(&1.status == :active))
+    |> Enum.each(&add_goal_to_kg(agent_id, &1))
+  rescue
+    _ -> :ok
+  end
+
+  defp add_goal_to_kg(agent_id, goal) do
+    case Arbor.Memory.find_knowledge_by_name(agent_id, goal.description) do
+      {:ok, _existing_id} ->
+        :ok
+
+      {:error, _} ->
+        Arbor.Memory.add_knowledge(agent_id, %{
+          type: :insight,
+          content: goal.description,
+          metadata: %{source: :goal, goal_id: goal.id}
+        })
     end
   end
 
@@ -862,6 +1150,44 @@ defmodule Arbor.Memory.ReflectionProcessor do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp time_since_last_reflection(agent_id) do
+    ensure_ets_exists()
+
+    case :ets.lookup(@reflections_ets, agent_id) do
+      [{^agent_id, [latest | _]}] ->
+        now = DateTime.utc_now()
+        DateTime.diff(now, latest.timestamp, :millisecond)
+
+      _ ->
+        :infinity
+    end
+  end
+
+  defp event_count_since_last_reflection(agent_id) do
+    ensure_ets_exists()
+
+    last_reflection_time =
+      case :ets.lookup(@reflections_ets, agent_id) do
+        [{^agent_id, [latest | _]}] -> latest.timestamp
+        _ -> nil
+      end
+
+    case Events.get_recent(agent_id, 200) do
+      {:ok, events} when last_reflection_time != nil ->
+        Enum.count(events, fn event ->
+          event.timestamp != nil and
+            DateTime.compare(event.timestamp, last_reflection_time) == :gt
+        end)
+
+      {:ok, events} ->
+        length(events)
+
+      {:error, _} ->
+        # On error, trigger reflection to be safe
+        @default_signal_threshold + 1
+    end
+  end
 
   defp get_llm_module do
     Application.get_env(:arbor_memory, :reflection_llm_module, __MODULE__.MockLLM)

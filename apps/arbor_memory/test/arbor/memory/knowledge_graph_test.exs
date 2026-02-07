@@ -426,4 +426,33 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
       assert length(restored.pending_facts) == length(graph.pending_facts)
     end
   end
+
+  describe "find_by_name/2" do
+    test "finds existing node by exact name" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Elixir"})
+
+      assert {:ok, ^node_id} = KnowledgeGraph.find_by_name(graph, "Elixir")
+    end
+
+    test "case-insensitive matching" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Elixir"})
+
+      assert {:ok, ^node_id} = KnowledgeGraph.find_by_name(graph, "elixir")
+      assert {:ok, ^node_id} = KnowledgeGraph.find_by_name(graph, "ELIXIR")
+    end
+
+    test "returns not_found for missing name" do
+      graph = KnowledgeGraph.new("agent_001")
+      {:ok, graph, _} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Elixir"})
+
+      assert {:error, :not_found} = KnowledgeGraph.find_by_name(graph, "Ruby")
+    end
+
+    test "returns not_found on empty graph" do
+      graph = KnowledgeGraph.new("agent_001")
+      assert {:error, :not_found} = KnowledgeGraph.find_by_name(graph, "anything")
+    end
+  end
 end
