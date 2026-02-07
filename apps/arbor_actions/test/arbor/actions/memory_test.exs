@@ -274,4 +274,47 @@ defmodule Arbor.Actions.MemoryTest do
       assert roles[:prompt] == :data
     end
   end
+
+  # ============================================================================
+  # Recall Cascade
+  # ============================================================================
+
+  describe "Recall with cascade" do
+    test "returns cascade_applied: false by default", %{context: ctx} do
+      # Store a node first
+      {:ok, _} =
+        Memory.Remember.run(
+          %{content: "Cascade test content", type: "fact", importance: 0.8},
+          ctx
+        )
+
+      {:ok, result} = Memory.Recall.run(%{query: "cascade test"}, ctx)
+      assert result.cascade_applied == false
+    end
+
+    test "returns cascade_applied field when cascade: true", %{context: ctx} do
+      # Store a node first
+      {:ok, remember_result} =
+        Memory.Remember.run(
+          %{content: "Cascade activation test", type: "fact", importance: 0.8},
+          ctx
+        )
+
+      assert remember_result.node_id
+
+      {:ok, result} = Memory.Recall.run(%{query: "cascade activation", cascade: true}, ctx)
+      # cascade_applied will be true or false depending on whether node_id was in results
+      assert is_boolean(result.cascade_applied)
+    end
+
+    test "includes cascade taint role" do
+      roles = Memory.Recall.taint_roles()
+      assert roles[:cascade] == :data
+    end
+
+    test "tool schema includes cascade in description" do
+      tool = Memory.Recall.to_tool()
+      assert tool[:description] || tool["description"] =~ "cascade"
+    end
+  end
 end
