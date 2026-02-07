@@ -114,19 +114,28 @@ defmodule Arbor.Actions.MemoryIdentity do
     use Jido.Action,
       name: "memory_read_self",
       description:
-        "Query your self-knowledge. Aspects: memory_system, identity, tools, cognition, capabilities, all. Optional: aspect (default all).",
+        "Query your self-knowledge. Aspects: memory_system, identity, tools, cognition, capabilities, all. Optional: aspect (default all), include_source (include source module paths).",
       category: "memory_identity",
       tags: ["memory", "identity", "self-knowledge", "read"],
       schema: [
-        aspect: [type: :string, default: "all", doc: "Aspect to query: memory_system, identity, tools, cognition, capabilities, all"]
+        aspect: [type: :string, default: "all", doc: "Aspect to query: memory_system, identity, tools, cognition, capabilities, all"],
+        include_source: [type: :boolean, default: false, doc: "Include source module paths in response"]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Memory, as: MemoryHelpers
 
+    @source_paths %{
+      memory_system: "apps/arbor_memory/lib/arbor/memory/knowledge_graph.ex",
+      identity: "apps/arbor_memory/lib/arbor/memory/self_knowledge.ex",
+      cognition: "apps/arbor_memory/lib/arbor/memory/preferences.ex",
+      tools: "apps/arbor_actions/lib/arbor_actions.ex",
+      capabilities: "apps/arbor_memory/lib/arbor/memory/self_knowledge.ex"
+    }
+
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles do
-      %{aspect: :control}
+      %{aspect: :control, include_source: :data}
     end
 
     @impl true
@@ -138,8 +147,16 @@ defmodule Arbor.Actions.MemoryIdentity do
         aspect = MemoryHelpers.safe_to_atom(params[:aspect] || "all")
         result = Arbor.Memory.query_self(agent_id, aspect)
 
+        result =
+          if params[:include_source] == true do
+            source = Map.get(@source_paths, aspect, @source_paths)
+            Map.put(%{data: result}, :source_paths, source)
+          else
+            %{data: result}
+          end
+
         Actions.emit_completed(__MODULE__, %{aspect: aspect})
-        {:ok, %{aspect: aspect, data: result}}
+        {:ok, Map.put(result, :aspect, aspect)}
       else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -200,6 +217,26 @@ defmodule Arbor.Actions.MemoryIdentity do
         # Preferences
         prefs = Arbor.Memory.inspect_preferences(agent_id)
         result = Map.put(result, :preferences, prefs)
+
+        # Near-threshold nodes (at risk of decay/pruning)
+        result =
+          case Arbor.Memory.near_threshold_nodes(agent_id, 5) do
+            {:ok, at_risk} when at_risk != [] ->
+              formatted =
+                Enum.map(at_risk, fn node ->
+                  %{
+                    id: node.id,
+                    type: node.type,
+                    content: String.slice(node.content || "", 0, 80),
+                    relevance: node.relevance
+                  }
+                end)
+
+              Map.put(result, :near_threshold, formatted)
+
+            _ ->
+              result
+          end
 
         Actions.emit_completed(__MODULE__, %{sections: Map.keys(result)})
         {:ok, result}
