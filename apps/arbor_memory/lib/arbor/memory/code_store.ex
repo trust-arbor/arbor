@@ -149,6 +149,22 @@ defmodule Arbor.Memory.CodeStore do
   end
 
   @doc """
+  Get a specific code pattern by ID.
+
+  ## Examples
+
+      {:ok, entry} = CodeStore.get("agent_001", "code_abc123")
+      {:error, :not_found} = CodeStore.get("agent_001", "nonexistent")
+  """
+  @spec get(String.t(), String.t()) :: {:ok, code_entry()} | {:error, :not_found}
+  def get(agent_id, entry_id) do
+    case Enum.find(get_agent_entries(agent_id), &(&1.id == entry_id)) do
+      nil -> {:error, :not_found}
+      entry -> {:ok, entry}
+    end
+  end
+
+  @doc """
   Delete a specific code pattern.
   """
   @spec delete(String.t(), String.t()) :: :ok

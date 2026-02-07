@@ -1295,6 +1295,61 @@ defmodule Arbor.Memory do
   defdelegate get_self_knowledge(agent_id), to: IdentityConsolidator
 
   @doc """
+  Add a self-insight for an agent.
+
+  Maps category to the appropriate SelfKnowledge function:
+  - `:capability` → `SelfKnowledge.add_capability/4`
+  - `:personality` / `:trait` → `SelfKnowledge.add_trait/4`
+  - `:value` → `SelfKnowledge.add_value/4`
+  - Other categories → stored as a knowledge node with type `:insight`
+
+  ## Options
+
+  - `:confidence` - Confidence score (default: 0.5)
+  - `:evidence` - Evidence for the insight
+
+  ## Examples
+
+      {:ok, sk} = Arbor.Memory.add_insight("agent_001", "Good at pattern matching", :capability)
+  """
+  @spec add_insight(String.t(), String.t(), atom(), keyword()) ::
+          {:ok, SelfKnowledge.t()} | {:ok, String.t()} | {:error, term()}
+  def add_insight(agent_id, content, category, opts \\ []) do
+    confidence = Keyword.get(opts, :confidence, 0.5)
+    evidence = Keyword.get(opts, :evidence)
+
+    sk = get_self_knowledge(agent_id) || SelfKnowledge.new(agent_id)
+
+    case category do
+      cat when cat in [:capability, :skill] ->
+        updated = SelfKnowledge.add_capability(sk, content, confidence, evidence)
+        IdentityConsolidator.save_self_knowledge(agent_id, updated)
+        {:ok, updated}
+
+      cat when cat in [:personality, :trait] ->
+        trait_atom = safe_insight_atom(content)
+        updated = SelfKnowledge.add_trait(sk, trait_atom, confidence, evidence)
+        IdentityConsolidator.save_self_knowledge(agent_id, updated)
+        {:ok, updated}
+
+      :value ->
+        value_atom = safe_insight_atom(content)
+        updated = SelfKnowledge.add_value(sk, value_atom, confidence, evidence)
+        IdentityConsolidator.save_self_knowledge(agent_id, updated)
+        {:ok, updated}
+
+      _other ->
+        # Fall back to storing as a knowledge node
+        add_knowledge(agent_id, %{
+          type: :insight,
+          content: content,
+          relevance: confidence,
+          metadata: %{category: category, evidence: evidence}
+        })
+    end
+  end
+
+  @doc """
   Query a specific aspect of self-knowledge.
 
   ## Aspects
@@ -1753,6 +1808,26 @@ defmodule Arbor.Memory do
   defdelegate find_code_by_purpose(agent_id, query), to: CodeStore, as: :find_by_purpose
 
   @doc """
+  Get a specific code pattern by ID.
+
+  ## Examples
+
+      {:ok, entry} = Arbor.Memory.get_code("agent_001", "code_abc123")
+  """
+  @spec get_code(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  defdelegate get_code(agent_id, entry_id), to: CodeStore, as: :get
+
+  @doc """
+  Delete a specific code pattern.
+
+  ## Examples
+
+      :ok = Arbor.Memory.delete_code("agent_001", "code_abc123")
+  """
+  @spec delete_code(String.t(), String.t()) :: :ok
+  defdelegate delete_code(agent_id, entry_id), to: CodeStore, as: :delete
+
+  @doc """
   List all code patterns for an agent.
 
   ## Options
@@ -1853,6 +1928,17 @@ defmodule Arbor.Memory do
   defp save_graph(agent_id, graph) do
     :ets.insert(@graph_ets, {agent_id, graph})
     :ok
+  end
+
+  # Convert a string to an atom safely for insight categories.
+  # Tries existing atoms first, then downcases and underscores.
+  defp safe_insight_atom(name) when is_atom(name), do: name
+
+  defp safe_insight_atom(name) when is_binary(name) do
+    name
+    |> String.downcase()
+    |> String.replace(~r/\s+/, "_")
+    |> String.to_atom()
   end
 
   defp has_graph?(agent_id) do
