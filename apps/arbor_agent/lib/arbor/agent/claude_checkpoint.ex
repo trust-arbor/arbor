@@ -2,8 +2,9 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
   @moduledoc """
   State checkpoint/restore for the Claude agent.
 
-  Saves full agent state (context window, goals, intents/percepts,
-  timing, body config) and restores it across restarts.
+  Delegates state capture to `Arbor.Agent.Seed` for comprehensive snapshots
+  that include all memory subsystems. Agent-specific timing state (timestamps,
+  query count) is stored in the seed's metadata field.
 
   Uses `Arbor.Checkpoint` with the ETS store by default; can be
   configured with any `Arbor.Checkpoint.Store` implementation.
@@ -23,10 +24,14 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
 
   require Logger
 
+  alias Arbor.Agent.Seed
+  alias Arbor.Memory.ContextWindow
+
   @doc """
   Save the agent's current state as a checkpoint.
 
-  Extracts essential state fields and persists via `Arbor.Checkpoint.save/4`.
+  Captures a full Seed snapshot via `Seed.capture/2` and persists
+  via `Arbor.Checkpoint.save/3`.
   """
   @spec save_state(map()) :: :ok | {:error, term()}
   def save_state(state) do
@@ -80,46 +85,47 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
   @doc """
   Apply restored checkpoint data onto a fresh agent state.
 
-  Merges timing, context, and body fields. GoalStore and IntentStore
-  are repopulated from the checkpoint data.
+  Reconstructs a Seed from the checkpoint data, restores subsystem state
+  (working memory, knowledge graph, preferences, goals) via `Seed.restore/2`,
+  and merges timing fields back into the agent state.
   """
   @spec apply_checkpoint(map(), map()) :: map()
   def apply_checkpoint(state, checkpoint_data) do
     agent_id = state[:id] || state[:agent_id]
 
-    # Restore timing fields
-    state =
-      Map.merge(state, %{
-        last_user_message_at: parse_datetime(checkpoint_data[:last_user_message_at]),
-        last_assistant_output_at: parse_datetime(checkpoint_data[:last_assistant_output_at]),
-        responded_to_last_user_message:
-          Map.get(checkpoint_data, :responded_to_last_user_message, true),
-        query_count: Map.get(checkpoint_data, :query_count, 0)
-      })
+    case Seed.from_map(checkpoint_data) do
+      {:ok, seed} ->
+        # Restore subsystem state (WM, KG, Preferences, Goals)
+        Seed.restore(seed, emit_signals: false)
 
-    # Restore context window if available
-    state =
-      case checkpoint_data[:context_window] do
-        window when is_map(window) and map_size(window) > 0 ->
-          restored = restore_context_window(window)
-          if restored, do: %{state | context_window: restored}, else: state
+        # Extract timing fields from seed metadata
+        meta = seed.metadata || %{}
 
-        _ ->
-          state
-      end
+        state =
+          Map.merge(state, %{
+            last_user_message_at: parse_datetime(meta_get(meta, :last_user_message_at)),
+            last_assistant_output_at:
+              parse_datetime(meta_get(meta, :last_assistant_output_at)),
+            responded_to_last_user_message:
+              meta_get(meta, :responded_to_last_user_message, true),
+            query_count: meta_get(meta, :query_count, 0)
+          })
 
-    # Repopulate GoalStore
-    repopulate_goals(agent_id, Map.get(checkpoint_data, :goals, []))
+        # Restore context window if present in seed
+        state = maybe_restore_context_window(state, seed.context_window)
 
-    # Repopulate IntentStore
-    repopulate_intents(agent_id, checkpoint_data)
+        Logger.info("Checkpoint applied for #{agent_id}",
+          seed_id: seed.id,
+          goals: length(seed.goals),
+          query_count: state.query_count
+        )
 
-    Logger.info("Checkpoint applied for #{agent_id}",
-      goals: length(Map.get(checkpoint_data, :goals, [])),
-      query_count: state.query_count
-    )
+        state
 
-    state
+      {:error, reason} ->
+        Logger.warning("Failed to reconstruct Seed from checkpoint: #{inspect(reason)}")
+        state
+    end
   end
 
   @doc """
@@ -146,36 +152,55 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
     Process.send_after(self(), :checkpoint, interval)
   end
 
-  # -- Private --
+  # -- Private: State Extraction (delegates to Seed) --
 
   defp extract_state(state) do
     agent_id = state[:id] || state[:agent_id]
 
+    context_window_map =
+      if state[:context_window] do
+        safe_call(fn -> serialize_context_window(state.context_window) end)
+      end
+
+    capture_opts = [
+      reason: :checkpoint,
+      name: state[:name],
+      context_window: context_window_map,
+      metadata: %{
+        query_count: state[:query_count] || 0,
+        last_user_message_at: format_datetime(state[:last_user_message_at]),
+        last_assistant_output_at: format_datetime(state[:last_assistant_output_at]),
+        responded_to_last_user_message: state[:responded_to_last_user_message]
+      }
+    ]
+
+    case Seed.capture(agent_id, capture_opts) do
+      {:ok, seed} -> Seed.to_map(seed)
+      {:error, _} -> fallback_extract_state(state, agent_id)
+    end
+  end
+
+  # Fallback if Seed capture fails — minimal checkpoint with timing only
+  defp fallback_extract_state(state, agent_id) do
     %{
-      agent_id: agent_id,
-      # Timing state
-      last_user_message_at: format_datetime(state[:last_user_message_at]),
-      last_assistant_output_at: format_datetime(state[:last_assistant_output_at]),
-      responded_to_last_user_message: state[:responded_to_last_user_message],
-      query_count: state[:query_count] || 0,
-      # Context window (serialized)
-      context_window: serialize_context_window(state[:context_window]),
-      # Goals (snapshot from GoalStore)
-      goals: snapshot_goals(agent_id),
-      # Recent intents/percepts (from IntentStore)
-      recent_intents: snapshot_intents(agent_id),
-      recent_percepts: snapshot_percepts(agent_id),
-      # Timestamp
-      checkpointed_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      "agent_id" => agent_id,
+      "metadata" => %{
+        "query_count" => state[:query_count] || 0,
+        "last_user_message_at" => format_datetime(state[:last_user_message_at]),
+        "last_assistant_output_at" => format_datetime(state[:last_assistant_output_at]),
+        "responded_to_last_user_message" => state[:responded_to_last_user_message]
+      },
+      "seed_version" => 1,
+      "version" => 0
     }
   end
 
-  defp serialize_context_window(nil), do: nil
+  # -- Private: Context Window --
 
   defp serialize_context_window(window) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-         function_exported?(Arbor.Memory.ContextWindow, :serialize, 1) do
-      Arbor.Memory.ContextWindow.serialize(window)
+    if Code.ensure_loaded?(ContextWindow) and
+         function_exported?(ContextWindow, :serialize, 1) do
+      ContextWindow.serialize(window)
     else
       window
     end
@@ -183,81 +208,28 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
     _ -> nil
   end
 
-  defp restore_context_window(data) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-         function_exported?(Arbor.Memory.ContextWindow, :deserialize, 1) do
-      Arbor.Memory.ContextWindow.deserialize(data)
+  defp maybe_restore_context_window(state, nil), do: state
+
+  defp maybe_restore_context_window(state, cw_map) when map_size(cw_map) == 0, do: state
+
+  defp maybe_restore_context_window(state, cw_map) do
+    if Code.ensure_loaded?(ContextWindow) and
+         function_exported?(ContextWindow, :deserialize, 1) do
+      restored = ContextWindow.deserialize(cw_map)
+      %{state | context_window: restored}
     else
-      data
+      state
     end
   rescue
-    _ -> nil
+    _ -> state
   end
 
-  defp snapshot_goals(agent_id) do
-    goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
+  # -- Private: Metadata Helpers --
 
-    Enum.map(goals, fn goal ->
-      %{
-        id: goal.id,
-        description: goal.description,
-        type: goal.type,
-        priority: goal.priority,
-        progress: goal.progress,
-        status: goal.status,
-        parent_id: goal.parent_id
-      }
-    end)
-  end
-
-  defp snapshot_intents(agent_id) do
-    intents = safe_call(fn -> Arbor.Memory.recent_intents(agent_id, limit: 20) end) || []
-
-    Enum.map(intents, fn intent ->
-      %{
-        id: intent.id,
-        type: intent.type,
-        action: intent.action,
-        reasoning: intent.reasoning
-      }
-    end)
-  end
-
-  defp snapshot_percepts(agent_id) do
-    percepts = safe_call(fn -> Arbor.Memory.recent_percepts(agent_id, limit: 20) end) || []
-
-    Enum.map(percepts, fn percept ->
-      %{
-        id: percept.id,
-        type: percept.type,
-        outcome: percept.outcome,
-        intent_id: percept.intent_id,
-        duration_ms: percept.duration_ms
-      }
-    end)
-  end
-
-  defp repopulate_goals(agent_id, goals) when is_list(goals) do
-    Enum.each(goals, fn goal_data ->
-      safe_call(fn ->
-        goal =
-          Arbor.Contracts.Memory.Goal.new(
-            goal_data[:description] || goal_data["description"] || "Restored goal",
-            type: goal_data[:type] || goal_data["type"] || :achieve,
-            priority: goal_data[:priority] || goal_data["priority"] || 50
-          )
-
-        Arbor.Memory.add_goal(agent_id, goal)
-      end)
-    end)
-  end
-
-  defp repopulate_goals(_, _), do: :ok
-
-  defp repopulate_intents(_agent_id, _checkpoint_data) do
-    # IntentStore is a ring buffer — we don't repopulate it on restore
-    # because the intents/percepts are already stale. Fresh state is fine.
-    :ok
+  # Get a value from metadata supporting both string and atom keys
+  defp meta_get(meta, atom_key, default \\ nil) do
+    string_key = Atom.to_string(atom_key)
+    meta[atom_key] || meta[string_key] || default
   end
 
   defp format_datetime(nil), do: nil
@@ -275,6 +247,8 @@ defmodule Arbor.Agent.ClaudeCheckpoint do
   end
 
   defp parse_datetime(_), do: nil
+
+  # -- Private: Config & Safety --
 
   defp checkpoint_store do
     Application.get_env(:arbor_agent, :checkpoint_store, Arbor.Checkpoint.Store.ETS)

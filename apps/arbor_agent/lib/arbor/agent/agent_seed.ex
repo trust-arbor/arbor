@@ -56,6 +56,7 @@ defmodule Arbor.Agent.AgentSeed do
   alias Arbor.Agent.{
     ContextManager,
     ExecutorIntegration,
+    Seed,
     TimingContext
   }
 
@@ -230,6 +231,9 @@ defmodule Arbor.Agent.AgentSeed do
   """
   @spec seed_terminate(term(), map()) :: :ok
   def seed_terminate(reason, state) do
+    # Capture a full Seed snapshot before shutdown
+    capture_seed_on_terminate(state, reason)
+
     # Save context window
     if state[:context_window] do
       ContextManager.save_context(state.id, state.context_window)
@@ -865,6 +869,55 @@ defmodule Arbor.Agent.AgentSeed do
     _ -> Logger.debug("Could not subscribe to memory signals")
   catch
     :exit, _ -> Logger.debug("Memory signal subscription timeout")
+  end
+
+  # ============================================================================
+  # Private: Seed Capture on Terminate
+  # ============================================================================
+
+  defp capture_seed_on_terminate(state, reason) do
+    capture_reason =
+      case reason do
+        :normal -> :shutdown
+        :shutdown -> :shutdown
+        {:shutdown, _} -> :shutdown
+        _ -> :crash
+      end
+
+    context_window_map =
+      if state[:context_window] do
+        safe_memory_call(fn ->
+          Arbor.Memory.ContextWindow.serialize(state.context_window)
+        end)
+      end
+
+    capture_opts = [
+      reason: capture_reason,
+      name: state[:name],
+      context_window: context_window_map,
+      metadata: %{
+        query_count: state[:query_count] || 0,
+        heartbeat_count: state[:heartbeat_count] || 0,
+        last_user_message_at: state[:last_user_message_at],
+        last_assistant_output_at: state[:last_assistant_output_at],
+        responded_to_last_user_message: state[:responded_to_last_user_message]
+      }
+    ]
+
+    case Seed.capture(state.id, capture_opts) do
+      {:ok, seed} ->
+        Logger.debug("Seed captured on terminate",
+          agent_id: state.id,
+          seed_id: seed.id,
+          reason: capture_reason
+        )
+
+      {:error, err} ->
+        Logger.warning("Seed capture on terminate failed: #{inspect(err)}")
+    end
+  rescue
+    e ->
+      Logger.warning("Seed capture on terminate rescued: #{Exception.message(e)}")
   end
 
   # ============================================================================
