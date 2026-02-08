@@ -463,6 +463,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> assign(loading: false, session_id: response.session_id)
     |> add_thinking_blocks(response.thinking)
     |> add_recalled_memories(response.recalled_memories)
+    |> add_tool_use_actions(assistant_msg.tool_uses)
     |> extract_token_usage(response)
     |> update_agent_state(agent)
   end
@@ -521,6 +522,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       stream_insert(acc, :memories, entry)
     end)
+  end
+
+  defp add_tool_use_actions(socket, nil), do: socket
+  defp add_tool_use_actions(socket, []), do: socket
+
+  defp add_tool_use_actions(socket, tool_uses) do
+    Enum.reduce(tool_uses, socket, fn tool, acc ->
+      name = tool[:name] || tool["name"] || "unknown"
+
+      action_entry = %{
+        id: "act-#{System.unique_integer([:positive])}",
+        name: name,
+        outcome: tool_use_outcome(tool),
+        timestamp: DateTime.utc_now(),
+        details: tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{}
+      }
+
+      stream_insert(acc, :actions, action_entry)
+    end)
+  end
+
+  defp tool_use_outcome(tool) do
+    cond do
+      tool[:error] || tool["error"] -> :error
+      tool[:result] || tool["result"] -> :success
+      true -> :pending
+    end
   end
 
   defp update_agent_state(socket, agent) do
