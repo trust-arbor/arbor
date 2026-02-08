@@ -121,7 +121,7 @@ defmodule Arbor.Memory.WorkingMemory do
   @default_max_thoughts 20
   @default_max_goals 10
   @default_max_concerns 5
-  @default_max_curiosity 5
+  @default_max_curiosity 10
 
   # ============================================================================
   # Construction
@@ -592,6 +592,48 @@ defmodule Arbor.Memory.WorkingMemory do
       started_at: parse_datetime(get_field.(:started_at)),
       thought_count: get_field.(:thought_count) || 0,
       version: get_field.(:version) || @version
+    }
+  end
+
+  # ============================================================================
+  # Migration
+  # ============================================================================
+
+  @doc """
+  Migrate state to current version.
+
+  Called on every GenServer callback to ensure state is current after hot reloads.
+  Handles version upgrades, nil-versioned state, and plain maps.
+  """
+  @spec migrate(t() | map()) :: t()
+  def migrate(%__MODULE__{version: @version} = wm), do: wm
+
+  def migrate(%__MODULE__{version: 1} = wm) do
+    %{wm | version: @version, max_tokens: nil, model: nil}
+    |> ensure_defaults()
+    |> migrate()
+  end
+
+  def migrate(%__MODULE__{version: nil} = wm) do
+    %{wm | version: @version, max_tokens: nil, model: nil}
+    |> ensure_defaults()
+    |> migrate()
+  end
+
+  def migrate(%{} = old) when not is_struct(old) do
+    deserialize(old)
+  end
+
+  defp ensure_defaults(%__MODULE__{} = wm) do
+    %{
+      wm
+      | recent_thoughts: wm.recent_thoughts || [],
+        active_goals: wm.active_goals || [],
+        curiosity: wm.curiosity || [],
+        concerns: wm.concerns || [],
+        engagement_level: wm.engagement_level || 0.5,
+        started_at: wm.started_at || DateTime.utc_now(),
+        thought_count: wm.thought_count || 0
     }
   end
 
