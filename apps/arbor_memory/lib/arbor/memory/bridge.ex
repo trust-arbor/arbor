@@ -203,13 +203,7 @@ defmodule Arbor.Memory.Bridge do
     with_signals(
       fn signals ->
         signals.subscribe("bridge.intent", fn signal ->
-          if signal.data[:agent_id] == agent_id do
-            case signal_to_intent(signal) do
-              nil -> :ok
-              intent -> handler.(intent)
-            end
-          end
-
+          maybe_handle_intent(signal, agent_id, handler)
           :ok
         end)
       end,
@@ -238,13 +232,7 @@ defmodule Arbor.Memory.Bridge do
     with_signals(
       fn signals ->
         signals.subscribe("bridge.percept", fn signal ->
-          if signal.data[:agent_id] == agent_id do
-            case signal_to_percept(signal) do
-              nil -> :ok
-              percept -> handler.(percept)
-            end
-          end
-
+          maybe_handle_percept(signal, agent_id, handler)
           :ok
         end)
       end,
@@ -302,12 +290,7 @@ defmodule Arbor.Memory.Bridge do
         # Subscribe to percepts for this specific intent
         {:ok, sub_id} =
           signals.subscribe("bridge.percept", fn signal ->
-            if signal.data[:agent_id] == agent_id and
-                 signal.data[:intent_id] == intent_id do
-              percept = signal_to_percept(signal)
-              send(caller, {:bridge_percept, intent_id, percept})
-            end
-
+            maybe_send_percept(signal, agent_id, intent_id, caller)
             :ok
           end)
 
@@ -454,14 +437,7 @@ defmodule Arbor.Memory.Bridge do
       fn signals ->
         case signals.query(category: :bridge, type: :intent, limit: limit * 2) do
           {:ok, all_signals} ->
-            intents =
-              all_signals
-              |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
-              |> Enum.take(limit)
-              |> Enum.map(&signal_to_intent/1)
-              |> Enum.reject(&is_nil/1)
-
-            {:ok, intents}
+            {:ok, filter_and_convert_intents(all_signals, agent_id, limit)}
 
           {:error, reason} ->
             {:error, reason}
@@ -492,14 +468,7 @@ defmodule Arbor.Memory.Bridge do
       fn signals ->
         case signals.query(category: :bridge, type: :percept, limit: limit * 2) do
           {:ok, all_signals} ->
-            percepts =
-              all_signals
-              |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
-              |> Enum.take(limit)
-              |> Enum.map(&signal_to_percept/1)
-              |> Enum.reject(&is_nil/1)
-
-            {:ok, percepts}
+            {:ok, filter_and_convert_percepts(all_signals, agent_id, limit)}
 
           {:error, reason} ->
             {:error, reason}
@@ -532,6 +501,52 @@ defmodule Arbor.Memory.Bridge do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Dispatch intent to handler if signal matches the agent
+  defp maybe_handle_intent(signal, agent_id, handler) do
+    if signal.data[:agent_id] == agent_id do
+      case signal_to_intent(signal) do
+        nil -> :ok
+        intent -> handler.(intent)
+      end
+    end
+  end
+
+  # Dispatch percept to handler if signal matches the agent
+  defp maybe_handle_percept(signal, agent_id, handler) do
+    if signal.data[:agent_id] == agent_id do
+      case signal_to_percept(signal) do
+        nil -> :ok
+        percept -> handler.(percept)
+      end
+    end
+  end
+
+  # Send percept to caller if signal matches agent and intent
+  defp maybe_send_percept(signal, agent_id, intent_id, caller) do
+    if signal.data[:agent_id] == agent_id and signal.data[:intent_id] == intent_id do
+      percept = signal_to_percept(signal)
+      send(caller, {:bridge_percept, intent_id, percept})
+    end
+  end
+
+  # Filter signals by agent and convert to intents
+  defp filter_and_convert_intents(signals, agent_id, limit) do
+    signals
+    |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
+    |> Enum.take(limit)
+    |> Enum.map(&signal_to_intent/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  # Filter signals by agent and convert to percepts
+  defp filter_and_convert_percepts(signals, agent_id, limit) do
+    signals
+    |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
+    |> Enum.take(limit)
+    |> Enum.map(&signal_to_percept/1)
+    |> Enum.reject(&is_nil/1)
+  end
 
   # Source URI for bridge signals, scoped to agent.
   defp bridge_source(agent_id), do: "arbor://bridge/#{agent_id}"

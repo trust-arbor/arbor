@@ -553,21 +553,21 @@ defmodule Arbor.Memory.FactExtractor do
   """
   @spec format_messages_for_extraction([map()]) :: String.t()
   def format_messages_for_extraction(messages) when is_list(messages) do
-    Enum.map_join(messages, "\n", fn msg ->
-      role = msg[:role] || msg["role"] || "unknown"
-      content = msg[:content] || msg["content"] || ""
-      speaker = msg[:speaker] || msg["speaker"]
-
-      speaker_label =
-        case role do
-          r when r in [:user, "user"] -> speaker || "Human"
-          r when r in [:assistant, "assistant"] -> "Assistant"
-          _ -> to_string(role)
-        end
-
-      "#{speaker_label}: #{truncate_text(content, 1000)}"
-    end)
+    Enum.map_join(messages, "\n", &format_single_message/1)
   end
+
+  defp format_single_message(msg) do
+    role = msg[:role] || msg["role"] || "unknown"
+    content = msg[:content] || msg["content"] || ""
+    speaker = msg[:speaker] || msg["speaker"]
+    label = speaker_label(role, speaker)
+
+    "#{label}: #{truncate_text(content, 1000)}"
+  end
+
+  defp speaker_label(role, speaker) when role in [:user, "user"], do: speaker || "Human"
+  defp speaker_label(role, _speaker) when role in [:assistant, "assistant"], do: "Assistant"
+  defp speaker_label(role, _speaker), do: to_string(role)
 
   defp truncate_text(text, max_length) when byte_size(text) > max_length do
     String.slice(text, 0, max_length) <> "..."

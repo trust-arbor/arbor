@@ -309,23 +309,21 @@ defmodule Arbor.Monitor.Diagnostics do
   defp get_registered_name(_), do: nil
 
   defp get_process_ancestors(pid) do
-    case Process.info(pid, :dictionary) do
-      {:dictionary, dict} ->
-        case Keyword.get(dict, :"$ancestors") do
-          ancestors when is_list(ancestors) ->
-            Enum.map(ancestors, fn
-              name when is_atom(name) -> {name, Process.whereis(name), :supervisor, []}
-              pid when is_pid(pid) -> {:undefined, pid, :supervisor, []}
-              _ -> nil
-            end)
-            |> Enum.reject(&is_nil/1)
-
-          _ ->
-            []
-        end
-
-      nil ->
-        []
+    with {:dictionary, dict} <- Process.info(pid, :dictionary),
+         ancestors when is_list(ancestors) <- Keyword.get(dict, :"$ancestors") do
+      ancestors
+      |> Enum.map(&ancestor_to_tuple/1)
+      |> Enum.reject(&is_nil/1)
+    else
+      _ -> []
     end
   end
+
+  defp ancestor_to_tuple(name) when is_atom(name),
+    do: {name, Process.whereis(name), :supervisor, []}
+
+  defp ancestor_to_tuple(pid) when is_pid(pid),
+    do: {:undefined, pid, :supervisor, []}
+
+  defp ancestor_to_tuple(_), do: nil
 end

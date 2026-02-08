@@ -151,29 +151,25 @@ defmodule Arbor.Agent.HeartbeatResponse do
   defp parse_proposal_decisions(data) do
     case Map.get(data, "proposal_decisions") do
       decisions when is_list(decisions) ->
-        Enum.map(decisions, fn
-          d when is_map(d) ->
-            decision = d["decision"] || ""
-
-            if decision in ["accept", "reject", "defer"] do
-              %{
-                proposal_id: d["proposal_id"],
-                decision: String.to_existing_atom(decision),
-                reason: d["reason"] || ""
-              }
-            else
-              nil
-            end
-
-          _ ->
-            nil
-        end)
+        decisions
+        |> Enum.map(&parse_single_decision/1)
         |> Enum.reject(&is_nil/1)
 
       _ ->
         []
     end
   end
+
+  defp parse_single_decision(%{"decision" => decision} = d)
+       when decision in ["accept", "reject", "defer"] do
+    %{
+      proposal_id: d["proposal_id"],
+      decision: String.to_existing_atom(decision),
+      reason: d["reason"] || ""
+    }
+  end
+
+  defp parse_single_decision(_), do: nil
 
   # Known action types that the LLM may return
   @known_action_types ~w(

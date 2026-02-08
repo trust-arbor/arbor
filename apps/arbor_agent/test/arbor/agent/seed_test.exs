@@ -119,7 +119,7 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "captures knowledge_graph when initialized" do
-      graph = Arbor.Memory.KnowledgeGraph.new(@agent_id)
+      graph = KnowledgeGraph.new(@agent_id)
       :ets.insert(:arbor_memory_graphs, {@agent_id, graph})
 
       {:ok, seed} = Seed.capture(@agent_id)
@@ -199,8 +199,8 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "restores knowledge_graph via Memory facade" do
-      graph = Arbor.Memory.KnowledgeGraph.new(@agent_id)
-      graph_map = Arbor.Memory.KnowledgeGraph.to_map(graph)
+      graph = KnowledgeGraph.new(@agent_id)
+      graph_map = KnowledgeGraph.to_map(graph)
 
       seed = %Seed{
         id: "seed_test",

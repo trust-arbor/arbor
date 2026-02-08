@@ -112,40 +112,38 @@ defmodule Arbor.Dashboard.AgentManager do
 
     case find_agent(agent_id) do
       {:ok, pid, metadata} ->
-        # Broadcast the incoming message to ChatLive
         broadcast({:chat_message, %{role: :user, content: input, sender: sender}})
-
-        backend = metadata[:backend] || metadata[:model_config][:backend]
-
-        result =
-          case backend do
-            :cli ->
-              Claude.query(pid, input,
-                timeout: Keyword.get(opts, :timeout, :infinity),
-                permission_mode: :bypass
-              )
-
-            :api ->
-              APIAgent.query(pid, input)
-
-            _ ->
-              {:error, :unknown_backend}
-          end
-
-        case result do
-          {:ok, response} ->
-            text = response[:text] || response.text || ""
-            broadcast({:chat_message, %{role: :assistant, content: text, sender: "Agent"}})
-            {:ok, text}
-
-          {:error, _} = error ->
-            error
-        end
+        dispatch_query(pid, metadata, input, opts)
 
       :not_found ->
         {:error, :agent_not_found}
     end
   end
+
+  defp dispatch_query(pid, metadata, input, opts) do
+    backend = metadata[:backend] || metadata[:model_config][:backend]
+
+    result = query_backend(backend, pid, input, opts)
+    handle_query_result(result)
+  end
+
+  defp query_backend(:cli, pid, input, opts) do
+    Claude.query(pid, input,
+      timeout: Keyword.get(opts, :timeout, :infinity),
+      permission_mode: :bypass
+    )
+  end
+
+  defp query_backend(:api, pid, input, _opts), do: APIAgent.query(pid, input)
+  defp query_backend(_, _pid, _input, _opts), do: {:error, :unknown_backend}
+
+  defp handle_query_result({:ok, response}) do
+    text = response[:text] || response.text || ""
+    broadcast({:chat_message, %{role: :assistant, content: text, sender: "Agent"}})
+    {:ok, text}
+  end
+
+  defp handle_query_result({:error, _} = error), do: error
 
   # ── Private ─────────────────────────────────────────────────────────
 

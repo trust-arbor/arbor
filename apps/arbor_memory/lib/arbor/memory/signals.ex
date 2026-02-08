@@ -93,20 +93,16 @@ defmodule Arbor.Memory.Signals do
       filters = [category: :memory, source: source, limit: limit]
       filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
-      case Arbor.Signals.recent(filters) do
-        {:ok, signals} ->
-          case Keyword.get(opts, :types) do
-            nil -> {:ok, signals}
-            types -> {:ok, Enum.filter(signals, &(&1.type in types))}
-          end
-
-        {:error, _} = error ->
-          error
+      with {:ok, signals} <- Arbor.Signals.recent(filters) do
+        {:ok, filter_by_types(signals, Keyword.get(opts, :types))}
       end
     else
       {:ok, []}
     end
   end
+
+  defp filter_by_types(signals, nil), do: signals
+  defp filter_by_types(signals, types), do: Enum.filter(signals, &(&1.type in types))
 
   # ============================================================================
   # Emission API
@@ -1205,29 +1201,14 @@ defmodule Arbor.Memory.Signals do
       filters = [category: :memory, type: :episode_archived, source: memory_source(agent_id), limit: limit * 2]
       filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
-      case Arbor.Signals.query(filters) do
-        {:ok, signals} ->
-          episodes =
-            signals
-            |> Enum.map(& &1.data)
-            |> Enum.filter(fn ep ->
-              outcome_match = outcome_filter == nil || ep[:outcome] == outcome_filter
+      with {:ok, signals} <- Arbor.Signals.query(filters) do
+        episodes =
+          signals
+          |> Enum.map(& &1.data)
+          |> Enum.filter(&episode_matches?(&1, outcome_filter, search_text))
+          |> Enum.take(limit)
 
-              search_match =
-                search_text == nil ||
-                  String.contains?(
-                    String.downcase(to_string(ep[:description] || "")),
-                    String.downcase(search_text)
-                  )
-
-              outcome_match && search_match
-            end)
-            |> Enum.take(limit)
-
-          {:ok, episodes}
-
-        {:error, _} = error ->
-          error
+        {:ok, episodes}
       end
     else
       {:ok, []}
@@ -1256,29 +1237,14 @@ defmodule Arbor.Memory.Signals do
       filters = [category: :memory, type: :knowledge_archived, source: memory_source(agent_id), limit: limit * 2]
       filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
-      case Arbor.Signals.query(filters) do
-        {:ok, signals} ->
-          nodes =
-            signals
-            |> Enum.map(& &1.data)
-            |> Enum.filter(fn node ->
-              type_match = node_type_filter == nil || node[:node_type] == node_type_filter
+      with {:ok, signals} <- Arbor.Signals.query(filters) do
+        nodes =
+          signals
+          |> Enum.map(& &1.data)
+          |> Enum.filter(&knowledge_node_matches?(&1, node_type_filter, search_text))
+          |> Enum.take(limit)
 
-              search_match =
-                search_text == nil ||
-                  String.contains?(
-                    String.downcase(to_string(node[:content_preview] || "")),
-                    String.downcase(search_text)
-                  )
-
-              type_match && search_match
-            end)
-            |> Enum.take(limit)
-
-          {:ok, nodes}
-
-        {:error, _} = error ->
-          error
+        {:ok, nodes}
       end
     else
       {:ok, []}
@@ -1364,6 +1330,27 @@ defmodule Arbor.Memory.Signals do
 
   @doc false
   defp memory_source(agent_id), do: "arbor://memory/#{agent_id}"
+
+  defp episode_matches?(ep, outcome_filter, search_text) do
+    outcome_ok = outcome_filter == nil || ep[:outcome] == outcome_filter
+    search_ok = text_matches?(ep[:description], search_text)
+    outcome_ok && search_ok
+  end
+
+  defp knowledge_node_matches?(node, node_type_filter, search_text) do
+    type_ok = node_type_filter == nil || node[:node_type] == node_type_filter
+    search_ok = text_matches?(node[:content_preview], search_text)
+    type_ok && search_ok
+  end
+
+  defp text_matches?(_field, nil), do: true
+
+  defp text_matches?(field, search_text) do
+    String.contains?(
+      String.downcase(to_string(field || "")),
+      String.downcase(search_text)
+    )
+  end
 
   @doc false
   defp emit_memory_signal(agent_id, type, data) do

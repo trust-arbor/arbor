@@ -352,29 +352,8 @@ defmodule Arbor.Memory.Preferences do
 
   def adjust(%__MODULE__{} = prefs, :type_quota, {type, quota}, opts)
       when is_atom(type) and (is_integer(quota) or quota == :unlimited) do
-    cond do
-      is_integer(quota) and quota <= 0 ->
-        {:error, {:invalid_quota, :must_be_positive_or_unlimited}}
-
-      quota == :unlimited ->
-        {:ok, %{prefs | type_quotas: Map.put(prefs.type_quotas, type, quota)} |> touch_adjusted()}
-
-      true ->
-        case quota_range_for(opts) do
-          nil ->
-            {:ok,
-             %{prefs | type_quotas: Map.put(prefs.type_quotas, type, quota)} |> touch_adjusted()}
-
-          {min, max} when quota >= min and quota <= max ->
-            {:ok,
-             %{prefs | type_quotas: Map.put(prefs.type_quotas, type, quota)} |> touch_adjusted()}
-
-          {_min, max} when quota > max ->
-            {:error, {:exceeds_max_quota, type}}
-
-          {_min, _max} ->
-            {:error, {:below_min_quota, type}}
-        end
+    with :ok <- validate_quota(quota, type, opts) do
+      {:ok, %{prefs | type_quotas: Map.put(prefs.type_quotas, type, quota)} |> touch_adjusted()}
     end
   end
 
@@ -598,24 +577,21 @@ defmodule Arbor.Memory.Preferences do
   ]
 
   defp deserialize_context_preferences(prefs) when is_map(prefs) do
-    alias Arbor.Common.SafeAtom
-
-    Map.new(prefs, fn {k, v} ->
-      key =
-        if is_atom(k) do
-          k
-        else
-          case SafeAtom.to_allowed(to_string(k), @known_context_keys) do
-            {:ok, atom} -> atom
-            {:error, _} -> String.to_existing_atom(to_string(k))
-          end
-        end
-
-      {key, v}
-    end)
+    Map.new(prefs, fn {k, v} -> {deserialize_context_key(k), v} end)
   end
 
   defp deserialize_context_preferences(_), do: @default_context_preferences
+
+  defp deserialize_context_key(k) when is_atom(k), do: k
+
+  defp deserialize_context_key(k) do
+    alias Arbor.Common.SafeAtom
+
+    case SafeAtom.to_allowed(to_string(k), @known_context_keys) do
+      {:ok, atom} -> atom
+      {:error, _} -> String.to_existing_atom(to_string(k))
+    end
+  end
 
   # ============================================================================
   # Private Helpers
@@ -648,6 +624,21 @@ defmodule Arbor.Memory.Preferences do
       tier when tier in @valid_tiers ->
         bounds = Map.fetch!(@tier_cognitive_bounds, tier)
         {1, bounds.max_pins}
+    end
+  end
+
+  defp validate_quota(quota, _type, _opts) when is_integer(quota) and quota <= 0 do
+    {:error, {:invalid_quota, :must_be_positive_or_unlimited}}
+  end
+
+  defp validate_quota(:unlimited, _type, _opts), do: :ok
+
+  defp validate_quota(quota, type, opts) when is_integer(quota) do
+    case quota_range_for(opts) do
+      nil -> :ok
+      {min, max} when quota >= min and quota <= max -> :ok
+      {_min, max} when quota > max -> {:error, {:exceeds_max_quota, type}}
+      {_min, _max} -> {:error, {:below_min_quota, type}}
     end
   end
 

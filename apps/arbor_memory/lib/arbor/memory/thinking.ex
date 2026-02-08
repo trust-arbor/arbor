@@ -367,44 +367,62 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp extract_generic_thinking(response) do
-    # Try Anthropic-style content blocks first
+    with :not_found <- try_anthropic_thinking(response),
+         :not_found <- try_deepseek_reasoning(response),
+         :not_found <- try_thinking_field(response) do
+      extract_xml_thinking(response)
+    end
+  end
+
+  defp try_anthropic_thinking(response) do
     case extract_anthropic_thinking(response) do
       {:ok, _} = ok -> ok
-      _ ->
-        # Try DeepSeek-style reasoning_content
-        case extract_deepseek_reasoning(response) do
-          {:ok, _} = ok -> ok
-          _ ->
-            # Try "thinking" field directly
-            thinking = get_nested(response, ["thinking"]) || get_nested(response, [:thinking])
-            case thinking do
-              t when is_binary(t) and t != "" -> {:ok, t}
-              _ ->
-                # Try XML <thinking> tags in text content
-                extract_xml_thinking(response)
-            end
-        end
+      _ -> :not_found
+    end
+  end
+
+  defp try_deepseek_reasoning(response) do
+    case extract_deepseek_reasoning(response) do
+      {:ok, _} = ok -> ok
+      _ -> :not_found
+    end
+  end
+
+  defp try_thinking_field(response) do
+    thinking = get_nested(response, ["thinking"]) || get_nested(response, [:thinking])
+
+    case thinking do
+      t when is_binary(t) and t != "" -> {:ok, t}
+      _ -> :not_found
     end
   end
 
   defp extract_xml_thinking(response) do
-    # Try to find text content that has <thinking> tags
-    text =
-      cond do
-        is_binary(response) -> response
-        is_binary(response["content"]) -> response["content"]
-        is_binary(response[:content]) -> response[:content]
-        true ->
-          blocks = get_content_blocks(response)
-          blocks
-          |> Enum.filter(&(is_map(&1) and (&1["type"] == "text" or &1[:type] == "text")))
-          |> Enum.map_join("\n", &(&1["text"] || &1[:text] || ""))
-      end
+    text = extract_text_content(response)
 
     case Regex.run(~r/<thinking>(.*?)<\/thinking>/s, text) do
       [_, captured] when captured != "" -> {:ok, String.trim(captured)}
       _ -> {:none, :no_thinking_found}
     end
+  end
+
+  defp extract_text_content(response) when is_binary(response), do: response
+
+  defp extract_text_content(response) when is_map(response) do
+    cond do
+      is_binary(response["content"]) -> response["content"]
+      is_binary(response[:content]) -> response[:content]
+      true -> extract_text_from_blocks(response)
+    end
+  end
+
+  defp extract_text_content(_response), do: ""
+
+  defp extract_text_from_blocks(response) do
+    response
+    |> get_content_blocks()
+    |> Enum.filter(&(is_map(&1) and (&1["type"] == "text" or &1[:type] == "text")))
+    |> Enum.map_join("\n", &(&1["text"] || &1[:text] || ""))
   end
 
   defp get_content_blocks(response) when is_map(response) do

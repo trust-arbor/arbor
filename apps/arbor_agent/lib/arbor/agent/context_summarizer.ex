@@ -157,14 +157,18 @@ defmodule Arbor.Agent.ContextSummarizer do
         {:ok, cached_summary}
 
       {:error, _} ->
-        case do_summarize_tier(messages, tier, existing_summary) do
-          {:ok, summary} = result ->
-            if summary, do: SummaryCache.put(content_hash, summary)
-            result
+        summarize_and_cache(messages, tier, existing_summary, content_hash)
+    end
+  end
 
-          error ->
-            error
-        end
+  defp summarize_and_cache(messages, tier, existing_summary, content_hash) do
+    case do_summarize_tier(messages, tier, existing_summary) do
+      {:ok, summary} = result ->
+        if summary, do: SummaryCache.put(content_hash, summary)
+        result
+
+      error ->
+        error
     end
   end
 

@@ -317,47 +317,97 @@ defmodule Arbor.Agent.Executor do
     context = params[:context] || params["context"] || %{}
 
     prompt = build_analysis_prompt(anomaly, context)
-
-    # In demo mode, use the configured demo LLM model (OpenRouter with free model)
-    # Otherwise, fall back to default routing
-    ai_opts =
-      if demo_mode?() do
-        case get_demo_llm_config() do
-          %{provider: provider, model: model} ->
-            [max_tokens: 2000, backend: :api, provider: provider, model: model]
-
-          _ ->
-            [max_tokens: 2000]
-        end
-      else
-        [max_tokens: 2000]
-      end
+    ai_opts = build_ai_opts()
 
     Logger.debug("[Executor] AI analyze with opts: #{inspect(ai_opts)}")
 
-    case safe_call(fn -> Arbor.AI.generate_text(prompt, ai_opts) end) do
-      {:ok, %{text: text}} ->
-        # Parse the AI response to extract fix suggestion
-        {:ok, %{analysis: text, raw_response: text}}
-
-      {:ok, response} when is_map(response) ->
-        text = response[:text] || response["text"] || inspect(response)
-        {:ok, %{analysis: text, raw_response: response}}
-
-      {:error, reason} ->
-        {:error, {:ai_analysis_failed, reason}}
-
-      nil ->
-        {:error, :ai_service_unavailable}
-    end
+    prompt
+    |> call_ai_generate(ai_opts)
+    |> normalize_ai_result()
   end
 
   # Proposal submission — map to Proposal.Submit action (runtime call to avoid Level 2 cycle)
   defp dispatch_action(:proposal_submit, params) do
     proposal = params[:proposal] || params["proposal"] || %{}
+    submit_params = build_submit_params(proposal)
 
-    # Transform DebugAgent proposal format to Submit action format
-    submit_params = %{
+    # Runtime call to avoid compile-time dependency on arbor_actions
+    action_mod = Module.concat([Arbor, Actions, Proposal, Submit])
+    run_runtime_action(action_mod, submit_params, :proposal_submit_failed, :consensus_unavailable)
+  end
+
+  # Code hot-load — map to Code.HotLoad action (runtime call to avoid Level 2 cycle)
+  defp dispatch_action(:code_hot_load, params) do
+    module = params[:module] || params["module"]
+    code = params[:code] || params[:source] || params["code"] || params["source"]
+    do_hot_load(module, code, params)
+  end
+
+  # Proposal status — query the status of a submitted proposal
+  defp dispatch_action(:proposal_status, params) do
+    proposal_id = params[:proposal_id] || params["proposal_id"]
+    do_proposal_status(proposal_id)
+  end
+
+  # Generic action dispatch — try to find a matching action module
+  defp dispatch_action(action, params) when is_atom(action) do
+    # Try to find an action module by name convention
+    action_module = find_action_module(action)
+    run_discovered_action(action_module, action, params)
+  end
+
+  defp dispatch_action(action, params) do
+    Logger.warning("Executor: invalid action type #{inspect(action)}")
+    {:ok, %{action: action, status: :invalid_action_type, params: params}}
+  end
+
+  # ============================================================================
+  # Action Dispatch Helpers
+  # ============================================================================
+
+  # Build AI options based on demo mode configuration
+  defp build_ai_opts do
+    if demo_mode?() do
+      demo_ai_opts()
+    else
+      [max_tokens: 2000]
+    end
+  end
+
+  defp demo_ai_opts do
+    case get_demo_llm_config() do
+      %{provider: provider, model: model} ->
+        [max_tokens: 2000, backend: :api, provider: provider, model: model]
+
+      _ ->
+        [max_tokens: 2000]
+    end
+  end
+
+  defp call_ai_generate(prompt, ai_opts) do
+    safe_call(fn -> Arbor.AI.generate_text(prompt, ai_opts) end)
+  end
+
+  defp normalize_ai_result({:ok, %{text: text}}) do
+    {:ok, %{analysis: text, raw_response: text}}
+  end
+
+  defp normalize_ai_result({:ok, response}) when is_map(response) do
+    text = response[:text] || response["text"] || inspect(response)
+    {:ok, %{analysis: text, raw_response: response}}
+  end
+
+  defp normalize_ai_result({:error, reason}) do
+    {:error, {:ai_analysis_failed, reason}}
+  end
+
+  defp normalize_ai_result(nil) do
+    {:error, :ai_service_unavailable}
+  end
+
+  # Transform DebugAgent proposal format to Submit action format
+  defp build_submit_params(proposal) do
+    %{
       title: proposal[:title] || "Fix for detected anomaly",
       description: proposal[:description] || proposal[:rationale] || "Auto-generated fix",
       branch: proposal[:branch] || "main",
@@ -365,86 +415,58 @@ defmodule Arbor.Agent.Executor do
       urgency: proposal[:urgency] || "high",
       change_type: proposal[:change_type] || "code_modification"
     }
+  end
 
-    # Runtime call to avoid compile-time dependency on arbor_actions
-    action_mod = Module.concat([Arbor, Actions, Proposal, Submit])
-
-    case safe_call(fn -> apply(action_mod, :run, [submit_params, %{}]) end) do
+  # Run an action module at runtime via apply, normalizing the result
+  defp run_runtime_action(action_mod, params, error_tag, unavailable_tag) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case safe_call(fn -> apply(action_mod, :run, [params, %{}]) end) do
       {:ok, result} -> {:ok, result}
-      {:error, reason} -> {:error, {:proposal_submit_failed, reason}}
+      {:error, reason} -> {:error, {error_tag, reason}}
+      nil -> {:error, unavailable_tag}
+    end
+  end
+
+  defp do_hot_load(module, code, _params) when is_nil(module) or is_nil(code) do
+    {:error, :missing_module_or_code}
+  end
+
+  defp do_hot_load(module, code, params) do
+    hot_load_params = %{
+      module: to_string(module),
+      source: code,
+      verify_fn: params[:verify_fn],
+      rollback_timeout_ms: params[:timeout] || 30_000
+    }
+
+    action_mod = Module.concat([Arbor, Actions, Code, HotLoad])
+    run_runtime_action(action_mod, hot_load_params, :hot_load_failed, :code_service_unavailable)
+  end
+
+  defp do_proposal_status(nil), do: {:error, :missing_proposal_id}
+
+  defp do_proposal_status(proposal_id) do
+    consensus_mod = Module.concat([Arbor, Consensus])
+
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case safe_call(fn -> apply(consensus_mod, :get_status, [proposal_id]) end) do
+      {:ok, status} -> {:ok, %{proposal_id: proposal_id, status: status}}
+      {:error, reason} -> {:error, {:status_query_failed, reason}}
       nil -> {:error, :consensus_unavailable}
     end
   end
 
-  # Code hot-load — map to Code.HotLoad action (runtime call to avoid Level 2 cycle)
-  defp dispatch_action(:code_hot_load, params) do
-    module = params[:module] || params["module"]
-    code = params[:code] || params[:source] || params["code"] || params["source"]
-
-    if is_nil(module) or is_nil(code) do
-      {:error, :missing_module_or_code}
-    else
-      hot_load_params = %{
-        module: to_string(module),
-        source: code,
-        verify_fn: params[:verify_fn],
-        rollback_timeout_ms: params[:timeout] || 30_000
-      }
-
-      # Runtime call to avoid compile-time dependency on arbor_actions
-      action_mod = Module.concat([Arbor, Actions, Code, HotLoad])
-
-      case safe_call(fn -> apply(action_mod, :run, [hot_load_params, %{}]) end) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, {:hot_load_failed, reason}}
-        nil -> {:error, :code_service_unavailable}
-      end
-    end
+  defp run_discovered_action(nil, action, params) do
+    Logger.warning("Executor: unknown action #{inspect(action)}, returning stub result")
+    {:ok, %{action: action, status: :no_handler, params: params}}
   end
 
-  # Proposal status — query the status of a submitted proposal
-  defp dispatch_action(:proposal_status, params) do
-    proposal_id = params[:proposal_id] || params["proposal_id"]
-
-    if is_nil(proposal_id) do
-      {:error, :missing_proposal_id}
-    else
-      # Runtime call to avoid compile-time dependency on arbor_consensus
-      consensus_mod = Module.concat([Arbor, Consensus])
-
-      case safe_call(fn -> apply(consensus_mod, :get_status, [proposal_id]) end) do
-        {:ok, status} ->
-          {:ok, %{proposal_id: proposal_id, status: status}}
-
-        {:error, reason} ->
-          {:error, {:status_query_failed, reason}}
-
-        nil ->
-          {:error, :consensus_unavailable}
-      end
+  defp run_discovered_action(action_module, action, params) do
+    case safe_call(fn -> action_module.run(params, %{}) end) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, {action, reason}}
+      nil -> {:error, {:action_failed, action}}
     end
-  end
-
-  # Generic action dispatch — try to find a matching action module
-  defp dispatch_action(action, params) when is_atom(action) do
-    # Try to find an action module by name convention
-    action_module = find_action_module(action)
-
-    if action_module && function_exported?(action_module, :run, 2) do
-      case safe_call(fn -> action_module.run(params, %{}) end) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, {action, reason}}
-        nil -> {:error, {:action_failed, action}}
-      end
-    else
-      Logger.warning("Executor: unknown action #{inspect(action)}, returning stub result")
-      {:ok, %{action: action, status: :no_handler, params: params}}
-    end
-  end
-
-  defp dispatch_action(action, params) do
-    Logger.warning("Executor: invalid action type #{inspect(action)}")
-    {:ok, %{action: action, status: :invalid_action_type, params: params}}
   end
 
   # Get the demo LLM configuration (runtime call to avoid dependency cycle)
@@ -614,20 +636,8 @@ defmodule Arbor.Agent.Executor do
 
     Logger.debug("[Executor] Subscribing to intents for #{state.agent_id}")
 
-    result =
-      safe_call(fn ->
-        Arbor.Memory.subscribe_to_intents(state.agent_id, fn signal ->
-          # Signal.data contains %{intent: %Intent{}, ...}
-          intent = extract_intent_from_signal(signal)
-
-          if intent do
-            Logger.debug("[Executor] Received intent signal: #{intent.id}")
-            GenServer.cast(executor_pid, {:intent, intent})
-          end
-
-          :ok
-        end)
-      end)
+    handler = build_intent_handler(executor_pid)
+    result = safe_call(fn -> Arbor.Memory.subscribe_to_intents(state.agent_id, handler) end)
 
     Logger.debug("[Executor] Subscription result: #{inspect(result)}")
 
@@ -635,6 +645,22 @@ defmodule Arbor.Agent.Executor do
       {:ok, sub_id} -> %{state | intent_subscription: sub_id}
       _ -> state
     end
+  end
+
+  defp build_intent_handler(executor_pid) do
+    fn signal ->
+      # Signal.data contains %{intent: %Intent{}, ...}
+      intent = extract_intent_from_signal(signal)
+      maybe_forward_intent(intent, executor_pid)
+      :ok
+    end
+  end
+
+  defp maybe_forward_intent(nil, _executor_pid), do: :ok
+
+  defp maybe_forward_intent(intent, executor_pid) do
+    Logger.debug("[Executor] Received intent signal: #{intent.id}")
+    GenServer.cast(executor_pid, {:intent, intent})
   end
 
   defp extract_intent_from_signal(signal) do

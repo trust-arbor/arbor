@@ -79,17 +79,17 @@ defmodule Arbor.Agent.ExecutorIntegration do
   @spec subscribe_to_percepts(String.t(), pid()) :: {:ok, String.t()} | {:error, term()}
   def subscribe_to_percepts(agent_id, agent_pid) do
     safe_call(fn ->
-      Arbor.Memory.subscribe_to_percepts(agent_id, fn signal ->
-        data = Map.get(signal, :data) || %{}
-        percept = data[:percept] || data["percept"]
-
-        if percept do
-          send(agent_pid, {:percept_result, percept})
-        end
-
-        :ok
-      end)
+      Arbor.Memory.subscribe_to_percepts(agent_id, &forward_percept(&1, agent_pid))
     end)
+  end
+
+  defp forward_percept(signal, agent_pid) do
+    data = Map.get(signal, :data) || %{}
+    percept = data[:percept] || data["percept"]
+
+    if percept, do: send(agent_pid, {:percept_result, percept})
+
+    :ok
   end
 
   # -- Private --

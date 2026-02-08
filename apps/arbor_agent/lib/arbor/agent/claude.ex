@@ -365,23 +365,7 @@ defmodule Arbor.Agent.Claude do
   # ============================================================================
 
   defp run_llm_think_cycle(state, mode) do
-    think_fn =
-      if user_waiting?(state) do
-        fn -> {:ok, HeartbeatResponse.empty_response()} end
-      else
-        case mode do
-          :conversation ->
-            fn -> {:ok, HeartbeatResponse.empty_response()} end
-
-          m when m in [:introspection, :reflection, :pattern_analysis, :insight_detection] ->
-            fn -> HeartbeatLLM.idle_think(state) end
-
-          _ ->
-            fn -> HeartbeatLLM.think(state) end
-        end
-      end
-
-    case think_fn.() do
+    case select_think_result(state, mode) do
       {:ok, parsed} ->
         {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
          Map.get(parsed, :goal_updates, [])}
@@ -390,6 +374,24 @@ defmodule Arbor.Agent.Claude do
         {HeartbeatResponse.empty_response(), "", [], []}
     end
   end
+
+  defp select_think_result(state, mode) do
+    if user_waiting?(state) do
+      {:ok, HeartbeatResponse.empty_response()}
+    else
+      execute_think_mode(state, mode)
+    end
+  end
+
+  defp execute_think_mode(_state, :conversation),
+    do: {:ok, HeartbeatResponse.empty_response()}
+
+  defp execute_think_mode(state, mode)
+       when mode in [:introspection, :reflection, :pattern_analysis, :insight_detection],
+       do: HeartbeatLLM.idle_think(state)
+
+  defp execute_think_mode(state, _mode),
+    do: HeartbeatLLM.think(state)
 
   defp user_waiting?(state) do
     timing = TimingContext.compute(state)
@@ -472,7 +474,20 @@ defmodule Arbor.Agent.Claude do
   defp execute_query(prompt, model, capture, state, opts) do
     case AgentSDK.query(prompt, Keyword.merge(opts, model: model)) do
       {:ok, response} ->
+        raw_count = thinking_count_label(response.thinking)
+
+        Logger.debug(
+          "[Claude] Raw response thinking: #{raw_count}, session: #{inspect(response.session_id)}, capture: #{capture}"
+        )
+
         {thinking, session_id} = resolve_thinking(response, capture, state)
+
+        resolved_count = thinking_count_label(thinking)
+
+        Logger.debug(
+          "[Claude] Resolved thinking: #{resolved_count}, session: #{inspect(session_id)}"
+        )
+
         maybe_record_thinking(state.id, thinking)
         emit_query_completed(state.id, model, thinking)
 
@@ -484,6 +499,11 @@ defmodule Arbor.Agent.Claude do
         error
     end
   end
+
+  defp thinking_count_label(nil), do: "nil"
+  defp thinking_count_label([]), do: "[]"
+  defp thinking_count_label(blocks) when is_list(blocks), do: "#{length(blocks)} blocks"
+  defp thinking_count_label(other), do: inspect(other)
 
   defp execute_stream(prompt, callback, model, capture, state, opts) do
     case AgentSDK.stream(prompt, callback, Keyword.merge(opts, model: model)) do

@@ -352,39 +352,29 @@ defmodule Arbor.AI do
   defp build_self_knowledge_section(agent_id) do
     if Code.ensure_loaded?(IdentityConsolidator) and
          function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
-      case IdentityConsolidator.get_self_knowledge(agent_id) do
-        nil ->
-          nil
-
-        sk ->
-          summary = SelfKnowledge.summarize(sk)
-          if summary not in ["", nil], do: "## Self-Awareness\n#{summary}"
-      end
+      agent_id
+      |> IdentityConsolidator.get_self_knowledge()
+      |> format_self_knowledge()
     end
   rescue
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp format_self_knowledge(nil), do: nil
+
+  defp format_self_knowledge(sk) do
+    summary = SelfKnowledge.summarize(sk)
+    if summary not in ["", nil], do: "## Self-Awareness\n#{summary}"
   end
 
   defp build_goals_section(agent_id) do
     if Code.ensure_loaded?(GoalStore) and
          function_exported?(GoalStore, :get_active_goals, 1) do
-      goals = GoalStore.get_active_goals(agent_id)
-
-      if goals == [] do
-        nil
-      else
-        lines =
-          goals
-          |> Enum.take(5)
-          |> Enum.map_join("\n", fn goal ->
-            pct = round((goal.progress || 0) * 100)
-            "- [#{pct}%] #{goal.description} (priority: #{goal.priority})"
-          end)
-
-        "## Active Goals\n#{lines}"
-      end
+      agent_id
+      |> GoalStore.get_active_goals()
+      |> format_goals()
     end
   rescue
     _ -> nil
@@ -392,24 +382,41 @@ defmodule Arbor.AI do
     :exit, _ -> nil
   end
 
+  defp format_goals([]), do: nil
+
+  defp format_goals(goals) do
+    lines =
+      goals
+      |> Enum.take(5)
+      |> Enum.map_join("\n", &format_goal_line/1)
+
+    "## Active Goals\n#{lines}"
+  end
+
+  defp format_goal_line(goal) do
+    pct = round((goal.progress || 0) * 100)
+    "- [#{pct}%] #{goal.description} (priority: #{goal.priority})"
+  end
+
   defp build_working_memory_section(agent_id) do
     if Code.ensure_loaded?(Arbor.Memory) and
          function_exported?(Arbor.Memory, :get_working_memory, 1) do
-      case Arbor.Memory.get_working_memory(agent_id) do
-        nil ->
-          nil
-
-        wm ->
-          # Filter out heartbeat-sourced entries from query context
-          filtered_wm = filter_heartbeat_entries(wm)
-          text = WorkingMemory.to_prompt_text(filtered_wm)
-          if text not in ["", nil], do: "## Working Memory\n#{text}"
-      end
+      agent_id
+      |> Arbor.Memory.get_working_memory()
+      |> format_working_memory()
     end
   rescue
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp format_working_memory(nil), do: nil
+
+  defp format_working_memory(wm) do
+    filtered_wm = filter_heartbeat_entries(wm)
+    text = WorkingMemory.to_prompt_text(filtered_wm)
+    if text not in ["", nil], do: "## Working Memory\n#{text}"
   end
 
   # Remove heartbeat-sourced entries (prefixed with "[hb] ") from working memory
@@ -433,14 +440,9 @@ defmodule Arbor.AI do
 
   defp build_knowledge_graph_section(agent_id) do
     if :ets.whereis(:arbor_memory_graphs) != :undefined do
-      case :ets.lookup(:arbor_memory_graphs, agent_id) do
-        [{^agent_id, graph}] ->
-          text = KnowledgeGraph.to_prompt_text(graph, max_nodes: 20)
-          if text not in ["", nil], do: "## Knowledge\n#{text}"
-
-        [] ->
-          nil
-      end
+      agent_id
+      |> lookup_knowledge_graph()
+      |> format_knowledge_graph()
     end
   rescue
     _ -> nil
@@ -448,10 +450,27 @@ defmodule Arbor.AI do
     :exit, _ -> nil
   end
 
+  defp lookup_knowledge_graph(agent_id) do
+    case :ets.lookup(:arbor_memory_graphs, agent_id) do
+      [{_id, graph}] -> graph
+      [] -> nil
+    end
+  end
+
+  defp format_knowledge_graph(nil), do: nil
+
+  defp format_knowledge_graph(graph) do
+    case KnowledgeGraph.to_prompt_text(graph, max_nodes: 20) do
+      "" -> nil
+      text -> "## Knowledge\n#{text}"
+    end
+  end
+
   defp build_timing_section(opts) do
     state = Keyword.get(opts, :state)
 
     if state && Code.ensure_loaded?(Arbor.Agent.TimingContext) do
+      # credo:disable-for-lines:2 Credo.Check.Refactor.Apply
       timing = apply(Arbor.Agent.TimingContext, :compute, [state])
       text = apply(Arbor.Agent.TimingContext, :to_markdown, [timing])
       if text not in ["", nil], do: text
@@ -652,6 +671,7 @@ defmodule Arbor.AI do
       entries =
         Enum.map(blocks, fn block ->
           text = block[:text] || block["text"] || ""
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
           {:ok, entry} = apply(Arbor.Memory.Thinking, :record_thinking, [agent_id, text, opts])
           entry
         end)
