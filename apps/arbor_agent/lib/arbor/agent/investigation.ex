@@ -248,7 +248,7 @@ defmodule Arbor.Agent.Investigation do
       {:ok, response} ->
         # Parse AI response and update confidence/evidence
         enhanced = parse_ai_response(investigation, response)
-        text = if is_map(response), do: response[:text] || response.text, else: to_string(response)
+        text = extract_response_text(response)
         log = ["AI analysis complete: #{String.slice(text, 0, 100)}..."]
         %{enhanced | thinking_log: investigation.thinking_log ++ log}
 
@@ -768,7 +768,7 @@ defmodule Arbor.Agent.Investigation do
 
   defp parse_ai_response(investigation, response) do
     # Extract text from response map (Arbor.AI returns %{text: ..., usage: ...})
-    text = if is_map(response), do: response[:text] || response.text, else: to_string(response)
+    text = extract_response_text(response)
 
     # Extract confidence adjustment from AI response
     confidence_match = Regex.run(~r/confidence[:\s]+(\d+\.?\d*)/i, text)
@@ -819,6 +819,20 @@ defmodule Arbor.Agent.Investigation do
   defp describe_action(:restart_child, id), do: "Restart child #{inspect(id)}"
   defp describe_action(:logged_warning, _), do: "Log warning (manual intervention needed)"
   defp describe_action(action, _), do: "#{action}"
+
+  # Extract text string from various AI response formats.
+  # Handles plain maps, structs, and raw strings safely.
+  defp extract_response_text(response) when is_binary(response), do: response
+
+  defp extract_response_text(response) when is_struct(response) do
+    Map.get(response, :text) || Map.get(response, :content) || inspect(response)
+  end
+
+  defp extract_response_text(response) when is_map(response) do
+    response[:text] || response["text"] || response[:content] || response["content"] || inspect(response)
+  end
+
+  defp extract_response_text(response), do: to_string(response)
 
   defp safe_call(fun, default) do
     fun.()
