@@ -732,11 +732,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </summary>
               <div style="padding: 0.35rem; border-top: 1px solid var(--aw-border, #333);">
                 <div style="margin-bottom: 0.3rem;">
-                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Input:</strong>
+                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+                    Input:
+                  </strong>
                   <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{format_tool_input(action.input)}</pre>
                 </div>
                 <div :if={action[:result]}>
-                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Result:</strong>
+                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+                    Result:
+                  </strong>
                   <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{format_tool_result(action.result)}</pre>
                 </div>
               </div>
