@@ -207,12 +207,14 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp render_tab(%{active_tab: "overview"} = assigns) do
     ~H"""
     <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem;">
+      <.stat_card label="Engagement" value={format_pct(@tab_data[:engagement])} />
+      <.stat_card label="Thoughts" value={@tab_data[:thought_count] || get_in(@tab_data, [:wm_stats, :thought_count]) || 0} />
+      <.stat_card label="Concerns" value={@tab_data[:concerns_count] || 0} />
+      <.stat_card label="Curiosity" value={@tab_data[:curiosity_count] || 0} />
+      <.stat_card label="Active Goals" value={@tab_data[:goal_count] || 0} />
+      <.stat_card label="Proposals Pending" value={get_in(@tab_data, [:proposal_stats, :pending]) || 0} />
       <.stat_card label="KG Nodes" value={get_in(@tab_data, [:kg_stats, :node_count]) || 0} />
       <.stat_card label="KG Edges" value={get_in(@tab_data, [:kg_stats, :edge_count]) || 0} />
-      <.stat_card label="Thoughts" value={get_in(@tab_data, [:wm_stats, :thought_count]) || 0} />
-      <.stat_card label="Proposals Pending" value={get_in(@tab_data, [:proposal_stats, :pending]) || 0} />
-      <.stat_card label="Active Goals" value={@tab_data[:goal_count] || 0} />
-      <.stat_card label="Engagement" value={format_pct(@tab_data[:engagement])} />
     </div>
     """
   end
@@ -482,19 +484,25 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp load_tab_data(socket, "overview", agent_id) do
     data =
       case safe_call(fn -> Arbor.Memory.read_self(agent_id, :all) end) do
-        {:ok, result} ->
-          kg = result[:memory_system][:knowledge_graph] || %{}
-          wm = result[:memory_system][:working_memory] || %{}
-          proposals = result[:memory_system][:proposals] || %{}
-          goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
-          engagement = result[:cognition][:working_memory][:engagement] || 0.5
+        {:ok, result} when is_map(result) ->
+          kg = get_in(result, [:memory_system, :knowledge_graph]) || %{}
+          wm = get_in(result, [:memory_system, :working_memory]) || %{}
+          proposals = get_in(result, [:memory_system, :proposals]) || %{}
+          goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
+          engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
+
+          # Also pull direct working memory for richer stats
+          direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
 
           %{
             kg_stats: kg,
             wm_stats: wm,
             proposal_stats: proposals,
             goal_count: length(goals),
-            engagement: engagement
+            engagement: if(direct_wm, do: Map.get(direct_wm, :engagement_level, engagement), else: engagement),
+            thought_count: if(direct_wm, do: length(Map.get(direct_wm, :recent_thoughts, [])), else: 0),
+            concerns_count: if(direct_wm, do: length(Map.get(direct_wm, :concerns, [])), else: 0),
+            curiosity_count: if(direct_wm, do: length(Map.get(direct_wm, :curiosity, [])), else: 0)
           }
 
         _ ->
@@ -520,40 +528,29 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp load_tab_data(socket, "knowledge", agent_id) do
-    stats = safe_call(fn -> Arbor.Memory.knowledge_stats(agent_id) end) || %{}
-    near = safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end) || []
+    stats = unwrap_map(safe_call(fn -> Arbor.Memory.knowledge_stats(agent_id) end)) || %{}
+    near = unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
     assign(socket, tab_data: %{stats: stats, near_threshold: near})
   end
 
   defp load_tab_data(socket, "working_memory", agent_id) do
-    wm =
-      case safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end) do
-        {:ok, wm} -> wm
-        wm when is_map(wm) -> wm
-        _ -> nil
-      end
-
+    wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
     assign(socket, tab_data: %{working_memory: wm})
   end
 
   defp load_tab_data(socket, "preferences", agent_id) do
-    prefs =
-      case safe_call(fn -> Arbor.Memory.inspect_preferences(agent_id) end) do
-        prefs when is_map(prefs) -> prefs
-        _ -> nil
-      end
-
+    prefs = unwrap_map(safe_call(fn -> Arbor.Memory.inspect_preferences(agent_id) end))
     assign(socket, tab_data: %{prefs: prefs})
   end
 
   defp load_tab_data(socket, "proposals", agent_id) do
-    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
-    stats = safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end) || %{}
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
     assign(socket, tab_data: %{proposals: proposals, stats: stats})
   end
 
   defp load_tab_data(socket, "code", agent_id) do
-    entries = safe_call(fn -> Arbor.Memory.list_code(agent_id) end) || []
+    entries = unwrap_list(safe_call(fn -> Arbor.Memory.list_code(agent_id) end))
     assign(socket, tab_data: %{code_entries: entries})
   end
 
@@ -632,6 +629,19 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       :exit, _ -> nil
     end
   end
+
+  # Unwrap {:ok, value} tuples and handle {:error, _} — return map or nil
+  defp unwrap_map({:ok, val}) when is_map(val), do: val
+  defp unwrap_map({:error, _}), do: nil
+  defp unwrap_map(nil), do: nil
+  defp unwrap_map(val) when is_map(val), do: val
+  defp unwrap_map(_), do: nil
+
+  # Unwrap {:ok, value} tuples and handle {:error, _} — return list or []
+  defp unwrap_list({:ok, val}) when is_list(val), do: val
+  defp unwrap_list({:error, _}), do: []
+  defp unwrap_list(val) when is_list(val), do: val
+  defp unwrap_list(_), do: []
 
   defp discover_agents do
     # Combine agents from ETS tables and ChatState recent list

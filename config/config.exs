@@ -189,7 +189,13 @@ config :arbor_agent,
   summary_tier_2_age_hours: 24,
   # Summary cache
   summary_cache_enabled: true,
-  summary_cache_ttl_minutes: 60
+  summary_cache_ttl_minutes: 60,
+  # API agent defaults (tiered config: these are the global tier)
+  api_defaults: [
+    max_tokens: 16_384,
+    temperature: 0.7,
+    max_turns: 10
+  ]
 
 # Memory system defaults
 config :arbor_memory,
@@ -215,6 +221,24 @@ config :arbor_persistence,
 config :arbor_monitor,
   signal_emission_enabled: true,
   signal_module: Arbor.Signals
+
+# Dashboard chat model configuration
+config :arbor_dashboard,
+  chat_models: [
+    # Anthropic models — use Claude CLI backend (agentic, tool use, thinking)
+    %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli},
+    %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, backend: :cli},
+    %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli},
+    # OpenRouter models — use API backend
+    %{id: "arcee-ai/trinity-large-preview:free", label: "Trinity Large (free)", provider: :openrouter, backend: :api},
+    # Z.AI models — use API backend
+    %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan, backend: :api}
+  ],
+  # Heartbeat model choices (API models only — CLI models are too slow)
+  heartbeat_models: [
+    %{id: "arcee-ai/trinity-large-preview:free", label: "Trinity Large (free)", provider: :openrouter},
+    %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan}
+  ]
 
 # Dashboard endpoint
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,

@@ -42,14 +42,20 @@ defmodule Arbor.Agent.HeartbeatLLM do
     ]
 
     case call_ai(prompt, ai_opts) do
-      {:ok, %{text: text}} ->
+      {:ok, %{text: text, usage: usage}} ->
         parsed = HeartbeatResponse.parse(text)
-        {:ok, parsed}
+        {:ok, Map.put(parsed, :usage, usage)}
+
+      {:ok, %{text: text} = response} ->
+        parsed = HeartbeatResponse.parse(text)
+        usage = response[:usage] || %{input_tokens: 0, output_tokens: 0}
+        {:ok, Map.put(parsed, :usage, usage)}
 
       {:ok, response} when is_map(response) ->
         text = response[:text] || response["text"] || ""
         parsed = HeartbeatResponse.parse(text)
-        {:ok, parsed}
+        usage = response[:usage] || %{input_tokens: 0, output_tokens: 0}
+        {:ok, Map.put(parsed, :usage, usage)}
 
       {:error, reason} ->
         Logger.debug("Heartbeat LLM call failed: #{inspect(reason)}")
