@@ -212,7 +212,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           Task.start(fn ->
             result =
               try do
-                Claude.query(agent, input, timeout: 300_000, permission_mode: :bypass)
+                Claude.query(agent, input, timeout: :infinity, permission_mode: :bypass)
               catch
                 :exit, reason -> {:error, {:agent_crashed, reason}}
               end
@@ -536,7 +536,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         name: name,
         outcome: tool_use_outcome(tool),
         timestamp: DateTime.utc_now(),
-        details: tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{}
+        input: tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{},
+        result: tool[:result] || tool["result"]
       }
 
       stream_insert(acc, :actions, action_entry)
@@ -546,8 +547,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp tool_use_outcome(tool) do
     cond do
       tool[:error] || tool["error"] -> :error
-      tool[:result] || tool["result"] -> :success
-      true -> :pending
+      tool[:result] != nil || tool["result"] != nil -> :success
+      true -> :success
     end
   end
 
@@ -713,19 +714,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             phx-update="stream"
             style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
           >
-            <div
+            <details
               :for={{dom_id, action} <- @streams.actions}
               id={dom_id}
-              style={"margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; font-size: 0.8em; " <> action_style(action.outcome)}
+              style={"margin-bottom: 0.35rem; border-radius: 4px; font-size: 0.8em; " <> action_style(action.outcome)}
             >
-              <div style="display: flex; align-items: center; gap: 0.25rem;">
-                <span>⚡</span>
-                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  {action.name}
-                </span>
-                <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
+              <summary style="padding: 0.35rem; cursor: pointer; list-style: none; user-select: none;">
+                <div style="display: flex; align-items: center; gap: 0.25rem;">
+                  <span style={"padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(action.name)}>
+                    {action.name}
+                  </span>
+                  <span style="color: var(--aw-text-muted, #888); font-size: 0.85em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    {action_input_summary(action)}
+                  </span>
+                  <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
+                </div>
+              </summary>
+              <div style="padding: 0.35rem; border-top: 1px solid var(--aw-border, #333);">
+                <div style="margin-bottom: 0.3rem;">
+                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Input:</strong>
+                  <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{format_tool_input(action.input)}</pre>
+                </div>
+                <div :if={action[:result]}>
+                  <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Result:</strong>
+                  <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{format_tool_result(action.result)}</pre>
+                </div>
               </div>
-            </div>
+            </details>
           </div>
           <div :if={@show_actions} style="padding: 0.4rem; text-align: center;">
             <.empty_state
@@ -1003,39 +1018,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             <div :if={msg.content != ""} style="white-space: pre-wrap; font-size: 0.9em;">
               {msg.content}
             </div>
-            <%!-- Tool uses (collapsible) --%>
+            <%!-- Tool use count (details in Actions panel) --%>
             <div
               :if={msg[:tool_uses] && msg[:tool_uses] != []}
-              style="margin-top: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem;"
+              style="margin-top: 0.3rem;"
             >
-              <details
-                :for={tool <- msg.tool_uses}
-                style="border: 1px solid var(--aw-border, #333); border-radius: 4px; background: rgba(0,0,0,0.2); font-size: 0.85em;"
-              >
-                <summary style="padding: 0.3rem 0.5rem; cursor: pointer; color: var(--aw-text-muted, #aaa); user-select: none; list-style: none; display: flex; align-items: center; gap: 0.4rem;">
-                  <span style="color: #888; font-size: 0.9em;">&#9654;</span>
-                  <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(tool[:name] || tool["name"] || "unknown")}>
-                    {tool[:name] || tool["name"] || "unknown"}
-                  </span>
-                  <span style="color: var(--aw-text-muted, #888); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    {tool_summary(tool)}
-                  </span>
-                </summary>
-                <div style="padding: 0.4rem 0.5rem; border-top: 1px solid var(--aw-border, #333);">
-                  <div style="margin-bottom: 0.3rem;">
-                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
-                      Input:
-                    </strong>
-                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_input(tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{})}</pre>
-                  </div>
-                  <div :if={tool[:result] || tool["result"]}>
-                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
-                      Result:
-                    </strong>
-                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_result(tool[:result] || tool["result"])}</pre>
-                  </div>
-                </div>
-              </details>
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                ⚡ {length(msg.tool_uses)} tool call{if length(msg.tool_uses) != 1, do: "s", else: ""} — see Actions panel
+              </span>
             </div>
             <div
               :if={msg[:model] || msg[:memory_count]}
@@ -1555,6 +1545,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp stream_empty?(%Phoenix.LiveView.LiveStream{inserts: []}), do: true
   defp stream_empty?(_), do: false
 
+  defp action_input_summary(%{input: input}) when is_map(input) and map_size(input) > 0 do
+    cond do
+      Map.has_key?(input, "command") -> String.slice(to_string(input["command"]), 0, 60)
+      Map.has_key?(input, "file_path") -> Path.basename(to_string(input["file_path"]))
+      Map.has_key?(input, "pattern") -> to_string(input["pattern"])
+      Map.has_key?(input, "query") -> String.slice(to_string(input["query"]), 0, 60)
+      true -> input |> Map.keys() |> Enum.take(2) |> Enum.join(", ")
+    end
+  end
+
+  defp action_input_summary(_), do: ""
+
   defp action_style(:success), do: "background: rgba(74, 255, 158, 0.1);"
   defp action_style(:failure), do: "background: rgba(255, 74, 74, 0.1);"
   defp action_style(:blocked), do: "background: rgba(255, 165, 0, 0.1);"
@@ -1671,61 +1673,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         "background: rgba(255, 255, 255, 0.1); color: #aaa;"
     end
   end
-
-  defp tool_summary(tool) when is_map(tool) do
-    name = tool[:name] || tool["name"] || ""
-    input = tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{}
-
-    case name do
-      "Read" ->
-        Map.get(input, "file_path", "") |> Path.basename()
-
-      "Glob" ->
-        Map.get(input, "pattern", "")
-
-      "Grep" ->
-        Map.get(input, "pattern", "")
-
-      "Edit" ->
-        Map.get(input, "file_path", "") |> Path.basename()
-
-      "Write" ->
-        Map.get(input, "file_path", "") |> Path.basename()
-
-      "Bash" ->
-        Map.get(input, "command", "") |> String.slice(0, 60)
-
-      "Task" ->
-        Map.get(input, "description", "")
-
-      "WebFetch" ->
-        Map.get(input, "url", "") |> String.slice(0, 60)
-
-      "WebSearch" ->
-        Map.get(input, "query", "")
-
-      n when is_binary(n) ->
-        # Handle API tool names like "memory_remember", "memory_recall"
-        summarize_api_tool(n, input)
-
-      _ ->
-        ""
-    end
-  end
-
-  defp tool_summary(_), do: ""
-
-  defp summarize_api_tool(name, input) when is_map(input) do
-    cond do
-      Map.has_key?(input, "content") -> String.slice(to_string(input["content"]), 0, 50)
-      Map.has_key?(input, :content) -> String.slice(to_string(input[:content]), 0, 50)
-      Map.has_key?(input, "query") -> String.slice(to_string(input["query"]), 0, 50)
-      Map.has_key?(input, :query) -> String.slice(to_string(input[:query]), 0, 50)
-      true -> name
-    end
-  end
-
-  defp summarize_api_tool(name, _), do: name
 
   defp format_tool_input(input) when is_map(input) do
     Jason.encode!(input, pretty: true)
