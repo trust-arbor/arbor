@@ -7,13 +7,16 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   ## Usage
 
-      # Start a client
+      # Start a client (opens persistent CLI connection)
       {:ok, client} = Client.start_link(model: :opus)
 
       # Send a query and collect responses
       {:ok, response} = Client.query(client, "What is 2 + 2?")
       response.text      #=> "2 + 2 equals 4."
       response.thinking  #=> [%{text: "Simple arithmetic...", signature: "..."}]
+
+      # Multi-turn conversation
+      {:ok, r2} = Client.query(client, "What about 3 + 3?")
 
       # Stream responses
       Client.stream(client, "Explain recursion", fn event ->
@@ -67,6 +70,8 @@ defmodule Arbor.AI.AgentSDK.Client do
 
   @doc """
   Start a client process linked to the caller.
+
+  Opens a persistent Transport connection to the Claude CLI eagerly.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -101,7 +106,7 @@ defmodule Arbor.AI.AgentSDK.Client do
   end
 
   @doc """
-  Close the client.
+  Close the client and its Transport connection.
   """
   @spec close(t()) :: :ok
   def close(client) do
@@ -116,104 +121,126 @@ defmodule Arbor.AI.AgentSDK.Client do
   def init(opts) do
     hooks = Keyword.get(opts, :hooks, %{})
 
-    state = %{
+    # Allow injecting an existing transport (for testing)
+    case Keyword.get(opts, :transport) do
+      nil ->
+        # Start the persistent Transport eagerly
+        transport_opts = Keyword.put(opts, :receiver, self())
+
+        case Transport.start_link(transport_opts) do
+          {:ok, transport} ->
+            {:ok, build_state(opts, transport, hooks)}
+
+          {:error, reason} ->
+            {:stop, reason}
+        end
+
+      transport when is_pid(transport) ->
+        {:ok, build_state(opts, transport, hooks)}
+    end
+  end
+
+  defp build_state(opts, transport, hooks) do
+    %{
       opts: opts,
-      transport: nil,
-      pending_query: nil,
-      current_response: new_response_acc(),
-      stream_callback: nil,
+      transport: transport,
+      transport_ready: false,
+      pending_queries: %{},
       hooks: hooks,
       hook_context: Hooks.build_context(opts),
       tool_server: Keyword.get(opts, :tool_server)
     }
-
-    {:ok, state}
   end
 
   @impl true
-  def handle_call({:query, prompt, query_opts}, from, state) do
-    opts = Keyword.merge(state.opts, query_opts)
-    transport_opts = Keyword.put(opts, :prompt, prompt) |> Keyword.put(:receiver, self())
+  def handle_call({:query, prompt, _query_opts}, from, state) do
+    case Transport.send_query(state.transport, prompt) do
+      {:ok, query_ref} ->
+        pending =
+          Map.put(state.pending_queries, query_ref, %{
+            from: from,
+            response: new_response_acc(),
+            callback: nil
+          })
 
-    case Transport.start_link(transport_opts) do
-      {:ok, transport} ->
-        new_state = %{
-          state
-          | transport: transport,
-            pending_query: from,
-            current_response: new_response_acc(),
-            stream_callback: nil
-        }
+        {:noreply, %{state | pending_queries: pending}}
 
-        {:noreply, new_state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      {:error, _} = error ->
+        {:reply, error, state}
     end
   end
 
-  def handle_call({:stream, prompt, callback, query_opts}, from, state) do
-    opts = Keyword.merge(state.opts, query_opts)
-    transport_opts = Keyword.put(opts, :prompt, prompt) |> Keyword.put(:receiver, self())
+  def handle_call({:stream, prompt, callback, _query_opts}, from, state) do
+    case Transport.send_query(state.transport, prompt) do
+      {:ok, query_ref} ->
+        pending =
+          Map.put(state.pending_queries, query_ref, %{
+            from: from,
+            response: new_response_acc(),
+            callback: callback
+          })
 
-    case Transport.start_link(transport_opts) do
-      {:ok, transport} ->
-        new_state = %{
-          state
-          | transport: transport,
-            pending_query: from,
-            current_response: new_response_acc(),
-            stream_callback: callback
-        }
+        {:noreply, %{state | pending_queries: pending}}
 
-        {:noreply, new_state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      {:error, _} = error ->
+        {:reply, error, state}
     end
   end
 
   @impl true
-  def handle_info({:claude_message, message}, state) do
-    # Run on_message hooks
-    if state.hooks != %{} do
-      Hooks.run_message_hooks(state.hooks, message, state.hook_context)
-    end
-
-    new_state = process_message(state, message)
-    {:noreply, new_state}
+  def handle_info({:transport_ready}, state) do
+    Logger.debug("Transport ready")
+    {:noreply, %{state | transport_ready: true}}
   end
 
-  def handle_info({:transport_closed, status}, state) do
-    Logger.debug("Transport closed with status #{status}")
+  def handle_info({:claude_message, query_ref, message}, state) do
+    case Map.get(state.pending_queries, query_ref) do
+      nil ->
+        Logger.debug("Received message for unknown query_ref, ignoring")
+        {:noreply, state}
 
-    if state.pending_query do
-      response = build_response(state.current_response)
+      pending ->
+        # Run on_message hooks
+        if state.hooks != %{} do
+          Hooks.run_message_hooks(state.hooks, message, state.hook_context)
+        end
+
+        {new_pending, new_state} = process_message(state, query_ref, pending, message)
+        {:noreply, new_state |> Map.put(:pending_queries, new_pending)}
+    end
+  end
+
+  def handle_info({:transport_closed, reason}, state) do
+    Logger.debug("Transport closed: #{inspect(reason)}")
+
+    # Reply error to all pending queries
+    Enum.each(state.pending_queries, fn {_ref, pending} ->
+      response = build_response(pending.response)
 
       if response.text != "" or response.thinking != nil do
-        GenServer.reply(state.pending_query, {:ok, response})
+        GenServer.reply(pending.from, {:ok, response})
       else
-        GenServer.reply(
-          state.pending_query,
-          {:error, Error.process_error(status, "")}
-        )
+        GenServer.reply(pending.from, {:error, Error.process_error(0, "Transport closed")})
       end
-    end
+    end)
 
-    {:noreply, %{state | transport: nil, pending_query: nil}}
+    {:noreply, %{state | pending_queries: %{}, transport_ready: false}}
   end
 
-  def handle_info({:transport_error, %Error{} = error}, state) do
-    Logger.warning("Transport error: #{error.message}")
+  def handle_info({:transport_error, query_ref, %Error{} = error}, state) do
+    Logger.warning("Transport error for query: #{error.message}")
 
-    if state.pending_query do
-      GenServer.reply(state.pending_query, {:error, error})
+    case Map.pop(state.pending_queries, query_ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {pending, remaining} ->
+        GenServer.reply(pending.from, {:error, error})
+        {:noreply, %{state | pending_queries: remaining}}
     end
-
-    {:noreply, %{state | pending_query: nil}}
   end
 
-  def handle_info({:transport_error, error}, state) do
+  def handle_info({:transport_error, _ref, error}, state) do
     Logger.warning("Transport error: #{inspect(error)}")
     {:noreply, state}
   end
@@ -247,12 +274,21 @@ defmodule Arbor.AI.AgentSDK.Client do
     }
   end
 
-  defp process_message(state, %{"type" => "assistant", "message" => message}) do
+  defp process_message(state, query_ref, pending, %{"type" => "assistant", "message" => message}) do
     content = message["content"] || []
 
+    # Build processing context with hooks + tool_server from state
+    ctx = %{
+      callback: pending.callback,
+      hooks: state.hooks,
+      hook_context: state.hook_context,
+      tool_server: state.tool_server,
+      opts: state.opts
+    }
+
     acc =
-      Enum.reduce(content, state.current_response, fn block, acc ->
-        process_content_block(state, block, acc)
+      Enum.reduce(content, pending.response, fn block, acc ->
+        process_content_block(ctx, block, acc)
       end)
 
     acc =
@@ -262,36 +298,34 @@ defmodule Arbor.AI.AgentSDK.Client do
         acc
       end
 
-    %{state | current_response: acc}
+    updated = %{pending | response: acc}
+    {Map.put(state.pending_queries, query_ref, updated), state}
   end
 
-  defp process_message(state, %{"type" => "result"} = result) do
+  defp process_message(state, query_ref, pending, %{"type" => "result"} = result) do
     acc = %{
-      state.current_response
+      pending.response
       | usage: result["usage"],
         session_id: result["session_id"]
     }
 
     response = build_response(acc)
 
-    if state.stream_callback do
-      state.stream_callback.({:complete, response})
+    if pending.callback do
+      pending.callback.({:complete, response})
     end
 
-    if state.pending_query do
-      GenServer.reply(state.pending_query, {:ok, response})
-    end
+    GenServer.reply(pending.from, {:ok, response})
 
-    %{state | pending_query: nil, current_response: new_response_acc()}
+    {Map.delete(state.pending_queries, query_ref), state}
   end
 
-  defp process_message(state, %{"type" => "user", "message" => message}) do
+  defp process_message(state, query_ref, pending, %{"type" => "user", "message" => message}) do
     content = message["content"] || []
     tool_use_result = message["tool_use_result"]
 
-    # Match tool results back to their tool_uses by tool_use_id
     acc =
-      Enum.reduce(content, state.current_response, fn
+      Enum.reduce(content, pending.response, fn
         %{"type" => "tool_result", "tool_use_id" => tool_use_id, "content" => result_content},
         acc ->
           is_error = message["is_error"] == true
@@ -306,68 +340,71 @@ defmodule Arbor.AI.AgentSDK.Client do
           result = if is_error, do: {:error, result_text}, else: {:ok, result_text}
 
           updated_tool_uses =
-            Enum.map(acc.tool_uses, fn tool ->
-              if tool.id == tool_use_id, do: %{tool | result: result}, else: tool
-            end)
+            Enum.map(acc.tool_uses, &match_tool_result(&1, tool_use_id, result))
 
-          notify_stream(state, {:tool_result, %{tool_use_id: tool_use_id, result: result}})
+          notify_stream(pending, {:tool_result, %{tool_use_id: tool_use_id, result: result}})
           %{acc | tool_uses: updated_tool_uses}
 
         _, acc ->
           acc
       end)
 
-    %{state | current_response: acc}
+    updated = %{pending | response: acc}
+    {Map.put(state.pending_queries, query_ref, updated), state}
   end
 
-  defp process_message(state, %{type: :thinking_complete, thinking: thinking}) do
-    if state.stream_callback do
+  defp process_message(state, query_ref, pending, %{type: :thinking_complete, thinking: thinking}) do
+    if pending.callback do
       Enum.each(thinking, fn block ->
-        state.stream_callback.({:thinking, block})
+        pending.callback.({:thinking, block})
       end)
     end
 
     acc = %{
-      state.current_response
-      | thinking_blocks: thinking ++ state.current_response.thinking_blocks
+      pending.response
+      | thinking_blocks: thinking ++ pending.response.thinking_blocks
     }
 
-    %{state | current_response: acc}
+    updated = %{pending | response: acc}
+    {Map.put(state.pending_queries, query_ref, updated), state}
   end
 
-  defp process_message(state, _message) do
-    state
+  defp process_message(state, _query_ref, _pending, _message) do
+    {state.pending_queries, state}
   end
 
-  defp process_content_block(state, %{"type" => "text"} = block, acc) do
+  defp match_tool_result(%{id: id} = tool, id, result), do: %{tool | result: result}
+  defp match_tool_result(tool, _id, _result), do: tool
+
+  defp process_content_block(ctx, %{"type" => "text"} = block, acc) do
     text = block["text"] || ""
 
-    if state.stream_callback do
-      state.stream_callback.({:text, text})
+    if ctx.callback do
+      ctx.callback.({:text, text})
     end
 
     %{acc | text_chunks: [text | acc.text_chunks]}
   end
 
-  defp process_content_block(state, %{"type" => "thinking"} = block, acc) do
+  defp process_content_block(ctx, %{"type" => "thinking"} = block, acc) do
     thinking = %{
       text: block["thinking"] || "",
       signature: block["signature"]
     }
 
-    if state.stream_callback do
-      state.stream_callback.({:thinking, thinking})
+    if ctx.callback do
+      ctx.callback.({:thinking, thinking})
     end
 
     %{acc | thinking_blocks: [thinking | acc.thinking_blocks]}
   end
 
-  defp process_content_block(state, %{"type" => "tool_use"} = block, acc) do
+  defp process_content_block(ctx, %{"type" => "tool_use"} = block, acc) do
     tool_name = block["name"]
     tool_input = block["input"] || %{}
 
     # Step 1: Run pre-hooks
-    case run_pre_hooks(state, tool_name, tool_input) do
+    case run_pre_hooks(ctx, tool_name, tool_input) do
       {:deny, reason} ->
         tool_use = %{
           id: block["id"],
@@ -377,14 +414,14 @@ defmodule Arbor.AI.AgentSDK.Client do
           result: {:error, Error.hook_denied(tool_name, to_string(reason))}
         }
 
-        notify_stream(state, {:tool_use, tool_use})
+        notify_stream(ctx, {:tool_use, tool_use})
         %{acc | tool_uses: [tool_use | acc.tool_uses]}
 
       {:allow, final_input} ->
         # Step 2: Try in-process execution or record CLI-handled
-        case maybe_execute_tool(state, tool_name, final_input) do
+        case maybe_execute_tool(ctx, tool_name, final_input) do
           {:executed, result} ->
-            run_post_hooks_for_tool(state, tool_name, final_input, result)
+            run_post_hooks(ctx, tool_name, final_input, result)
 
             tool_use = %{
               id: block["id"],
@@ -394,7 +431,7 @@ defmodule Arbor.AI.AgentSDK.Client do
               result: result
             }
 
-            notify_stream(state, {:tool_use, tool_use})
+            notify_stream(ctx, {:tool_use, tool_use})
             %{acc | tool_uses: [tool_use | acc.tool_uses]}
 
           {:permission_denied, reason} ->
@@ -406,7 +443,7 @@ defmodule Arbor.AI.AgentSDK.Client do
               result: {:error, Error.permission_denied(tool_name, reason)}
             }
 
-            notify_stream(state, {:tool_use, tool_use})
+            notify_stream(ctx, {:tool_use, tool_use})
             %{acc | tool_uses: [tool_use | acc.tool_uses]}
 
           :not_registered ->
@@ -418,20 +455,20 @@ defmodule Arbor.AI.AgentSDK.Client do
               result: nil
             }
 
-            notify_stream(state, {:tool_use, tool_use})
+            notify_stream(ctx, {:tool_use, tool_use})
             %{acc | tool_uses: [tool_use | acc.tool_uses]}
         end
     end
   end
 
-  defp process_content_block(_state, _block, acc), do: acc
+  defp process_content_block(_ctx, _block, acc), do: acc
 
-  defp run_pre_hooks(%{hooks: hooks, hook_context: ctx}, tool_name, tool_input)
+  defp run_pre_hooks(%{hooks: hooks, hook_context: hook_ctx}, tool_name, tool_input)
        when hooks != %{} do
-    Hooks.run_pre_hooks(hooks, tool_name, tool_input, ctx)
+    Hooks.run_pre_hooks(hooks, tool_name, tool_input, hook_ctx)
   end
 
-  defp run_pre_hooks(_state, _tool_name, tool_input), do: {:allow, tool_input}
+  defp run_pre_hooks(_ctx, _tool_name, tool_input), do: {:allow, tool_input}
 
   defp maybe_execute_tool(%{tool_server: nil}, _name, _input), do: :not_registered
 
@@ -450,20 +487,31 @@ defmodule Arbor.AI.AgentSDK.Client do
     end
   end
 
-  defp run_post_hooks_for_tool(%{hooks: hooks, hook_context: ctx}, name, input, result)
+  defp run_post_hooks(%{hooks: hooks, hook_context: hook_ctx}, name, input, result)
        when hooks != %{} do
-    Hooks.run_post_hooks(hooks, name, input, result, ctx)
+    Hooks.run_post_hooks(hooks, name, input, result, hook_ctx)
   end
 
-  defp run_post_hooks_for_tool(_state, _name, _input, _result), do: :ok
+  defp run_post_hooks(_ctx, _name, _input, _result), do: :ok
 
-  defp notify_stream(%{stream_callback: nil}, _event), do: :ok
-  defp notify_stream(%{stream_callback: cb}, event), do: cb.(event)
+  defp notify_stream(%{callback: nil}, _event), do: :ok
+  defp notify_stream(%{callback: cb}, event), do: cb.(event)
 
   defp build_response(acc) do
+    thinking = normalize_thinking(acc.thinking_blocks)
+
+    Logger.debug(
+      "[Client] build_response: #{length(acc.thinking_blocks)} raw thinking blocks -> " <>
+        "#{inspect(thinking |> then(fn
+          nil -> nil
+          blocks -> length(blocks)
+        end))} normalized, " <>
+        "session: #{inspect(acc.session_id)}"
+    )
+
     %{
       text: acc.text_chunks |> Enum.reverse() |> Enum.join(""),
-      thinking: normalize_thinking(acc.thinking_blocks),
+      thinking: thinking,
       tool_uses: Enum.reverse(acc.tool_uses),
       usage: acc.usage,
       session_id: acc.session_id,

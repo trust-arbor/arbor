@@ -114,6 +114,47 @@ defmodule Arbor.AI.StreamParserTest do
     end
   end
 
+  describe "reset/1" do
+    test "clears accumulators but preserves session_id and model" do
+      state = StreamParser.new()
+
+      # Process some data — assistant before result (normal order)
+      events = [
+        ~s({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}),
+        ~s({"type":"assistant","message":{"model":"claude-opus-4","content":[]}}),
+        ~s({"type":"result","session_id":"sess-123","usage":{"input_tokens":10,"output_tokens":20}})
+      ]
+
+      state = Enum.reduce(events, state, &StreamParser.process_line(&2, &1))
+      assert state.session_id == "sess-123"
+      assert state.model == "claude-opus-4"
+
+      # Reset
+      reset_state = StreamParser.reset(state)
+
+      # Session metadata preserved
+      assert reset_state.session_id == "sess-123"
+      assert reset_state.model == "claude-opus-4"
+
+      # Accumulators cleared
+      assert reset_state.text_acc == []
+      assert reset_state.thinking_acc == []
+      assert reset_state.thinking_blocks == []
+      assert reset_state.current_block_type == nil
+      assert reset_state.usage == nil
+      assert reset_state.raw_events == []
+    end
+
+    test "reset from fresh state works" do
+      state = StreamParser.new()
+      reset_state = StreamParser.reset(state)
+
+      assert reset_state.session_id == nil
+      assert reset_state.model == nil
+      assert reset_state.text_acc == []
+    end
+  end
+
   describe "mixed content" do
     test "handles text and thinking interleaved" do
       state = StreamParser.new()

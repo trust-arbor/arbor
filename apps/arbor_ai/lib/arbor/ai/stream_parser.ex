@@ -78,6 +78,17 @@ defmodule Arbor.AI.StreamParser do
   end
 
   @doc """
+  Reset parser state for a new query while preserving session metadata.
+
+  Clears all accumulators (text, thinking, raw events) but retains
+  `session_id` and `model` for multi-turn session continuity.
+  """
+  @spec reset(state()) :: state()
+  def reset(state) do
+    %{new() | session_id: state.session_id, model: state.model}
+  end
+
+  @doc """
   Parse a single NDJSON line into an event map.
   """
   @spec parse_line(String.t()) :: {:ok, map()} | {:error, term()}
