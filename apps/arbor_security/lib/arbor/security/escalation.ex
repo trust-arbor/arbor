@@ -33,6 +33,8 @@ defmodule Arbor.Security.Escalation do
 
   alias Arbor.Security.Config
 
+  require Logger
+
   @doc """
   Check if the capability requires approval and submit for consensus if so.
 
@@ -52,10 +54,21 @@ defmodule Arbor.Security.Escalation do
       not requires_approval? ->
         :ok
 
+      # M2: Log when escalation is bypassed due to disabled config or missing module
       not escalation_enabled? ->
+        Logger.warning("Escalation bypassed: consensus_escalation_enabled is false",
+          principal_id: principal_id,
+          resource_uri: resource_uri
+        )
+
         :ok
 
       is_nil(consensus_module) ->
+        Logger.warning("Escalation bypassed: no consensus_module configured",
+          principal_id: principal_id,
+          resource_uri: resource_uri
+        )
+
         :ok
 
       not consensus_available?(consensus_module) ->

@@ -124,6 +124,9 @@ defmodule Arbor.Gateway.Memory.Router do
   plug(:dispatch)
 
   # POST /api/memory/recall — Semantic recall for an agent
+  # M13: agent_id from request body is used as-is — scoping relies on Gateway auth
+  # ensuring the caller is authorized for arbor://memory/* resources.
+  # TODO: Extract agent_id from authenticated session and enforce agent_id == caller_id
   post "/recall" do
     case Schemas.Memory.validate(Schemas.Memory.recall_request(), conn.body_params) do
       {:ok, validated} ->

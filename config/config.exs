@@ -81,7 +81,10 @@ config :arbor_signals,
   checkpoint_module: Arbor.Checkpoint,
   checkpoint_store: Arbor.Checkpoint.Store.ETS,
   # Signal bus authorization — OpenAuthorizer allows all (backward compatible).
-  # Switch to SecurityAuthorizer when the security kernel is running.
+  # M5: WARNING — OpenAuthorizer permits any agent to emit/subscribe to any signal topic,
+  # including :security and :identity restricted topics. Switch to SecurityAuthorizer
+  # when the security kernel is fully running in production.
+  # TODO: Change to Arbor.Signals.Adapters.SecurityAuthorizer
   authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
   restricted_topics: [:security, :identity]
 

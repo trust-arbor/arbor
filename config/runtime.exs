@@ -36,6 +36,16 @@ if config_env() == :prod do
   config :arbor_dashboard, Arbor.Dashboard.Endpoint,
     secret_key_base: secret_key_base
 
+  # M14: Enforce check_origin in production (override dev's check_origin: false)
+  dashboard_host = System.get_env("DASHBOARD_HOST") || "localhost"
+  dashboard_port = System.get_env("DASHBOARD_PORT") || "4001"
+
+  config :arbor_dashboard, Arbor.Dashboard.Endpoint,
+    check_origin: [
+      "https://#{dashboard_host}",
+      "http://#{dashboard_host}:#{dashboard_port}"
+    ]
+
   # H5: Require dashboard auth in production
   config :arbor_dashboard, require_auth: true
 end

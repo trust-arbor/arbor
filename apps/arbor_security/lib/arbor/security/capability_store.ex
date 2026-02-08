@@ -329,8 +329,10 @@ defmodule Arbor.Security.CapabilityStore do
     # The action is encoded in the URI: arbor://{type}/{action}/{path}
     # Matching is done via prefix: capability for "arbor://fs/read/project"
     # authorizes access to "arbor://fs/read/project/src/file.ex"
-    String.starts_with?(resource_uri, cap.resource_uri) or
-      cap.resource_uri == resource_uri
+    # M4: Require exact match OR prefix + separator to prevent
+    # "arbor://fs/read/home" matching "arbor://fs/read/home_config"
+    cap.resource_uri == resource_uri or
+      String.starts_with?(resource_uri, cap.resource_uri <> "/")
   end
 
   defp cleanup_expired(state) do

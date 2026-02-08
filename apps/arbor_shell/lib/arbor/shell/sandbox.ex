@@ -41,21 +41,19 @@ defmodule Arbor.Shell.Sandbox do
     -f
   ]
 
-  # Commands allowed at :strict level
+  # Commands allowed at :strict level — read-only utilities only
+  # M8: Removed language runtimes (mix, elixir, erl, node, npm, npx, python, pip)
+  # and write-capable tools (sed -i, awk system(), git push/fetch)
   @strict_allowlist ~w[
     ls cat head tail less more
     echo printf
-    grep rg awk sed
+    grep rg
     find fd
     wc sort uniq tr cut
     date cal
-    pwd cd
+    pwd
     file stat
     diff comm
-    git
-    mix elixir erl
-    node npm npx
-    python python3 pip
   ]
 
   @doc """
