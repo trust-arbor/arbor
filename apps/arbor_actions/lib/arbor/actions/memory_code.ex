@@ -31,8 +31,7 @@ defmodule Arbor.Actions.MemoryCode do
 
     use Jido.Action,
       name: "memory_store_code",
-      description:
-        "Store a code pattern. Required: code, language, purpose.",
+      description: "Store a code pattern. Required: code, language, purpose.",
       category: "memory_code",
       tags: ["memory", "code", "store"],
       schema: [
@@ -89,8 +88,7 @@ defmodule Arbor.Actions.MemoryCode do
 
     use Jido.Action,
       name: "memory_list_code",
-      description:
-        "List stored code patterns. Optional: language filter, limit.",
+      description: "List stored code patterns. Optional: language filter, limit.",
       category: "memory_code",
       tags: ["memory", "code", "list"],
       schema: [

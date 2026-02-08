@@ -35,8 +35,7 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
-  config :arbor_dashboard, Arbor.Dashboard.Endpoint,
-    secret_key_base: secret_key_base
+  config :arbor_dashboard, Arbor.Dashboard.Endpoint, secret_key_base: secret_key_base
 
   # M14: Enforce check_origin in production (override dev's check_origin: false)
   dashboard_host = System.get_env("DASHBOARD_HOST") || "localhost"

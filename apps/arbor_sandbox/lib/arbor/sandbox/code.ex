@@ -280,7 +280,8 @@ defmodule Arbor.Sandbox.Code do
           {node, check_dynamic_dispatch(level, location, "apply/3", acc)}
 
         # H9: Kernel.apply/3 with variable module
-        {{:., meta, [{:__aliases__, _, [:Kernel]}, :apply]}, _, [_dynamic_module, _function, _args]} =
+        {{:., meta, [{:__aliases__, _, [:Kernel]}, :apply]}, _,
+         [_dynamic_module, _function, _args]} =
             node,
         acc ->
           location = extract_location(meta)

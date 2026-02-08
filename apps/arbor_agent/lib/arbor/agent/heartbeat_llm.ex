@@ -112,7 +112,11 @@ defmodule Arbor.Agent.HeartbeatLLM do
   end
 
   defp idle_heartbeat_model do
-    Application.get_env(:arbor_agent, :idle_heartbeat_model, "arcee-ai/trinity-large-preview:free")
+    Application.get_env(
+      :arbor_agent,
+      :idle_heartbeat_model,
+      "arcee-ai/trinity-large-preview:free"
+    )
   end
 
   defp heartbeat_provider do

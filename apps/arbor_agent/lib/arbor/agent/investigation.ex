@@ -829,7 +829,8 @@ defmodule Arbor.Agent.Investigation do
   end
 
   defp extract_response_text(response) when is_map(response) do
-    response[:text] || response["text"] || response[:content] || response["content"] || inspect(response)
+    response[:text] || response["text"] || response[:content] || response["content"] ||
+      inspect(response)
   end
 
   defp extract_response_text(response), do: to_string(response)

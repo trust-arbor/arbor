@@ -157,8 +157,7 @@ defmodule Arbor.Agent.APIAgent do
       temperature: config.temperature,
       max_turns: config.max_turns,
       # Heartbeat model (separate from query model)
-      heartbeat_model:
-        Keyword.get(opts, :heartbeat_model, Keyword.get(opts, :model)),
+      heartbeat_model: Keyword.get(opts, :heartbeat_model, Keyword.get(opts, :model)),
       heartbeat_provider:
         Keyword.get(opts, :heartbeat_provider, Keyword.get(opts, :provider, :openrouter))
     }
@@ -335,9 +334,7 @@ defmodule Arbor.Agent.APIAgent do
 
     case think_fn.() do
       {:ok, parsed} ->
-        {parsed,
-         Map.get(parsed, :thinking, ""),
-         Map.get(parsed, :memory_notes, []),
+        {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
          Map.get(parsed, :goal_updates, [])}
 
       {:error, _reason} ->

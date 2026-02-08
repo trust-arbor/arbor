@@ -170,7 +170,11 @@ defmodule Arbor.Actions.Memory do
         query: [type: :string, required: true, doc: "The search query"],
         limit: [type: :non_neg_integer, default: 10, doc: "Maximum results to return"],
         types: [type: {:list, :string}, doc: "Filter by memory types"],
-        cascade: [type: :boolean, default: false, doc: "Enable spreading activation to boost related nodes"]
+        cascade: [
+          type: :boolean,
+          default: false,
+          doc: "Enable spreading activation to boost related nodes"
+        ]
       ]
 
     alias Arbor.Actions

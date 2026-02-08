@@ -230,13 +230,22 @@ config :arbor_dashboard,
     %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, backend: :cli},
     %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli},
     # OpenRouter models — use API backend
-    %{id: "arcee-ai/trinity-large-preview:free", label: "Trinity Large (free)", provider: :openrouter, backend: :api},
+    %{
+      id: "arcee-ai/trinity-large-preview:free",
+      label: "Trinity Large (free)",
+      provider: :openrouter,
+      backend: :api
+    },
     # Z.AI models — use API backend
     %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan, backend: :api}
   ],
   # Heartbeat model choices (API models only — CLI models are too slow)
   heartbeat_models: [
-    %{id: "arcee-ai/trinity-large-preview:free", label: "Trinity Large (free)", provider: :openrouter},
+    %{
+      id: "arcee-ai/trinity-large-preview:free",
+      label: "Trinity Large (free)",
+      provider: :openrouter
+    },
     %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan}
   ]
 

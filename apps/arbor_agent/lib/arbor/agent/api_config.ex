@@ -26,7 +26,13 @@ defmodule Arbor.Agent.APIConfig do
     heartbeat_interval_ms: 10_000
   }
 
-  @configurable_keys [:max_tokens, :temperature, :max_turns, :heartbeat_enabled, :heartbeat_interval_ms]
+  @configurable_keys [
+    :max_tokens,
+    :temperature,
+    :max_turns,
+    :heartbeat_enabled,
+    :heartbeat_interval_ms
+  ]
 
   @doc """
   Resolve full agent configuration from tiered sources.

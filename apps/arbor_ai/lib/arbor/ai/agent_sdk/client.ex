@@ -292,7 +292,8 @@ defmodule Arbor.AI.AgentSDK.Client do
     # Match tool results back to their tool_uses by tool_use_id
     acc =
       Enum.reduce(content, state.current_response, fn
-        %{"type" => "tool_result", "tool_use_id" => tool_use_id, "content" => result_content}, acc ->
+        %{"type" => "tool_result", "tool_use_id" => tool_use_id, "content" => result_content},
+        acc ->
           is_error = message["is_error"] == true
 
           result_text =

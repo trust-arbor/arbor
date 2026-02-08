@@ -83,8 +83,7 @@ defmodule Arbor.Agent.AgentSeed do
   `{parsed_response, thinking_string, memory_notes_list, goal_updates_list}`
   """
   @callback seed_think(state :: map(), mode :: atom()) ::
-              {parsed :: map(), thinking :: String.t(), notes :: [String.t()],
-               goals :: [map()]}
+              {parsed :: map(), thinking :: String.t(), notes :: [String.t()], goals :: [map()]}
 
   defmacro __using__(_opts) do
     quote do
@@ -514,7 +513,7 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   @doc false
-  @spec safe_memory_call((() -> any())) :: any()
+  @spec safe_memory_call((-> any())) :: any()
   def safe_memory_call(fun) do
     fun.()
   rescue
@@ -924,7 +923,11 @@ defmodule Arbor.Agent.AgentSeed do
       if state[:working_memory] && insights != [] do
         Enum.reduce(Enum.take(insights, 2), state.working_memory, fn insight, wm ->
           content = insight[:content] || inspect(insight)
-          Arbor.Memory.WorkingMemory.add_curiosity(wm, "[hb] [insight] #{String.slice(content, 0..80)}")
+
+          Arbor.Memory.WorkingMemory.add_curiosity(
+            wm,
+            "[hb] [insight] #{String.slice(content, 0..80)}"
+          )
         end)
       else
         state[:working_memory]
@@ -941,7 +944,11 @@ defmodule Arbor.Agent.AgentSeed do
       if state[:working_memory] && memories != [] do
         Enum.reduce(Enum.take(memories, 2), state.working_memory, fn mem, wm ->
           content = mem[:content] || mem[:text] || inspect(mem)
-          Arbor.Memory.WorkingMemory.add_thought(wm, "[hb] [recalled] #{String.slice(content, 0..120)}")
+
+          Arbor.Memory.WorkingMemory.add_thought(
+            wm,
+            "[hb] [recalled] #{String.slice(content, 0..120)}"
+          )
         end)
       else
         state[:working_memory]
