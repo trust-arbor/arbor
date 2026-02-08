@@ -40,11 +40,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_actions: true,
         show_thoughts: true,
         show_goals: true,
-        show_llm_panel: false,
-        show_identity: false,
-        show_cognitive: false,
-        show_code: false,
-        show_proposals: false,
+        show_llm_panel: true,
+        show_identity: true,
+        show_cognitive: true,
+        show_code: true,
+        show_proposals: true,
         # Memory state
         memory_stats: nil,
         # Working memory thoughts
@@ -525,7 +525,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Recent Actions — collapsible --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-actions"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -539,7 +539,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@show_actions}
             id="actions-container"
             phx-update="stream"
-            style="max-height: 30vh; overflow-y: auto; padding: 0.4rem;"
+            style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
           >
             <div
               :for={{dom_id, action} <- @streams.actions}
@@ -564,7 +564,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- LLM Heartbeat --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-llm-panel"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -577,7 +577,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
           </div>
-          <div :if={@show_llm_panel} style="max-height: 25vh; overflow-y: auto;">
+          <div :if={@show_llm_panel} style="flex: 1; overflow-y: auto; min-height: 0;">
             <%!-- Last heartbeat thinking --%>
             <div :if={@last_llm_thinking} style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);">
               <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
@@ -625,7 +625,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Code Modules Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-code"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -638,7 +638,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
           </div>
-          <div :if={@show_code} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_code} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div
               :for={mod <- @code_modules}
               style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
@@ -659,7 +659,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Proposals Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-proposals"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -672,7 +672,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
           </div>
-          <div :if={@show_proposals} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_proposals} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div
               :for={proposal <- @proposals}
               style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
@@ -827,7 +827,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; min-height: 0;">
 
         <%!-- Goals panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-goals"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -837,7 +837,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               {if @show_goals, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_goals} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_goals} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div
               :for={goal <- @agent_goals}
               style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(74, 255, 158, 0.05); font-size: 0.8em;"
@@ -911,7 +911,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Working Thoughts --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-thoughts"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -921,7 +921,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               {if @show_thoughts, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_thoughts} style="max-height: 15vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_thoughts} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div
               :for={thought <- @working_thoughts}
               style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.8em;"
@@ -941,7 +941,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Memory Notes --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-memories"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -955,7 +955,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@show_memories}
             id="memories-container"
             phx-update="stream"
-            style="max-height: 15vh; overflow-y: auto; padding: 0.4rem;"
+            style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
           >
             <div
               :for={{dom_id, memory} <- @streams.memories}
@@ -986,7 +986,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Identity Evolution Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-identity"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -999,7 +999,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
           </div>
-          <div :if={@show_identity} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_identity} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div :if={@self_insights != []} style="margin-bottom: 0.5rem;">
               <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Self Insights</div>
               <div
@@ -1037,7 +1037,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Cognitive Preferences Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
             phx-click="toggle-cognitive"
             style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -1047,7 +1047,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               {if @show_cognitive, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_cognitive} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+          <div :if={@show_cognitive} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div :if={@cognitive_prefs} style="margin-bottom: 0.4rem;">
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
                 <.badge label={"Decay: #{Map.get(@cognitive_prefs, :decay_rate, "—")}"} color={:blue} />
