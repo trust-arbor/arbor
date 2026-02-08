@@ -49,6 +49,8 @@ defmodule Arbor.Memory.Signals do
   | `:curiosity_satisfied` | Curiosity item satisfied |
   | `:conversation_changed` | Conversation context changed |
   | `:relationship_changed` | Relationship context changed |
+  | `:identity` | Full identity snapshot broadcast |
+  | `:decision` | Important decision recorded |
 
   ## Examples
 
@@ -1124,6 +1126,236 @@ defmodule Arbor.Memory.Signals do
       context: context,
       changed_at: DateTime.utc_now()
     })
+  end
+
+  # ============================================================================
+  # Identity & Decision Signals
+  # ============================================================================
+
+  @doc """
+  Emit a full identity snapshot signal.
+
+  Called when the agent establishes or broadcasts its identity (e.g. on startup
+  or after major identity changes). Unlike `:identity_change` which tracks
+  mutations, this captures the complete identity state.
+
+  ## Data
+
+  - `:name` - Agent's name
+  - `:traits` - Personality traits map
+  - `:background` - Background/context string (optional)
+  """
+  @spec emit_identity(String.t(), keyword()) :: :ok
+  def emit_identity(agent_id, opts \\ []) do
+    emit_memory_signal(agent_id, :identity, %{
+      type: :identity,
+      name: Keyword.get(opts, :name),
+      traits: Keyword.get(opts, :traits, %{}),
+      background: Keyword.get(opts, :background),
+      emitted_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a decision event signal.
+
+  Called when the agent makes an important decision worth recording
+  for audit trails and decision replay.
+
+  ## Options
+
+  - `:reasoning` - Why the decision was made
+  - `:confidence` - Confidence level (default: 0.5)
+  """
+  @spec emit_decision(String.t(), String.t(), map(), keyword()) :: :ok
+  def emit_decision(agent_id, description, details, opts \\ []) do
+    emit_memory_signal(agent_id, :decision, %{
+      type: :decision,
+      description: description,
+      details: details,
+      reasoning: Keyword.get(opts, :reasoning),
+      confidence: Keyword.get(opts, :confidence, 0.5),
+      decided_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Query Functions
+  # ============================================================================
+
+  @doc """
+  Query archived episodes for an agent.
+
+  Returns episode signals filtered by agent and optional criteria.
+
+  ## Options
+
+  - `:limit` - Maximum episodes to return (default: 20)
+  - `:outcome` - Filter by outcome (`:success`, `:failure`, `:neutral`)
+  - `:search` - Text search in episode descriptions
+  - `:since` - Only episodes after this DateTime
+  """
+  @spec query_episodes(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def query_episodes(agent_id, opts \\ []) do
+    if signals_available?() do
+      limit = Keyword.get(opts, :limit, 20)
+      outcome_filter = Keyword.get(opts, :outcome)
+      search_text = Keyword.get(opts, :search)
+
+      filters = [category: :memory, type: :episode_archived, source: memory_source(agent_id), limit: limit * 2]
+      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+
+      case Arbor.Signals.query(filters) do
+        {:ok, signals} ->
+          episodes =
+            signals
+            |> Enum.map(& &1.data)
+            |> Enum.filter(fn ep ->
+              outcome_match = outcome_filter == nil || ep[:outcome] == outcome_filter
+
+              search_match =
+                search_text == nil ||
+                  String.contains?(
+                    String.downcase(to_string(ep[:description] || "")),
+                    String.downcase(search_text)
+                  )
+
+              outcome_match && search_match
+            end)
+            |> Enum.take(limit)
+
+          {:ok, episodes}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc """
+  Query archived knowledge nodes for an agent.
+
+  Returns knowledge nodes that were archived from the graph due to decay.
+
+  ## Options
+
+  - `:limit` - Maximum nodes to return (default: 20)
+  - `:node_type` - Filter by node type (e.g., "person", "concept")
+  - `:search` - Text search in node content
+  - `:since` - Only nodes archived after this DateTime
+  """
+  @spec query_archived_knowledge(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def query_archived_knowledge(agent_id, opts \\ []) do
+    if signals_available?() do
+      limit = Keyword.get(opts, :limit, 20)
+      node_type_filter = Keyword.get(opts, :node_type)
+      search_text = Keyword.get(opts, :search)
+
+      filters = [category: :memory, type: :knowledge_archived, source: memory_source(agent_id), limit: limit * 2]
+      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+
+      case Arbor.Signals.query(filters) do
+        {:ok, signals} ->
+          nodes =
+            signals
+            |> Enum.map(& &1.data)
+            |> Enum.filter(fn node ->
+              type_match = node_type_filter == nil || node[:node_type] == node_type_filter
+
+              search_match =
+                search_text == nil ||
+                  String.contains?(
+                    String.downcase(to_string(node[:content_preview] || "")),
+                    String.downcase(search_text)
+                  )
+
+              type_match && search_match
+            end)
+            |> Enum.take(limit)
+
+          {:ok, nodes}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  @doc """
+  Query the most recent memory signal of a specific type for an agent.
+
+  Returns the data map of the most recent signal, or `{:error, :not_found}`.
+
+  ## Examples
+
+      {:ok, identity} = Signals.latest_memory("agent_001", :identity)
+      {:error, :not_found} = Signals.latest_memory("agent_001", :decision)
+  """
+  @spec latest_memory(String.t(), atom()) :: {:ok, map()} | {:error, :not_found | term()}
+  def latest_memory(agent_id, memory_type) do
+    case query_recent(agent_id, types: [memory_type], limit: 1) do
+      {:ok, [signal | _]} -> {:ok, signal.data}
+      {:ok, []} -> {:error, :not_found}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  List all known memory signal types.
+
+  Useful for introspection, validation, and documentation.
+  """
+  @spec memory_signal_types() :: [atom()]
+  def memory_signal_types do
+    [
+      # Operational
+      :indexed, :recalled, :consolidation_started, :consolidation_completed,
+      :fact_extracted, :learning_extracted, :knowledge_added, :knowledge_linked,
+      :knowledge_decayed, :knowledge_pruned, :knowledge_archived,
+      :pending_approved, :pending_rejected, :initialized, :cleaned_up,
+      # Working Memory
+      :working_memory_loaded, :working_memory_saved, :thought_recorded,
+      :facts_extracted, :context_summarized,
+      # Lifecycle
+      :agent_stopped, :heartbeat,
+      # Background / Proposals
+      :background_checks_started, :background_checks_completed,
+      :pattern_detected, :insight_detected,
+      :proposal_created, :proposal_accepted, :proposal_rejected, :proposal_deferred,
+      :cognitive_adjustment,
+      # Relationships
+      :relationship_created, :relationship_updated, :moment_added, :relationship_accessed,
+      # Preconscious
+      :preconscious_check, :preconscious_surfaced,
+      # Reflection
+      :reflection_started, :reflection_completed, :reflection_insight,
+      :reflection_learning, :reflection_goal_update, :reflection_goal_created,
+      :reflection_knowledge_graph, :reflection_knowledge_decay, :reflection_llm_call,
+      # Goals
+      :goal_created, :goal_progress, :goal_achieved, :goal_abandoned,
+      # Thinking
+      :thinking_recorded,
+      # Identity / Insight lifecycle
+      :identity, :identity_change, :identity_rollback,
+      :self_insight_created, :self_insight_reinforced,
+      :insight_promoted, :insight_deferred, :insight_blocked,
+      # Episodic
+      :episode_archived, :lesson_extracted,
+      # Memory operations
+      :memory_promoted, :memory_demoted, :memory_corrected,
+      # Decision
+      :decision,
+      # Bridge
+      :bridge_interrupt, :bridge_interrupt_cleared,
+      # WorkingMemory state
+      :engagement_changed, :concern_added, :concern_resolved,
+      :curiosity_added, :curiosity_satisfied,
+      :conversation_changed, :relationship_changed
+    ]
   end
 
   # ============================================================================
