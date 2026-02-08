@@ -213,20 +213,38 @@ defmodule Arbor.Agent.HeartbeatLoop do
 
   defp process_heartbeat_result({:ok, actions, body, window, prompt, metadata}, state) do
     emit_heartbeat_signal(state, actions, metadata)
-    sync_context_window(state, window)
-    update_temporal_state(state, body, window, prompt, metadata)
+
+    # Gate #1: Only sync context window if heartbeat had meaningful output
+    if has_meaningful_output?(metadata) do
+      sync_context_window(state, window)
+      update_temporal_state(state, body, window, prompt, metadata)
+    else
+      state
+      |> maybe_put_body(body)
+      |> Map.put(:last_heartbeat_at, DateTime.utc_now())
+    end
   end
 
   defp process_heartbeat_result({:ok, actions, body, window, _prompt}, state) do
     emit_heartbeat_signal(state, actions, nil)
-    sync_context_window(state, window)
-    %{state | context_window: window} |> maybe_put_body(body)
+
+    if body_has_output?(body) do
+      sync_context_window(state, window)
+      %{state | context_window: window} |> maybe_put_body(body)
+    else
+      maybe_put_body(state, body)
+    end
   end
 
   defp process_heartbeat_result({:ok, actions, body, window}, state) do
     emit_heartbeat_signal(state, actions, nil)
-    sync_context_window(state, window)
-    %{state | context_window: window} |> maybe_put_body(body)
+
+    if body_has_output?(body) do
+      sync_context_window(state, window)
+      %{state | context_window: window} |> maybe_put_body(body)
+    else
+      maybe_put_body(state, body)
+    end
   end
 
   defp process_heartbeat_result({:ok, actions, body}, state) do
@@ -262,6 +280,13 @@ defmodule Arbor.Agent.HeartbeatLoop do
     output = Map.get(metadata, :output, "")
     is_binary(output) and String.trim(output) != ""
   end
+
+  defp body_has_output?(body) when is_map(body) do
+    output = Map.get(body, :output, "")
+    is_binary(output) and String.trim(output) != ""
+  end
+
+  defp body_has_output?(_body), do: false
 
   defp maybe_put_body(state, body) when is_map(body) and map_size(body) > 0 do
     Map.put(state, :body, body)
