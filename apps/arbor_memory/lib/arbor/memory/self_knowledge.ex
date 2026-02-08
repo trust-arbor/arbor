@@ -752,16 +752,14 @@ defmodule Arbor.Memory.SelfKnowledge do
     end
   end
 
-  # For traits and values, we need to convert to atoms (they're always atoms).
-  # This is safe because traits/values are controlled by the memory system's own
-  # serialized output — not external/untrusted input. The fallback creates atoms
-  # only for self-knowledge traits (e.g. :analytical, :creative) on cold start
-  # when the atom table hasn't been populated yet.
+  # L4: Use to_existing_atom with string fallback instead of unbounded String.to_atom.
+  # Traits/values are controlled by the memory system's own serialized output,
+  # but we avoid unbounded atom creation by falling back to the string form
+  # when the atom doesn't already exist.
   defp safe_atom_or_new(str) when is_binary(str) do
     case SafeAtom.to_existing(str) do
       {:ok, atom} -> atom
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-      {:error, _} -> String.to_atom(str)
+      {:error, _} -> str
     end
   end
 
