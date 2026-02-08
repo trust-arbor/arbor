@@ -30,6 +30,9 @@ defmodule Arbor.AI.AgentSDK.Error do
           | :hook_denied
           | :buffer_overflow
           | :prompt_required
+          | :not_ready
+          | :port_crashed
+          | :reconnect_failed
 
   @type t :: %__MODULE__{
           type: error_type(),
@@ -127,6 +130,36 @@ defmodule Arbor.AI.AgentSDK.Error do
       type: :prompt_required,
       message: "A prompt is required",
       details: %{}
+    }
+  end
+
+  @doc "Transport not yet connected and ready for queries."
+  @spec not_ready() :: t()
+  def not_ready do
+    %__MODULE__{
+      type: :not_ready,
+      message: "Transport is not ready — Port not yet connected",
+      details: %{}
+    }
+  end
+
+  @doc "Underlying Port process crashed."
+  @spec port_crashed(term()) :: t()
+  def port_crashed(reason) do
+    %__MODULE__{
+      type: :port_crashed,
+      message: "Port process crashed: #{inspect(reason)}",
+      details: %{reason: reason}
+    }
+  end
+
+  @doc "Exhausted reconnection attempts to the CLI."
+  @spec reconnect_failed(non_neg_integer()) :: t()
+  def reconnect_failed(attempts) do
+    %__MODULE__{
+      type: :reconnect_failed,
+      message: "Failed to reconnect after #{attempts} attempts",
+      details: %{attempts: attempts}
     }
   end
 end

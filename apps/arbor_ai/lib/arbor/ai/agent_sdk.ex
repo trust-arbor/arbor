@@ -173,19 +173,48 @@ defmodule Arbor.AI.AgentSDK do
   end
 
   @doc """
-  Start a client for multi-turn conversations.
+  Continue a multi-turn conversation with an existing client.
 
-  The client maintains conversation state and allows multiple queries
-  in a single session. Accepts the same options as `query/2`.
+  Sends a follow-up query using the same persistent Transport connection,
+  maintaining session context.
 
   ## Examples
 
-      {:ok, client} = Arbor.AI.AgentSDK.start_client(
-        model: :opus,
-        hooks: %{pre_tool_use: fn _, _, _ -> :allow end}
-      )
-      {:ok, r1} = Arbor.AI.AgentSDK.Client.query(client, "Hello")
-      {:ok, r2} = Arbor.AI.AgentSDK.Client.continue(client, "Tell me more")
+      {:ok, client} = Arbor.AI.AgentSDK.start_client(model: :opus)
+      {:ok, r1} = Arbor.AI.AgentSDK.query_client(client, "Hello")
+      {:ok, r2} = Arbor.AI.AgentSDK.continue(client, "Tell me more")
+      :ok = Client.close(client)
+  """
+  @spec continue(Client.t(), String.t(), query_opts()) ::
+          {:ok, response()} | {:error, term()}
+  def continue(client, prompt, opts \\ []) do
+    Client.query(client, prompt, opts)
+  end
+
+  @doc """
+  Send a query through an existing client.
+
+  Unlike `query/2`, this does not create or close a client — the caller
+  manages the client lifecycle.
+  """
+  @spec query_client(Client.t(), String.t(), query_opts()) ::
+          {:ok, response()} | {:error, term()}
+  def query_client(client, prompt, opts \\ []) do
+    Client.query(client, prompt, opts)
+  end
+
+  @doc """
+  Start a client for multi-turn conversations.
+
+  Opens a persistent Transport connection to the Claude CLI. The client
+  maintains conversation state and allows multiple queries in a single
+  session. Accepts the same options as `query/2`.
+
+  ## Examples
+
+      {:ok, client} = Arbor.AI.AgentSDK.start_client(model: :opus)
+      {:ok, r1} = Arbor.AI.AgentSDK.query_client(client, "Hello")
+      {:ok, r2} = Arbor.AI.AgentSDK.continue(client, "Tell me more")
       :ok = Arbor.AI.AgentSDK.Client.close(client)
   """
   @spec start_client(query_opts()) :: {:ok, Client.t()} | {:error, term()}
