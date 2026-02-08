@@ -431,7 +431,15 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
     pid = self()
 
     case Arbor.Signals.subscribe("*", fn signal ->
-           send(pid, {:signal_received, signal})
+           # Drop signals when LiveView mailbox is too full
+           case Process.info(pid, :message_queue_len) do
+             {:message_queue_len, len} when len < 500 ->
+               send(pid, {:signal_received, signal})
+
+             _ ->
+               :ok
+           end
+
            :ok
          end) do
       {:ok, id} -> id

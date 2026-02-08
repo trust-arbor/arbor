@@ -49,6 +49,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_actions: true,
         show_thoughts: true,
         show_goals: true,
+        show_completed_goals: false,
         show_llm_panel: true,
         show_identity: true,
         show_cognitive: true,
@@ -256,6 +257,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, show_goals: !socket.assigns.show_goals)}
   end
 
+  def handle_event("toggle-completed-goals", _params, socket) do
+    agent_id = socket.assigns.agent_id
+    show_completed = !socket.assigns.show_completed_goals
+    goals = if agent_id, do: fetch_goals(agent_id, show_completed), else: []
+
+    {:noreply, assign(socket, show_completed_goals: show_completed, agent_goals: goals)}
+  end
+
   def handle_event("toggle-llm-panel", _params, socket) do
     {:noreply, assign(socket, show_llm_panel: !socket.assigns.show_llm_panel)}
   end
@@ -410,6 +419,36 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     else
       {:noreply, socket}
     end
+  end
+
+  # PubSub: external chat message (e.g., from Claude Code via AgentManager.chat/3)
+  def handle_info({:chat_message, %{role: role, content: content} = payload}, socket) do
+    sender = Map.get(payload, :sender, "External")
+
+    msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: role,
+      content: content,
+      timestamp: DateTime.utc_now(),
+      model: if(role == :assistant, do: sender, else: nil),
+      sender: sender,
+      tool_uses: [],
+      memory_count: 0,
+      session_id: nil
+    }
+
+    socket =
+      socket
+      |> stream_insert(:messages, msg)
+      |> then(fn s ->
+        if role == :assistant do
+          assign(s, loading: false, query_count: s.assigns.query_count + 1)
+        else
+          assign(s, loading: true)
+        end
+      end)
+
+    {:noreply, socket}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -1039,12 +1078,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             </span>
           </div>
           <div :if={@show_goals} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
+            <%!-- Toggle for completed goals --%>
+            <div
+              :if={@agent != nil}
+              style="margin-bottom: 0.4rem; padding: 0.3rem 0.4rem; border-radius: 4px; background: rgba(128,128,128,0.1); display: flex; justify-content: space-between; align-items: center; cursor: pointer;"
+              phx-click="toggle-completed-goals"
+            >
+              <span style="font-size: 0.75em; color: var(--aw-text-muted, #888);">
+                Show completed
+              </span>
+              <span style="font-size: 0.8em;">
+                {if @show_completed_goals, do: "✓", else: "○"}
+              </span>
+            </div>
             <div
               :for={goal <- @agent_goals}
-              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(74, 255, 158, 0.05); font-size: 0.8em;"
+              style={"margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; font-size: 0.8em; " <> goal_background_style(goal.status)}
             >
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
-                <span style="flex: 1;">{goal.description}</span>
+                <span style={"flex: 1; " <> goal_text_style(goal.status)}>{goal.description}</span>
                 <.badge label={to_string(goal.status)} color={goal_status_color(goal.status)} />
               </div>
               <div style="background: rgba(128,128,128,0.2); height: 3px; border-radius: 2px; overflow: hidden;">
@@ -1058,6 +1110,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
                   {round(goal.progress * 100)}%
                 </span>
+              </div>
+              <div
+                :if={goal.achieved_at && goal.status == :achieved}
+                style="margin-top: 0.2rem; font-size: 0.7em; color: var(--aw-text-muted, #888);"
+              >
+                ✓ Achieved {format_time(goal.achieved_at)}
               </div>
             </div>
             <.empty_state
@@ -1345,7 +1403,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> assign(
       query_count: 0,
       working_thoughts: [],
-      agent_goals: fetch_goals(agent_id),
+      agent_goals: fetch_goals(agent_id, socket.assigns[:show_completed_goals] || false),
       llm_call_count: tokens.count,
       last_llm_mode: nil,
       last_llm_thinking: nil,
@@ -1498,11 +1556,23 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     :exit, _ -> nil
   end
 
+  # Max messages we allow in the LiveView mailbox before dropping signals.
+  # Prevents signal storms from making the UI unresponsive.
+  @max_signal_queue 500
+
   defp safe_subscribe do
     pid = self()
 
     handler = fn signal ->
-      send(pid, {:signal_received, signal})
+      # Check queue pressure before sending — drop signals when overwhelmed
+      case Process.info(pid, :message_queue_len) do
+        {:message_queue_len, len} when len < @max_signal_queue ->
+          send(pid, {:signal_received, signal})
+
+        _ ->
+          :ok
+      end
+
       :ok
     end
 
@@ -1874,10 +1944,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Goals ──────────────────────────────────────────────────────────
 
-  defp fetch_goals(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory) and
-         function_exported?(Arbor.Memory, :get_active_goals, 1) do
-      Arbor.Memory.get_active_goals(agent_id)
+  defp fetch_goals(agent_id, show_completed \\ false) do
+    if Code.ensure_loaded?(Arbor.Memory) do
+      if show_completed do
+        cond do
+          function_exported?(Arbor.Memory, :get_all_goals, 1) ->
+            Arbor.Memory.get_all_goals(agent_id)
+            |> Enum.sort_by(fn goal ->
+              # Sort: active goals by priority (desc), completed by achieved_at (desc)
+              case goal.status do
+                :active -> {0, -goal.priority}
+                _ -> {1, goal.achieved_at || goal.created_at}
+              end
+            end)
+
+          function_exported?(Arbor.Memory, :get_active_goals, 1) ->
+            Arbor.Memory.get_active_goals(agent_id)
+
+          true ->
+            []
+        end
+      else
+        if function_exported?(Arbor.Memory, :get_active_goals, 1) do
+          Arbor.Memory.get_active_goals(agent_id)
+        else
+          []
+        end
+      end
     else
       []
     end
@@ -1896,6 +1989,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp goal_progress_color(p) when p >= 0.5, do: "#4a9eff"
   defp goal_progress_color(p) when p >= 0.2, do: "#eab308"
   defp goal_progress_color(_), do: "#888"
+
+  defp goal_background_style(:active), do: "background: rgba(74, 255, 158, 0.05);"
+  defp goal_background_style(:achieved), do: "background: rgba(74, 158, 255, 0.05); opacity: 0.7;"
+  defp goal_background_style(:abandoned), do: "background: rgba(255, 74, 74, 0.05); opacity: 0.7;"
+  defp goal_background_style(:failed), do: "background: rgba(255, 74, 74, 0.05); opacity: 0.7;"
+  defp goal_background_style(_), do: "background: rgba(128, 128, 128, 0.05); opacity: 0.7;"
+
+  defp goal_text_style(:active), do: ""
+  defp goal_text_style(_), do: "opacity: 0.8;"
 
   # ── Heartbeat / LLM Tracking ───────────────────────────────────────
 
@@ -1955,7 +2057,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     if String.contains?(event, "goal") do
       agent_id = socket.assigns.agent_id
-      assign(socket, agent_goals: fetch_goals(agent_id))
+      show_completed = socket.assigns.show_completed_goals
+      assign(socket, agent_goals: fetch_goals(agent_id, show_completed))
     else
       socket
     end
