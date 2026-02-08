@@ -562,6 +562,158 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             />
           </div>
         </div>
+
+        <%!-- LLM Heartbeat --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-llm-panel"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">🔄 Heartbeat LLM</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@llm_call_count > 0} label={"#{@llm_call_count}"} color={:blue} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_llm_panel, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_llm_panel} style="max-height: 25vh; overflow-y: auto;">
+            <%!-- Last heartbeat thinking --%>
+            <div :if={@last_llm_thinking} style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);">
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
+                Last heartbeat ({@last_llm_mode || "unknown"} mode):
+              </div>
+              <p style="color: var(--aw-text, #ccc); font-size: 0.8em; white-space: pre-wrap; margin: 0;">
+                {Helpers.truncate(@last_llm_thinking, 500)}
+              </p>
+            </div>
+            <%!-- LLM interaction stream --%>
+            <div
+              id="llm-interactions-container"
+              phx-update="stream"
+              style="padding: 0.4rem;"
+            >
+              <div
+                :for={{dom_id, interaction} <- @streams.llm_interactions}
+                id={dom_id}
+                style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
+              >
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                  <.badge label={to_string(interaction.mode)} color={:yellow} />
+                  <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
+                    {format_time(interaction.timestamp)}
+                  </span>
+                </div>
+                <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
+                  {Helpers.truncate(interaction.thinking, 250)}
+                </p>
+                <div :if={interaction.actions > 0 || interaction.notes > 0} style="margin-top: 0.2rem; display: flex; gap: 0.25rem;">
+                  <.badge :if={interaction.actions > 0} label={"#{interaction.actions} actions"} color={:green} />
+                  <.badge :if={interaction.notes > 0} label={"#{interaction.notes} notes"} color={:purple} />
+                </div>
+              </div>
+            </div>
+            <div style="padding: 0.4rem; text-align: center;">
+              <.empty_state
+                :if={stream_empty?(@streams.llm_interactions)}
+                icon="🔄"
+                title="No LLM heartbeats yet"
+                hint="LLM calls happen during heartbeat cycles"
+              />
+            </div>
+          </div>
+        </div>
+
+        <%!-- Code Modules Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-code"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">💻 Code</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@code_modules != []} label={"#{length(@code_modules)}"} color={:green} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_code, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_code} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+            <div
+              :for={mod <- @code_modules}
+              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
+                <span style="font-weight: 500;">{mod[:name] || "unnamed"}</span>
+                <.badge :if={mod[:sandbox_level]} label={to_string(mod[:sandbox_level])} color={:yellow} />
+              </div>
+              <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">{Helpers.truncate(mod[:purpose], 100)}</span>
+            </div>
+            <.empty_state
+              :if={@code_modules == []}
+              icon="💻"
+              title="No code modules"
+              hint="Code appears when the agent creates modules"
+            />
+          </div>
+        </div>
+
+        <%!-- Proposals Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-proposals"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">📋 Proposals</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@proposals != []} label={"#{length(@proposals)}"} color={:yellow} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_proposals, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_proposals} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
+            <div
+              :for={proposal <- @proposals}
+              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
+                <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
+                <.badge :if={proposal[:confidence]} label={"#{round(proposal[:confidence] * 100)}%"} color={:blue} />
+              </div>
+              <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">{Helpers.truncate(proposal[:content] || proposal[:description] || "", 200)}</p>
+              <div style="display: flex; gap: 0.3rem;">
+                <button
+                  phx-click="accept-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Accept
+                </button>
+                <button
+                  phx-click="reject-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Reject
+                </button>
+                <button
+                  phx-click="defer-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #888; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Defer
+                </button>
+              </div>
+            </div>
+            <.empty_state
+              :if={@proposals == []}
+              icon="📋"
+              title="No pending proposals"
+              hint="Proposals appear from reflection & analysis"
+            />
+          </div>
+        </div>
       </div>
 
       <%!-- CENTER: Chat Panel --%>
@@ -833,67 +985,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
         </div>
 
-        <%!-- LLM Heartbeat --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
-          <div
-            phx-click="toggle-llm-panel"
-            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong style="font-size: 0.85em;">🔄 Heartbeat LLM</strong>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <.badge :if={@llm_call_count > 0} label={"#{@llm_call_count}"} color={:blue} />
-              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-                {if @show_llm_panel, do: "▼", else: "▶"}
-              </span>
-            </div>
-          </div>
-          <div :if={@show_llm_panel} style="max-height: 25vh; overflow-y: auto;">
-            <%!-- Last heartbeat thinking --%>
-            <div :if={@last_llm_thinking} style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);">
-              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
-                Last heartbeat ({@last_llm_mode || "unknown"} mode):
-              </div>
-              <p style="color: var(--aw-text, #ccc); font-size: 0.8em; white-space: pre-wrap; margin: 0;">
-                {Helpers.truncate(@last_llm_thinking, 500)}
-              </p>
-            </div>
-            <%!-- LLM interaction stream --%>
-            <div
-              id="llm-interactions-container"
-              phx-update="stream"
-              style="padding: 0.4rem;"
-            >
-              <div
-                :for={{dom_id, interaction} <- @streams.llm_interactions}
-                id={dom_id}
-                style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
-              >
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
-                  <.badge label={to_string(interaction.mode)} color={:yellow} />
-                  <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
-                    {format_time(interaction.timestamp)}
-                  </span>
-                </div>
-                <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
-                  {Helpers.truncate(interaction.thinking, 250)}
-                </p>
-                <div :if={interaction.actions > 0 || interaction.notes > 0} style="margin-top: 0.2rem; display: flex; gap: 0.25rem;">
-                  <.badge :if={interaction.actions > 0} label={"#{interaction.actions} actions"} color={:green} />
-                  <.badge :if={interaction.notes > 0} label={"#{interaction.notes} notes"} color={:purple} />
-                </div>
-              </div>
-            </div>
-            <div style="padding: 0.4rem; text-align: center;">
-              <.empty_state
-                :if={stream_empty?(@streams.llm_interactions)}
-                icon="🔄"
-                title="No LLM heartbeats yet"
-                hint="LLM calls happen during heartbeat cycles"
-              />
-            </div>
-          </div>
-        </div>
-
         <%!-- Identity Evolution Panel --%>
         <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
           <div
@@ -978,97 +1069,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               icon="🧠"
               title="No cognitive data"
               hint="Preferences appear as the agent adapts"
-            />
-          </div>
-        </div>
-
-        <%!-- Code Modules Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
-          <div
-            phx-click="toggle-code"
-            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong style="font-size: 0.85em;">💻 Code</strong>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <.badge :if={@code_modules != []} label={"#{length(@code_modules)}"} color={:green} />
-              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-                {if @show_code, do: "▼", else: "▶"}
-              </span>
-            </div>
-          </div>
-          <div :if={@show_code} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
-            <div
-              :for={mod <- @code_modules}
-              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
-            >
-              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
-                <span style="font-weight: 500;">{mod[:name] || "unnamed"}</span>
-                <.badge :if={mod[:sandbox_level]} label={to_string(mod[:sandbox_level])} color={:yellow} />
-              </div>
-              <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">{Helpers.truncate(mod[:purpose], 100)}</span>
-            </div>
-            <.empty_state
-              :if={@code_modules == []}
-              icon="💻"
-              title="No code modules"
-              hint="Code appears when the agent creates modules"
-            />
-          </div>
-        </div>
-
-        <%!-- Proposals Panel --%>
-        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
-          <div
-            phx-click="toggle-proposals"
-            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-          >
-            <strong style="font-size: 0.85em;">📋 Proposals</strong>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-              <.badge :if={@proposals != []} label={"#{length(@proposals)}"} color={:yellow} />
-              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-                {if @show_proposals, do: "▼", else: "▶"}
-              </span>
-            </div>
-          </div>
-          <div :if={@show_proposals} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
-            <div
-              :for={proposal <- @proposals}
-              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
-            >
-              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
-                <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
-                <.badge :if={proposal[:confidence]} label={"#{round(proposal[:confidence] * 100)}%"} color={:blue} />
-              </div>
-              <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">{Helpers.truncate(proposal[:content] || proposal[:description] || "", 200)}</p>
-              <div style="display: flex; gap: 0.3rem;">
-                <button
-                  phx-click="accept-proposal"
-                  phx-value-id={proposal[:id]}
-                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
-                >
-                  Accept
-                </button>
-                <button
-                  phx-click="reject-proposal"
-                  phx-value-id={proposal[:id]}
-                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
-                >
-                  Reject
-                </button>
-                <button
-                  phx-click="defer-proposal"
-                  phx-value-id={proposal[:id]}
-                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #888; color: white; cursor: pointer; font-size: 0.8em;"
-                >
-                  Defer
-                </button>
-              </div>
-            </div>
-            <.empty_state
-              :if={@proposals == []}
-              icon="📋"
-              title="No pending proposals"
-              hint="Proposals appear from reflection & analysis"
             />
           </div>
         </div>
