@@ -355,6 +355,8 @@ defmodule Arbor.Agent.AgentSeed do
 
     llm_usage = Map.get(llm_result, :usage, %{})
 
+    llm_output = Map.get(llm_result, :output, "")
+
     metadata = %{
       cognitive_mode: mode,
       background_actions: length(bg_actions),
@@ -363,10 +365,19 @@ defmodule Arbor.Agent.AgentSeed do
       memory_notes_count: length(memory_notes),
       goal_updates_count: length(goal_updates),
       heartbeat_count: heartbeat_count,
-      usage: llm_usage
+      usage: llm_usage,
+      output: llm_output
     }
 
-    {:ok, all_actions, %{}, state[:context_window], nil, metadata}
+    # Only pass context window back if there's meaningful user-facing output
+    context_window_to_sync =
+      if is_binary(llm_output) and String.trim(llm_output) != "" do
+        state[:context_window]
+      else
+        nil
+      end
+
+    {:ok, all_actions, %{}, context_window_to_sync, nil, metadata}
   end
 
   @doc """
@@ -913,7 +924,7 @@ defmodule Arbor.Agent.AgentSeed do
       if state[:working_memory] && insights != [] do
         Enum.reduce(Enum.take(insights, 2), state.working_memory, fn insight, wm ->
           content = insight[:content] || inspect(insight)
-          Arbor.Memory.WorkingMemory.add_curiosity(wm, "[insight] #{String.slice(content, 0..80)}")
+          Arbor.Memory.WorkingMemory.add_curiosity(wm, "[hb] [insight] #{String.slice(content, 0..80)}")
         end)
       else
         state[:working_memory]
@@ -930,7 +941,7 @@ defmodule Arbor.Agent.AgentSeed do
       if state[:working_memory] && memories != [] do
         Enum.reduce(Enum.take(memories, 2), state.working_memory, fn mem, wm ->
           content = mem[:content] || mem[:text] || inspect(mem)
-          Arbor.Memory.WorkingMemory.add_thought(wm, "[recalled] #{String.slice(content, 0..120)}")
+          Arbor.Memory.WorkingMemory.add_thought(wm, "[hb] [recalled] #{String.slice(content, 0..120)}")
         end)
       else
         state[:working_memory]
@@ -1075,7 +1086,7 @@ defmodule Arbor.Agent.AgentSeed do
           wm =
             state.working_memory
             |> Arbor.Memory.WorkingMemory.add_curiosity(
-              "[#{suggestion[:type]}] #{summary}",
+              "[hb] [#{suggestion[:type]}] #{summary}",
               max_curiosity: 5
             )
 

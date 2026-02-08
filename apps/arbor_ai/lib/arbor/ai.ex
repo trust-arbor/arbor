@@ -392,7 +392,9 @@ defmodule Arbor.AI do
           nil
 
         wm ->
-          text = Arbor.Memory.WorkingMemory.to_prompt_text(wm)
+          # Filter out heartbeat-sourced entries from query context
+          filtered_wm = filter_heartbeat_entries(wm)
+          text = Arbor.Memory.WorkingMemory.to_prompt_text(filtered_wm)
           if text not in ["", nil], do: "## Working Memory\n#{text}"
       end
     end
@@ -400,6 +402,25 @@ defmodule Arbor.AI do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  # Remove heartbeat-sourced entries (prefixed with "[hb] ") from working memory
+  # so they don't leak into the query model's system prompt.
+  defp filter_heartbeat_entries(wm) do
+    filtered_thoughts =
+      Enum.reject(wm.recent_thoughts, fn thought ->
+        content = if is_map(thought), do: Map.get(thought, :content, ""), else: ""
+        String.starts_with?(content, "[hb] ")
+      end)
+
+    filtered_curiosity =
+      Enum.reject(wm.curiosity, fn item ->
+        is_binary(item) and String.starts_with?(item, "[hb] ")
+      end)
+
+    %{wm | recent_thoughts: filtered_thoughts, curiosity: filtered_curiosity}
+  rescue
+    _ -> wm
   end
 
   defp build_knowledge_graph_section(agent_id) do
