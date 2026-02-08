@@ -354,7 +354,7 @@ defmodule Arbor.Cartographer.Hardware do
                   intel_vendor?("/sys/class/drm/#{card}/device/vendor")
               end)
 
-            if length(intel_cards) > 0 do
+            if intel_cards != [] do
               acc ++ [%{type: :intel, name: "Intel Integrated Graphics", vram_gb: 0.0}]
             else
               acc
@@ -387,7 +387,7 @@ defmodule Arbor.Cartographer.Hardware do
     # Check for Coral TPU devices
     coral_devices = find_devices("/dev", ~r/^apex_\d+$/)
 
-    if length(coral_devices) > 0 do
+    if coral_devices != [] do
       tpus =
         Enum.map(coral_devices, fn device ->
           %{type: :coral_tpu, device: device}

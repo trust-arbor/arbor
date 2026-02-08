@@ -180,7 +180,7 @@ defmodule Arbor.Gateway.SchemasTest do
                Schemas.Memory.validate(schema, %{
                  "agent_id" => "test",
                  "text" => "test",
-                 "max_length" => 10000
+                 "max_length" => 10_000
                })
 
       assert Enum.any?(errors, fn e -> e.field =~ "max_length" end)

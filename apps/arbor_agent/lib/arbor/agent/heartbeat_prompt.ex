@@ -8,6 +8,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   """
 
   alias Arbor.Agent.{CognitivePrompts, TimingContext}
+  alias Arbor.Memory.ContextWindow
+  alias Arbor.Memory.IdentityConsolidator
+  alias Arbor.Memory.SelfKnowledge
 
   @doc """
   Build the full heartbeat prompt from agent state.
@@ -37,10 +40,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         pending_section(state),
         response_format_section()
       ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.reject(&(&1 == ""))
-
-    Enum.join(parts, "\n\n")
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.join("\n\n")
   end
 
   @doc """
@@ -100,11 +101,10 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       goal_lines =
         goals
         |> Enum.take(5)
-        |> Enum.map(fn goal ->
+        |> Enum.map_join("\n", fn goal ->
           progress_pct = round((goal.progress || 0) * 100)
           "- [#{progress_pct}%] #{goal.description} (priority: #{goal.priority})"
         end)
-        |> Enum.join("\n")
 
       "## Active Goals\n#{goal_lines}"
     end
@@ -147,10 +147,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     else
       percept_lines =
         percepts
-        |> Enum.map(fn p ->
+        |> Enum.map_join("\n", fn p ->
           "- [#{p.outcome}] intent=#{p.intent_id || "?"}, duration=#{p.duration_ms || "?"}ms"
         end)
-        |> Enum.join("\n")
 
       "## Recent Action Results\n#{percept_lines}"
     end
@@ -161,8 +160,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp conversation_section(%{context_window: window}) do
     text =
       safe_call(fn ->
-        if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
-          Arbor.Memory.ContextWindow.to_prompt_text(window)
+        if Code.ensure_loaded?(ContextWindow) do
+          ContextWindow.to_prompt_text(window)
         else
           # Fallback for plain map context windows
           entries = Map.get(window, :entries, [])
@@ -201,9 +200,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     sk =
       safe_call(fn ->
-        if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-             function_exported?(Arbor.Memory.IdentityConsolidator, :get_self_knowledge, 1) do
-          Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id)
+        if Code.ensure_loaded?(IdentityConsolidator) and
+             function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
+          IdentityConsolidator.get_self_knowledge(agent_id)
         end
       end)
 
@@ -212,7 +211,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         nil
 
       sk_struct ->
-        summary = safe_call(fn -> Arbor.Memory.SelfKnowledge.summarize(sk_struct) end)
+        summary = safe_call(fn -> SelfKnowledge.summarize(sk_struct) end)
         if summary && summary != "", do: "## Self-Awareness\n#{summary}", else: nil
     end
   end

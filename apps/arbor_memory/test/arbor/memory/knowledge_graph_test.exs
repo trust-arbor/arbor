@@ -1685,8 +1685,15 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
       # Build identical graphs
       build_graph = fn ->
         graph = KnowledgeGraph.new("agent_001")
-        {:ok, graph, a_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Decay center custom", relevance: 0.3, skip_dedup: true})
-        {:ok, graph, b_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Decay neighbor custom", relevance: 0.3, skip_dedup: true})
+        {:ok, graph, a_id} =
+          KnowledgeGraph.add_node(graph, %{
+            type: :fact, content: "Decay center custom", relevance: 0.3, skip_dedup: true
+          })
+
+        {:ok, graph, b_id} =
+          KnowledgeGraph.add_node(graph, %{
+            type: :fact, content: "Decay neighbor custom", relevance: 0.3, skip_dedup: true
+          })
         {:ok, graph} = KnowledgeGraph.add_edge(graph, a_id, b_id, :relates_to)
         {graph, a_id, b_id}
       end
@@ -1796,7 +1803,10 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
   describe "apply_decay auto_prune (polish)" do
     test "auto-prune removes low-relevance nodes after decay" do
       graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
-      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Will be pruned", relevance: 0.2, skip_dedup: true})
+      {:ok, graph, node_id} =
+        KnowledgeGraph.add_node(graph, %{
+          type: :fact, content: "Will be pruned", relevance: 0.2, skip_dedup: true
+        })
 
       # Set access time far in the past so decay pushes below prune threshold
       old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
@@ -1809,7 +1819,10 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
 
     test "auto_prune: false preserves low-relevance nodes" do
       graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
-      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Preserved node", relevance: 0.2, skip_dedup: true})
+      {:ok, graph, node_id} =
+        KnowledgeGraph.add_node(graph, %{
+          type: :fact, content: "Preserved node", relevance: 0.2, skip_dedup: true
+        })
 
       old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
       old_node = %{graph.nodes[node_id] | last_accessed: old}
@@ -1821,7 +1834,12 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
 
     test "pinned nodes survive auto-prune" do
       graph = KnowledgeGraph.new("agent_001", decay_rate: 1.0)
-      {:ok, graph, node_id} = KnowledgeGraph.add_node(graph, %{type: :fact, content: "Pinned survives", relevance: 0.2, pinned: true, skip_dedup: true})
+
+      {:ok, graph, node_id} =
+        KnowledgeGraph.add_node(graph, %{
+          type: :fact, content: "Pinned survives", relevance: 0.2,
+          pinned: true, skip_dedup: true
+        })
 
       old = DateTime.add(DateTime.utc_now(), -50 * 86_400, :second)
       old_node = %{graph.nodes[node_id] | last_accessed: old}
@@ -1840,7 +1858,11 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
         nodes: %{},
         edges: %{
           "node_1" => [
-            %{id: "edge_1", source_id: "node_1", target_id: "node_2", relationship: :relates_to, strength: 1.0, created_at: DateTime.utc_now()}
+            %{
+              id: "edge_1", source_id: "node_1", target_id: "node_2",
+              relationship: :relates_to, strength: 1.0,
+              created_at: DateTime.utc_now()
+            }
           ]
         }
       }

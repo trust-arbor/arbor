@@ -33,6 +33,9 @@ defmodule Arbor.Agent.DebugAgent do
 
   use GenServer
 
+  alias Arbor.Actions.Remediation.ForceGC
+  alias Arbor.Actions.Remediation.KillProcess
+  alias Arbor.Actions.Remediation.StopSupervisor
   alias Arbor.Agent.CircuitBreaker
   alias Arbor.Agent.Investigation
   alias Arbor.Agent.Lifecycle
@@ -384,7 +387,7 @@ defmodule Arbor.Agent.DebugAgent do
 
   defp maybe_enhance_with_ai(investigation) do
     # Only call AI if we have low confidence or no hypotheses
-    if investigation.confidence < 0.7 || length(investigation.hypotheses) == 0 do
+    if investigation.confidence < 0.7 || investigation.hypotheses == [] do
       Investigation.enhance_with_ai(investigation)
     else
       investigation
@@ -725,7 +728,7 @@ defmodule Arbor.Agent.DebugAgent do
     Logger.info("[DebugAgent] Killing process #{inspect(pid)}")
     pid_string = inspect(pid)
 
-    case Arbor.Actions.Remediation.KillProcess.run(%{pid: pid_string, reason: :kill}, %{}) do
+    case KillProcess.run(%{pid: pid_string, reason: :kill}, %{}) do
       {:ok, %{killed: true}} -> %{success: true, action: :kill_process, reason: nil}
       {:ok, %{killed: false}} -> %{success: false, action: :kill_process, reason: :not_alive}
       {:error, reason} -> %{success: false, action: :kill_process, reason: reason}
@@ -736,7 +739,7 @@ defmodule Arbor.Agent.DebugAgent do
     Logger.info("[DebugAgent] Forcing GC on #{inspect(pid)}")
     pid_string = inspect(pid)
 
-    case Arbor.Actions.Remediation.ForceGC.run(%{pid: pid_string}, %{}) do
+    case ForceGC.run(%{pid: pid_string}, %{}) do
       {:ok, %{collected: true}} -> %{success: true, action: :force_gc, reason: nil}
       {:ok, %{collected: false}} -> %{success: false, action: :force_gc, reason: :not_alive}
       {:error, reason} -> %{success: false, action: :force_gc, reason: reason}
@@ -747,7 +750,7 @@ defmodule Arbor.Agent.DebugAgent do
     Logger.info("[DebugAgent] Stopping supervisor #{inspect(pid)}")
     pid_string = inspect(pid)
 
-    case Arbor.Actions.Remediation.StopSupervisor.run(%{pid: pid_string}, %{}) do
+    case StopSupervisor.run(%{pid: pid_string}, %{}) do
       {:ok, %{stopped: true}} ->
         %{success: true, action: :stop_supervisor, reason: nil}
 

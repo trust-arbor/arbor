@@ -32,8 +32,8 @@ defmodule Arbor.Cartographer.Scout do
 
   require Logger
 
-  alias Arbor.Cartographer.Hardware
   alias Arbor.Cartographer.CapabilityRegistry
+  alias Arbor.Cartographer.Hardware
   alias Arbor.Contracts.Libraries.Cartographer, as: Contract
 
   @type hardware_info :: Contract.hardware_info()

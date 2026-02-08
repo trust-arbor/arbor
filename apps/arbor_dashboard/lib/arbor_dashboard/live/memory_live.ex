@@ -774,13 +774,11 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp safe_call(fun) do
-    try do
-      fun.()
-    rescue
-      _ -> nil
-    catch
-      :exit, _ -> nil
-    end
+    fun.()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # Unwrap {:ok, value} tuples and handle {:error, _} — return map or nil

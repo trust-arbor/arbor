@@ -24,6 +24,8 @@ defmodule Arbor.Actions.Memory do
       )
   """
 
+  alias Arbor.Common.SafeAtom
+
   # ============================================================================
   # Shared Helpers
   # ============================================================================
@@ -49,9 +51,10 @@ defmodule Arbor.Actions.Memory do
   def safe_to_atom(type) when is_atom(type), do: type
 
   def safe_to_atom(type) when is_binary(type) do
-    String.to_existing_atom(type)
-  rescue
-    ArgumentError -> String.to_atom(type)
+    case SafeAtom.to_existing(type) do
+      {:ok, atom} -> atom
+      {:error, _} -> type
+    end
   end
 
   # ============================================================================

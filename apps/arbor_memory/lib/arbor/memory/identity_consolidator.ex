@@ -132,85 +132,86 @@ defmodule Arbor.Memory.IdentityConsolidator do
     force = Keyword.get(opts, :force, false)
     min_confidence = Keyword.get(opts, :min_confidence, 0.7)
 
-    with {:ok, :allowed} <- check_consolidation_allowed(agent_id, force) do
-      # Source 1: InsightDetector suggestions (ephemeral)
-      detector_insights = get_high_confidence_insights(agent_id, min_confidence)
+    case check_consolidation_allowed(agent_id, force) do
+      {:ok, :allowed} ->
+        # Source 1: InsightDetector suggestions (ephemeral)
+        detector_insights = get_high_confidence_insights(agent_id, min_confidence)
 
-      # Source 2: KG promotion candidates (matured nodes)
-      kg_candidates = find_promotion_candidates(agent_id, opts)
+        # Source 2: KG promotion candidates (matured nodes)
+        kg_candidates = find_promotion_candidates(agent_id, opts)
 
-      # Categorize all KG insight nodes
-      all_kg_insights = find_all_insight_nodes(agent_id)
-      {_promoted_ids, deferred, blocked} = categorize_insights(all_kg_insights, kg_candidates)
+        # Categorize all KG insight nodes
+        all_kg_insights = find_all_insight_nodes(agent_id)
+        {_promoted_ids, deferred, blocked} = categorize_insights(all_kg_insights, kg_candidates)
 
-      # If no insights from either source, nothing to do
-      if detector_insights == [] and kg_candidates == [] do
-        {:ok, :no_changes}
-      else
-        sk = get_or_create_self_knowledge(agent_id)
-
-        # Snapshot before changes
-        sk = SelfKnowledge.snapshot(sk)
-
-        # Process InsightDetector suggestions (existing per-insight integration)
-        {updated_sk, detector_changes} =
-          Enum.reduce(detector_insights, {sk, []}, fn insight, {acc_sk, acc_changes} ->
-            case integrate_insight(acc_sk, insight) do
-              {:ok, new_sk, change} -> {new_sk, [change | acc_changes]}
-              {:skip, _reason} -> {acc_sk, acc_changes}
-            end
-          end)
-
-        # Process KG promotion candidates (category-based synthesis)
-        {updated_sk, kg_changes} = synthesize_from_kg_candidates(updated_sk, kg_candidates)
-
-        all_changes = Enum.reverse(detector_changes) ++ Enum.reverse(kg_changes)
-
-        if all_changes != [] do
-          # Save updated SelfKnowledge
-          save_self_knowledge(agent_id, updated_sk)
-
-          # Record rate limit
-          record_consolidation(agent_id)
-
-          # Mark promoted KG insights (prevents re-promotion)
-          mark_insights_promoted(agent_id, kg_candidates)
-
-          # Emit deferred/blocked signals
-          emit_deferred_signals(agent_id, deferred)
-          emit_blocked_signals(agent_id, blocked)
-
-          # Pattern analysis post-consolidation
-          pattern_insights = analyze_patterns_post_consolidation(agent_id, opts)
-
-          # Update consolidation state
-          state = update_consolidation_state(agent_id)
-
-          # Emit events for each change
-          Enum.each(all_changes, fn change ->
-            Events.record_identity_changed(agent_id, change)
-            Signals.emit_cognitive_adjustment(agent_id, :identity_consolidated, change)
-          end)
-
-          # Emit consolidation completed signal
-          result = %{
-            promoted_count: length(kg_candidates),
-            deferred_count: length(deferred),
-            blocked_count: length(blocked),
-            pattern_insights_count: length(pattern_insights),
-            detector_changes_count: length(detector_changes),
-            changes_made: all_changes,
-            consolidation_number: state.consolidation_count
-          }
-
-          Signals.emit_consolidation_completed(agent_id, result)
-
-          {:ok, updated_sk, result}
-        else
+        # If no insights from either source, nothing to do
+        if detector_insights == [] and kg_candidates == [] do
           {:ok, :no_changes}
+        else
+          sk = get_or_create_self_knowledge(agent_id)
+
+          # Snapshot before changes
+          sk = SelfKnowledge.snapshot(sk)
+
+          # Process InsightDetector suggestions (existing per-insight integration)
+          {updated_sk, detector_changes} =
+            Enum.reduce(detector_insights, {sk, []}, fn insight, {acc_sk, acc_changes} ->
+              case integrate_insight(acc_sk, insight) do
+                {:ok, new_sk, change} -> {new_sk, [change | acc_changes]}
+                {:skip, _reason} -> {acc_sk, acc_changes}
+              end
+            end)
+
+          # Process KG promotion candidates (category-based synthesis)
+          {updated_sk, kg_changes} = synthesize_from_kg_candidates(updated_sk, kg_candidates)
+
+          all_changes = Enum.reverse(detector_changes) ++ Enum.reverse(kg_changes)
+
+          if all_changes != [] do
+            # Save updated SelfKnowledge
+            save_self_knowledge(agent_id, updated_sk)
+
+            # Record rate limit
+            record_consolidation(agent_id)
+
+            # Mark promoted KG insights (prevents re-promotion)
+            mark_insights_promoted(agent_id, kg_candidates)
+
+            # Emit deferred/blocked signals
+            emit_deferred_signals(agent_id, deferred)
+            emit_blocked_signals(agent_id, blocked)
+
+            # Pattern analysis post-consolidation
+            pattern_insights = analyze_patterns_post_consolidation(agent_id, opts)
+
+            # Update consolidation state
+            state = update_consolidation_state(agent_id)
+
+            # Emit events for each change
+            Enum.each(all_changes, fn change ->
+              Events.record_identity_changed(agent_id, change)
+              Signals.emit_cognitive_adjustment(agent_id, :identity_consolidated, change)
+            end)
+
+            # Emit consolidation completed signal
+            result = %{
+              promoted_count: length(kg_candidates),
+              deferred_count: length(deferred),
+              blocked_count: length(blocked),
+              pattern_insights_count: length(pattern_insights),
+              detector_changes_count: length(detector_changes),
+              changes_made: all_changes,
+              consolidation_number: state.consolidation_count
+            }
+
+            Signals.emit_consolidation_completed(agent_id, result)
+
+            {:ok, updated_sk, result}
+          else
+            {:ok, :no_changes}
+          end
         end
-      end
-    else
+
       {:error, _} = error ->
         error
     end
@@ -911,7 +912,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
       if node.relevance < min_rel, do: [:min_relevance | missing], else: missing
 
     missing =
-      if not has_valid_evidence?(node), do: [:evidence | missing], else: missing
+      if has_valid_evidence?(node), do: missing, else: [:evidence | missing]
 
     Enum.reverse(missing)
   end

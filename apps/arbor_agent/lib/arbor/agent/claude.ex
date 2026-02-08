@@ -32,6 +32,7 @@ defmodule Arbor.Agent.Claude do
 
   alias Arbor.AI.AgentSDK
   alias Arbor.AI.SessionReader
+  alias Arbor.Memory.Thinking
 
   @type option ::
           {:id, String.t()}
@@ -572,15 +573,15 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp memory_thinking_available? do
-    Code.ensure_loaded?(Arbor.Memory.Thinking) and
-      Process.whereis(Arbor.Memory.Thinking) != nil
+    Code.ensure_loaded?(Thinking) and
+      Process.whereis(Thinking) != nil
   end
 
   defp record_single_thinking(agent_id, block) do
     text = block.text || block[:text] || ""
     opts = if block.signature, do: [metadata: %{signature: block.signature}], else: []
 
-    result = Arbor.Memory.Thinking.record_thinking(agent_id, text, opts)
+    result = Thinking.record_thinking(agent_id, text, opts)
 
     case result do
       {:ok, _entry} -> :ok

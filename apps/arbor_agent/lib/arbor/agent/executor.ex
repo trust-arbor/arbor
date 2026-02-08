@@ -492,9 +492,7 @@ defmodule Arbor.Agent.Executor do
   defp format_anomaly(anomaly), do: inspect(anomaly)
 
   defp format_context(context) when is_map(context) do
-    context
-    |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
-    |> Enum.join("\n")
+    Enum.map_join(context, "\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
   end
 
   defp format_context(_), do: "No additional context"
@@ -524,7 +522,7 @@ defmodule Arbor.Agent.Executor do
     case parts do
       [category | rest] when rest != [] ->
         category_mod = category |> String.capitalize()
-        action_mod = rest |> Enum.map(&String.capitalize/1) |> Enum.join("")
+        action_mod = Enum.map_join(rest, "", &String.capitalize/1)
 
         module =
           Module.concat([

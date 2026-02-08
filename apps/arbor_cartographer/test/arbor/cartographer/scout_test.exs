@@ -2,7 +2,7 @@ defmodule Arbor.Cartographer.ScoutTest do
   # No async since we're managing global processes
   use ExUnit.Case, async: false
 
-  alias Arbor.Cartographer.{Scout, CapabilityRegistry}
+  alias Arbor.Cartographer.{CapabilityRegistry, Scout}
 
   @moduletag :fast
 

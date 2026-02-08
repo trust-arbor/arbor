@@ -2,6 +2,7 @@ defmodule Arbor.Agent.ContextManagerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.ContextManager
+  alias Arbor.Memory.ContextWindow
 
   # Use a temp directory for test persistence
   @test_dir System.tmp_dir!() |> Path.join("arbor_context_manager_test_#{:rand.uniform(10_000)}")
