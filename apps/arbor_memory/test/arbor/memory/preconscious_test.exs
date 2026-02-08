@@ -82,7 +82,7 @@ defmodule Arbor.Memory.PreconsciousTest do
 
       {:ok, context} = Preconscious.extract_context(agent_id)
 
-      assert context.goals == ["Implement memory system", "Add vector search"]
+      assert [%{description: "Implement memory system"}, %{description: "Add vector search"}] = context.goals
       # Goals should be included in search query
       assert String.contains?(context.combined_query, "memory") or
              String.contains?(context.combined_query, "system") or

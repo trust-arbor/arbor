@@ -1119,11 +1119,16 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
       wm ->
         wm.recent_thoughts
+        |> Enum.map(&thought_content/1)
         |> Enum.filter(&String.starts_with?(&1, prefix))
         |> Enum.map(&String.replace_leading(&1, prefix, ""))
         |> MapSet.new()
     end
   end
+
+  defp thought_content(%{content: content}) when is_binary(content), do: content
+  defp thought_content(content) when is_binary(content), do: content
+  defp thought_content(_), do: ""
 
   # ============================================================================
   # Goals in Knowledge Graph

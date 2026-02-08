@@ -261,7 +261,10 @@ defmodule Arbor.Memory.Preconscious do
     |> Enum.map(fn {word, _count} -> word end)
   end
 
-  defp tokenize_thought(thought) do
+  defp tokenize_thought(%{content: content}) when is_binary(content), do: tokenize_thought(content)
+  defp tokenize_thought(%{description: desc}) when is_binary(desc), do: tokenize_thought(desc)
+
+  defp tokenize_thought(thought) when is_binary(thought) do
     # Extract significant words (simple tokenization)
     thought
     |> String.downcase()
@@ -270,6 +273,8 @@ defmodule Arbor.Memory.Preconscious do
     |> Enum.reject(&stop_word?/1)
     |> Enum.filter(&(String.length(&1) > 3))
   end
+
+  defp tokenize_thought(_), do: []
 
   defp stop_word?(word) do
     word in ~w(
@@ -334,7 +339,12 @@ defmodule Arbor.Memory.Preconscious do
         "No active context"
       else
         topic_part = if context.topics != [], do: "Topics: #{Enum.join(context.topics, ", ")}", else: ""
-        goal_part = if context.goals != [], do: "Goals: #{Enum.join(context.goals, ", ")}", else: ""
+        goal_texts = Enum.map(context.goals, fn
+          %{description: d} -> d
+          g when is_binary(g) -> g
+          _ -> ""
+        end)
+        goal_part = if context.goals != [], do: "Goals: #{Enum.join(goal_texts, ", ")}", else: ""
 
         [topic_part, goal_part]
         |> Enum.reject(&(&1 == ""))

@@ -6,6 +6,10 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
 
   @moduletag :fast
 
+  # Helper to extract text content from structured thought maps
+  defp thought_content(%{content: c}), do: c
+  defp thought_content(c) when is_binary(c), do: c
+
   setup do
     # Ensure ETS table exists
     if :ets.whereis(:arbor_reflections) == :undefined do
@@ -431,7 +435,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "Important insight"))
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Important insight"))
     end
 
     test "skips low-importance insights", %{agent_id: agent_id} do
@@ -468,7 +472,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "[Technical Learning]"))
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "[Technical Learning]"))
     end
 
     test "skips low-confidence learnings", %{agent_id: agent_id} do
@@ -1180,7 +1184,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "Test learning"))
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Test learning"))
     end
 
     test "unknown category does not error", %{agent_id: agent_id} do
@@ -1193,7 +1197,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(&1, "Mystery learning"))
+      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Mystery learning"))
     end
   end
 
@@ -1455,7 +1459,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(&String.starts_with?(&1, "[Insight Suggestion]"))
+          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
 
         # Should be 2: one existing + one new (not duplicate)
         assert suggestion_count == 2
@@ -1463,7 +1467,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         # Verify "I am curious" only appears once
         curious_count =
           updated_wm.recent_thoughts
-          |> Enum.count(&String.contains?(&1, "I am curious"))
+          |> Enum.count(fn t -> String.contains?(thought_content(t), "I am curious") end)
 
         assert curious_count == 1
       after
@@ -1515,7 +1519,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(&String.starts_with?(&1, "[Insight Suggestion]"))
+          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
 
         # 9 existing + at most 1 new = 10 (capped)
         assert suggestion_count == 10
@@ -1560,7 +1564,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(&String.starts_with?(&1, "[Insight Suggestion]"))
+          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
 
         assert suggestion_count == 2
       after

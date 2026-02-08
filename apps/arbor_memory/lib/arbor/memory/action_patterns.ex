@@ -386,7 +386,10 @@ defmodule Arbor.Memory.ActionPatterns do
     formatted =
       patterns
       |> Enum.take(3)
-      |> Enum.map_join("\n", fn p -> "- #{p.description}" end)
+      |> Enum.map_join("\n", fn p ->
+        desc = Map.get(p, :description) || "#{p.type} (#{p.occurrences}x, #{Float.round(p.confidence * 100, 0)}%)"
+        "- #{desc}"
+      end)
 
     "#{title}:\n#{formatted}"
   end
