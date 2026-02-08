@@ -129,7 +129,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         identity = ChatState.get_identity_state(agent_id)
         cognitive = ChatState.get_cognitive_state(agent_id)
         code = ChatState.get_code_modules(agent_id)
-        proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+        proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
         ChatState.touch_agent(agent_id)
 
         socket =
@@ -275,27 +275,31 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_event("accept-proposal", %{"id" => proposal_id}, socket) do
     agent_id = socket.assigns.agent_id
     safe_call(fn -> Arbor.Memory.accept_proposal(agent_id, proposal_id) end)
-    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
     {:noreply, assign(socket, proposals: proposals)}
   end
 
   def handle_event("reject-proposal", %{"id" => proposal_id}, socket) do
     agent_id = socket.assigns.agent_id
     safe_call(fn -> Arbor.Memory.reject_proposal(agent_id, proposal_id) end)
-    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
     {:noreply, assign(socket, proposals: proposals)}
   end
 
   def handle_event("defer-proposal", %{"id" => proposal_id}, socket) do
     agent_id = socket.assigns.agent_id
     safe_call(fn -> Arbor.Memory.defer_proposal(agent_id, proposal_id) end)
-    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
     {:noreply, assign(socket, proposals: proposals)}
   end
 
   @impl true
   def handle_info({:query, agent, prompt}, socket) do
-    case Claude.query(agent, prompt, timeout: 180_000) do
+    case Claude.query(agent, prompt,
+           timeout: 60_000,
+           max_turns: 1,
+           permission_mode: :bypass
+         ) do
       {:ok, response} ->
         socket = process_query_response(socket, agent, response)
         {:noreply, socket}
@@ -1171,6 +1175,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       _ -> nil
     catch
       :exit, _ -> nil
+    end
+  end
+
+  defp unwrap_list(result) do
+    case result do
+      {:ok, list} when is_list(list) -> list
+      list when is_list(list) -> list
+      _ -> []
     end
   end
 
