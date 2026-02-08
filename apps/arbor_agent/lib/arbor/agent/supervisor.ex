@@ -80,6 +80,64 @@ defmodule Arbor.Agent.Supervisor do
   end
 
   @doc """
+  Start any GenServer module as a supervised child.
+
+  Unlike `start_agent/1` which is hardcoded to `Arbor.Agent.Server`,
+  this function accepts an arbitrary module and start opts. Used by
+  AgentManager to supervise Claude CLI agents, API agents, etc.
+
+  ## Options
+
+  - `:agent_id` — required, unique identifier
+  - `:module` — required, the GenServer module to start
+  - `:start_opts` — keyword list passed to `module.start_link/1` (default: `[]`)
+  - `:metadata` — map registered alongside the agent (default: `%{}`)
+  - `:restart` — restart strategy (default: `:transient`)
+
+  ## Returns
+
+  - `{:ok, pid}` on success
+  - `{:error, :already_running}` if agent_id is already registered with a live process
+  - `{:error, reason}` on failure
+  """
+  @spec start_child(keyword()) :: {:ok, pid()} | {:error, term()}
+  def start_child(opts) do
+    agent_id = Keyword.fetch!(opts, :agent_id)
+    module = Keyword.fetch!(opts, :module)
+    start_opts = Keyword.get(opts, :start_opts, [])
+    metadata = Keyword.get(opts, :metadata, %{})
+
+    case Arbor.Agent.Registry.whereis(agent_id) do
+      {:ok, _pid} ->
+        {:error, :already_running}
+
+      {:error, :not_found} ->
+        child_spec = %{
+          id: agent_id,
+          start: {module, :start_link, [start_opts]},
+          restart: Keyword.get(opts, :restart, :transient),
+          type: :worker
+        }
+
+        case DynamicSupervisor.start_child(__MODULE__, child_spec) do
+          {:ok, pid} ->
+            Arbor.Agent.Registry.register(
+              agent_id,
+              pid,
+              Map.merge(metadata, %{module: module})
+            )
+
+            Logger.info("Child started: #{agent_id} (#{inspect(module)}, pid: #{inspect(pid)})")
+            {:ok, pid}
+
+          {:error, reason} = error ->
+            Logger.error("Failed to start child #{agent_id}: #{inspect(reason)}")
+            error
+        end
+    end
+  end
+
+  @doc """
   Stop a supervised agent process.
 
   Terminates the agent gracefully, allowing it to save a final checkpoint.

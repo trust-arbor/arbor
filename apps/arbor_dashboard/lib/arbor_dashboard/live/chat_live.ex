@@ -11,16 +11,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Web.Components
 
   alias Arbor.Agent.{APIAgent, Claude}
-  alias Arbor.Dashboard.ChatState
+  alias Arbor.Dashboard.{AgentManager, ChatState}
   alias Arbor.Web.Helpers
 
   @impl true
   def mount(_params, _session, socket) do
     ChatState.init()
 
-    subscription_ids =
+    {subscription_ids, existing_agent} =
       if connected?(socket) do
-        safe_subscribe()
+        AgentManager.subscribe()
+        {safe_subscribe(), AgentManager.find_agent()}
+      else
+        {nil, :not_found}
       end
 
     available_models =
@@ -98,23 +101,23 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       |> stream(:actions, [])
       |> stream(:llm_interactions, [])
 
+    # Reconnect to existing agent if one is running
+    socket =
+      case existing_agent do
+        {:ok, pid, metadata} ->
+          reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+
+        :not_found ->
+          socket
+      end
+
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    # Stop the agent if running (both CLI and API agents are GenServers)
-    if is_pid(socket.assigns[:agent]) do
-      try do
-        GenServer.stop(socket.assigns.agent, :normal, 1000)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
-
-    # Unsubscribe from signals
+    # Agent survives navigation — managed by Supervisor, not LiveView.
+    # Only unsubscribe from signals.
     case socket.assigns[:subscription_ids] do
       {agent_sub, memory_sub} ->
         safe_unsubscribe(agent_sub)
@@ -131,111 +134,32 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   @impl true
   def handle_event("start-agent", %{"model" => model_id}, socket) do
     model_config = find_model_config(model_id, socket.assigns.available_models)
-    agent_id = "chat-#{System.unique_integer([:positive])}"
 
     case model_config do
-      %{backend: :cli} ->
-        # Anthropic models — use Claude CLI (agentic, tool use, thinking)
-        model_atom = String.to_existing_atom(model_id)
+      nil ->
+        {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
 
-        case Claude.start_link(id: agent_id, model: model_atom, capture_thinking: true) do
-          {:ok, agent} ->
-            memory_stats = get_memory_stats(agent)
-            tokens = ChatState.get_tokens(agent_id)
-            identity = ChatState.get_identity_state(agent_id)
-            cognitive = ChatState.get_cognitive_state(agent_id)
-            code = ChatState.get_code_modules(agent_id)
-            proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-            ChatState.touch_agent(agent_id)
-
-            socket =
-              socket
-              |> assign(
-                agent: agent, agent_id: agent_id, error: nil,
-                memory_stats: memory_stats, current_model: model_config, chat_backend: :cli
-              )
-              |> assign(
-                query_count: 0,
-                working_thoughts: [],
-                agent_goals: fetch_goals(agent_id),
-                llm_call_count: tokens.count,
-                last_llm_mode: nil,
-                last_llm_thinking: nil,
-                heartbeat_count: 0,
-                memory_notes_total: 0,
-                input_tokens: tokens.input,
-                output_tokens: tokens.output,
-                cached_tokens: tokens.cached,
-                last_duration_ms: tokens.last_duration,
-                self_insights: identity.insights,
-                identity_changes: identity.identity_changes,
-                last_consolidation: identity.last_consolidation,
-                cognitive_prefs: cognitive.current_prefs,
-                cognitive_adjustments: cognitive.adjustments,
-                pinned_count: cognitive.pinned_count,
-                code_modules: code,
-                proposals: proposals
-              )
-              |> stream(:messages, [], reset: true)
-              |> stream(:signals, [], reset: true)
-              |> stream(:thinking, [], reset: true)
-              |> stream(:memories, [], reset: true)
-              |> stream(:actions, [], reset: true)
-              |> stream(:llm_interactions, [], reset: true)
-
+      config ->
+        case AgentManager.start_agent(config) do
+          {:ok, agent_id, pid} ->
+            metadata = %{model_config: config, backend: config.backend}
+            socket = reconnect_to_agent(socket, agent_id, pid, metadata)
             {:noreply, socket}
+
+          {:error, :already_running} ->
+            # Agent already exists — just reconnect
+            case AgentManager.find_agent() do
+              {:ok, pid, metadata} ->
+                socket = reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+                {:noreply, socket}
+
+              :not_found ->
+                {:noreply, assign(socket, error: "Agent reported running but not found")}
+            end
 
           {:error, reason} ->
             {:noreply, assign(socket, error: "Failed to start agent: #{inspect(reason)}")}
         end
-
-      %{backend: :api} = config ->
-        # API models — full GenServer agent with memory, heartbeat, tools
-        case APIAgent.start_link(
-               id: agent_id,
-               model: config.id,
-               provider: config.provider,
-               model_id: config.id
-             ) do
-          {:ok, agent} ->
-            memory_stats = get_memory_stats(agent)
-            goals = fetch_goals(agent_id)
-            proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-
-            socket =
-              socket
-              |> assign(
-                agent: agent, agent_id: agent_id, error: nil,
-                current_model: config, chat_backend: :api,
-                memory_stats: memory_stats
-              )
-              |> assign(
-                query_count: 0, working_thoughts: [],
-                agent_goals: goals,
-                llm_call_count: 0, last_llm_mode: nil, last_llm_thinking: nil,
-                heartbeat_count: 0, memory_notes_total: 0,
-                input_tokens: 0, output_tokens: 0, cached_tokens: 0, last_duration_ms: nil,
-                hb_input_tokens: 0, hb_output_tokens: 0, hb_cached_tokens: 0,
-                self_insights: [], identity_changes: [], last_consolidation: nil,
-                cognitive_prefs: nil, cognitive_adjustments: [], pinned_count: 0,
-                code_modules: [], proposals: proposals,
-                selected_heartbeat_model: nil
-              )
-              |> stream(:messages, [], reset: true)
-              |> stream(:signals, [], reset: true)
-              |> stream(:thinking, [], reset: true)
-              |> stream(:memories, [], reset: true)
-              |> stream(:actions, [], reset: true)
-              |> stream(:llm_interactions, [], reset: true)
-
-            {:noreply, socket}
-
-          {:error, reason} ->
-            {:noreply, assign(socket, error: "Failed to start API agent: #{inspect(reason)}")}
-        end
-
-      nil ->
-        {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
     end
   rescue
     e ->
@@ -243,29 +167,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("stop-agent", _params, socket) do
-    # Both CLI and API agents are now GenServers
-    if is_pid(socket.assigns[:agent]) do
-      try do
-        GenServer.stop(socket.assigns.agent, :normal, 1000)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+    if socket.assigns[:agent_id] do
+      AgentManager.stop_agent(socket.assigns.agent_id)
     end
 
-    {:noreply,
-     assign(socket,
-       agent: nil,
-       agent_id: nil,
-       session_id: nil,
-       memory_stats: nil,
-       agent_goals: [],
-       llm_call_count: 0,
-       heartbeat_count: 0,
-       chat_backend: nil,
-       current_model: nil
-     )}
+    {:noreply, clear_agent_assigns(socket)}
   end
 
   def handle_event("update-input", %{"message" => value}, socket) do
@@ -462,6 +368,30 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       socket = maybe_track_code(socket, signal)
 
       {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # PubSub: another tab started an agent — reconnect if we have none
+  def handle_info({:agent_started, agent_id, pid, model_config}, socket) do
+    if socket.assigns[:agent] == nil do
+      metadata = %{model_config: model_config, backend: model_config[:backend] || model_config.backend}
+      {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # PubSub: agent was stopped (by another tab or programmatically)
+  def handle_info({:agent_stopped, _agent_id}, socket) do
+    {:noreply, clear_agent_assigns(socket)}
+  end
+
+  # Process monitor: agent crashed or was killed
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
+    if pid == socket.assigns[:agent] do
+      {:noreply, clear_agent_assigns(socket)}
     else
       {:noreply, socket}
     end
@@ -1286,6 +1216,79 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       </div>
     </div>
     """
+  end
+
+  # ── Agent Lifecycle Helpers ──────────────────────────────────────────
+
+  defp reconnect_to_agent(socket, agent_id, pid, metadata) do
+    Process.monitor(pid)
+
+    model_config = metadata[:model_config] || %{}
+    backend = metadata[:backend] || model_config[:backend]
+
+    memory_stats = get_memory_stats(pid)
+    tokens = ChatState.get_tokens(agent_id)
+    identity = ChatState.get_identity_state(agent_id)
+    cognitive = ChatState.get_cognitive_state(agent_id)
+    code = ChatState.get_code_modules(agent_id)
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    ChatState.touch_agent(agent_id)
+
+    socket
+    |> assign(
+      agent: pid,
+      agent_id: agent_id,
+      error: nil,
+      memory_stats: memory_stats,
+      current_model: model_config,
+      chat_backend: backend
+    )
+    |> assign(
+      query_count: 0,
+      working_thoughts: [],
+      agent_goals: fetch_goals(agent_id),
+      llm_call_count: tokens.count,
+      last_llm_mode: nil,
+      last_llm_thinking: nil,
+      heartbeat_count: 0,
+      memory_notes_total: 0,
+      input_tokens: tokens.input,
+      output_tokens: tokens.output,
+      cached_tokens: tokens.cached,
+      last_duration_ms: tokens.last_duration,
+      hb_input_tokens: 0,
+      hb_output_tokens: 0,
+      hb_cached_tokens: 0,
+      self_insights: identity.insights,
+      identity_changes: identity.identity_changes,
+      last_consolidation: identity.last_consolidation,
+      cognitive_prefs: cognitive.current_prefs,
+      cognitive_adjustments: cognitive.adjustments,
+      pinned_count: cognitive.pinned_count,
+      code_modules: code,
+      proposals: proposals,
+      selected_heartbeat_model: nil
+    )
+    |> stream(:messages, [], reset: true)
+    |> stream(:signals, [], reset: true)
+    |> stream(:thinking, [], reset: true)
+    |> stream(:memories, [], reset: true)
+    |> stream(:actions, [], reset: true)
+    |> stream(:llm_interactions, [], reset: true)
+  end
+
+  defp clear_agent_assigns(socket) do
+    assign(socket,
+      agent: nil,
+      agent_id: nil,
+      session_id: nil,
+      memory_stats: nil,
+      agent_goals: [],
+      llm_call_count: 0,
+      heartbeat_count: 0,
+      chat_backend: nil,
+      current_model: nil
+    )
   end
 
   # ── Model Config Helpers ─────────────────────────────────────────────
