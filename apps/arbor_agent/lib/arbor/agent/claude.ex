@@ -92,7 +92,11 @@ defmodule Arbor.Agent.Claude do
   @spec stream(t(), String.t(), (term() -> any()), keyword()) ::
           {:ok, map()} | {:error, term()}
   def stream(agent, prompt, callback, opts \\ []) when is_function(callback, 1) do
-    GenServer.call(agent, {:stream, prompt, callback, opts}, Keyword.get(opts, :timeout, :infinity))
+    GenServer.call(
+      agent,
+      {:stream, prompt, callback, opts},
+      Keyword.get(opts, :timeout, :infinity)
+    )
   end
 
   @doc "Get thinking blocks from the most recent session."
