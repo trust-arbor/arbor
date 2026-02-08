@@ -21,7 +21,7 @@
 ## Remediation Status
 
 - [x] **Phase 1** — Critical (C1-C5) — All 5 remediated
-- [ ] **Phase 2** — High (H1-H15) — 10/15 done, 2 deferred (H1/H2), 3 remaining (H9/H13/H15)
+- [x] **Phase 2** — High (H1-H15) — 12/15 remediated, 2 deferred (H1/H2), 1 documented (H15)
 - [ ] **Phase 3** — Medium (M1-M20)
 - [ ] **Phase 4** — Low (L1-L10)
 
@@ -106,7 +106,7 @@
 ### H9: Code Sandbox Dynamic Dispatch Bypass
 - **File:** `apps/arbor_sandbox/lib/arbor/sandbox/code.ex:260-261`
 - **Issue:** AST walker only catches `apply` with literal atom module. Variable modules bypass.
-- **Status:** [ ] Not started — medium effort, needs design decision
+- **Status:** [x] Remediated — block apply/3 and spawn with variable modules at pure/strict/limited
 
 ### H10: Unsigned Capabilities Accepted by Default
 - **File:** `apps/arbor_security/lib/arbor/security/config.ex:53`
@@ -126,7 +126,7 @@
 ### H13: No HTTP-Level Rate Limiting on Gateway
 - **File:** `apps/arbor_gateway/lib/arbor/gateway/router.ex`
 - **Issue:** Unlimited requests to all API endpoints.
-- **Status:** [ ] Not started — medium effort, needs plug implementation
+- **Status:** [x] Remediated — ETS-based rate limiter plug (100 req/min default, configurable)
 
 ### H14: No Production secret_key_base
 - **Files:** `config/dev.exs:26`, no `prod.exs`/`runtime.exs` override

@@ -17,6 +17,8 @@ defmodule Arbor.Gateway.Router do
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
   plug(:require_auth_unless_health)
+  # H13: Rate limiting on all authenticated endpoints
+  plug(Arbor.Gateway.RateLimiter)
   plug(:dispatch)
 
   get "/health" do
