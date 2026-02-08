@@ -770,8 +770,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
         GoalStore.block_goal(agent_id, goal_id, update["blockers"])
 
       "failed" ->
-        reason = "[Failed] #{update["note"] || "No reason given"}"
-        GoalStore.abandon_goal(agent_id, goal_id, reason)
+        GoalStore.fail_goal(agent_id, goal_id, update["note"])
 
       _ ->
         :ok
@@ -811,18 +810,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp create_goal_from_data(agent_id, goal_data) do
-    metadata =
-      if goal_data["success_criteria"] do
-        %{success_criteria: goal_data["success_criteria"]}
-      else
-        %{}
-      end
-
     goal =
       Goal.new(goal_data["description"],
         type: atomize_type(goal_data["type"]),
         priority: atomize_priority_to_int(goal_data["priority"]),
-        metadata: metadata
+        success_criteria: goal_data["success_criteria"],
+        notes: if(goal_data["note"], do: [goal_data["note"]], else: [])
       )
 
     goal = maybe_set_parent(goal, goal_data["parent_goal_id"])
@@ -843,17 +836,8 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp accumulate_goal_note(agent_id, goal_id, note) do
-    case GoalStore.get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        existing_notes = Map.get(goal.metadata || %{}, :notes, [])
-        timestamped_note = "#{DateTime.utc_now() |> DateTime.to_iso8601()}: #{note}"
-        updated_metadata = Map.put(goal.metadata || %{}, :notes, existing_notes ++ [timestamped_note])
-        updated_goal = %{goal | metadata: updated_metadata}
-        :ets.insert(:arbor_memory_goals, {{agent_id, goal_id}, updated_goal})
-
-      _ ->
-        :ok
-    end
+    timestamped_note = "#{DateTime.utc_now() |> DateTime.to_iso8601()}: #{note}"
+    GoalStore.add_note(agent_id, goal_id, timestamped_note)
   end
 
   defp maybe_set_parent(goal, nil), do: goal
@@ -1452,30 +1436,40 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp maybe_append_criteria(text, goal) do
-    case get_in(goal.metadata || %{}, [:success_criteria]) do
+    criteria = goal.success_criteria || get_in(goal.metadata || %{}, [:success_criteria])
+
+    case criteria do
       nil -> text
       "" -> text
-      criteria -> text <> "\n  Success criteria: #{criteria}"
+      c -> text <> "\n  Success criteria: #{c}"
     end
   end
 
   defp maybe_append_notes(text, goal) do
-    case get_in(goal.metadata || %{}, [:notes]) do
-      nil -> text
+    notes =
+      case goal.notes do
+        [] -> get_in(goal.metadata || %{}, [:notes]) || []
+        n when is_list(n) -> n
+        _ -> []
+      end
+
+    case notes do
       [] -> text
-      notes ->
-        recent = Enum.take(notes, -3)
-        notes_text = Enum.map_join(recent, "\n", &("    - " <> &1))
+      ns ->
+        recent = Enum.take(ns, -3)
+        notes_text = Enum.map_join(recent, "\n", &("    - " <> to_string(&1)))
         text <> "\n  Recent notes:\n#{notes_text}"
     end
   end
 
   defp goal_urgency(goal) do
+    deadline = goal.deadline || get_in(goal.metadata || %{}, [:deadline])
+
     overdue_factor =
-      case get_in(goal.metadata || %{}, [:deadline]) do
+      case deadline do
         nil -> 0.0
-        deadline when is_binary(deadline) ->
-          case DateTime.from_iso8601(deadline) do
+        d when is_binary(d) ->
+          case DateTime.from_iso8601(d) do
             {:ok, dt, _} -> deadline_urgency_factor(dt)
             _ -> 0.0
           end
@@ -1509,10 +1503,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
   defp priority_emoji(_), do: "🟡"
 
   defp deadline_text(goal) do
-    case get_in(goal.metadata || %{}, [:deadline]) do
+    deadline = goal.deadline || get_in(goal.metadata || %{}, [:deadline])
+
+    case deadline do
       nil -> ""
-      deadline when is_binary(deadline) ->
-        case DateTime.from_iso8601(deadline) do
+      d when is_binary(d) ->
+        case DateTime.from_iso8601(d) do
           {:ok, dt, _} -> format_deadline(dt)
           _ -> ""
         end

@@ -450,6 +450,101 @@ defmodule Arbor.Memory.InsightDetector do
   end
 
   # ============================================================================
+  # Working Memory Analysis
+  # ============================================================================
+
+  @doc """
+  Detect behavioral insights from working memory thoughts.
+
+  Analyzes recent thoughts for patterns:
+  - `:curiosity` — questioning, exploring, wondering
+  - `:methodical` — step-by-step, structured, systematic
+  - `:caution` — careful, checking, verifying
+  - `:learning` — learned, discovered, realized
+
+  ## Options
+
+  - `:max_suggestions` — max insights to return (default: 5)
+  - `:min_hits` — minimum keyword hits to generate an insight (default: 2)
+  """
+  @spec detect_from_working_memory(String.t(), keyword()) :: [insight_suggestion()]
+  def detect_from_working_memory(agent_id, opts \\ []) do
+    max_suggestions = Keyword.get(opts, :max_suggestions, 5)
+    min_hits = Keyword.get(opts, :min_hits, 2)
+
+    thoughts = fetch_thought_texts(agent_id)
+
+    if length(thoughts) < 2 do
+      []
+    else
+      combined = Enum.join(thoughts, " ") |> String.downcase()
+
+      categories()
+      |> Enum.map(fn {category, keywords, template} ->
+        hits = count_keyword_hits(combined, keywords)
+
+        if hits >= min_hits do
+          %{
+            content: template,
+            category: category,
+            confidence: min(0.9, 0.4 + hits * 0.1),
+            source: :working_memory,
+            evidence: ["#{hits} keyword matches in #{length(thoughts)} recent thoughts"]
+          }
+        else
+          nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.sort_by(& &1.confidence, :desc)
+      |> Enum.take(max_suggestions)
+    end
+  end
+
+  defp categories do
+    [
+      {:curiosity,
+       ~w(why how wonder curious question explore what if interesting),
+       "Agent shows curiosity-driven behavior, frequently asking questions and exploring"},
+      {:methodical,
+       ~w(step first then next plan systematic structure organize sequence),
+       "Agent follows methodical, step-by-step approaches to problem solving"},
+      {:caution,
+       ~w(careful check verify confirm test validate safe ensure double-check),
+       "Agent demonstrates cautious behavior, verifying before acting"},
+      {:learning,
+       ~w(learned discovered realized understand now know figured found insight),
+       "Agent actively synthesizes new understanding from experiences"}
+    ]
+  end
+
+  defp count_keyword_hits(text, keywords) do
+    Enum.count(keywords, &String.contains?(text, &1))
+  end
+
+  defp fetch_thought_texts(agent_id) do
+    if :ets.whereis(:arbor_working_memory) != :undefined do
+      case :ets.lookup(:arbor_working_memory, agent_id) do
+        [{^agent_id, wm}] ->
+          (Map.get(wm, :recent_thoughts, []))
+          |> Enum.map(&extract_thought_text/1)
+          |> Enum.reject(&(&1 == ""))
+
+        [] ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp extract_thought_text(%{content: content}) when is_binary(content), do: content
+  defp extract_thought_text(text) when is_binary(text), do: text
+  defp extract_thought_text(_), do: ""
+
+  # ============================================================================
   # Integration Functions
   # ============================================================================
 

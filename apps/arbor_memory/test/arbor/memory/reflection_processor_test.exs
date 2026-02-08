@@ -1065,7 +1065,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       assert updated.metadata[:blockers] == ["waiting on API key"]
     end
 
-    test "failed status maps to abandoned with prefix", %{agent_id: agent_id} do
+    test "failed status sets :failed and records reason in notes", %{agent_id: agent_id} do
       goal = Goal.new("Failing goal")
       {:ok, _} = GoalStore.add_goal(agent_id, goal)
 
@@ -1078,9 +1078,8 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       {:ok, updated} = GoalStore.get_goal(agent_id, goal.id)
-      assert updated.status == :abandoned
-      assert updated.metadata[:abandon_reason] =~ "[Failed]"
-      assert updated.metadata[:abandon_reason] =~ "API deprecated"
+      assert updated.status == :failed
+      assert Enum.any?(updated.notes, &String.contains?(&1, "API deprecated"))
     end
 
     test "GoalStore.block_goal sets status and stores blockers", %{agent_id: agent_id} do
@@ -1206,7 +1205,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   # ============================================================================
 
   describe "goal metadata polish" do
-    test "success_criteria stored in goal metadata", %{agent_id: agent_id} do
+    test "success_criteria stored in goal struct field", %{agent_id: agent_id} do
       ReflectionProcessor.process_new_goals(agent_id, [
         %{
           "description" => "Goal with criteria",
@@ -1217,7 +1216,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
 
       goals = GoalStore.get_active_goals(agent_id)
       assert length(goals) == 1
-      assert hd(goals).metadata[:success_criteria] == "All tests pass"
+      assert hd(goals).success_criteria == "All tests pass"
     end
 
     test "notes accumulate on goal updates", %{agent_id: agent_id} do
@@ -1233,10 +1232,10 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       {:ok, updated} = GoalStore.get_goal(agent_id, goal.id)
-      notes = updated.metadata[:notes] || []
-      assert length(notes) == 2
-      assert Enum.any?(notes, &String.contains?(&1, "First update"))
-      assert Enum.any?(notes, &String.contains?(&1, "Second update"))
+      # Notes are now stored in the struct field, prepended (newest first)
+      assert length(updated.notes) == 2
+      assert Enum.any?(updated.notes, &String.contains?(&1, "First update"))
+      assert Enum.any?(updated.notes, &String.contains?(&1, "Second update"))
     end
   end
 
