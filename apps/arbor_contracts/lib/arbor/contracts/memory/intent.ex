@@ -112,9 +112,51 @@ defmodule Arbor.Contracts.Memory.Intent do
   def actionable?(%__MODULE__{type: :act}), do: true
   def actionable?(%__MODULE__{}), do: false
 
+  @doc """
+  Reconstruct an Intent from a plain map (e.g. deserialized signal data).
+
+  Handles both atom and string keys. Safely atomizes `:type` and `:action`.
+  Parses ISO8601 datetime strings for `:created_at`.
+  """
+  @spec from_map(map()) :: t()
+  def from_map(map) when is_map(map) do
+    %__MODULE__{
+      id: map_get(map, :id) || generate_id(),
+      type: atomize(map_get(map, :type)) || :act,
+      action: atomize(map_get(map, :action)),
+      params: map_get(map, :params) || %{},
+      reasoning: map_get(map, :reasoning),
+      goal_id: map_get(map, :goal_id),
+      urgency: map_get(map, :urgency) || 50,
+      created_at: parse_datetime(map_get(map, :created_at)) || DateTime.utc_now(),
+      metadata: map_get(map, :metadata) || %{}
+    }
+  end
+
   defp generate_id do
     "int_" <> Base.encode32(:crypto.strong_rand_bytes(8), case: :lower, padding: false)
   end
+
+  defp map_get(map, key), do: Map.get(map, key) || Map.get(map, to_string(key))
+
+  defp atomize(nil), do: nil
+  defp atomize(a) when is_atom(a), do: a
+  defp atomize(s) when is_binary(s) do
+    try do
+      String.to_existing_atom(s)
+    rescue
+      ArgumentError -> String.to_atom(s)
+    end
+  end
+
+  defp parse_datetime(%DateTime{} = dt), do: dt
+  defp parse_datetime(s) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+  defp parse_datetime(_), do: nil
 end
 
 defimpl Jason.Encoder, for: Arbor.Contracts.Memory.Intent do

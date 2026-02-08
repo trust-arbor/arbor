@@ -27,8 +27,7 @@ defmodule Arbor.Memory.Bridge do
   ## Interrupt Protocol
 
   The Bridge supports an interrupt protocol for cancelling long-running operations.
-  The Mind can interrupt the Body via `interrupt/4`, and the Body can check for
-  interrupts with `interrupted?/1` during long-running work.
+  Interrupts are managed via `Arbor.Signals` (ETS-backed for fast synchronous lookups).
 
       # Mind side: interrupt a body
       Bridge.interrupt("agent_001", "body_123", :higher_priority)
@@ -46,20 +45,24 @@ defmodule Arbor.Memory.Bridge do
   - Subscribe functions return `{:error, :signals_not_available}`
   - Query functions return `{:ok, []}` (empty results)
   - `available?/0` returns `false`
-  - Interrupt functions use a local ETS table as fallback
+  - Interrupt functions return safe defaults
 
   ## Signal Topics
 
   - `bridge.intent` — Mind → Body intent channel
   - `bridge.percept` — Body → Mind percept channel
+
+  ## Typed Handlers
+
+  Subscription handlers receive typed structs (`Intent.t()` or `Percept.t()`)
+  rather than raw signal maps. The Bridge reconstructs structs from signal data
+  automatically via `Intent.from_map/1` and `Percept.from_map/1`.
   """
 
   alias Arbor.Contracts.Memory.Intent
   alias Arbor.Contracts.Memory.Percept
 
   require Logger
-
-  @interrupt_table :arbor_bridge_interrupts
 
   # ============================================================================
   # Intent Emission
@@ -96,6 +99,7 @@ defmodule Arbor.Memory.Bridge do
           priority: priority,
           emitted_at: DateTime.utc_now()
         }, [
+          source: bridge_source(agent_id),
           correlation_id: Keyword.get(opts, :correlation_id),
           metadata: %{agent_id: agent_id, priority: priority}
         ])
@@ -159,6 +163,7 @@ defmodule Arbor.Memory.Bridge do
           outcome: percept.outcome,
           emitted_at: DateTime.utc_now()
         }, [
+          source: bridge_source(agent_id),
           correlation_id: Keyword.get(opts, :correlation_id),
           cause_id: Keyword.get(opts, :cause_id),
           metadata: %{agent_id: agent_id}
@@ -183,23 +188,26 @@ defmodule Arbor.Memory.Bridge do
   @doc """
   Subscribe to intents for a specific agent (Body subscribes).
 
-  The handler function receives the signal data map containing the intent.
+  The handler function receives a typed `Intent.t()` struct.
 
   ## Examples
 
-      Bridge.subscribe_to_intents("agent_001", fn signal ->
-        intent = signal.data.intent
-        # ... execute intent ...
+      Bridge.subscribe_to_intents("agent_001", fn intent ->
+        # intent is an %Intent{} struct
+        IO.puts("Received intent: \#{intent.id}")
         :ok
       end)
   """
-  @spec subscribe_to_intents(String.t(), (map() -> :ok)) :: {:ok, String.t()} | {:error, term()}
+  @spec subscribe_to_intents(String.t(), (Intent.t() -> :ok)) :: {:ok, String.t()} | {:error, term()}
   def subscribe_to_intents(agent_id, handler) when is_function(handler, 1) do
     with_signals(
       fn signals ->
         signals.subscribe("bridge.intent", fn signal ->
           if signal.data[:agent_id] == agent_id do
-            handler.(signal)
+            case signal_to_intent(signal) do
+              nil -> :ok
+              intent -> handler.(intent)
+            end
           end
 
           :ok
@@ -215,23 +223,26 @@ defmodule Arbor.Memory.Bridge do
   @doc """
   Subscribe to percepts for a specific agent (Mind subscribes).
 
-  The handler function receives the signal data map containing the percept.
+  The handler function receives a typed `Percept.t()` struct.
 
   ## Examples
 
-      Bridge.subscribe_to_percepts("agent_001", fn signal ->
-        percept = signal.data.percept
-        # ... integrate result ...
+      Bridge.subscribe_to_percepts("agent_001", fn percept ->
+        # percept is a %Percept{} struct
+        IO.puts("Outcome: \#{percept.outcome}")
         :ok
       end)
   """
-  @spec subscribe_to_percepts(String.t(), (map() -> :ok)) :: {:ok, String.t()} | {:error, term()}
+  @spec subscribe_to_percepts(String.t(), (Percept.t() -> :ok)) :: {:ok, String.t()} | {:error, term()}
   def subscribe_to_percepts(agent_id, handler) when is_function(handler, 1) do
     with_signals(
       fn signals ->
         signals.subscribe("bridge.percept", fn signal ->
           if signal.data[:agent_id] == agent_id do
-            handler.(signal)
+            case signal_to_percept(signal) do
+              nil -> :ok
+              percept -> handler.(percept)
+            end
           end
 
           :ok
@@ -265,6 +276,8 @@ defmodule Arbor.Memory.Bridge do
   This is the request-response pattern: emit an intent, then block until
   a percept with a matching `intent_id` arrives, or timeout.
 
+  Returns a typed `Percept.t()` struct on success.
+
   ## Options
 
   - `:timeout` — maximum wait time in milliseconds (default: 30_000)
@@ -291,7 +304,8 @@ defmodule Arbor.Memory.Bridge do
           signals.subscribe("bridge.percept", fn signal ->
             if signal.data[:agent_id] == agent_id and
                  signal.data[:intent_id] == intent_id do
-              send(caller, {:bridge_percept, intent_id, signal.data[:percept]})
+              percept = signal_to_percept(signal)
+              send(caller, {:bridge_percept, intent_id, percept})
             end
 
             :ok
@@ -330,8 +344,8 @@ defmodule Arbor.Memory.Bridge do
   operations. The Body can then gracefully stop its current work and respond
   to the new priority.
 
-  Interrupts are tracked via a local ETS table and also emitted as signals
-  for observability.
+  Interrupts are managed via `Arbor.Signals.interrupt/3` (ETS-backed for
+  fast synchronous lookups) and also emitted as observability signals.
 
   ## Options
 
@@ -346,23 +360,19 @@ defmodule Arbor.Memory.Bridge do
   """
   @spec interrupt(String.t(), String.t(), atom(), keyword()) :: :ok | {:error, term()}
   def interrupt(agent_id, target_id, reason, opts \\ []) do
-    ensure_interrupt_table()
-
-    interrupt_data = %{
-      agent_id: agent_id,
-      target_id: target_id,
-      reason: reason,
-      replacement_intent_id: Keyword.get(opts, :replacement_intent_id),
-      allow_resume: Keyword.get(opts, :allow_resume, false),
-      interrupted_at: DateTime.utc_now()
-    }
-
-    :ets.insert(@interrupt_table, {target_id, interrupt_data})
-
-    # Emit signal for observability
     with_signals(
       fn signals ->
-        signals.emit(:bridge, :interrupt, interrupt_data)
+        signals.interrupt(target_id, reason,
+          replacement_intent_id: Keyword.get(opts, :replacement_intent_id),
+          allow_resume: Keyword.get(opts, :allow_resume, false)
+        )
+
+        # Emit observability signal
+        signals.emit(:bridge, :interrupt, %{
+          agent_id: agent_id,
+          target_id: target_id,
+          reason: reason
+        }, source: bridge_source(agent_id))
       end,
       :ok
     )
@@ -391,12 +401,10 @@ defmodule Arbor.Memory.Bridge do
   """
   @spec interrupted?(String.t()) :: map() | false
   def interrupted?(target_id) do
-    ensure_interrupt_table()
-
-    case :ets.lookup(@interrupt_table, target_id) do
-      [{^target_id, interrupt_data}] -> interrupt_data
-      [] -> false
-    end
+    with_signals(
+      fn signals -> signals.interrupted?(target_id) end,
+      false
+    )
   end
 
   @doc """
@@ -408,12 +416,10 @@ defmodule Arbor.Memory.Bridge do
   """
   @spec clear_interrupt(String.t()) :: :ok
   def clear_interrupt(target_id) do
-    ensure_interrupt_table()
-    :ets.delete(@interrupt_table, target_id)
-
-    # Emit signal for observability
     with_signals(
       fn signals ->
+        signals.clear_interrupt(target_id)
+
         signals.emit(:bridge, :interrupt_cleared, %{target_id: target_id})
       end,
       :ok
@@ -430,6 +436,8 @@ defmodule Arbor.Memory.Bridge do
   @doc """
   Query recent intents for an agent.
 
+  Returns typed `Intent.t()` structs reconstructed from signal data.
+
   ## Options
 
   - `:limit` — Maximum number to return (default: 50)
@@ -438,7 +446,7 @@ defmodule Arbor.Memory.Bridge do
 
       {:ok, intents} = Bridge.recent_intents("agent_001", limit: 10)
   """
-  @spec recent_intents(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  @spec recent_intents(String.t(), keyword()) :: {:ok, [Intent.t()]} | {:error, term()}
   def recent_intents(agent_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
 
@@ -450,7 +458,8 @@ defmodule Arbor.Memory.Bridge do
               all_signals
               |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
               |> Enum.take(limit)
-              |> Enum.map(fn signal -> signal.data end)
+              |> Enum.map(&signal_to_intent/1)
+              |> Enum.reject(&is_nil/1)
 
             {:ok, intents}
 
@@ -465,6 +474,8 @@ defmodule Arbor.Memory.Bridge do
   @doc """
   Query recent percepts for an agent.
 
+  Returns typed `Percept.t()` structs reconstructed from signal data.
+
   ## Options
 
   - `:limit` — Maximum number to return (default: 50)
@@ -473,7 +484,7 @@ defmodule Arbor.Memory.Bridge do
 
       {:ok, percepts} = Bridge.recent_percepts("agent_001", limit: 10)
   """
-  @spec recent_percepts(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  @spec recent_percepts(String.t(), keyword()) :: {:ok, [Percept.t()]} | {:error, term()}
   def recent_percepts(agent_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
 
@@ -485,7 +496,8 @@ defmodule Arbor.Memory.Bridge do
               all_signals
               |> Enum.filter(fn signal -> signal.data[:agent_id] == agent_id end)
               |> Enum.take(limit)
-              |> Enum.map(fn signal -> signal.data end)
+              |> Enum.map(&signal_to_percept/1)
+              |> Enum.reject(&is_nil/1)
 
             {:ok, percepts}
 
@@ -521,6 +533,27 @@ defmodule Arbor.Memory.Bridge do
   # Private Helpers
   # ============================================================================
 
+  # Source URI for bridge signals, scoped to agent.
+  defp bridge_source(agent_id), do: "arbor://bridge/#{agent_id}"
+
+  # Reconstruct an Intent struct from signal data.
+  defp signal_to_intent(signal) do
+    case signal.data[:intent] do
+      %Intent{} = intent -> intent
+      map when is_map(map) -> Intent.from_map(map)
+      _ -> nil
+    end
+  end
+
+  # Reconstruct a Percept struct from signal data.
+  defp signal_to_percept(signal) do
+    case signal.data[:percept] do
+      %Percept{} = percept -> percept
+      map when is_map(map) -> Percept.from_map(map)
+      _ -> nil
+    end
+  end
+
   # Graceful degradation helper — calls the callback with the Signals module
   # if available, otherwise returns the default value or calls the default function.
   defp with_signals(callback, default) when is_function(callback, 1) do
@@ -536,12 +569,6 @@ defmodule Arbor.Memory.Bridge do
       Arbor.Signals
     else
       nil
-    end
-  end
-
-  defp ensure_interrupt_table do
-    if :ets.whereis(@interrupt_table) == :undefined do
-      :ets.new(@interrupt_table, [:named_table, :public, :set])
     end
   end
 

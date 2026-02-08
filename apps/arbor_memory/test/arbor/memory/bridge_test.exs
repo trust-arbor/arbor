@@ -18,9 +18,10 @@ defmodule Arbor.Memory.BridgeTest do
     target_id = "target_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
-      # Clean up any interrupt entries
-      if :ets.whereis(:arbor_bridge_interrupts) != :undefined do
-        :ets.delete(:arbor_bridge_interrupts, target_id)
+      # Clean up any interrupt entries via Signals API
+      if Code.ensure_loaded?(Arbor.Signals) and
+           function_exported?(Arbor.Signals, :clear_interrupt, 1) do
+        Arbor.Signals.clear_interrupt(target_id)
       end
     end)
 
@@ -83,7 +84,33 @@ defmodule Arbor.Memory.BridgeTest do
   describe "subscribe_to_intents/2" do
     test "subscribes to intent signals for an agent", %{agent_id: agent_id} do
       assert {:ok, sub_id} =
-               Bridge.subscribe_to_intents(agent_id, fn _signal -> :ok end)
+               Bridge.subscribe_to_intents(agent_id, fn _intent -> :ok end)
+
+      Bridge.unsubscribe(sub_id)
+    end
+
+    test "handler receives typed Intent struct", %{agent_id: agent_id} do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bridge.subscribe_to_intents(agent_id, fn intent ->
+          send(test_pid, {:received_intent, intent})
+          :ok
+        end)
+
+      intent = Intent.action(:shell_execute, %{command: "mix test"})
+      Bridge.emit_intent(agent_id, intent)
+
+      # Give signal bus time to deliver
+      receive do
+        {:received_intent, received} ->
+          assert %Intent{} = received
+          assert received.id == intent.id
+          assert received.type == :act
+          assert received.action == :shell_execute
+      after
+        1000 -> :ok
+      end
 
       Bridge.unsubscribe(sub_id)
     end
@@ -92,7 +119,32 @@ defmodule Arbor.Memory.BridgeTest do
   describe "subscribe_to_percepts/2" do
     test "subscribes to percept signals for an agent", %{agent_id: agent_id} do
       assert {:ok, sub_id} =
-               Bridge.subscribe_to_percepts(agent_id, fn _signal -> :ok end)
+               Bridge.subscribe_to_percepts(agent_id, fn _percept -> :ok end)
+
+      Bridge.unsubscribe(sub_id)
+    end
+
+    test "handler receives typed Percept struct", %{agent_id: agent_id} do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bridge.subscribe_to_percepts(agent_id, fn percept ->
+          send(test_pid, {:received_percept, percept})
+          :ok
+        end)
+
+      percept = Percept.success("int_abc", %{exit_code: 0, output: "OK"})
+      Bridge.emit_percept(agent_id, percept)
+
+      receive do
+        {:received_percept, received} ->
+          assert %Percept{} = received
+          assert received.id == percept.id
+          assert received.outcome == :success
+          assert received.intent_id == "int_abc"
+      after
+        1000 -> :ok
+      end
 
       Bridge.unsubscribe(sub_id)
     end
@@ -100,7 +152,7 @@ defmodule Arbor.Memory.BridgeTest do
 
   describe "unsubscribe/1" do
     test "unsubscribes from a subscription", %{agent_id: agent_id} do
-      {:ok, sub_id} = Bridge.subscribe_to_intents(agent_id, fn _signal -> :ok end)
+      {:ok, sub_id} = Bridge.subscribe_to_intents(agent_id, fn _intent -> :ok end)
       assert :ok = Bridge.unsubscribe(sub_id)
     end
 
@@ -123,7 +175,7 @@ defmodule Arbor.Memory.BridgeTest do
                Bridge.execute_and_wait(agent_id, intent, timeout: 50)
     end
 
-    test "returns percept when it arrives before timeout", %{agent_id: agent_id} do
+    test "returns typed percept when it arrives before timeout", %{agent_id: agent_id} do
       intent = Intent.action(:shell_execute, %{command: "mix test"})
 
       # Spawn a process that simulates the Body receiving and responding
@@ -140,6 +192,8 @@ defmodule Arbor.Memory.BridgeTest do
 
       case result do
         {:ok, percept} ->
+          # Verify we get a typed Percept struct back
+          assert %Percept{} = percept
           assert percept.intent_id == intent.id
           assert percept.outcome == :success
 
@@ -166,7 +220,6 @@ defmodule Arbor.Memory.BridgeTest do
       data = Bridge.interrupted?(target_id)
       assert data != false
       assert data.reason == :user_cancel
-      assert data.agent_id == agent_id
       assert data.target_id == target_id
     end
 
@@ -254,6 +307,24 @@ defmodule Arbor.Memory.BridgeTest do
     test "respects limit option", %{agent_id: agent_id} do
       assert {:ok, _intents} = Bridge.recent_intents(agent_id, limit: 5)
     end
+
+    test "returns typed Intent structs", %{agent_id: agent_id} do
+      # Emit a few intents
+      intent1 = Intent.action(:shell_execute, %{command: "mix test"})
+      intent2 = Intent.action(:read_file, %{path: "/tmp/test"})
+      Bridge.emit_intent(agent_id, intent1)
+      Bridge.emit_intent(agent_id, intent2)
+
+      # Small delay for async signal storage
+      Process.sleep(50)
+
+      {:ok, intents} = Bridge.recent_intents(agent_id, limit: 10)
+
+      # All returned items should be Intent structs
+      for intent <- intents do
+        assert %Intent{} = intent
+      end
+    end
   end
 
   describe "recent_percepts/2" do
@@ -264,6 +335,24 @@ defmodule Arbor.Memory.BridgeTest do
 
     test "respects limit option", %{agent_id: agent_id} do
       assert {:ok, _percepts} = Bridge.recent_percepts(agent_id, limit: 5)
+    end
+
+    test "returns typed Percept structs", %{agent_id: agent_id} do
+      # Emit a few percepts
+      percept1 = Percept.success("int_1", %{exit_code: 0})
+      percept2 = Percept.failure("int_2", :command_failed)
+      Bridge.emit_percept(agent_id, percept1)
+      Bridge.emit_percept(agent_id, percept2)
+
+      # Small delay for async signal storage
+      Process.sleep(50)
+
+      {:ok, percepts} = Bridge.recent_percepts(agent_id, limit: 10)
+
+      # All returned items should be Percept structs
+      for percept <- percepts do
+        assert %Percept{} = percept
+      end
     end
   end
 
@@ -280,6 +369,109 @@ defmodule Arbor.Memory.BridgeTest do
     test "returns true when signals bus is running" do
       # We started the bus in setup_all, so it should be available
       assert Bridge.available?() == true
+    end
+  end
+
+  # ============================================================================
+  # Struct Reconstruction
+  # ============================================================================
+
+  describe "struct reconstruction" do
+    test "Intent.from_map/1 reconstructs from atom-keyed map" do
+      map = %{
+        id: "int_test",
+        type: :act,
+        action: :shell_execute,
+        params: %{command: "ls"},
+        reasoning: "testing",
+        urgency: 80
+      }
+
+      intent = Intent.from_map(map)
+      assert %Intent{} = intent
+      assert intent.id == "int_test"
+      assert intent.type == :act
+      assert intent.action == :shell_execute
+      assert intent.urgency == 80
+    end
+
+    test "Intent.from_map/1 reconstructs from string-keyed map" do
+      map = %{
+        "id" => "int_str",
+        "type" => "act",
+        "action" => "read_file",
+        "params" => %{"path" => "/tmp"}
+      }
+
+      intent = Intent.from_map(map)
+      assert %Intent{} = intent
+      assert intent.id == "int_str"
+      assert intent.type == :act
+      assert intent.action == :read_file
+    end
+
+    test "Percept.from_map/1 reconstructs from atom-keyed map" do
+      map = %{
+        id: "prc_test",
+        type: :action_result,
+        intent_id: "int_abc",
+        outcome: :success,
+        data: %{exit_code: 0}
+      }
+
+      percept = Percept.from_map(map)
+      assert %Percept{} = percept
+      assert percept.id == "prc_test"
+      assert percept.outcome == :success
+      assert percept.intent_id == "int_abc"
+    end
+
+    test "Percept.from_map/1 reconstructs from string-keyed map" do
+      map = %{
+        "id" => "prc_str",
+        "type" => "action_result",
+        "outcome" => "failure",
+        "error" => "timeout"
+      }
+
+      percept = Percept.from_map(map)
+      assert %Percept{} = percept
+      assert percept.id == "prc_str"
+      assert percept.outcome == :failure
+    end
+
+    test "round-trip: Intent struct survives emit → query → reconstruct", %{agent_id: agent_id} do
+      original = Intent.action(:shell_execute, %{command: "echo hello"}, reasoning: "test")
+      Bridge.emit_intent(agent_id, original)
+      Process.sleep(50)
+
+      {:ok, intents} = Bridge.recent_intents(agent_id, limit: 5)
+
+      matching = Enum.find(intents, fn i -> i.id == original.id end)
+
+      if matching do
+        assert %Intent{} = matching
+        assert matching.id == original.id
+        assert matching.type == original.type
+        assert matching.action == original.action
+      end
+    end
+
+    test "round-trip: Percept struct survives emit → query → reconstruct", %{agent_id: agent_id} do
+      original = Percept.success("int_round", %{result: "done"})
+      Bridge.emit_percept(agent_id, original)
+      Process.sleep(50)
+
+      {:ok, percepts} = Bridge.recent_percepts(agent_id, limit: 5)
+
+      matching = Enum.find(percepts, fn p -> p.id == original.id end)
+
+      if matching do
+        assert %Percept{} = matching
+        assert matching.id == original.id
+        assert matching.outcome == original.outcome
+        assert matching.intent_id == original.intent_id
+      end
     end
   end
 

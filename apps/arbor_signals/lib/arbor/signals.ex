@@ -234,4 +234,44 @@ defmodule Arbor.Signals do
       healthy: healthy?()
     }
   end
+
+  # ============================================================================
+  # Interrupt Protocol
+  # ============================================================================
+
+  @doc """
+  Signal an interrupt to a target.
+
+  Bodies check for interrupts periodically during long-running operations.
+
+  ## Options
+
+  - `:replacement_intent_id` — ID of new intent that should take over
+  - `:allow_resume` — Whether interrupted work can resume (default: false)
+  """
+  @impl true
+  @spec interrupt(String.t(), atom(), keyword()) :: :ok
+  def interrupt(target_id, reason, opts \\ []) do
+    Store.interrupt(target_id, reason, opts)
+  end
+
+  @doc """
+  Check if a target has been interrupted.
+
+  Returns the interrupt data map if interrupted, `false` otherwise.
+  """
+  @impl true
+  @spec interrupted?(String.t()) :: map() | false
+  def interrupted?(target_id) do
+    Store.interrupted?(target_id)
+  end
+
+  @doc """
+  Clear an interrupt for a target, allowing normal operation to resume.
+  """
+  @impl true
+  @spec clear_interrupt(String.t()) :: :ok
+  def clear_interrupt(target_id) do
+    Store.clear_interrupt(target_id)
+  end
 end
