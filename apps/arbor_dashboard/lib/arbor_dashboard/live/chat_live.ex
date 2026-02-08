@@ -11,11 +11,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Web.Components
 
   alias Arbor.Agent.Claude
+  alias Arbor.Dashboard.ChatState
   alias Arbor.Web.Helpers
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_id =
+    ChatState.init()
+
+    subscription_ids =
       if connected?(socket) do
         safe_subscribe()
       end
@@ -30,7 +33,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         input: "",
         loading: false,
         error: nil,
-        subscription_id: subscription_id,
+        subscription_ids: subscription_ids,
         # Panel visibility toggles
         show_thinking: true,
         show_memories: true,
@@ -38,11 +41,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_thoughts: true,
         show_goals: true,
         show_llm_panel: false,
+        show_identity: false,
+        show_cognitive: false,
+        show_code: false,
+        show_proposals: false,
         # Memory state
         memory_stats: nil,
         # Working memory thoughts
         working_thoughts: [],
         # Token tracking
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+        last_duration_ms: nil,
         total_tokens: 0,
         query_count: 0,
         # Goals
@@ -52,7 +63,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         last_llm_mode: nil,
         last_llm_thinking: nil,
         heartbeat_count: 0,
-        memory_notes_total: 0
+        memory_notes_total: 0,
+        # Identity evolution
+        self_insights: [],
+        identity_changes: [],
+        last_consolidation: nil,
+        # Cognitive preferences
+        cognitive_prefs: nil,
+        cognitive_adjustments: [],
+        pinned_count: 0,
+        # Code modules
+        code_modules: [],
+        # Proposals
+        proposals: []
       )
       |> stream(:messages, [])
       |> stream(:signals, [])
@@ -78,14 +101,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
 
     # Unsubscribe from signals
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+    case socket.assigns[:subscription_ids] do
+      {agent_sub, memory_sub} ->
+        safe_unsubscribe(agent_sub)
+        safe_unsubscribe(memory_sub)
+
+      sub_id when is_binary(sub_id) ->
+        safe_unsubscribe(sub_id)
+
+      _ ->
+        :ok
     end
   end
 
@@ -99,6 +124,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Get initial memory stats
         memory_stats = get_memory_stats(agent)
 
+        # Load persisted ETS state
+        tokens = ChatState.get_tokens(agent_id)
+        identity = ChatState.get_identity_state(agent_id)
+        cognitive = ChatState.get_cognitive_state(agent_id)
+        code = ChatState.get_code_modules(agent_id)
+        proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+        ChatState.touch_agent(agent_id)
+
         socket =
           socket
           |> assign(agent: agent, agent_id: agent_id, error: nil, memory_stats: memory_stats)
@@ -106,11 +139,23 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             query_count: 0,
             working_thoughts: [],
             agent_goals: fetch_goals(agent_id),
-            llm_call_count: 0,
+            llm_call_count: tokens.count,
             last_llm_mode: nil,
             last_llm_thinking: nil,
             heartbeat_count: 0,
-            memory_notes_total: 0
+            memory_notes_total: 0,
+            input_tokens: tokens.input,
+            output_tokens: tokens.output,
+            cached_tokens: tokens.cached,
+            last_duration_ms: tokens.last_duration,
+            self_insights: identity.insights,
+            identity_changes: identity.identity_changes,
+            last_consolidation: identity.last_consolidation,
+            cognitive_prefs: cognitive.current_prefs,
+            cognitive_adjustments: cognitive.adjustments,
+            pinned_count: cognitive.pinned_count,
+            code_modules: code,
+            proposals: proposals
           )
           |> stream(:messages, [], reset: true)
           |> stream(:signals, [], reset: true)
@@ -211,6 +256,43 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, show_llm_panel: !socket.assigns.show_llm_panel)}
   end
 
+  def handle_event("toggle-identity", _params, socket) do
+    {:noreply, assign(socket, show_identity: !socket.assigns.show_identity)}
+  end
+
+  def handle_event("toggle-cognitive", _params, socket) do
+    {:noreply, assign(socket, show_cognitive: !socket.assigns.show_cognitive)}
+  end
+
+  def handle_event("toggle-code", _params, socket) do
+    {:noreply, assign(socket, show_code: !socket.assigns.show_code)}
+  end
+
+  def handle_event("toggle-proposals", _params, socket) do
+    {:noreply, assign(socket, show_proposals: !socket.assigns.show_proposals)}
+  end
+
+  def handle_event("accept-proposal", %{"id" => proposal_id}, socket) do
+    agent_id = socket.assigns.agent_id
+    safe_call(fn -> Arbor.Memory.accept_proposal(agent_id, proposal_id) end)
+    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    {:noreply, assign(socket, proposals: proposals)}
+  end
+
+  def handle_event("reject-proposal", %{"id" => proposal_id}, socket) do
+    agent_id = socket.assigns.agent_id
+    safe_call(fn -> Arbor.Memory.reject_proposal(agent_id, proposal_id) end)
+    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    {:noreply, assign(socket, proposals: proposals)}
+  end
+
+  def handle_event("defer-proposal", %{"id" => proposal_id}, socket) do
+    agent_id = socket.assigns.agent_id
+    safe_call(fn -> Arbor.Memory.defer_proposal(agent_id, proposal_id) end)
+    proposals = safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end) || []
+    {:noreply, assign(socket, proposals: proposals)}
+  end
+
   @impl true
   def handle_info({:query, agent, prompt}, socket) do
     case Claude.query(agent, prompt, timeout: 180_000) do
@@ -250,6 +332,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       # Track memory note signals
       socket = maybe_track_memory_note(socket, signal)
 
+      # Track identity, cognitive, code signals
+      socket = maybe_track_identity(socket, signal)
+      socket = maybe_track_cognitive(socket, signal)
+      socket = maybe_track_code(socket, signal)
+
       {:noreply, socket}
     else
       {:noreply, socket}
@@ -268,6 +355,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> assign(loading: false, session_id: response.session_id)
     |> add_thinking_blocks(response.thinking)
     |> add_recalled_memories(response.recalled_memories)
+    |> extract_token_usage(response)
     |> update_agent_state(agent)
   end
 
@@ -369,6 +457,31 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         label={"Mode: #{@last_llm_mode}"}
         color={:yellow}
       />
+    </div>
+
+    <%!-- Token counter bar --%>
+    <div
+      :if={@agent && @llm_call_count > 0}
+      style="display: flex; gap: 0.75rem; flex-wrap: wrap; padding: 0.4rem 0.75rem; margin-top: 0.35rem; border: 1px solid rgba(74, 158, 255, 0.3); border-radius: 6px; font-size: 0.8em; background: rgba(74, 158, 255, 0.05);"
+    >
+      <span style="color: #4a9eff;">
+        INPUT: <strong>{format_token_count(@input_tokens)}</strong>
+      </span>
+      <span style="color: #22c55e;">
+        OUTPUT: <strong>{format_token_count(@output_tokens)}</strong>
+      </span>
+      <span :if={@cached_tokens > 0} style="color: #a855f7;">
+        CACHED: <strong>{format_token_count(@cached_tokens)}</strong>
+      </span>
+      <span style="color: #e2e8f0;">
+        TOTAL: <strong>{format_token_count(@input_tokens + @output_tokens)}</strong>
+      </span>
+      <span style="color: #4a9eff;">
+        CALLS: <strong>{@llm_call_count}</strong>
+      </span>
+      <span :if={@last_duration_ms} style="color: #eab308;">
+        LAST: <strong>{format_duration(@last_duration_ms)}</strong>
+      </span>
     </div>
 
     <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
@@ -781,6 +894,185 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
         </div>
 
+        <%!-- Identity Evolution Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-identity"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">🪞 Identity</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@self_insights != []} label={"#{length(@self_insights)}"} color={:purple} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_identity, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_identity} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
+            <div :if={@self_insights != []} style="margin-bottom: 0.5rem;">
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Self Insights</div>
+              <div
+                :for={insight <- Enum.take(@self_insights, 5)}
+                style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(168, 85, 247, 0.1); font-size: 0.8em;"
+              >
+                <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
+                  <.badge :if={insight[:category]} label={to_string(insight[:category])} color={:purple} />
+                  <.badge :if={insight[:confidence]} label={"#{round(insight[:confidence] * 100)}%"} color={:blue} />
+                </div>
+                <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(insight[:content] || "", 150)}</span>
+              </div>
+            </div>
+            <div :if={@identity_changes != []} style="margin-bottom: 0.5rem;">
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Identity Changes</div>
+              <div
+                :for={change <- Enum.take(@identity_changes, 5)}
+                style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
+              >
+                <.badge :if={change[:field]} label={to_string(change[:field])} color={:yellow} />
+                <.badge :if={change[:change_type]} label={to_string(change[:change_type])} color={:gray} />
+                <span :if={change[:reason]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;"> {Helpers.truncate(change[:reason], 100)}</span>
+              </div>
+            </div>
+            <div :if={@last_consolidation} style="font-size: 0.75em; color: var(--aw-text-muted, #888); padding: 0.3rem; background: rgba(128,128,128,0.1); border-radius: 4px;">
+              Last consolidation: promoted {Map.get(@last_consolidation, :promoted, 0)}, deferred {Map.get(@last_consolidation, :deferred, 0)}
+            </div>
+            <.empty_state
+              :if={@self_insights == [] && @identity_changes == [] && @last_consolidation == nil}
+              icon="🪞"
+              title="No identity data"
+              hint="Identity changes appear as the agent evolves"
+            />
+          </div>
+        </div>
+
+        <%!-- Cognitive Preferences Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-cognitive"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">🧠 Cognitive</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+              {if @show_cognitive, do: "▼", else: "▶"}
+            </span>
+          </div>
+          <div :if={@show_cognitive} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+            <div :if={@cognitive_prefs} style="margin-bottom: 0.4rem;">
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
+                <.badge label={"Decay: #{Map.get(@cognitive_prefs, :decay_rate, "—")}"} color={:blue} />
+                <.badge label={"Threshold: #{Map.get(@cognitive_prefs, :retrieval_threshold, "—")}"} color={:green} />
+                <.badge :if={@pinned_count > 0} label={"Pinned: #{@pinned_count}"} color={:purple} />
+              </div>
+            </div>
+            <div :if={@cognitive_adjustments != []}>
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Adjustments</div>
+              <div
+                :for={adj <- Enum.take(@cognitive_adjustments, 5)}
+                style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
+              >
+                <span style="color: var(--aw-text-muted, #888);">{inspect(adj)}</span>
+              </div>
+            </div>
+            <.empty_state
+              :if={@cognitive_prefs == nil && @cognitive_adjustments == []}
+              icon="🧠"
+              title="No cognitive data"
+              hint="Preferences appear as the agent adapts"
+            />
+          </div>
+        </div>
+
+        <%!-- Code Modules Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-code"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">💻 Code</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@code_modules != []} label={"#{length(@code_modules)}"} color={:green} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_code, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_code} style="max-height: 20vh; overflow-y: auto; padding: 0.4rem;">
+            <div
+              :for={mod <- @code_modules}
+              style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
+                <span style="font-weight: 500;">{mod[:name] || "unnamed"}</span>
+                <.badge :if={mod[:sandbox_level]} label={to_string(mod[:sandbox_level])} color={:yellow} />
+              </div>
+              <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">{Helpers.truncate(mod[:purpose], 100)}</span>
+            </div>
+            <.empty_state
+              :if={@code_modules == []}
+              icon="💻"
+              title="No code modules"
+              hint="Code appears when the agent creates modules"
+            />
+          </div>
+        </div>
+
+        <%!-- Proposals Panel --%>
+        <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex-shrink: 0;">
+          <div
+            phx-click="toggle-proposals"
+            style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+          >
+            <strong style="font-size: 0.85em;">📋 Proposals</strong>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <.badge :if={@proposals != []} label={"#{length(@proposals)}"} color={:yellow} />
+              <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+                {if @show_proposals, do: "▼", else: "▶"}
+              </span>
+            </div>
+          </div>
+          <div :if={@show_proposals} style="max-height: 25vh; overflow-y: auto; padding: 0.4rem;">
+            <div
+              :for={proposal <- @proposals}
+              style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
+            >
+              <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
+                <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
+                <.badge :if={proposal[:confidence]} label={"#{round(proposal[:confidence] * 100)}%"} color={:blue} />
+              </div>
+              <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">{Helpers.truncate(proposal[:content] || proposal[:description] || "", 200)}</p>
+              <div style="display: flex; gap: 0.3rem;">
+                <button
+                  phx-click="accept-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Accept
+                </button>
+                <button
+                  phx-click="reject-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Reject
+                </button>
+                <button
+                  phx-click="defer-proposal"
+                  phx-value-id={proposal[:id]}
+                  style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #888; color: white; cursor: pointer; font-size: 0.8em;"
+                >
+                  Defer
+                </button>
+              </div>
+            </div>
+            <.empty_state
+              :if={@proposals == []}
+              icon="📋"
+              title="No pending proposals"
+              hint="Proposals appear from reflection & analysis"
+            />
+          </div>
+        </div>
+
       </div>
     </div>
     """
@@ -841,18 +1133,165 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp safe_subscribe do
     pid = self()
+    handler = fn signal -> send(pid, {:signal_received, signal}); :ok end
 
-    case Arbor.Signals.subscribe("agent.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
+    agent_sub =
+      case Arbor.Signals.subscribe("agent.*", handler) do
+        {:ok, id} -> id
+        _ -> nil
+      end
+
+    memory_sub =
+      case Arbor.Signals.subscribe("memory.*", handler) do
+        {:ok, id} -> id
+        _ -> nil
+      end
+
+    {agent_sub, memory_sub}
   rescue
-    _ -> nil
+    _ -> {nil, nil}
   catch
-    :exit, _ -> nil
+    :exit, _ -> {nil, nil}
+  end
+
+  defp safe_unsubscribe(nil), do: :ok
+
+  defp safe_unsubscribe(sub_id) do
+    Arbor.Signals.unsubscribe(sub_id)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp safe_call(fun) do
+    try do
+      fun.()
+    rescue
+      _ -> nil
+    catch
+      :exit, _ -> nil
+    end
+  end
+
+  # ── Token Tracking ─────────────────────────────────────────────────
+
+  defp extract_token_usage(socket, response) do
+    usage = Map.get(response, :usage) || %{}
+    input = usage["input_tokens"] || usage[:input_tokens] || 0
+    output = usage["output_tokens"] || usage[:output_tokens] || 0
+    cached = usage["cache_read_input_tokens"] || usage[:cache_read_input_tokens] || 0
+    agent_id = socket.assigns.agent_id
+
+    if agent_id && (input > 0 || output > 0) do
+      tokens = ChatState.add_tokens(agent_id, input, output, nil)
+      if cached > 0, do: ChatState.add_cached_tokens(agent_id, cached)
+
+      assign(socket,
+        input_tokens: tokens.input,
+        output_tokens: tokens.output,
+        cached_tokens: if(cached > 0, do: tokens.cached + cached, else: tokens.cached),
+        llm_call_count: tokens.count
+      )
+    else
+      socket
+    end
+  end
+
+  defp format_token_count(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M"
+  defp format_token_count(n) when n >= 1000, do: "#{Float.round(n / 1000, 1)}k"
+  defp format_token_count(n), do: to_string(n)
+
+  defp format_duration(ms) when is_number(ms) and ms >= 1000, do: "#{Float.round(ms / 1000, 1)}s"
+  defp format_duration(ms) when is_number(ms), do: "#{ms}ms"
+  defp format_duration(_), do: ""
+
+  # ── Signal Tracking: Identity, Cognitive, Code ─────────────────────
+
+  defp maybe_track_identity(socket, signal) do
+    event = to_string(signal.type)
+    agent_id = socket.assigns.agent_id
+
+    cond do
+      event == "memory_self_insight_created" ->
+        insight = %{
+          content: get_in(signal.data, [:content]) || get_in(signal.metadata, [:content]) || "",
+          category: get_in(signal.data, [:category]) || get_in(signal.metadata, [:category]),
+          confidence: get_in(signal.data, [:confidence]) || get_in(signal.metadata, [:confidence]),
+          timestamp: signal.timestamp
+        }
+
+        ChatState.add_insight(agent_id, insight)
+        assign(socket, self_insights: ChatState.get_identity_state(agent_id).insights)
+
+      event == "memory_identity_change" ->
+        change = %{
+          field: get_in(signal.data, [:field]) || get_in(signal.metadata, [:field]),
+          change_type: get_in(signal.data, [:change_type]) || get_in(signal.metadata, [:change_type]),
+          reason: get_in(signal.data, [:reason]) || get_in(signal.metadata, [:reason]),
+          timestamp: signal.timestamp
+        }
+
+        ChatState.add_identity_change(agent_id, change)
+        assign(socket, identity_changes: ChatState.get_identity_state(agent_id).identity_changes)
+
+      event == "memory_consolidation_completed" ->
+        data = signal.data || signal.metadata || %{}
+
+        consolidation = %{
+          promoted: data[:promoted] || data["promoted"] || 0,
+          deferred: data[:deferred] || data["deferred"] || 0,
+          timestamp: signal.timestamp
+        }
+
+        ChatState.set_consolidation(agent_id, consolidation)
+        assign(socket, last_consolidation: consolidation)
+
+      true ->
+        socket
+    end
+  end
+
+  defp maybe_track_cognitive(socket, signal) do
+    event = to_string(signal.type)
+    agent_id = socket.assigns.agent_id
+
+    if event == "memory_cognitive_adjustment" do
+      data = signal.data || signal.metadata || %{}
+
+      adjustment = %{
+        field: data[:field] || data["field"],
+        old_value: data[:old_value] || data["old_value"],
+        new_value: data[:new_value] || data["new_value"],
+        timestamp: signal.timestamp
+      }
+
+      ChatState.add_cognitive_adjustment(agent_id, adjustment)
+      assign(socket, cognitive_adjustments: ChatState.get_cognitive_state(agent_id).adjustments)
+    else
+      socket
+    end
+  end
+
+  defp maybe_track_code(socket, signal) do
+    event = to_string(signal.type)
+    agent_id = socket.assigns.agent_id
+
+    if event in ["code_created", "memory_code_loaded"] do
+      data = signal.data || signal.metadata || %{}
+
+      module_info = %{
+        name: data[:name] || data["name"] || data[:module] || data["module"] || "unnamed",
+        purpose: data[:purpose] || data["purpose"] || "",
+        sandbox_level: data[:sandbox_level] || data["sandbox_level"],
+        created_at: signal.timestamp
+      }
+
+      ChatState.add_code_module(agent_id, module_info)
+      assign(socket, code_modules: ChatState.get_code_modules(agent_id))
+    else
+      socket
+    end
   end
 
   defp get_working_thoughts(agent) do
