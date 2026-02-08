@@ -256,16 +256,34 @@ defmodule Arbor.Sandbox.Code do
           location = extract_location(meta)
           {node, check_erlang_call(module, function, level, location, acc)}
 
-        # Apply calls
+        # Apply calls with literal module
         {:apply, meta, [module, function, _args]} = node, acc when is_atom(module) ->
           location = extract_location(meta)
           {node, check_apply_call(module, function, level, location, acc)}
 
-        # spawn/spawn_link with MFA
+        # H9: Apply calls with variable/dynamic module — can't verify target at compile time
+        {:apply, meta, [_dynamic_module, _function, _args]} = node, acc ->
+          location = extract_location(meta)
+          {node, check_dynamic_dispatch(level, location, "apply/3", acc)}
+
+        # H9: Kernel.apply/3 with variable module
+        {{:., meta, [{:__aliases__, _, [:Kernel]}, :apply]}, _, [_dynamic_module, _function, _args]} =
+            node,
+        acc ->
+          location = extract_location(meta)
+          {node, check_dynamic_dispatch(level, location, "Kernel.apply/3", acc)}
+
+        # spawn/spawn_link with MFA (literal module)
         {spawn_fn, meta, [module | _]} = node, acc
         when spawn_fn in [:spawn, :spawn_link, :spawn_monitor] and is_atom(module) ->
           location = extract_location(meta)
           {node, check_spawn_call(module, location, acc)}
+
+        # H9: spawn/spawn_link with variable module
+        {spawn_fn, meta, [_dynamic_module | _]} = node, acc
+        when spawn_fn in [:spawn, :spawn_link, :spawn_monitor] ->
+          location = extract_location(meta)
+          {node, check_dynamic_dispatch(level, location, "#{spawn_fn} with dynamic module", acc)}
 
         node, acc ->
           {node, acc}
@@ -415,6 +433,24 @@ defmodule Arbor.Sandbox.Code do
         acc
     end
   end
+
+  # H9: Block dynamic dispatch (variable modules in apply/spawn) at restrictive levels.
+  # At :pure/:strict/:limited we can't verify the target module, so block it.
+  # At :full and above, allow it (the caller has high trust).
+  defp check_dynamic_dispatch(level, location, call_form, acc)
+       when level in [:pure, :strict, :limited] do
+    [
+      make_violation(
+        :unsafe_pattern,
+        location,
+        "#{call_form} with dynamic module not allowed at #{level} level — " <>
+          "target module cannot be verified at compile time"
+      )
+      | acc
+    ]
+  end
+
+  defp check_dynamic_dispatch(_level, _location, _call_form, acc), do: acc
 
   defp check_spawn_call(module, location, acc) do
     if module in @never_allowed_modules do
