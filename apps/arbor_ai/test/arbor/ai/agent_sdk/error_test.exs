@@ -59,6 +59,26 @@ defmodule Arbor.AI.AgentSDK.ErrorTest do
       err = Error.prompt_required()
       assert err.type == :prompt_required
     end
+
+    test "not_ready" do
+      err = Error.not_ready()
+      assert err.type == :not_ready
+      assert String.contains?(err.message, "not ready")
+    end
+
+    test "port_crashed" do
+      err = Error.port_crashed(:enoent)
+      assert err.type == :port_crashed
+      assert err.details.reason == :enoent
+      assert String.contains?(err.message, "crashed")
+    end
+
+    test "reconnect_failed" do
+      err = Error.reconnect_failed(3)
+      assert err.type == :reconnect_failed
+      assert err.details.attempts == 3
+      assert String.contains?(err.message, "3")
+    end
   end
 
   describe "Exception behaviour" do
