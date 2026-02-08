@@ -353,6 +353,8 @@ defmodule Arbor.Agent.AgentSeed do
     # Combine actions
     all_actions = bg_actions ++ llm_actions
 
+    llm_usage = Map.get(llm_result, :usage, %{})
+
     metadata = %{
       cognitive_mode: mode,
       background_actions: length(bg_actions),
@@ -360,7 +362,8 @@ defmodule Arbor.Agent.AgentSeed do
       thinking: thinking,
       memory_notes_count: length(memory_notes),
       goal_updates_count: length(goal_updates),
-      heartbeat_count: heartbeat_count
+      heartbeat_count: heartbeat_count,
+      usage: llm_usage
     }
 
     {:ok, all_actions, %{}, state[:context_window], nil, metadata}
