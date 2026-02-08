@@ -107,6 +107,7 @@ defmodule Arbor.Agent.Loops.MonitorLoopTest do
       for i <- 1..5 do
         signal = %{
           data: %{
+            # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
             metric: :"metric_#{i}",
             value: 100 + i,
             baseline: 50,
@@ -127,6 +128,7 @@ defmodule Arbor.Agent.Loops.MonitorLoopTest do
       for i <- 1..30 do
         signal = %{
           data: %{
+            # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
             metric: :"metric_#{i}",
             value: 100 + i,
             baseline: 50,

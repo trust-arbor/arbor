@@ -2,7 +2,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{GoalStore, ReflectionProcessor, WorkingMemory}
+  alias Arbor.Memory.{GoalStore, IdentityConsolidator, ReflectionProcessor, Relationship, SelfKnowledge, WorkingMemory}
 
   @moduletag :fast
 
@@ -1171,7 +1171,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_sk = Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id)
-      assert length(updated_sk.growth_log) >= 1
+      assert updated_sk.growth_log != []
     end
 
     test "all learnings also go to working memory", %{agent_id: agent_id} do

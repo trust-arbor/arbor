@@ -59,6 +59,7 @@ defmodule Arbor.Memory.WorkingMemory do
   - **Bridged agents:** Serialized to/from JSON for gateway transport
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Memory.TokenBudget
 
   require Logger
@@ -995,10 +996,9 @@ defmodule Arbor.Memory.WorkingMemory do
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
   defp atomize(s) when is_binary(s) do
-    try do
-      String.to_existing_atom(s)
-    rescue
-      ArgumentError -> String.to_atom(s)
+    case SafeAtom.to_existing(s) do
+      {:ok, atom} -> atom
+      {:error, _} -> s
     end
   end
 

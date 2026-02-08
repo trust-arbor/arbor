@@ -270,17 +270,15 @@ defmodule Arbor.Monitor.Diagnostics do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp safe_supervisor_call(pid, action) do
-    try do
-      result =
-        case action do
-          :which_children -> Supervisor.which_children(pid)
-          :count_children -> Supervisor.count_children(pid)
-        end
+    result =
+      case action do
+        :which_children -> Supervisor.which_children(pid)
+        :count_children -> Supervisor.count_children(pid)
+      end
 
-      {:ok, result}
-    catch
-      :exit, _ -> {:error, :not_supervisor}
-    end
+    {:ok, result}
+  catch
+    :exit, _ -> {:error, :not_supervisor}
   end
 
   defp get_restart_intensity(pid) do

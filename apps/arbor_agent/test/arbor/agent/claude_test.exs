@@ -80,7 +80,7 @@ defmodule Arbor.Agent.ClaudeTest do
       # Should return a list of tool schemas if arbor_actions is available
       assert is_list(tools)
 
-      if length(tools) > 0 do
+      if tools != [] do
         [first | _] = tools
         assert is_map(first)
         assert Map.has_key?(first, "name") or Map.has_key?(first, :name)

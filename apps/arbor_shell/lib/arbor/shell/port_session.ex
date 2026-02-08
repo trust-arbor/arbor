@@ -27,6 +27,7 @@ defmodule Arbor.Shell.PortSession do
   use GenServer
 
   alias Arbor.Identifiers
+  alias Arbor.Shell.Sandbox
   alias Arbor.Signals
 
   require Logger
@@ -320,16 +321,16 @@ defmodule Arbor.Shell.PortSession do
   # ===========================================================================
 
   defp resolve_command(command) do
-    {cmd, args} = Arbor.Shell.Sandbox.parse_command(command)
+    {cmd, args} = Sandbox.parse_command(command)
 
-    case Arbor.Shell.Sandbox.resolve_executable(cmd) do
+    case Sandbox.resolve_executable(cmd) do
       {:ok, path} -> {path, args}
       {:error, :executable_not_found} -> raise "Executable not found: #{cmd}"
     end
   end
 
   defp build_port_opts(command, cwd, env) do
-    {_cmd, args} = Arbor.Shell.Sandbox.parse_command(command)
+    {_cmd, args} = Sandbox.parse_command(command)
 
     opts = [
       :binary,

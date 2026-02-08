@@ -398,8 +398,7 @@ defmodule Arbor.Memory.Thinking do
           blocks = get_content_blocks(response)
           blocks
           |> Enum.filter(&(is_map(&1) and (&1["type"] == "text" or &1[:type] == "text")))
-          |> Enum.map(&(&1["text"] || &1[:text] || ""))
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", &(&1["text"] || &1[:text] || ""))
       end
 
     case Regex.run(~r/<thinking>(.*?)<\/thinking>/s, text) do

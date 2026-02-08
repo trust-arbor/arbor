@@ -47,6 +47,7 @@ defmodule Arbor.Actions.MemoryCognitive do
 
     alias Arbor.Actions
     alias Arbor.Actions.Memory, as: MemoryHelpers
+    alias Arbor.Memory.Preferences
 
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles do
@@ -68,7 +69,7 @@ defmodule Arbor.Actions.MemoryCognitive do
            param: param_atom,
            value: params.value,
            adjusted: true,
-           current: Arbor.Memory.Preferences.inspect_preferences(prefs)
+           current: Preferences.inspect_preferences(prefs)
          }}
       else
         {:error, reason} ->

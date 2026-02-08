@@ -151,14 +151,15 @@ defmodule Arbor.Contracts.Memory.Intent do
 
   defp map_get(map, key), do: Map.get(map, key) || Map.get(map, to_string(key))
 
+  @known_types [:think, :act, :wait, :reflect, :internal]
+
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
   defp atomize(s) when is_binary(s) do
-    try do
-      String.to_existing_atom(s)
-    rescue
-      ArgumentError -> String.to_atom(s)
-    end
+    atom_match = Enum.find(@known_types, fn a -> Atom.to_string(a) == s end)
+    atom_match || String.to_existing_atom(s)
+  rescue
+    ArgumentError -> nil
   end
 
   defp parse_float(nil), do: nil

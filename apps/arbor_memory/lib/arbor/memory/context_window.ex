@@ -67,6 +67,8 @@ defmodule Arbor.Memory.ContextWindow do
 
   require Logger
 
+  alias Arbor.Memory.FactExtractor
+  alias Arbor.Memory.Signals
   alias Arbor.Memory.TokenBudget
 
   @type entry_type :: :message | :summary
@@ -531,7 +533,7 @@ defmodule Arbor.Memory.ContextWindow do
   def add_retrieved(%{multi_layer: true} = window, context) do
     content = context[:content] || context["content"] || ""
 
-    if is_semantically_duplicate?(window.retrieved_context, content) do
+    if semantically_duplicate?(window.retrieved_context, content) do
       Logger.debug("ContextWindow dedup: skipping duplicate retrieved context",
         content_preview: String.slice(content, 0, 50)
       )
@@ -1310,7 +1312,7 @@ defmodule Arbor.Memory.ContextWindow do
       min_confidence: window.min_fact_confidence
     ]
 
-    case Arbor.Memory.FactExtractor.extract_batch(texts, opts) do
+    case FactExtractor.extract_batch(texts, opts) do
       facts when is_list(facts) ->
         # Filter by confidence threshold
         filtered = Enum.filter(facts, fn f ->
@@ -1324,8 +1326,8 @@ defmodule Arbor.Memory.ContextWindow do
   end
 
   defp fact_extractor_available? do
-    Code.ensure_loaded?(Arbor.Memory.FactExtractor) and
-      function_exported?(Arbor.Memory.FactExtractor, :extract_batch, 2)
+    Code.ensure_loaded?(FactExtractor) and
+      function_exported?(FactExtractor, :extract_batch, 2)
   end
 
   defp split_for_compression(messages, target_tokens) do
@@ -1771,7 +1773,7 @@ defmodule Arbor.Memory.ContextWindow do
     if signals_available?() do
       original_tokens = tokens_for_messages(messages)
 
-      Arbor.Memory.Signals.emit_context_summarized(agent_id, %{
+      Signals.emit_context_summarized(agent_id, %{
         from_layer: :full_detail,
         to_layer: :recent_summary,
         original_tokens: original_tokens,
@@ -1787,7 +1789,7 @@ defmodule Arbor.Memory.ContextWindow do
 
   defp emit_fact_extraction_signal(%{agent_id: agent_id}, facts) do
     if signals_available?() do
-      Arbor.Memory.Signals.emit_facts_extracted(agent_id, %{
+      Signals.emit_facts_extracted(agent_id, %{
         count: length(facts),
         categories: Enum.frequencies_by(facts, fn f -> f[:category] || f.category end),
         source: :compression
@@ -1798,8 +1800,8 @@ defmodule Arbor.Memory.ContextWindow do
   end
 
   defp signals_available? do
-    Code.ensure_loaded?(Arbor.Memory.Signals) and
-      function_exported?(Arbor.Memory.Signals, :emit_context_summarized, 2)
+    Code.ensure_loaded?(Signals) and
+      function_exported?(Signals, :emit_context_summarized, 2)
   end
 
   # ============================================================================
@@ -1808,9 +1810,9 @@ defmodule Arbor.Memory.ContextWindow do
 
   # Check if content is semantically similar to any existing retrieved context.
   # Uses embedding-based cosine similarity when available, falls back to exact match.
-  defp is_semantically_duplicate?([], _content), do: false
+  defp semantically_duplicate?([], _content), do: false
 
-  defp is_semantically_duplicate?(existing_contexts, new_content) do
+  defp semantically_duplicate?(existing_contexts, new_content) do
     case compute_embedding(new_content) do
       nil ->
         # No embedding available, fall back to exact match
@@ -1913,11 +1915,9 @@ defmodule Arbor.Memory.ContextWindow do
   defp parse_atom(value, _default) when is_atom(value), do: value
 
   defp parse_atom(value, default) when is_binary(value) do
-    try do
-      String.to_existing_atom(value)
-    rescue
-      _ -> default
-    end
+    String.to_existing_atom(value)
+  rescue
+    _ -> default
   end
 
   defp parse_atom(_, default), do: default

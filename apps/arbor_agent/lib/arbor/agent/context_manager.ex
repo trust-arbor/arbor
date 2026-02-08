@@ -12,6 +12,9 @@ defmodule Arbor.Agent.ContextManager do
   directory (default: `~/.arbor/context_windows/`).
   """
 
+  alias Arbor.Agent.ContextSummarizer
+  alias Arbor.Memory.ContextWindow
+
   require Logger
 
   @doc """
@@ -70,7 +73,7 @@ defmodule Arbor.Agent.ContextManager do
     threshold = Keyword.get(opts, :summary_threshold, preset_config[:summary_threshold])
 
     if context_window_available?() do
-      Arbor.Memory.ContextWindow.new(agent_id,
+      ContextWindow.new(agent_id,
         max_tokens: max_tokens,
         summary_threshold: threshold
       )
@@ -120,7 +123,7 @@ defmodule Arbor.Agent.ContextManager do
 
   defp deserialize_context(data) do
     if context_window_available?() do
-      {:ok, Arbor.Memory.ContextWindow.deserialize(data)}
+      {:ok, ContextWindow.deserialize(data)}
     else
       {:ok, data}
     end
@@ -137,8 +140,8 @@ defmodule Arbor.Agent.ContextManager do
 
       with :ok <- File.mkdir_p(dir) do
         serialized =
-          if context_window_available?() and is_struct(window, Arbor.Memory.ContextWindow) do
-            Arbor.Memory.ContextWindow.serialize(window)
+          if context_window_available?() and is_struct(window, ContextWindow) do
+            ContextWindow.serialize(window)
           else
             window
           end
@@ -159,8 +162,8 @@ defmodule Arbor.Agent.ContextManager do
   @spec should_compress?(struct() | map()) :: boolean()
   def should_compress?(window) do
     if config(:context_compression_enabled, true) do
-      if context_window_available?() and is_struct(window, Arbor.Memory.ContextWindow) do
-        Arbor.Memory.ContextWindow.should_summarize?(window)
+      if context_window_available?() and is_struct(window, ContextWindow) do
+        ContextWindow.should_summarize?(window)
       else
         false
       end
@@ -179,7 +182,7 @@ defmodule Arbor.Agent.ContextManager do
   @spec maybe_compress(map()) :: {:ok, map()} | {:error, term()}
   def maybe_compress(window) do
     if config(:context_summarization_enabled, false) do
-      Arbor.Agent.ContextSummarizer.maybe_summarize(window)
+      ContextSummarizer.maybe_summarize(window)
     else
       {:ok, window}
     end
@@ -191,7 +194,7 @@ defmodule Arbor.Agent.ContextManager do
 
   defp entry_count(window) when is_struct(window) do
     if context_window_available?() do
-      Arbor.Memory.ContextWindow.entry_count(window)
+      ContextWindow.entry_count(window)
     else
       0
     end
@@ -204,8 +207,8 @@ defmodule Arbor.Agent.ContextManager do
   defp entry_count(_), do: 0
 
   defp context_window_available? do
-    Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-      function_exported?(Arbor.Memory.ContextWindow, :new, 2)
+    Code.ensure_loaded?(ContextWindow) and
+      function_exported?(ContextWindow, :new, 2)
   end
 
   defp context_window_path(agent_id) do

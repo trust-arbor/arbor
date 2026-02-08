@@ -56,9 +56,17 @@ defmodule Arbor.Agent.AgentSeed do
   alias Arbor.Agent.{
     CheckpointManager,
     ContextManager,
+    Executor,
     ExecutorIntegration,
     TimingContext
   }
+
+  alias Arbor.Memory.BackgroundChecks
+  alias Arbor.Memory.ContextWindow
+  alias Arbor.Memory.IdentityConsolidator
+  alias Arbor.Memory.ReflectionProcessor
+  alias Arbor.Memory.SelfKnowledge
+  alias Arbor.Memory.WorkingMemory
 
   # Constants
   @default_id "agent"
@@ -245,7 +253,7 @@ defmodule Arbor.Agent.AgentSeed do
 
     # Stop Executor
     if state[:executor_pid] do
-      Arbor.Agent.Executor.stop(state.id)
+      Executor.stop(state.id)
     end
 
     Logger.info("Agent seed terminating", id: state.id, reason: inspect(reason))
@@ -498,8 +506,8 @@ defmodule Arbor.Agent.AgentSeed do
   @doc false
   @spec background_checks_available?() :: boolean()
   def background_checks_available? do
-    Code.ensure_loaded?(Arbor.Memory.BackgroundChecks) and
-      function_exported?(Arbor.Memory.BackgroundChecks, :run, 2)
+    Code.ensure_loaded?(BackgroundChecks) and
+      function_exported?(BackgroundChecks, :run, 2)
   end
 
   @doc false
@@ -643,7 +651,7 @@ defmodule Arbor.Agent.AgentSeed do
           "I responded: #{String.slice(response, 0..200)}..."
 
       working_memory =
-        Arbor.Memory.WorkingMemory.add_thought(
+        WorkingMemory.add_thought(
           state.working_memory,
           thought,
           priority: :medium
@@ -702,14 +710,14 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp build_self_knowledge_context(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-         function_exported?(Arbor.Memory.IdentityConsolidator, :get_self_knowledge, 1) do
-      case Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id) do
+    if Code.ensure_loaded?(IdentityConsolidator) and
+         function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
+      case IdentityConsolidator.get_self_knowledge(agent_id) do
         nil ->
           nil
 
         sk ->
-          summary = Arbor.Memory.SelfKnowledge.summarize(sk)
+          summary = SelfKnowledge.summarize(sk)
           if summary != "" and summary != nil, do: "## Self-Awareness\n#{summary}", else: nil
       end
     else
@@ -728,12 +736,12 @@ defmodule Arbor.Agent.AgentSeed do
   defp add_to_context_window(%{context_window: nil} = state, _prompt, _response), do: state
 
   defp add_to_context_window(%{context_window: window} = state, prompt, response) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-         function_exported?(Arbor.Memory.ContextWindow, :add_entry, 3) do
+    if Code.ensure_loaded?(ContextWindow) and
+         function_exported?(ContextWindow, :add_entry, 3) do
       window =
         window
-        |> Arbor.Memory.ContextWindow.add_entry(:message, "Human: #{prompt}")
-        |> Arbor.Memory.ContextWindow.add_entry(:message, "Assistant: #{response}")
+        |> ContextWindow.add_entry(:message, "Human: #{prompt}")
+        |> ContextWindow.add_entry(:message, "Assistant: #{response}")
 
       %{state | context_window: window}
     else
@@ -929,7 +937,7 @@ defmodule Arbor.Agent.AgentSeed do
         Enum.reduce(Enum.take(insights, 2), state.working_memory, fn insight, wm ->
           content = insight[:content] || inspect(insight)
 
-          Arbor.Memory.WorkingMemory.add_curiosity(
+          WorkingMemory.add_curiosity(
             wm,
             "[hb] [insight] #{String.slice(content, 0..80)}"
           )
@@ -950,7 +958,7 @@ defmodule Arbor.Agent.AgentSeed do
         Enum.reduce(Enum.take(memories, 2), state.working_memory, fn mem, wm ->
           content = mem[:content] || mem[:text] || inspect(mem)
 
-          Arbor.Memory.WorkingMemory.add_thought(
+          WorkingMemory.add_thought(
             wm,
             "[hb] [recalled] #{String.slice(content, 0..120)}"
           )
@@ -1078,7 +1086,7 @@ defmodule Arbor.Agent.AgentSeed do
 
   defp run_background_checks(state) do
     if background_checks_available?() do
-      result = Arbor.Memory.BackgroundChecks.run(state.id, skip_patterns: true)
+      result = BackgroundChecks.run(state.id, skip_patterns: true)
 
       Enum.each(result.warnings, fn warning ->
         Logger.info("Background check warning: #{warning.message}",
@@ -1143,7 +1151,7 @@ defmodule Arbor.Agent.AgentSeed do
         safe_memory_call(fn ->
           wm =
             state.working_memory
-            |> Arbor.Memory.WorkingMemory.add_curiosity(
+            |> WorkingMemory.add_curiosity(
               "[hb] [#{suggestion[:type]}] #{summary}",
               max_curiosity: 5
             )
@@ -1158,9 +1166,9 @@ defmodule Arbor.Agent.AgentSeed do
     if rem(heartbeat_count, @identity_consolidation_interval) == 0 do
       spawn(fn ->
         safe_memory_call(fn ->
-          if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-               function_exported?(Arbor.Memory.IdentityConsolidator, :consolidate, 2) do
-            case Arbor.Memory.IdentityConsolidator.consolidate(agent_id) do
+          if Code.ensure_loaded?(IdentityConsolidator) and
+               function_exported?(IdentityConsolidator, :consolidate, 2) do
+            case IdentityConsolidator.consolidate(agent_id) do
               {:ok, :no_changes} ->
                 :ok
 
@@ -1185,9 +1193,9 @@ defmodule Arbor.Agent.AgentSeed do
     if rem(heartbeat_count, @reflection_interval) == 0 do
       spawn(fn ->
         safe_memory_call(fn ->
-          if Code.ensure_loaded?(Arbor.Memory.ReflectionProcessor) and
-               function_exported?(Arbor.Memory.ReflectionProcessor, :periodic_reflection, 1) do
-            case Arbor.Memory.ReflectionProcessor.periodic_reflection(agent_id) do
+          if Code.ensure_loaded?(ReflectionProcessor) and
+               function_exported?(ReflectionProcessor, :periodic_reflection, 1) do
+            case ReflectionProcessor.periodic_reflection(agent_id) do
               {:ok, reflection} ->
                 Logger.info("Periodic reflection completed",
                   agent_id: agent_id,

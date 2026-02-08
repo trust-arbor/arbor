@@ -28,6 +28,10 @@ defmodule Mix.Tasks.Arbor.Helpers do
         """)
 
       value ->
+        # Safe: ARBOR_COOKIE is operator-controlled, not user input.
+        # Erlang distribution cookies must be atoms, and each unique cookie
+        # value is set once per node lifetime.
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         String.to_atom(value)
     end
   end

@@ -27,7 +27,7 @@ defmodule Arbor.Common.ConfigValidatorTest do
       schema =
         Zoi.map(
           %{
-            "port" => Zoi.integer() |> Zoi.min(1) |> Zoi.max(65535),
+            "port" => Zoi.integer() |> Zoi.min(1) |> Zoi.max(65_535),
             "host" => Zoi.string()
           },
           coerce: true
@@ -44,13 +44,13 @@ defmodule Arbor.Common.ConfigValidatorTest do
       schema =
         Zoi.map(
           %{
-            "port" => Zoi.integer() |> Zoi.min(1) |> Zoi.max(65535)
+            "port" => Zoi.integer() |> Zoi.min(1) |> Zoi.max(65_535)
           },
           coerce: true
         )
 
       assert {:error, errors} = ConfigValidator.validate(app, schema)
-      assert length(errors) > 0
+      assert errors != []
       assert Enum.any?(errors, fn e -> e.field =~ "port" end)
     end
 
@@ -130,7 +130,7 @@ defmodule Arbor.Common.ConfigValidatorTest do
   describe "from_spec/1" do
     test "builds schema from spec" do
       spec = %{
-        "port" => {:integer, min: 1, max: 65535, required: true},
+        "port" => {:integer, min: 1, max: 65_535, required: true},
         "host" => {:string, []},
         "debug" => {:boolean, []}
       }

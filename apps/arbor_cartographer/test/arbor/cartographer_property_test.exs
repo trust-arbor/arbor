@@ -21,6 +21,7 @@ defmodule Arbor.Cartographer.PropertyTest do
           base <- member_of(@capability_tags),
           suffix <- one_of([constant(nil), atom(:alphanumeric)])
         ) do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       if suffix, do: :"#{base}_#{suffix}", else: base
     end
   end
@@ -153,7 +154,7 @@ defmodule Arbor.Cartographer.PropertyTest do
         {:ok, nodes} ->
           assert is_list(nodes)
           # With empty requirements, should find at least the local node
-          assert length(nodes) >= 1
+          assert nodes != []
 
         {:error, _reason} ->
           assert true

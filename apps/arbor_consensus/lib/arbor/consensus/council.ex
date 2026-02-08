@@ -117,18 +117,16 @@ defmodule Arbor.Consensus.Council do
   end
 
   defp get_evaluator_perspectives(evaluator) do
-    try do
-      # Ensure module is loaded (important when running in spawned Task context)
-      Code.ensure_loaded(evaluator)
+    # Ensure module is loaded (important when running in spawned Task context)
+    Code.ensure_loaded(evaluator)
 
-      if function_exported?(evaluator, :perspectives, 0) do
-        evaluator.perspectives()
-      else
-        []
-      end
-    rescue
-      _ -> []
+    if function_exported?(evaluator, :perspectives, 0) do
+      evaluator.perspectives()
+    else
+      []
     end
+  rescue
+    _ -> []
   end
 
   @doc """

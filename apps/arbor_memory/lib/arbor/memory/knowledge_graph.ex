@@ -55,6 +55,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Memory.Signals
   alias Arbor.Memory.TokenBudget
 
   require Logger
@@ -808,8 +809,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
       ""
     else
       body =
-        nodes
-        |> Enum.map(fn node ->
+        Enum.map_join(nodes, "\n", fn node ->
           pct = round(node.relevance * 100)
           line = "    - [#{node.type}] #{node.content} (#{pct}% relevance)"
 
@@ -825,7 +825,6 @@ defmodule Arbor.Memory.KnowledgeGraph do
             line
           end
         end)
-        |> Enum.join("\n")
 
       "## Knowledge Graph (Active Context)\n\n" <> body
     end
@@ -1033,7 +1032,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
     # Emit signals for archived nodes
     Enum.each(to_archive, fn node ->
-      Arbor.Memory.Signals.emit_knowledge_archived(graph.agent_id, node, :low_relevance)
+      Signals.emit_knowledge_archived(graph.agent_id, node, :low_relevance)
     end)
 
     archived_ids = MapSet.new(to_archive, & &1.id)
@@ -1719,9 +1718,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
       |> Enum.filter(&(&1.type == type))
 
     # Try semantic dedup first if embeddings available
-    if embedding && length(embedding) > 0 do
+    if embedding && embedding != [] do
       case Enum.find(same_type_nodes, fn node ->
-             node.embedding && length(node.embedding) > 0 &&
+             node.embedding && node.embedding != [] &&
                cosine_similarity(embedding, node.embedding) >= graph.dedup_threshold
            end) do
         nil -> check_exact_duplicate(same_type_nodes, content)
@@ -1770,7 +1769,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
     content_lower = String.downcase(node.content)
     matching = Enum.count(query_terms, &String.contains?(content_lower, &1))
 
-    if length(query_terms) > 0 do
+    if query_terms != [] do
       matching / length(query_terms)
     else
       0.0

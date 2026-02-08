@@ -8,6 +8,9 @@ defmodule Arbor.Dashboard.AgentManager do
   No GenServer — just function calls. Nothing to crash.
   """
 
+  alias Arbor.Agent.APIAgent
+  alias Arbor.Agent.Claude
+
   require Logger
 
   @pubsub Arbor.Dashboard.PubSub
@@ -117,13 +120,13 @@ defmodule Arbor.Dashboard.AgentManager do
         result =
           case backend do
             :cli ->
-              Arbor.Agent.Claude.query(pid, input,
+              Claude.query(pid, input,
                 timeout: Keyword.get(opts, :timeout, :infinity),
                 permission_mode: :bypass
               )
 
             :api ->
-              Arbor.Agent.APIAgent.query(pid, input)
+              APIAgent.query(pid, input)
 
             _ ->
               {:error, :unknown_backend}
@@ -153,11 +156,11 @@ defmodule Arbor.Dashboard.AgentManager do
         id when is_binary(id) -> String.to_existing_atom(id)
       end
 
-    {Arbor.Agent.Claude, [id: agent_id, model: model_atom, capture_thinking: true]}
+    {Claude, [id: agent_id, model: model_atom, capture_thinking: true]}
   end
 
   defp build_start_opts(agent_id, %{backend: :api} = config) do
-    {Arbor.Agent.APIAgent,
+    {APIAgent,
      [
        id: agent_id,
        model: config.id,

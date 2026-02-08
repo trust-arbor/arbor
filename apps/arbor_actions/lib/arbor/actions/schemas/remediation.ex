@@ -123,7 +123,7 @@ defmodule Arbor.Actions.Schemas.Remediation do
           max_messages: %{
             type: "integer",
             description: "Maximum total messages to drain",
-            default: 10000
+            default: 10_000
           }
         },
         required: ["pid"]
