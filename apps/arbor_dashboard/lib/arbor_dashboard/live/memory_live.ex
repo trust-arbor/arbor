@@ -15,6 +15,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   @refresh_interval 10_000
   @tabs ~w(overview identity goals knowledge working_memory preferences proposals code)
+  @expandable_sections ~w(thoughts concerns curiosity goals proposals kg)a
 
   @impl true
   def mount(%{"agent_id" => agent_id}, _session, socket) do
@@ -32,6 +33,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         page_title: "Memory — #{agent_id}",
         agent_id: agent_id,
         active_tab: "overview",
+        expanded_section: nil,
         subscription_id: subscription_id,
         tab_data: %{},
         error: nil,
@@ -50,6 +52,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         page_title: "Memory Viewer",
         agent_id: nil,
         active_tab: nil,
+        expanded_section: nil,
         subscription_id: nil,
         tab_data: %{},
         error: nil,
@@ -80,10 +83,28 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
     socket =
       socket
-      |> assign(active_tab: tab)
+      |> assign(active_tab: tab, expanded_section: nil)
       |> load_tab_data(tab, agent_id)
 
     {:noreply, socket}
+  end
+
+  def handle_event("toggle-section", %{"section" => section}, socket) do
+    section_atom = String.to_existing_atom(section)
+
+    if section_atom in @expandable_sections do
+      current = socket.assigns.expanded_section
+      new_section = if current == section_atom, do: nil, else: section_atom
+
+      socket =
+        socket
+        |> assign(expanded_section: new_section)
+        |> maybe_load_section_data(new_section, socket.assigns.agent_id)
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("select-agent", %{"agent_id" => agent_id}, socket) do
@@ -230,20 +251,62 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp render_tab(%{active_tab: "overview"} = assigns) do
     ~H"""
     <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem;">
-      <.stat_card label="Engagement" value={format_pct(@tab_data[:engagement])} />
-      <.stat_card
+      <.clickable_stat_card
+        label="Engagement"
+        value={format_pct(@tab_data[:engagement])}
+        section={nil}
+        expanded={nil}
+      />
+      <.clickable_stat_card
         label="Thoughts"
         value={@tab_data[:thought_count] || get_in(@tab_data, [:wm_stats, :thought_count]) || 0}
+        section="thoughts"
+        expanded={@expanded_section}
       />
-      <.stat_card label="Concerns" value={@tab_data[:concerns_count] || 0} />
-      <.stat_card label="Curiosity" value={@tab_data[:curiosity_count] || 0} />
-      <.stat_card label="Active Goals" value={@tab_data[:goal_count] || 0} />
-      <.stat_card
+      <.clickable_stat_card
+        label="Concerns"
+        value={@tab_data[:concerns_count] || 0}
+        section="concerns"
+        expanded={@expanded_section}
+      />
+      <.clickable_stat_card
+        label="Curiosity"
+        value={@tab_data[:curiosity_count] || 0}
+        section="curiosity"
+        expanded={@expanded_section}
+      />
+      <.clickable_stat_card
+        label="Active Goals"
+        value={@tab_data[:goal_count] || 0}
+        section="goals"
+        expanded={@expanded_section}
+      />
+      <.clickable_stat_card
         label="Proposals Pending"
         value={get_in(@tab_data, [:proposal_stats, :pending]) || 0}
+        section="proposals"
+        expanded={@expanded_section}
       />
-      <.stat_card label="KG Nodes" value={get_in(@tab_data, [:kg_stats, :node_count]) || 0} />
-      <.stat_card label="KG Edges" value={get_in(@tab_data, [:kg_stats, :edge_count]) || 0} />
+      <.clickable_stat_card
+        label="KG Nodes"
+        value={get_in(@tab_data, [:kg_stats, :node_count]) || 0}
+        section="kg"
+        expanded={@expanded_section}
+      />
+      <.clickable_stat_card
+        label="KG Edges"
+        value={get_in(@tab_data, [:kg_stats, :edge_count]) || 0}
+        section="kg"
+        expanded={@expanded_section}
+      />
+    </div>
+
+    <%!-- Expanded detail panel --%>
+    <div
+      :if={@expanded_section}
+      style="margin-top: 0.75rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; padding: 0.75rem; background: rgba(0,0,0,0.15);"
+    >
+      {render_expanded_section(assigns)}
     </div>
     """
   end
@@ -618,6 +681,252 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     """
   end
 
+  # ── Clickable Stat Card ───────────────────────────────────────────
+
+  defp clickable_stat_card(assigns) do
+    is_clickable = assigns.section != nil
+    is_active = is_clickable && to_string(assigns.expanded) == assigns.section
+
+    assigns =
+      assigns
+      |> assign(:is_clickable, is_clickable)
+      |> assign(:is_active, is_active)
+
+    ~H"""
+    <div
+      phx-click={if @is_clickable, do: "toggle-section"}
+      phx-value-section={@section}
+      style={"padding: 0.75rem; border-radius: 6px; border: 1px solid #{if @is_active, do: "var(--aw-accent, #4a9eff)", else: "var(--aw-border, #333)"}; background: #{if @is_active, do: "rgba(74, 158, 255, 0.08)", else: "rgba(255,255,255,0.03)"}; #{if @is_clickable, do: "cursor: pointer;", else: ""}"}
+    >
+      <div style="font-size: 0.75em; color: var(--aw-text-muted, #888); margin-bottom: 0.25rem; display: flex; justify-content: space-between; align-items: center;">
+        <span>{@label}</span>
+        <span :if={@is_clickable} style="font-size: 0.9em;">{if @is_active, do: "▼", else: "▶"}</span>
+      </div>
+      <div style="font-size: 1.5em; font-weight: 600;">{@value}</div>
+    </div>
+    """
+  end
+
+  # ── Expanded Section Renderers ───────────────────────────────────
+
+  defp render_expanded_section(%{expanded_section: :thoughts} = assigns) do
+    thoughts = get_in(assigns.tab_data, [:working_memory, :recent_thoughts]) || []
+    assigns = assign(assigns, :thoughts, thoughts)
+
+    ~H"""
+    <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Recent Thoughts</h3>
+    <div
+      :for={thought <- Enum.take(@thoughts, 15)}
+      style="margin-bottom: 0.35rem; padding: 0.4rem 0.5rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.85em;"
+    >
+      <span style="margin-right: 0.3rem;">💭</span>
+      <span style="color: var(--aw-text, #ccc);">
+        {thought[:content] || to_string(thought)}
+      </span>
+      <div
+        :if={thought[:timestamp]}
+        style="font-size: 0.75em; color: var(--aw-text-muted, #888); margin-top: 0.15rem;"
+      >
+        {Helpers.format_relative_time(thought[:timestamp])}
+      </div>
+    </div>
+    <.empty_state
+      :if={@thoughts == []}
+      icon="💭"
+      title="No thoughts yet"
+      hint="Thoughts appear as the agent processes information"
+    />
+    """
+  end
+
+  defp render_expanded_section(%{expanded_section: :concerns} = assigns) do
+    concerns = get_in(assigns.tab_data, [:working_memory, :concerns]) || []
+    assigns = assign(assigns, :concerns, concerns)
+
+    ~H"""
+    <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Concerns</h3>
+    <div
+      :for={concern <- @concerns}
+      style="margin-bottom: 0.35rem; padding: 0.4rem 0.5rem; border-radius: 4px; background: rgba(255, 74, 74, 0.1); font-size: 0.85em;"
+    >
+      <span style="margin-right: 0.3rem;">⚠️</span>
+      <span style="color: var(--aw-text, #ccc);">
+        {concern[:content] || to_string(concern)}
+      </span>
+    </div>
+    <.empty_state
+      :if={@concerns == []}
+      icon="⚠️"
+      title="No concerns"
+      hint="Concerns appear when the agent detects potential issues"
+    />
+    """
+  end
+
+  defp render_expanded_section(%{expanded_section: :curiosity} = assigns) do
+    curiosity = get_in(assigns.tab_data, [:working_memory, :curiosity]) || []
+    assigns = assign(assigns, :curiosity_items, curiosity)
+
+    ~H"""
+    <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Curiosity</h3>
+    <div
+      :for={item <- @curiosity_items}
+      style="margin-bottom: 0.35rem; padding: 0.4rem 0.5rem; border-radius: 4px; background: rgba(74, 158, 255, 0.1); font-size: 0.85em;"
+    >
+      <span style="margin-right: 0.3rem;">🔍</span>
+      <span style="color: var(--aw-text, #ccc);">
+        {item[:content] || to_string(item)}
+      </span>
+    </div>
+    <.empty_state
+      :if={@curiosity_items == []}
+      icon="🔍"
+      title="No curiosity items"
+      hint="Curiosity items appear during idle reflection"
+    />
+    """
+  end
+
+  defp render_expanded_section(%{expanded_section: :goals} = assigns) do
+    goals = assigns.tab_data[:goals] || []
+    assigns = assign(assigns, :goals, goals)
+
+    ~H"""
+    <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Active Goals</h3>
+    <div
+      :for={goal <- @goals}
+      style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 6px; background: rgba(74, 255, 158, 0.05); border: 1px solid var(--aw-border, #333);"
+    >
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+        <span style="font-weight: 500; font-size: 0.9em;">{goal.description}</span>
+        <div style="display: flex; gap: 0.25rem;">
+          <.badge label={to_string(goal.status)} color={goal_color(goal.status)} />
+          <.badge :if={goal[:type]} label={to_string(goal.type)} color={:gray} />
+          <.badge label={"P#{goal.priority}"} color={:blue} />
+        </div>
+      </div>
+      <div style="background: rgba(128,128,128,0.2); height: 4px; border-radius: 2px; overflow: hidden; margin-bottom: 0.2rem;">
+        <div style={"background: #22c55e; height: 100%; width: #{round(goal.progress * 100)}%;"}>
+        </div>
+      </div>
+      <div style="display: flex; justify-content: space-between; font-size: 0.75em; color: var(--aw-text-muted, #888);">
+        <span>{round(goal.progress * 100)}% complete</span>
+        <span :if={goal[:deadline]}>Deadline: {format_deadline(goal.deadline)}</span>
+      </div>
+    </div>
+    <.empty_state
+      :if={@goals == []}
+      icon="🎯"
+      title="No active goals"
+      hint="Goals appear as the agent works"
+    />
+    """
+  end
+
+  defp render_expanded_section(%{expanded_section: :proposals} = assigns) do
+    proposals = assigns.tab_data[:proposals] || []
+    stats = assigns.tab_data[:proposal_stats] || %{}
+    assigns = assign(assigns, proposals: proposals, proposal_stats_detail: stats)
+
+    ~H"""
+    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+      <.badge label={"Pending: #{Map.get(@proposal_stats_detail, :pending, 0)}"} color={:yellow} />
+      <.badge label={"Accepted: #{Map.get(@proposal_stats_detail, :accepted, 0)}"} color={:green} />
+      <.badge label={"Rejected: #{Map.get(@proposal_stats_detail, :rejected, 0)}"} color={:red} />
+      <.badge label={"Deferred: #{Map.get(@proposal_stats_detail, :deferred, 0)}"} color={:gray} />
+    </div>
+    <div
+      :for={proposal <- Enum.take(@proposals, 10)}
+      style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 6px; background: rgba(234, 179, 8, 0.05); border: 1px solid var(--aw-border, #333);"
+    >
+      <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.3rem;">
+        <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
+        <.badge
+          :if={proposal[:confidence]}
+          label={"#{round(proposal[:confidence] * 100)}%"}
+          color={:blue}
+        />
+        <.badge
+          :if={proposal[:status]}
+          label={to_string(proposal[:status])}
+          color={proposal_status_color(proposal[:status])}
+        />
+      </div>
+      <p style="color: var(--aw-text, #ccc); margin: 0 0 0.3rem 0; font-size: 0.9em; white-space: pre-wrap;">
+        {Helpers.truncate(proposal[:content] || proposal[:description] || "", 300)}
+      </p>
+      <div
+        :if={proposal[:status] == :pending || proposal[:status] == "pending"}
+        style="display: flex; gap: 0.3rem;"
+      >
+        <button
+          phx-click="accept-proposal"
+          phx-value-id={proposal[:id]}
+          style="padding: 0.25rem 0.6rem; border: none; border-radius: 4px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
+        >
+          Accept
+        </button>
+        <button
+          phx-click="reject-proposal"
+          phx-value-id={proposal[:id]}
+          style="padding: 0.25rem 0.6rem; border: none; border-radius: 4px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
+        >
+          Reject
+        </button>
+        <button
+          phx-click="defer-proposal"
+          phx-value-id={proposal[:id]}
+          style="padding: 0.25rem 0.6rem; border: none; border-radius: 4px; background: #888; color: white; cursor: pointer; font-size: 0.8em;"
+        >
+          Defer
+        </button>
+      </div>
+    </div>
+    <.empty_state
+      :if={@proposals == []}
+      icon="📋"
+      title="No proposals"
+      hint="Proposals appear from reflection & analysis"
+    />
+    """
+  end
+
+  defp render_expanded_section(%{expanded_section: :kg} = assigns) do
+    kg_stats = assigns.tab_data[:kg_stats] || %{}
+    near_threshold = assigns.tab_data[:near_threshold] || []
+    assigns = assign(assigns, kg_detail: kg_stats, near_threshold: near_threshold)
+
+    ~H"""
+    <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Knowledge Graph</h3>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.5rem; margin-bottom: 0.75rem;">
+      <.stat_card label="Nodes" value={Map.get(@kg_detail, :node_count, 0)} />
+      <.stat_card label="Edges" value={Map.get(@kg_detail, :edge_count, 0)} />
+      <.stat_card label="Active Set" value={Map.get(@kg_detail, :active_set_size, 0)} />
+      <.stat_card label="Pending" value={Map.get(@kg_detail, :pending_count, 0)} />
+    </div>
+
+    <h4 :if={@near_threshold != []} style="font-size: 0.9em; margin-bottom: 0.4rem;">
+      Near-Threshold Nodes (decay candidates)
+    </h4>
+    <div
+      :for={node <- @near_threshold}
+      style="display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem; margin-bottom: 0.25rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.85em;"
+    >
+      <.badge label={to_string(node[:type] || "unknown")} color={:yellow} />
+      <span style="flex: 1;">{node[:content] || node[:name] || "—"}</span>
+      <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
+        relevance: {Float.round((node[:relevance] || 0) * 1.0, 3)}
+      </span>
+    </div>
+    <.empty_state :if={@near_threshold == []} icon="🕸️" title="No near-threshold nodes" hint="" />
+    """
+  end
+
+  defp render_expanded_section(assigns) do
+    ~H"""
+    """
+  end
+
   # ── Data Loading ──────────────────────────────────────────────────
 
   defp load_tab_data(socket, "overview", agent_id) do
@@ -626,18 +935,29 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         {:ok, result} when is_map(result) ->
           kg = get_in(result, [:memory_system, :knowledge_graph]) || %{}
           wm = get_in(result, [:memory_system, :working_memory]) || %{}
-          proposals = get_in(result, [:memory_system, :proposals]) || %{}
+          proposals_summary = get_in(result, [:memory_system, :proposals]) || %{}
           goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
           engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
 
-          # Also pull direct working memory for richer stats
+          # Pull direct working memory for content + stats
           direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
+
+          # Pull proposals list and near-threshold for expanded sections
+          proposals_list =
+            unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+
+          near_threshold =
+            unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
 
           %{
             kg_stats: kg,
             wm_stats: wm,
-            proposal_stats: proposals,
+            proposal_stats: proposals_summary,
             goal_count: length(goals),
+            goals: goals,
+            proposals: proposals_list,
+            near_threshold: near_threshold,
+            working_memory: direct_wm,
             engagement:
               if(direct_wm,
                 do: Map.get(direct_wm, :engagement_level, engagement),
@@ -702,6 +1022,35 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp load_tab_data(socket, _tab, _agent_id) do
     assign(socket, tab_data: %{})
   end
+
+  # Refresh section-specific data when expanding from Overview
+  defp maybe_load_section_data(socket, nil, _agent_id), do: socket
+
+  defp maybe_load_section_data(socket, section, agent_id)
+       when section in [:thoughts, :concerns, :curiosity] do
+    direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
+    update(socket, :tab_data, &Map.put(&1, :working_memory, direct_wm))
+  end
+
+  defp maybe_load_section_data(socket, :goals, agent_id) do
+    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
+    update(socket, :tab_data, &Map.put(&1, :goals, goals))
+  end
+
+  defp maybe_load_section_data(socket, :proposals, agent_id) do
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
+
+    socket
+    |> update(:tab_data, &Map.merge(&1, %{proposals: proposals, proposal_stats: stats}))
+  end
+
+  defp maybe_load_section_data(socket, :kg, agent_id) do
+    near = unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
+    update(socket, :tab_data, &Map.put(&1, :near_threshold, near))
+  end
+
+  defp maybe_load_section_data(socket, _section, _agent_id), do: socket
 
   # ── Helpers ───────────────────────────────────────────────────────
 
