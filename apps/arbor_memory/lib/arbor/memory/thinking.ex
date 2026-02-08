@@ -235,4 +235,197 @@ defmodule Arbor.Memory.Thinking do
   defp maybe_filter_since(entries, since) do
     Enum.filter(entries, &(DateTime.compare(&1.created_at, since) in [:gt, :eq]))
   end
+
+  # ============================================================================
+  # Multi-Provider Extraction (ported from Seed ThinkingBlockProcessor)
+  # ============================================================================
+
+  @doc """
+  Extract thinking content from an LLM response.
+
+  Supports multiple providers:
+  - `:anthropic` — content blocks with `"type" => "thinking"`
+  - `:deepseek` — `reasoning_content` field
+  - `:openai` — explicitly returns `{:none, :hidden_reasoning}` (o1/o3 hide reasoning)
+  - `:generic` — fallback chain: anthropic → deepseek → XML `<thinking>` tags
+
+  ## Options
+
+  - `:fallback_to_generic` — try generic extraction on failure (default: false)
+
+  ## Returns
+
+  - `{:ok, text}` — extracted thinking text
+  - `{:none, reason}` — no thinking found
+  """
+  @spec extract(map(), atom(), keyword()) :: {:ok, String.t()} | {:none, atom()}
+  def extract(response, provider, opts \\ [])
+
+  def extract(response, :anthropic, opts) do
+    case extract_anthropic_thinking(response) do
+      {:ok, _} = ok -> ok
+      {:none, _} = none ->
+        if Keyword.get(opts, :fallback_to_generic, false),
+          do: extract(response, :generic, []),
+          else: none
+    end
+  end
+
+  def extract(response, :deepseek, opts) do
+    case extract_deepseek_reasoning(response) do
+      {:ok, _} = ok -> ok
+      {:none, _} = none ->
+        if Keyword.get(opts, :fallback_to_generic, false),
+          do: extract(response, :generic, []),
+          else: none
+    end
+  end
+
+  def extract(_response, :openai, _opts) do
+    {:none, :hidden_reasoning}
+  end
+
+  def extract(response, :generic, _opts) do
+    extract_generic_thinking(response)
+  end
+
+  def extract(response, _unknown_provider, _opts) do
+    extract_generic_thinking(response)
+  end
+
+  @doc """
+  Extract thinking from an LLM response and record it for the agent.
+
+  Combines `extract/3` and `record_thinking/3`. Automatically flags
+  identity-affecting thinking as significant.
+  """
+  @spec extract_and_record(String.t(), map(), atom(), keyword()) ::
+          {:ok, thinking_entry()} | {:none, atom()}
+  def extract_and_record(agent_id, response, provider, opts \\ []) do
+    case extract(response, provider, opts) do
+      {:ok, text} ->
+        significant = identity_affecting?(text)
+        metadata = Keyword.get(opts, :metadata, %{})
+        record_thinking(agent_id, text, significant: significant, metadata: metadata)
+
+      {:none, reason} ->
+        {:none, reason}
+    end
+  end
+
+  @doc """
+  Returns true if the thinking text contains identity-affecting patterns.
+
+  Checks for goal-related, learning, self-reflection, and constraint keywords.
+  """
+  @spec identity_affecting?(String.t()) :: boolean()
+  def identity_affecting?(text) when is_binary(text) do
+    downcased = String.downcase(text)
+
+    goal_patterns = ["my goal", "i should", "i want to", "i need to"]
+    learning_patterns = ["i learned", "i realize", "i understand now", "i discovered"]
+    self_patterns = ["i am", "my purpose", "my role", "my values"]
+    constraint_patterns = ["i cannot", "i must not", "my constraints"]
+
+    Enum.any?(goal_patterns ++ learning_patterns ++ self_patterns ++ constraint_patterns, fn pattern ->
+      String.contains?(downcased, pattern)
+    end)
+  end
+
+  def identity_affecting?(_), do: false
+
+  # ============================================================================
+  # Provider-Specific Extraction
+  # ============================================================================
+
+  defp extract_anthropic_thinking(response) do
+    blocks = get_content_blocks(response)
+
+    thinking_texts =
+      blocks
+      |> Enum.filter(&(is_map(&1) and (&1["type"] == "thinking" or &1[:type] == "thinking")))
+      |> Enum.map(&(&1["thinking"] || &1[:thinking] || ""))
+      |> Enum.reject(&(&1 == ""))
+
+    case thinking_texts do
+      [] -> {:none, :no_thinking_blocks}
+      texts -> {:ok, Enum.join(texts, "\n\n")}
+    end
+  end
+
+  defp extract_deepseek_reasoning(response) do
+    reasoning =
+      get_nested(response, ["reasoning_content"]) ||
+        get_nested(response, [:reasoning_content])
+
+    case reasoning do
+      nil -> {:none, :no_reasoning_content}
+      "" -> {:none, :no_reasoning_content}
+      text when is_binary(text) -> {:ok, text}
+      _ -> {:none, :no_reasoning_content}
+    end
+  end
+
+  defp extract_generic_thinking(response) do
+    # Try Anthropic-style content blocks first
+    case extract_anthropic_thinking(response) do
+      {:ok, _} = ok -> ok
+      _ ->
+        # Try DeepSeek-style reasoning_content
+        case extract_deepseek_reasoning(response) do
+          {:ok, _} = ok -> ok
+          _ ->
+            # Try "thinking" field directly
+            thinking = get_nested(response, ["thinking"]) || get_nested(response, [:thinking])
+            case thinking do
+              t when is_binary(t) and t != "" -> {:ok, t}
+              _ ->
+                # Try XML <thinking> tags in text content
+                extract_xml_thinking(response)
+            end
+        end
+    end
+  end
+
+  defp extract_xml_thinking(response) do
+    # Try to find text content that has <thinking> tags
+    text =
+      cond do
+        is_binary(response) -> response
+        is_binary(response["content"]) -> response["content"]
+        is_binary(response[:content]) -> response[:content]
+        true ->
+          blocks = get_content_blocks(response)
+          blocks
+          |> Enum.filter(&(is_map(&1) and (&1["type"] == "text" or &1[:type] == "text")))
+          |> Enum.map(&(&1["text"] || &1[:text] || ""))
+          |> Enum.join("\n")
+      end
+
+    case Regex.run(~r/<thinking>(.*?)<\/thinking>/s, text) do
+      [_, captured] when captured != "" -> {:ok, String.trim(captured)}
+      _ -> {:none, :no_thinking_found}
+    end
+  end
+
+  defp get_content_blocks(response) when is_map(response) do
+    cond do
+      is_list(response["content"]) -> response["content"]
+      is_list(response[:content]) -> response[:content]
+      true -> []
+    end
+  end
+
+  defp get_content_blocks(_), do: []
+
+  defp get_nested(map, keys) when is_map(map) do
+    Enum.reduce_while(keys, map, fn key, acc ->
+      case acc do
+        %{^key => value} -> {:halt, value}
+        _ -> {:halt, nil}
+      end
+    end)
+  end
+
+  defp get_nested(_, _), do: nil
 end
