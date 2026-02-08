@@ -81,6 +81,24 @@ defmodule Arbor.Contracts.Memory.IntentTest do
     end
   end
 
+  describe "confidence" do
+    test "defaults to 0.5" do
+      intent = Intent.new(:act)
+      assert intent.confidence == 0.5
+    end
+
+    test "accepts custom confidence" do
+      intent = Intent.new(:act, confidence: 0.9)
+      assert intent.confidence == 0.9
+    end
+
+    test "is independent from urgency" do
+      intent = Intent.new(:act, confidence: 0.3, urgency: 90)
+      assert intent.confidence == 0.3
+      assert intent.urgency == 90
+    end
+  end
+
   describe "actionable?/1" do
     test "returns true for :act type" do
       intent = Intent.action(:test, %{})
@@ -95,12 +113,48 @@ defmodule Arbor.Contracts.Memory.IntentTest do
     end
   end
 
+  describe "mental?/1" do
+    test "returns true for think, wait, internal, reflect" do
+      for type <- [:think, :wait, :internal, :reflect] do
+        intent = Intent.new(type)
+        assert Intent.mental?(intent), "expected mental? to be true for #{type}"
+      end
+    end
+
+    test "returns false for :act" do
+      intent = Intent.action(:test, %{})
+      refute Intent.mental?(intent)
+    end
+  end
+
   describe "intent types" do
     test "supports all intent types" do
       for type <- [:think, :act, :wait, :reflect, :internal] do
         intent = Intent.new(type)
         assert intent.type == type
       end
+    end
+  end
+
+  describe "from_map/1" do
+    test "parses confidence from map with atom keys" do
+      intent = Intent.from_map(%{type: :act, action: :test, confidence: 0.8})
+      assert intent.confidence == 0.8
+    end
+
+    test "parses confidence from map with string keys" do
+      intent = Intent.from_map(%{"type" => "act", "confidence" => 0.7})
+      assert intent.confidence == 0.7
+    end
+
+    test "defaults confidence to 0.5 when missing" do
+      intent = Intent.from_map(%{type: :think})
+      assert intent.confidence == 0.5
+    end
+
+    test "handles integer confidence" do
+      intent = Intent.from_map(%{type: :act, confidence: 1})
+      assert intent.confidence == 1.0
     end
   end
 

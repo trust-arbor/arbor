@@ -50,6 +50,7 @@ defmodule Arbor.Contracts.Memory.Intent do
     field :params, map(), default: %{}
     field :reasoning, String.t() | nil, default: nil
     field :goal_id, String.t() | nil, default: nil
+    field :confidence, float(), default: 0.5
     field :urgency, integer(), default: 50
     field :created_at, DateTime.t()
     field :metadata, map(), default: %{}
@@ -67,6 +68,7 @@ defmodule Arbor.Contracts.Memory.Intent do
       params: opts[:params] || %{},
       reasoning: opts[:reasoning],
       goal_id: opts[:goal_id],
+      confidence: opts[:confidence] || 0.5,
       urgency: opts[:urgency] || 50,
       created_at: opts[:created_at] || DateTime.utc_now(),
       metadata: opts[:metadata] || %{}
@@ -113,6 +115,15 @@ defmodule Arbor.Contracts.Memory.Intent do
   def actionable?(%__MODULE__{}), do: false
 
   @doc """
+  Returns true if this is a mental intent (no external action required).
+
+  Mental intents include `:think`, `:wait`, `:internal`, and `:reflect`.
+  """
+  @spec mental?(t()) :: boolean()
+  def mental?(%__MODULE__{type: type}) when type in [:think, :wait, :internal, :reflect], do: true
+  def mental?(%__MODULE__{}), do: false
+
+  @doc """
   Reconstruct an Intent from a plain map (e.g. deserialized signal data).
 
   Handles both atom and string keys. Safely atomizes `:type` and `:action`.
@@ -127,6 +138,7 @@ defmodule Arbor.Contracts.Memory.Intent do
       params: map_get(map, :params) || %{},
       reasoning: map_get(map, :reasoning),
       goal_id: map_get(map, :goal_id),
+      confidence: parse_float(map_get(map, :confidence)) || 0.5,
       urgency: map_get(map, :urgency) || 50,
       created_at: parse_datetime(map_get(map, :created_at)) || DateTime.utc_now(),
       metadata: map_get(map, :metadata) || %{}
@@ -148,6 +160,11 @@ defmodule Arbor.Contracts.Memory.Intent do
       ArgumentError -> String.to_atom(s)
     end
   end
+
+  defp parse_float(nil), do: nil
+  defp parse_float(f) when is_float(f), do: f
+  defp parse_float(i) when is_integer(i), do: i * 1.0
+  defp parse_float(_), do: nil
 
   defp parse_datetime(%DateTime{} = dt), do: dt
   defp parse_datetime(s) when is_binary(s) do

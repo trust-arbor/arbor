@@ -116,6 +116,98 @@ defmodule Arbor.Memory.GoalStoreTest do
     end
   end
 
+  describe "fail_goal/3" do
+    test "marks goal as failed", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Risky task")
+
+      assert {:ok, failed} = GoalStore.fail_goal(agent_id, goal.id, "Timeout")
+      assert failed.status == :failed
+      assert hd(failed.notes) == "Failed: Timeout"
+    end
+
+    test "persists failed status", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Will fail")
+      GoalStore.fail_goal(agent_id, goal.id, "Error")
+
+      {:ok, retrieved} = GoalStore.get_goal(agent_id, goal.id)
+      assert retrieved.status == :failed
+    end
+
+    test "returns error for missing goal", %{agent_id: agent_id} do
+      assert {:error, :not_found} = GoalStore.fail_goal(agent_id, "missing", "reason")
+    end
+
+    test "works without reason", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Fail silently")
+
+      assert {:ok, failed} = GoalStore.fail_goal(agent_id, goal.id)
+      assert failed.status == :failed
+    end
+  end
+
+  describe "add_note/3" do
+    test "adds note to goal", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Task with notes")
+
+      assert {:ok, updated} = GoalStore.add_note(agent_id, goal.id, "First note")
+      assert hd(updated.notes) == "First note"
+    end
+
+    test "prepends multiple notes", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Task with notes")
+      GoalStore.add_note(agent_id, goal.id, "Note 1")
+      {:ok, updated} = GoalStore.add_note(agent_id, goal.id, "Note 2")
+
+      assert updated.notes == ["Note 2", "Note 1"]
+    end
+
+    test "persists notes", %{agent_id: agent_id} do
+      {:ok, goal} = GoalStore.add_goal(agent_id, "Persistent notes")
+      GoalStore.add_note(agent_id, goal.id, "Saved note")
+
+      {:ok, retrieved} = GoalStore.get_goal(agent_id, goal.id)
+      assert hd(retrieved.notes) == "Saved note"
+    end
+
+    test "returns error for missing goal", %{agent_id: agent_id} do
+      assert {:error, :not_found} = GoalStore.add_note(agent_id, "missing", "note")
+    end
+  end
+
+  describe "export/import with new fields" do
+    test "exports and imports deadline", %{agent_id: agent_id} do
+      deadline = ~U[2026-03-15 10:00:00Z]
+      goal = Goal.new("With deadline", deadline: deadline)
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      exported = GoalStore.export_all_goals(agent_id)
+      assert [exported_goal] = exported
+      assert exported_goal[:deadline] == "2026-03-15T10:00:00Z"
+
+      GoalStore.clear_goals(agent_id)
+      GoalStore.import_goals(agent_id, exported)
+
+      {:ok, imported} = GoalStore.get_goal(agent_id, goal.id)
+      assert imported.deadline == ~U[2026-03-15T10:00:00Z]
+    end
+
+    test "exports and imports success_criteria and notes", %{agent_id: agent_id} do
+      goal = Goal.new("Rich goal",
+        success_criteria: "All tests pass",
+        notes: ["note1", "note2"]
+      )
+      {:ok, _} = GoalStore.add_goal(agent_id, goal)
+
+      exported = GoalStore.export_all_goals(agent_id)
+      GoalStore.clear_goals(agent_id)
+      GoalStore.import_goals(agent_id, exported)
+
+      {:ok, imported} = GoalStore.get_goal(agent_id, goal.id)
+      assert imported.success_criteria == "All tests pass"
+      assert imported.notes == ["note1", "note2"]
+    end
+  end
+
   describe "get_active_goals/1" do
     test "returns only active goals sorted by priority", %{agent_id: agent_id} do
       {:ok, _} = GoalStore.add_goal(agent_id, "Low priority", priority: 10)

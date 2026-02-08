@@ -145,6 +145,47 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   @doc """
+  Mark a goal as failed with an optional reason.
+
+  Sets status to `:failed` and prepends a "Failed: reason" note.
+  Emits a `{:memory, :goal_failed}` signal.
+  """
+  @spec fail_goal(String.t(), String.t(), String.t() | nil) ::
+          {:ok, Goal.t()} | {:error, :not_found}
+  def fail_goal(agent_id, goal_id, reason \\ nil) do
+    case get_goal(agent_id, goal_id) do
+      {:ok, goal} ->
+        updated = Goal.fail(goal, reason)
+        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+
+        Signals.emit_goal_abandoned(agent_id, goal_id, reason || "failed")
+        {:ok, updated}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Add a note to a goal's notes list.
+
+  Prepends the note to the goal's notes field.
+  """
+  @spec add_note(String.t(), String.t(), String.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found}
+  def add_note(agent_id, goal_id, note) when is_binary(note) do
+    case get_goal(agent_id, goal_id) do
+      {:ok, goal} ->
+        updated = Goal.add_note(goal, note)
+        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        {:ok, updated}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
   Mark a goal as blocked with optional blocker descriptions.
 
   Sets status to `:blocked` and stores blockers in `metadata.blockers`.
@@ -246,6 +287,7 @@ defmodule Arbor.Memory.GoalStore do
       |> Map.from_struct()
       |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
       |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
+      |> Map.update(:deadline, nil, &maybe_to_iso8601/1)
     end)
   end
 
@@ -281,6 +323,10 @@ defmodule Arbor.Memory.GoalStore do
       progress: map[:progress] || 0.0,
       created_at: parse_datetime(map[:created_at]),
       achieved_at: parse_datetime(map[:achieved_at]),
+      deadline: parse_datetime(map[:deadline]),
+      success_criteria: map[:success_criteria],
+      notes: map[:notes] || [],
+      assigned_by: safe_atom(map[:assigned_by], nil),
       metadata: map[:metadata] || %{}
     }
   end
