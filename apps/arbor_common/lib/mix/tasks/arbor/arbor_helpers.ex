@@ -67,7 +67,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"arbor_mix_#{suffix}@localhost"
       {:ok, _} = Node.start(name, :shortnames)
-      Node.set_cookie(@cookie)
+      Node.set_cookie(cookie())
     end
 
     :ok
