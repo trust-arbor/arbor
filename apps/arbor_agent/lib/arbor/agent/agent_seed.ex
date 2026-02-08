@@ -645,6 +645,7 @@ defmodule Arbor.Agent.AgentSeed do
           priority: :medium
         )
 
+      save_working_memory(state.id, working_memory)
       %{state | working_memory: working_memory}
     else
       state
@@ -919,8 +920,8 @@ defmodule Arbor.Agent.AgentSeed do
   defp handle_memory_signal(:insights_detected, payload, state) do
     insights = payload[:insights] || []
 
-    new_wm =
-      if state[:working_memory] && insights != [] do
+    if state[:working_memory] && insights != [] do
+      new_wm =
         Enum.reduce(Enum.take(insights, 2), state.working_memory, fn insight, wm ->
           content = insight[:content] || inspect(insight)
 
@@ -929,19 +930,19 @@ defmodule Arbor.Agent.AgentSeed do
             "[hb] [insight] #{String.slice(content, 0..80)}"
           )
         end)
-      else
-        state[:working_memory]
-      end
 
-    state = if new_wm, do: %{state | working_memory: new_wm}, else: state
-    {:noreply, state}
+      save_working_memory(state.id, new_wm)
+      {:noreply, %{state | working_memory: new_wm}}
+    else
+      {:noreply, state}
+    end
   end
 
   defp handle_memory_signal(:preconscious_surfaced, payload, state) do
     memories = payload[:memories] || []
 
-    new_wm =
-      if state[:working_memory] && memories != [] do
+    if state[:working_memory] && memories != [] do
+      new_wm =
         Enum.reduce(Enum.take(memories, 2), state.working_memory, fn mem, wm ->
           content = mem[:content] || mem[:text] || inspect(mem)
 
@@ -950,12 +951,12 @@ defmodule Arbor.Agent.AgentSeed do
             "[hb] [recalled] #{String.slice(content, 0..120)}"
           )
         end)
-      else
-        state[:working_memory]
-      end
 
-    state = if new_wm, do: %{state | working_memory: new_wm}, else: state
-    {:noreply, state}
+      save_working_memory(state.id, new_wm)
+      {:noreply, %{state | working_memory: new_wm}}
+    else
+      {:noreply, state}
+    end
   end
 
   defp handle_memory_signal(_type, _payload, state) do
@@ -1022,6 +1023,23 @@ defmodule Arbor.Agent.AgentSeed do
         id: agent_id,
         note: String.slice(note, 0..100)
       })
+    end)
+
+    # Also add heartbeat notes to working memory so they're visible in the dashboard.
+    # This runs in a Task (not the GenServer), so we read/update/save ETS directly.
+    safe_memory_call(fn ->
+      wm = Arbor.Memory.load_working_memory(agent_id)
+
+      updated_wm =
+        Enum.reduce(notes, wm, fn note, acc ->
+          Arbor.Memory.WorkingMemory.add_thought(
+            acc,
+            "[hb] #{String.slice(note, 0..120)}",
+            priority: :low
+          )
+        end)
+
+      Arbor.Memory.save_working_memory(agent_id, updated_wm)
     end)
   end
 
