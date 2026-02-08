@@ -225,7 +225,7 @@ defmodule Arbor.Agent.HeartbeatLoopTest do
     test "processes pending messages with context window" do
       # Only works when ContextWindow module is available
       if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
-        window = Arbor.Memory.ContextWindow.new("test")
+        window = ContextWindow.new("test")
 
         state = %{
           pending_messages: [{"hello", [speaker: "User"]}],

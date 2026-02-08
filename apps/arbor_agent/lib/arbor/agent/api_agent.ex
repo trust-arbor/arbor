@@ -316,23 +316,7 @@ defmodule Arbor.Agent.APIAgent do
       provider: state[:heartbeat_provider]
     ]
 
-    think_fn =
-      if user_waiting?(state) do
-        fn -> {:ok, HeartbeatResponse.empty_response()} end
-      else
-        case mode do
-          :conversation ->
-            fn -> {:ok, HeartbeatResponse.empty_response()} end
-
-          m when m in [:introspection, :reflection, :pattern_analysis, :insight_detection] ->
-            fn -> HeartbeatLLM.idle_think(state, hb_opts) end
-
-          _ ->
-            fn -> HeartbeatLLM.think(state, hb_opts) end
-        end
-      end
-
-    case think_fn.() do
+    case select_think_result(state, mode, hb_opts) do
       {:ok, parsed} ->
         {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
          Map.get(parsed, :goal_updates, [])}
@@ -341,6 +325,24 @@ defmodule Arbor.Agent.APIAgent do
         {HeartbeatResponse.empty_response(), "", [], []}
     end
   end
+
+  defp select_think_result(state, mode, hb_opts) do
+    if user_waiting?(state) do
+      {:ok, HeartbeatResponse.empty_response()}
+    else
+      execute_think_mode(state, mode, hb_opts)
+    end
+  end
+
+  defp execute_think_mode(_state, :conversation, _hb_opts),
+    do: {:ok, HeartbeatResponse.empty_response()}
+
+  defp execute_think_mode(state, mode, hb_opts)
+       when mode in [:introspection, :reflection, :pattern_analysis, :insight_detection],
+       do: HeartbeatLLM.idle_think(state, hb_opts)
+
+  defp execute_think_mode(state, _mode, hb_opts),
+    do: HeartbeatLLM.think(state, hb_opts)
 
   defp user_waiting?(state) do
     timing = TimingContext.compute(state)

@@ -148,73 +148,91 @@ defmodule Arbor.Memory.IdentityConsolidator do
         if detector_insights == [] and kg_candidates == [] do
           {:ok, :no_changes}
         else
-          sk = get_or_create_self_knowledge(agent_id)
-
-          # Snapshot before changes
-          sk = SelfKnowledge.snapshot(sk)
-
-          # Process InsightDetector suggestions (existing per-insight integration)
-          {updated_sk, detector_changes} =
-            Enum.reduce(detector_insights, {sk, []}, fn insight, {acc_sk, acc_changes} ->
-              case integrate_insight(acc_sk, insight) do
-                {:ok, new_sk, change} -> {new_sk, [change | acc_changes]}
-                {:skip, _reason} -> {acc_sk, acc_changes}
-              end
-            end)
-
-          # Process KG promotion candidates (category-based synthesis)
-          {updated_sk, kg_changes} = synthesize_from_kg_candidates(updated_sk, kg_candidates)
-
-          all_changes = Enum.reverse(detector_changes) ++ Enum.reverse(kg_changes)
-
-          if all_changes != [] do
-            # Save updated SelfKnowledge
-            save_self_knowledge(agent_id, updated_sk)
-
-            # Record rate limit
-            record_consolidation(agent_id)
-
-            # Mark promoted KG insights (prevents re-promotion)
-            mark_insights_promoted(agent_id, kg_candidates)
-
-            # Emit deferred/blocked signals
-            emit_deferred_signals(agent_id, deferred)
-            emit_blocked_signals(agent_id, blocked)
-
-            # Pattern analysis post-consolidation
-            pattern_insights = analyze_patterns_post_consolidation(agent_id, opts)
-
-            # Update consolidation state
-            state = update_consolidation_state(agent_id)
-
-            # Emit events for each change
-            Enum.each(all_changes, fn change ->
-              Events.record_identity_changed(agent_id, change)
-              Signals.emit_cognitive_adjustment(agent_id, :identity_consolidated, change)
-            end)
-
-            # Emit consolidation completed signal
-            result = %{
-              promoted_count: length(kg_candidates),
-              deferred_count: length(deferred),
-              blocked_count: length(blocked),
-              pattern_insights_count: length(pattern_insights),
-              detector_changes_count: length(detector_changes),
-              changes_made: all_changes,
-              consolidation_number: state.consolidation_count
-            }
-
-            Signals.emit_consolidation_completed(agent_id, result)
-
-            {:ok, updated_sk, result}
-          else
-            {:ok, :no_changes}
-          end
+          process_consolidation_insights(
+            agent_id, detector_insights, kg_candidates, deferred, blocked, opts
+          )
         end
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp process_consolidation_insights(
+         agent_id, detector_insights, kg_candidates, deferred, blocked, opts
+       ) do
+    sk = get_or_create_self_knowledge(agent_id)
+
+    # Snapshot before changes
+    sk = SelfKnowledge.snapshot(sk)
+
+    # Process InsightDetector suggestions (existing per-insight integration)
+    {updated_sk, detector_changes} = integrate_detector_insights(sk, detector_insights)
+
+    # Process KG promotion candidates (category-based synthesis)
+    {updated_sk, kg_changes} = synthesize_from_kg_candidates(updated_sk, kg_candidates)
+
+    all_changes = Enum.reverse(detector_changes) ++ Enum.reverse(kg_changes)
+
+    if all_changes != [] do
+      finalize_consolidation(
+        agent_id, updated_sk, all_changes, kg_candidates,
+        deferred, blocked, detector_changes, opts
+      )
+    else
+      {:ok, :no_changes}
+    end
+  end
+
+  defp integrate_detector_insights(sk, detector_insights) do
+    Enum.reduce(detector_insights, {sk, []}, fn insight, {acc_sk, acc_changes} ->
+      case integrate_insight(acc_sk, insight) do
+        {:ok, new_sk, change} -> {new_sk, [change | acc_changes]}
+        {:skip, _reason} -> {acc_sk, acc_changes}
+      end
+    end)
+  end
+
+  defp finalize_consolidation(
+         agent_id, updated_sk, all_changes, kg_candidates,
+         deferred, blocked, detector_changes, opts
+       ) do
+    # Save updated SelfKnowledge
+    save_self_knowledge(agent_id, updated_sk)
+
+    # Record rate limit
+    record_consolidation(agent_id)
+
+    # Mark promoted KG insights (prevents re-promotion)
+    mark_insights_promoted(agent_id, kg_candidates)
+
+    # Emit deferred/blocked signals
+    emit_deferred_signals(agent_id, deferred)
+    emit_blocked_signals(agent_id, blocked)
+
+    # Pattern analysis post-consolidation
+    pattern_insights = analyze_patterns_post_consolidation(agent_id, opts)
+
+    # Update consolidation state
+    state = update_consolidation_state(agent_id)
+
+    # Emit events for each change
+    emit_change_events(agent_id, all_changes)
+
+    # Emit consolidation completed signal
+    result = %{
+      promoted_count: length(kg_candidates),
+      deferred_count: length(deferred),
+      blocked_count: length(blocked),
+      pattern_insights_count: length(pattern_insights),
+      detector_changes_count: length(detector_changes),
+      changes_made: all_changes,
+      consolidation_number: state.consolidation_count
+    }
+
+    Signals.emit_consolidation_completed(agent_id, result)
+
+    {:ok, updated_sk, result}
   end
 
   @doc """
@@ -769,35 +787,17 @@ defmodule Arbor.Memory.IdentityConsolidator do
   def find_promotion_candidates(agent_id, opts \\ []) do
     case get_graph(agent_id) do
       {:ok, graph} ->
-        min_age_days = Keyword.get(opts, :min_age_days, @default_min_age_days)
-        min_confidence = Keyword.get(opts, :min_confidence, @default_min_confidence)
-        min_access_count = Keyword.get(opts, :min_access_count, @default_min_access_count)
-        min_relevance = Keyword.get(opts, :min_relevance, @default_min_relevance)
-        fast_track = Keyword.get(opts, :fast_track, false)
-        fast_track_confidence = Keyword.get(opts, :fast_track_confidence, @default_fast_track_confidence)
+        criteria_config = %{
+          min_confidence: Keyword.get(opts, :min_confidence, @default_min_confidence),
+          min_relevance: Keyword.get(opts, :min_relevance, @default_min_relevance),
+          min_age_days: Keyword.get(opts, :min_age_days, @default_min_age_days),
+          min_access_count: Keyword.get(opts, :min_access_count, @default_min_access_count),
+          fast_track: Keyword.get(opts, :fast_track, false),
+          fast_track_confidence: Keyword.get(opts, :fast_track_confidence, @default_fast_track_confidence),
+          now: DateTime.utc_now()
+        }
 
-        now = DateTime.utc_now()
-
-        criteria_fn = fn node ->
-          confidence_ok = node.confidence >= min_confidence
-          relevance_ok = node.relevance >= min_relevance
-          evidence_ok = has_valid_evidence?(node)
-          not_blocked = not ((node.metadata || %{})[:promotion_blocked] == true)
-          not_promoted = is_nil((node.metadata || %{})[:promoted_at])
-
-          age_ok = node_age_days(node, now) >= min_age_days
-          access_ok = (node.access_count || 0) >= min_access_count
-
-          maturation_ok =
-            if fast_track and node.confidence >= fast_track_confidence do
-              true
-            else
-              age_ok and access_ok
-            end
-
-          confidence_ok and relevance_ok and evidence_ok and not_blocked and
-            not_promoted and maturation_ok
-        end
+        criteria_fn = fn node -> meets_promotion_criteria?(node, criteria_config) end
 
         KnowledgeGraph.find_by_type_and_criteria(graph, :insight, criteria_fn,
           sort_by: :confidence
@@ -812,6 +812,30 @@ defmodule Arbor.Memory.IdentityConsolidator do
     case get_graph(agent_id) do
       {:ok, graph} -> KnowledgeGraph.find_by_type(graph, :insight)
       _ -> []
+    end
+  end
+
+  defp meets_promotion_criteria?(node, config) do
+    metadata = node.metadata || %{}
+
+    confidence_ok = node.confidence >= config.min_confidence
+    relevance_ok = node.relevance >= config.min_relevance
+    evidence_ok = has_valid_evidence?(node)
+    not_blocked = metadata[:promotion_blocked] != true
+    not_promoted = is_nil(metadata[:promoted_at])
+    maturation_ok = maturation_met?(node, config)
+
+    confidence_ok and relevance_ok and evidence_ok and not_blocked and
+      not_promoted and maturation_ok
+  end
+
+  defp maturation_met?(node, config) do
+    if config.fast_track and node.confidence >= config.fast_track_confidence do
+      true
+    else
+      age_ok = node_age_days(node, config.now) >= config.min_age_days
+      access_ok = (node.access_count || 0) >= config.min_access_count
+      age_ok and access_ok
     end
   end
 
@@ -938,6 +962,13 @@ defmodule Arbor.Memory.IdentityConsolidator do
     end)
   end
 
+  defp emit_change_events(agent_id, changes) do
+    Enum.each(changes, fn change ->
+      Events.record_identity_changed(agent_id, change)
+      Signals.emit_cognitive_adjustment(agent_id, :identity_consolidated, change)
+    end)
+  end
+
   defp mark_insights_promoted(agent_id, promoted_candidates) do
     case get_graph(agent_id) do
       {:ok, graph} ->
@@ -945,21 +976,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
 
         updated_graph =
           Enum.reduce(promoted_candidates, graph, fn node, acc_graph ->
-            case merge_node_metadata(acc_graph, node.id, %{
-                   promoted_at: DateTime.to_iso8601(now),
-                   promotion_blocked: true
-                 }) do
-              {:ok, new_graph} ->
-                Signals.emit_insight_promoted(agent_id, node.id, %{
-                  content: node.content,
-                  confidence: node.confidence
-                })
-
-                new_graph
-
-              {:error, _} ->
-                acc_graph
-            end
+            promote_single_node(acc_graph, agent_id, node, now)
           end)
 
         save_graph(agent_id, updated_graph)
@@ -970,30 +987,51 @@ defmodule Arbor.Memory.IdentityConsolidator do
     end
   end
 
+  defp promote_single_node(graph, agent_id, node, now) do
+    case merge_node_metadata(graph, node.id, %{
+           promoted_at: DateTime.to_iso8601(now),
+           promotion_blocked: true
+         }) do
+      {:ok, new_graph} ->
+        Signals.emit_insight_promoted(agent_id, node.id, %{
+          content: node.content,
+          confidence: node.confidence
+        })
+
+        new_graph
+
+      {:error, _} ->
+        graph
+    end
+  end
+
   # ============================================================================
   # Pattern Analysis
   # ============================================================================
 
   defp analyze_patterns_post_consolidation(agent_id, opts) do
     if Keyword.get(opts, :analyze_patterns, true) do
-      case Patterns.analyze(agent_id) do
-        %{suggestions: suggestions} when is_list(suggestions) and suggestions != [] ->
-          Enum.map(suggestions, fn text ->
-            %{
-              content: text,
-              category: :preference,
-              confidence: 0.6,
-              evidence: ["pattern_analysis"],
-              source: :pattern_analysis
-            }
-          end)
-
-        _ ->
-          []
-      end
+      agent_id |> Patterns.analyze() |> suggestions_to_insights()
     else
       []
     end
+  end
+
+  defp suggestions_to_insights(%{suggestions: suggestions})
+       when is_list(suggestions) and suggestions != [] do
+    Enum.map(suggestions, &suggestion_to_insight/1)
+  end
+
+  defp suggestions_to_insights(_), do: []
+
+  defp suggestion_to_insight(text) do
+    %{
+      content: text,
+      category: :preference,
+      confidence: 0.6,
+      evidence: ["pattern_analysis"],
+      source: :pattern_analysis
+    }
   end
 
   defp get_insight_category(node) do
@@ -1005,12 +1043,16 @@ defmodule Arbor.Memory.IdentityConsolidator do
     by_category = Enum.group_by(candidates, &get_insight_category/1)
 
     Enum.reduce(by_category, {sk, []}, fn {category, nodes}, {acc_sk, acc_changes} ->
-      Enum.reduce(nodes, {acc_sk, acc_changes}, fn node, {sk_inner, changes_inner} ->
-        case apply_kg_insight(sk_inner, node, category) do
-          {:ok, new_sk, change} -> {new_sk, [change | changes_inner]}
-          {:skip, _} -> {sk_inner, changes_inner}
-        end
-      end)
+      synthesize_category_nodes(acc_sk, acc_changes, nodes, category)
+    end)
+  end
+
+  defp synthesize_category_nodes(sk, changes, nodes, category) do
+    Enum.reduce(nodes, {sk, changes}, fn node, {sk_inner, changes_inner} ->
+      case apply_kg_insight(sk_inner, node, category) do
+        {:ok, new_sk, change} -> {new_sk, [change | changes_inner]}
+        {:skip, _} -> {sk_inner, changes_inner}
+      end
     end)
   end
 
@@ -1018,64 +1060,68 @@ defmodule Arbor.Memory.IdentityConsolidator do
     content = node.content || ""
     evidence = ((node.metadata || %{})[:evidence] || []) |> List.wrap() |> List.first()
 
-    case category do
-      cat when cat in [:personality, "personality"] ->
-        trait = extract_trait_from_content(content)
-
-        if trait do
-          updated_sk = SelfKnowledge.add_trait(sk, trait, node.confidence, evidence)
-
-          {:ok, updated_sk,
-           %{
-             field: :personality_traits,
-             old_value: nil,
-             new_value: {trait, node.confidence},
-             reason: "kg_promotion",
-             source_node_id: node.id
-           }}
-        else
-          {:skip, :could_not_extract_trait}
-        end
-
-      cat when cat in [:capability, "capability"] ->
-        cap = extract_capability_from_content(content)
-
-        if cap do
-          updated_sk = SelfKnowledge.add_capability(sk, cap, node.confidence, evidence)
-
-          {:ok, updated_sk,
-           %{
-             field: :capabilities,
-             old_value: nil,
-             new_value: {cap, node.confidence},
-             reason: "kg_promotion",
-             source_node_id: node.id
-           }}
-        else
-          {:skip, :could_not_extract_capability}
-        end
-
-      cat when cat in [:value, "value"] ->
-        val = extract_value_from_content(content)
-
-        if val do
-          updated_sk = SelfKnowledge.add_value(sk, val, node.confidence, evidence)
-
-          {:ok, updated_sk,
-           %{
-             field: :values,
-             old_value: nil,
-             new_value: {val, node.confidence},
-             reason: "kg_promotion",
-             source_node_id: node.id
-           }}
-        else
-          {:skip, :could_not_extract_value}
-        end
-
-      _ ->
-        {:skip, :unknown_category}
+    case extract_and_apply_insight(sk, node, category, content, evidence) do
+      nil -> {:skip, :unknown_category}
+      result -> result
     end
+  end
+
+  defp extract_and_apply_insight(sk, node, cat, content, evidence)
+       when cat in [:personality, "personality"] do
+    apply_extracted_insight(
+      extract_trait_from_content(content),
+      sk,
+      node,
+      :personality_traits,
+      &SelfKnowledge.add_trait(&1, &2, &3, &4),
+      evidence,
+      :could_not_extract_trait
+    )
+  end
+
+  defp extract_and_apply_insight(sk, node, cat, content, evidence)
+       when cat in [:capability, "capability"] do
+    apply_extracted_insight(
+      extract_capability_from_content(content),
+      sk,
+      node,
+      :capabilities,
+      &SelfKnowledge.add_capability(&1, &2, &3, &4),
+      evidence,
+      :could_not_extract_capability
+    )
+  end
+
+  defp extract_and_apply_insight(sk, node, cat, content, evidence)
+       when cat in [:value, "value"] do
+    apply_extracted_insight(
+      extract_value_from_content(content),
+      sk,
+      node,
+      :values,
+      &SelfKnowledge.add_value(&1, &2, &3, &4),
+      evidence,
+      :could_not_extract_value
+    )
+  end
+
+  defp extract_and_apply_insight(_sk, _node, _cat, _content, _evidence), do: nil
+
+  defp apply_extracted_insight(nil, _sk, _node, _field, _apply_fn, _evidence, skip_reason) do
+    {:skip, skip_reason}
+  end
+
+  defp apply_extracted_insight(extracted, sk, node, field, apply_fn, evidence, _skip_reason) do
+    updated_sk = apply_fn.(sk, extracted, node.confidence, evidence)
+
+    {:ok, updated_sk,
+     %{
+       field: field,
+       old_value: nil,
+       new_value: {extracted, node.confidence},
+       reason: "kg_promotion",
+       source_node_id: node.id
+     }}
   end
 
   defp extract_trait_from_content(content) do

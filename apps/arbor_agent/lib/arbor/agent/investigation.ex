@@ -323,29 +323,10 @@ defmodule Arbor.Agent.Investigation do
   defp gather_skill_symptoms(%{skill: :processes, details: details}) do
     pid = Map.get(details, :pid) || Map.get(details, :process)
 
-    # Process-specific symptoms
     {pid_symptoms, pid_log} =
-      if is_pid(pid) do
-        case safe_call(fn -> Diagnostics.inspect_process(pid) end, nil) do
-          nil ->
-            {[], []}
-
-          info ->
-            {[
-               %{
-                 type: :process_info,
-                 source: :diagnostics,
-                 description: "Anomalous process details",
-                 value: info,
-                 severity: :high,
-                 timestamp: DateTime.utc_now()
-               }
-             ],
-             ["Process #{inspect(pid)}: queue=#{info.message_queue_len}, memory=#{info.memory}"]}
-        end
-      else
-        {[], []}
-      end
+      inspect_process_symptom(pid, :process_info, "Anomalous process details", fn info ->
+        "Process #{inspect(pid)}: queue=#{info.message_queue_len}, memory=#{info.memory}"
+      end)
 
     # Top processes by message queue
     top_queue = safe_call(fn -> Diagnostics.top_processes_by(:message_queue, 5) end, [])
@@ -372,28 +353,10 @@ defmodule Arbor.Agent.Investigation do
   defp gather_skill_symptoms(%{skill: :memory, details: details}) do
     pid = Map.get(details, :pid) || Map.get(details, :process)
 
-    # Process-specific memory symptoms
     {pid_symptoms, pid_log} =
-      if is_pid(pid) do
-        case safe_call(fn -> Diagnostics.inspect_process(pid) end, nil) do
-          nil ->
-            {[], []}
-
-          info ->
-            {[
-               %{
-                 type: :process_memory,
-                 source: :diagnostics,
-                 description: "High memory process details",
-                 value: info,
-                 severity: :high,
-                 timestamp: DateTime.utc_now()
-               }
-             ], ["Memory process: heap=#{info.heap_size}, total=#{info.total_heap_size}"]}
-        end
-      else
-        {[], []}
-      end
+      inspect_process_symptom(pid, :process_memory, "High memory process details", fn info ->
+        "Memory process: heap=#{info.heap_size}, total=#{info.total_heap_size}"
+      end)
 
     # Top processes by memory
     top_mem = safe_call(fn -> Diagnostics.top_processes_by(:memory, 5) end, [])
@@ -478,6 +441,27 @@ defmodule Arbor.Agent.Investigation do
   end
 
   defp gather_skill_symptoms(_), do: {[], []}
+
+  defp inspect_process_symptom(pid, type, description, log_fn) when is_pid(pid) do
+    case safe_call(fn -> Diagnostics.inspect_process(pid) end, nil) do
+      nil ->
+        {[], []}
+
+      info ->
+        {[
+           %{
+             type: type,
+             source: :diagnostics,
+             description: description,
+             value: info,
+             severity: :high,
+             timestamp: DateTime.utc_now()
+           }
+         ], [log_fn.(info)]}
+    end
+  end
+
+  defp inspect_process_symptom(_pid, _type, _description, _log_fn), do: {[], []}
 
   defp hypothesize_process_issue(symptoms, anomaly) do
     bloated = find_symptom(symptoms, :bloated_queues)

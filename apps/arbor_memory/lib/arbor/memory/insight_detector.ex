@@ -478,26 +478,28 @@ defmodule Arbor.Memory.InsightDetector do
       []
     else
       combined = Enum.join(thoughts, " ") |> String.downcase()
+      thought_count = length(thoughts)
 
       categories()
-      |> Enum.map(fn {category, keywords, template} ->
-        hits = count_keyword_hits(combined, keywords)
-
-        if hits >= min_hits do
-          %{
-            content: template,
-            category: category,
-            confidence: min(0.9, 0.4 + hits * 0.1),
-            source: :working_memory,
-            evidence: ["#{hits} keyword matches in #{length(thoughts)} recent thoughts"]
-          }
-        else
-          nil
-        end
-      end)
-      |> Enum.reject(&is_nil/1)
+      |> Enum.flat_map(&build_suggestion_from_category(&1, combined, min_hits, thought_count))
       |> Enum.sort_by(& &1.confidence, :desc)
       |> Enum.take(max_suggestions)
+    end
+  end
+
+  defp build_suggestion_from_category({category, keywords, template}, combined, min_hits, thought_count) do
+    hits = count_keyword_hits(combined, keywords)
+
+    if hits >= min_hits do
+      [%{
+        content: template,
+        category: category,
+        confidence: min(0.9, 0.4 + hits * 0.1),
+        source: :working_memory,
+        evidence: ["#{hits} keyword matches in #{thought_count} recent thoughts"]
+      }]
+    else
+      []
     end
   end
 

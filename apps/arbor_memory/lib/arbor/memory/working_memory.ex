@@ -60,6 +60,7 @@ defmodule Arbor.Memory.WorkingMemory do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Memory.Signals
   alias Arbor.Memory.TokenBudget
 
   require Logger
@@ -464,10 +465,9 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec rebuild_from_long_term(t()) :: {:ok, t()} | {:error, term()}
   def rebuild_from_long_term(%__MODULE__{} = wm) do
-    signals_mod = Arbor.Memory.Signals
-    if Code.ensure_loaded?(signals_mod) and
-         function_exported?(signals_mod, :query_recent, 2) do
-      case apply(signals_mod, :query_recent, [wm.agent_id, [limit: 100]]) do
+    if Code.ensure_loaded?(Signals) and
+         function_exported?(Signals, :query_recent, 2) do
+      case Signals.query_recent(wm.agent_id, limit: 100) do
         {:ok, signals} ->
           rebuilt = Enum.reduce(signals, wm, &apply_memory_event/2)
           Logger.info("Rebuilt working memory for #{wm.agent_id} from #{length(signals)} signals")
@@ -1019,65 +1019,7 @@ defmodule Arbor.Memory.WorkingMemory do
   @doc since: "0.1.0"
   def apply_memory_event(%{type: sig_type, data: data}, wm) do
     type = data[:type] || data["type"] || infer_type(sig_type)
-
-    case type do
-      t when t in [:identity, "identity"] ->
-        %{wm | name: data[:name] || data["name"]}
-
-      t when t in [:relationship, "relationship"] ->
-        human = data[:human_name] || data["human_name"]
-        context = data[:context] || data["context"]
-        set_relationship(wm, human || wm.current_human, context || wm.relationship_context)
-
-      t when t in [:goal, "goal"] ->
-        goal = data[:goal] || data["goal"]
-        event_type = data[:event_type] || data["event_type"]
-
-        case event_type do
-          et when et in [:added, "added"] -> add_goal(wm, goal)
-          et when et in [:achieved, "achieved", :failed, "failed"] -> remove_goal(wm, goal[:id] || goal["id"])
-          _ -> add_goal(wm, goal)
-        end
-
-      t when t in [:thought, "thought"] ->
-        content = data[:content] || data["content"] || data[:thought_preview] || data["thought_preview"]
-        if content, do: add_thought(wm, content), else: wm
-
-      t when t in [:engagement, "engagement"] ->
-        level = data[:level] || data["level"]
-        if is_number(level), do: set_engagement_level(wm, level), else: wm
-
-      t when t in [:concern, "concern"] ->
-        concern = data[:concern] || data["concern"]
-        action = data[:action] || data["action"]
-        cond do
-          action in [:resolved, "resolved"] ->
-            %{wm | concerns: Enum.reject(wm.concerns, &(normalize_concern_text(&1) == concern))}
-          concern ->
-            add_concern(wm, concern)
-          true ->
-            wm
-        end
-
-      t when t in [:curiosity, "curiosity"] ->
-        item = data[:item] || data["item"]
-        action = data[:action] || data["action"]
-        cond do
-          action in [:satisfied, "satisfied"] ->
-            %{wm | curiosity: Enum.reject(wm.curiosity, &(normalize_curiosity_text(&1) == item))}
-          item ->
-            add_curiosity(wm, item)
-          true ->
-            wm
-        end
-
-      t when t in [:conversation, "conversation"] ->
-        conv = data[:conversation] || data["conversation"]
-        set_conversation(wm, conv)
-
-      _ ->
-        wm
-    end
+    apply_event_by_type(type, data, wm)
   end
 
   # Fallback for signals without :type field (legacy format with just :data)
@@ -1086,6 +1028,105 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   def apply_memory_event(_signal, wm), do: wm
+
+  # Event type dispatch — each clause extracted for reduced complexity
+  defp apply_event_by_type(:identity, data, wm), do: apply_identity_event(data, wm)
+  defp apply_event_by_type("identity", data, wm), do: apply_identity_event(data, wm)
+  defp apply_event_by_type(:relationship, data, wm), do: apply_relationship_event(data, wm)
+  defp apply_event_by_type("relationship", data, wm), do: apply_relationship_event(data, wm)
+  defp apply_event_by_type(:goal, data, wm), do: apply_goal_event(data, wm)
+  defp apply_event_by_type("goal", data, wm), do: apply_goal_event(data, wm)
+  defp apply_event_by_type(:thought, data, wm), do: apply_thought_event(data, wm)
+  defp apply_event_by_type("thought", data, wm), do: apply_thought_event(data, wm)
+  defp apply_event_by_type(:engagement, data, wm), do: apply_engagement_event(data, wm)
+  defp apply_event_by_type("engagement", data, wm), do: apply_engagement_event(data, wm)
+  defp apply_event_by_type(:concern, data, wm), do: apply_concern_event(data, wm)
+  defp apply_event_by_type("concern", data, wm), do: apply_concern_event(data, wm)
+  defp apply_event_by_type(:curiosity, data, wm), do: apply_curiosity_event(data, wm)
+  defp apply_event_by_type("curiosity", data, wm), do: apply_curiosity_event(data, wm)
+  defp apply_event_by_type(:conversation, data, wm), do: apply_conversation_event(data, wm)
+  defp apply_event_by_type("conversation", data, wm), do: apply_conversation_event(data, wm)
+  defp apply_event_by_type(_type, _data, wm), do: wm
+
+  defp apply_identity_event(data, wm) do
+    %{wm | name: data[:name] || data["name"]}
+  end
+
+  defp apply_relationship_event(data, wm) do
+    human = data[:human_name] || data["human_name"]
+    context = data[:context] || data["context"]
+    set_relationship(wm, human || wm.current_human, context || wm.relationship_context)
+  end
+
+  defp apply_goal_event(data, wm) do
+    goal = data[:goal] || data["goal"]
+    event_type = data[:event_type] || data["event_type"]
+    apply_goal_by_event_type(event_type, goal, wm)
+  end
+
+  defp apply_goal_by_event_type(et, goal, wm) when et in [:added, "added"],
+    do: add_goal(wm, goal)
+
+  defp apply_goal_by_event_type(et, goal, wm) when et in [:achieved, "achieved", :failed, "failed"],
+    do: remove_goal(wm, goal[:id] || goal["id"])
+
+  defp apply_goal_by_event_type(_et, goal, wm),
+    do: add_goal(wm, goal)
+
+  defp apply_thought_event(data, wm) do
+    content = data[:content] || data["content"] || data[:thought_preview] || data["thought_preview"]
+    if content, do: add_thought(wm, content), else: wm
+  end
+
+  defp apply_engagement_event(data, wm) do
+    level = data[:level] || data["level"]
+    if is_number(level), do: set_engagement_level(wm, level), else: wm
+  end
+
+  defp apply_concern_event(data, wm) do
+    concern = data[:concern] || data["concern"]
+    action = data[:action] || data["action"]
+    apply_concern_action(action, concern, wm)
+  end
+
+  defp apply_concern_action(action, concern, wm) when action in [:resolved, "resolved"] do
+    %{wm | concerns: Enum.reject(wm.concerns, &(normalize_concern_text(&1) == concern))}
+  end
+
+  defp apply_concern_action(_action, concern, wm) when is_binary(concern) do
+    add_concern(wm, concern)
+  end
+
+  defp apply_concern_action(_action, concern, wm) when is_map(concern) do
+    add_concern(wm, concern)
+  end
+
+  defp apply_concern_action(_action, _concern, wm), do: wm
+
+  defp apply_curiosity_event(data, wm) do
+    item = data[:item] || data["item"]
+    action = data[:action] || data["action"]
+    apply_curiosity_action(action, item, wm)
+  end
+
+  defp apply_curiosity_action(action, item, wm) when action in [:satisfied, "satisfied"] do
+    %{wm | curiosity: Enum.reject(wm.curiosity, &(normalize_curiosity_text(&1) == item))}
+  end
+
+  defp apply_curiosity_action(_action, item, wm) when is_binary(item) do
+    add_curiosity(wm, item)
+  end
+
+  defp apply_curiosity_action(_action, item, wm) when is_map(item) do
+    add_curiosity(wm, item)
+  end
+
+  defp apply_curiosity_action(_action, _item, wm), do: wm
+
+  defp apply_conversation_event(data, wm) do
+    conv = data[:conversation] || data["conversation"]
+    set_conversation(wm, conv)
+  end
 
   # Map signal types to working memory data types
   defp infer_type(:identity_change), do: :identity

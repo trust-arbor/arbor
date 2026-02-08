@@ -188,29 +188,7 @@ defmodule Arbor.Memory.Summarizer do
     prompt = build_prompt(text, algorithm, opts)
     system_prompt = system_prompt_for(algorithm)
 
-    result =
-      if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
-        llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
-
-        case Arbor.AI.generate_text(prompt, llm_opts) do
-          {:ok, %{text: summary}} when is_binary(summary) ->
-            {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
-
-          {:ok, summary} when is_binary(summary) ->
-            {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
-
-          {:error, reason} ->
-            {:error, reason}
-
-          other ->
-            {:error, {:unexpected_response, other}}
-        end
-      else
-        {:error, :arbor_ai_not_available}
-      end
-
-    # Graceful fallback: if LLM fails, produce a simple truncation summary
-    case result do
+    case call_llm_summarize(prompt, system_prompt, model, complexity) do
       {:ok, _} = success ->
         success
 
@@ -218,6 +196,28 @@ defmodule Arbor.Memory.Summarizer do
         max_length = Keyword.get(opts, :max_length, 200)
         fallback = fallback_summary(text, max_length)
         {:ok, %{summary: fallback, complexity: complexity, model_used: "fallback"}}
+    end
+  end
+
+  defp call_llm_summarize(prompt, system_prompt, model, complexity) do
+    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+      llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
+
+      case Arbor.AI.generate_text(prompt, llm_opts) do
+        {:ok, %{text: summary}} when is_binary(summary) ->
+          {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
+
+        {:ok, summary} when is_binary(summary) ->
+          {:ok, %{summary: String.trim(summary), complexity: complexity, model_used: model}}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        other ->
+          {:error, {:unexpected_response, other}}
+      end
+    else
+      {:error, :arbor_ai_not_available}
     end
   end
 

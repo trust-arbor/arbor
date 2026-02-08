@@ -396,23 +396,14 @@ defmodule Arbor.Memory.ActionPatterns do
 
   @doc false
   def parse_llm_learnings(response, patterns, max_learnings) do
-    text =
-      cond do
-        is_map(response) and is_binary(response[:text]) -> response[:text]
-        is_map(response) and is_binary(response["text"]) -> response["text"]
-        is_binary(response) -> response
-        true -> ""
-      end
-
+    text = extract_response_text(response)
     json_text = extract_json(text)
 
     case Jason.decode(json_text) do
       {:ok, learnings} when is_list(learnings) ->
         learnings
         |> Enum.take(max_learnings)
-        |> Enum.map(fn l ->
-          l["content"] || ""
-        end)
+        |> Enum.map(fn l -> l["content"] || "" end)
         |> Enum.filter(fn content -> content != "" end)
 
       {:error, _} ->
@@ -420,6 +411,18 @@ defmodule Arbor.Memory.ActionPatterns do
         synthesize_with_templates(patterns)
     end
   end
+
+  defp extract_response_text(response) when is_binary(response), do: response
+
+  defp extract_response_text(response) when is_map(response) do
+    cond do
+      is_binary(response[:text]) -> response[:text]
+      is_binary(response["text"]) -> response["text"]
+      true -> ""
+    end
+  end
+
+  defp extract_response_text(_response), do: ""
 
   @doc false
   def extract_json(text) do

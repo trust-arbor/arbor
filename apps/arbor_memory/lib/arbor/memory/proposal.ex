@@ -536,26 +536,27 @@ defmodule Arbor.Memory.Proposal do
       end)
 
     case exact do
-      nil ->
-        # Fuzzy match using Jaro-Winkler distance
-        # Only apply to content >= 30 chars (short strings have inflated similarity)
-        if String.length(content_lower) >= 30 do
-          similar =
-            Enum.find(candidates, fn p ->
-              String.jaro_distance(content_lower, String.downcase(p.content)) >=
-                @content_similarity_threshold
-            end)
+      nil -> fuzzy_match_duplicate(content_lower, candidates)
+      p -> {:duplicate, p}
+    end
+  end
 
-          case similar do
-            nil -> :no_duplicate
-            p -> {:duplicate, p}
-          end
-        else
-          :no_duplicate
-        end
+  # Fuzzy match using Jaro-Winkler distance
+  # Only apply to content >= 30 chars (short strings have inflated similarity)
+  defp fuzzy_match_duplicate(content_lower, candidates) do
+    if String.length(content_lower) < 30 do
+      :no_duplicate
+    else
+      similar =
+        Enum.find(candidates, fn p ->
+          String.jaro_distance(content_lower, String.downcase(p.content)) >=
+            @content_similarity_threshold
+        end)
 
-      p ->
-        {:duplicate, p}
+      case similar do
+        nil -> :no_duplicate
+        p -> {:duplicate, p}
+      end
     end
   end
 

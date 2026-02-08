@@ -91,17 +91,7 @@ defmodule Arbor.Agent.ReasoningLoop do
     loop_pid = self()
 
     safe_call(fn ->
-      Arbor.Memory.subscribe_to_percepts(agent_id, fn signal ->
-        # Signal.data contains %{percept: %Percept{}, ...}
-        data = Map.get(signal, :data) || %{}
-        percept = data[:percept] || data["percept"]
-
-        if percept do
-          GenServer.cast(loop_pid, {:percept, percept})
-        end
-
-        :ok
-      end)
+      Arbor.Memory.subscribe_to_percepts(agent_id, &forward_percept_signal(&1, loop_pid))
     end)
 
     # Auto-start continuous mode
@@ -249,6 +239,15 @@ defmodule Arbor.Agent.ReasoningLoop do
 
   defp safe_emit(category, type, data) do
     safe_call(fn -> Arbor.Signals.emit(category, type, data) end)
+  end
+
+  defp forward_percept_signal(signal, loop_pid) do
+    data = Map.get(signal, :data) || %{}
+    percept = data[:percept] || data["percept"]
+
+    if percept, do: GenServer.cast(loop_pid, {:percept, percept})
+
+    :ok
   end
 
   defp safe_call(fun) do
