@@ -32,6 +32,8 @@ defmodule Arbor.Agent.HeartbeatLoop do
   The agent must implement the `run_heartbeat_cycle/2` callback.
   """
 
+  alias Arbor.Memory.ContextWindow
+
   require Logger
 
   @type heartbeat_result ::
@@ -333,8 +335,8 @@ defmodule Arbor.Agent.HeartbeatLoop do
     if config(:context_persistence_enabled, true) do
       agent_id = state[:agent_id] || state[:id]
 
-      if agent_id && Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
-        serialized = Arbor.Memory.ContextWindow.serialize(window)
+      if agent_id && Code.ensure_loaded?(ContextWindow) do
+        serialized = ContextWindow.serialize(window)
         path = context_window_path(agent_id)
         dir = Path.dirname(path)
         File.mkdir_p!(dir)
@@ -348,9 +350,9 @@ defmodule Arbor.Agent.HeartbeatLoop do
   end
 
   defp add_message_to_window(window, message, speaker) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-         function_exported?(Arbor.Memory.ContextWindow, :add_entry, 3) do
-      Arbor.Memory.ContextWindow.add_entry(window, :message, "#{speaker}: #{message}")
+    if Code.ensure_loaded?(ContextWindow) and
+         function_exported?(ContextWindow, :add_entry, 3) do
+      ContextWindow.add_entry(window, :message, "#{speaker}: #{message}")
     else
       window
     end

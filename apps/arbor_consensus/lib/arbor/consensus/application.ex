@@ -8,6 +8,8 @@ defmodule Arbor.Consensus.Application do
 
   use Application
 
+  alias Arbor.Consensus.TopicRegistry
+
   @impl true
   def start(_type, _args) do
     children =
@@ -15,7 +17,7 @@ defmodule Arbor.Consensus.Application do
         [
           Arbor.Consensus.EventStore,
           # TopicRegistry for topic routing configuration
-          Arbor.Consensus.TopicRegistry,
+          TopicRegistry,
           # Registry for EvaluatorAgent name lookups
           {Registry, keys: :unique, name: Arbor.Consensus.EvaluatorAgent.Registry},
           # DynamicSupervisor for persistent EvaluatorAgents
@@ -32,7 +34,7 @@ defmodule Arbor.Consensus.Application do
 
     # Register default topics after supervisor is up
     if Application.get_env(:arbor_consensus, :start_children, true) do
-      Arbor.Consensus.TopicRegistry.register_default_topics()
+      TopicRegistry.register_default_topics()
     end
 
     result

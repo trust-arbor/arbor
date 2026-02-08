@@ -23,9 +23,9 @@ defmodule Arbor.Agent.Investigation do
       proposal = Investigation.to_proposal(investigation)
   """
 
-  alias Arbor.Monitor.Diagnostics
   alias Arbor.Historian
   alias Arbor.Historian.Timeline.Span
+  alias Arbor.Monitor.Diagnostics
 
   require Logger
 
@@ -150,7 +150,7 @@ defmodule Arbor.Agent.Investigation do
     bloated = safe_call(fn -> Diagnostics.find_bloated_queues(100) end, [])
 
     {bloated_symptoms, bloated_log} =
-      if length(bloated) > 0 do
+      if bloated != [] do
         {[
            %{
              type: :bloated_queues,
@@ -351,7 +351,7 @@ defmodule Arbor.Agent.Investigation do
     top_queue = safe_call(fn -> Diagnostics.top_processes_by(:message_queue, 5) end, [])
 
     {queue_symptoms, queue_log} =
-      if length(top_queue) > 0 do
+      if top_queue != [] do
         {[
            %{
              type: :top_by_queue,
@@ -399,7 +399,7 @@ defmodule Arbor.Agent.Investigation do
     top_mem = safe_call(fn -> Diagnostics.top_processes_by(:memory, 5) end, [])
 
     {mem_symptoms, mem_log} =
-      if length(top_mem) > 0 do
+      if top_mem != [] do
         {[
            %{
              type: :top_by_memory,
@@ -486,7 +486,7 @@ defmodule Arbor.Agent.Investigation do
 
     # Hypothesis 1: Message queue flood
     bloated_hyp =
-      if bloated && is_list(bloated.value) && length(bloated.value) > 0 do
+      if bloated && is_list(bloated.value) && bloated.value != [] do
         top_process = List.first(bloated.value)
 
         [
@@ -571,7 +571,7 @@ defmodule Arbor.Agent.Investigation do
 
     # Hypothesis 2: Top memory consumer
     top_hyp =
-      if top_memory && is_list(top_memory.value) && length(top_memory.value) > 0 do
+      if top_memory && is_list(top_memory.value) && top_memory.value != [] do
         top = List.first(top_memory.value)
 
         [
@@ -737,14 +737,14 @@ defmodule Arbor.Agent.Investigation do
 
   defp build_ai_prompt(investigation) do
     symptoms_text =
-      investigation.symptoms
-      |> Enum.map(fn s -> "- #{s.description}: #{inspect(s.value)}" end)
-      |> Enum.join("\n")
+      Enum.map_join(investigation.symptoms, "\n", fn s ->
+        "- #{s.description}: #{inspect(s.value)}"
+      end)
 
     hypotheses_text =
-      investigation.hypotheses
-      |> Enum.map(fn h -> "- #{h.root_cause} (confidence: #{h.confidence})" end)
-      |> Enum.join("\n")
+      Enum.map_join(investigation.hypotheses, "\n", fn h ->
+        "- #{h.root_cause} (confidence: #{h.confidence})"
+      end)
 
     """
     Analyze this BEAM runtime investigation and refine the diagnosis:

@@ -69,9 +69,19 @@ defmodule Arbor.AI do
     Config,
     Response,
     Router,
+    SessionReader,
     TaskMeta,
     UsageStats
   }
+
+  alias Arbor.Memory.GoalStore
+  alias Arbor.Memory.IdentityConsolidator
+  alias Arbor.Memory.KnowledgeGraph
+  alias Arbor.Memory.SelfKnowledge
+  alias Arbor.Memory.WorkingMemory
+
+  alias Jido.AI.Actions.ToolCalling.CallWithTools
+  alias Jido.AI.Executor
 
   require Logger
 
@@ -246,7 +256,7 @@ defmodule Arbor.AI do
 
     # Build jido_ai tools map from Arbor.Actions
     action_modules = Keyword.get(opts, :tools, Arbor.Actions.all_actions())
-    tools_map = Jido.AI.Executor.build_tools_map(action_modules)
+    tools_map = Executor.build_tools_map(action_modules)
 
     # Auto-build rich system prompt if none provided and agent_id is available
     system_prompt =
@@ -278,7 +288,7 @@ defmodule Arbor.AI do
       |> Map.merge(extra_context)
 
     # Execute via jido_ai agentic loop
-    result = Jido.AI.Actions.ToolCalling.CallWithTools.run(params, context)
+    result = CallWithTools.run(params, context)
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     case result do
@@ -324,8 +334,7 @@ defmodule Arbor.AI do
     ]
 
     sections
-    |> Enum.reject(&is_nil/1)
-    |> Enum.reject(&(&1 == ""))
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n")
   end
 
@@ -341,14 +350,14 @@ defmodule Arbor.AI do
   end
 
   defp build_self_knowledge_section(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-         function_exported?(Arbor.Memory.IdentityConsolidator, :get_self_knowledge, 1) do
-      case Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id) do
+    if Code.ensure_loaded?(IdentityConsolidator) and
+         function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
+      case IdentityConsolidator.get_self_knowledge(agent_id) do
         nil ->
           nil
 
         sk ->
-          summary = Arbor.Memory.SelfKnowledge.summarize(sk)
+          summary = SelfKnowledge.summarize(sk)
           if summary not in ["", nil], do: "## Self-Awareness\n#{summary}"
       end
     end
@@ -359,9 +368,9 @@ defmodule Arbor.AI do
   end
 
   defp build_goals_section(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory.GoalStore) and
-         function_exported?(Arbor.Memory.GoalStore, :get_active_goals, 1) do
-      goals = Arbor.Memory.GoalStore.get_active_goals(agent_id)
+    if Code.ensure_loaded?(GoalStore) and
+         function_exported?(GoalStore, :get_active_goals, 1) do
+      goals = GoalStore.get_active_goals(agent_id)
 
       if goals == [] do
         nil
@@ -369,11 +378,10 @@ defmodule Arbor.AI do
         lines =
           goals
           |> Enum.take(5)
-          |> Enum.map(fn goal ->
+          |> Enum.map_join("\n", fn goal ->
             pct = round((goal.progress || 0) * 100)
             "- [#{pct}%] #{goal.description} (priority: #{goal.priority})"
           end)
-          |> Enum.join("\n")
 
         "## Active Goals\n#{lines}"
       end
@@ -394,7 +402,7 @@ defmodule Arbor.AI do
         wm ->
           # Filter out heartbeat-sourced entries from query context
           filtered_wm = filter_heartbeat_entries(wm)
-          text = Arbor.Memory.WorkingMemory.to_prompt_text(filtered_wm)
+          text = WorkingMemory.to_prompt_text(filtered_wm)
           if text not in ["", nil], do: "## Working Memory\n#{text}"
       end
     end
@@ -427,7 +435,7 @@ defmodule Arbor.AI do
     if :ets.whereis(:arbor_memory_graphs) != :undefined do
       case :ets.lookup(:arbor_memory_graphs, agent_id) do
         [{^agent_id, graph}] ->
-          text = Arbor.Memory.KnowledgeGraph.to_prompt_text(graph, max_nodes: 20)
+          text = KnowledgeGraph.to_prompt_text(graph, max_nodes: 20)
           if text not in ["", nil], do: "## Knowledge\n#{text}"
 
         [] ->
@@ -678,7 +686,7 @@ defmodule Arbor.AI do
   """
   @spec read_session_thinking(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   defdelegate read_session_thinking(session_id, opts \\ []),
-    to: Arbor.AI.SessionReader,
+    to: SessionReader,
     as: :read_thinking
 
   @doc """
@@ -699,7 +707,7 @@ defmodule Arbor.AI do
   """
   @spec latest_session_thinking(keyword()) :: {:ok, [map()]} | {:error, term()}
   defdelegate latest_session_thinking(opts \\ []),
-    to: Arbor.AI.SessionReader,
+    to: SessionReader,
     as: :latest_thinking
 
   @doc """
@@ -728,9 +736,9 @@ defmodule Arbor.AI do
 
     reading_result =
       if session_id do
-        Arbor.AI.SessionReader.read_thinking(session_id, opts)
+        SessionReader.read_thinking(session_id, opts)
       else
-        Arbor.AI.SessionReader.latest_thinking(opts)
+        SessionReader.latest_thinking(opts)
       end
 
     case reading_result do
@@ -912,6 +920,8 @@ defmodule Arbor.AI do
       nil -> :ok
       "" -> :ok
       # ReqLLM.Keys.get/2 checks Application.get_env(:req_llm, :"#{provider}_api_key")
+      # Safe: provider is always an atom from api_key_env_var/1 pattern match
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       key -> Application.put_env(:req_llm, :"#{provider}_api_key", key, persistent: false)
     end
   end
@@ -1051,9 +1061,7 @@ defmodule Arbor.AI do
 
   # Extract text from ReqLLM content parts list
   defp extract_content_parts(parts) when is_list(parts) do
-    parts
-    |> Enum.map(&extract_content_part/1)
-    |> Enum.join("")
+    Enum.map_join(parts, "", &extract_content_part/1)
   end
 
   defp extract_content_parts(_), do: ""

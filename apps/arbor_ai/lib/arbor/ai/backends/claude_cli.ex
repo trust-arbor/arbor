@@ -42,6 +42,7 @@ defmodule Arbor.AI.Backends.ClaudeCli do
 
   use Arbor.AI.Backends.CliBackend, provider: :anthropic
 
+  alias Arbor.AI.QuotaTracker
   alias Arbor.AI.StreamParser
 
   # Model mappings - atom shortcuts and full names
@@ -200,7 +201,7 @@ defmodule Arbor.AI.Backends.ClaudeCli do
 
       {:error, {:exit_code, _code, output}} = error ->
         # Check for quota exhaustion in error output
-        Arbor.AI.QuotaTracker.check_and_mark(@provider, output)
+        QuotaTracker.check_and_mark(@provider, output)
         Logger.warning("Claude CLI streaming execution error", error: inspect(error))
         error
 

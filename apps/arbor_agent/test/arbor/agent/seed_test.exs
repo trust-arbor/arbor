@@ -3,7 +3,7 @@ defmodule Arbor.Agent.SeedTest do
 
   alias Arbor.Agent.Seed
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{GoalStore, WorkingMemory, Preferences}
+  alias Arbor.Memory.{GoalStore, KnowledgeGraph, Preferences, WorkingMemory}
 
   @agent_id "test_seed_agent"
 
@@ -572,6 +572,7 @@ defmodule Arbor.Agent.SeedTest do
 
       final =
         Enum.reduce(1..55, seed, fn i, acc ->
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
           Seed.record_action_outcome(acc, :"action_#{i}", :success)
         end)
 

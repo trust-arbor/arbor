@@ -240,15 +240,13 @@ defmodule Arbor.Agent.ContextSummarizer do
   end
 
   defp format_messages_for_summary(messages) do
-    messages
-    |> Enum.map(fn msg ->
+    Enum.map_join(messages, "\n", fn msg ->
       role = msg[:role] || "unknown"
       content = msg[:content] || ""
       # Truncate individual messages to avoid prompt explosion
       truncated = String.slice(to_string(content), 0, 500)
       "[#{role}]: #{truncated}"
     end)
-    |> Enum.join("\n")
   end
 
   defp build_tier_section(tier, summary) do

@@ -37,7 +37,7 @@ defmodule Arbor.Agent.InvestigationTest do
         |> Investigation.start()
         |> Investigation.gather_symptoms()
 
-      assert length(investigation.symptoms) > 0
+      assert investigation.symptoms != []
 
       # Should have memory and scheduler symptoms at minimum
       symptom_types = Enum.map(investigation.symptoms, & &1.type)
@@ -93,7 +93,7 @@ defmodule Arbor.Agent.InvestigationTest do
         |> Investigation.gather_symptoms()
         |> Investigation.generate_hypotheses()
 
-      assert length(investigation.hypotheses) > 0
+      assert investigation.hypotheses != []
       assert investigation.selected_hypothesis != nil
       assert investigation.confidence > 0.0
 

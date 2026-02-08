@@ -878,7 +878,7 @@ defmodule Arbor.Memory.ContextWindowTest do
       # Embedding may or may not be present depending on whether Arbor.AI.embed/2 works in test
       if ctx[:embedding] do
         assert is_list(ctx.embedding)
-        assert length(ctx.embedding) > 0
+        assert ctx.embedding != []
       end
     end
 

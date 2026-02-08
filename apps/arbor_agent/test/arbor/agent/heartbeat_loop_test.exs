@@ -2,6 +2,7 @@ defmodule Arbor.Agent.HeartbeatLoopTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.HeartbeatLoop
+  alias Arbor.Memory.ContextWindow
 
   # A test agent module that uses HeartbeatLoop
   defmodule TestAgent do

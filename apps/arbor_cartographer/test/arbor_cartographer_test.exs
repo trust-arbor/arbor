@@ -138,7 +138,7 @@ defmodule Arbor.CartographerTest do
       # Current node should be registered
       {:ok, tags} = Cartographer.my_capabilities()
       # Use actual tags from current node
-      if length(tags) > 0 do
+      if tags != [] do
         [first_tag | _] = tags
         {:ok, nodes} = Cartographer.find_capable_nodes([first_tag])
         assert Node.self() in nodes
@@ -171,7 +171,7 @@ defmodule Arbor.CartographerTest do
       {:ok, all} = Cartographer.list_all_capabilities()
 
       assert is_list(all)
-      assert length(all) >= 1
+      assert all != []
 
       nodes = Enum.map(all, & &1.node)
       assert Node.self() in nodes
@@ -194,7 +194,7 @@ defmodule Arbor.CartographerTest do
     test "returns true for matching capabilities" do
       {:ok, tags} = Cartographer.my_capabilities()
 
-      if length(tags) > 0 do
+      if tags != [] do
         [tag | _] = tags
         assert Cartographer.node_has_capabilities?(Node.self(), [tag])
       end
@@ -237,7 +237,7 @@ defmodule Arbor.CartographerTest do
       # Use capabilities that we know the local node has
       {:ok, tags} = Cartographer.my_capabilities()
 
-      if length(tags) > 0 do
+      if tags != [] do
         [tag | _] = tags
         {:ok, pid} = Cartographer.deploy(TestAgent, needs: [tag], args: [name: "test"])
         assert Process.alive?(pid)
@@ -280,7 +280,7 @@ defmodule Arbor.CartographerTest do
     test "returns authorized when capabilities exist" do
       {:ok, tags} = Cartographer.my_capabilities()
 
-      if length(tags) > 0 do
+      if tags != [] do
         [tag | _] = tags
         {:ok, :authorized} = Cartographer.authorize_deployment("test_agent", [tag])
       end

@@ -6,6 +6,8 @@ defmodule Arbor.Sandbox.Filesystem do
   to prevent directory traversal and unauthorized access.
   """
 
+  alias Arbor.Common.SafePath
+
   # L1: Use a user-owned directory instead of world-writable /tmp
   @default_base_path Path.expand("~/.arbor/sandbox/agents")
 
@@ -62,7 +64,7 @@ defmodule Arbor.Sandbox.Filesystem do
     clean_path = String.trim_leading(relative_path, "/")
 
     # H8: Use SafePath for symlink-safe resolution within sandbox boundary
-    case Arbor.Common.SafePath.resolve_within(clean_path, fs.base_path) do
+    case SafePath.resolve_within(clean_path, fs.base_path) do
       {:ok, resolved} -> {:ok, resolved}
       {:error, :path_traversal} -> {:error, :path_traversal_blocked}
       {:error, reason} -> {:error, reason}

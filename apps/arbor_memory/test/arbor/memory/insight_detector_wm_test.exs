@@ -60,7 +60,7 @@ defmodule Arbor.Memory.InsightDetectorWMTest do
 
       insights = InsightDetector.detect_from_working_memory(agent_id)
 
-      assert length(insights) > 0
+      assert insights != []
       categories = Enum.map(insights, & &1.category)
       assert :curiosity in categories
     end

@@ -157,14 +157,17 @@ defmodule Arbor.Contracts.Memory.Percept do
 
   defp map_get(map, key), do: Map.get(map, key) || Map.get(map, to_string(key))
 
+  @known_types [:action_result, :environment, :interrupt, :error, :timeout]
+  @known_outcomes [:success, :failure, :partial, :blocked, :interrupted]
+  @known_atoms @known_types ++ @known_outcomes
+
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
   defp atomize(s) when is_binary(s) do
-    try do
-      String.to_existing_atom(s)
-    rescue
-      ArgumentError -> String.to_atom(s)
-    end
+    atom_match = Enum.find(@known_atoms, fn a -> Atom.to_string(a) == s end)
+    atom_match || String.to_existing_atom(s)
+  rescue
+    ArgumentError -> nil
   end
 
   defp parse_datetime(%DateTime{} = dt), do: dt
