@@ -164,6 +164,10 @@ defmodule Arbor.Agent.Executor do
     {:reply, {:ok, info}, state}
   end
 
+  # M19: Intent handler accepts any cast without verifying the sender's identity.
+  # The intent's source_agent should be validated against a capability like
+  # arbor://agent/intent/{agent_id}. Currently relies on signal bus authorization.
+  # TODO: Add Arbor.Security.authorize(intent.source_agent, resource, :send) check
   @impl true
   def handle_cast({:intent, %Intent{} = intent}, state) do
     state = update_in(state, [:stats, :intents_received], &(&1 + 1))
@@ -513,6 +517,7 @@ defmodule Arbor.Agent.Executor do
     end)
   end
 
+  # M12: Use String.to_existing_atom to prevent atom table exhaustion
   defp build_action_module_name(action_str) do
     parts = action_str |> String.split("_")
 
@@ -520,12 +525,21 @@ defmodule Arbor.Agent.Executor do
       [category | rest] when rest != [] ->
         category_mod = category |> String.capitalize()
         action_mod = rest |> Enum.map(&String.capitalize/1) |> Enum.join("")
-        Module.concat([Arbor.Actions, String.to_atom(category_mod), String.to_atom(action_mod)])
+
+        module =
+          Module.concat([
+            Arbor.Actions,
+            String.to_existing_atom(category_mod),
+            String.to_existing_atom(action_mod)
+          ])
+
+        if Code.ensure_loaded?(module), do: module, else: nil
 
       _ ->
         nil
     end
   rescue
+    ArgumentError -> nil
     _ -> nil
   end
 
@@ -534,12 +548,21 @@ defmodule Arbor.Agent.Executor do
       [category, action_name] ->
         category_mod = category |> String.capitalize()
         action_mod = action_name |> Macro.camelize()
-        Module.concat([Arbor.Actions, String.to_atom(category_mod), String.to_atom(action_mod)])
+
+        module =
+          Module.concat([
+            Arbor.Actions,
+            String.to_existing_atom(category_mod),
+            String.to_existing_atom(action_mod)
+          ])
+
+        if Code.ensure_loaded?(module), do: module, else: nil
 
       _ ->
         nil
     end
   rescue
+    ArgumentError -> nil
     _ -> nil
   end
 

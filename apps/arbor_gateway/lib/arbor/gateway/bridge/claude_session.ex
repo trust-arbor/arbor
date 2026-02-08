@@ -280,10 +280,17 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
     end
   end
 
+  # M18: Use Path.expand for canonicalization, then safe prefix replacement.
+  # Avoids fragile regex that could be bypassed by non-standard home dirs.
   defp normalize_path(path) when is_binary(path) do
-    path
-    |> Path.expand()
-    |> String.replace(~r{^/Users/[^/]+/}, "~/")
+    expanded = Path.expand(path)
+    home = System.user_home() || ""
+
+    if home != "" and String.starts_with?(expanded, home <> "/") do
+      "~/" <> String.trim_leading(expanded, home <> "/")
+    else
+      expanded
+    end
   end
 
   defp normalize_path(_), do: ""

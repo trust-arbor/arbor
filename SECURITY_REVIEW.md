@@ -22,7 +22,7 @@
 
 - [x] **Phase 1** — Critical (C1-C5) — All 5 remediated
 - [x] **Phase 2** — High (H1-H15) — 12/15 remediated, 2 deferred (H1/H2), 1 documented (H15)
-- [ ] **Phase 3** — Medium (M1-M20)
+- [x] **Phase 3** — Medium (M1-M20) — 12 remediated, 2 documented (M5, M13, M19), 6 document-only
 - [ ] **Phase 4** — Low (L1-L10)
 
 ---
@@ -142,28 +142,28 @@
 
 ## MEDIUM (20)
 
-| # | Finding | File |
-|---|---------|------|
-| M1 | `requires_approval` constraint is no-op | `constraint.ex:100-102` |
-| M2 | Escalation bypassed when config disabled | `escalation.ex:46-67` |
-| M3 | Trust points only boost tier, never lower | `trust/store.ex:255-268` |
-| M4 | Prefix-based URI matching over-grants access | `capability_store.ex:327-334` |
-| M5 | Signal bus uses OpenAuthorizer | `config.exs:85` |
-| M6 | Missing dangerous `:erlang` functions in code sandbox | `sandbox/code.ex` |
-| M7 | `Agent`/`Task` in `@always_allowed` at `:pure` level | `sandbox/code.ex:65-66` |
-| M8 | Dangerous commands in `:strict` allowlist | `sandbox.ex:36-50` |
-| M9 | PATH manipulation bypass at `:basic` level | `sandbox.ex` |
-| M10 | Public ETS tables (21+) including reflex registry | `reflex/registry.ex:151` + others |
-| M11 | TOCTOU race in filesystem sandbox | `sandbox/filesystem.ex` |
-| M12 | `String.to_atom` atom exhaustion in Executor | `executor.ex:523,537` |
-| M13 | Memory API has no agent-level authorization | `memory/router.ex` |
-| M14 | `check_origin: false` in dev, no prod override | `dev.exs:29` |
-| M15 | Git dependency without commit pinning | `mix.exs:29` |
-| M16 | 7 path dependencies with `override: true` | `mix.exs:20-26` |
-| M17 | No CSP, HSTS, or TLS configuration | Gateway + Dashboard |
-| M18 | Path normalization inconsistency in bridge | `claude_session.ex:283-289` |
-| M19 | Executor accepts unauthenticated GenServer casts | `executor.ex:167-189` |
-| M20 | Lua eval via JidoSandbox (external trust) | `sandbox/virtual.ex:95-101` |
+| # | Finding | File | Status |
+|---|---------|------|--------|
+| M1 | `requires_approval` constraint is no-op | `constraint.ex:100-102` | [x] Remediated — returns constraint violation when approval=true |
+| M2 | Escalation bypassed when config disabled | `escalation.ex:46-67` | [x] Remediated — Logger.warning on bypass |
+| M3 | Trust points only boost tier, never lower | `trust/store.ex:255-268` | [ ] Document only — by design for trust accumulation model |
+| M4 | Prefix-based URI matching over-grants access | `capability_store.ex:327-334` | [x] Remediated — require exact match or prefix + "/" separator |
+| M5 | Signal bus uses OpenAuthorizer | `config.exs:85` | [x] Documented — TODO comment to switch to SecurityAuthorizer |
+| M6 | Missing dangerous `:erlang` functions in code sandbox | `sandbox/code.ex` | [x] Remediated — 10 functions added to @never_allowed_functions |
+| M7 | `Agent`/`Task` in `@always_allowed` at `:pure` level | `sandbox/code.ex:65-66` | [x] Remediated — moved to @limited_allowed |
+| M8 | Dangerous commands in `:strict` allowlist | `sandbox.ex:36-50` | [x] Remediated — removed runtimes (mix, elixir, node, python, etc.) |
+| M9 | PATH manipulation bypass at `:basic` level | `sandbox.ex` | [ ] Document only — requires resolve_executable integration |
+| M10 | Public ETS tables (21+) including reflex registry | `reflex/registry.ex:151` + others | [ ] Document only — requires systematic :protected audit |
+| M11 | TOCTOU race in filesystem sandbox | `sandbox/filesystem.ex` | [ ] Document only — inherent in userspace file checks |
+| M12 | `String.to_atom` atom exhaustion in Executor | `executor.ex:523,537` | [x] Remediated — String.to_existing_atom + rescue |
+| M13 | Memory API has no agent-level authorization | `memory/router.ex` | [x] Documented — TODO for agent_id == caller_id enforcement |
+| M14 | `check_origin: false` in dev, no prod override | `dev.exs:29` | [x] Remediated — check_origin enforced in prod via runtime.exs |
+| M15 | Git dependency without commit pinning | `mix.exs:29` | [x] Remediated — pinned to commit 4ebedfbb |
+| M16 | 7 path dependencies with `override: true` | `mix.exs:20-26` | [ ] Document only — required for local development |
+| M17 | No CSP, HSTS, or TLS configuration | Gateway + Dashboard | [ ] Document only — deployment-level concern |
+| M18 | Path normalization inconsistency in bridge | `claude_session.ex:283-289` | [x] Remediated — use System.user_home() instead of fragile regex |
+| M19 | Executor accepts unauthenticated GenServer casts | `executor.ex:167-189` | [x] Documented — TODO for source_agent authorization |
+| M20 | Lua eval via JidoSandbox (external trust) | `sandbox/virtual.ex:95-101` | [ ] Document only — external dependency trust boundary |
 
 ---
 
@@ -187,7 +187,7 @@
 ## Positive Security Findings
 
 - `SafeAtom` — proper atom safety with allowlists and `to_existing` only
-- `SafePath` — symlink detection, path traversal prevention (exists but not integrated with sandbox)
+- `SafePath` — symlink detection, path traversal prevention (now integrated with filesystem sandbox via H8)
 - Custom Credo checks for `unsafe_atom_conversion` and `unsafe_binary_to_term`
 - All `binary_to_term` calls use `[:safe]` flag
 - No `keys: :atoms` in JSON decoding

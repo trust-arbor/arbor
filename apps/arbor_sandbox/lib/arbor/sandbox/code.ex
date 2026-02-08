@@ -39,6 +39,7 @@ defmodule Arbor.Sandbox.Code do
   alias Arbor.Contracts.Security.TrustBounds
 
   # Modules always allowed (safe pure functions)
+  # M7: Agent/Task moved to @limited_allowed — they can spawn processes
   @always_allowed [
     Kernel,
     Enum,
@@ -62,8 +63,6 @@ defmodule Arbor.Sandbox.Code do
     URI,
     Base,
     Bitwise,
-    Agent,
-    Task,
     Inspect,
     Protocol,
     Behaviour,
@@ -72,6 +71,7 @@ defmodule Arbor.Sandbox.Code do
   ]
 
   # Modules only allowed at :limited and above
+  # M7: Agent/Task moved here from @always_allowed — they can spawn processes
   @limited_allowed [
     File,
     Path,
@@ -91,7 +91,9 @@ defmodule Arbor.Sandbox.Code do
     Node,
     Registry,
     OptionParser,
-    StringIO
+    StringIO,
+    Agent,
+    Task
   ]
 
   # Network modules — require :limited or higher
@@ -134,7 +136,18 @@ defmodule Arbor.Sandbox.Code do
     {Node, :spawn},
     {Node, :spawn_link},
     {:rpc, :call},
-    {:rpc, :cast}
+    {:rpc, :cast},
+    # M6: Additional dangerous :erlang functions
+    {:erlang, :open_port},
+    {:erlang, :send},
+    {:erlang, :spawn},
+    {:erlang, :spawn_link},
+    {:erlang, :spawn_monitor},
+    {:erlang, :binary_to_term},
+    {:erlang, :apply},
+    {:erlang, :load_module},
+    {:erlang, :delete_module},
+    {:erlang, :purge_module}
   ]
 
   # Functions restricted by level (allowed at :limited+)
