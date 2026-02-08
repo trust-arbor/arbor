@@ -296,8 +296,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   @impl true
   def handle_info({:query, agent, prompt}, socket) do
     case Claude.query(agent, prompt,
-           timeout: 60_000,
-           max_turns: 1,
+           timeout: 300_000,
            permission_mode: :bypass
          ) do
       {:ok, response} ->
@@ -364,15 +363,27 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp build_assistant_message(response) do
+    tool_uses = response[:tool_uses] || response.tool_uses || []
+
     %{
       id: "msg-#{System.unique_integer([:positive])}",
       role: :assistant,
-      content: response.text,
+      content: strip_tool_output(response.text, tool_uses),
+      tool_uses: tool_uses,
       timestamp: DateTime.utc_now(),
       model: response.model,
       session_id: response.session_id,
       memory_count: length(response.recalled_memories || [])
     }
+  end
+
+  # Strip tool call artifacts from the response text since we render them separately
+  defp strip_tool_output(text, []), do: text
+
+  defp strip_tool_output(text, _tool_uses) do
+    text
+    |> String.replace(~r/\n?⏺ [^\n]*(?:\n  [^\n]*)*/m, "")
+    |> String.trim()
   end
 
   defp add_thinking_blocks(socket, nil), do: socket
@@ -774,7 +785,31 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 {format_time(msg.timestamp)}
               </span>
             </div>
-            <div style="white-space: pre-wrap; font-size: 0.9em;">{msg.content}</div>
+            <div :if={msg.content != ""} style="white-space: pre-wrap; font-size: 0.9em;">{msg.content}</div>
+            <%!-- Tool uses (collapsible) --%>
+            <div :if={msg[:tool_uses] && msg[:tool_uses] != []} style="margin-top: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem;">
+              <details :for={tool <- msg.tool_uses} style="border: 1px solid var(--aw-border, #333); border-radius: 4px; background: rgba(0,0,0,0.2); font-size: 0.85em;">
+                <summary style="padding: 0.3rem 0.5rem; cursor: pointer; color: var(--aw-text-muted, #aaa); user-select: none; list-style: none; display: flex; align-items: center; gap: 0.4rem;">
+                  <span style="color: #888; font-size: 0.9em;">&#9654;</span>
+                  <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(tool.name)}>
+                    {tool.name}
+                  </span>
+                  <span style="color: var(--aw-text-muted, #888); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    {tool_summary(tool)}
+                  </span>
+                </summary>
+                <div style="padding: 0.4rem 0.5rem; border-top: 1px solid var(--aw-border, #333);">
+                  <div style="margin-bottom: 0.3rem;">
+                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Input:</strong>
+                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_input(tool.input)}</pre>
+                  </div>
+                  <div :if={tool[:result]}>
+                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Result:</strong>
+                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_result(tool.result)}</pre>
+                  </div>
+                </div>
+              </details>
+            </div>
             <div
               :if={msg[:model] || msg[:memory_count]}
               style="margin-top: 0.4rem; display: flex; gap: 0.5rem;"
@@ -1185,6 +1220,61 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       _ -> []
     end
   end
+
+  # ── Tool Display Helpers ────────────────────────────────────────────
+
+  defp tool_badge_style(name) do
+    cond do
+      name in ~w(Read Glob Grep) -> "background: rgba(74, 158, 255, 0.2); color: #4a9eff;"
+      name in ~w(Edit Write NotebookEdit) -> "background: rgba(255, 167, 38, 0.2); color: #ffa726;"
+      name in ~w(Bash) -> "background: rgba(255, 74, 74, 0.2); color: #ff4a4a;"
+      name in ~w(Task WebFetch WebSearch) -> "background: rgba(171, 71, 188, 0.2); color: #ab47bc;"
+      true -> "background: rgba(255, 255, 255, 0.1); color: #aaa;"
+    end
+  end
+
+  defp tool_summary(%{name: name, input: input}) do
+    case name do
+      "Read" -> Map.get(input, "file_path", "") |> Path.basename()
+      "Glob" -> Map.get(input, "pattern", "")
+      "Grep" -> Map.get(input, "pattern", "")
+      "Edit" -> Map.get(input, "file_path", "") |> Path.basename()
+      "Write" -> Map.get(input, "file_path", "") |> Path.basename()
+      "Bash" -> Map.get(input, "command", "") |> String.slice(0, 60)
+      "Task" -> Map.get(input, "description", "")
+      "WebFetch" -> Map.get(input, "url", "") |> String.slice(0, 60)
+      "WebSearch" -> Map.get(input, "query", "")
+      _ -> inspect(Map.keys(input)) |> String.slice(0, 40)
+    end
+  end
+
+  defp tool_summary(%{"name" => name, "input" => input}) do
+    tool_summary(%{name: name, input: input})
+  end
+
+  defp tool_summary(_), do: ""
+
+  defp format_tool_input(input) when is_map(input) do
+    Jason.encode!(input, pretty: true)
+  rescue
+    _ -> inspect(input, pretty: true, limit: 500)
+  end
+
+  defp format_tool_input(input), do: inspect(input, pretty: true, limit: 500)
+
+  defp format_tool_result({:ok, result}), do: format_tool_result(result)
+  defp format_tool_result({:error, reason}), do: "Error: #{inspect(reason)}"
+  defp format_tool_result(nil), do: "(handled by CLI)"
+
+  defp format_tool_result(result) when is_binary(result) do
+    if String.length(result) > 2000 do
+      String.slice(result, 0, 2000) <> "\n... (truncated)"
+    else
+      result
+    end
+  end
+
+  defp format_tool_result(result), do: inspect(result, pretty: true, limit: 500)
 
   # ── Token Tracking ─────────────────────────────────────────────────
 

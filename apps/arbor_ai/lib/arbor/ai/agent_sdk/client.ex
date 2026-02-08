@@ -285,6 +285,40 @@ defmodule Arbor.AI.AgentSDK.Client do
     %{state | pending_query: nil, current_response: new_response_acc()}
   end
 
+  defp process_message(state, %{"type" => "user", "message" => message}) do
+    content = message["content"] || []
+    tool_use_result = message["tool_use_result"]
+
+    # Match tool results back to their tool_uses by tool_use_id
+    acc =
+      Enum.reduce(content, state.current_response, fn
+        %{"type" => "tool_result", "tool_use_id" => tool_use_id, "content" => result_content}, acc ->
+          is_error = message["is_error"] == true
+
+          result_text =
+            cond do
+              is_binary(result_content) -> result_content
+              tool_use_result && tool_use_result["stdout"] -> tool_use_result["stdout"]
+              true -> inspect(result_content)
+            end
+
+          result = if is_error, do: {:error, result_text}, else: {:ok, result_text}
+
+          updated_tool_uses =
+            Enum.map(acc.tool_uses, fn tool ->
+              if tool.id == tool_use_id, do: %{tool | result: result}, else: tool
+            end)
+
+          notify_stream(state, {:tool_result, %{tool_use_id: tool_use_id, result: result}})
+          %{acc | tool_uses: updated_tool_uses}
+
+        _, acc ->
+          acc
+      end)
+
+    %{state | current_response: acc}
+  end
+
   defp process_message(state, %{type: :thinking_complete, thinking: thinking}) do
     if state.stream_callback do
       Enum.each(thinking, fn block ->
