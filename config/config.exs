@@ -236,6 +236,7 @@ config :arbor_dashboard,
       provider: :openrouter,
       backend: :api
     },
+    %{id: "openrouter/pony-alpha", label: "Pony Alpha", provider: :openrouter, backend: :api},
     # Z.AI models — use API backend
     %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan, backend: :api}
   ],
@@ -246,6 +247,7 @@ config :arbor_dashboard,
       label: "Trinity Large (free)",
       provider: :openrouter
     },
+    %{id: "openrouter/pony-alpha", label: "Pony Alpha", provider: :openrouter},
     %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan}
   ]
 
