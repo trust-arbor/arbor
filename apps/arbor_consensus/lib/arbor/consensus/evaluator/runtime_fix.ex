@@ -180,7 +180,9 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
   end
 
   defp parse_response(proposal, perspective, evaluator_id, response) do
-    case extract_json(response) do
+    response_text = extract_text(response)
+
+    case extract_json(response_text) do
       {:ok, %{"vote" => vote_str, "reasoning" => reasoning} = parsed} ->
         vote = parse_vote(vote_str)
         concerns = Map.get(parsed, "concerns", [])
@@ -201,7 +203,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
 
       {:error, _reason} ->
         # Try to detect vote from text
-        vote = detect_vote_from_text(response)
+        vote = detect_vote_from_text(response_text)
 
         evaluation = %Evaluation{
           id: generate_evaluation_id(proposal.id, perspective),
@@ -209,7 +211,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
           evaluator_id: evaluator_id,
           perspective: perspective,
           vote: vote,
-          reasoning: response,
+          reasoning: response_text,
           concerns: [],
           confidence: 0.5,
           created_at: DateTime.utc_now()
@@ -219,7 +221,14 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
     end
   end
 
-  defp extract_json(text) do
+  # Extract the text content from an AI response, which may be a map or a plain string.
+  # AI responses from Arbor.AI may return maps like:
+  #   %{text: "...", usage: %{...}, provider: ..., model: ..., thinking: ...}
+  defp extract_text(%{text: text}) when is_binary(text), do: text
+  defp extract_text(text) when is_binary(text), do: text
+  defp extract_text(other), do: inspect(other)
+
+  defp extract_json(text) when is_binary(text) do
     # Try to find JSON in the response
     case Regex.run(~r/\{[^}]+\}/s, text) do
       [json_str] ->
@@ -232,6 +241,8 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
         {:error, :no_json_found}
     end
   end
+
+  defp extract_json(_), do: {:error, :invalid_input}
 
   defp parse_vote("approve"), do: :approve
   defp parse_vote("reject"), do: :reject

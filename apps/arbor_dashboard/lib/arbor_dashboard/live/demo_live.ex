@@ -79,6 +79,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         evaluations: [],
         decision: nil,
         # Investigation tracking
+        current_anomaly: nil,
         current_investigation: nil,
         investigation_expanded: false,
         # Verification tracking
@@ -815,7 +816,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
     investigation = %{
       id: data[:investigation_id] || data["investigation_id"] || "inv_unknown",
-      anomaly: socket.assigns.current_anomaly || %{skill: :unknown},
+      anomaly: socket.assigns[:current_anomaly] || %{skill: :unknown},
       symptoms: [],
       hypotheses: [],
       selected_hypothesis: %{
