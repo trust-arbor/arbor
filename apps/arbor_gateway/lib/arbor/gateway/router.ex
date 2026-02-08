@@ -28,7 +28,10 @@ defmodule Arbor.Gateway.Router do
   forward("/api/bridge", to: Arbor.Gateway.Bridge.Router)
   forward("/api/memory", to: Arbor.Gateway.Memory.Router)
   forward("/api/signals", to: Arbor.Gateway.Signals.Router)
-  forward("/api/dev", to: Arbor.Gateway.Dev.Router)
+  # H4: Dev eval endpoint only compiled into dev/test builds
+  if Mix.env() in [:dev, :test] do
+    forward("/api/dev", to: Arbor.Gateway.Dev.Router)
+  end
 
   match _ do
     send_resp(conn, 404, "Not found")

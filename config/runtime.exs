@@ -35,6 +35,17 @@ if config_env() == :prod do
 
   config :arbor_dashboard, Arbor.Dashboard.Endpoint,
     secret_key_base: secret_key_base
+
+  # H5: Require dashboard auth in production
+  config :arbor_dashboard, require_auth: true
+end
+
+# Dashboard auth credentials (any environment)
+dashboard_user = System.get_env("DASHBOARD_USER")
+dashboard_pass = System.get_env("DASHBOARD_PASS")
+
+if dashboard_user && dashboard_pass do
+  config :arbor_dashboard, auth_user: dashboard_user, auth_pass: dashboard_pass
 end
 
 # ============================================================================

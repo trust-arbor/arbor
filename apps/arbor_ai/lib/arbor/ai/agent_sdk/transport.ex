@@ -178,34 +178,28 @@ defmodule Arbor.AI.AgentSDK.Transport do
   defp connect(state) do
     case build_command(state.opts) do
       {:ok, {cmd, args}} ->
-        # Use :os.cmd which works reliably with Claude CLI
-        # Run in a separate process to not block the GenServer
+        # H12: Use System.cmd instead of :os.cmd to avoid shell interpretation
         parent = self()
 
         spawn_link(fn ->
-          command = "#{cmd} #{Enum.map(args, &shell_escape/1) |> Enum.join(" ")}"
-          Logger.debug("Executing: #{command}")
+          Logger.debug("Executing: #{cmd} #{Enum.join(args, " ")}")
 
-          output = :os.cmd(String.to_charlist(command))
-          output_str = List.to_string(output)
+          try do
+            {output_str, _exit_status} =
+              System.cmd(cmd, args, stderr_to_stdout: true, cd: state.cwd)
 
-          # Send output to parent for processing
-          send(parent, {:cli_output, output_str})
+            send(parent, {:cli_output, output_str})
+          rescue
+            e ->
+              Logger.error("CLI execution failed: #{Exception.message(e)}")
+              send(parent, {:cli_output, ""})
+          end
         end)
 
         {:ok, %{state | connected: true}}
 
       {:error, _} = error ->
         error
-    end
-  end
-
-  defp shell_escape(arg) do
-    # Simple shell escaping for arguments
-    if String.contains?(arg, [" ", "'", "\""]) do
-      "\"#{String.replace(arg, "\"", "\\\"")}\""
-    else
-      arg
     end
   end
 
