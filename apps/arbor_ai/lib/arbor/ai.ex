@@ -209,6 +209,246 @@ defmodule Arbor.AI do
   end
 
   @doc """
+  Generate text using the API backend with tool/action support.
+
+  Uses jido_ai's CallWithTools for an agentic loop where the LLM receives
+  Arbor.Actions as tools, can call them, and loops until a final answer.
+
+  Wraps with arbor infrastructure: signals, budget tracking, usage stats.
+
+  ## Options
+
+  - `:provider` - LLM provider atom (e.g. `:openrouter`, `:zai_coding_plan`)
+  - `:model` - Model string (e.g. `"arcee-ai/trinity-large-preview:free"`)
+  - `:system_prompt` - Optional system prompt
+  - `:max_tokens` - Max tokens (default: 4096)
+  - `:temperature` - Sampling temperature (default: 0.7)
+  - `:auto_execute` - Auto-execute tool calls (default: true)
+  - `:max_turns` - Max tool-use turns (default: 10)
+  - `:tools` - List of Jido.Action modules (default: Arbor.Actions.all_actions())
+  - `:agent_id` - Agent ID for memory/action context (required for memory tools)
+  - `:context` - Additional context map merged into tool execution context
+  """
+  @spec generate_text_with_tools(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def generate_text_with_tools(prompt, opts \\ []) do
+    provider = Keyword.get(opts, :provider, Config.default_provider())
+    model = Keyword.get(opts, :model, Config.default_model())
+
+    # Arbor layer: signal + timing
+    emit_tool_request_started(provider, model, String.length(prompt))
+    start_time = System.monotonic_time(:millisecond)
+
+    # Ensure API key is available to ReqLLM
+    ensure_provider_api_key(provider)
+
+    # Build model struct (bypasses LLMDB lookup, avoids base_url bug)
+    model_struct = build_model_spec(provider, model)
+
+    # Build jido_ai tools map from Arbor.Actions
+    action_modules = Keyword.get(opts, :tools, Arbor.Actions.all_actions())
+    tools_map = Jido.AI.Executor.build_tools_map(action_modules)
+
+    # Auto-build rich system prompt if none provided and agent_id is available
+    system_prompt =
+      case Keyword.get(opts, :system_prompt) do
+        nil ->
+          agent_id = Keyword.get(opts, :agent_id)
+          if agent_id, do: build_rich_system_prompt(agent_id, opts), else: nil
+
+        prompt ->
+          prompt
+      end
+
+    params = %{
+      model: model_struct,
+      prompt: prompt,
+      system_prompt: system_prompt,
+      max_tokens: Keyword.get(opts, :max_tokens, 16_384),
+      temperature: Keyword.get(opts, :temperature, 0.7),
+      auto_execute: Keyword.get(opts, :auto_execute, true),
+      max_turns: Keyword.get(opts, :max_turns, 10)
+    }
+
+    # Build execution context — agent_id needed for memory actions
+    extra_context = Keyword.get(opts, :context, %{})
+
+    context =
+      %{tools: tools_map}
+      |> maybe_put(:agent_id, Keyword.get(opts, :agent_id))
+      |> Map.merge(extra_context)
+
+    # Execute via jido_ai agentic loop
+    result = Jido.AI.Actions.ToolCalling.CallWithTools.run(params, context)
+    duration_ms = System.monotonic_time(:millisecond) - start_time
+
+    case result do
+      {:ok, raw_result} ->
+        response = format_tools_response(raw_result, provider, model)
+        emit_tool_request_completed(provider, model, duration_ms, response)
+        record_tool_budget_usage(provider, opts, response)
+        record_tool_usage_stats_success(provider, opts, response, duration_ms)
+        {:ok, response}
+
+      {:error, reason} ->
+        duration_ms_err = System.monotonic_time(:millisecond) - start_time
+        emit_tool_request_failed(provider, model, reason)
+        record_tool_usage_stats_failure(provider, opts, reason, duration_ms_err)
+        Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # ── Rich System Prompt ──
+
+  @doc """
+  Build a rich system prompt for API-backend agents.
+
+  Assembles identity, self-knowledge, goals, working memory, knowledge graph,
+  timing context, and tool guidance from the agent's memory subsystems.
+  Each section gracefully degrades if the data isn't available.
+
+  ## Options
+
+  - `:state` - Agent state map (for timing context)
+  """
+  @spec build_rich_system_prompt(String.t(), keyword()) :: String.t()
+  def build_rich_system_prompt(agent_id, opts \\ []) do
+    sections = [
+      build_identity_section(),
+      build_self_knowledge_section(agent_id),
+      build_goals_section(agent_id),
+      build_working_memory_section(agent_id),
+      build_knowledge_graph_section(agent_id),
+      build_timing_section(opts),
+      build_tool_guidance_section()
+    ]
+
+    sections
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp build_identity_section do
+    """
+    ## Identity
+    You are Arbor, an autonomous AI agent. You have memory, goals, and tools.
+    You can recall past conversations, store new knowledge, reflect on your
+    experiences, and take actions through your available tools. You are helpful,
+    thorough, and you actively use your tools when they can help answer questions.
+    When asked about yourself, use your memory tools to introspect.\
+    """
+  end
+
+  defp build_self_knowledge_section(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
+         function_exported?(Arbor.Memory.IdentityConsolidator, :get_self_knowledge, 1) do
+      case Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id) do
+        nil ->
+          nil
+
+        sk ->
+          summary = Arbor.Memory.SelfKnowledge.summarize(sk)
+          if summary not in ["", nil], do: "## Self-Awareness\n#{summary}"
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp build_goals_section(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory.GoalStore) and
+         function_exported?(Arbor.Memory.GoalStore, :get_active_goals, 1) do
+      goals = Arbor.Memory.GoalStore.get_active_goals(agent_id)
+
+      if goals == [] do
+        nil
+      else
+        lines =
+          goals
+          |> Enum.take(5)
+          |> Enum.map(fn goal ->
+            pct = round((goal.progress || 0) * 100)
+            "- [#{pct}%] #{goal.description} (priority: #{goal.priority})"
+          end)
+          |> Enum.join("\n")
+
+        "## Active Goals\n#{lines}"
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp build_working_memory_section(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory) and
+         function_exported?(Arbor.Memory, :get_working_memory, 1) do
+      case Arbor.Memory.get_working_memory(agent_id) do
+        nil ->
+          nil
+
+        wm ->
+          text = Arbor.Memory.WorkingMemory.to_prompt_text(wm)
+          if text not in ["", nil], do: "## Working Memory\n#{text}"
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp build_knowledge_graph_section(agent_id) do
+    if :ets.whereis(:arbor_memory_graphs) != :undefined do
+      case :ets.lookup(:arbor_memory_graphs, agent_id) do
+        [{^agent_id, graph}] ->
+          text = Arbor.Memory.KnowledgeGraph.to_prompt_text(graph, max_nodes: 20)
+          if text not in ["", nil], do: "## Knowledge\n#{text}"
+
+        [] ->
+          nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp build_timing_section(opts) do
+    state = Keyword.get(opts, :state)
+
+    if state && Code.ensure_loaded?(Arbor.Agent.TimingContext) do
+      timing = apply(Arbor.Agent.TimingContext, :compute, [state])
+      text = apply(Arbor.Agent.TimingContext, :to_markdown, [timing])
+      if text not in ["", nil], do: text
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp build_tool_guidance_section do
+    """
+    ## Tool Usage
+    You have access to tools for memory, files, code, shell, git, communication,
+    and more. When a user's request can be fulfilled by using a tool, use the
+    appropriate tool rather than just describing what you would do. For example:
+    - To search memory: use memory_recall
+    - To learn about yourself: use memory_read_self
+    - To store knowledge: use memory_remember
+    - To read files: use file_read
+    - To run commands: use shell_execute
+    Be concise. Use tools proactively.\
+    """
+  end
+
+  @doc """
   Check available backends.
 
   Returns a list of available backends with their status.
@@ -623,16 +863,131 @@ defmodule Arbor.AI do
   defp api_key_env_var(:openai), do: "OPENAI_API_KEY"
   defp api_key_env_var(:google), do: "GOOGLE_API_KEY"
   defp api_key_env_var(:gemini), do: "GEMINI_API_KEY"
+  defp api_key_env_var(:zai_coding_plan), do: "ZAI_API_KEY"
   defp api_key_env_var(_), do: nil
 
+  # ── Tool-calling helpers ──
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp format_tools_response(result, provider, model) do
+    %{
+      text: result[:text] || "",
+      thinking: nil,
+      usage: result[:usage] || %{},
+      model: model,
+      provider: provider,
+      tool_calls: result[:tool_calls] || [],
+      turns: result[:turns],
+      type: result[:type]
+    }
+  end
+
+  defp ensure_provider_api_key(provider) do
+    key_var = api_key_env_var(provider)
+
+    case key_var && System.get_env(key_var) do
+      nil -> :ok
+      "" -> :ok
+      # ReqLLM.Keys.get/2 checks Application.get_env(:req_llm, :"#{provider}_api_key")
+      key -> Application.put_env(:req_llm, :"#{provider}_api_key", key, persistent: false)
+    end
+  end
+
+  # ── Signal emission for tool requests ──
+
+  defp emit_tool_request_started(provider, model, prompt_length) do
+    Arbor.Signals.emit(:ai, :tool_request_started, %{
+      provider: provider,
+      model: model,
+      prompt_length: prompt_length,
+      backend: :api_with_tools
+    })
+  rescue
+    _ -> :ok
+  end
+
+  defp emit_tool_request_completed(provider, model, duration_ms, response) do
+    Arbor.Signals.emit(:ai, :tool_request_completed, %{
+      provider: provider,
+      model: model,
+      duration_ms: duration_ms,
+      turns: response[:turns],
+      tool_calls_count: length(response[:tool_calls] || []),
+      backend: :api_with_tools
+    })
+  rescue
+    _ -> :ok
+  end
+
+  defp emit_tool_request_failed(provider, model, reason) do
+    Arbor.Signals.emit(:ai, :tool_request_failed, %{
+      provider: provider,
+      model: model,
+      error: inspect(reason),
+      backend: :api_with_tools
+    })
+  rescue
+    _ -> :ok
+  end
+
+  # ── Budget/stats for tool requests ──
+
+  defp record_tool_budget_usage(provider, opts, response) do
+    if BudgetTracker.started?() do
+      usage = response[:usage] || %{}
+
+      BudgetTracker.record_usage(provider, %{
+        input_tokens: usage[:input_tokens] || 0,
+        output_tokens: usage[:output_tokens] || 0,
+        model: Keyword.get(opts, :model, "unknown")
+      })
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp record_tool_usage_stats_success(provider, opts, response, latency_ms) do
+    if UsageStats.started?() do
+      usage = response[:usage] || %{}
+
+      UsageStats.record_success(provider, %{
+        model: Keyword.get(opts, :model, "unknown"),
+        input_tokens: usage[:input_tokens] || 0,
+        output_tokens: usage[:output_tokens] || 0,
+        latency_ms: latency_ms,
+        backend: :api_with_tools
+      })
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp record_tool_usage_stats_failure(provider, opts, error, latency_ms) do
+    if UsageStats.started?() do
+      UsageStats.record_failure(provider, %{
+        model: Keyword.get(opts, :model, "unknown"),
+        error: inspect(error),
+        latency_ms: latency_ms,
+        backend: :api_with_tools
+      })
+    end
+  rescue
+    _ -> :ok
+  end
+
   defp build_model_spec(provider, model) do
-    # Build raw LLMDB.Model struct to bypass LLMDB lookup
-    # This allows using models not yet in the database
+    # Build raw LLMDB.Model struct to bypass LLMDB lookup.
+    # This allows using models not yet in the database.
+    # Note: Map.put adds :base_url to work around req_llm accessing
+    # model.base_url even though LLMDB.Model doesn't define that field.
     %LLMDB.Model{
       provider: provider,
       model: model,
       id: model
     }
+    |> Map.put(:base_url, nil)
   end
 
   defp format_api_response(response, provider, model) do
@@ -696,13 +1051,14 @@ defmodule Arbor.AI do
     %{
       input_tokens: Map.get(usage, :input_tokens, 0),
       output_tokens: Map.get(usage, :output_tokens, 0),
+      cache_read_input_tokens: Map.get(usage, :cache_read_input_tokens, 0),
       total_tokens:
         Map.get(usage, :total_tokens) ||
           Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
     }
   end
 
-  defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+  defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, total_tokens: 0}
 
   # Extract thinking blocks from extended thinking responses
   # ReqLLM returns thinking blocks in the message content array

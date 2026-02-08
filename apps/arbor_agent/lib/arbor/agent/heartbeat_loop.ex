@@ -284,7 +284,8 @@ defmodule Arbor.Agent.HeartbeatLoop do
           cognitive_mode: metadata[:cognitive_mode],
           llm_actions: metadata[:llm_actions],
           memory_notes_count: metadata[:memory_notes_count],
-          goal_updates_count: metadata[:goal_updates_count]
+          goal_updates_count: metadata[:goal_updates_count],
+          usage: metadata[:usage]
         })
       else
         signal_data

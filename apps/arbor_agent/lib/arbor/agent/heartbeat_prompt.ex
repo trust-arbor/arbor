@@ -15,6 +15,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   Returns a string combining:
   - Temporal context (time since last user message, etc.)
   - Cognitive mode prompt (introspection, consolidation, etc.)
+  - Self-knowledge summary
+  - Conversation context from context window
   - Active goals summary
   - Recent percept results
   - Pending messages summary
@@ -28,6 +30,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         timing_section(state),
         cognitive_section(mode),
         self_knowledge_section(state),
+        conversation_section(state),
         goals_section(state),
         percepts_section(state),
         pending_section(state),
@@ -118,6 +121,27 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       "## Recent Action Results\n#{percept_lines}"
     end
   end
+
+  defp conversation_section(%{context_window: nil}), do: nil
+  defp conversation_section(%{context_window: window}) do
+    text =
+      safe_call(fn ->
+        if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
+          Arbor.Memory.ContextWindow.to_prompt_text(window)
+        else
+          # Fallback for plain map context windows
+          entries = Map.get(window, :entries, [])
+          Enum.map_join(entries, "\n", fn {_type, content, _ts} -> content end)
+        end
+      end)
+
+    cond do
+      is_nil(text) -> nil
+      text == "" -> nil
+      true -> "## Conversation Context\n#{text}"
+    end
+  end
+  defp conversation_section(_state), do: nil
 
   defp pending_section(state) do
     pending = Map.get(state, :pending_messages, [])

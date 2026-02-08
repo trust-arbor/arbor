@@ -10,7 +10,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.Agent.Claude
+  alias Arbor.Agent.{APIAgent, Claude}
   alias Arbor.Dashboard.ChatState
   alias Arbor.Web.Helpers
 
@@ -23,6 +23,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         safe_subscribe()
       end
 
+    available_models =
+      Application.get_env(:arbor_dashboard, :chat_models, default_models())
+
     socket =
       socket
       |> assign(
@@ -34,6 +37,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         loading: false,
         error: nil,
         subscription_ids: subscription_ids,
+        available_models: available_models,
+        current_model: nil,
+        chat_backend: nil,
         # Panel visibility toggles
         show_thinking: true,
         show_memories: true,
@@ -64,6 +70,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         last_llm_thinking: nil,
         heartbeat_count: 0,
         memory_notes_total: 0,
+        # Heartbeat token tracking (separate from chat tokens)
+        hb_input_tokens: 0,
+        hb_output_tokens: 0,
+        hb_cached_tokens: 0,
         # Identity evolution
         self_insights: [],
         identity_changes: [],
@@ -75,7 +85,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Code modules
         code_modules: [],
         # Proposals
-        proposals: []
+        proposals: [],
+        # Heartbeat model selection (API agents only)
+        heartbeat_models:
+          Application.get_env(:arbor_dashboard, :heartbeat_models, []),
+        selected_heartbeat_model: nil
       )
       |> stream(:messages, [])
       |> stream(:signals, [])
@@ -89,10 +103,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   @impl true
   def terminate(_reason, socket) do
-    # Stop the agent if running
-    if agent = socket.assigns[:agent] do
+    # Stop the agent if running (both CLI and API agents are GenServers)
+    if is_pid(socket.assigns[:agent]) do
       try do
-        GenServer.stop(agent, :normal, 1000)
+        GenServer.stop(socket.assigns.agent, :normal, 1000)
       rescue
         _ -> :ok
       catch
@@ -115,59 +129,113 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   @impl true
-  def handle_event("start-agent", %{"model" => model}, socket) do
-    model_atom = String.to_existing_atom(model)
+  def handle_event("start-agent", %{"model" => model_id}, socket) do
+    model_config = find_model_config(model_id, socket.assigns.available_models)
     agent_id = "chat-#{System.unique_integer([:positive])}"
 
-    case Claude.start_link(id: agent_id, model: model_atom, capture_thinking: true) do
-      {:ok, agent} ->
-        # Get initial memory stats
-        memory_stats = get_memory_stats(agent)
+    case model_config do
+      %{backend: :cli} ->
+        # Anthropic models — use Claude CLI (agentic, tool use, thinking)
+        model_atom = String.to_existing_atom(model_id)
 
-        # Load persisted ETS state
-        tokens = ChatState.get_tokens(agent_id)
-        identity = ChatState.get_identity_state(agent_id)
-        cognitive = ChatState.get_cognitive_state(agent_id)
-        code = ChatState.get_code_modules(agent_id)
-        proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-        ChatState.touch_agent(agent_id)
+        case Claude.start_link(id: agent_id, model: model_atom, capture_thinking: true) do
+          {:ok, agent} ->
+            memory_stats = get_memory_stats(agent)
+            tokens = ChatState.get_tokens(agent_id)
+            identity = ChatState.get_identity_state(agent_id)
+            cognitive = ChatState.get_cognitive_state(agent_id)
+            code = ChatState.get_code_modules(agent_id)
+            proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+            ChatState.touch_agent(agent_id)
 
-        socket =
-          socket
-          |> assign(agent: agent, agent_id: agent_id, error: nil, memory_stats: memory_stats)
-          |> assign(
-            query_count: 0,
-            working_thoughts: [],
-            agent_goals: fetch_goals(agent_id),
-            llm_call_count: tokens.count,
-            last_llm_mode: nil,
-            last_llm_thinking: nil,
-            heartbeat_count: 0,
-            memory_notes_total: 0,
-            input_tokens: tokens.input,
-            output_tokens: tokens.output,
-            cached_tokens: tokens.cached,
-            last_duration_ms: tokens.last_duration,
-            self_insights: identity.insights,
-            identity_changes: identity.identity_changes,
-            last_consolidation: identity.last_consolidation,
-            cognitive_prefs: cognitive.current_prefs,
-            cognitive_adjustments: cognitive.adjustments,
-            pinned_count: cognitive.pinned_count,
-            code_modules: code,
-            proposals: proposals
-          )
-          |> stream(:messages, [], reset: true)
-          |> stream(:signals, [], reset: true)
-          |> stream(:thinking, [], reset: true)
-          |> stream(:memories, [], reset: true)
-          |> stream(:actions, [], reset: true)
-          |> stream(:llm_interactions, [], reset: true)
+            socket =
+              socket
+              |> assign(
+                agent: agent, agent_id: agent_id, error: nil,
+                memory_stats: memory_stats, current_model: model_config, chat_backend: :cli
+              )
+              |> assign(
+                query_count: 0,
+                working_thoughts: [],
+                agent_goals: fetch_goals(agent_id),
+                llm_call_count: tokens.count,
+                last_llm_mode: nil,
+                last_llm_thinking: nil,
+                heartbeat_count: 0,
+                memory_notes_total: 0,
+                input_tokens: tokens.input,
+                output_tokens: tokens.output,
+                cached_tokens: tokens.cached,
+                last_duration_ms: tokens.last_duration,
+                self_insights: identity.insights,
+                identity_changes: identity.identity_changes,
+                last_consolidation: identity.last_consolidation,
+                cognitive_prefs: cognitive.current_prefs,
+                cognitive_adjustments: cognitive.adjustments,
+                pinned_count: cognitive.pinned_count,
+                code_modules: code,
+                proposals: proposals
+              )
+              |> stream(:messages, [], reset: true)
+              |> stream(:signals, [], reset: true)
+              |> stream(:thinking, [], reset: true)
+              |> stream(:memories, [], reset: true)
+              |> stream(:actions, [], reset: true)
+              |> stream(:llm_interactions, [], reset: true)
 
-        {:noreply, socket}
+            {:noreply, socket}
 
-      {:error, reason} ->
-        {:noreply, assign(socket, error: "Failed to start agent: #{inspect(reason)}")}
+          {:error, reason} ->
+            {:noreply, assign(socket, error: "Failed to start agent: #{inspect(reason)}")}
+        end
+
+      %{backend: :api} = config ->
+        # API models — full GenServer agent with memory, heartbeat, tools
+        case APIAgent.start_link(
+               id: agent_id,
+               model: config.id,
+               provider: config.provider,
+               model_id: config.id
+             ) do
+          {:ok, agent} ->
+            memory_stats = get_memory_stats(agent)
+            goals = fetch_goals(agent_id)
+            proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+
+            socket =
+              socket
+              |> assign(
+                agent: agent, agent_id: agent_id, error: nil,
+                current_model: config, chat_backend: :api,
+                memory_stats: memory_stats
+              )
+              |> assign(
+                query_count: 0, working_thoughts: [],
+                agent_goals: goals,
+                llm_call_count: 0, last_llm_mode: nil, last_llm_thinking: nil,
+                heartbeat_count: 0, memory_notes_total: 0,
+                input_tokens: 0, output_tokens: 0, cached_tokens: 0, last_duration_ms: nil,
+                hb_input_tokens: 0, hb_output_tokens: 0, hb_cached_tokens: 0,
+                self_insights: [], identity_changes: [], last_consolidation: nil,
+                cognitive_prefs: nil, cognitive_adjustments: [], pinned_count: 0,
+                code_modules: [], proposals: proposals,
+                selected_heartbeat_model: nil
+              )
+              |> stream(:messages, [], reset: true)
+              |> stream(:signals, [], reset: true)
+              |> stream(:thinking, [], reset: true)
+              |> stream(:memories, [], reset: true)
+              |> stream(:actions, [], reset: true)
+              |> stream(:llm_interactions, [], reset: true)
+
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, error: "Failed to start API agent: #{inspect(reason)}")}
+        end
+
+      nil ->
+        {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
     end
   rescue
     e ->
@@ -175,9 +243,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("stop-agent", _params, socket) do
-    if agent = socket.assigns.agent do
+    # Both CLI and API agents are now GenServers
+    if is_pid(socket.assigns[:agent]) do
       try do
-        GenServer.stop(agent, :normal, 1000)
+        GenServer.stop(socket.assigns.agent, :normal, 1000)
       rescue
         _ -> :ok
       catch
@@ -193,7 +262,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
        memory_stats: nil,
        agent_goals: [],
        llm_call_count: 0,
-       heartbeat_count: 0
+       heartbeat_count: 0,
+       chat_backend: nil,
+       current_model: nil
      )}
   end
 
@@ -224,9 +295,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         |> stream_insert(:messages, user_msg)
         |> assign(input: "", loading: true, error: nil)
 
-      # Send async query
-      agent = socket.assigns.agent
-      send(self(), {:query, agent, input})
+      # Send async query — route based on backend
+      case socket.assigns.chat_backend do
+        :cli ->
+          send(self(), {:query, socket.assigns.agent, input})
+
+        :api ->
+          send(self(), {:api_query, input})
+      end
 
       {:noreply, socket}
     end
@@ -293,6 +369,21 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, proposals: proposals)}
   end
 
+  def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
+    {:noreply, assign(socket, selected_heartbeat_model: nil)}
+  end
+
+  def handle_event("set-heartbeat-model", %{"heartbeat_model" => model_id}, socket) do
+    hb_config =
+      Enum.find(socket.assigns.heartbeat_models, &(&1[:id] == model_id))
+
+    if hb_config && is_pid(socket.assigns[:agent]) do
+      APIAgent.set_heartbeat_model(socket.assigns.agent, hb_config)
+    end
+
+    {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
+  end
+
   @impl true
   def handle_info({:query, agent, prompt}, socket) do
     case Claude.query(agent, prompt,
@@ -301,6 +392,36 @@ defmodule Arbor.Dashboard.Live.ChatLive do
          ) do
       {:ok, response} ->
         socket = process_query_response(socket, agent, response)
+        {:noreply, socket}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, loading: false, error: "Query failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_info({:api_query, prompt}, socket) do
+    model_config = socket.assigns.current_model
+
+    case APIAgent.query(socket.assigns.agent, prompt) do
+      {:ok, response} ->
+        assistant_msg = %{
+          id: "msg-#{System.unique_integer([:positive])}",
+          role: :assistant,
+          content: response[:text] || response.text || "",
+          tool_uses: response[:tool_calls] || [],
+          timestamp: DateTime.utc_now(),
+          model: "#{model_config.provider}:#{model_config.id}",
+          session_id: nil,
+          memory_count: length(response[:recalled_memories] || [])
+        }
+
+        socket =
+          socket
+          |> stream_insert(:messages, assistant_msg)
+          |> assign(loading: false, query_count: socket.assigns.query_count + 1)
+          |> maybe_extract_api_usage(response)
+          |> maybe_add_recalled_memories_api(response)
+
         {:noreply, socket}
 
       {:error, reason} ->
@@ -476,27 +597,50 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     <%!-- Token counter bar --%>
     <div
-      :if={@agent && @llm_call_count > 0}
-      style="display: flex; gap: 0.75rem; flex-wrap: wrap; padding: 0.4rem 0.75rem; margin-top: 0.35rem; border: 1px solid rgba(74, 158, 255, 0.3); border-radius: 6px; font-size: 0.8em; background: rgba(74, 158, 255, 0.05);"
+      :if={@agent && (@llm_call_count > 0 or @heartbeat_count > 0)}
+      style="display: flex; justify-content: space-between; padding: 0.4rem 0.75rem; margin-top: 0.35rem; border: 1px solid rgba(74, 158, 255, 0.3); border-radius: 6px; font-size: 0.8em; background: rgba(74, 158, 255, 0.05);"
     >
-      <span style="color: #4a9eff;">
-        INPUT: <strong>{format_token_count(@input_tokens)}</strong>
-      </span>
-      <span style="color: #22c55e;">
-        OUTPUT: <strong>{format_token_count(@output_tokens)}</strong>
-      </span>
-      <span :if={@cached_tokens > 0} style="color: #a855f7;">
-        CACHED: <strong>{format_token_count(@cached_tokens)}</strong>
-      </span>
-      <span style="color: #e2e8f0;">
-        TOTAL: <strong>{format_token_count(@input_tokens + @output_tokens)}</strong>
-      </span>
-      <span style="color: #4a9eff;">
-        CALLS: <strong>{@llm_call_count}</strong>
-      </span>
-      <span :if={@last_duration_ms} style="color: #eab308;">
-        LAST: <strong>{format_duration(@last_duration_ms)}</strong>
-      </span>
+      <%!-- Chat tokens (left) --%>
+      <div :if={@llm_call_count > 0} style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+        <span style="color: #94a3b8; font-weight: 600;">CHAT</span>
+        <span style="color: #4a9eff;">
+          IN: <strong>{format_token_count(@input_tokens)}</strong>
+        </span>
+        <span style="color: #22c55e;">
+          OUT: <strong>{format_token_count(@output_tokens)}</strong>
+        </span>
+        <span :if={@cached_tokens > 0} style="color: #a855f7;">
+          CACHED: <strong>{format_token_count(@cached_tokens)}</strong>
+        </span>
+        <span style="color: #e2e8f0;">
+          TOTAL: <strong>{format_token_count(@input_tokens + @output_tokens)}</strong>
+        </span>
+        <span style="color: #4a9eff;">
+          CALLS: <strong>{@llm_call_count}</strong>
+        </span>
+        <span :if={@last_duration_ms} style="color: #eab308;">
+          LAST: <strong>{format_duration(@last_duration_ms)}</strong>
+        </span>
+      </div>
+      <%!-- Heartbeat tokens (right) --%>
+      <div :if={@heartbeat_count > 0} style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+        <span style="color: #f97316; font-weight: 600;">HB</span>
+        <span style="color: #4a9eff;">
+          IN: <strong>{format_token_count(@hb_input_tokens)}</strong>
+        </span>
+        <span style="color: #22c55e;">
+          OUT: <strong>{format_token_count(@hb_output_tokens)}</strong>
+        </span>
+        <span :if={@hb_cached_tokens > 0} style="color: #a855f7;">
+          CACHED: <strong>{format_token_count(@hb_cached_tokens)}</strong>
+        </span>
+        <span style="color: #e2e8f0;">
+          TOTAL: <strong>{format_token_count(@hb_input_tokens + @hb_output_tokens)}</strong>
+        </span>
+        <span style="color: #f97316;">
+          BEATS: <strong>{@heartbeat_count}</strong>
+        </span>
+      </div>
     </div>
 
     <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
@@ -741,9 +885,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 name="model"
                 style="padding: 0.4rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
               >
-                <option value="haiku">Haiku (fast)</option>
-                <option value="sonnet">Sonnet (balanced)</option>
-                <option value="opus">Opus (powerful)</option>
+                <%= for model <- @available_models do %>
+                  <option value={model.id}><%= model.label %></option>
+                <% end %>
               </select>
               <button
                 type="submit"
@@ -757,8 +901,35 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             :if={@agent != nil}
             style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
           >
-            <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">Chat with Claude</span>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
+              <%= if @current_model do %>
+                Chat with <%= @current_model.label %> (<%= @current_model.provider %>)
+              <% else %>
+                Chat with Claude
+              <% end %>
+            </span>
             <div style="flex: 1;"></div>
+            <form
+              :if={@chat_backend == :api and @heartbeat_models != []}
+              phx-change="set-heartbeat-model"
+              style="display: flex; align-items: center; gap: 0.3rem;"
+            >
+              <label style="color: var(--aw-text-muted, #888); font-size: 0.8em;">HB:</label>
+              <select
+                name="heartbeat_model"
+                style="padding: 0.2rem 0.4rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.8em;"
+              >
+                <option value="">default</option>
+                <%= for hb <- @heartbeat_models do %>
+                  <option
+                    value={hb.id}
+                    selected={@selected_heartbeat_model && @selected_heartbeat_model[:id] == hb.id}
+                  >
+                    <%= hb.label %>
+                  </option>
+                <% end %>
+              </select>
+            </form>
             <button
               phx-click="stop-agent"
               style="padding: 0.4rem 0.75rem; background: var(--aw-error, #ff4a4a); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
@@ -791,8 +962,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               <details :for={tool <- msg.tool_uses} style="border: 1px solid var(--aw-border, #333); border-radius: 4px; background: rgba(0,0,0,0.2); font-size: 0.85em;">
                 <summary style="padding: 0.3rem 0.5rem; cursor: pointer; color: var(--aw-text-muted, #aaa); user-select: none; list-style: none; display: flex; align-items: center; gap: 0.4rem;">
                   <span style="color: #888; font-size: 0.9em;">&#9654;</span>
-                  <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(tool.name)}>
-                    {tool.name}
+                  <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(tool[:name] || tool["name"] || "unknown")}>
+                    {tool[:name] || tool["name"] || "unknown"}
                   </span>
                   <span style="color: var(--aw-text-muted, #888); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                     {tool_summary(tool)}
@@ -801,11 +972,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 <div style="padding: 0.4rem 0.5rem; border-top: 1px solid var(--aw-border, #333);">
                   <div style="margin-bottom: 0.3rem;">
                     <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Input:</strong>
-                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_input(tool.input)}</pre>
+                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_input(tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{})}</pre>
                   </div>
-                  <div :if={tool[:result]}>
+                  <div :if={tool[:result] || tool["result"]}>
                     <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Result:</strong>
-                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_result(tool.result)}</pre>
+                    <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_result(tool[:result] || tool["result"])}</pre>
                   </div>
                 </div>
               </details>
@@ -1117,6 +1288,59 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     """
   end
 
+  # ── Model Config Helpers ─────────────────────────────────────────────
+
+  defp find_model_config(model_id, models) do
+    Enum.find(models, fn m -> m.id == model_id end)
+  end
+
+  defp default_models do
+    [
+      %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli},
+      %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, backend: :cli},
+      %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli}
+    ]
+  end
+
+  defp maybe_extract_api_usage(socket, response) do
+    usage = response[:usage] || %{}
+    input = usage[:input_tokens] || usage["input_tokens"] || 0
+    output = usage[:output_tokens] || usage["output_tokens"] || 0
+
+    if input > 0 or output > 0 do
+      agent_id = socket.assigns.agent_id
+      tokens = ChatState.add_tokens(agent_id, input, output, nil)
+
+      assign(socket,
+        input_tokens: tokens.input,
+        output_tokens: tokens.output,
+        total_tokens: tokens.input + tokens.output,
+        llm_call_count: tokens.count
+      )
+    else
+      assign(socket, llm_call_count: socket.assigns.llm_call_count + 1)
+    end
+  end
+
+  defp maybe_add_recalled_memories_api(socket, response) do
+    memories = response[:recalled_memories] || []
+
+    if memories != [] do
+      Enum.reduce(memories, socket, fn memory, sock ->
+        entry = %{
+          id: "mem-#{System.unique_integer([:positive])}",
+          content: memory[:content] || memory[:text] || inspect(memory),
+          score: memory[:score] || memory[:similarity],
+          timestamp: DateTime.utc_now()
+        }
+
+        stream_insert(sock, :memories, entry)
+      end)
+    else
+      socket
+    end
+  end
+
   # ── Helpers ──────────────────────────────────────────────────────────
 
   defp message_style(:user), do: "background: rgba(74, 158, 255, 0.1); margin-left: 2rem;"
@@ -1162,12 +1386,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp signal_icon(_), do: "▶"
 
   defp get_memory_stats(agent) do
-    case Claude.memory_stats(agent) do
+    case GenServer.call(agent, :memory_stats) do
       {:ok, stats} -> stats
       _ -> nil
     end
   rescue
     _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_subscribe do
@@ -1233,7 +1459,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  defp tool_summary(%{name: name, input: input}) do
+  defp tool_summary(tool) when is_map(tool) do
+    name = tool[:name] || tool["name"] || ""
+    input = tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{}
+
     case name do
       "Read" -> Map.get(input, "file_path", "") |> Path.basename()
       "Glob" -> Map.get(input, "pattern", "")
@@ -1244,15 +1473,26 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       "Task" -> Map.get(input, "description", "")
       "WebFetch" -> Map.get(input, "url", "") |> String.slice(0, 60)
       "WebSearch" -> Map.get(input, "query", "")
-      _ -> inspect(Map.keys(input)) |> String.slice(0, 40)
+      n when is_binary(n) ->
+        # Handle API tool names like "memory_remember", "memory_recall"
+        summarize_api_tool(n, input)
+      _ -> ""
     end
   end
 
-  defp tool_summary(%{"name" => name, "input" => input}) do
-    tool_summary(%{name: name, input: input})
+  defp tool_summary(_), do: ""
+
+  defp summarize_api_tool(name, input) when is_map(input) do
+    cond do
+      Map.has_key?(input, "content") -> String.slice(to_string(input["content"]), 0, 50)
+      Map.has_key?(input, :content) -> String.slice(to_string(input[:content]), 0, 50)
+      Map.has_key?(input, "query") -> String.slice(to_string(input["query"]), 0, 50)
+      Map.has_key?(input, :query) -> String.slice(to_string(input[:query]), 0, 50)
+      true -> name
+    end
   end
 
-  defp tool_summary(_), do: ""
+  defp summarize_api_tool(name, _), do: name
 
   defp format_tool_input(input) when is_map(input) do
     Jason.encode!(input, pretty: true)
@@ -1532,18 +1772,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       thinking = data[:agent_thinking] || data["agent_thinking"]
       llm_actions = data[:llm_actions] || data["llm_actions"] || 0
       notes_count = data[:memory_notes_count] || data["memory_notes_count"] || 0
+      usage = data[:usage] || data["usage"] || %{}
 
-      # Count heartbeat and LLM calls
+      # Extract heartbeat LLM token usage
+      hb_in = usage[:input_tokens] || usage["input_tokens"] || 0
+      hb_out = usage[:output_tokens] || usage["output_tokens"] || 0
+      hb_cached = usage[:cache_read_input_tokens] || usage["cache_read_input_tokens"] || 0
+
+      # Count heartbeat (LLM call count tracked separately for chat only)
       heartbeat_count = socket.assigns.heartbeat_count + 1
-      llm_call_count = if llm_actions > 0 or thinking, do: socket.assigns.llm_call_count + 1, else: socket.assigns.llm_call_count
 
       socket =
         assign(socket,
           heartbeat_count: heartbeat_count,
-          llm_call_count: llm_call_count,
           last_llm_mode: mode,
           last_llm_thinking: thinking,
-          memory_notes_total: socket.assigns.memory_notes_total + notes_count
+          memory_notes_total: socket.assigns.memory_notes_total + notes_count,
+          hb_input_tokens: socket.assigns.hb_input_tokens + hb_in,
+          hb_output_tokens: socket.assigns.hb_output_tokens + hb_out,
+          hb_cached_tokens: socket.assigns.hb_cached_tokens + hb_cached
         )
 
       # Add to LLM interactions stream if there was thinking
