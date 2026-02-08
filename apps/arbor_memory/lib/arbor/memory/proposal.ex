@@ -23,6 +23,14 @@ defmodule Arbor.Memory.Proposal do
   5. Rejected proposals are removed (with calibration feedback)
   6. Deferred proposals stay in queue for later review
 
+  ## Deduplication
+
+  When creating a proposal, the system checks for existing pending/deferred
+  proposals of the same type with similar content. If a match is found
+  (exact case-insensitive match, or Jaro-Winkler similarity >= 0.85 for
+  content >= 30 chars), the existing proposal's confidence is boosted instead
+  of creating a duplicate. A cap of 20 pending proposals per agent is enforced.
+
   ## Storage
 
   Phase 4: ETS-backed (in-memory, ephemeral)
@@ -82,6 +90,12 @@ defmodule Arbor.Memory.Proposal do
   # Confidence boost when a proposal is accepted
   @acceptance_boost 0.2
 
+  # Maximum pending proposals per agent before oldest are pruned
+  @max_pending 20
+
+  # Similarity threshold for content dedup (Jaro-Winkler distance)
+  @content_similarity_threshold 0.85
+
   @allowed_types [:fact, :insight, :learning, :pattern, :preconscious]
 
   # ============================================================================
@@ -90,6 +104,11 @@ defmodule Arbor.Memory.Proposal do
 
   @doc """
   Create a new proposal for agent review.
+
+  Deduplicates against existing pending/deferred proposals of the same type.
+  If a similar proposal already exists, boosts its confidence instead of
+  creating a duplicate. Enforces a cap of #{@max_pending} pending proposals
+  per agent.
 
   ## Data Fields
 
@@ -111,27 +130,41 @@ defmodule Arbor.Memory.Proposal do
   @spec create(String.t(), proposal_type(), map()) :: {:ok, t()} | {:error, term()}
   def create(agent_id, type, data) when type in @allowed_types do
     with {:ok, content} <- validate_content(data) do
-      proposal = %__MODULE__{
-        id: generate_id(),
-        agent_id: agent_id,
-        type: type,
-        content: content,
-        confidence: Map.get(data, :confidence, 0.5),
-        source: Map.get(data, :source),
-        evidence: Map.get(data, :evidence, []),
-        metadata: Map.get(data, :metadata, %{}),
-        created_at: DateTime.utc_now(),
-        status: :pending
-      }
-
-      # Store in ETS
       ensure_table_exists()
-      :ets.insert(@proposals_ets, {{agent_id, proposal.id}, proposal})
 
-      # Emit signal
-      Signals.emit_proposal_created(agent_id, proposal)
+      # Check for duplicate content among pending/deferred proposals
+      case find_similar_pending(agent_id, type, content) do
+        {:duplicate, existing} ->
+          # Boost confidence of existing proposal instead of creating duplicate
+          boosted = %{existing | confidence: min(1.0, existing.confidence + 0.05)}
+          :ets.insert(@proposals_ets, {{agent_id, existing.id}, boosted})
+          {:ok, existing}
 
-      {:ok, proposal}
+        :no_duplicate ->
+          proposal = %__MODULE__{
+            id: generate_id(),
+            agent_id: agent_id,
+            type: type,
+            content: content,
+            confidence: Map.get(data, :confidence, 0.5),
+            source: Map.get(data, :source),
+            evidence: Map.get(data, :evidence, []),
+            metadata: Map.get(data, :metadata, %{}),
+            created_at: DateTime.utc_now(),
+            status: :pending
+          }
+
+          # Enforce pending queue cap — prune oldest low-confidence proposals
+          enforce_pending_cap(agent_id)
+
+          # Store in ETS
+          :ets.insert(@proposals_ets, {{agent_id, proposal.id}, proposal})
+
+          # Emit signal
+          Signals.emit_proposal_created(agent_id, proposal)
+
+          {:ok, proposal}
+      end
     end
   end
 
@@ -480,6 +513,66 @@ defmodule Arbor.Memory.Proposal do
   defp avg_confidence(proposals) do
     total = Enum.sum(Enum.map(proposals, & &1.confidence))
     Float.round(total / length(proposals), 3)
+  end
+
+  # ============================================================================
+  # Deduplication
+  # ============================================================================
+
+  defp find_similar_pending(agent_id, type, content) do
+    # Get pending and deferred proposals of the same type
+    candidates =
+      @proposals_ets
+      |> :ets.match_object({{agent_id, :_}, :_})
+      |> Enum.map(fn {_key, proposal} -> proposal end)
+      |> Enum.filter(&(&1.type == type and &1.status in [:pending, :deferred]))
+
+    content_lower = String.downcase(content)
+
+    # Check exact match first
+    exact =
+      Enum.find(candidates, fn p ->
+        String.downcase(p.content) == content_lower
+      end)
+
+    case exact do
+      nil ->
+        # Fuzzy match using Jaro-Winkler distance
+        # Only apply to content >= 30 chars (short strings have inflated similarity)
+        if String.length(content_lower) >= 30 do
+          similar =
+            Enum.find(candidates, fn p ->
+              String.jaro_distance(content_lower, String.downcase(p.content)) >=
+                @content_similarity_threshold
+            end)
+
+          case similar do
+            nil -> :no_duplicate
+            p -> {:duplicate, p}
+          end
+        else
+          :no_duplicate
+        end
+
+      p ->
+        {:duplicate, p}
+    end
+  end
+
+  defp enforce_pending_cap(agent_id) do
+    {:ok, pending} = list_pending(agent_id)
+
+    if length(pending) >= @max_pending do
+      # Remove lowest-confidence, oldest proposals to make room
+      to_prune =
+        pending
+        |> Enum.sort_by(fn p -> {p.confidence, p.created_at} end, :asc)
+        |> Enum.take(length(pending) - @max_pending + 1)
+
+      Enum.each(to_prune, fn p ->
+        :ets.delete(@proposals_ets, {agent_id, p.id})
+      end)
+    end
   end
 
   # Graph access - uses the same ETS table as the facade

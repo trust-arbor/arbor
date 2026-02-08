@@ -32,6 +32,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         self_knowledge_section(state),
         conversation_section(state),
         goals_section(state),
+        proposals_section(state),
         percepts_section(state),
         pending_section(state),
         response_format_section()
@@ -62,11 +63,18 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       ],
       "goal_updates": [
         {"goal_id": "id", "progress": 0.5, "note": "progress description"}
+      ],
+      "proposal_decisions": [
+        {"proposal_id": "prop_abc123", "decision": "accept|reject|defer", "reason": "why"}
       ]
     }
 
-    If you have nothing to do, return empty arrays for actions, memory_notes, and goal_updates.
+    If you have nothing to do, return empty arrays for actions, memory_notes, goal_updates, and proposal_decisions.
     Always include your thinking.
+
+    When pending proposals are shown, review them and decide whether to accept (integrate into
+    your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
+    proposal_decisions for proposals you've actively reviewed.
     """
   end
 
@@ -99,6 +107,32 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         |> Enum.join("\n")
 
       "## Active Goals\n#{goal_lines}"
+    end
+  end
+
+  defp proposals_section(state) do
+    agent_id = state[:id] || state[:agent_id]
+
+    proposals =
+      safe_call(fn ->
+        case Arbor.Memory.Proposal.list_pending(agent_id) do
+          {:ok, list} -> Enum.take(list, 5)
+          _ -> []
+        end
+      end) || []
+
+    if proposals == [] do
+      nil
+    else
+      lines =
+        proposals
+        |> Enum.map(fn p ->
+          conf = round((p.confidence || 0.5) * 100)
+          "- [#{p.id}] (#{p.type}, #{conf}% confidence) #{String.slice(p.content, 0..80)}"
+        end)
+        |> Enum.join("\n")
+
+      "## Pending Proposals\nReview and decide: accept, reject, or defer.\n#{lines}"
     end
   end
 
@@ -158,7 +192,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp response_format_section do
     """
     ## Response Format
-    Respond with JSON only. Include "thinking", "actions", "memory_notes", and "goal_updates" keys.
+    Respond with JSON only. Include "thinking", "actions", "memory_notes", "goal_updates", and optionally "proposal_decisions" keys.
     """
   end
 

@@ -118,7 +118,7 @@ defmodule Arbor.Dashboard.AgentManager do
           case backend do
             :cli ->
               Arbor.Agent.Claude.query(pid, input,
-                timeout: Keyword.get(opts, :timeout, 120_000),
+                timeout: Keyword.get(opts, :timeout, :infinity),
                 permission_mode: :bypass
               )
 
