@@ -20,8 +20,8 @@
 
 ## Remediation Status
 
-- [ ] **Phase 1** — Critical (C1-C5)
-- [ ] **Phase 2** — High (H1-H15)
+- [x] **Phase 1** — Critical (C1-C5) — All 5 remediated
+- [ ] **Phase 2** — High (H1-H15) — 10/15 done, 2 deferred (H1/H2), 3 remaining (H9/H13/H15)
 - [ ] **Phase 3** — Medium (M1-M20)
 - [ ] **Phase 4** — Low (L1-L10)
 
@@ -33,31 +33,31 @@
 - **File:** `apps/arbor_gateway/lib/arbor/gateway/router.ex`
 - **Issue:** Zero auth plugs on any endpoint. Any localhost process can: authorize tools (`/api/bridge`), read/write any agent's memory (`/api/memory`), inject signals (`/api/signals`), execute code (`/api/dev/eval`).
 - **Remediation:** Add authentication plug (API key or bearer token) to Gateway router.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — `Arbor.Gateway.Auth` plug (API key via env/config)
 
 ### C2: Shell Metacharacter Sandbox Bypass
 - **Files:** `apps/arbor_shell/lib/arbor/shell/sandbox.ex:137-143`, `apps/arbor_shell/lib/arbor/shell/executor.ex:43`, `apps/arbor_shell/lib/arbor/shell/port_session.ex:162`
 - **Issue:** Sandbox only checks first word of command. `;`, `&&`, `||`, `|`, `` ` ``, `$()` all bypass. `Port.open({:spawn, command})` passes through `/bin/sh -c`.
 - **Remediation:** Use `{:spawn_executable, path}` with args list; add metacharacter detection to sandbox.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — metacharacter detection + spawn_executable in executor/port_session
 
 ### C3: Reflex Safety System Fails Open on Any Exception
 - **File:** `apps/arbor_security/lib/arbor/security.ex:608-612`
 - **Issue:** `rescue _ -> :ok` catches all exceptions. If Reflex.Registry crashes, ALL reflex protections (rm -rf, sudo, SSH, SSRF blocks) permanently disabled.
 - **Remediation:** Change to `rescue _ -> {:error, :reflex_check_failed}` (fail-closed).
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — fail-closed with Logger.error
 
 ### C4: HotLoad Compiles Arbitrary Code Without Sandbox Validation
 - **File:** `apps/arbor_actions/lib/arbor/actions/code.ex:407`
 - **Issue:** `Code.compile_string(source_code)` runs without passing through `Arbor.Sandbox.Code.validate/2` despite that module existing. Module immediately loaded into VM.
 - **Remediation:** Route source through `Arbor.Sandbox.Code.validate/2` before compilation.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — `validate_source_safety/1` added before `compile_source/1`
 
 ### C5: Hardcoded Erlang Cookie + Unrestricted RPC
 - **Files:** `apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex:11`, `apps/arbor_common/lib/mix/tasks/arbor/eval.ex:34`
 - **Issue:** Cookie `:arbor_dev` in source. `:rpc.call(node, Code, :eval_string, [expr])` enables full RCE if distribution port reachable.
 - **Remediation:** Generate random cookie at runtime, don't commit to source.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — cookie from `ARBOR_COOKIE` env var, no fallback
 
 ---
 
@@ -66,77 +66,77 @@
 ### H1: Identity Verification Bypass (no signed_request)
 - **File:** `apps/arbor_security/lib/arbor/security.ex:556-561`
 - **Issue:** When `signed_request` is nil (omitted), returns `:ok` even with verification enabled.
-- **Status:** [ ] Not started
+- **Status:** [ ] Deferred — requires identity infrastructure (19 callers pass no signed_request)
 
 ### H2: Unregistered Identities Pass Authorization
 - **File:** `apps/arbor_security/lib/arbor/security.ex:545-547`
 - **Issue:** `{:error, :not_found} -> :ok` — any arbitrary principal_id works without registration.
-- **Status:** [ ] Not started
+- **Status:** [ ] Deferred — requires identity infrastructure (most callers use unregistered IDs)
 
 ### H3: `can?/3` Skips All Security Checks
 - **File:** `apps/arbor_security/lib/arbor/security.ex:332-338`
 - **Issue:** Only checks capability existence. Bypasses identity, constraints, rate limits, escalation, reflexes.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — Logger.warning on every call + deprecation comment
 
 ### H4: Dev Eval Endpoint
 - **File:** `apps/arbor_gateway/lib/arbor/gateway/dev/router.ex:142`
 - **Issue:** `Code.eval_string(code)` on HTTP POST body. Route mounted unconditionally; guard is config-based.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — compile-time guard: only mounted in dev/test
 
 ### H5: Unauthenticated Dashboard
 - **File:** `apps/arbor_dashboard/lib/arbor_dashboard/router.ex`
 - **Issue:** Zero auth on `/eval`, `/agents`, `/consensus`, `/signals`, `/monitor`.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — HTTP Basic Auth plug (`Arbor.Dashboard.Auth`), required in prod
 
 ### H6: Consensus force_approve Accepts Any Caller
 - **File:** `apps/arbor_consensus/lib/arbor/consensus/coordinator.ex:469-496`
 - **Issue:** `force_approve/3` accepts any `approver_id` without authority verification.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — `can?/3` check for `arbor://consensus/admin` capability
 
 ### H7: Audit Event Persistence Fails Silently
 - **File:** `apps/arbor_security/lib/arbor/security/events.ex:332-337`
 - **Issue:** `rescue _ -> :ok` drops all audit events if EventLog backend is down.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — Logger.error + error return instead of silent swallow
 
 ### H8: Filesystem Sandbox Symlink Escape
 - **File:** `apps/arbor_sandbox/lib/arbor/sandbox/filesystem.ex:67-74`
 - **Issue:** `Path.expand` doesn't resolve symlinks. SafePath module exists but not used.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — `SafePath.resolve_within/2` integrated into `resolve_path/2`
 
 ### H9: Code Sandbox Dynamic Dispatch Bypass
 - **File:** `apps/arbor_sandbox/lib/arbor/sandbox/code.ex:260-261`
 - **Issue:** AST walker only catches `apply` with literal atom module. Variable modules bypass.
-- **Status:** [ ] Not started
+- **Status:** [ ] Not started — medium effort, needs design decision
 
 ### H10: Unsigned Capabilities Accepted by Default
 - **File:** `apps/arbor_security/lib/arbor/security/config.ex:53`
 - **Issue:** `capability_signing_required` defaults to `false`.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — default changed to `true`
 
 ### H11: CompileAndTest Shell Injection
 - **File:** `apps/arbor_actions/lib/arbor/actions/code.ex:176`
 - **Issue:** `test_files` joined into shell command unsanitized with `sandbox: :none`.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — validate_test_files/1 (must end _test.exs, no metacharacters, no ..)
 
 ### H12: :os.cmd Insufficient Shell Escaping
 - **File:** `apps/arbor_ai/lib/arbor/ai/agent_sdk/transport.ex:189`
 - **Issue:** `shell_escape/1` only escapes double quotes. `$()`, backticks, pipes pass through.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — replaced with System.cmd (no shell interpretation)
 
 ### H13: No HTTP-Level Rate Limiting on Gateway
 - **File:** `apps/arbor_gateway/lib/arbor/gateway/router.ex`
 - **Issue:** Unlimited requests to all API endpoints.
-- **Status:** [ ] Not started
+- **Status:** [ ] Not started — medium effort, needs plug implementation
 
 ### H14: No Production secret_key_base
 - **Files:** `config/dev.exs:26`, no `prod.exs`/`runtime.exs` override
 - **Issue:** Deterministic dev key, no production override exists.
-- **Status:** [ ] Not started
+- **Status:** [x] Remediated — SECRET_KEY_BASE required from env var in prod
 
 ### H15: Macro-Generated Code After Sandbox Check
 - **File:** `apps/arbor_sandbox/lib/arbor/sandbox/code.ex`
 - **Issue:** AST validated pre-expansion. Macros expand after check.
-- **Status:** [ ] Not started
+- **Status:** [ ] Document only — inherent limitation of pre-compilation validation
 
 ---
 

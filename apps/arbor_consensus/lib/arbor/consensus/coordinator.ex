@@ -467,58 +467,60 @@ defmodule Arbor.Consensus.Coordinator do
 
   @impl true
   def handle_call({:force_approve, proposal_id, approver_id}, _from, state) do
-    case Map.get(state.proposals, proposal_id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
+    # H6: Require consensus/admin capability for force operations
+    with :ok <- check_force_authorization(approver_id),
+         proposal when not is_nil(proposal) <- Map.get(state.proposals, proposal_id) do
+      state = kill_active_council(state, proposal_id)
+      proposal = Proposal.update_status(proposal, :approved)
 
-      proposal ->
-        state = kill_active_council(state, proposal_id)
-        proposal = Proposal.update_status(proposal, :approved)
+      state = %{
+        state
+        | proposals: Map.put(state.proposals, proposal_id, proposal),
+          proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+      }
 
-        state = %{
-          state
-          | proposals: Map.put(state.proposals, proposal_id, proposal),
-            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
-        }
+      record_event(state, :decision_reached, %{
+        proposal_id: proposal_id,
+        agent_id: approver_id,
+        decision: :approved,
+        data: %{override: true, approver: approver_id}
+      })
 
-        record_event(state, :decision_reached, %{
-          proposal_id: proposal_id,
-          agent_id: approver_id,
-          decision: :approved,
-          data: %{override: true, approver: approver_id}
-        })
+      # Execute if configured
+      state = maybe_execute(state, proposal, nil)
 
-        # Execute if configured
-        state = maybe_execute(state, proposal, nil)
-
-        {:reply, :ok, state}
+      {:reply, :ok, state}
+    else
+      nil -> {:reply, {:error, :not_found}, state}
+      {:error, _} = error -> {:reply, error, state}
     end
   end
 
   @impl true
   def handle_call({:force_reject, proposal_id, rejector_id}, _from, state) do
-    case Map.get(state.proposals, proposal_id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
+    # H6: Require consensus/admin capability for force operations
+    with :ok <- check_force_authorization(rejector_id),
+         proposal when not is_nil(proposal) <- Map.get(state.proposals, proposal_id) do
+      state = kill_active_council(state, proposal_id)
+      proposal = Proposal.update_status(proposal, :rejected)
 
-      proposal ->
-        state = kill_active_council(state, proposal_id)
-        proposal = Proposal.update_status(proposal, :rejected)
+      state = %{
+        state
+        | proposals: Map.put(state.proposals, proposal_id, proposal),
+          proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+      }
 
-        state = %{
-          state
-          | proposals: Map.put(state.proposals, proposal_id, proposal),
-            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
-        }
+      record_event(state, :decision_reached, %{
+        proposal_id: proposal_id,
+        agent_id: rejector_id,
+        decision: :rejected,
+        data: %{override: true, rejector: rejector_id}
+      })
 
-        record_event(state, :decision_reached, %{
-          proposal_id: proposal_id,
-          agent_id: rejector_id,
-          decision: :rejected,
-          data: %{override: true, rejector: rejector_id}
-        })
-
-        {:reply, :ok, state}
+      {:reply, :ok, state}
+    else
+      nil -> {:reply, {:error, :not_found}, state}
+      {:error, _} = error -> {:reply, error, state}
     end
   end
 
@@ -678,6 +680,22 @@ defmodule Arbor.Consensus.Coordinator do
       {false, _} ->
         :ok
     end
+  end
+
+  # H6: Check force_approve/force_reject authorization via capability system.
+  # Uses can?/3 (capability existence) for now. Upgrade to authorize/4
+  # (full identity verification) once identity infrastructure is wired in (H1/H2).
+  defp check_force_authorization(actor_id) do
+    if Arbor.Security.can?(actor_id, "arbor://consensus/admin", :force) do
+      :ok
+    else
+      Logger.warning("Unauthorized force operation attempted by #{actor_id}")
+      {:error, {:unauthorized, :consensus_admin_required}}
+    end
+  rescue
+    _ ->
+      # If security module isn't available, deny by default (fail-closed)
+      {:error, {:unauthorized, :security_unavailable}}
   end
 
   defp maybe_authorize(nil, _proposal), do: :ok

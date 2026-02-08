@@ -111,6 +111,14 @@ defmodule Arbor.Actions.Code do
       compile_only = params[:compile_only] || false
       test_files = params[:test_files] || []
 
+      # H11: Validate test files upfront before doing any work
+      if test_files != [] do
+        case validate_test_files(test_files) do
+          :ok -> :ok
+          {:error, reason} -> throw({:invalid_test_files, reason})
+        end
+      end
+
       Actions.emit_started(__MODULE__, %{file: file, worktree: worktree})
 
       # First, compile the project
@@ -146,6 +154,9 @@ defmodule Arbor.Actions.Code do
           Actions.emit_failed(__MODULE__, "Compilation failed")
           {:ok, result}
       end
+    catch
+      {:invalid_test_files, reason} ->
+        {:error, reason}
     end
 
     defp run_compile(worktree) do
@@ -169,7 +180,7 @@ defmodule Arbor.Actions.Code do
     end
 
     defp run_tests(worktree, test_files, warnings) do
-      # Build test command
+      # Build test command (test_files already validated in do_run)
       test_cmd =
         case test_files do
           [] -> "mix test"
@@ -213,6 +224,27 @@ defmodule Arbor.Actions.Code do
           Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
           {:ok, result}
       end
+    end
+
+    # H11: Validate test file paths — reject metacharacters and non-test files
+    defp validate_test_files(files) do
+      shell_metacharacters = [";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r"]
+
+      Enum.reduce_while(files, :ok, fn file, :ok ->
+        cond do
+          not String.ends_with?(file, "_test.exs") ->
+            {:halt, {:error, {:invalid_test_file, file, "must end with _test.exs"}}}
+
+          String.contains?(file, "..") ->
+            {:halt, {:error, {:invalid_test_file, file, "path traversal not allowed"}}}
+
+          Enum.any?(shell_metacharacters, &String.contains?(file, &1)) ->
+            {:halt, {:error, {:invalid_test_file, file, "shell metacharacters not allowed"}}}
+
+          true ->
+            {:cont, :ok}
+        end
+      end)
     end
 
     defp extract_warnings(output) do
