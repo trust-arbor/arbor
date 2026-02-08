@@ -84,6 +84,7 @@ defmodule Arbor.Memory.WorkingMemory do
           agent_id: String.t(),
           name: String.t() | nil,
           current_human: String.t() | nil,
+          current_conversation: map() | nil,
           recent_thoughts: [thought()],
           active_goals: [goal()],
           relationship_context: String.t() | map() | nil,
@@ -102,6 +103,7 @@ defmodule Arbor.Memory.WorkingMemory do
     :agent_id,
     :name,
     :current_human,
+    :current_conversation,
     recent_thoughts: [],
     active_goals: [],
     relationship_context: nil,
@@ -153,7 +155,7 @@ defmodule Arbor.Memory.WorkingMemory do
       thought_count: 0
     }
 
-    if Keyword.get(opts, :rebuild_from_signals, false) do
+    if Keyword.get(opts, :rebuild_from_signals, true) do
       case rebuild_from_long_term(base) do
         {:ok, rebuilt} -> rebuilt
         {:error, _reason} -> base
@@ -264,13 +266,40 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   @doc """
-  Remove a completed goal by description string or goal id.
+  Mark a goal as completed and remove it from active goals.
+  Also records the completion as a thought for audit trail.
   """
   @spec complete_goal(t(), String.t()) :: t()
   def complete_goal(wm, goal_or_id) do
-    %{wm | active_goals: Enum.reject(wm.active_goals, fn g ->
+    goal = Enum.find(wm.active_goals, fn g ->
+      g.id == goal_or_id or g.description == goal_or_id
+    end)
+
+    wm = %{wm | active_goals: Enum.reject(wm.active_goals, fn g ->
       g.id == goal_or_id or g.description == goal_or_id
     end)}
+
+    if goal do
+      add_thought(wm, "Completed goal: #{goal.description}")
+    else
+      wm
+    end
+  end
+
+  @doc """
+  Mark a goal as abandoned and remove it from active goals.
+  Records the abandonment as a thought for audit trail.
+  """
+  @spec abandon_goal(t(), String.t()) :: t()
+  def abandon_goal(wm, goal_id) do
+    goal = Enum.find(wm.active_goals, &(&1.id == goal_id))
+    wm = remove_goal(wm, goal_id)
+
+    if goal do
+      add_thought(wm, "Abandoned goal: #{goal.description}")
+    else
+      wm
+    end
   end
 
   @doc """
@@ -326,6 +355,22 @@ defmodule Arbor.Memory.WorkingMemory do
   @spec set_relationship_context(t(), String.t() | map() | nil) :: t()
   def set_relationship_context(wm, context) do
     %{wm | relationship_context: context}
+  end
+
+  @doc """
+  Set both current human and relationship context in one call.
+  """
+  @spec set_relationship(t(), String.t(), String.t() | map() | nil) :: t()
+  def set_relationship(wm, human_name, context) do
+    %{wm | current_human: human_name, relationship_context: context}
+  end
+
+  @doc """
+  Set the current conversation context.
+  """
+  @spec set_conversation(t(), map() | nil) :: t()
+  def set_conversation(wm, conversation) do
+    %{wm | current_conversation: conversation}
   end
 
   # ============================================================================
@@ -444,6 +489,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
   ## Options
 
+  - `:include_identity` - Include identity section (default: true)
   - `:include_thoughts` - Include recent thoughts (default: true)
   - `:include_goals` - Include active goals (default: true)
   - `:include_relationship` - Include relationship context (default: true)
@@ -456,6 +502,7 @@ defmodule Arbor.Memory.WorkingMemory do
     max_thoughts = Keyword.get(opts, :max_thoughts, 5)
 
     []
+    |> maybe_add_identity(opts, wm)
     |> maybe_add_section(opts, :include_relationship, wm.relationship_context, &format_relationship/1)
     |> maybe_add_section(opts, :include_goals, wm.active_goals, &format_goals/1)
     |> maybe_add_thoughts(opts, wm.recent_thoughts, max_thoughts)
@@ -498,6 +545,7 @@ defmodule Arbor.Memory.WorkingMemory do
       "agent_id" => wm.agent_id,
       "name" => wm.name,
       "current_human" => wm.current_human,
+      "current_conversation" => wm.current_conversation,
       "recent_thoughts" => Enum.map(wm.recent_thoughts, &serialize_thought/1),
       "active_goals" => Enum.map(wm.active_goals, &serialize_goal/1),
       "relationship_context" => wm.relationship_context,
@@ -531,6 +579,7 @@ defmodule Arbor.Memory.WorkingMemory do
       agent_id: get_field.(:agent_id),
       name: get_field.(:name),
       current_human: get_field.(:current_human),
+      current_conversation: get_field.(:current_conversation),
       recent_thoughts: Enum.map(raw_thoughts, &deserialize_thought/1),
       active_goals: Enum.map(raw_goals, &deserialize_goal/1),
       relationship_context: get_field.(:relationship_context),
@@ -712,6 +761,21 @@ defmodule Arbor.Memory.WorkingMemory do
   # ============================================================================
   # Private Helpers — Rendering
   # ============================================================================
+
+  defp maybe_add_identity(sections, opts, wm) do
+    if Keyword.get(opts, :include_identity, true) do
+      identity =
+        if wm.name do
+          "## Identity\n\nName: #{wm.name}\nAgent ID: #{wm.agent_id}"
+        else
+          "## Identity\n\nAgent ID: #{wm.agent_id}"
+        end
+
+      [identity | sections]
+    else
+      sections
+    end
+  end
 
   defp maybe_add_section(sections, opts, key, nil, _formatter) do
     _ = Keyword.get(opts, key, true)
@@ -904,8 +968,15 @@ defmodule Arbor.Memory.WorkingMemory do
   # Private Helpers — Signal Replay
   # ============================================================================
 
-  defp apply_memory_event(%{data: data}, wm) do
-    type = data[:type] || data["type"]
+  @doc """
+  Apply a memory event signal to reconstruct working memory state.
+
+  Handles both legacy format (data contains `:type` key) and signal format
+  (type inferred from signal's `.type` field via `infer_type/1`).
+  """
+  @doc since: "0.1.0"
+  def apply_memory_event(%{type: sig_type, data: data}, wm) do
+    type = data[:type] || data["type"] || infer_type(sig_type)
 
     case type do
       t when t in [:identity, "identity"] ->
@@ -914,7 +985,7 @@ defmodule Arbor.Memory.WorkingMemory do
       t when t in [:relationship, "relationship"] ->
         human = data[:human_name] || data["human_name"]
         context = data[:context] || data["context"]
-        %{wm | current_human: human, relationship_context: context}
+        set_relationship(wm, human || wm.current_human, context || wm.relationship_context)
 
       t when t in [:goal, "goal"] ->
         goal = data[:goal] || data["goal"]
@@ -927,13 +998,77 @@ defmodule Arbor.Memory.WorkingMemory do
         end
 
       t when t in [:thought, "thought"] ->
-        content = data[:content] || data["content"]
-        add_thought(wm, content)
+        content = data[:content] || data["content"] || data[:thought_preview] || data["thought_preview"]
+        if content, do: add_thought(wm, content), else: wm
+
+      t when t in [:engagement, "engagement"] ->
+        level = data[:level] || data["level"]
+        if is_number(level), do: set_engagement_level(wm, level), else: wm
+
+      t when t in [:concern, "concern"] ->
+        concern = data[:concern] || data["concern"]
+        action = data[:action] || data["action"]
+        cond do
+          action in [:resolved, "resolved"] ->
+            %{wm | concerns: Enum.reject(wm.concerns, &(normalize_concern_text(&1) == concern))}
+          concern ->
+            add_concern(wm, concern)
+          true ->
+            wm
+        end
+
+      t when t in [:curiosity, "curiosity"] ->
+        item = data[:item] || data["item"]
+        action = data[:action] || data["action"]
+        cond do
+          action in [:satisfied, "satisfied"] ->
+            %{wm | curiosity: Enum.reject(wm.curiosity, &(normalize_curiosity_text(&1) == item))}
+          item ->
+            add_curiosity(wm, item)
+          true ->
+            wm
+        end
+
+      t when t in [:conversation, "conversation"] ->
+        conv = data[:conversation] || data["conversation"]
+        set_conversation(wm, conv)
 
       _ ->
         wm
     end
   end
 
-  defp apply_memory_event(_signal, wm), do: wm
+  # Fallback for signals without :type field (legacy format with just :data)
+  def apply_memory_event(%{data: _data} = signal, wm) do
+    apply_memory_event(Map.put(signal, :type, nil), wm)
+  end
+
+  def apply_memory_event(_signal, wm), do: wm
+
+  # Map signal types to working memory data types
+  defp infer_type(:identity_change), do: :identity
+  defp infer_type(:identity_rollback), do: :identity
+  defp infer_type(:thought_recorded), do: :thought
+  defp infer_type(:goal_created), do: :goal
+  defp infer_type(:goal_achieved), do: :goal
+  defp infer_type(:goal_abandoned), do: :goal
+  defp infer_type(:goal_progress), do: :goal
+  defp infer_type(:engagement_changed), do: :engagement
+  defp infer_type(:concern_added), do: :concern
+  defp infer_type(:concern_resolved), do: :concern
+  defp infer_type(:curiosity_added), do: :curiosity
+  defp infer_type(:curiosity_satisfied), do: :curiosity
+  defp infer_type(:conversation_changed), do: :conversation
+  defp infer_type(:relationship_changed), do: :relationship
+  defp infer_type(_), do: nil
+
+  defp normalize_concern_text(concern) when is_binary(concern), do: concern
+  defp normalize_concern_text(%{content: content}), do: content
+  defp normalize_concern_text(%{"content" => content}), do: content
+  defp normalize_concern_text(_), do: nil
+
+  defp normalize_curiosity_text(item) when is_binary(item), do: item
+  defp normalize_curiosity_text(%{topic: topic}), do: topic
+  defp normalize_curiosity_text(%{"topic" => topic}), do: topic
+  defp normalize_curiosity_text(_), do: nil
 end
