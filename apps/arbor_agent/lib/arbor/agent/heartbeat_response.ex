@@ -15,7 +15,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: String.t(),
           actions: [map()],
           memory_notes: [String.t()],
-          goal_updates: [map()]
+          goal_updates: [map()],
+          proposal_decisions: [map()]
         }
 
   @doc """
@@ -38,7 +39,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: get_string(data, "thinking", text),
           actions: parse_actions(data),
           memory_notes: parse_memory_notes(data),
-          goal_updates: parse_goal_updates(data)
+          goal_updates: parse_goal_updates(data),
+          proposal_decisions: parse_proposal_decisions(data)
         }
 
       _ ->
@@ -49,7 +51,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: text,
           actions: [],
           memory_notes: [],
-          goal_updates: []
+          goal_updates: [],
+          proposal_decisions: []
         }
     end
   end
@@ -63,7 +66,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
       thinking: "",
       actions: [],
       memory_notes: [],
-      goal_updates: []
+      goal_updates: [],
+      proposal_decisions: []
     }
   end
 
@@ -143,6 +147,33 @@ defmodule Arbor.Agent.HeartbeatResponse do
   defp parse_progress(p) when is_float(p) and p >= 0.0 and p <= 1.0, do: p
   defp parse_progress(p) when is_integer(p) and p >= 0 and p <= 100, do: p / 100.0
   defp parse_progress(_), do: nil
+
+  defp parse_proposal_decisions(data) do
+    case Map.get(data, "proposal_decisions") do
+      decisions when is_list(decisions) ->
+        Enum.map(decisions, fn
+          d when is_map(d) ->
+            decision = d["decision"] || ""
+
+            if decision in ["accept", "reject", "defer"] do
+              %{
+                proposal_id: d["proposal_id"],
+                decision: String.to_existing_atom(decision),
+                reason: d["reason"] || ""
+              }
+            else
+              nil
+            end
+
+          _ ->
+            nil
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      _ ->
+        []
+    end
+  end
 
   # Known action types that the LLM may return
   @known_action_types ~w(

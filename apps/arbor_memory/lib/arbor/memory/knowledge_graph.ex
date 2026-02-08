@@ -489,7 +489,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   - `boost_amount` - Amount to add to relevance (capped at 1.0)
   """
   @spec boost_node(t(), node_id(), float()) :: t()
-  def boost_node(graph, node_id, boost_amount) when is_float(boost_amount) do
+  def boost_node(graph, node_id, boost_amount) when is_number(boost_amount) do
     case Map.get(graph.nodes, node_id) do
       nil ->
         graph
@@ -778,7 +778,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
   - `:decay_factor` - Multiplier for boost at each hop (default 0.5)
   """
   @spec cascade_recall(t(), node_id(), float(), keyword()) :: t()
-  def cascade_recall(graph, node_id, boost_amount, opts \\ []) do
+  def cascade_recall(graph, node_id, boost_amount, opts \\ [])
+      when is_number(boost_amount) do
+    boost_amount = boost_amount / 1
     max_depth = Keyword.get(opts, :max_depth, 3)
     min_boost = Keyword.get(opts, :min_boost, 0.05)
     decay_factor = Keyword.get(opts, :decay_factor, 0.5)

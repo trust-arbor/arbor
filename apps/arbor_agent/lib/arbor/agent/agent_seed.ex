@@ -340,7 +340,11 @@ defmodule Arbor.Agent.AgentSeed do
     # 5. Index memory notes
     index_memory_notes(state.id, memory_notes)
 
-    # 6. Context compression
+    # 6. Process proposal decisions from LLM
+    proposal_decisions = Map.get(llm_result, :proposal_decisions, [])
+    process_proposal_decisions(state.id, proposal_decisions)
+
+    # 7. Context compression
     maybe_compress_context(state)
 
     # 7. Periodic identity consolidation
@@ -991,6 +995,35 @@ defmodule Arbor.Agent.AgentSeed do
 
   defp idle_reflection_chance do
     Application.get_env(:arbor_agent, :idle_reflection_chance, 0.3)
+  end
+
+  defp process_proposal_decisions(_agent_id, []), do: :ok
+
+  defp process_proposal_decisions(agent_id, decisions) do
+    Enum.each(decisions, fn decision ->
+      proposal_id = decision[:proposal_id]
+      action = decision[:decision]
+      reason = decision[:reason]
+
+      if proposal_id && action do
+        safe_memory_call(fn ->
+          case action do
+            :accept ->
+              Arbor.Memory.Proposal.accept(agent_id, proposal_id)
+
+            :reject ->
+              opts = if reason, do: [reason: reason], else: []
+              Arbor.Memory.Proposal.reject(agent_id, proposal_id, opts)
+
+            :defer ->
+              Arbor.Memory.Proposal.defer(agent_id, proposal_id)
+
+            _ ->
+              :ok
+          end
+        end)
+      end
+    end)
   end
 
   defp process_goal_updates(_agent_id, []), do: :ok
