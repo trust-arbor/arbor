@@ -484,11 +484,13 @@ defmodule Arbor.Consensus.TopicRegistry do
     end
   end
 
-  # Signed checkpoint but no verify key — accept with warning
-  defp verify_and_extract_checkpoint(%{data: data, signature: _sig}, nil) do
-    Logger.warning("TopicRegistry: signed checkpoint but no verify key, accepting unsigned")
-    Logger.info("TopicRegistry: restored #{map_size(data)} topics from checkpoint (unverified)")
-    data
+  # L5: Signed checkpoint but no verify key — reject instead of silently accepting
+  defp verify_and_extract_checkpoint(%{data: _data, signature: _sig}, nil) do
+    Logger.warning(
+      "TopicRegistry: signed checkpoint but no verify key — rejecting unverifiable checkpoint"
+    )
+
+    %{}
   end
 
   # Unsigned checkpoint (pre-signing migration) — accept with log

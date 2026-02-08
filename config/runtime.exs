@@ -1,6 +1,8 @@
 import Config
 
 # Load .env file if present (dev/prod — test config disables channels)
+# L6: WARNING — loads from CWD, which means a malicious .env in a project directory
+# could override secrets. Consider using a fixed path like ~/.arbor/.env in production.
 dotenv_path = Path.join(File.cwd!(), ".env")
 
 if File.exists?(dotenv_path) do

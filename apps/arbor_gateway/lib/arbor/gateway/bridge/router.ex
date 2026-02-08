@@ -98,6 +98,9 @@ defmodule Arbor.Gateway.Bridge.Router do
       }
     )
   rescue
-    _ -> :ok
+    # L8: Log signal emission errors instead of silently swallowing
+    e ->
+      Logger.debug("Bridge signal emission failed: #{Exception.message(e)}")
+      :ok
   end
 end

@@ -162,20 +162,26 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
         ""
       end
 
+    # L10: Shell-escape interpolated paths to prevent injection via
+    # directory names or file paths containing shell metacharacters
+    safe_config_dir = shell_escape(config_dir)
+    safe_cwd = shell_escape(cwd)
+    safe_prompt_file = shell_escape(prompt_file)
+
     script_content =
       if opts[:interactive] do
         """
         #!/bin/bash
-        export CLAUDE_CONFIG_DIR=#{config_dir}
-        cd #{cwd}
+        export CLAUDE_CONFIG_DIR=#{safe_config_dir}
+        cd #{safe_cwd}
         #{bootstrap}exec claude --dangerously-skip-permissions
         """
       else
         """
         #!/bin/bash
-        export CLAUDE_CONFIG_DIR=#{config_dir}
-        cd #{cwd}
-        #{bootstrap}exec claude -p "$(cat #{prompt_file})" --dangerously-skip-permissions
+        export CLAUDE_CONFIG_DIR=#{safe_config_dir}
+        cd #{safe_cwd}
+        #{bootstrap}exec claude -p "$(cat #{safe_prompt_file})" --dangerously-skip-permissions
         """
       end
 
@@ -389,5 +395,10 @@ defmodule Mix.Tasks.Arbor.Hands.Spawn do
       ],
       stderr_to_stdout: true
     )
+  end
+
+  # L10: Wrap value in single quotes, escaping any embedded single quotes
+  defp shell_escape(str) do
+    "'" <> String.replace(str, "'", "'\\''") <> "'"
   end
 end
