@@ -55,8 +55,14 @@ defmodule Mix.Tasks.Arbor.Hands.Send do
     end
   end
 
+  # L9: Sanitize message to prevent tmux control sequence injection.
+  # Strip control characters (except printable ASCII + common unicode).
   defp send_to_tmux(session, message) do
-    System.cmd("tmux", ["send-keys", "-t", session, message, "Enter"], stderr_to_stdout: true)
+    safe_message = String.replace(message, ~r/[\x00-\x1f\x7f]/, "")
+
+    System.cmd("tmux", ["send-keys", "-t", session, safe_message, "Enter"],
+      stderr_to_stdout: true
+    )
   end
 
   defp send_to_docker(container, message) do

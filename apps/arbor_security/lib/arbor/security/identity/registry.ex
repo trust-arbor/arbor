@@ -394,8 +394,9 @@ defmodule Arbor.Security.Identity.Registry do
       case Map.get(state.by_agent_id, agent_id) do
         nil -> {:error, :not_found}
         %{status: status} -> {:ok, status}
-        # Backward compat: old entries without status field default to :active
-        _entry -> {:ok, :active}
+        # L7: Old entries without status field default to :unknown (not :active)
+        # to avoid granting active status to legacy unverified entries
+        _entry -> {:ok, :unknown}
       end
 
     {:reply, result, state}

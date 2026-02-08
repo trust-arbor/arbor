@@ -6,7 +6,8 @@ defmodule Arbor.Sandbox.Filesystem do
   to prevent directory traversal and unauthorized access.
   """
 
-  @default_base_path "/tmp/arbor/agents"
+  # L1: Use a user-owned directory instead of world-writable /tmp
+  @default_base_path Path.expand("~/.arbor/sandbox/agents")
 
   @type t :: %{
           agent_id: String.t(),

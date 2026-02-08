@@ -23,7 +23,7 @@
 - [x] **Phase 1** — Critical (C1-C5) — All 5 remediated
 - [x] **Phase 2** — High (H1-H15) — 12/15 remediated, 2 deferred (H1/H2), 1 documented (H15)
 - [x] **Phase 3** — Medium (M1-M20) — 12 remediated, 2 documented (M5, M13, M19), 6 document-only
-- [ ] **Phase 4** — Low (L1-L10)
+- [x] **Phase 4** — Low (L1-L10) — 8 remediated, 2 document-only
 
 ---
 
@@ -169,18 +169,18 @@
 
 ## LOW (10)
 
-| # | Finding | File |
-|---|---------|------|
-| L1 | Default sandbox path in `/tmp` (world-writable) | `filesystem.ex:9` |
-| L2 | EPMD on localhost | `arbor_helpers.ex:10,52` |
-| L3 | Process enumeration at `:limited` level | Multiple |
-| L4 | `String.to_atom` fallback in self_knowledge | `self_knowledge.ex:764` |
-| L5 | `term_to_binary` nil-key acceptance | `topic_registry.ex:488-489` |
-| L6 | Runtime .env loading from CWD | `runtime.exs:4-22` |
-| L7 | Old identity entries default to `:active` | `identity/registry.ex:397-398` |
-| L8 | Bridge signal emission swallows errors | `bridge/router.ex:100-102` |
-| L9 | tmux send-keys injection (local CLI) | `hands/send.ex:59` |
-| L10 | Hands.Spawn script interpolation | `hands/spawn.ex:165-179` |
+| # | Finding | File | Status |
+|---|---------|------|--------|
+| L1 | Default sandbox path in `/tmp` (world-writable) | `filesystem.ex:9` | [x] Remediated — changed to `~/.arbor/sandbox/agents` |
+| L2 | EPMD on localhost | `arbor_helpers.ex:10,52` | [ ] Document only — required for Erlang distribution |
+| L3 | Process enumeration at `:limited` level | Multiple | [ ] Document only — by design for agent introspection |
+| L4 | `String.to_atom` fallback in self_knowledge | `self_knowledge.ex:764` | [x] Remediated — falls back to string instead of creating atom |
+| L5 | `term_to_binary` nil-key acceptance | `topic_registry.ex:488-489` | [x] Remediated — reject unverifiable signed checkpoints |
+| L6 | Runtime .env loading from CWD | `runtime.exs:4-22` | [x] Documented — warning comment about CWD .env risk |
+| L7 | Old identity entries default to `:active` | `identity/registry.ex:397-398` | [x] Remediated — defaults to `:unknown` instead of `:active` |
+| L8 | Bridge signal emission swallows errors | `bridge/router.ex:100-102` | [x] Remediated — Logger.debug on emission failure |
+| L9 | tmux send-keys injection (local CLI) | `hands/send.ex:59` | [x] Remediated — strip control characters from message |
+| L10 | Hands.Spawn script interpolation | `hands/spawn.ex:165-179` | [x] Remediated — shell_escape all interpolated paths |
 
 ---
 
