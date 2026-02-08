@@ -98,6 +98,15 @@ defmodule Arbor.Security.Constraint do
   end
 
   @doc false
-  @spec evaluate_requires_approval(boolean() | nil) :: :ok
-  def evaluate_requires_approval(_), do: :ok
+  # M1: When requires_approval is true, return a constraint violation
+  # instead of silently passing. Escalation module handles the actual
+  # consensus submission — this just ensures the constraint is enforced.
+  @spec evaluate_requires_approval(boolean() | nil) ::
+          :ok | {:error, {:constraint_violated, :requires_approval, map()}}
+  def evaluate_requires_approval(nil), do: :ok
+  def evaluate_requires_approval(false), do: :ok
+
+  def evaluate_requires_approval(true) do
+    {:error, {:constraint_violated, :requires_approval, %{reason: :approval_required}}}
+  end
 end
