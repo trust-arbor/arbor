@@ -83,7 +83,7 @@ defmodule Arbor.Shell.Executor do
     end
   end
 
-  defp build_port_opts(executable, args, cwd, env) do
+  defp build_port_opts(_executable, args, cwd, env) do
     opts = [
       :binary,
       :exit_status,

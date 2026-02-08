@@ -225,28 +225,9 @@ defmodule Arbor.Agent.Verification do
     pid = Map.get(details, :pid) || Map.get(details, :supervisor)
 
     cond do
-      is_nil(pid) ->
-        {:ok, :verified}
-
-      not Process.alive?(pid) ->
-        {:ok, :verified}
-
-      true ->
-        # Check if supervisor has recovered
-        case Diagnostics.inspect_supervisor(pid) do
-          %{children: children} when is_list(children) ->
-            active_count = Enum.count(children, fn c -> c.alive == true end)
-            total_count = length(children)
-
-            if total_count == 0 or active_count / total_count >= 0.8 do
-              {:ok, :verified}
-            else
-              {:ok, :unverified}
-            end
-
-          _ ->
-            {:ok, :unverified}
-        end
+      is_nil(pid) -> {:ok, :verified}
+      not Process.alive?(pid) -> {:ok, :verified}
+      true -> verify_supervisor_recovery(pid)
     end
   rescue
     _ -> {:error, :verification_failed}
@@ -257,21 +238,36 @@ defmodule Arbor.Agent.Verification do
     {:ok, :verified}
   end
 
+  defp verify_supervisor_recovery(pid) do
+    case Diagnostics.inspect_supervisor(pid) do
+      %{children: children} when is_list(children) ->
+        check_child_health_ratio(children)
+
+      _ ->
+        {:ok, :unverified}
+    end
+  end
+
+  defp check_child_health_ratio(children) do
+    active_count = Enum.count(children, fn c -> c.alive == true end)
+    total_count = length(children)
+
+    if total_count == 0 or active_count / total_count >= 0.8 do
+      {:ok, :verified}
+    else
+      {:ok, :unverified}
+    end
+  end
+
   # ============================================================================
   # Private — Metrics Gathering
   # ============================================================================
 
   defp gather_metrics(%{skill: :processes, details: details}, target) do
     pid = target || Map.get(details, :pid) || Map.get(details, :process)
-
-    if is_pid(pid) and Process.alive?(pid) do
-      case safe_call(fn -> Diagnostics.inspect_process(pid) end) do
-        nil -> %{process_alive: true}
-        info -> Map.take(info, [:message_queue_len, :memory, :reductions, :status])
-      end
-    else
-      %{process_alive: is_pid(pid) and Process.alive?(pid)}
-    end
+    inspect_fn = &Diagnostics.inspect_process/1
+    keys = [:message_queue_len, :memory, :reductions, :status]
+    gather_process_metrics(pid, :process_alive, inspect_fn, keys)
   end
 
   defp gather_metrics(%{skill: :beam}, _target) do
@@ -284,18 +280,32 @@ defmodule Arbor.Agent.Verification do
 
   defp gather_metrics(%{skill: :supervisor, details: details}, target) do
     pid = target || Map.get(details, :pid) || Map.get(details, :supervisor)
-
-    if is_pid(pid) and Process.alive?(pid) do
-      case safe_call(fn -> Diagnostics.inspect_supervisor(pid) end) do
-        nil -> %{supervisor_alive: true}
-        info -> Map.take(info, [:strategy, :intensity, :period])
-      end
-    else
-      %{supervisor_alive: is_pid(pid) and Process.alive?(pid)}
-    end
+    inspect_fn = &Diagnostics.inspect_supervisor/1
+    keys = [:strategy, :intensity, :period]
+    gather_process_metrics(pid, :supervisor_alive, inspect_fn, keys)
   end
 
   defp gather_metrics(_anomaly, _target), do: %{}
+
+  defp gather_process_metrics(pid, alive_key, inspect_fn, keys)
+       when is_pid(pid) do
+    if Process.alive?(pid) do
+      inspect_and_take(pid, inspect_fn, keys, alive_key)
+    else
+      %{alive_key => false}
+    end
+  end
+
+  defp gather_process_metrics(_pid, alive_key, _inspect_fn, _keys) do
+    %{alive_key => false}
+  end
+
+  defp inspect_and_take(pid, inspect_fn, keys, alive_key) do
+    case safe_call(fn -> inspect_fn.(pid) end) do
+      nil -> %{alive_key => true}
+      info -> Map.take(info, keys)
+    end
+  end
 
   defp safe_call(fun) do
     fun.()

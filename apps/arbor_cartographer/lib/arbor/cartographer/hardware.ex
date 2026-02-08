@@ -250,22 +250,12 @@ defmodule Arbor.Cartographer.Hardware do
     # Look for GPU name and VRAM info
     name =
       Enum.find_value(lines, "AMD GPU", fn line ->
-        if String.contains?(line, "Card series") do
-          case String.split(line, ":") do
-            [_, value] -> String.trim(value)
-            _ -> nil
-          end
-        end
+        if String.contains?(line, "Card series"), do: extract_card_name(line)
       end)
 
     vram_gb =
       Enum.find_value(lines, 0.0, fn line ->
-        if String.contains?(line, "VRAM Total") do
-          case Regex.run(~r/(\d+)\s*MB/, line) do
-            [_, mb] -> String.to_integer(mb) / 1024
-            _ -> 0.0
-          end
-        end
+        if String.contains?(line, "VRAM Total"), do: extract_vram_mb(line)
       end)
 
     if vram_gb > 0 do
@@ -275,47 +265,47 @@ defmodule Arbor.Cartographer.Hardware do
     end
   end
 
+  defp extract_card_name(line) do
+    case String.split(line, ":") do
+      [_, value] -> String.trim(value)
+      _ -> nil
+    end
+  end
+
+  defp extract_vram_mb(line) do
+    case Regex.run(~r/(\d+)\s*MB/, line) do
+      [_, mb] -> String.to_integer(mb) / 1024
+      _ -> 0.0
+    end
+  end
+
   defp detect_apple_gpus(acc) do
-    case :os.type() do
-      {:unix, :darwin} ->
-        case run_command("system_profiler", ["SPDisplaysDataType", "-json"]) do
-          {:ok, output} ->
-            gpus = parse_apple_gpu_json(output)
-            acc ++ gpus
-
-          {:error, _} ->
-            acc
-        end
-
-      _ ->
-        acc
+    with {:unix, :darwin} <- :os.type(),
+         {:ok, output} <- run_command("system_profiler", ["SPDisplaysDataType", "-json"]) do
+      acc ++ parse_apple_gpu_json(output)
+    else
+      _ -> acc
     end
   end
 
   defp parse_apple_gpu_json(json_output) do
     case Jason.decode(json_output) do
       {:ok, %{"SPDisplaysDataType" => displays}} ->
-        Enum.flat_map(displays, fn display ->
-          name = Map.get(display, "sppci_model", "Apple GPU")
-
-          # Apple Silicon unified memory - estimate GPU allocation
-          vram =
-            case Map.get(display, "spdisplays_vram") do
-              vram_str when is_binary(vram_str) ->
-                parse_vram_string(vram_str)
-
-              _ ->
-                # For Apple Silicon, estimate based on unified memory
-                estimate_apple_silicon_vram()
-            end
-
-          [%{type: :apple, name: name, vram_gb: vram}]
-        end)
+        Enum.flat_map(displays, &parse_apple_display/1)
 
       _ ->
         []
     end
   end
+
+  defp parse_apple_display(display) do
+    name = Map.get(display, "sppci_model", "Apple GPU")
+    vram = resolve_apple_vram(Map.get(display, "spdisplays_vram"))
+    [%{type: :apple, name: name, vram_gb: vram}]
+  end
+
+  defp resolve_apple_vram(vram_str) when is_binary(vram_str), do: parse_vram_string(vram_str)
+  defp resolve_apple_vram(_), do: estimate_apple_silicon_vram()
 
   defp parse_vram_string(vram_str) do
     cond do
@@ -344,29 +334,20 @@ defmodule Arbor.Cartographer.Hardware do
 
   defp detect_intel_gpus(acc) do
     # Intel integrated GPU detection via /sys on Linux
-    case :os.type() do
-      {:unix, :linux} ->
-        case File.ls("/sys/class/drm") do
-          {:ok, entries} ->
-            intel_cards =
-              Enum.filter(entries, fn card ->
-                String.starts_with?(card, "card") &&
-                  intel_vendor?("/sys/class/drm/#{card}/device/vendor")
-              end)
-
-            if intel_cards != [] do
-              acc ++ [%{type: :intel, name: "Intel Integrated Graphics", vram_gb: 0.0}]
-            else
-              acc
-            end
-
-          _ ->
-            acc
-        end
-
-      _ ->
-        acc
+    with {:unix, :linux} <- :os.type(),
+         {:ok, entries} <- File.ls("/sys/class/drm"),
+         true <- has_intel_cards?(entries) do
+      acc ++ [%{type: :intel, name: "Intel Integrated Graphics", vram_gb: 0.0}]
+    else
+      _ -> acc
     end
+  end
+
+  defp has_intel_cards?(entries) do
+    Enum.any?(entries, fn card ->
+      String.starts_with?(card, "card") &&
+        intel_vendor?("/sys/class/drm/#{card}/device/vendor")
+    end)
   end
 
   # ==========================================================================
@@ -494,6 +475,7 @@ defmodule Arbor.Cartographer.Hardware do
 
       path ->
         try do
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
           case System.cmd(path, args, stderr_to_stdout: true) do
             {output, 0} -> {:ok, output}
             {output, _} -> {:error, {:exit_code, output}}

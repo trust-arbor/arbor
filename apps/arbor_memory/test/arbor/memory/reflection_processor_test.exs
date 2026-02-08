@@ -963,7 +963,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
 
     @tag :database
     test "updates existing relationship", %{agent_id: agent_id} do
-      rel = Arbor.Memory.Relationship.new("ExistingPerson")
+      rel = Relationship.new("ExistingPerson")
       {:ok, _} = Arbor.Memory.save_relationship(agent_id, rel)
 
       ReflectionProcessor.process_relationships(agent_id, [
@@ -1160,8 +1160,8 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
 
     test "self learnings go to SelfKnowledge growth log", %{agent_id: agent_id} do
       # Set up SelfKnowledge
-      sk = Arbor.Memory.SelfKnowledge.new(agent_id)
-      Arbor.Memory.IdentityConsolidator.save_self_knowledge(agent_id, sk)
+      sk = SelfKnowledge.new(agent_id)
+      IdentityConsolidator.save_self_knowledge(agent_id, sk)
 
       wm = WorkingMemory.new(agent_id)
       Arbor.Memory.save_working_memory(agent_id, wm)
@@ -1170,7 +1170,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         %{"content" => "I am more patient now", "confidence" => 0.8, "category" => "self"}
       ])
 
-      updated_sk = Arbor.Memory.IdentityConsolidator.get_self_knowledge(agent_id)
+      updated_sk = IdentityConsolidator.get_self_knowledge(agent_id)
       assert updated_sk.growth_log != []
     end
 

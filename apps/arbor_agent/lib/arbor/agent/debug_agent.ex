@@ -443,54 +443,39 @@ defmodule Arbor.Agent.DebugAgent do
         safe_complete(state.current_lease, :rejected)
         reset_to_idle(state)
 
-      {:ok, :pending} ->
-        # Still pending, keep polling
-        if state.decision_polls < @max_decision_polls do
-          schedule_decision_poll()
-          %{state | decision_polls: state.decision_polls + 1}
-        else
-          Logger.warning("[DebugAgent] Decision timeout after #{@max_decision_polls} polls")
-          safe_complete(state.current_lease, :failed)
-          reset_to_idle(state)
-        end
-
-      {:ok, :evaluating} ->
-        # Still evaluating, keep polling
-        if state.decision_polls < @max_decision_polls do
-          schedule_decision_poll()
-          %{state | decision_polls: state.decision_polls + 1}
-        else
-          Logger.warning("[DebugAgent] Decision timeout after #{@max_decision_polls} polls")
-          safe_complete(state.current_lease, :failed)
-          reset_to_idle(state)
-        end
+      {:ok, status} when status in [:pending, :evaluating] ->
+        continue_or_timeout_poll(state)
 
       {:error, reason} ->
         Logger.warning("[DebugAgent] Status check failed: #{inspect(reason)}")
-        # Keep trying
-        if state.decision_polls < @max_decision_polls do
-          schedule_decision_poll()
-          %{state | decision_polls: state.decision_polls + 1}
-        else
-          safe_complete(state.current_lease, :failed)
-          reset_to_idle(state)
-        end
+        continue_or_timeout_poll(state)
+    end
+  end
+
+  defp continue_or_timeout_poll(state) do
+    if state.decision_polls < @max_decision_polls do
+      schedule_decision_poll()
+      %{state | decision_polls: state.decision_polls + 1}
+    else
+      Logger.warning("[DebugAgent] Decision timeout after #{@max_decision_polls} polls")
+      safe_complete(state.current_lease, :failed)
+      reset_to_idle(state)
     end
   end
 
   defp handle_approval(state) do
     Logger.info("[DebugAgent] Proposal approved!")
 
-    if state.callbacks[:on_decision] do
-      state.callbacks[:on_decision].(%{decision: :approved, proposal: state.current_proposal})
-    end
+    maybe_invoke_callback(state.callbacks, :on_decision, %{
+      decision: :approved,
+      proposal: state.current_proposal
+    })
 
     safe_emit(:debug_agent, :proposal_approved, %{
       agent_id: state.agent_id,
       proposal_id: state.current_proposal_id
     })
 
-    # Execute the fix
     context = state.current_proposal[:context] || %{}
     action = context[:suggested_action] || :none
     target = context[:action_target]
@@ -498,79 +483,76 @@ defmodule Arbor.Agent.DebugAgent do
 
     case safe_execute_fix(state) do
       :ok ->
-        # Verify the fix worked
-        verification_result = verify_fix(state, action, target)
-
-        if state.callbacks[:on_verification] do
-          state.callbacks[:on_verification].(verification_result)
-        end
-
-        case verification_result do
-          {:ok, :verified} ->
-            Logger.info("[DebugAgent] Fix verified successfully")
-
-            safe_emit(:debug_agent, :fix_verified, %{
-              agent_id: state.agent_id,
-              proposal_id: state.current_proposal_id,
-              action: action
-            })
-
-            # Record success in circuit breaker
-            record_circuit_breaker_success(state, breaker_key)
-
-            safe_complete(state.current_lease, :resolved)
-
-            reset_to_idle(%{
-              state
-              | stats:
-                  state.stats
-                  |> update_stat(:proposals_approved)
-                  |> update_stat(:verifications_passed)
-            })
-
-          {:ok, :unverified} ->
-            Logger.warning("[DebugAgent] Fix applied but verification failed")
-
-            safe_emit(:debug_agent, :fix_unverified, %{
-              agent_id: state.agent_id,
-              proposal_id: state.current_proposal_id,
-              action: action
-            })
-
-            # Record failure in circuit breaker
-            record_circuit_breaker_failure(state, breaker_key)
-
-            # Report as failed so it can be retried or escalated
-            safe_complete(state.current_lease, :failed)
-
-            reset_to_idle(%{
-              state
-              | stats:
-                  state.stats
-                  |> update_stat(:proposals_approved)
-                  |> update_stat(:verifications_failed)
-            })
-
-          {:error, reason} ->
-            Logger.warning("[DebugAgent] Verification error: #{inspect(reason)}")
-            # Treat verification errors as success (fix was applied, just can't verify)
-            safe_complete(state.current_lease, :resolved)
-
-            reset_to_idle(%{
-              state
-              | stats: update_stat(state.stats, :proposals_approved)
-            })
-        end
+        handle_fix_verification(state, action, target, breaker_key)
 
       {:error, reason} ->
         Logger.warning("[DebugAgent] Fix execution failed: #{inspect(reason)}")
-
-        # Record failure in circuit breaker
         record_circuit_breaker_failure(state, breaker_key)
-
         safe_complete(state.current_lease, :failed)
         reset_to_idle(state)
     end
+  end
+
+  defp handle_fix_verification(state, action, target, breaker_key) do
+    verification_result = verify_fix(state, action, target)
+    maybe_invoke_callback(state.callbacks, :on_verification, verification_result)
+    apply_verification_result(state, verification_result, action, breaker_key)
+  end
+
+  defp apply_verification_result(state, {:ok, :verified}, action, breaker_key) do
+    Logger.info("[DebugAgent] Fix verified successfully")
+
+    safe_emit(:debug_agent, :fix_verified, %{
+      agent_id: state.agent_id,
+      proposal_id: state.current_proposal_id,
+      action: action
+    })
+
+    record_circuit_breaker_success(state, breaker_key)
+    safe_complete(state.current_lease, :resolved)
+
+    reset_to_idle(%{
+      state
+      | stats:
+          state.stats
+          |> update_stat(:proposals_approved)
+          |> update_stat(:verifications_passed)
+    })
+  end
+
+  defp apply_verification_result(state, {:ok, :unverified}, action, breaker_key) do
+    Logger.warning("[DebugAgent] Fix applied but verification failed")
+
+    safe_emit(:debug_agent, :fix_unverified, %{
+      agent_id: state.agent_id,
+      proposal_id: state.current_proposal_id,
+      action: action
+    })
+
+    record_circuit_breaker_failure(state, breaker_key)
+    safe_complete(state.current_lease, :failed)
+
+    reset_to_idle(%{
+      state
+      | stats:
+          state.stats
+          |> update_stat(:proposals_approved)
+          |> update_stat(:verifications_failed)
+    })
+  end
+
+  defp apply_verification_result(state, {:error, reason}, _action, _breaker_key) do
+    Logger.warning("[DebugAgent] Verification error: #{inspect(reason)}")
+    safe_complete(state.current_lease, :resolved)
+
+    reset_to_idle(%{
+      state
+      | stats: update_stat(state.stats, :proposals_approved)
+    })
+  end
+
+  defp maybe_invoke_callback(callbacks, key, arg) do
+    if callbacks[key], do: callbacks[key].(arg)
   end
 
   defp handle_rejection(state, reason) do

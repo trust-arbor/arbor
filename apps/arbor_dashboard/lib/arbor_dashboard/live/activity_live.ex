@@ -430,18 +430,7 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
   defp safe_subscribe do
     pid = self()
 
-    case Arbor.Signals.subscribe("*", fn signal ->
-           # Drop signals when LiveView mailbox is too full
-           case Process.info(pid, :message_queue_len) do
-             {:message_queue_len, len} when len < 500 ->
-               send(pid, {:signal_received, signal})
-
-             _ ->
-               :ok
-           end
-
-           :ok
-         end) do
+    case Arbor.Signals.subscribe("*", &maybe_forward_signal(&1, pid)) do
       {:ok, id} -> id
       _ -> nil
     end
@@ -449,5 +438,17 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp maybe_forward_signal(signal, pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, len} when len < 500 ->
+        send(pid, {:signal_received, signal})
+
+      _ ->
+        :ok
+    end
+
+    :ok
   end
 end

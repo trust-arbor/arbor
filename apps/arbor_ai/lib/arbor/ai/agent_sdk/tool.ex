@@ -92,7 +92,7 @@ defmodule Arbor.AI.AgentSDK.Tool do
 
           %{function: func} ->
             result = apply(__MODULE__, func, [args])
-            Arbor.AI.AgentSDK.Tool.normalize_result(result)
+            unquote(__MODULE__).normalize_result(result)
         end
       end
 

@@ -10,6 +10,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   alias Arbor.Agent.{CognitivePrompts, TimingContext}
   alias Arbor.Memory.ContextWindow
   alias Arbor.Memory.IdentityConsolidator
+  alias Arbor.Memory.Proposal
   alias Arbor.Memory.SelfKnowledge
 
   @doc """
@@ -28,20 +29,19 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   def build_prompt(state) do
     mode = Map.get(state, :cognitive_mode, :consolidation)
 
-    parts =
-      [
-        timing_section(state),
-        cognitive_section(mode),
-        self_knowledge_section(state),
-        conversation_section(state),
-        goals_section(state),
-        proposals_section(state),
-        percepts_section(state),
-        pending_section(state),
-        response_format_section()
-      ]
-      |> Enum.reject(&(is_nil(&1) or &1 == ""))
-      |> Enum.join("\n\n")
+    [
+      timing_section(state),
+      cognitive_section(mode),
+      self_knowledge_section(state),
+      conversation_section(state),
+      goals_section(state),
+      proposals_section(state),
+      percepts_section(state),
+      pending_section(state),
+      response_format_section()
+    ]
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.join("\n\n")
   end
 
   @doc """
@@ -115,7 +115,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     proposals =
       safe_call(fn ->
-        case Arbor.Memory.Proposal.list_pending(agent_id) do
+        case Proposal.list_pending(agent_id) do
           {:ok, list} -> Enum.take(list, 5)
           _ -> []
         end
@@ -125,12 +125,10 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       nil
     else
       lines =
-        proposals
-        |> Enum.map(fn p ->
+        Enum.map_join(proposals, "\n", fn p ->
           conf = round((p.confidence || 0.5) * 100)
           "- [#{p.id}] (#{p.type}, #{conf}% confidence) #{String.slice(p.content, 0..80)}"
         end)
-        |> Enum.join("\n")
 
       "## Pending Proposals\nReview and decide: accept, reject, or defer.\n#{lines}"
     end
@@ -158,16 +156,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp conversation_section(%{context_window: nil}), do: nil
 
   defp conversation_section(%{context_window: window}) do
-    text =
-      safe_call(fn ->
-        if Code.ensure_loaded?(ContextWindow) do
-          ContextWindow.to_prompt_text(window)
-        else
-          # Fallback for plain map context windows
-          entries = Map.get(window, :entries, [])
-          Enum.map_join(entries, "\n", fn {_type, content, _ts} -> content end)
-        end
-      end)
+    text = safe_call(fn -> context_window_text(window) end)
 
     cond do
       is_nil(text) -> nil
@@ -177,6 +166,15 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   end
 
   defp conversation_section(_state), do: nil
+
+  defp context_window_text(window) do
+    if Code.ensure_loaded?(ContextWindow) do
+      ContextWindow.to_prompt_text(window)
+    else
+      entries = Map.get(window, :entries, [])
+      Enum.map_join(entries, "\n", fn {_type, content, _ts} -> content end)
+    end
+  end
 
   defp pending_section(state) do
     pending = Map.get(state, :pending_messages, [])

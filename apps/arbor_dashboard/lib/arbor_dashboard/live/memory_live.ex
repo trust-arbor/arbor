@@ -933,42 +933,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     data =
       case safe_call(fn -> Arbor.Memory.read_self(agent_id, :all) end) do
         {:ok, result} when is_map(result) ->
-          kg = get_in(result, [:memory_system, :knowledge_graph]) || %{}
-          wm = get_in(result, [:memory_system, :working_memory]) || %{}
-          proposals_summary = get_in(result, [:memory_system, :proposals]) || %{}
-          goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
-          engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
-
-          # Pull direct working memory for content + stats
-          direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
-
-          # Pull proposals list and near-threshold for expanded sections
-          proposals_list =
-            unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-
-          near_threshold =
-            unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
-
-          %{
-            kg_stats: kg,
-            wm_stats: wm,
-            proposal_stats: proposals_summary,
-            goal_count: length(goals),
-            goals: goals,
-            proposals: proposals_list,
-            near_threshold: near_threshold,
-            working_memory: direct_wm,
-            engagement:
-              if(direct_wm,
-                do: Map.get(direct_wm, :engagement_level, engagement),
-                else: engagement
-              ),
-            thought_count:
-              if(direct_wm, do: length(Map.get(direct_wm, :recent_thoughts, [])), else: 0),
-            concerns_count: if(direct_wm, do: length(Map.get(direct_wm, :concerns, [])), else: 0),
-            curiosity_count:
-              if(direct_wm, do: length(Map.get(direct_wm, :curiosity, [])), else: 0)
-          }
+          build_overview_data(result, agent_id)
 
         _ ->
           %{}
@@ -1022,6 +987,41 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp load_tab_data(socket, _tab, _agent_id) do
     assign(socket, tab_data: %{})
   end
+
+  defp build_overview_data(result, agent_id) do
+    kg = get_in(result, [:memory_system, :knowledge_graph]) || %{}
+    wm = get_in(result, [:memory_system, :working_memory]) || %{}
+    proposals_summary = get_in(result, [:memory_system, :proposals]) || %{}
+    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
+    engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
+
+    direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
+    proposals_list = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+
+    near_threshold =
+      unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
+
+    %{
+      kg_stats: kg,
+      wm_stats: wm,
+      proposal_stats: proposals_summary,
+      goal_count: length(goals),
+      goals: goals,
+      proposals: proposals_list,
+      near_threshold: near_threshold,
+      working_memory: direct_wm,
+      engagement: wm_field(direct_wm, :engagement_level, engagement),
+      thought_count: wm_list_count(direct_wm, :recent_thoughts),
+      concerns_count: wm_list_count(direct_wm, :concerns),
+      curiosity_count: wm_list_count(direct_wm, :curiosity)
+    }
+  end
+
+  defp wm_field(nil, _key, default), do: default
+  defp wm_field(wm, key, default), do: Map.get(wm, key, default)
+
+  defp wm_list_count(nil, _key), do: 0
+  defp wm_list_count(wm, key), do: length(Map.get(wm, key, []))
 
   # Refresh section-specific data when expanding from Overview
   defp maybe_load_section_data(socket, nil, _agent_id), do: socket
@@ -1101,18 +1101,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp safe_subscribe do
     pid = self()
 
-    case Arbor.Signals.subscribe("memory.*", fn signal ->
-           # Drop signals when LiveView mailbox is too full
-           case Process.info(pid, :message_queue_len) do
-             {:message_queue_len, len} when len < 500 ->
-               send(pid, {:signal_received, signal})
-
-             _ ->
-               :ok
-           end
-
-           :ok
-         end) do
+    case Arbor.Signals.subscribe("memory.*", &maybe_forward_signal(&1, pid)) do
       {:ok, id} -> id
       _ -> nil
     end
@@ -1120,6 +1109,18 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp maybe_forward_signal(signal, pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, len} when len < 500 ->
+        send(pid, {:signal_received, signal})
+
+      _ ->
+        :ok
+    end
+
+    :ok
   end
 
   defp safe_call(fun) do

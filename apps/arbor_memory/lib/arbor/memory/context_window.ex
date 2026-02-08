@@ -312,11 +312,7 @@ defmodule Arbor.Memory.ContextWindow do
             {[], remaining}
 
           preset_config ->
-            preset_kw =
-              preset_config
-              |> Map.to_list()
-              |> Enum.map(fn {k, v} -> {k, v} end)
-
+            preset_kw = Map.to_list(preset_config)
             {preset_kw, remaining}
         end
     end
@@ -340,20 +336,20 @@ defmodule Arbor.Memory.ContextWindow do
       n when is_integer(n) and n > 0 ->
         n
 
-      # No max_tokens specified
+      # No max_tokens specified - infer from model
       nil ->
-        case model_id do
-          nil ->
-            @default_max_tokens
-
-          _model ->
-            budget = Keyword.get(opts, :budget, {:percentage, 0.10})
-            TokenBudget.resolve_for_model(budget, model_id)
-        end
+        resolve_max_tokens_from_model(model_id, opts)
 
       _ ->
         @default_max_tokens
     end
+  end
+
+  defp resolve_max_tokens_from_model(nil, _opts), do: @default_max_tokens
+
+  defp resolve_max_tokens_from_model(model_id, opts) do
+    budget = Keyword.get(opts, :budget, {:percentage, 0.10})
+    TokenBudget.resolve_for_model(budget, model_id)
   end
 
   defp resolve_budget_spec(spec, nil) do
@@ -1133,7 +1129,16 @@ defmodule Arbor.Memory.ContextWindow do
   end
 
   defp deserialize_multi_layer(data) do
-    %__MODULE__{
+    base = deserialize_multi_layer_base(data)
+    tokens = deserialize_multi_layer_tokens(data)
+    summarization = deserialize_multi_layer_summarization(data)
+    fact_extraction = deserialize_multi_layer_fact_extraction(data)
+
+    struct!(__MODULE__, Map.merge(base, tokens) |> Map.merge(summarization) |> Map.merge(fact_extraction))
+  end
+
+  defp deserialize_multi_layer_base(data) do
+    %{
       agent_id: flex_field(data, :agent_id),
       multi_layer: true,
       version: flex_field(data, :version) || 1,
@@ -1144,24 +1149,39 @@ defmodule Arbor.Memory.ContextWindow do
       full_detail: flex_field(data, :full_detail) || [],
       clarity_boundary: parse_datetime(flex_field(data, :clarity_boundary)),
       retrieved_context: flex_field(data, :retrieved_context) || [],
+      ratios: flex_field(data, :ratios) || @default_ratios,
+      last_compression_at: parse_datetime(flex_field(data, :last_compression_at)),
+      compression_count: flex_field(data, :compression_count) || 0
+    }
+  end
+
+  defp deserialize_multi_layer_tokens(data) do
+    %{
       distant_tokens: flex_field(data, :distant_tokens) || 0,
       recent_tokens: flex_field(data, :recent_tokens) || 0,
       detail_tokens: flex_field(data, :detail_tokens) || 0,
-      retrieved_tokens: flex_field(data, :retrieved_tokens) || 0,
-      ratios: flex_field(data, :ratios) || @default_ratios,
+      retrieved_tokens: flex_field(data, :retrieved_tokens) || 0
+    }
+  end
+
+  defp deserialize_multi_layer_summarization(data) do
+    %{
       summarization_enabled: flex_field(data, :summarization_enabled) || false,
       summarization_algorithm:
         parse_atom(flex_field(data, :summarization_algorithm), :prose),
       summarization_model: flex_field(data, :summarization_model),
       summarization_provider:
-        parse_atom(flex_field(data, :summarization_provider), nil),
+        parse_atom(flex_field(data, :summarization_provider), nil)
+    }
+  end
+
+  defp deserialize_multi_layer_fact_extraction(data) do
+    %{
       fact_extraction_enabled: flex_field(data, :fact_extraction_enabled) || false,
       fact_extraction_model: flex_field(data, :fact_extraction_model),
       fact_extraction_provider:
         parse_atom(flex_field(data, :fact_extraction_provider), nil),
-      min_fact_confidence: flex_field(data, :min_fact_confidence) || 0.7,
-      last_compression_at: parse_datetime(flex_field(data, :last_compression_at)),
-      compression_count: flex_field(data, :compression_count) || 0
+      min_fact_confidence: flex_field(data, :min_fact_confidence) || 0.7
     }
   end
 
@@ -1549,46 +1569,50 @@ defmodule Arbor.Memory.ContextWindow do
     to_distant_text = Enum.join(to_distant, "\n")
     new_recent_text = Enum.join(keep_recent, "\n")
 
-    # Summarize what's flowing to distant (if enabled and content is substantial)
-    summarized_distant =
-      if window.summarization_enabled and String.length(to_distant_text) > 500 do
-        case summarize_for_distant(window, to_distant_text) do
-          {:ok, summary} -> summary
-          {:error, _} -> to_distant_text
-        end
-      else
-        to_distant_text
-      end
+    summarized_distant = maybe_summarize_for_distant(window, to_distant_text)
+    updated_distant = merge_distant_content(window, distant, summarized_distant, distant_budget)
 
-    # Merge into existing distant
-    updated_distant =
-      if distant == "" do
-        summarized_distant
-      else
-        combined = distant <> "\n\n" <> summarized_distant
-
-        # If combined exceeds budget, try LLM re-summarization first
-        if estimate_tokens_text(combined) > distant_budget do
-          case summarize_for_distant(window, combined) do
-            {:ok, summary} -> summary
-            {:error, _} -> truncate_to_budget(combined, distant_budget)
-          end
-        else
-          combined
-        end
-      end
-
+    final_distant = enforce_distant_budget(updated_distant, distant_budget)
     new_recent_tokens = estimate_tokens_text(new_recent_text)
-    final_distant_tokens = estimate_tokens_text(updated_distant)
-
-    final_distant =
-      if final_distant_tokens > distant_budget do
-        truncate_to_budget(updated_distant, distant_budget)
-      else
-        updated_distant
-      end
 
     {new_recent_text, final_distant, new_recent_tokens, estimate_tokens_text(final_distant)}
+  end
+
+  # Summarize content flowing to distant if enabled and substantial
+  defp maybe_summarize_for_distant(window, text) do
+    if window.summarization_enabled and String.length(text) > 500 do
+      case summarize_for_distant(window, text) do
+        {:ok, summary} -> summary
+        {:error, _} -> text
+      end
+    else
+      text
+    end
+  end
+
+  # Merge new content into existing distant summary, re-summarizing if over budget
+  defp merge_distant_content(_window, "", new_content, _budget), do: new_content
+
+  defp merge_distant_content(window, existing, new_content, budget) do
+    combined = existing <> "\n\n" <> new_content
+
+    if estimate_tokens_text(combined) > budget do
+      case summarize_for_distant(window, combined) do
+        {:ok, summary} -> summary
+        {:error, _} -> truncate_to_budget(combined, budget)
+      end
+    else
+      combined
+    end
+  end
+
+  # Ensure final distant text fits within budget
+  defp enforce_distant_budget(text, budget) do
+    if estimate_tokens_text(text) > budget do
+      truncate_to_budget(text, budget)
+    else
+      text
+    end
   end
 
   # Summarize text for distant memory (very aggressive compression)
@@ -1619,28 +1643,24 @@ defmodule Arbor.Memory.ContextWindow do
   # ============================================================================
 
   defp format_messages_for_summary(messages) do
-    Enum.map_join(messages, "\n", fn msg ->
-      role = msg[:role] || msg["role"] || "unknown"
-      content = msg[:content] || msg["content"] || ""
-      speaker = msg[:speaker] || msg["speaker"]
-      timestamp = msg[:timestamp]
-
-      time_str =
-        if timestamp do
-          Calendar.strftime(timestamp, "%Y-%m-%d %H:%M")
-        else
-          ""
-        end
-
-      speaker_label =
-        case role do
-          r when r in [:user, "user"] -> speaker || "Human"
-          _ -> to_string(role)
-        end
-
-      "[#{time_str}] #{speaker_label}: #{truncate_content(content, 500)}"
-    end)
+    Enum.map_join(messages, "\n", &format_single_message_for_summary/1)
   end
+
+  defp format_single_message_for_summary(msg) do
+    role = msg[:role] || msg["role"] || "unknown"
+    content = msg[:content] || msg["content"] || ""
+    speaker = msg[:speaker] || msg["speaker"]
+    time_str = format_message_time(msg[:timestamp])
+    speaker_label = resolve_speaker_label(role, speaker)
+
+    "[#{time_str}] #{speaker_label}: #{truncate_content(content, 500)}"
+  end
+
+  defp format_message_time(nil), do: ""
+  defp format_message_time(timestamp), do: Calendar.strftime(timestamp, "%Y-%m-%d %H:%M")
+
+  defp resolve_speaker_label(role, speaker) when role in [:user, "user"], do: speaker || "Human"
+  defp resolve_speaker_label(role, _speaker), do: to_string(role)
 
   defp format_messages_as_bullets(messages) do
     Enum.map_join(messages, "\n", fn msg ->
@@ -1712,27 +1732,22 @@ defmodule Arbor.Memory.ContextWindow do
   defp format_full_detail(messages) do
     messages
     |> Enum.reverse()
-    |> Enum.map_join("\n\n", fn msg ->
-      role = msg[:role] || msg["role"] || "unknown"
-      content = msg[:content] || msg["content"] || ""
-      speaker = msg[:speaker] || msg["speaker"]
-
-      case role do
-        r when r in [:user, "user"] ->
-          speaker_name = speaker || "Human"
-          "[#{speaker_name}]\n#{content}"
-
-        r when r in [:assistant, "assistant"] ->
-          "[Assistant]\n#{content}"
-
-        r when r in [:system, "system"] ->
-          "[System]\n#{content}"
-
-        _ ->
-          "[#{role}]\n#{content}"
-      end
-    end)
+    |> Enum.map_join("\n\n", &format_detail_message/1)
   end
+
+  defp format_detail_message(msg) do
+    role = msg[:role] || msg["role"] || "unknown"
+    content = msg[:content] || msg["content"] || ""
+    speaker = msg[:speaker] || msg["speaker"]
+    label = detail_role_label(role, speaker)
+
+    "[#{label}]\n#{content}"
+  end
+
+  defp detail_role_label(role, speaker) when role in [:user, "user"], do: speaker || "Human"
+  defp detail_role_label(role, _speaker) when role in [:assistant, "assistant"], do: "Assistant"
+  defp detail_role_label(role, _speaker) when role in [:system, "system"], do: "System"
+  defp detail_role_label(role, _speaker), do: role
 
   defp format_action_result(%{action: action, outcome: outcome, result: result}) do
     result_text =
@@ -1823,24 +1838,24 @@ defmodule Arbor.Memory.ContextWindow do
 
       new_embedding ->
         Enum.any?(existing_contexts, fn ctx ->
-          case ctx[:embedding] do
-            nil ->
-              # Existing context has no embedding, try computing one
-              existing_content = ctx[:content] || ctx["content"] || ""
-
-              case compute_embedding(existing_content) do
-                nil -> false
-                existing_embedding ->
-                  cosine_similarity(new_embedding, existing_embedding) >=
-                    @retrieved_dedup_threshold
-              end
-
-            existing_embedding ->
-              cosine_similarity(new_embedding, existing_embedding) >=
-                @retrieved_dedup_threshold
-          end
+          context_exceeds_similarity?(ctx, new_embedding)
         end)
     end
+  end
+
+  # Check if a single context item is similar enough to count as a duplicate
+  defp context_exceeds_similarity?(ctx, new_embedding) do
+    embedding = ctx[:embedding] || compute_context_embedding(ctx)
+
+    case embedding do
+      nil -> false
+      existing_embedding -> cosine_similarity(new_embedding, existing_embedding) >= @retrieved_dedup_threshold
+    end
+  end
+
+  defp compute_context_embedding(ctx) do
+    existing_content = ctx[:content] || ctx["content"] || ""
+    compute_embedding(existing_content)
   end
 
   # Add embedding to context for future dedup checks

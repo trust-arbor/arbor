@@ -209,21 +209,23 @@ defmodule Arbor.Dashboard.ChatState do
 
   def add_code_module(agent_id, module_info) do
     modules = get_code_modules(agent_id)
-
-    updated =
-      if Enum.any?(modules, &(&1.name == module_info.name)) do
-        Enum.map(modules, fn m ->
-          if m.name == module_info.name, do: module_info, else: m
-        end)
-      else
-        [module_info | modules] |> Enum.take(@max_code_modules)
-      end
-
+    updated = upsert_module(modules, module_info)
     :ets.insert(@code_table, {agent_id, updated})
     updated
   rescue
     ArgumentError -> [module_info]
   end
+
+  defp upsert_module(modules, module_info) do
+    if Enum.any?(modules, &(&1.name == module_info.name)) do
+      Enum.map(modules, &replace_module(&1, module_info))
+    else
+      [module_info | modules] |> Enum.take(@max_code_modules)
+    end
+  end
+
+  defp replace_module(%{name: name} = _m, %{name: name} = new), do: new
+  defp replace_module(m, _new), do: m
 
   def remove_code_module(agent_id, module_name) do
     modules = get_code_modules(agent_id)

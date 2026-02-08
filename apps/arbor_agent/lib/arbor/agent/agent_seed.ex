@@ -64,6 +64,7 @@ defmodule Arbor.Agent.AgentSeed do
   alias Arbor.Memory.BackgroundChecks
   alias Arbor.Memory.ContextWindow
   alias Arbor.Memory.IdentityConsolidator
+  alias Arbor.Memory.Proposal
   alias Arbor.Memory.ReflectionProcessor
   alias Arbor.Memory.SelfKnowledge
   alias Arbor.Memory.WorkingMemory
@@ -710,23 +711,35 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp build_self_knowledge_context(agent_id) do
-    if Code.ensure_loaded?(IdentityConsolidator) and
-         function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
-      case IdentityConsolidator.get_self_knowledge(agent_id) do
-        nil ->
-          nil
+    if identity_consolidator_available?(:get_self_knowledge, 1),
+      do: fetch_self_knowledge(agent_id)
+  end
 
-        sk ->
-          summary = SelfKnowledge.summarize(sk)
-          if summary != "" and summary != nil, do: "## Self-Awareness\n#{summary}", else: nil
-      end
-    else
-      nil
-    end
+  defp identity_consolidator_available?(fun, arity) do
+    Code.ensure_loaded?(IdentityConsolidator) and
+      function_exported?(IdentityConsolidator, fun, arity)
+  end
+
+  defp fetch_self_knowledge(agent_id) do
+    agent_id
+    |> IdentityConsolidator.get_self_knowledge()
+    |> format_self_knowledge()
   rescue
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp format_self_knowledge(nil), do: nil
+
+  defp format_self_knowledge(sk) do
+    case SelfKnowledge.summarize(sk) do
+      summary when summary != "" and not is_nil(summary) ->
+        "## Self-Awareness\n#{summary}"
+
+      _ ->
+        nil
+    end
   end
 
   # ============================================================================
@@ -862,8 +875,19 @@ defmodule Arbor.Agent.AgentSeed do
   # ============================================================================
 
   defp subscribe_to_memory_signals(agent_id) do
-    pid = self()
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :subscribe, 2) do
+      subscribe_to_each_memory_topic(self())
+    end
 
+    Logger.debug("Subscribed to memory signals", agent_id: agent_id)
+  rescue
+    _ -> Logger.debug("Could not subscribe to memory signals")
+  catch
+    :exit, _ -> Logger.debug("Memory signal subscription timeout")
+  end
+
+  defp subscribe_to_each_memory_topic(pid) do
     memory_topics = [
       "memory.consolidation_completed",
       "memory.insights_detected",
@@ -873,29 +897,20 @@ defmodule Arbor.Agent.AgentSeed do
 
     Enum.each(memory_topics, fn topic ->
       safe_memory_call(fn ->
-        if Code.ensure_loaded?(Arbor.Signals) and
-             function_exported?(Arbor.Signals, :subscribe, 2) do
-          Arbor.Signals.subscribe(topic, fn signal ->
-            signal_type =
-              case signal.type do
-                t when is_atom(t) -> t
-                t when is_binary(t) -> String.to_existing_atom(t)
-                _ -> :unknown
-              end
-
-            send(pid, {:memory_signal, signal_type, signal.payload || %{}})
-            :ok
-          end)
-        end
+        Arbor.Signals.subscribe(topic, &handle_memory_signal(&1, pid))
       end)
     end)
-
-    Logger.debug("Subscribed to memory signals", agent_id: agent_id)
-  rescue
-    _ -> Logger.debug("Could not subscribe to memory signals")
-  catch
-    :exit, _ -> Logger.debug("Memory signal subscription timeout")
   end
+
+  defp handle_memory_signal(signal, pid) do
+    signal_type = normalize_signal_type(signal.type)
+    send(pid, {:memory_signal, signal_type, signal.payload || %{}})
+    :ok
+  end
+
+  defp normalize_signal_type(t) when is_atom(t), do: t
+  defp normalize_signal_type(t) when is_binary(t), do: String.to_existing_atom(t)
+  defp normalize_signal_type(_), do: :unknown
 
   # ============================================================================
   # Private: Seed Capture on Terminate
@@ -1008,45 +1023,48 @@ defmodule Arbor.Agent.AgentSeed do
   defp process_proposal_decisions(_agent_id, []), do: :ok
 
   defp process_proposal_decisions(agent_id, decisions) do
-    Enum.each(decisions, fn decision ->
-      proposal_id = decision[:proposal_id]
-      action = decision[:decision]
-      reason = decision[:reason]
-
-      if proposal_id && action do
-        safe_memory_call(fn ->
-          case action do
-            :accept ->
-              Arbor.Memory.Proposal.accept(agent_id, proposal_id)
-
-            :reject ->
-              opts = if reason, do: [reason: reason], else: []
-              Arbor.Memory.Proposal.reject(agent_id, proposal_id, opts)
-
-            :defer ->
-              Arbor.Memory.Proposal.defer(agent_id, proposal_id)
-
-            _ ->
-              :ok
-          end
-        end)
-      end
-    end)
+    Enum.each(decisions, &apply_proposal_decision(agent_id, &1))
   end
+
+  defp apply_proposal_decision(_agent_id, decision) when not is_map(decision), do: :ok
+
+  defp apply_proposal_decision(agent_id, decision) do
+    proposal_id = decision[:proposal_id]
+    action = decision[:decision]
+
+    if proposal_id && action do
+      safe_memory_call(fn ->
+        execute_proposal_action(agent_id, proposal_id, action, decision[:reason])
+      end)
+    end
+  end
+
+  defp execute_proposal_action(agent_id, proposal_id, :accept, _reason),
+    do: Proposal.accept(agent_id, proposal_id)
+
+  defp execute_proposal_action(agent_id, proposal_id, :reject, reason) do
+    opts = if reason, do: [reason: reason], else: []
+    Proposal.reject(agent_id, proposal_id, opts)
+  end
+
+  defp execute_proposal_action(agent_id, proposal_id, :defer, _reason),
+    do: Proposal.defer(agent_id, proposal_id)
+
+  defp execute_proposal_action(_agent_id, _proposal_id, _action, _reason), do: :ok
 
   defp process_goal_updates(_agent_id, []), do: :ok
 
   defp process_goal_updates(agent_id, updates) do
-    Enum.each(updates, fn update ->
-      goal_id = update[:goal_id]
-      progress = update[:progress]
+    Enum.each(updates, &apply_goal_update(agent_id, &1))
+  end
 
-      if goal_id && progress do
-        safe_memory_call(fn ->
-          Arbor.Memory.update_goal_progress(agent_id, goal_id, progress)
-        end)
-      end
-    end)
+  defp apply_goal_update(agent_id, update) do
+    goal_id = update[:goal_id]
+    progress = update[:progress]
+
+    if goal_id && progress do
+      safe_memory_call(fn -> Arbor.Memory.update_goal_progress(agent_id, goal_id, progress) end)
+    end
   end
 
   defp index_memory_notes(_agent_id, []), do: :ok
@@ -1073,7 +1091,7 @@ defmodule Arbor.Agent.AgentSeed do
 
       updated_wm =
         Enum.reduce(notes, wm, fn note, acc ->
-          Arbor.Memory.WorkingMemory.add_thought(
+          WorkingMemory.add_thought(
             acc,
             "[hb] #{String.slice(note, 0..120)}",
             priority: :low
@@ -1096,15 +1114,7 @@ defmodule Arbor.Agent.AgentSeed do
         )
       end)
 
-      Enum.each(result.actions, fn action ->
-        case action.type do
-          :run_consolidation ->
-            spawn(fn -> Arbor.Memory.run_consolidation(state.id) end)
-
-          other ->
-            Logger.debug("Background check action: #{other}", agent_id: state.id)
-        end
-      end)
+      Enum.each(result.actions, &dispatch_background_action(&1, state.id))
 
       # Surface suggestions
       surface_background_suggestions(state.id, result.suggestions, state)
@@ -1130,91 +1140,124 @@ defmodule Arbor.Agent.AgentSeed do
       %{actions: [], warnings: [], suggestions: []}
   end
 
+  defp dispatch_background_action(%{type: :run_consolidation}, agent_id) do
+    spawn(fn -> Arbor.Memory.run_consolidation(agent_id) end)
+  end
+
+  defp dispatch_background_action(%{type: other}, agent_id) do
+    Logger.debug("Background check action: #{other}", agent_id: agent_id)
+  end
+
   defp surface_background_suggestions(_agent_id, [], _state), do: :ok
 
   defp surface_background_suggestions(agent_id, suggestions, state) do
     Enum.each(suggestions, fn suggestion ->
-      if (suggestion[:confidence] || 0) >= 0.5 do
-        safe_memory_call(fn ->
-          Arbor.Memory.create_proposal(
-            agent_id,
-            suggestion[:type] || :background_insight,
-            suggestion[:content] || inspect(suggestion)
-          )
-        end)
-      end
-
-      if state[:working_memory] && (suggestion[:confidence] || 0) >= 0.6 do
-        content = suggestion[:content] || inspect(suggestion)
-        summary = String.slice(content, 0..120)
-
-        safe_memory_call(fn ->
-          wm =
-            state.working_memory
-            |> WorkingMemory.add_curiosity(
-              "[hb] [#{suggestion[:type]}] #{summary}",
-              max_curiosity: 5
-            )
-
-          Arbor.Memory.save_working_memory(agent_id, wm)
-        end)
-      end
+      maybe_create_suggestion_proposal(agent_id, suggestion)
+      maybe_add_suggestion_curiosity(agent_id, suggestion, state)
     end)
+  end
+
+  defp maybe_create_suggestion_proposal(agent_id, suggestion) do
+    if (suggestion[:confidence] || 0) >= 0.5 do
+      safe_memory_call(fn ->
+        Arbor.Memory.create_proposal(
+          agent_id,
+          suggestion[:type] || :background_insight,
+          suggestion[:content] || inspect(suggestion)
+        )
+      end)
+    end
+  end
+
+  defp maybe_add_suggestion_curiosity(agent_id, suggestion, state) do
+    if state[:working_memory] && (suggestion[:confidence] || 0) >= 0.6 do
+      content = suggestion[:content] || inspect(suggestion)
+      summary = String.slice(content, 0..120)
+
+      safe_memory_call(fn ->
+        wm =
+          state.working_memory
+          |> WorkingMemory.add_curiosity(
+            "[hb] [#{suggestion[:type]}] #{summary}",
+            max_curiosity: 5
+          )
+
+        Arbor.Memory.save_working_memory(agent_id, wm)
+      end)
+    end
   end
 
   defp maybe_consolidate_identity(agent_id, heartbeat_count) do
     if rem(heartbeat_count, @identity_consolidation_interval) == 0 do
-      spawn(fn ->
-        safe_memory_call(fn ->
-          if Code.ensure_loaded?(IdentityConsolidator) and
-               function_exported?(IdentityConsolidator, :consolidate, 2) do
-            case IdentityConsolidator.consolidate(agent_id) do
-              {:ok, :no_changes} ->
-                :ok
+      spawn(fn -> run_identity_consolidation(agent_id, heartbeat_count) end)
+    end
+  end
 
-              {:ok, _sk} ->
-                Logger.info("Identity consolidated", agent_id: agent_id)
-
-                seed_emit_signal(:identity_consolidated, %{
-                  id: agent_id,
-                  heartbeat: heartbeat_count
-                })
-
-              {:error, reason} ->
-                Logger.debug("Identity consolidation skipped: #{inspect(reason)}")
-            end
-          end
-        end)
+  defp run_identity_consolidation(agent_id, heartbeat_count) do
+    if identity_consolidator_available?(:consolidate, 2) do
+      safe_memory_call(fn ->
+        handle_consolidation_result(
+          IdentityConsolidator.consolidate(agent_id),
+          agent_id,
+          heartbeat_count
+        )
       end)
     end
   end
 
+  defp handle_consolidation_result({:ok, :no_changes}, _agent_id, _heartbeat_count), do: :ok
+
+  defp handle_consolidation_result({:ok, _sk}, agent_id, heartbeat_count) do
+    Logger.info("Identity consolidated", agent_id: agent_id)
+
+    seed_emit_signal(:identity_consolidated, %{
+      id: agent_id,
+      heartbeat: heartbeat_count
+    })
+  end
+
+  defp handle_consolidation_result({:error, reason}, _agent_id, _heartbeat_count) do
+    Logger.debug("Identity consolidation skipped: #{inspect(reason)}")
+  end
+
   defp maybe_periodic_reflection(agent_id, heartbeat_count) do
     if rem(heartbeat_count, @reflection_interval) == 0 do
-      spawn(fn ->
-        safe_memory_call(fn ->
-          if Code.ensure_loaded?(ReflectionProcessor) and
-               function_exported?(ReflectionProcessor, :periodic_reflection, 1) do
-            case ReflectionProcessor.periodic_reflection(agent_id) do
-              {:ok, reflection} ->
-                Logger.info("Periodic reflection completed",
-                  agent_id: agent_id,
-                  insights: length(reflection[:insights] || [])
-                )
+      spawn(fn -> run_periodic_reflection(agent_id, heartbeat_count) end)
+    end
+  end
 
-                seed_emit_signal(:reflection_completed, %{
-                  id: agent_id,
-                  insights_count: length(reflection[:insights] || []),
-                  heartbeat: heartbeat_count
-                })
-
-              {:error, reason} ->
-                Logger.debug("Periodic reflection failed: #{inspect(reason)}")
-            end
-          end
-        end)
+  defp run_periodic_reflection(agent_id, heartbeat_count) do
+    if reflection_processor_available?() do
+      safe_memory_call(fn ->
+        handle_reflection_result(
+          ReflectionProcessor.periodic_reflection(agent_id),
+          agent_id,
+          heartbeat_count
+        )
       end)
     end
+  end
+
+  defp reflection_processor_available? do
+    Code.ensure_loaded?(ReflectionProcessor) and
+      function_exported?(ReflectionProcessor, :periodic_reflection, 1)
+  end
+
+  defp handle_reflection_result({:ok, reflection}, agent_id, heartbeat_count) do
+    Logger.info("Periodic reflection completed",
+      agent_id: agent_id,
+      insights: length(reflection[:insights] || [])
+    )
+
+    seed_emit_signal(:reflection_completed, %{
+      id: agent_id,
+      insights_count: length(reflection[:insights] || []),
+      heartbeat: heartbeat_count
+    })
+  end
+
+  defp handle_reflection_result({:error, reason}, _agent_id, _heartbeat_count) do
+    Logger.debug("Periodic reflection failed: #{inspect(reason)}")
   end
 
   defp get_memory_stats(agent_id) do
