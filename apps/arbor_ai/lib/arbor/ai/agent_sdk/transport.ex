@@ -49,8 +49,8 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
   @type t :: GenServer.server()
 
-  # Default buffer limit (1MB)
-  @buffer_limit 1_048_576
+  # Default buffer limit (50MB — multi-turn tool use generates large output)
+  @buffer_limit 52_428_800
 
   # ============================================================================
   # Public API
