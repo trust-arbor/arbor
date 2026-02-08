@@ -42,6 +42,13 @@ defmodule Arbor.Memory.Signals do
   | `:memory_corrected` | Memory content corrected |
   | `:bridge_interrupt` | Interrupt sent via Bridge |
   | `:bridge_interrupt_cleared` | Interrupt cleared via Bridge |
+  | `:engagement_changed` | Engagement level changed |
+  | `:concern_added` | Concern added to working memory |
+  | `:concern_resolved` | Concern resolved in working memory |
+  | `:curiosity_added` | Curiosity item added |
+  | `:curiosity_satisfied` | Curiosity item satisfied |
+  | `:conversation_changed` | Conversation context changed |
+  | `:relationship_changed` | Relationship context changed |
 
   ## Examples
 
@@ -58,6 +65,51 @@ defmodule Arbor.Memory.Signals do
       end)
   """
 
+  require Logger
+
+  # ============================================================================
+  # Query API
+  # ============================================================================
+
+  @doc """
+  Query recent memory signals for an agent.
+
+  Returns signals filtered by agent_id (via source URI) and optionally by type.
+
+  ## Options
+
+  - `:limit` - Maximum signals to return (default: 100)
+  - `:types` - List of signal types to include (default: all)
+  - `:since` - Only signals after this DateTime
+  """
+  @spec query_recent(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def query_recent(agent_id, opts \\ []) do
+    if signals_available?() do
+      limit = Keyword.get(opts, :limit, 100)
+      source = memory_source(agent_id)
+
+      filters = [category: :memory, source: source, limit: limit]
+      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+
+      case Arbor.Signals.recent(filters) do
+        {:ok, signals} ->
+          case Keyword.get(opts, :types) do
+            nil -> {:ok, signals}
+            types -> {:ok, Enum.filter(signals, &(&1.type in types))}
+          end
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  # ============================================================================
+  # Emission API
+  # ============================================================================
+
   @doc """
   Emit a signal when content is indexed.
 
@@ -69,8 +121,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_indexed(String.t(), map()) :: :ok
   def emit_indexed(agent_id, metadata) do
-    Arbor.Signals.emit(:memory, :indexed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :indexed, %{
       entry_id: metadata[:entry_id],
       type: metadata[:type],
       source: metadata[:source]
@@ -88,8 +139,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_recalled(String.t(), String.t(), non_neg_integer(), keyword()) :: :ok
   def emit_recalled(agent_id, query, result_count, opts \\ []) do
-    Arbor.Signals.emit(:memory, :recalled, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :recalled, %{
       query: query,
       result_count: result_count,
       top_similarity: Keyword.get(opts, :top_similarity)
@@ -103,8 +153,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_consolidation_started(String.t()) :: :ok
   def emit_consolidation_started(agent_id) do
-    Arbor.Signals.emit(:memory, :consolidation_started, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :consolidation_started, %{
       started_at: DateTime.utc_now()
     })
   end
@@ -120,8 +169,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_consolidation_completed(String.t(), map()) :: :ok
   def emit_consolidation_completed(agent_id, metrics) do
-    Arbor.Signals.emit(:memory, :consolidation_completed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :consolidation_completed, %{
       decayed_count: metrics[:decayed_count],
       pruned_count: metrics[:pruned_count],
       duration_ms: metrics[:duration_ms],
@@ -134,8 +182,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_fact_extracted(String.t(), map()) :: :ok
   def emit_fact_extracted(agent_id, fact) do
-    Arbor.Signals.emit(:memory, :fact_extracted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :fact_extracted, %{
       pending_id: fact[:id],
       content_preview: String.slice(fact[:content] || "", 0, 100),
       confidence: fact[:confidence],
@@ -148,8 +195,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_learning_extracted(String.t(), map()) :: :ok
   def emit_learning_extracted(agent_id, learning) do
-    Arbor.Signals.emit(:memory, :learning_extracted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :learning_extracted, %{
       pending_id: learning[:id],
       content_preview: String.slice(learning[:content] || "", 0, 100),
       confidence: learning[:confidence],
@@ -162,8 +208,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_added(String.t(), String.t(), atom()) :: :ok
   def emit_knowledge_added(agent_id, node_id, node_type) do
-    Arbor.Signals.emit(:memory, :knowledge_added, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :knowledge_added, %{
       node_id: node_id,
       node_type: node_type
     })
@@ -174,8 +219,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_linked(String.t(), String.t(), String.t(), atom()) :: :ok
   def emit_knowledge_linked(agent_id, source_id, target_id, relationship) do
-    Arbor.Signals.emit(:memory, :knowledge_linked, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :knowledge_linked, %{
       source_id: source_id,
       target_id: target_id,
       relationship: relationship
@@ -187,8 +231,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_decayed(String.t(), map()) :: :ok
   def emit_knowledge_decayed(agent_id, stats) do
-    Arbor.Signals.emit(:memory, :knowledge_decayed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :knowledge_decayed, %{
       node_count: stats[:node_count],
       average_relevance: stats[:average_relevance]
     })
@@ -199,8 +242,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_pruned(String.t(), non_neg_integer()) :: :ok
   def emit_knowledge_pruned(agent_id, pruned_count) do
-    Arbor.Signals.emit(:memory, :knowledge_pruned, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :knowledge_pruned, %{
       pruned_count: pruned_count
     })
   end
@@ -210,8 +252,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_pending_approved(String.t(), String.t(), String.t()) :: :ok
   def emit_pending_approved(agent_id, pending_id, node_id) do
-    Arbor.Signals.emit(:memory, :pending_approved, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :pending_approved, %{
       pending_id: pending_id,
       node_id: node_id
     })
@@ -222,8 +263,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_pending_rejected(String.t(), String.t()) :: :ok
   def emit_pending_rejected(agent_id, pending_id) do
-    Arbor.Signals.emit(:memory, :pending_rejected, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :pending_rejected, %{
       pending_id: pending_id
     })
   end
@@ -233,8 +273,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_memory_initialized(String.t(), map()) :: :ok
   def emit_memory_initialized(agent_id, opts \\ %{}) do
-    Arbor.Signals.emit(:memory, :initialized, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :initialized, %{
       index_enabled: Map.get(opts, :index_enabled, true),
       graph_enabled: Map.get(opts, :graph_enabled, true)
     })
@@ -245,9 +284,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_memory_cleaned_up(String.t()) :: :ok
   def emit_memory_cleaned_up(agent_id) do
-    Arbor.Signals.emit(:memory, :cleaned_up, %{
-      agent_id: agent_id
-    })
+    emit_memory_signal(agent_id, :cleaned_up, %{})
   end
 
   # ============================================================================
@@ -264,8 +301,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_working_memory_loaded(String.t(), atom()) :: :ok
   def emit_working_memory_loaded(agent_id, status) do
-    Arbor.Signals.emit(:memory, :working_memory_loaded, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :working_memory_loaded, %{
       status: status,
       loaded_at: DateTime.utc_now()
     })
@@ -276,8 +312,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_working_memory_saved(String.t(), map()) :: :ok
   def emit_working_memory_saved(agent_id, stats) do
-    Arbor.Signals.emit(:memory, :working_memory_saved, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :working_memory_saved, %{
       thought_count: stats[:thought_count],
       goal_count: stats[:goal_count],
       engagement_level: stats[:engagement_level],
@@ -290,8 +325,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_thought_recorded(String.t(), String.t()) :: :ok
   def emit_thought_recorded(agent_id, thought_preview) do
-    Arbor.Signals.emit(:memory, :thought_recorded, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :thought_recorded, %{
       thought_preview: String.slice(thought_preview, 0, 100),
       recorded_at: DateTime.utc_now()
     })
@@ -302,8 +336,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_facts_extracted(String.t(), map()) :: :ok
   def emit_facts_extracted(agent_id, extraction_info) do
-    Arbor.Signals.emit(:memory, :facts_extracted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :facts_extracted, %{
       fact_count: extraction_info[:fact_count],
       categories: extraction_info[:categories],
       source: extraction_info[:source],
@@ -316,8 +349,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_context_summarized(String.t(), map()) :: :ok
   def emit_context_summarized(agent_id, summary_info) do
-    Arbor.Signals.emit(:memory, :context_summarized, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :context_summarized, %{
       complexity: summary_info[:complexity],
       model_used: summary_info[:model_used],
       summarized_at: DateTime.utc_now()
@@ -329,8 +361,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_agent_stopped(String.t()) :: :ok
   def emit_agent_stopped(agent_id) do
-    Arbor.Signals.emit(:memory, :agent_stopped, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :agent_stopped, %{
       stopped_at: DateTime.utc_now()
     })
   end
@@ -340,8 +371,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_heartbeat(String.t()) :: :ok
   def emit_heartbeat(agent_id) do
-    Arbor.Signals.emit(:memory, :heartbeat, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :heartbeat, %{
       timestamp: DateTime.utc_now()
     })
   end
@@ -355,8 +385,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_background_checks_started(String.t()) :: :ok
   def emit_background_checks_started(agent_id) do
-    Arbor.Signals.emit(:memory, :background_checks_started, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :background_checks_started, %{
       started_at: DateTime.utc_now()
     })
   end
@@ -373,8 +402,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_background_checks_completed(String.t(), map()) :: :ok
   def emit_background_checks_completed(agent_id, result_summary) do
-    Arbor.Signals.emit(:memory, :background_checks_completed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :background_checks_completed, %{
       action_count: result_summary[:action_count],
       warning_count: result_summary[:warning_count],
       suggestion_count: result_summary[:suggestion_count],
@@ -388,8 +416,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_pattern_detected(String.t(), map()) :: :ok
   def emit_pattern_detected(agent_id, pattern) do
-    Arbor.Signals.emit(:memory, :pattern_detected, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :pattern_detected, %{
       pattern_type: pattern[:type],
       tools: pattern[:tools],
       occurrences: pattern[:occurrences],
@@ -403,8 +430,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_insight_detected(String.t(), map()) :: :ok
   def emit_insight_detected(agent_id, suggestion) do
-    Arbor.Signals.emit(:memory, :insight_detected, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :insight_detected, %{
       category: suggestion[:category],
       content_preview: String.slice(suggestion[:content] || "", 0, 100),
       confidence: suggestion[:confidence],
@@ -417,8 +443,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_proposal_created(String.t(), struct()) :: :ok
   def emit_proposal_created(agent_id, proposal) do
-    Arbor.Signals.emit(:memory, :proposal_created, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :proposal_created, %{
       proposal_id: proposal.id,
       type: proposal.type,
       content_preview: String.slice(proposal.content || "", 0, 100),
@@ -433,8 +458,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_proposal_accepted(String.t(), String.t(), String.t()) :: :ok
   def emit_proposal_accepted(agent_id, proposal_id, node_id) do
-    Arbor.Signals.emit(:memory, :proposal_accepted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :proposal_accepted, %{
       proposal_id: proposal_id,
       node_id: node_id,
       accepted_at: DateTime.utc_now()
@@ -446,8 +470,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_proposal_rejected(String.t(), String.t(), atom(), String.t() | nil) :: :ok
   def emit_proposal_rejected(agent_id, proposal_id, proposal_type, reason) do
-    Arbor.Signals.emit(:memory, :proposal_rejected, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :proposal_rejected, %{
       proposal_id: proposal_id,
       proposal_type: proposal_type,
       reason: reason,
@@ -460,8 +483,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_proposal_deferred(String.t(), String.t()) :: :ok
   def emit_proposal_deferred(agent_id, proposal_id) do
-    Arbor.Signals.emit(:memory, :proposal_deferred, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :proposal_deferred, %{
       proposal_id: proposal_id,
       deferred_at: DateTime.utc_now()
     })
@@ -482,8 +504,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_cognitive_adjustment(String.t(), atom(), map()) :: :ok
   def emit_cognitive_adjustment(agent_id, adjustment_type, details) do
-    Arbor.Signals.emit(:memory, :cognitive_adjustment, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :cognitive_adjustment, %{
       adjustment_type: adjustment_type,
       details: details,
       emitted_at: DateTime.utc_now()
@@ -499,8 +520,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_relationship_created(String.t(), String.t(), String.t()) :: :ok
   def emit_relationship_created(agent_id, relationship_id, name) do
-    Arbor.Signals.emit(:memory, :relationship_created, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :relationship_created, %{
       relationship_id: relationship_id,
       name: name,
       created_at: DateTime.utc_now()
@@ -517,8 +537,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_relationship_updated(String.t(), String.t(), map()) :: :ok
   def emit_relationship_updated(agent_id, relationship_id, changes) do
-    Arbor.Signals.emit(:memory, :relationship_updated, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :relationship_updated, %{
       relationship_id: relationship_id,
       changes: changes,
       updated_at: DateTime.utc_now()
@@ -530,8 +549,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_moment_added(String.t(), String.t(), String.t()) :: :ok
   def emit_moment_added(agent_id, relationship_id, moment_summary) do
-    Arbor.Signals.emit(:memory, :moment_added, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :moment_added, %{
       relationship_id: relationship_id,
       moment_preview: String.slice(moment_summary, 0, 100),
       added_at: DateTime.utc_now()
@@ -543,8 +561,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_relationship_accessed(String.t(), String.t()) :: :ok
   def emit_relationship_accessed(agent_id, relationship_id) do
-    Arbor.Signals.emit(:memory, :relationship_accessed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :relationship_accessed, %{
       relationship_id: relationship_id,
       accessed_at: DateTime.utc_now()
     })
@@ -559,8 +576,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_preconscious_check(String.t()) :: :ok
   def emit_preconscious_check(agent_id) do
-    Arbor.Signals.emit(:memory, :preconscious_check, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :preconscious_check, %{
       started_at: DateTime.utc_now()
     })
   end
@@ -576,8 +592,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_preconscious_surfaced(String.t(), map(), non_neg_integer()) :: :ok
   def emit_preconscious_surfaced(agent_id, anticipation, memory_count) do
-    Arbor.Signals.emit(:memory, :preconscious_surfaced, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :preconscious_surfaced, %{
       memory_count: memory_count,
       query_used: anticipation.query_used,
       relevance_score: anticipation.relevance_score,
@@ -595,8 +610,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_started(String.t(), map()) :: :ok
   def emit_reflection_started(agent_id, metadata) do
-    Arbor.Signals.emit(:memory, :reflection_started, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_started, %{
       started_at: DateTime.utc_now(),
       metadata: metadata
     })
@@ -607,8 +621,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_completed(String.t(), map()) :: :ok
   def emit_reflection_completed(agent_id, metadata) do
-    Arbor.Signals.emit(:memory, :reflection_completed, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_completed, %{
       duration_ms: metadata[:duration_ms],
       insight_count: metadata[:insight_count],
       goal_updates: metadata[:goal_update_count],
@@ -621,8 +634,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_insight(String.t(), map()) :: :ok
   def emit_reflection_insight(agent_id, insight) do
-    Arbor.Signals.emit(:memory, :reflection_insight, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_insight, %{
       content: insight[:content],
       importance: insight[:importance],
       related_goal_id: insight[:related_goal_id],
@@ -635,8 +647,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_learning(String.t(), map()) :: :ok
   def emit_reflection_learning(agent_id, learning) do
-    Arbor.Signals.emit(:memory, :reflection_learning, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_learning, %{
       content: learning[:content],
       confidence: learning[:confidence],
       category: learning[:category],
@@ -649,8 +660,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_goal_update(String.t(), String.t(), map()) :: :ok
   def emit_reflection_goal_update(agent_id, goal_id, update) do
-    Arbor.Signals.emit(:memory, :reflection_goal_update, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_goal_update, %{
       goal_id: goal_id,
       new_progress: update["new_progress"],
       status: update["status"],
@@ -663,8 +673,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_goal_created(String.t(), String.t(), map()) :: :ok
   def emit_reflection_goal_created(agent_id, goal_id, data) do
-    Arbor.Signals.emit(:memory, :reflection_goal_created, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_goal_created, %{
       goal_id: goal_id,
       description: data["description"],
       priority: data["priority"],
@@ -677,8 +686,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_knowledge_graph(String.t(), map()) :: :ok
   def emit_reflection_knowledge_graph(agent_id, stats) do
-    Arbor.Signals.emit(:memory, :reflection_knowledge_graph, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_knowledge_graph, %{
       nodes_added: stats[:nodes_added],
       edges_added: stats[:edges_added],
       updated_at: DateTime.utc_now()
@@ -690,8 +698,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_knowledge_decay(String.t(), map()) :: :ok
   def emit_reflection_knowledge_decay(agent_id, data) do
-    Arbor.Signals.emit(:memory, :reflection_knowledge_decay, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_knowledge_decay, %{
       archived_count: data[:archived_count],
       remaining_nodes: data[:remaining_nodes],
       decayed_at: DateTime.utc_now()
@@ -703,8 +710,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_reflection_llm_call(String.t(), map()) :: :ok
   def emit_reflection_llm_call(agent_id, metrics) do
-    Arbor.Signals.emit(:memory, :reflection_llm_call, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :reflection_llm_call, %{
       provider: metrics[:provider],
       model: metrics[:model],
       prompt_chars: metrics[:prompt_chars],
@@ -724,8 +730,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_goal_created(String.t(), struct()) :: :ok
   def emit_goal_created(agent_id, goal) do
-    Arbor.Signals.emit(:memory, :goal_created, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :goal_created, %{
       goal_id: goal.id,
       description: goal.description,
       type: goal.type,
@@ -740,8 +745,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_goal_progress(String.t(), String.t(), float()) :: :ok
   def emit_goal_progress(agent_id, goal_id, progress) do
-    Arbor.Signals.emit(:memory, :goal_progress, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :goal_progress, %{
       goal_id: goal_id,
       progress: progress,
       updated_at: DateTime.utc_now()
@@ -753,8 +757,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_goal_achieved(String.t(), String.t()) :: :ok
   def emit_goal_achieved(agent_id, goal_id) do
-    Arbor.Signals.emit(:memory, :goal_achieved, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :goal_achieved, %{
       goal_id: goal_id,
       achieved_at: DateTime.utc_now()
     })
@@ -765,8 +768,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_goal_abandoned(String.t(), String.t(), String.t() | nil) :: :ok
   def emit_goal_abandoned(agent_id, goal_id, reason) do
-    Arbor.Signals.emit(:memory, :goal_abandoned, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :goal_abandoned, %{
       goal_id: goal_id,
       reason: reason,
       abandoned_at: DateTime.utc_now()
@@ -778,6 +780,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_intent_formed(String.t(), struct()) :: :ok
   def emit_intent_formed(agent_id, intent) do
+    # Uses :agent category (not :memory) — intentionally not using emit_memory_signal
     Arbor.Signals.emit(:agent, :intent_formed, %{
       agent_id: agent_id,
       intent_id: intent.id,
@@ -793,6 +796,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_percept_received(String.t(), struct()) :: :ok
   def emit_percept_received(agent_id, percept) do
+    # Uses :agent category (not :memory) — intentionally not using emit_memory_signal
     Arbor.Signals.emit(:agent, :percept_received, %{
       agent_id: agent_id,
       percept_id: percept.id,
@@ -809,8 +813,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_thinking_recorded(String.t(), String.t()) :: :ok
   def emit_thinking_recorded(agent_id, text) do
-    Arbor.Signals.emit(:memory, :thinking_recorded, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :thinking_recorded, %{
       text_preview: String.slice(text, 0, 100),
       text_length: String.length(text),
       recorded_at: DateTime.utc_now()
@@ -820,9 +823,9 @@ defmodule Arbor.Memory.Signals do
   @doc """
   Emit when a knowledge node is archived (removed during decay/prune).
   """
+  @spec emit_knowledge_archived(String.t(), map(), term()) :: :ok
   def emit_knowledge_archived(agent_id, node_data, reason) do
-    Arbor.Signals.emit(:memory, :knowledge_archived, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :knowledge_archived, %{
       node_id: node_data[:id],
       node_type: node_data[:type],
       content_preview: String.slice(node_data[:content] || "", 0, 100),
@@ -841,8 +844,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_identity_change(String.t(), atom(), map()) :: :ok
   def emit_identity_change(agent_id, change_type, details) do
-    Arbor.Signals.emit(:memory, :identity_change, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :identity_change, %{
       change_type: change_type,
       details: details,
       changed_at: DateTime.utc_now()
@@ -854,8 +856,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_identity_rollback(String.t(), atom(), map()) :: :ok
   def emit_identity_rollback(agent_id, change_type, details) do
-    Arbor.Signals.emit(:memory, :identity_rollback, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :identity_rollback, %{
       change_type: change_type,
       details: details,
       rolled_back_at: DateTime.utc_now()
@@ -867,8 +868,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_self_insight_created(String.t(), map()) :: :ok
   def emit_self_insight_created(agent_id, insight) do
-    Arbor.Signals.emit(:memory, :self_insight_created, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :self_insight_created, %{
       category: insight[:category],
       content_preview: String.slice(insight[:content] || "", 0, 100),
       confidence: insight[:confidence],
@@ -881,8 +881,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_self_insight_reinforced(String.t(), map()) :: :ok
   def emit_self_insight_reinforced(agent_id, insight) do
-    Arbor.Signals.emit(:memory, :self_insight_reinforced, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :self_insight_reinforced, %{
       category: insight[:category],
       content_preview: String.slice(insight[:content] || "", 0, 100),
       new_confidence: insight[:confidence],
@@ -899,8 +898,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_insight_promoted(String.t(), String.t(), map()) :: :ok
   def emit_insight_promoted(agent_id, insight_id, details) do
-    Arbor.Signals.emit(:memory, :insight_promoted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :insight_promoted, %{
       insight_id: insight_id,
       content_preview: String.slice(details[:content] || "", 0, 100),
       promoted_at: DateTime.utc_now()
@@ -912,8 +910,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_insight_deferred(String.t(), String.t(), String.t() | nil) :: :ok
   def emit_insight_deferred(agent_id, insight_id, reason \\ nil) do
-    Arbor.Signals.emit(:memory, :insight_deferred, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :insight_deferred, %{
       insight_id: insight_id,
       reason: reason,
       deferred_at: DateTime.utc_now()
@@ -925,8 +922,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_insight_blocked(String.t(), String.t(), String.t() | nil) :: :ok
   def emit_insight_blocked(agent_id, insight_id, reason \\ nil) do
-    Arbor.Signals.emit(:memory, :insight_blocked, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :insight_blocked, %{
       insight_id: insight_id,
       reason: reason,
       blocked_at: DateTime.utc_now()
@@ -942,8 +938,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_episode_archived(String.t(), map()) :: :ok
   def emit_episode_archived(agent_id, episode) do
-    Arbor.Signals.emit(:memory, :episode_archived, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :episode_archived, %{
       episode_id: episode[:id],
       description: episode[:description],
       outcome: episode[:outcome],
@@ -957,8 +952,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_lesson_extracted(String.t(), String.t(), map()) :: :ok
   def emit_lesson_extracted(agent_id, lesson, details) do
-    Arbor.Signals.emit(:memory, :lesson_extracted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :lesson_extracted, %{
       lesson_preview: String.slice(lesson, 0, 100),
       source_episode_id: details[:episode_id],
       importance: details[:importance],
@@ -975,8 +969,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_memory_promoted(String.t(), String.t(), map()) :: :ok
   def emit_memory_promoted(agent_id, node_id, details) do
-    Arbor.Signals.emit(:memory, :memory_promoted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :memory_promoted, %{
       node_id: node_id,
       old_relevance: details[:old_relevance],
       new_relevance: details[:new_relevance],
@@ -990,8 +983,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_memory_demoted(String.t(), String.t(), map()) :: :ok
   def emit_memory_demoted(agent_id, node_id, details) do
-    Arbor.Signals.emit(:memory, :memory_demoted, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :memory_demoted, %{
       node_id: node_id,
       old_relevance: details[:old_relevance],
       new_relevance: details[:new_relevance],
@@ -1005,8 +997,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_memory_corrected(String.t(), String.t(), map()) :: :ok
   def emit_memory_corrected(agent_id, node_id, details) do
-    Arbor.Signals.emit(:memory, :memory_corrected, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :memory_corrected, %{
       node_id: node_id,
       field: details[:field],
       old_preview: String.slice(to_string(details[:old_value] || ""), 0, 80),
@@ -1024,8 +1015,7 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_bridge_interrupt(String.t(), String.t(), atom()) :: :ok
   def emit_bridge_interrupt(agent_id, target_id, reason) do
-    Arbor.Signals.emit(:memory, :bridge_interrupt, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :bridge_interrupt, %{
       target_id: target_id,
       reason: reason,
       interrupted_at: DateTime.utc_now()
@@ -1037,10 +1027,123 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_bridge_interrupt_cleared(String.t(), String.t()) :: :ok
   def emit_bridge_interrupt_cleared(agent_id, target_id) do
-    Arbor.Signals.emit(:memory, :bridge_interrupt_cleared, %{
-      agent_id: agent_id,
+    emit_memory_signal(agent_id, :bridge_interrupt_cleared, %{
       target_id: target_id,
       cleared_at: DateTime.utc_now()
     })
+  end
+
+  # ============================================================================
+  # WorkingMemory State Change Signals
+  # ============================================================================
+
+  @doc """
+  Emit a signal when engagement level changes.
+  """
+  @spec emit_engagement_changed(String.t(), float()) :: :ok
+  def emit_engagement_changed(agent_id, level) do
+    emit_memory_signal(agent_id, :engagement_changed, %{
+      type: :engagement,
+      level: level,
+      changed_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a concern is added to working memory.
+  """
+  @spec emit_concern_added(String.t(), String.t()) :: :ok
+  def emit_concern_added(agent_id, concern) do
+    emit_memory_signal(agent_id, :concern_added, %{
+      type: :concern,
+      concern: concern,
+      action: :added,
+      added_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a concern is resolved in working memory.
+  """
+  @spec emit_concern_resolved(String.t(), String.t()) :: :ok
+  def emit_concern_resolved(agent_id, concern) do
+    emit_memory_signal(agent_id, :concern_resolved, %{
+      type: :concern,
+      concern: concern,
+      action: :resolved,
+      resolved_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a curiosity item is added.
+  """
+  @spec emit_curiosity_added(String.t(), String.t()) :: :ok
+  def emit_curiosity_added(agent_id, item) do
+    emit_memory_signal(agent_id, :curiosity_added, %{
+      type: :curiosity,
+      item: item,
+      action: :added,
+      added_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a curiosity item is satisfied.
+  """
+  @spec emit_curiosity_satisfied(String.t(), String.t()) :: :ok
+  def emit_curiosity_satisfied(agent_id, item) do
+    emit_memory_signal(agent_id, :curiosity_satisfied, %{
+      type: :curiosity,
+      item: item,
+      action: :satisfied,
+      satisfied_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when the conversation context changes.
+  """
+  @spec emit_conversation_changed(String.t(), map() | nil) :: :ok
+  def emit_conversation_changed(agent_id, conversation) do
+    emit_memory_signal(agent_id, :conversation_changed, %{
+      type: :conversation,
+      conversation: conversation,
+      changed_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when the relationship context changes in working memory.
+  """
+  @spec emit_relationship_changed(String.t(), String.t(), term()) :: :ok
+  def emit_relationship_changed(agent_id, human_name, context) do
+    emit_memory_signal(agent_id, :relationship_changed, %{
+      type: :relationship,
+      human_name: human_name,
+      context: context,
+      changed_at: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Private Helpers
+  # ============================================================================
+
+  @doc false
+  defp memory_source(agent_id), do: "arbor://memory/#{agent_id}"
+
+  @doc false
+  defp emit_memory_signal(agent_id, type, data) do
+    Arbor.Signals.emit(:memory, type, Map.put(data, :agent_id, agent_id),
+      source: memory_source(agent_id))
+  end
+
+  defp signals_available? do
+    Code.ensure_loaded?(Arbor.Signals) and
+      function_exported?(Arbor.Signals, :healthy?, 0) and
+      Arbor.Signals.healthy?()
+  rescue
+    _ -> false
   end
 end
