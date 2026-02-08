@@ -118,8 +118,16 @@ defmodule Arbor.Actions.MemoryIdentity do
       category: "memory_identity",
       tags: ["memory", "identity", "self-knowledge", "read"],
       schema: [
-        aspect: [type: :string, default: "all", doc: "Aspect to query: memory_system, identity, tools, cognition, capabilities, all"],
-        include_source: [type: :boolean, default: false, doc: "Include source module paths in response"]
+        aspect: [
+          type: :string,
+          default: "all",
+          doc: "Aspect to query: memory_system, identity, tools, cognition, capabilities, all"
+        ],
+        include_source: [
+          type: :boolean,
+          default: false,
+          doc: "Include source module paths in response"
+        ]
       ]
 
     alias Arbor.Actions

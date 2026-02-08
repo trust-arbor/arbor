@@ -1079,7 +1079,8 @@ defmodule Arbor.AI do
     }
   end
 
-  defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, total_tokens: 0}
+  defp extract_usage(_),
+    do: %{input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, total_tokens: 0}
 
   # Extract thinking blocks from extended thinking responses
   # ReqLLM returns thinking blocks in the message content array

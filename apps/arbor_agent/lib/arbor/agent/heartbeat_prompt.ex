@@ -123,6 +123,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   end
 
   defp conversation_section(%{context_window: nil}), do: nil
+
   defp conversation_section(%{context_window: window}) do
     text =
       safe_call(fn ->
@@ -141,6 +142,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       true -> "## Conversation Context\n#{text}"
     end
   end
+
   defp conversation_section(_state), do: nil
 
   defp pending_section(state) do

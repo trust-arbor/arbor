@@ -319,7 +319,6 @@ defmodule Arbor.Agent.Server do
     Registry.register(state.agent_id, self(), metadata)
   end
 
-
   # ============================================================================
   # Signal Emissions
   # ============================================================================

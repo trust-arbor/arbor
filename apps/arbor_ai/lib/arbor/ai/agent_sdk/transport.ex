@@ -3,7 +3,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
   Transport layer for Claude Agent SDK.
 
   Spawns the Claude Code CLI as a subprocess and streams responses.
-  Uses `--output-format stream-json --verbose --print` mode for capturing
+  Uses `--output-format stream-json --verbose` mode for capturing
   thinking blocks and real-time streaming.
 
   ## Architecture
@@ -210,7 +210,27 @@ defmodule Arbor.AI.AgentSDK.Transport do
   end
 
   defp shell_escape(arg) do
-    if String.contains?(arg, [" ", "\"", "'", "\\", "$", "`", "(", ")", "{", "}", "<", ">", "|", "&", ";", "!", "~", "*", "?"]) do
+    if String.contains?(arg, [
+         " ",
+         "\"",
+         "'",
+         "\\",
+         "$",
+         "`",
+         "(",
+         ")",
+         "{",
+         "}",
+         "<",
+         ">",
+         "|",
+         "&",
+         ";",
+         "!",
+         "~",
+         "*",
+         "?"
+       ]) do
       "'" <> String.replace(arg, "'", "'\\''") <> "'"
     else
       arg
@@ -252,11 +272,13 @@ defmodule Arbor.AI.AgentSDK.Transport do
     permission_mode = Permissions.resolve_mode(opts)
 
     # Base args for streaming with thinking
+    # Note: --print is intentionally omitted. It interferes with
+    # thinking block streaming in stream-json mode. The Python SDK
+    # removed it in v0.1.24 for the same reason.
     args = [
       "--output-format",
       "stream-json",
-      "--verbose",
-      "--print"
+      "--verbose"
     ]
 
     # Permission mode flags

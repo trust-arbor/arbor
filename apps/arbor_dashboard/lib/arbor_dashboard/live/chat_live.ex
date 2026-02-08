@@ -90,8 +90,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Proposals
         proposals: [],
         # Heartbeat model selection (API agents only)
-        heartbeat_models:
-          Application.get_env(:arbor_dashboard, :heartbeat_models, []),
+        heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
         selected_heartbeat_model: nil
       )
       |> stream(:messages, [])
@@ -150,7 +149,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             # Agent already exists — just reconnect
             case AgentManager.find_agent() do
               {:ok, pid, metadata} ->
-                socket = reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+                socket =
+                  reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+
                 {:noreply, socket}
 
               :not_found ->
@@ -201,13 +202,34 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         |> stream_insert(:messages, user_msg)
         |> assign(input: "", loading: true, error: nil)
 
-      # Send async query — route based on backend
+      # Spawn async query — keeps LiveView responsive during LLM calls
+      lv = self()
+      agent = socket.assigns.agent
+
       case socket.assigns.chat_backend do
         :cli ->
-          send(self(), {:query, socket.assigns.agent, input})
+          Task.start(fn ->
+            result =
+              try do
+                Claude.query(agent, input, timeout: 300_000, permission_mode: :bypass)
+              catch
+                :exit, reason -> {:error, {:agent_crashed, reason}}
+              end
+
+            send(lv, {:query_result, :cli, result})
+          end)
 
         :api ->
-          send(self(), {:api_query, input})
+          Task.start(fn ->
+            result =
+              try do
+                APIAgent.query(agent, input)
+              catch
+                :exit, reason -> {:error, {:agent_crashed, reason}}
+              end
+
+            send(lv, {:query_result, :api, result})
+          end)
       end
 
       {:noreply, socket}
@@ -291,48 +313,37 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   @impl true
-  def handle_info({:query, agent, prompt}, socket) do
-    case Claude.query(agent, prompt,
-           timeout: 300_000,
-           permission_mode: :bypass
-         ) do
-      {:ok, response} ->
-        socket = process_query_response(socket, agent, response)
-        {:noreply, socket}
-
-      {:error, reason} ->
-        {:noreply, assign(socket, loading: false, error: "Query failed: #{inspect(reason)}")}
-    end
+  def handle_info({:query_result, :cli, {:ok, response}}, socket) do
+    socket = process_query_response(socket, socket.assigns.agent, response)
+    {:noreply, socket}
   end
 
-  def handle_info({:api_query, prompt}, socket) do
-    model_config = socket.assigns.current_model
+  def handle_info({:query_result, :api, {:ok, response}}, socket) do
+    model_config = socket.assigns.current_model || %{}
 
-    case APIAgent.query(socket.assigns.agent, prompt) do
-      {:ok, response} ->
-        assistant_msg = %{
-          id: "msg-#{System.unique_integer([:positive])}",
-          role: :assistant,
-          content: response[:text] || response.text || "",
-          tool_uses: response[:tool_calls] || [],
-          timestamp: DateTime.utc_now(),
-          model: "#{model_config.provider}:#{model_config.id}",
-          session_id: nil,
-          memory_count: length(response[:recalled_memories] || [])
-        }
+    assistant_msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: :assistant,
+      content: response[:text] || response.text || "",
+      tool_uses: response[:tool_calls] || [],
+      timestamp: DateTime.utc_now(),
+      model: "#{model_config[:provider]}:#{model_config[:id]}",
+      session_id: nil,
+      memory_count: length(response[:recalled_memories] || [])
+    }
 
-        socket =
-          socket
-          |> stream_insert(:messages, assistant_msg)
-          |> assign(loading: false, query_count: socket.assigns.query_count + 1)
-          |> maybe_extract_api_usage(response)
-          |> maybe_add_recalled_memories_api(response)
+    socket =
+      socket
+      |> stream_insert(:messages, assistant_msg)
+      |> assign(loading: false, query_count: socket.assigns.query_count + 1)
+      |> maybe_extract_api_usage(response)
+      |> maybe_add_recalled_memories_api(response)
 
-        {:noreply, socket}
+    {:noreply, socket}
+  end
 
-      {:error, reason} ->
-        {:noreply, assign(socket, loading: false, error: "Query failed: #{inspect(reason)}")}
-    end
+  def handle_info({:query_result, _backend, {:error, reason}}, socket) do
+    {:noreply, assign(socket, loading: false, error: "Query failed: #{inspect(reason)}")}
   end
 
   def handle_info({:signal_received, signal}, socket) do
@@ -376,7 +387,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # PubSub: another tab started an agent — reconnect if we have none
   def handle_info({:agent_started, agent_id, pid, model_config}, socket) do
     if socket.assigns[:agent] == nil do
-      metadata = %{model_config: model_config, backend: model_config[:backend] || model_config.backend}
+      metadata = %{
+        model_config: model_config,
+        backend: model_config[:backend] || model_config.backend
+      }
+
       {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
     else
       {:noreply, socket}
@@ -575,7 +590,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
     <div style="display: grid; grid-template-columns: 20% 1fr 30%; gap: 0.75rem; margin-top: 0.5rem; height: calc(100vh - 160px); min-height: 400px;">
-
       <%!-- LEFT PANEL: Signals + Actions --%>
       <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden;">
         <%!-- Signal Stream — grows to fill --%>
@@ -596,7 +610,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               <div style="display: flex; align-items: center; gap: 0.25rem;">
                 <span>{signal_icon(sig.category)}</span>
-                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{sig.event}</span>
+                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  {sig.event}
+                </span>
                 <span style="color: var(--aw-text-muted, #888); font-size: 0.75em; flex-shrink: 0;">
                   {format_time(sig.timestamp)}
                 </span>
@@ -637,7 +653,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               <div style="display: flex; align-items: center; gap: 0.25rem;">
                 <span>⚡</span>
-                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{action.name}</span>
+                <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  {action.name}
+                </span>
                 <.badge label={to_string(action.outcome)} color={outcome_color(action.outcome)} />
               </div>
             </div>
@@ -668,7 +686,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
           <div :if={@show_llm_panel} style="flex: 1; overflow-y: auto; min-height: 0;">
             <%!-- Last heartbeat thinking --%>
-            <div :if={@last_llm_thinking} style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);">
+            <div
+              :if={@last_llm_thinking}
+              style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);"
+            >
               <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
                 Last heartbeat ({@last_llm_mode || "unknown"} mode):
               </div>
@@ -696,9 +717,20 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap; margin: 0;">
                   {Helpers.truncate(interaction.thinking, 250)}
                 </p>
-                <div :if={interaction.actions > 0 || interaction.notes > 0} style="margin-top: 0.2rem; display: flex; gap: 0.25rem;">
-                  <.badge :if={interaction.actions > 0} label={"#{interaction.actions} actions"} color={:green} />
-                  <.badge :if={interaction.notes > 0} label={"#{interaction.notes} notes"} color={:purple} />
+                <div
+                  :if={interaction.actions > 0 || interaction.notes > 0}
+                  style="margin-top: 0.2rem; display: flex; gap: 0.25rem;"
+                >
+                  <.badge
+                    :if={interaction.actions > 0}
+                    label={"#{interaction.actions} actions"}
+                    color={:green}
+                  />
+                  <.badge
+                    :if={interaction.notes > 0}
+                    label={"#{interaction.notes} notes"}
+                    color={:purple}
+                  />
                 </div>
               </div>
             </div>
@@ -734,9 +766,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
                 <span style="font-weight: 500;">{mod[:name] || "unnamed"}</span>
-                <.badge :if={mod[:sandbox_level]} label={to_string(mod[:sandbox_level])} color={:yellow} />
+                <.badge
+                  :if={mod[:sandbox_level]}
+                  label={to_string(mod[:sandbox_level])}
+                  color={:yellow}
+                />
               </div>
-              <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">{Helpers.truncate(mod[:purpose], 100)}</span>
+              <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
+                {Helpers.truncate(mod[:purpose], 100)}
+              </span>
             </div>
             <.empty_state
               :if={@code_modules == []}
@@ -761,16 +799,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </span>
             </div>
           </div>
-          <div :if={@show_proposals} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
+          <div
+            :if={@show_proposals}
+            style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+          >
             <div
               :for={proposal <- @proposals}
               style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
             >
               <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
                 <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
-                <.badge :if={proposal[:confidence]} label={"#{round(proposal[:confidence] * 100)}%"} color={:blue} />
+                <.badge
+                  :if={proposal[:confidence]}
+                  label={"#{round(proposal[:confidence] * 100)}%"}
+                  color={:blue}
+                />
               </div>
-              <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">{Helpers.truncate(proposal[:content] || proposal[:description] || "", 200)}</p>
+              <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">
+                {Helpers.truncate(proposal[:content] || proposal[:description] || "", 200)}
+              </p>
               <div style="display: flex; gap: 0.3rem;">
                 <button
                   phx-click="accept-proposal"
@@ -816,7 +863,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 style="padding: 0.4rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
               >
                 <%= for model <- @available_models do %>
-                  <option value={model.id}><%= model.label %></option>
+                  <option value={model.id}>{model.label}</option>
                 <% end %>
               </select>
               <button
@@ -833,7 +880,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           >
             <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
               <%= if @current_model do %>
-                Chat with <%= @current_model.label %> (<%= @current_model.provider %>)
+                Chat with {@current_model.label} ({@current_model.provider})
               <% else %>
                 Chat with Claude
               <% end %>
@@ -855,7 +902,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                     value={hb.id}
                     selected={@selected_heartbeat_model && @selected_heartbeat_model[:id] == hb.id}
                   >
-                    <%= hb.label %>
+                    {hb.label}
                   </option>
                 <% end %>
               </select>
@@ -886,10 +933,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 {format_time(msg.timestamp)}
               </span>
             </div>
-            <div :if={msg.content != ""} style="white-space: pre-wrap; font-size: 0.9em;">{msg.content}</div>
+            <div :if={msg.content != ""} style="white-space: pre-wrap; font-size: 0.9em;">
+              {msg.content}
+            </div>
             <%!-- Tool uses (collapsible) --%>
-            <div :if={msg[:tool_uses] && msg[:tool_uses] != []} style="margin-top: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem;">
-              <details :for={tool <- msg.tool_uses} style="border: 1px solid var(--aw-border, #333); border-radius: 4px; background: rgba(0,0,0,0.2); font-size: 0.85em;">
+            <div
+              :if={msg[:tool_uses] && msg[:tool_uses] != []}
+              style="margin-top: 0.3rem; display: flex; flex-direction: column; gap: 0.2rem;"
+            >
+              <details
+                :for={tool <- msg.tool_uses}
+                style="border: 1px solid var(--aw-border, #333); border-radius: 4px; background: rgba(0,0,0,0.2); font-size: 0.85em;"
+              >
                 <summary style="padding: 0.3rem 0.5rem; cursor: pointer; color: var(--aw-text-muted, #aaa); user-select: none; list-style: none; display: flex; align-items: center; gap: 0.4rem;">
                   <span style="color: #888; font-size: 0.9em;">&#9654;</span>
                   <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; " <> tool_badge_style(tool[:name] || tool["name"] || "unknown")}>
@@ -901,11 +956,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 </summary>
                 <div style="padding: 0.4rem 0.5rem; border-top: 1px solid var(--aw-border, #333);">
                   <div style="margin-bottom: 0.3rem;">
-                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Input:</strong>
+                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+                      Input:
+                    </strong>
                     <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_input(tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{})}</pre>
                   </div>
                   <div :if={tool[:result] || tool["result"]}>
-                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">Result:</strong>
+                    <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+                      Result:
+                    </strong>
                     <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 20vh; overflow-y: auto;">{format_tool_result(tool[:result] || tool["result"])}</pre>
                   </div>
                 </div>
@@ -926,7 +985,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
 
         <%!-- Loading indicator --%>
-        <div :if={@loading} style="padding: 0.75rem; border-top: 1px solid var(--aw-border, #333); flex-shrink: 0;">
+        <div
+          :if={@loading}
+          style="padding: 0.75rem; border-top: 1px solid var(--aw-border, #333); flex-shrink: 0;"
+        >
           <span style="color: var(--aw-text-muted, #888);">🤔 Thinking...</span>
         </div>
 
@@ -965,7 +1027,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       <%!-- RIGHT PANEL: Goals + Thinking + Memory + LLM --%>
       <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; min-height: 0;">
-
         <%!-- Goals panel --%>
         <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
           <div
@@ -987,7 +1048,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                 <.badge label={to_string(goal.status)} color={goal_status_color(goal.status)} />
               </div>
               <div style="background: rgba(128,128,128,0.2); height: 3px; border-radius: 2px; overflow: hidden;">
-                <div style={"background: #{goal_progress_color(goal.progress)}; height: 100%; width: #{round(goal.progress * 100)}%; transition: width 0.3s ease;"}></div>
+                <div style={"background: #{goal_progress_color(goal.progress)}; height: 100%; width: #{round(goal.progress * 100)}%; transition: width 0.3s ease;"}>
+                </div>
               </div>
               <div style="display: flex; justify-content: space-between; margin-top: 2px;">
                 <span style="font-size: 0.7em; color: var(--aw-text-muted, #888);">
@@ -1141,31 +1203,61 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           </div>
           <div :if={@show_identity} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
             <div :if={@self_insights != []} style="margin-bottom: 0.5rem;">
-              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Self Insights</div>
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
+                Self Insights
+              </div>
               <div
                 :for={insight <- Enum.take(@self_insights, 5)}
                 style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(168, 85, 247, 0.1); font-size: 0.8em;"
               >
                 <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
-                  <.badge :if={insight[:category]} label={to_string(insight[:category])} color={:purple} />
-                  <.badge :if={insight[:confidence]} label={"#{round(insight[:confidence] * 100)}%"} color={:blue} />
+                  <.badge
+                    :if={insight[:category]}
+                    label={to_string(insight[:category])}
+                    color={:purple}
+                  />
+                  <.badge
+                    :if={insight[:confidence]}
+                    label={"#{round(insight[:confidence] * 100)}%"}
+                    color={:blue}
+                  />
                 </div>
-                <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(insight[:content] || "", 150)}</span>
+                <span style="color: var(--aw-text-muted, #888);">
+                  {Helpers.truncate(insight[:content] || "", 150)}
+                </span>
               </div>
             </div>
             <div :if={@identity_changes != []} style="margin-bottom: 0.5rem;">
-              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Identity Changes</div>
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
+                Identity Changes
+              </div>
               <div
                 :for={change <- Enum.take(@identity_changes, 5)}
                 style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
               >
                 <.badge :if={change[:field]} label={to_string(change[:field])} color={:yellow} />
-                <.badge :if={change[:change_type]} label={to_string(change[:change_type])} color={:gray} />
-                <span :if={change[:reason]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;"> {Helpers.truncate(change[:reason], 100)}</span>
+                <.badge
+                  :if={change[:change_type]}
+                  label={to_string(change[:change_type])}
+                  color={:gray}
+                />
+                <span
+                  :if={change[:reason]}
+                  style="color: var(--aw-text-muted, #888); font-size: 0.9em;"
+                >
+                  {Helpers.truncate(change[:reason], 100)}
+                </span>
               </div>
             </div>
-            <div :if={@last_consolidation} style="font-size: 0.75em; color: var(--aw-text-muted, #888); padding: 0.3rem; background: rgba(128,128,128,0.1); border-radius: 4px;">
-              Last consolidation: promoted {Map.get(@last_consolidation, :promoted, 0)}, deferred {Map.get(@last_consolidation, :deferred, 0)}
+            <div
+              :if={@last_consolidation}
+              style="font-size: 0.75em; color: var(--aw-text-muted, #888); padding: 0.3rem; background: rgba(128,128,128,0.1); border-radius: 4px;"
+            >
+              Last consolidation: promoted {Map.get(@last_consolidation, :promoted, 0)}, deferred {Map.get(
+                @last_consolidation,
+                :deferred,
+                0
+              )}
             </div>
             <.empty_state
               :if={@self_insights == [] && @identity_changes == [] && @last_consolidation == nil}
@@ -1187,16 +1279,24 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               {if @show_cognitive, do: "▼", else: "▶"}
             </span>
           </div>
-          <div :if={@show_cognitive} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
+          <div
+            :if={@show_cognitive}
+            style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+          >
             <div :if={@cognitive_prefs} style="margin-bottom: 0.4rem;">
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
                 <.badge label={"Decay: #{Map.get(@cognitive_prefs, :decay_rate, "—")}"} color={:blue} />
-                <.badge label={"Threshold: #{Map.get(@cognitive_prefs, :retrieval_threshold, "—")}"} color={:green} />
+                <.badge
+                  label={"Threshold: #{Map.get(@cognitive_prefs, :retrieval_threshold, "—")}"}
+                  color={:green}
+                />
                 <.badge :if={@pinned_count > 0} label={"Pinned: #{@pinned_count}"} color={:purple} />
               </div>
             </div>
             <div :if={@cognitive_adjustments != []}>
-              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">Adjustments</div>
+              <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
+                Adjustments
+              </div>
               <div
                 :for={adj <- Enum.take(@cognitive_adjustments, 5)}
                 style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
@@ -1212,7 +1312,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             />
           </div>
         </div>
-
       </div>
     </div>
     """
@@ -1401,7 +1500,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp safe_subscribe do
     pid = self()
-    handler = fn signal -> send(pid, {:signal_received, signal}); :ok end
+
+    handler = fn signal ->
+      send(pid, {:signal_received, signal})
+      :ok
+    end
 
     agent_sub =
       case Arbor.Signals.subscribe("agent.*", handler) do
@@ -1454,11 +1557,20 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp tool_badge_style(name) do
     cond do
-      name in ~w(Read Glob Grep) -> "background: rgba(74, 158, 255, 0.2); color: #4a9eff;"
-      name in ~w(Edit Write NotebookEdit) -> "background: rgba(255, 167, 38, 0.2); color: #ffa726;"
-      name in ~w(Bash) -> "background: rgba(255, 74, 74, 0.2); color: #ff4a4a;"
-      name in ~w(Task WebFetch WebSearch) -> "background: rgba(171, 71, 188, 0.2); color: #ab47bc;"
-      true -> "background: rgba(255, 255, 255, 0.1); color: #aaa;"
+      name in ~w(Read Glob Grep) ->
+        "background: rgba(74, 158, 255, 0.2); color: #4a9eff;"
+
+      name in ~w(Edit Write NotebookEdit) ->
+        "background: rgba(255, 167, 38, 0.2); color: #ffa726;"
+
+      name in ~w(Bash) ->
+        "background: rgba(255, 74, 74, 0.2); color: #ff4a4a;"
+
+      name in ~w(Task WebFetch WebSearch) ->
+        "background: rgba(171, 71, 188, 0.2); color: #ab47bc;"
+
+      true ->
+        "background: rgba(255, 255, 255, 0.1); color: #aaa;"
     end
   end
 
@@ -1467,19 +1579,39 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     input = tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{}
 
     case name do
-      "Read" -> Map.get(input, "file_path", "") |> Path.basename()
-      "Glob" -> Map.get(input, "pattern", "")
-      "Grep" -> Map.get(input, "pattern", "")
-      "Edit" -> Map.get(input, "file_path", "") |> Path.basename()
-      "Write" -> Map.get(input, "file_path", "") |> Path.basename()
-      "Bash" -> Map.get(input, "command", "") |> String.slice(0, 60)
-      "Task" -> Map.get(input, "description", "")
-      "WebFetch" -> Map.get(input, "url", "") |> String.slice(0, 60)
-      "WebSearch" -> Map.get(input, "query", "")
+      "Read" ->
+        Map.get(input, "file_path", "") |> Path.basename()
+
+      "Glob" ->
+        Map.get(input, "pattern", "")
+
+      "Grep" ->
+        Map.get(input, "pattern", "")
+
+      "Edit" ->
+        Map.get(input, "file_path", "") |> Path.basename()
+
+      "Write" ->
+        Map.get(input, "file_path", "") |> Path.basename()
+
+      "Bash" ->
+        Map.get(input, "command", "") |> String.slice(0, 60)
+
+      "Task" ->
+        Map.get(input, "description", "")
+
+      "WebFetch" ->
+        Map.get(input, "url", "") |> String.slice(0, 60)
+
+      "WebSearch" ->
+        Map.get(input, "query", "")
+
       n when is_binary(n) ->
         # Handle API tool names like "memory_remember", "memory_recall"
         summarize_api_tool(n, input)
-      _ -> ""
+
+      _ ->
+        ""
     end
   end
 
@@ -1562,7 +1694,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         insight = %{
           content: get_in(signal.data, [:content]) || get_in(signal.metadata, [:content]) || "",
           category: get_in(signal.data, [:category]) || get_in(signal.metadata, [:category]),
-          confidence: get_in(signal.data, [:confidence]) || get_in(signal.metadata, [:confidence]),
+          confidence:
+            get_in(signal.data, [:confidence]) || get_in(signal.metadata, [:confidence]),
           timestamp: signal.timestamp
         }
 
@@ -1572,7 +1705,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       event == "memory_identity_change" ->
         change = %{
           field: get_in(signal.data, [:field]) || get_in(signal.metadata, [:field]),
-          change_type: get_in(signal.data, [:change_type]) || get_in(signal.metadata, [:change_type]),
+          change_type:
+            get_in(signal.data, [:change_type]) || get_in(signal.metadata, [:change_type]),
           reason: get_in(signal.data, [:reason]) || get_in(signal.metadata, [:reason]),
           timestamp: signal.timestamp
         }

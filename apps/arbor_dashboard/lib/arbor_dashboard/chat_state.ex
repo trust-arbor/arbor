@@ -70,7 +70,13 @@ defmodule Arbor.Dashboard.ChatState do
     updated
   rescue
     ArgumentError ->
-      %{input: input_tokens, output: output_tokens, cached: 0, count: 1, last_duration: duration_ms}
+      %{
+        input: input_tokens,
+        output: output_tokens,
+        cached: 0,
+        count: 1,
+        last_duration: duration_ms
+      }
   end
 
   def add_cached_tokens(agent_id, cached_tokens) do

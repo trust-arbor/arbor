@@ -37,7 +37,11 @@ defmodule Arbor.Actions.MemoryCognitive do
       category: "memory_cognitive",
       tags: ["memory", "cognitive", "preferences", "adjust"],
       schema: [
-        param: [type: :string, required: true, doc: "Parameter to adjust: decay_rate, max_pins, retrieval_threshold, etc."],
+        param: [
+          type: :string,
+          required: true,
+          doc: "Parameter to adjust: decay_rate, max_pins, retrieval_threshold, etc."
+        ],
         value: [type: :any, required: true, doc: "New value for the parameter"]
       ]
 

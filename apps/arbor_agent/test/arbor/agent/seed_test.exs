@@ -249,7 +249,20 @@ defmodule Arbor.Agent.SeedTest do
         id: "seed_test",
         agent_id: @agent_id,
         working_memory: wm_map,
-        goals: [%{id: "goal_skip", description: "Skip me", type: :achieve, status: :active, priority: 50, parent_id: nil, progress: 0.0, created_at: nil, achieved_at: nil, metadata: %{}}]
+        goals: [
+          %{
+            id: "goal_skip",
+            description: "Skip me",
+            type: :achieve,
+            status: :active,
+            priority: 50,
+            parent_id: nil,
+            progress: 0.0,
+            created_at: nil,
+            achieved_at: nil,
+            metadata: %{}
+          }
+        ]
       }
 
       {:ok, _} = Seed.restore(seed, skip: [:working_memory, :goals])
