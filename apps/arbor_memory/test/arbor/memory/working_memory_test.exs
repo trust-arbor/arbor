@@ -23,6 +23,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert wm.version == 2
       assert wm.name == nil
       assert wm.current_human == nil
+      assert wm.current_conversation == nil
       assert wm.max_tokens == nil
       assert wm.model == nil
       assert wm.thought_count == 0
@@ -244,7 +245,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   end
 
   describe "complete_goal/2" do
-    test "removes goal by description" do
+    test "removes goal by description and records thought" do
       wm =
         WorkingMemory.new("agent_001")
         |> WorkingMemory.set_goals(["A", "B", "C"])
@@ -253,9 +254,13 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       descriptions = Enum.map(wm.active_goals, & &1.description)
       assert "B" not in descriptions
       assert length(wm.active_goals) == 2
+
+      # Audit trail: completion recorded as thought
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "Completed goal: B"
     end
 
-    test "removes goal by id" do
+    test "removes goal by id and records thought" do
       wm =
         WorkingMemory.new("agent_001")
         |> WorkingMemory.add_goal(%{id: "g1", description: "Task A"})
@@ -264,6 +269,41 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
       assert length(wm.active_goals) == 1
       assert hd(wm.active_goals).id == "g2"
+
+      # Audit trail
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "Completed goal: Task A"
+    end
+
+    test "no-op when goal not found" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.complete_goal("nonexistent")
+
+      assert wm.active_goals == []
+      assert wm.recent_thoughts == []
+    end
+  end
+
+  describe "abandon_goal/2" do
+    test "removes goal and records abandonment thought" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.add_goal(%{id: "g1", description: "Research topic"})
+        |> WorkingMemory.abandon_goal("g1")
+
+      assert wm.active_goals == []
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "Abandoned goal: Research topic"
+    end
+
+    test "no-op when goal not found" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.abandon_goal("nonexistent")
+
+      assert wm.active_goals == []
+      assert wm.recent_thoughts == []
     end
   end
 
@@ -336,6 +376,45 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.set_relationship_context(nil)
 
       assert wm.relationship_context == nil
+    end
+  end
+
+  describe "set_relationship/3" do
+    test "sets both current_human and relationship_context" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.set_relationship("Hysun", %{role: "creator", trust: :high})
+
+      assert wm.current_human == "Hysun"
+      assert wm.relationship_context == %{role: "creator", trust: :high}
+    end
+
+    test "accepts string context" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.set_relationship("Hysun", "Primary collaborator")
+
+      assert wm.current_human == "Hysun"
+      assert wm.relationship_context == "Primary collaborator"
+    end
+  end
+
+  describe "set_conversation/2" do
+    test "sets conversation context" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.set_conversation(%{topic: "migration", turn: 5})
+
+      assert wm.current_conversation == %{topic: "migration", turn: 5}
+    end
+
+    test "allows nil to clear conversation" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.set_conversation(%{topic: "test"})
+        |> WorkingMemory.set_conversation(nil)
+
+      assert wm.current_conversation == nil
     end
   end
 
@@ -437,9 +516,11 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   end
 
   describe "rebuild_from_long_term/1" do
-    test "returns error when signals not available" do
-      wm = WorkingMemory.new("agent_001")
-      assert {:error, :signals_not_available} = WorkingMemory.rebuild_from_long_term(wm)
+    test "gracefully returns unchanged wm when signals bus not running" do
+      wm = WorkingMemory.new("agent_001", rebuild_from_signals: false)
+      assert {:ok, rebuilt} = WorkingMemory.rebuild_from_long_term(wm)
+      assert rebuilt.agent_id == wm.agent_id
+      assert rebuilt.recent_thoughts == wm.recent_thoughts
     end
   end
 
@@ -448,9 +529,9 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   # ============================================================================
 
   describe "to_prompt_text/2" do
-    test "formats working memory as text" do
+    test "formats working memory as text with identity" do
       wm =
-        WorkingMemory.new("agent_001")
+        WorkingMemory.new("agent_001", name: "Atlas")
         |> WorkingMemory.set_relationship_context("Primary collaborator")
         |> WorkingMemory.set_goals(["Help with task"])
         |> WorkingMemory.add_thought("User seems interested")
@@ -459,6 +540,9 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
       text = WorkingMemory.to_prompt_text(wm)
 
+      assert text =~ "## Identity"
+      assert text =~ "Name: Atlas"
+      assert text =~ "Agent ID: agent_001"
       assert text =~ "Relationship Context"
       assert text =~ "Primary collaborator"
       assert text =~ "Active Goals"
@@ -469,6 +553,15 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert text =~ "Unclear requirements"
       assert text =~ "Things I'm Curious About"
       assert text =~ "New technology"
+    end
+
+    test "identity section without name shows only agent_id" do
+      wm = WorkingMemory.new("agent_001")
+      text = WorkingMemory.to_prompt_text(wm)
+
+      assert text =~ "## Identity"
+      assert text =~ "Agent ID: agent_001"
+      refute text =~ "Name:"
     end
 
     test "respects include options" do
@@ -483,9 +576,17 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       refute text =~ "Recent Thoughts"
     end
 
-    test "returns empty string when nothing to show" do
+    test "include_identity: false hides identity section" do
+      wm = WorkingMemory.new("agent_001", name: "Atlas")
+      text = WorkingMemory.to_prompt_text(wm, include_identity: false)
+
+      refute text =~ "## Identity"
+      refute text =~ "Agent ID:"
+    end
+
+    test "returns empty string when nothing to show and identity disabled" do
       wm = WorkingMemory.new("agent_001")
-      text = WorkingMemory.to_prompt_text(wm)
+      text = WorkingMemory.to_prompt_text(wm, include_identity: false)
 
       assert text == ""
     end
@@ -518,6 +619,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         WorkingMemory.new("agent_001", name: "Atlas")
         |> WorkingMemory.set_current_human("Hysun")
         |> WorkingMemory.set_relationship_context("Context")
+        |> WorkingMemory.set_conversation(%{"topic" => "migration", "turn" => 5})
         |> WorkingMemory.set_goals(["Goal 1", "Goal 2"])
         |> WorkingMemory.add_thought("Thought 1")
         |> WorkingMemory.add_thought("Thought 2")
@@ -531,6 +633,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert deserialized.agent_id == original.agent_id
       assert deserialized.name == original.name
       assert deserialized.current_human == original.current_human
+      assert deserialized.current_conversation == original.current_conversation
       assert deserialized.relationship_context == original.relationship_context
       assert deserialized.concerns == original.concerns
       assert deserialized.curiosity == original.curiosity
@@ -657,6 +760,143 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.clear_thoughts()
 
       assert wm.recent_thoughts == []
+    end
+  end
+
+  # ============================================================================
+  # Signal Replay (apply_memory_event/2)
+  # ============================================================================
+
+  describe "apply_memory_event/2" do
+    setup do
+      {:ok, wm: WorkingMemory.new("event_test", rebuild_from_signals: false)}
+    end
+
+    test "applies identity event from data.type", %{wm: wm} do
+      signal = %{type: :identity_change, data: %{type: :identity, name: "Atlas"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.name == "Atlas"
+    end
+
+    test "infers identity type from signal type", %{wm: wm} do
+      signal = %{type: :identity_change, data: %{name: "Orion"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.name == "Orion"
+    end
+
+    test "applies thought event", %{wm: wm} do
+      signal = %{type: :thought_recorded, data: %{thought_preview: "Deep thinking"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert length(result.recent_thoughts) == 1
+      assert hd(result.recent_thoughts).content == "Deep thinking"
+    end
+
+    test "applies thought with data.type", %{wm: wm} do
+      signal = %{type: nil, data: %{type: :thought, content: "Explicit thought"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert length(result.recent_thoughts) == 1
+      assert hd(result.recent_thoughts).content == "Explicit thought"
+    end
+
+    test "applies goal added event", %{wm: wm} do
+      goal = %{id: "g1", description: "Learn Elixir", type: :short_term, priority: :medium}
+      signal = %{type: nil, data: %{type: :goal, event_type: :added, goal: goal}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert length(result.active_goals) == 1
+      assert hd(result.active_goals).description == "Learn Elixir"
+    end
+
+    test "applies goal achieved event (removes goal)", %{wm: wm} do
+      wm = WorkingMemory.set_goals(wm, [%{id: "g1", description: "Done"}])
+      signal = %{type: nil, data: %{type: :goal, event_type: :achieved, goal: %{id: "g1"}}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.active_goals == []
+    end
+
+    test "applies relationship event", %{wm: wm} do
+      signal = %{type: :relationship_changed, data: %{human_name: "Alice", context: "Collaborator"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.current_human == "Alice"
+      assert result.relationship_context == "Collaborator"
+    end
+
+    test "applies engagement event", %{wm: wm} do
+      signal = %{type: :engagement_changed, data: %{level: 0.9}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.engagement_level == 0.9
+    end
+
+    test "ignores non-numeric engagement", %{wm: wm} do
+      signal = %{type: :engagement_changed, data: %{level: "high"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.engagement_level == 0.5
+    end
+
+    test "applies concern added event", %{wm: wm} do
+      signal = %{type: :concern_added, data: %{concern: "Memory usage", action: :added}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert length(result.concerns) == 1
+    end
+
+    test "applies concern resolved event", %{wm: wm} do
+      wm = WorkingMemory.add_concern(wm, "Memory usage")
+      signal = %{type: :concern_resolved, data: %{concern: "Memory usage", action: :resolved}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.concerns == []
+    end
+
+    test "applies curiosity added event", %{wm: wm} do
+      signal = %{type: :curiosity_added, data: %{item: "Quantum computing", action: :added}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert length(result.curiosity) == 1
+    end
+
+    test "applies curiosity satisfied event", %{wm: wm} do
+      wm = WorkingMemory.add_curiosity(wm, "Quantum computing")
+      signal = %{type: :curiosity_satisfied, data: %{item: "Quantum computing", action: :satisfied}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.curiosity == []
+    end
+
+    test "applies conversation event", %{wm: wm} do
+      conv = %{topic: "Elixir OTP", turn_count: 5}
+      signal = %{type: :conversation_changed, data: %{conversation: conv}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.current_conversation == conv
+    end
+
+    test "ignores unknown event types", %{wm: wm} do
+      signal = %{type: :unknown_signal, data: %{foo: "bar"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result == wm
+    end
+
+    test "handles signal without :type field (legacy format)", %{wm: wm} do
+      signal = %{data: %{type: :identity, name: "Legacy"}}
+      result = WorkingMemory.apply_memory_event(signal, wm)
+      assert result.name == "Legacy"
+    end
+
+    test "handles completely invalid signal", %{wm: wm} do
+      result = WorkingMemory.apply_memory_event(:garbage, wm)
+      assert result == wm
+    end
+  end
+
+  # ============================================================================
+  # Rebuild Integration (new/2 with rebuild_from_signals)
+  # ============================================================================
+
+  describe "new/2 with rebuild_from_signals" do
+    test "defaults to true and gracefully returns base when signals not running" do
+      wm = WorkingMemory.new("rebuild_test")
+      assert wm.agent_id == "rebuild_test"
+      assert wm.recent_thoughts == []
+    end
+
+    test "can be explicitly disabled" do
+      wm = WorkingMemory.new("no_rebuild", rebuild_from_signals: false)
+      assert wm.agent_id == "no_rebuild"
     end
   end
 end
