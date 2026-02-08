@@ -17,6 +17,7 @@ defmodule Arbor.Dashboard.Nav do
     DemoLive,
     EvalLive,
     LandingLive,
+    MemoryLive,
     MonitorLive,
     RoadmapLive,
     SignalsLive
@@ -32,7 +33,8 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},
     %{href: "/demo", label: "Demo", icon: "\u{1F52C}", view: DemoLive},
-    %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive}
+    %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive},
+    %{href: "/memory", label: "Memory", icon: "\u{1F9E0}", view: MemoryLive}
   ]
 
   def on_mount(:default, _params, _session, socket) do
