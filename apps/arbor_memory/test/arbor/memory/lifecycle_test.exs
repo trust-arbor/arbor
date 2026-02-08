@@ -35,8 +35,8 @@ defmodule Arbor.Memory.LifecycleTest do
       # Now call on_agent_start
       {:ok, state} = Lifecycle.on_agent_start(agent_id)
 
-      assert state.working_memory.recent_thoughts == ["Previous thought"]
-      assert state.working_memory.active_goals == ["Previous goal"]
+      assert [%{content: "Previous thought"}] = state.working_memory.recent_thoughts
+      assert [%{description: "Previous goal"}] = state.working_memory.active_goals
     end
 
     test "creates new working memory if none exists", %{agent_id: agent_id} do
@@ -71,8 +71,8 @@ defmodule Arbor.Memory.LifecycleTest do
 
       # Verify working memory is still there (persisted)
       loaded = Memory.get_working_memory(agent_id)
-      assert loaded.recent_thoughts == ["Thought to persist"]
-      assert loaded.active_goals == ["Goal to persist"]
+      assert [%{content: "Thought to persist"}] = loaded.recent_thoughts
+      assert [%{description: "Goal to persist"}] = loaded.active_goals
     end
 
     test "handles agent with no working memory gracefully", %{agent_id: agent_id} do
