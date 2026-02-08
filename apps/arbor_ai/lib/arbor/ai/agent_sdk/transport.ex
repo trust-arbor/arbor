@@ -178,15 +178,21 @@ defmodule Arbor.AI.AgentSDK.Transport do
   defp connect(state) do
     case build_command(state.opts) do
       {:ok, {cmd, args}} ->
-        # H12: Use System.cmd instead of :os.cmd to avoid shell interpretation
         parent = self()
 
         spawn_link(fn ->
           Logger.debug("Executing: #{cmd} #{Enum.join(args, " ")}")
 
           try do
+            # The Claude CLI hangs when stdin is /dev/null (System.cmd default).
+            # It needs a pipe that delivers EOF. Use bash to pipe empty stdin.
+            shell_cmd = Enum.join([cmd | Enum.map(args, &shell_escape/1)], " ")
+
             {output_str, _exit_status} =
-              System.cmd(cmd, args, stderr_to_stdout: true, cd: state.cwd)
+              System.cmd("bash", ["-c", "echo -n | #{shell_cmd}"],
+                stderr_to_stdout: true,
+                cd: state.cwd
+              )
 
             send(parent, {:cli_output, output_str})
           rescue
@@ -200,6 +206,14 @@ defmodule Arbor.AI.AgentSDK.Transport do
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp shell_escape(arg) do
+    if String.contains?(arg, [" ", "\"", "'", "\\", "$", "`", "(", ")", "{", "}", "<", ">", "|", "&", ";", "!", "~", "*", "?"]) do
+      "'" <> String.replace(arg, "'", "'\\''") <> "'"
+    else
+      arg
     end
   end
 
