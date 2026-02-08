@@ -143,7 +143,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <.dashboard_header title="Memory Viewer" subtitle={if @agent_id, do: "Agent: #{@agent_id}", else: "Select an agent to inspect"} />
+    <.dashboard_header
+      title="Memory Viewer"
+      subtitle={if @agent_id, do: "Agent: #{@agent_id}", else: "Select an agent to inspect"}
+    />
 
     <%= if @agent_id do %>
       <%!-- Tab bar --%>
@@ -180,7 +183,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
               hint="Start an agent with memory enabled in the Chat page"
             />
           </div>
-          <div :for={agent <- @available_agents} style="padding: 0.5rem; border-bottom: 1px solid var(--aw-border, #333);">
+          <div
+            :for={agent <- @available_agents}
+            style="padding: 0.5rem; border-bottom: 1px solid var(--aw-border, #333);"
+          >
             <button
               phx-click="select-agent"
               phx-value-agent_id={agent.agent_id}
@@ -189,7 +195,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
               <span style="font-size: 1.2em;">🤖</span>
               <div>
                 <div style="font-weight: 500;">{agent.agent_id}</div>
-                <div :if={agent[:last_seen]} style="font-size: 0.8em; color: var(--aw-text-muted, #888);">
+                <div
+                  :if={agent[:last_seen]}
+                  style="font-size: 0.8em; color: var(--aw-text-muted, #888);"
+                >
                   Last seen: {Helpers.format_relative_time(agent.last_seen)}
                   {if agent[:message_count], do: " · #{agent.message_count} messages", else: ""}
                 </div>
@@ -208,11 +217,17 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     ~H"""
     <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem;">
       <.stat_card label="Engagement" value={format_pct(@tab_data[:engagement])} />
-      <.stat_card label="Thoughts" value={@tab_data[:thought_count] || get_in(@tab_data, [:wm_stats, :thought_count]) || 0} />
+      <.stat_card
+        label="Thoughts"
+        value={@tab_data[:thought_count] || get_in(@tab_data, [:wm_stats, :thought_count]) || 0}
+      />
       <.stat_card label="Concerns" value={@tab_data[:concerns_count] || 0} />
       <.stat_card label="Curiosity" value={@tab_data[:curiosity_count] || 0} />
       <.stat_card label="Active Goals" value={@tab_data[:goal_count] || 0} />
-      <.stat_card label="Proposals Pending" value={get_in(@tab_data, [:proposal_stats, :pending]) || 0} />
+      <.stat_card
+        label="Proposals Pending"
+        value={get_in(@tab_data, [:proposal_stats, :pending]) || 0}
+      />
       <.stat_card label="KG Nodes" value={get_in(@tab_data, [:kg_stats, :node_count]) || 0} />
       <.stat_card label="KG Edges" value={get_in(@tab_data, [:kg_stats, :edge_count]) || 0} />
     </div>
@@ -233,9 +248,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         >
           <span style="font-weight: 500; min-width: 120px;">{elem(trait, 0)}</span>
           <div style="flex: 1; background: rgba(128,128,128,0.2); height: 4px; border-radius: 2px; overflow: hidden;">
-            <div style={"background: #a855f7; height: 100%; width: #{round(elem(trait, 1) * 100)}%;"}></div>
+            <div style={"background: #a855f7; height: 100%; width: #{round(elem(trait, 1) * 100)}%;"}>
+            </div>
           </div>
-          <span style="font-size: 0.8em; color: var(--aw-text-muted, #888);">{round(elem(trait, 1) * 100)}%</span>
+          <span style="font-size: 0.8em; color: var(--aw-text-muted, #888);">
+            {round(elem(trait, 1) * 100)}%
+          </span>
         </div>
 
         <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">Values</h3>
@@ -244,7 +262,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           style="display: inline-block; margin: 0.15rem; padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
         >
           {elem(value, 0)}
-          <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">({round(elem(value, 1) * 100)}%)</span>
+          <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+            ({round(elem(value, 1) * 100)}%)
+          </span>
         </div>
 
         <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">Capabilities</h3>
@@ -260,7 +280,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           <.badge label={"#{round(elem(cap, 1) * 100)}%"} color={:blue} />
         </div>
       </div>
-      <.empty_state :if={@tab_data[:self_knowledge] == nil} icon="🪞" title="No self-knowledge data" hint="Agent needs to be initialized with memory" />
+      <.empty_state
+        :if={@tab_data[:self_knowledge] == nil}
+        icon="🪞"
+        title="No self-knowledge data"
+        hint="Agent needs to be initialized with memory"
+      />
     </div>
     """
   end
@@ -281,14 +306,20 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           </div>
         </div>
         <div style="background: rgba(128,128,128,0.2); height: 4px; border-radius: 2px; overflow: hidden; margin-bottom: 0.2rem;">
-          <div style={"background: #22c55e; height: 100%; width: #{round(goal.progress * 100)}%;"}></div>
+          <div style={"background: #22c55e; height: 100%; width: #{round(goal.progress * 100)}%;"}>
+          </div>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 0.75em; color: var(--aw-text-muted, #888);">
           <span>{round(goal.progress * 100)}% complete</span>
           <span :if={goal[:deadline]}>Deadline: {format_deadline(goal.deadline)}</span>
         </div>
       </div>
-      <.empty_state :if={(@tab_data[:goals] || []) == []} icon="🎯" title="No goals" hint="Goals appear as the agent works" />
+      <.empty_state
+        :if={(@tab_data[:goals] || []) == []}
+        icon="🎯"
+        title="No goals"
+        hint="Goals appear as the agent works"
+      />
     </div>
     """
   end
@@ -303,7 +334,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         <.stat_card label="Pending" value={get_in(@tab_data, [:stats, :pending_count]) || 0} />
       </div>
 
-      <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Near-Threshold Nodes (decay candidates)</h3>
+      <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">
+        Near-Threshold Nodes (decay candidates)
+      </h3>
       <div
         :for={node <- @tab_data[:near_threshold] || []}
         style="display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem; margin-bottom: 0.25rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.85em;"
@@ -314,7 +347,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           relevance: {Float.round((node[:relevance] || 0) * 1.0, 3)}
         </span>
       </div>
-      <.empty_state :if={(@tab_data[:near_threshold] || []) == []} icon="🕸️" title="No near-threshold nodes" hint="" />
+      <.empty_state
+        :if={(@tab_data[:near_threshold] || []) == []}
+        icon="🕸️"
+        title="No near-threshold nodes"
+        hint=""
+      />
     </div>
     """
   end
@@ -324,10 +362,22 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     <div>
       <div :if={@tab_data[:working_memory]}>
         <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;">
-          <.stat_card label="Engagement" value={format_pct(Map.get(@tab_data[:working_memory], :engagement_level, 0.5))} />
-          <.stat_card label="Thoughts" value={length(Map.get(@tab_data[:working_memory], :recent_thoughts, []))} />
-          <.stat_card label="Concerns" value={length(Map.get(@tab_data[:working_memory], :concerns, []))} />
-          <.stat_card label="Curiosity" value={length(Map.get(@tab_data[:working_memory], :curiosity, []))} />
+          <.stat_card
+            label="Engagement"
+            value={format_pct(Map.get(@tab_data[:working_memory], :engagement_level, 0.5))}
+          />
+          <.stat_card
+            label="Thoughts"
+            value={length(Map.get(@tab_data[:working_memory], :recent_thoughts, []))}
+          />
+          <.stat_card
+            label="Concerns"
+            value={length(Map.get(@tab_data[:working_memory], :concerns, []))}
+          />
+          <.stat_card
+            label="Curiosity"
+            value={length(Map.get(@tab_data[:working_memory], :curiosity, []))}
+          />
         </div>
 
         <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Recent Thoughts</h3>
@@ -336,33 +386,64 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.85em;"
         >
           <span>💭</span>
-          <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(thought[:content] || to_string(thought), 200)}</span>
+          <span style="color: var(--aw-text-muted, #888);">
+            {Helpers.truncate(thought[:content] || to_string(thought), 200)}
+          </span>
         </div>
 
-        <h3 :if={Map.get(@tab_data[:working_memory], :concerns, []) != []} style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;">Concerns</h3>
+        <h3
+          :if={Map.get(@tab_data[:working_memory], :concerns, []) != []}
+          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
+        >
+          Concerns
+        </h3>
         <div
           :for={concern <- Map.get(@tab_data[:working_memory], :concerns, [])}
           style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(255, 74, 74, 0.1); font-size: 0.85em;"
         >
           <span>⚠️</span>
-          <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(concern[:content] || to_string(concern), 150)}</span>
+          <span style="color: var(--aw-text-muted, #888);">
+            {Helpers.truncate(concern[:content] || to_string(concern), 150)}
+          </span>
         </div>
 
-        <h3 :if={Map.get(@tab_data[:working_memory], :curiosity, []) != []} style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;">Curiosity</h3>
+        <h3
+          :if={Map.get(@tab_data[:working_memory], :curiosity, []) != []}
+          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
+        >
+          Curiosity
+        </h3>
         <div
           :for={item <- Map.get(@tab_data[:working_memory], :curiosity, [])}
           style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(74, 158, 255, 0.1); font-size: 0.85em;"
         >
           <span>🔍</span>
-          <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(item[:content] || to_string(item), 150)}</span>
+          <span style="color: var(--aw-text-muted, #888);">
+            {Helpers.truncate(item[:content] || to_string(item), 150)}
+          </span>
         </div>
 
-        <h3 :if={Map.get(@tab_data[:working_memory], :conversation_context, nil)} style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;">Conversation Context</h3>
-        <div :if={ctx = Map.get(@tab_data[:working_memory], :conversation_context, nil)} style="padding: 0.4rem; border-radius: 4px; background: rgba(128,128,128,0.1); font-size: 0.85em;">
-          <span style="color: var(--aw-text-muted, #888);">{Helpers.truncate(inspect(ctx), 300)}</span>
+        <h3
+          :if={Map.get(@tab_data[:working_memory], :conversation_context, nil)}
+          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
+        >
+          Conversation Context
+        </h3>
+        <div
+          :if={ctx = Map.get(@tab_data[:working_memory], :conversation_context, nil)}
+          style="padding: 0.4rem; border-radius: 4px; background: rgba(128,128,128,0.1); font-size: 0.85em;"
+        >
+          <span style="color: var(--aw-text-muted, #888);">
+            {Helpers.truncate(inspect(ctx), 300)}
+          </span>
         </div>
       </div>
-      <.empty_state :if={@tab_data[:working_memory] == nil} icon="💭" title="No working memory" hint="Agent needs to be active" />
+      <.empty_state
+        :if={@tab_data[:working_memory] == nil}
+        icon="💭"
+        title="No working memory"
+        hint="Agent needs to be active"
+      />
     </div>
     """
   end
@@ -373,12 +454,20 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       <div :if={@tab_data[:prefs]}>
         <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;">
           <.stat_card label="Decay Rate" value={Map.get(@tab_data[:prefs], :decay_rate, "—")} />
-          <.stat_card label="Retrieval Threshold" value={Map.get(@tab_data[:prefs], :retrieval_threshold, "—")} />
+          <.stat_card
+            label="Retrieval Threshold"
+            value={Map.get(@tab_data[:prefs], :retrieval_threshold, "—")}
+          />
           <.stat_card label="Pinned Memories" value={Map.get(@tab_data[:prefs], :pinned_count, 0)} />
           <.stat_card label="Adjustments" value={Map.get(@tab_data[:prefs], :adjustment_count, 0)} />
         </div>
 
-        <h3 :if={Map.get(@tab_data[:prefs], :type_quotas)} style="font-size: 0.95em; margin-bottom: 0.5rem;">Type Quotas</h3>
+        <h3
+          :if={Map.get(@tab_data[:prefs], :type_quotas)}
+          style="font-size: 0.95em; margin-bottom: 0.5rem;"
+        >
+          Type Quotas
+        </h3>
         <div
           :for={{type, quota} <- Map.get(@tab_data[:prefs], :type_quotas, %{}) |> Enum.to_list()}
           style="display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem; margin-bottom: 0.2rem; font-size: 0.85em;"
@@ -390,16 +479,28 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">{quota}%</span>
         </div>
 
-        <h3 :if={Map.get(@tab_data[:prefs], :context_preferences)} style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;">Context Preferences</h3>
+        <h3
+          :if={Map.get(@tab_data[:prefs], :context_preferences)}
+          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
+        >
+          Context Preferences
+        </h3>
         <div
-          :for={{key, value} <- Map.get(@tab_data[:prefs], :context_preferences, %{}) |> Enum.to_list()}
+          :for={
+            {key, value} <- Map.get(@tab_data[:prefs], :context_preferences, %{}) |> Enum.to_list()
+          }
           style="display: flex; gap: 0.5rem; padding: 0.25rem; font-size: 0.85em;"
         >
           <span style="font-weight: 500; min-width: 150px;">{key}</span>
           <span style="color: var(--aw-text-muted, #888);">{inspect(value)}</span>
         </div>
       </div>
-      <.empty_state :if={@tab_data[:prefs] == nil} icon="⚙️" title="No preferences data" hint="Preferences appear after initialization" />
+      <.empty_state
+        :if={@tab_data[:prefs] == nil}
+        icon="⚙️"
+        title="No preferences data"
+        hint="Preferences appear after initialization"
+      />
     </div>
     """
   end
@@ -407,7 +508,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp render_tab(%{active_tab: "proposals"} = assigns) do
     ~H"""
     <div>
-      <div :if={@tab_data[:stats]} style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;">
+      <div
+        :if={@tab_data[:stats]}
+        style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;"
+      >
         <.stat_card label="Pending" value={Map.get(@tab_data[:stats], :pending, 0)} />
         <.stat_card label="Accepted" value={Map.get(@tab_data[:stats], :accepted, 0)} />
         <.stat_card label="Rejected" value={Map.get(@tab_data[:stats], :rejected, 0)} />
@@ -420,13 +524,24 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       >
         <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.3rem;">
           <.badge :if={proposal[:type]} label={to_string(proposal[:type])} color={:yellow} />
-          <.badge :if={proposal[:confidence]} label={"#{round(proposal[:confidence] * 100)}%"} color={:blue} />
-          <.badge :if={proposal[:status]} label={to_string(proposal[:status])} color={proposal_status_color(proposal[:status])} />
+          <.badge
+            :if={proposal[:confidence]}
+            label={"#{round(proposal[:confidence] * 100)}%"}
+            color={:blue}
+          />
+          <.badge
+            :if={proposal[:status]}
+            label={to_string(proposal[:status])}
+            color={proposal_status_color(proposal[:status])}
+          />
         </div>
         <p style="color: var(--aw-text, #ccc); margin: 0 0 0.3rem 0; font-size: 0.9em; white-space: pre-wrap;">
           {Helpers.truncate(proposal[:content] || proposal[:description] || "", 300)}
         </p>
-        <div :if={proposal[:status] == :pending || proposal[:status] == "pending"} style="display: flex; gap: 0.3rem;">
+        <div
+          :if={proposal[:status] == :pending || proposal[:status] == "pending"}
+          style="display: flex; gap: 0.3rem;"
+        >
           <button
             phx-click="accept-proposal"
             phx-value-id={proposal[:id]}
@@ -450,7 +565,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           </button>
         </div>
       </div>
-      <.empty_state :if={(@tab_data[:proposals] || []) == []} icon="📋" title="No proposals" hint="Proposals appear from reflection & analysis" />
+      <.empty_state
+        :if={(@tab_data[:proposals] || []) == []}
+        icon="📋"
+        title="No proposals"
+        hint="Proposals appear from reflection & analysis"
+      />
     </div>
     """
   end
@@ -468,7 +588,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         </div>
         <pre style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; font-size: 0.8em; overflow-x: auto; white-space: pre-wrap; color: var(--aw-text-muted, #888); margin: 0;">{Helpers.truncate(entry[:code] || "", 500)}</pre>
       </div>
-      <.empty_state :if={(@tab_data[:code_entries] || []) == []} icon="💻" title="No code entries" hint="Code appears when the agent creates patterns" />
+      <.empty_state
+        :if={(@tab_data[:code_entries] || []) == []}
+        icon="💻"
+        title="No code entries"
+        hint="Code appears when the agent creates patterns"
+      />
     </div>
     """
   end
@@ -499,10 +624,16 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
             wm_stats: wm,
             proposal_stats: proposals,
             goal_count: length(goals),
-            engagement: if(direct_wm, do: Map.get(direct_wm, :engagement_level, engagement), else: engagement),
-            thought_count: if(direct_wm, do: length(Map.get(direct_wm, :recent_thoughts, [])), else: 0),
+            engagement:
+              if(direct_wm,
+                do: Map.get(direct_wm, :engagement_level, engagement),
+                else: engagement
+              ),
+            thought_count:
+              if(direct_wm, do: length(Map.get(direct_wm, :recent_thoughts, [])), else: 0),
             concerns_count: if(direct_wm, do: length(Map.get(direct_wm, :concerns, [])), else: 0),
-            curiosity_count: if(direct_wm, do: length(Map.get(direct_wm, :curiosity, [])), else: 0)
+            curiosity_count:
+              if(direct_wm, do: length(Map.get(direct_wm, :curiosity, [])), else: 0)
           }
 
         _ ->
@@ -650,7 +781,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     ets_agents =
       for table <- [:arbor_memory_graphs, :arbor_working_memory],
           :ets.whereis(table) != :undefined,
-          {agent_id, _} <- (try do :ets.tab2list(table) rescue _ -> [] end),
+          {agent_id, _} <-
+            (try do
+               :ets.tab2list(table)
+             rescue
+               _ -> []
+             end),
           is_binary(agent_id),
           reduce: MapSet.new() do
         acc -> MapSet.put(acc, agent_id)

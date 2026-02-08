@@ -342,10 +342,8 @@ defmodule Arbor.Agent.CheckpointManager do
         state =
           Map.merge(state, %{
             last_user_message_at: parse_datetime(meta_get(meta, :last_user_message_at)),
-            last_assistant_output_at:
-              parse_datetime(meta_get(meta, :last_assistant_output_at)),
-            responded_to_last_user_message:
-              meta_get(meta, :responded_to_last_user_message, true),
+            last_assistant_output_at: parse_datetime(meta_get(meta, :last_assistant_output_at)),
+            responded_to_last_user_message: meta_get(meta, :responded_to_last_user_message, true),
             query_count: meta_get(meta, :query_count, 0)
           })
 

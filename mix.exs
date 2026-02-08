@@ -27,7 +27,10 @@ defmodule Arbor.MixProject do
 
       # Override to resolve conflicts between jido_ai and jido_character
       # M15: Pinned to specific commit for supply chain safety
-      {:req_llm, git: "https://github.com/agentjido/req_llm.git", ref: "4ebedfbb614670fa1ba601fde68e2b643cc6c308", override: true},
+      {:req_llm,
+       git: "https://github.com/agentjido/req_llm.git",
+       ref: "4ebedfbb614670fa1ba601fde68e2b643cc6c308",
+       override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

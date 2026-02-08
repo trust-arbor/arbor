@@ -22,10 +22,13 @@ defmodule Arbor.Gateway.Auth do
       nil ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(503, Jason.encode!(%{
-          error: "Gateway API key not configured",
-          detail: "Set ARBOR_GATEWAY_API_KEY environment variable"
-        }))
+        |> send_resp(
+          503,
+          Jason.encode!(%{
+            error: "Gateway API key not configured",
+            detail: "Set ARBOR_GATEWAY_API_KEY environment variable"
+          })
+        )
         |> halt()
 
       expected_key ->
@@ -37,7 +40,10 @@ defmodule Arbor.Gateway.Auth do
             reject(conn, "Invalid API key")
 
           :error ->
-            reject(conn, "Missing API key. Provide via Authorization: Bearer <key> or x-api-key header")
+            reject(
+              conn,
+              "Missing API key. Provide via Authorization: Bearer <key> or x-api-key header"
+            )
         end
     end
   end

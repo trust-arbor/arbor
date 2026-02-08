@@ -378,9 +378,7 @@ defmodule Arbor.Agent.Claude do
 
     case think_fn.() do
       {:ok, parsed} ->
-        {parsed,
-         Map.get(parsed, :thinking, ""),
-         Map.get(parsed, :memory_notes, []),
+        {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
          Map.get(parsed, :goal_updates, [])}
 
       {:error, _reason} ->
@@ -498,14 +496,24 @@ defmodule Arbor.Agent.Claude do
     end
   end
 
+  # Use thinking from the stream response when available.
+  # Only fall back to SessionReader if the stream didn't capture thinking.
   defp resolve_thinking(response, true, state) do
-    capture_thinking_from_session(response.session_id, state)
+    case response.thinking do
+      blocks when is_list(blocks) and blocks != [] ->
+        {blocks, response.session_id}
+
+      _ ->
+        capture_thinking_from_session(response.session_id, state)
+    end
   end
 
   defp resolve_thinking(response, false, _state) do
     {response.thinking, response.session_id}
   end
 
+  # Fallback: read thinking from session JSONL files.
+  # Used when the stream didn't include thinking blocks (older CLI versions).
   defp capture_thinking_from_session(nil, _state) do
     case SessionReader.latest_thinking() do
       {:ok, blocks} -> {blocks, nil}
