@@ -34,7 +34,8 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         active_tab: "overview",
         subscription_id: subscription_id,
         tab_data: %{},
-        error: nil
+        error: nil,
+        signal_reload_pending: false
       )
       |> load_tab_data("overview", agent_id)
 
@@ -129,6 +130,19 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   def handle_info({:signal_received, _signal}, socket) do
+    # Debounce signal-triggered reloads to prevent feedback loops.
+    # Multiple signals within 500ms only trigger one reload.
+    if socket.assigns[:signal_reload_pending] do
+      {:noreply, socket}
+    else
+      Process.send_after(self(), :signal_reload, 500)
+      {:noreply, assign(socket, signal_reload_pending: true)}
+    end
+  end
+
+  def handle_info(:signal_reload, socket) do
+    socket = assign(socket, signal_reload_pending: false)
+
     if agent_id = socket.assigns.agent_id do
       {:noreply, load_tab_data(socket, socket.assigns.active_tab, agent_id)}
     else
@@ -739,7 +753,15 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     pid = self()
 
     case Arbor.Signals.subscribe("memory.*", fn signal ->
-           send(pid, {:signal_received, signal})
+           # Drop signals when LiveView mailbox is too full
+           case Process.info(pid, :message_queue_len) do
+             {:message_queue_len, len} when len < 500 ->
+               send(pid, {:signal_received, signal})
+
+             _ ->
+               :ok
+           end
+
            :ok
          end) do
       {:ok, id} -> id
