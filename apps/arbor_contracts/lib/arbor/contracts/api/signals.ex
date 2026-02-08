@@ -106,10 +106,28 @@ defmodule Arbor.Contracts.API.Signals do
   """
   @callback healthy?() :: boolean()
 
+  @doc """
+  Signal an interrupt to a target.
+  """
+  @callback interrupt(target_id :: String.t(), reason :: atom(), opts :: keyword()) :: :ok
+
+  @doc """
+  Check if a target has been interrupted. Returns interrupt data or false.
+  """
+  @callback interrupted?(target_id :: String.t()) :: map() | false
+
+  @doc """
+  Clear an interrupt for a target.
+  """
+  @callback clear_interrupt(target_id :: String.t()) :: :ok
+
   @optional_callbacks [
     emit_preconstructed_signal: 1,
     get_signal_by_id: 1,
     query_signals_with_filters: 1,
-    get_recent_signals_from_buffer: 1
+    get_recent_signals_from_buffer: 1,
+    interrupt: 3,
+    interrupted?: 1,
+    clear_interrupt: 1
   ]
 end

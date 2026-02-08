@@ -125,6 +125,71 @@ defmodule Arbor.Signals.Store do
     GenServer.call(server, {:restore, snapshot_data})
   end
 
+  # ============================================================================
+  # Interrupt Protocol
+  # ============================================================================
+
+  @interrupt_table :arbor_signals_interrupts
+
+  @doc """
+  Signal an interrupt to a target.
+
+  Stores interrupt data in ETS for fast synchronous lookups.
+
+  ## Options
+
+  - `:replacement_intent_id` — ID of new intent that should take over
+  - `:allow_resume` — Whether interrupted work can resume (default: false)
+  """
+  @spec interrupt(String.t(), atom(), keyword()) :: :ok
+  def interrupt(target_id, reason, opts \\ []) do
+    ensure_interrupt_table()
+
+    data = %{
+      target_id: target_id,
+      reason: reason,
+      replacement_intent_id: Keyword.get(opts, :replacement_intent_id),
+      allow_resume: Keyword.get(opts, :allow_resume, false),
+      interrupted_at: DateTime.utc_now()
+    }
+
+    :ets.insert(@interrupt_table, {target_id, data})
+    :ok
+  end
+
+  @doc """
+  Check if a target has been interrupted.
+
+  Returns the interrupt data map if interrupted, `false` otherwise.
+  """
+  @spec interrupted?(String.t()) :: map() | false
+  def interrupted?(target_id) do
+    ensure_interrupt_table()
+
+    case :ets.lookup(@interrupt_table, target_id) do
+      [{^target_id, data}] -> data
+      [] -> false
+    end
+  end
+
+  @doc """
+  Clear an interrupt for a target, allowing normal operation to resume.
+  """
+  @spec clear_interrupt(String.t()) :: :ok
+  def clear_interrupt(target_id) do
+    ensure_interrupt_table()
+    :ets.delete(@interrupt_table, target_id)
+    :ok
+  end
+
+  defp ensure_interrupt_table do
+    if :ets.whereis(@interrupt_table) == :undefined do
+      :ets.new(@interrupt_table, [:named_table, :public, :set])
+    end
+
+    :ok
+  end
+
   # Server callbacks
 
   @impl true
