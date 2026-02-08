@@ -95,6 +95,55 @@ defmodule Arbor.Dashboard.AgentManager do
   @spec default_agent_id() :: String.t()
   def default_agent_id, do: @default_agent_id
 
+  @doc """
+  Send a message to the agent and broadcast the conversation to the chat UI.
+
+  This allows external callers (e.g., Claude Code via Tidewave) to have
+  conversations with the agent that are visible in the ChatLive UI.
+
+  The `sender` label identifies who sent the message (e.g., "Opus", "Hysun").
+  """
+  @spec chat(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def chat(input, sender \\ "Opus", opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id, @default_agent_id)
+
+    case find_agent(agent_id) do
+      {:ok, pid, metadata} ->
+        # Broadcast the incoming message to ChatLive
+        broadcast({:chat_message, %{role: :user, content: input, sender: sender}})
+
+        backend = metadata[:backend] || metadata[:model_config][:backend]
+
+        result =
+          case backend do
+            :cli ->
+              Arbor.Agent.Claude.query(pid, input,
+                timeout: Keyword.get(opts, :timeout, 120_000),
+                permission_mode: :bypass
+              )
+
+            :api ->
+              Arbor.Agent.APIAgent.query(pid, input)
+
+            _ ->
+              {:error, :unknown_backend}
+          end
+
+        case result do
+          {:ok, response} ->
+            text = response[:text] || response.text || ""
+            broadcast({:chat_message, %{role: :assistant, content: text, sender: "Agent"}})
+            {:ok, text}
+
+          {:error, _} = error ->
+            error
+        end
+
+      :not_found ->
+        {:error, :agent_not_found}
+    end
+  end
+
   # ── Private ─────────────────────────────────────────────────────────
 
   defp build_start_opts(agent_id, %{backend: :cli} = config) do

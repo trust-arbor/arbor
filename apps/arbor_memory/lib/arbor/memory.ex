@@ -720,7 +720,10 @@ defmodule Arbor.Memory do
         wm
 
       wm ->
-        Signals.emit_working_memory_loaded(agent_id, :existing)
+        # Don't emit signal on reads — only on creation.
+        # Emitting here caused a feedback loop: MemoryLive subscribes to memory.*,
+        # reloads tab data on any signal, which calls load_working_memory, which
+        # emitted another signal → infinite loop at 131K signals/sec.
         wm
     end
   end
@@ -1772,6 +1775,12 @@ defmodule Arbor.Memory do
   """
   @spec get_active_goals(String.t()) :: [struct()]
   defdelegate get_active_goals(agent_id), to: GoalStore
+
+  @doc """
+  Get all goals for an agent, regardless of status.
+  """
+  @spec get_all_goals(String.t()) :: [struct()]
+  defdelegate get_all_goals(agent_id), to: GoalStore
 
   @doc """
   Update goal progress (0.0 to 1.0).
