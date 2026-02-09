@@ -54,7 +54,6 @@ defmodule Arbor.AI.Backends.CliBackend do
 
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.Response
-  alias Arbor.Common.ShellEscape
 
   require Logger
 
@@ -246,10 +245,6 @@ defmodule Arbor.AI.Backends.CliBackend do
     timeout = Keyword.get(opts, :timeout, 300_000)
     working_dir = Keyword.get(opts, :working_dir)
 
-    # Build shell command with escaped args and stdin redirect
-    quoted_args = Enum.map(args, &ShellEscape.escape_arg!/1)
-    shell_cmd = "#{cmd} #{Enum.join(quoted_args, " ")} < /dev/null"
-
     shell_opts = [
       sandbox: :none,
       timeout: timeout,
@@ -258,7 +253,7 @@ defmodule Arbor.AI.Backends.CliBackend do
 
     shell_opts = if working_dir, do: [{:cwd, working_dir} | shell_opts], else: shell_opts
 
-    case Arbor.Shell.execute(shell_cmd, shell_opts) do
+    case Arbor.Shell.execute_direct(cmd, args, shell_opts) do
       {:ok, %{exit_code: 0, stdout: output}} ->
         {:ok, output}
 
