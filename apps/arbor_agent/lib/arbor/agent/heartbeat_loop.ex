@@ -216,6 +216,9 @@ defmodule Arbor.Agent.HeartbeatLoop do
   defp process_heartbeat_result({:ok, actions, body, window, prompt, metadata}, state) do
     emit_heartbeat_signal(state, actions, metadata)
 
+    # Sync heartbeat_count and cognitive_mode from the Task back to GenServer state
+    state = sync_heartbeat_metadata(state, metadata)
+
     # Gate #1: Only sync context window if heartbeat had meaningful output
     if has_meaningful_output?(metadata) do
       sync_context_window(state, window)
@@ -257,6 +260,21 @@ defmodule Arbor.Agent.HeartbeatLoop do
   defp process_heartbeat_result({:error, reason}, state) do
     Logger.warning("Heartbeat cycle failed", reason: inspect(reason))
     state
+  end
+
+  defp sync_heartbeat_metadata(state, nil), do: state
+
+  defp sync_heartbeat_metadata(state, metadata) when is_map(metadata) do
+    state
+    |> maybe_put_metadata(:heartbeat_count, metadata)
+    |> maybe_put_metadata(:cognitive_mode, metadata)
+  end
+
+  defp maybe_put_metadata(state, key, metadata) do
+    case Map.get(metadata, key) do
+      nil -> state
+      value -> Map.put(state, key, value)
+    end
   end
 
   defp update_temporal_state(state, body, window, _prompt, metadata) do

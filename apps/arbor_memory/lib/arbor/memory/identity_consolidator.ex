@@ -194,16 +194,17 @@ defmodule Arbor.Memory.IdentityConsolidator do
   end
 
   defp finalize_consolidation(
-         agent_id, updated_sk, all_changes, kg_candidates,
+         agent_id, _updated_sk, all_changes, kg_candidates,
          deferred, blocked, detector_changes, opts
        ) do
-    # Save updated SelfKnowledge
-    save_self_knowledge(agent_id, updated_sk)
+    # Create :identity proposals instead of saving directly.
+    # The LLM reviews these during heartbeat and decides accept/reject/defer.
+    proposals_created = create_identity_proposals(agent_id, all_changes)
 
     # Record rate limit
     record_consolidation(agent_id)
 
-    # Mark promoted KG insights (prevents re-promotion)
+    # Mark promoted KG insights (prevents re-promotion in next cycle)
     mark_insights_promoted(agent_id, kg_candidates)
 
     # Emit deferred/blocked signals
@@ -216,24 +217,98 @@ defmodule Arbor.Memory.IdentityConsolidator do
     # Update consolidation state
     state = update_consolidation_state(agent_id)
 
-    # Emit events for each change
-    emit_change_events(agent_id, all_changes)
-
-    # Emit consolidation completed signal
+    # Emit consolidation completed signal (proposals created, not applied)
     result = %{
-      promoted_count: length(kg_candidates),
+      proposals_created: proposals_created,
       deferred_count: length(deferred),
       blocked_count: length(blocked),
       pattern_insights_count: length(pattern_insights),
       detector_changes_count: length(detector_changes),
-      changes_made: all_changes,
+      proposed_changes: all_changes,
       consolidation_number: state.consolidation_count
     }
 
     Signals.emit_consolidation_completed(agent_id, result)
 
-    {:ok, updated_sk, result}
+    # Return current SK (unchanged) — changes will apply when proposals are accepted
+    sk = get_or_create_self_knowledge(agent_id)
+    {:ok, sk, result}
   end
+
+  defp create_identity_proposals(agent_id, changes) do
+    alias Arbor.Memory.Proposal
+
+    Enum.count(changes, fn change ->
+      content = format_identity_change(change)
+
+      case Proposal.create(agent_id, :identity, %{
+             content: content,
+             confidence: 0.8,
+             source: "identity_consolidator",
+             metadata: %{change: change}
+           }) do
+        {:ok, _proposal} -> true
+        _ -> false
+      end
+    end)
+  end
+
+  defp format_identity_change(%{field: field, new_value: new_value, reason: reason}) do
+    case field do
+      :personality_traits ->
+        {trait, confidence} = new_value
+        "Identity update: personality trait '#{trait}' (confidence: #{confidence}, reason: #{reason})"
+
+      :capabilities ->
+        {name, level} = new_value
+        "Identity update: capability '#{name}' at level #{level} (reason: #{reason})"
+
+      :values ->
+        {value, importance} = new_value
+        "Identity update: value '#{value}' importance #{importance} (reason: #{reason})"
+
+      _ ->
+        "Identity update: #{field} = #{inspect(new_value)} (reason: #{reason})"
+    end
+  end
+
+  @doc """
+  Apply an accepted identity change from a proposal.
+
+  Called when the LLM accepts an `:identity` proposal.
+  Reads the change data from proposal metadata and applies it to SelfKnowledge.
+  """
+  @spec apply_accepted_change(String.t(), map()) :: :ok | {:error, term()}
+  def apply_accepted_change(agent_id, %{change: change}) do
+    sk = get_or_create_self_knowledge(agent_id)
+
+    case apply_change_to_sk(sk, change) do
+      {:ok, updated_sk} ->
+        save_self_knowledge(agent_id, updated_sk)
+        emit_change_events(agent_id, [change])
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def apply_accepted_change(_agent_id, _metadata), do: {:error, :no_change_data}
+
+  defp apply_change_to_sk(sk, %{field: :personality_traits, new_value: {trait, confidence}}) do
+    evidence = "Accepted via identity proposal"
+    {:ok, SelfKnowledge.add_trait(sk, trait, confidence, evidence)}
+  end
+
+  defp apply_change_to_sk(sk, %{field: :capabilities, new_value: {name, level}}) do
+    {:ok, SelfKnowledge.add_capability(sk, name, level)}
+  end
+
+  defp apply_change_to_sk(sk, %{field: :values, new_value: {value, importance}}) do
+    {:ok, SelfKnowledge.add_value(sk, value, importance)}
+  end
+
+  defp apply_change_to_sk(_sk, _change), do: {:error, :unknown_change_type}
 
   @doc """
   Check if consolidation should run for an agent.

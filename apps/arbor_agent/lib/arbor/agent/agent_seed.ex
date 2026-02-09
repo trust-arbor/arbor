@@ -346,6 +346,10 @@ defmodule Arbor.Agent.AgentSeed do
     # 4. Process goal updates
     process_goal_updates(state.id, goal_updates)
 
+    # 4.5. Create new goals suggested by the LLM
+    new_goals = Map.get(llm_result, :new_goals, [])
+    create_suggested_goals(state.id, new_goals)
+
     # 5. Index memory notes
     index_memory_notes(state.id, memory_notes)
 
@@ -945,45 +949,34 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp handle_memory_signal(:insights_detected, payload, state) do
-    insights = payload[:insights] || []
+    # Insights flow through the Proposal pipeline, not directly into working memory.
+    # The LLM sees pending proposals via HeartbeatPrompt.proposals_section/1
+    # and decides whether to accept/reject/defer them.
+    count = length(payload[:insights] || [])
 
-    if state[:working_memory] && insights != [] do
-      new_wm =
-        Enum.reduce(Enum.take(insights, 2), state.working_memory, fn insight, wm ->
-          content = insight[:content] || inspect(insight)
-
-          WorkingMemory.add_curiosity(
-            wm,
-            "[hb] [insight] #{String.slice(content, 0..80)}"
-          )
-        end)
-
-      save_working_memory(state.id, new_wm)
-      {:noreply, %{state | working_memory: new_wm}}
-    else
-      {:noreply, state}
+    if count > 0 do
+      Logger.debug("Insights detected (#{count}) — available as proposals for LLM review",
+        agent_id: state.id
+      )
     end
+
+    {:noreply, state}
   end
 
   defp handle_memory_signal(:preconscious_surfaced, payload, state) do
-    memories = payload[:memories] || []
+    # Preconscious memories flow through the Proposal pipeline, not directly into working memory.
+    # The LLM sees pending proposals via HeartbeatPrompt.proposals_section/1
+    # and decides whether to accept/reject/defer them.
+    count = length(payload[:memories] || [])
 
-    if state[:working_memory] && memories != [] do
-      new_wm =
-        Enum.reduce(Enum.take(memories, 2), state.working_memory, fn mem, wm ->
-          content = mem[:content] || mem[:text] || inspect(mem)
-
-          WorkingMemory.add_thought(
-            wm,
-            "[hb] [recalled] #{String.slice(content, 0..120)}"
-          )
-        end)
-
-      save_working_memory(state.id, new_wm)
-      {:noreply, %{state | working_memory: new_wm}}
-    else
-      {:noreply, state}
+    if count > 0 do
+      Logger.debug(
+        "Preconscious memories surfaced (#{count}) — available as proposals for LLM review",
+        agent_id: state.id
+      )
     end
+
+    {:noreply, state}
   end
 
   defp handle_memory_signal(_type, _payload, state) do
@@ -1066,8 +1059,20 @@ defmodule Arbor.Agent.AgentSeed do
     end
   end
 
-  defp execute_proposal_action(agent_id, proposal_id, :accept, _reason),
-    do: Proposal.accept(agent_id, proposal_id)
+  defp execute_proposal_action(agent_id, proposal_id, :accept, _reason) do
+    # Get the proposal first to check its type and metadata
+    case Proposal.get(agent_id, proposal_id) do
+      {:ok, proposal} ->
+        # Accept the proposal (marks it in ETS)
+        Proposal.accept(agent_id, proposal_id)
+
+        # Type-specific post-acceptance handling
+        apply_accepted_proposal(agent_id, proposal)
+
+      _ ->
+        Proposal.accept(agent_id, proposal_id)
+    end
+  end
 
   defp execute_proposal_action(agent_id, proposal_id, :reject, reason) do
     opts = if reason, do: [reason: reason], else: []
@@ -1078,6 +1083,15 @@ defmodule Arbor.Agent.AgentSeed do
     do: Proposal.defer(agent_id, proposal_id)
 
   defp execute_proposal_action(_agent_id, _proposal_id, _action, _reason), do: :ok
+
+  defp apply_accepted_proposal(agent_id, %{type: :identity, metadata: metadata})
+       when is_map(metadata) do
+    safe_memory_call(fn ->
+      IdentityConsolidator.apply_accepted_change(agent_id, metadata)
+    end)
+  end
+
+  defp apply_accepted_proposal(_agent_id, _proposal), do: :ok
 
   defp process_goal_updates(_agent_id, []), do: :ok
 
@@ -1092,6 +1106,38 @@ defmodule Arbor.Agent.AgentSeed do
     if goal_id && progress do
       safe_memory_call(fn -> Arbor.Memory.update_goal_progress(agent_id, goal_id, progress) end)
     end
+  end
+
+  defp create_suggested_goals(_agent_id, []), do: :ok
+
+  defp create_suggested_goals(agent_id, goals) do
+    alias Arbor.Contracts.Memory.Goal
+
+    # Cap at 3 new goals per heartbeat cycle
+    goals
+    |> Enum.take(3)
+    |> Enum.each(fn goal ->
+      desc = goal[:description]
+      priority = goal[:priority] || :medium
+
+      if desc do
+        goal_struct =
+          Goal.new(desc,
+            priority: priority,
+            success_criteria: goal[:success_criteria]
+          )
+
+        safe_memory_call(fn ->
+          Arbor.Memory.add_goal(agent_id, goal_struct)
+        end)
+
+        seed_emit_signal(:goal_suggested, %{
+          agent_id: agent_id,
+          description: String.slice(desc, 0..100),
+          priority: priority
+        })
+      end
+    end)
   end
 
   defp index_memory_notes(_agent_id, []), do: :ok
