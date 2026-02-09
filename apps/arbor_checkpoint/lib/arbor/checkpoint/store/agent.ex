@@ -11,7 +11,7 @@ defmodule Arbor.Checkpoint.Store.Agent do
       Arbor.Checkpoint.save("id", state, Arbor.Checkpoint.Store.Agent)
   """
 
-  @behaviour Arbor.Checkpoint.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
   @default_name __MODULE__
 
@@ -19,13 +19,13 @@ defmodule Arbor.Checkpoint.Store.Agent do
   # Store Behaviour
   # ============================================================================
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def put(id, checkpoint, _opts) do
     Agent.update(@default_name, &Map.put(&1, id, checkpoint))
     :ok
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def get(id, _opts) do
     case Agent.get(@default_name, &Map.fetch(&1, id)) do
       {:ok, checkpoint} -> {:ok, checkpoint}
@@ -33,19 +33,19 @@ defmodule Arbor.Checkpoint.Store.Agent do
     end
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def delete(id, _opts) do
     Agent.update(@default_name, &Map.delete(&1, id))
     :ok
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def list(_opts) do
     ids = Agent.get(@default_name, &Map.keys(&1))
     {:ok, ids}
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def exists?(id, _opts) do
     Agent.get(@default_name, &Map.has_key?(&1, id))
   end

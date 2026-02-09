@@ -29,7 +29,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   this is the atom name passed to `Arbor.Persistence.put(:jobs, Postgres, ...)`.
   """
 
-  @behaviour Arbor.Persistence.QueryableStore
+  @behaviour Arbor.Contracts.Persistence.Store
 
   import Ecto.Query
 

@@ -24,20 +24,20 @@ defmodule Arbor.Persistence.Store.ETS do
 
   require Logger
 
-  @behaviour Arbor.Persistence.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
   @default_max_entries 100_000
   @warning_threshold 0.8
 
   # --- Client API (Store behaviour) ---
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def put(key, value, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:put, key, value})
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
@@ -48,13 +48,13 @@ defmodule Arbor.Persistence.Store.ETS do
     end
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:delete, key})
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
@@ -62,7 +62,7 @@ defmodule Arbor.Persistence.Store.ETS do
     {:ok, keys}
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
