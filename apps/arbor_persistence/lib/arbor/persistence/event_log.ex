@@ -81,5 +81,16 @@ defmodule Arbor.Persistence.EventLog do
   @doc "Get the total number of events across all streams."
   @callback event_count(opts()) :: {:ok, non_neg_integer()}
 
-  @optional_callbacks [subscribe: 3, list_streams: 1, stream_count: 1, event_count: 1]
+  @doc """
+  Read events for a specific agent across all streams.
+
+  Options:
+  - `:from` - start from this global_position (inclusive, default 0)
+  - `:limit` - max events to return
+  - `:type` - filter by event type
+  """
+  @callback read_agent_events(agent_id :: String.t(), opts()) ::
+              {:ok, [Event.t()]} | {:error, term()}
+
+  @optional_callbacks [subscribe: 3, list_streams: 1, stream_count: 1, event_count: 1, read_agent_events: 2]
 end

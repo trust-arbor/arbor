@@ -53,6 +53,7 @@ defmodule Arbor.Memory do
     Bridge,
     CodeStore,
     Consolidation,
+    DurableStore,
     Embedding,
     Events,
     GoalStore,
@@ -696,6 +697,7 @@ defmodule Arbor.Memory do
   @spec save_working_memory(String.t(), WorkingMemory.t()) :: :ok
   def save_working_memory(agent_id, working_memory) do
     :ets.insert(@working_memory_ets, {agent_id, working_memory})
+    DurableStore.persist_async("working_memory", agent_id, WorkingMemory.serialize(working_memory))
     Signals.emit_working_memory_saved(agent_id, WorkingMemory.stats(working_memory))
     :ok
   end
@@ -714,10 +716,19 @@ defmodule Arbor.Memory do
   def load_working_memory(agent_id, opts \\ []) do
     case get_working_memory(agent_id) do
       nil ->
-        wm = WorkingMemory.new(agent_id, opts)
-        save_working_memory(agent_id, wm)
-        Signals.emit_working_memory_loaded(agent_id, :created)
-        wm
+        # Try loading from Postgres before creating fresh
+        case load_working_memory_from_postgres(agent_id) do
+          {:ok, wm} ->
+            :ets.insert(@working_memory_ets, {agent_id, wm})
+            Signals.emit_working_memory_loaded(agent_id, :restored)
+            wm
+
+          :not_found ->
+            wm = WorkingMemory.new(agent_id, opts)
+            save_working_memory(agent_id, wm)
+            Signals.emit_working_memory_loaded(agent_id, :created)
+            wm
+        end
 
       wm ->
         # Don't emit signal on reads — only on creation.
@@ -736,6 +747,7 @@ defmodule Arbor.Memory do
   @spec delete_working_memory(String.t()) :: :ok
   def delete_working_memory(agent_id) do
     :ets.delete(@working_memory_ets, agent_id)
+    DurableStore.delete("working_memory", agent_id)
     :ok
   end
 
@@ -2350,5 +2362,24 @@ defmodule Arbor.Memory do
   @spec save_preferences_for_agent(String.t(), Preferences.t()) :: :ok
   def save_preferences_for_agent(agent_id, prefs) do
     save_preferences(agent_id, prefs)
+  end
+
+  # ============================================================================
+  # Durable Persistence Helpers (Private)
+  # ============================================================================
+
+  defp load_working_memory_from_postgres(agent_id) do
+    case DurableStore.load("working_memory", agent_id) do
+      {:ok, data} when is_map(data) ->
+        wm = WorkingMemory.deserialize(data)
+        {:ok, wm}
+
+      _ ->
+        :not_found
+    end
+  rescue
+    e ->
+      Logger.warning("Failed to load working memory from Postgres for #{agent_id}: #{inspect(e)}")
+      :not_found
   end
 end

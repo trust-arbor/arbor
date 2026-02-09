@@ -22,6 +22,7 @@ defmodule Arbor.Persistence.Schemas.Event do
     field :type, :string
     field :data, :map, default: %{}
     field :metadata, :map, default: %{}
+    field :agent_id, :string
     field :causation_id, :string
     field :correlation_id, :string
     field :event_timestamp, :utc_datetime_usec
@@ -30,7 +31,7 @@ defmodule Arbor.Persistence.Schemas.Event do
   end
 
   @required_fields [:id, :stream_id, :event_number, :type]
-  @optional_fields [:global_position, :data, :metadata, :causation_id, :correlation_id, :event_timestamp]
+  @optional_fields [:global_position, :data, :metadata, :agent_id, :causation_id, :correlation_id, :event_timestamp]
 
   @doc """
   Create a changeset for inserting a new event.
@@ -55,6 +56,7 @@ defmodule Arbor.Persistence.Schemas.Event do
       type: event.type,
       data: event.data || %{},
       metadata: event.metadata || %{},
+      agent_id: event.agent_id,
       causation_id: event.causation_id,
       correlation_id: event.correlation_id,
       event_timestamp: event.timestamp
@@ -74,6 +76,7 @@ defmodule Arbor.Persistence.Schemas.Event do
       type: schema.type,
       data: schema.data || %{},
       metadata: schema.metadata || %{},
+      agent_id: schema.agent_id,
       causation_id: schema.causation_id,
       correlation_id: schema.correlation_id,
       timestamp: schema.event_timestamp

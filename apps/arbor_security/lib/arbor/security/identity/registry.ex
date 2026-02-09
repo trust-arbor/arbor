@@ -22,10 +22,10 @@ defmodule Arbor.Security.Identity.Registry do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
 
-  @collection "identities"
 
   # Client API
 
@@ -193,18 +193,15 @@ defmodule Arbor.Security.Identity.Registry do
   # Server callbacks
 
   @impl true
-  def init(opts) do
-    backend = Keyword.get(opts, :storage_backend, storage_backend())
-
+  def init(_opts) do
     state = %{
       by_agent_id: %{},
       by_public_key_hash: %{},
       by_name: %{},
-      stats: %{total_registered: 0, total_deregistered: 0},
-      storage_backend: backend
+      stats: %{total_registered: 0, total_deregistered: 0}
     }
 
-    {:ok, restore_all(state)}
+    {:ok, restore_from_store(state)}
   end
 
   @impl true
@@ -241,7 +238,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> index_by_name(identity.name, identity.agent_id)
           |> update_in([:stats, :total_registered], &(&1 + 1))
 
-        persist(state, identity.agent_id, entry)
+        persist_to_store(identity.agent_id, entry)
         {:reply, :ok, state}
     end
   end
@@ -294,7 +291,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> deindex_by_name(name, agent_id)
           |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
-        delete_persisted(state, agent_id)
+        delete_from_store(agent_id)
         {:reply, :ok, state}
     end
   end
@@ -341,7 +338,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist(state, agent_id, updated_entry)
+        persist_to_store(agent_id, updated_entry)
         {:reply, :ok, state}
     end
   end
@@ -364,7 +361,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist(state, agent_id, updated_entry)
+        persist_to_store(agent_id, updated_entry)
         {:reply, :ok, state}
     end
   end
@@ -384,7 +381,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist(state, agent_id, updated_entry)
+        persist_to_store(agent_id, updated_entry)
 
         # Revoke all capabilities for this agent
         {:ok, revoked_count} = CapabilityStore.revoke_all(agent_id)
@@ -429,61 +426,62 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   # ===========================================================================
-  # Pluggable Persistence
+  # Persistence via BufferedStore
   # ===========================================================================
 
-  defp storage_backend do
-    Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+  @id_store :arbor_security_identities
+
+  defp persist_to_store(agent_id, entry) do
+    if Process.whereis(@id_store) do
+      data = serialize_entry(agent_id, entry)
+      record = Record.new(agent_id, data)
+      BufferedStore.put(agent_id, record, name: @id_store)
+    end
+
+    :ok
+  catch
+    _, reason ->
+      Logger.warning("Failed to persist identity #{agent_id}: #{inspect(reason)}")
+      :ok
   end
 
-  defp persist(%{storage_backend: nil}, _agent_id, _entry), do: :ok
-
-  defp persist(%{storage_backend: backend}, agent_id, entry) do
-    data = serialize_entry(agent_id, entry)
-    record = Record.new(agent_id, data)
-
-    case backend.put(agent_id, record, name: @collection) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to persist identity #{agent_id}: #{inspect(reason)}")
-        :ok
+  defp delete_from_store(agent_id) do
+    if Process.whereis(@id_store) do
+      BufferedStore.delete(agent_id, name: @id_store)
     end
+
+    :ok
+  catch
+    _, reason ->
+      Logger.warning("Failed to delete persisted identity #{agent_id}: #{inspect(reason)}")
+      :ok
   end
 
-  defp delete_persisted(%{storage_backend: nil}, _agent_id), do: :ok
+  defp restore_from_store(state) do
+    if Process.whereis(@id_store) do
+      case BufferedStore.list(name: @id_store) do
+        {:ok, keys} ->
+          Enum.reduce(keys, state, fn key, acc ->
+            case BufferedStore.get(key, name: @id_store) do
+              {:ok, %Record{data: data}} ->
+                restore_entry(acc, data)
 
-  defp delete_persisted(%{storage_backend: backend}, agent_id) do
-    case backend.delete(agent_id, name: @collection) do
-      :ok ->
-        :ok
+              {:error, reason} ->
+                Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
+                acc
+            end
+          end)
 
-      {:error, reason} ->
-        Logger.warning("Failed to delete persisted identity #{agent_id}: #{inspect(reason)}")
-        :ok
+        {:error, _reason} ->
+          state
+      end
+    else
+      state
     end
-  end
-
-  defp restore_all(%{storage_backend: nil} = state), do: state
-
-  defp restore_all(%{storage_backend: backend} = state) do
-    case backend.list(name: @collection) do
-      {:ok, keys} ->
-        Enum.reduce(keys, state, fn key, acc ->
-          case backend.get(key, name: @collection) do
-            {:ok, %Record{data: data}} ->
-              restore_entry(acc, data)
-
-            {:error, reason} ->
-              Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
-              acc
-          end
-        end)
-
-      {:error, _reason} ->
-        state
-    end
+  catch
+    _, reason ->
+      Logger.warning("Failed to restore identities: #{inspect(reason)}")
+      state
   end
 
   defp restore_entry(state, data) do
