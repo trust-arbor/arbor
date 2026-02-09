@@ -366,12 +366,18 @@ defmodule Arbor.AI.AgentSDK.Transport do
       "--verbose"
     ]
 
+    # Default thinking budget for the subprocess. The CLI's non-interactive mode
+    # defaults maxThinkingTokens to 0 (disabled) unless --max-thinking-tokens is
+    # explicitly passed. Without this, the subprocess never produces thinking blocks.
+    thinking_budget = Keyword.get(opts, :max_thinking_tokens, 10_000)
+
     args =
       base_args
       |> append_permission_flags(permission_mode, opts)
       |> append_optional_flag(opts, :model, "--model")
       |> append_optional_flag(opts, :system_prompt, "--system-prompt")
       |> append_optional_flag(opts, :max_turns, "--max-turns")
+      |> Kernel.++(["--max-thinking-tokens", to_string(thinking_budget)])
 
     # Add --resume for session continuity on reconnect
     if session_id do
