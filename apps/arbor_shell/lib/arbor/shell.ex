@@ -151,6 +151,45 @@ defmodule Arbor.Shell do
     do: execute_shell_command_with_options(command, opts)
 
   @doc """
+  Execute a command with pre-parsed executable and arguments.
+
+  Bypasses shell string parsing — use when you already have structured
+  `{cmd, args}` and want to avoid the serialize-then-parse round-trip.
+  Still performs sandbox checks on the command name and execution tracking.
+
+  ## Examples
+
+      {:ok, result} = Arbor.Shell.execute_direct("echo", ["hello", "world"])
+      result.stdout  # => "hello world\\n"
+  """
+  @spec execute_direct(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def execute_direct(cmd, args, opts \\ []) do
+    sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
+
+    with {:ok, :allowed} <- Sandbox.check(cmd, sandbox),
+         {:ok, execution_id} <- register_execution(cmd, opts) do
+      emit_started(cmd, execution_id, opts)
+
+      case Executor.run_direct(cmd, args, opts) do
+        {:ok, result} ->
+          complete_execution(execution_id, result)
+          emit_completed(execution_id, result)
+          {:ok, result}
+
+        {:error, reason} ->
+          fail_execution(execution_id, reason)
+          emit_failed(execution_id, reason)
+          {:error, reason}
+      end
+    else
+      {:error, reason} ->
+        emit_blocked(cmd, reason)
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Execute a shell command asynchronously.
 
   Returns an execution ID that can be used to check status and get results.
