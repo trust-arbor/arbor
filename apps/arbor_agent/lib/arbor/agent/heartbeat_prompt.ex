@@ -55,7 +55,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     You are an autonomous AI agent running a heartbeat cycle. You have access to
     goals, recent action results, and conversational context.
 
-    You MUST respond with valid JSON in the following format:
+    You MUST respond with valid JSON only (no markdown, no code blocks, no explanation outside JSON).
+    Use this exact format:
     {
       "thinking": "Your internal reasoning about what to do next",
       "actions": [
@@ -67,6 +68,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       "goal_updates": [
         {"goal_id": "id", "progress": 0.5, "note": "progress description"}
       ],
+      "new_goals": [
+        {"description": "what to achieve", "priority": "high|medium|low", "success_criteria": "how to know it's done"}
+      ],
       "proposal_decisions": [
         {"proposal_id": "prop_abc123", "decision": "accept|reject|defer", "reason": "why"}
       ]
@@ -74,6 +78,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     Always include your thinking. Use actions to interact with the world.
     Use goal_updates to report progress on active goals (include goal_id and new progress 0.0-1.0).
+    Use new_goals to suggest goals you want to pursue. Each needs a description, priority, and success criteria.
 
     When pending proposals are shown, review them and decide whether to accept (integrate into
     your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
@@ -253,7 +258,10 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp response_format_section do
     """
     ## Response Format
-    Respond with JSON only. Include "thinking", "actions", "memory_notes", "goal_updates", and optionally "proposal_decisions" keys.
+    Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
+    Required keys: "thinking", "actions", "memory_notes", "goal_updates".
+    Optional keys: "new_goals", "proposal_decisions".
+    If you have no active goals, use "new_goals" to create some.
     """
   end
 
