@@ -478,19 +478,38 @@ defmodule Arbor.AI.AgentSDK.Transport do
   # Message Dispatch
   # ============================================================================
 
-  defp dispatch_message(state, %{"type" => "result"} = msg) do
+  defp dispatch_message(%{status: :querying, query_ref: ref} = state, %{"type" => "result"} = msg)
+       when ref != nil do
     # Capture session_id for reconnection
     session_id = msg["session_id"] || state.session_id
 
     # Send the result message tagged with query_ref
-    notify_receiver(state.receiver, {:claude_message, state.query_ref, msg})
+    notify_receiver(state.receiver, {:claude_message, ref, msg})
 
     # Query complete — transition back to ready
     %{state | status: :ready, query_ref: nil, session_id: session_id}
   end
 
-  defp dispatch_message(state, msg) do
+  defp dispatch_message(state, %{"type" => "result"} = msg) do
+    # Result event received outside of active query (e.g., during CLI init).
+    # Capture session_id but don't change status or notify receiver.
+    session_id = msg["session_id"] || state.session_id
+
+    Logger.debug(
+      "[Transport] Ignoring result event outside active query (status: #{state.status})"
+    )
+
+    %{state | session_id: session_id}
+  end
+
+  defp dispatch_message(%{status: :querying} = state, msg) do
     notify_receiver(state.receiver, {:claude_message, state.query_ref, msg})
+    state
+  end
+
+  defp dispatch_message(state, msg) do
+    # Messages outside of active query (init phase) — log but don't forward
+    Logger.debug("[Transport] Ignoring message outside active query: #{msg["type"]}")
     state
   end
 
