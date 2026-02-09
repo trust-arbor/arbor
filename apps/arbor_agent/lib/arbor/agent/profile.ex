@@ -48,7 +48,7 @@ defmodule Arbor.Agent.Profile do
   @doc """
   Serialize the profile to a JSON-encodable map.
 
-  Private keys are NOT included — only the identity reference (agent_id).
+  Private keys are NOT included — only public identity data.
   """
   @spec serialize(t()) :: map()
   def serialize(%__MODULE__{} = profile) do
@@ -61,7 +61,7 @@ defmodule Arbor.Agent.Profile do
       "character" => Character.to_map(profile.character),
       "initial_goals" => profile.initial_goals,
       "initial_capabilities" => profile.initial_capabilities,
-      "identity_ref" => if(profile.identity, do: profile.identity[:agent_id]),
+      "identity" => serialize_identity(profile.identity),
       "keychain_ref" => profile.keychain_ref,
       "metadata" => profile.metadata,
       "created_at" => if(profile.created_at, do: DateTime.to_iso8601(profile.created_at))
@@ -81,7 +81,7 @@ defmodule Arbor.Agent.Profile do
       template: maybe_to_atom(map["template"]),
       initial_goals: map["initial_goals"] || [],
       initial_capabilities: map["initial_capabilities"] || [],
-      identity: maybe_identity(map["identity_ref"]),
+      identity: deserialize_identity(map["identity"] || legacy_identity(map["identity_ref"])),
       keychain_ref: map["keychain_ref"],
       metadata: map["metadata"] || %{},
       created_at: maybe_datetime(map["created_at"]),
@@ -122,8 +122,66 @@ defmodule Arbor.Agent.Profile do
   defp maybe_to_atom(nil), do: nil
   defp maybe_to_atom(str) when is_binary(str), do: safe_to_atom(str)
 
-  defp maybe_identity(nil), do: nil
-  defp maybe_identity(ref), do: %{agent_id: ref}
+  defp serialize_identity(nil), do: nil
+
+  defp serialize_identity(%{} = identity) do
+    endorsement = identity[:endorsement]
+
+    %{
+      "agent_id" => identity[:agent_id],
+      "public_key" => identity[:public_key],
+      "endorsement" => serialize_endorsement(endorsement)
+    }
+  end
+
+  defp serialize_endorsement(nil), do: nil
+
+  defp serialize_endorsement(%{} = e) do
+    %{
+      "agent_id" => e[:agent_id],
+      "agent_public_key" => maybe_hex_encode(e[:agent_public_key]),
+      "authority_id" => e[:authority_id],
+      "authority_signature" => maybe_hex_encode(e[:authority_signature]),
+      "endorsed_at" => if(e[:endorsed_at], do: DateTime.to_iso8601(e[:endorsed_at]))
+    }
+  end
+
+  defp deserialize_identity(nil), do: nil
+
+  defp deserialize_identity(%{} = map) do
+    %{
+      agent_id: map["agent_id"],
+      public_key: map["public_key"],
+      endorsement: deserialize_endorsement(map["endorsement"])
+    }
+  end
+
+  defp deserialize_endorsement(nil), do: nil
+
+  defp deserialize_endorsement(%{} = map) do
+    %{
+      agent_id: map["agent_id"],
+      agent_public_key: maybe_hex_decode(map["agent_public_key"]),
+      authority_id: map["authority_id"],
+      authority_signature: maybe_hex_decode(map["authority_signature"]),
+      endorsed_at: maybe_datetime(map["endorsed_at"])
+    }
+  end
+
+  # Backward compat: old profiles stored only "identity_ref" (agent_id string)
+  defp legacy_identity(nil), do: nil
+  defp legacy_identity(ref) when is_binary(ref), do: %{"agent_id" => ref}
+
+  defp maybe_hex_encode(nil), do: nil
+  defp maybe_hex_encode(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)
+
+  defp maybe_hex_decode(nil), do: nil
+  defp maybe_hex_decode(str) when is_binary(str) do
+    case Base.decode16(str, case: :mixed) do
+      {:ok, bin} -> bin
+      :error -> str
+    end
+  end
 
   defp maybe_datetime(nil), do: nil
 
