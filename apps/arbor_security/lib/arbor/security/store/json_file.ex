@@ -3,18 +3,20 @@ defmodule Arbor.Security.Store.JSONFile do
   JSON file-backed storage backend.
 
   Implements `Arbor.Contracts.Persistence.Store` using JSON files on disk.
-  Each key maps to a single JSON file in the configured base directory.
+  Each record maps to a single JSON file in the configured base directory,
+  organized by namespace subdirectories.
 
   ## Configuration
 
       config :arbor_security, Arbor.Security.Store.JSONFile,
         base_dir: ".arbor/security"
 
-  ## Key Namespacing
+  ## Namespace Convention
 
-  Keys can include a namespace prefix separated by `:` which maps to
-  subdirectories. For example, `"identities:agent_abc123"` stores to
-  `{base_dir}/identities/agent_abc123.json`.
+  Pass `name: "identities"` in opts to scope storage to a subdirectory.
+  For example, with key `"agent_abc123"` and `name: "identities"`:
+
+      {base_dir}/identities/agent_abc123.json
 
   Keys without a namespace store directly in the base directory.
   """
@@ -23,11 +25,14 @@ defmodule Arbor.Security.Store.JSONFile do
 
   require Logger
 
+  alias Arbor.Contracts.Persistence.Record
+
   @default_base_dir ".arbor/security"
 
   @impl true
-  def put(key, value, opts \\ []) do
+  def put(key, %Record{} = record, opts \\ []) do
     path = key_to_path(key, opts)
+    value = %{"data" => record.data, "metadata" => record.metadata}
 
     with :ok <- File.mkdir_p!(Path.dirname(path)),
          {:ok, json} <- Jason.encode(value, pretty: true) do
@@ -46,8 +51,18 @@ defmodule Arbor.Security.Store.JSONFile do
     case File.read(path) do
       {:ok, json} ->
         case Jason.decode(json) do
-          {:ok, data} -> {:ok, data}
-          {:error, reason} -> {:error, reason}
+          {:ok, %{"data" => data} = envelope} ->
+            record = %Record{
+              id: key,
+              key: key,
+              data: data,
+              metadata: envelope["metadata"] || %{}
+            }
+
+            {:ok, record}
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
       {:error, :enoent} ->
@@ -71,18 +86,14 @@ defmodule Arbor.Security.Store.JSONFile do
 
   @impl true
   def list(opts \\ []) do
-    namespace = Keyword.get(opts, :namespace)
-    dir = namespace_dir(namespace, opts)
+    dir = namespace_dir(opts)
 
     case File.ls(dir) do
       {:ok, files} ->
         keys =
           files
           |> Enum.filter(&String.ends_with?(&1, ".json"))
-          |> Enum.map(fn file ->
-            base = String.trim_trailing(file, ".json")
-            if namespace, do: "#{namespace}:#{base}", else: base
-          end)
+          |> Enum.map(&String.trim_trailing(&1, ".json"))
 
         {:ok, keys}
 
@@ -103,21 +114,17 @@ defmodule Arbor.Security.Store.JSONFile do
   # --- Path helpers ---
 
   defp key_to_path(key, opts) do
-    base_dir = resolve_base_dir(opts)
-
-    case String.split(key, ":", parts: 2) do
-      [namespace, name] ->
-        Path.join([base_dir, namespace, "#{name}.json"])
-
-      [name] ->
-        Path.join(base_dir, "#{name}.json")
-    end
+    dir = namespace_dir(opts)
+    Path.join(dir, "#{key}.json")
   end
 
-  defp namespace_dir(nil, opts), do: resolve_base_dir(opts)
+  defp namespace_dir(opts) do
+    base_dir = resolve_base_dir(opts)
 
-  defp namespace_dir(namespace, opts) do
-    Path.join(resolve_base_dir(opts), namespace)
+    case Keyword.get(opts, :name) do
+      nil -> base_dir
+      name -> Path.join(base_dir, to_string(name))
+    end
   end
 
   defp resolve_base_dir(opts) do
