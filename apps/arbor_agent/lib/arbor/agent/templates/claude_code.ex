@@ -84,19 +84,24 @@ defmodule Arbor.Agent.Templates.ClaudeCode do
   @impl true
   def required_capabilities do
     [
-      # Full file system access for the project
-      %{resource: "arbor://fs/**", description: "Full project file access"},
+      # File system access — read/write/execute scoped
+      %{resource: "arbor://fs/read/**", description: "Read project files"},
+      %{resource: "arbor://fs/write/**", description: "Write project files"},
       # Memory system
-      %{resource: "arbor://memory/**", description: "Full memory access"},
+      %{resource: "arbor://memory/read/**", description: "Read memory"},
+      %{resource: "arbor://memory/write/**", description: "Write memory"},
       # Shell access (sandboxed)
-      %{resource: "arbor://shell/**", description: "Shell command execution"},
+      %{resource: "arbor://shell/execute/**", description: "Shell command execution"},
       # AI subsystem
-      %{resource: "arbor://ai/**", description: "AI generation and routing"},
+      %{resource: "arbor://ai/generate/**", description: "AI generation and routing"},
       # Signals
-      %{resource: "arbor://signals/**", description: "Signal emission and subscription"},
+      %{resource: "arbor://signals/emit/**", description: "Signal emission"},
+      %{resource: "arbor://signals/subscribe/**", description: "Signal subscription"},
       # Consensus proposals
       %{resource: "arbor://consensus/propose", description: "Submit proposals"},
       %{resource: "arbor://consensus/evaluate", description: "Participate in evaluation"},
+      # MCP tool use
+      %{resource: "arbor://tool/use/**", description: "MCP tool invocation"},
       # Actions - full access to all action categories
       %{resource: "arbor://actions/execute/**", description: "Execute all actions"}
     ]

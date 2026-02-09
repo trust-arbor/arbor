@@ -246,15 +246,25 @@ defmodule Arbor.Agent.Lifecycle do
   defp grant_capabilities(_agent_id, []), do: :ok
 
   defp grant_capabilities(agent_id, capabilities) do
-    Enum.each(capabilities, fn cap ->
-      resource = cap[:resource] || cap["resource"]
+    results =
+      Enum.map(capabilities, fn cap ->
+        resource = cap[:resource] || cap["resource"]
 
-      Arbor.Security.grant(
-        principal: agent_id,
-        resource: resource
-      )
-    end)
+        case Arbor.Security.grant(principal: agent_id, resource: resource) do
+          {:ok, _cap} ->
+            :ok
 
+          {:error, reason} ->
+            Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
+              agent_id: agent_id
+            )
+
+            {:error, reason}
+        end
+      end)
+
+    granted = Enum.count(results, &(&1 == :ok))
+    Logger.info("Granted #{granted}/#{length(capabilities)} capabilities", agent_id: agent_id)
     :ok
   end
 
