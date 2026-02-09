@@ -20,6 +20,7 @@ defmodule Arbor.Security.Identity.Registry do
 
   require Logger
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
@@ -439,9 +440,9 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp persist(%{storage_backend: backend}, agent_id, entry) do
     data = serialize_entry(agent_id, entry)
-    key = "#{@collection}:#{agent_id}"
+    record = Record.new(agent_id, data)
 
-    case backend.put(key, data, []) do
+    case backend.put(agent_id, record, name: @collection) do
       :ok ->
         :ok
 
@@ -454,9 +455,7 @@ defmodule Arbor.Security.Identity.Registry do
   defp delete_persisted(%{storage_backend: nil}, _agent_id), do: :ok
 
   defp delete_persisted(%{storage_backend: backend}, agent_id) do
-    key = "#{@collection}:#{agent_id}"
-
-    case backend.delete(key, []) do
+    case backend.delete(agent_id, name: @collection) do
       :ok ->
         :ok
 
@@ -469,11 +468,11 @@ defmodule Arbor.Security.Identity.Registry do
   defp restore_all(%{storage_backend: nil} = state), do: state
 
   defp restore_all(%{storage_backend: backend} = state) do
-    case backend.list(namespace: @collection) do
+    case backend.list(name: @collection) do
       {:ok, keys} ->
         Enum.reduce(keys, state, fn key, acc ->
-          case backend.get(key, []) do
-            {:ok, data} ->
+          case backend.get(key, name: @collection) do
+            {:ok, %Record{data: data}} ->
               restore_entry(acc, data)
 
             {:error, reason} ->

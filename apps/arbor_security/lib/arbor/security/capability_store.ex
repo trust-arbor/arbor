@@ -19,6 +19,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   require Logger
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
@@ -511,9 +512,9 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp persist_capability(%{storage_backend: backend}, cap) do
     data = serialize_capability(cap)
-    key = "#{@collection}:#{cap.id}"
+    record = Record.new(cap.id, data)
 
-    case backend.put(key, data, []) do
+    case backend.put(cap.id, record, name: @collection) do
       :ok ->
         :ok
 
@@ -526,9 +527,7 @@ defmodule Arbor.Security.CapabilityStore do
   defp delete_persisted_capability(%{storage_backend: nil}, _cap_id), do: :ok
 
   defp delete_persisted_capability(%{storage_backend: backend}, cap_id) do
-    key = "#{@collection}:#{cap_id}"
-
-    case backend.delete(key, []) do
+    case backend.delete(cap_id, name: @collection) do
       :ok ->
         :ok
 
@@ -541,11 +540,11 @@ defmodule Arbor.Security.CapabilityStore do
   defp restore_all(%{storage_backend: nil} = state), do: state
 
   defp restore_all(%{storage_backend: backend} = state) do
-    case backend.list(namespace: @collection) do
+    case backend.list(name: @collection) do
       {:ok, keys} ->
         Enum.reduce(keys, state, fn key, acc ->
-          case backend.get(key, []) do
-            {:ok, data} ->
+          case backend.get(key, name: @collection) do
+            {:ok, %Record{data: data}} ->
               restore_capability(acc, data)
 
             {:error, reason} ->
