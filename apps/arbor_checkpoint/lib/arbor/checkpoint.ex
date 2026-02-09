@@ -39,9 +39,8 @@ defmodule Arbor.Checkpoint do
   ## Storage Backends
 
   Checkpoints are stored using pluggable storage backends that implement
-  `Arbor.Checkpoint.Store`. The store interface is aligned with
-  `Arbor.Persistence.Store`, so any persistence backend can be injected
-  as a checkpoint store without adding a dependency.
+  `Arbor.Contracts.Persistence.Store`. Any persistence backend can be
+  injected as a checkpoint store.
 
   ## Usage
 
@@ -124,7 +123,7 @@ defmodule Arbor.Checkpoint do
   ## Parameters
   - `id` - Unique identifier for the checkpoint
   - `state` - The state data to checkpoint (or a module implementing the behaviour)
-  - `store` - Module implementing `Arbor.Checkpoint.Store`
+  - `store` - Module implementing `Arbor.Contracts.Persistence.Store`
   - `opts` - Options (also passed through to the store backend)
 
   ## Options
@@ -184,7 +183,7 @@ defmodule Arbor.Checkpoint do
 
   ## Parameters
   - `id` - The checkpoint identifier to load
-  - `store` - Module implementing `Arbor.Checkpoint.Store`
+  - `store` - Module implementing `Arbor.Contracts.Persistence.Store`
   - `opts` - Retry and loading options (also passed through to the store backend)
 
   ## Options
@@ -317,7 +316,7 @@ defmodule Arbor.Checkpoint do
   - `module` - Module implementing `Arbor.Checkpoint` behaviour
   - `id` - The checkpoint identifier
   - `initial_args` - Arguments to construct initial state for recovery
-  - `store` - Module implementing `Arbor.Checkpoint.Store`
+  - `store` - Module implementing `Arbor.Contracts.Persistence.Store`
   - `opts` - Options for loading (same as `load/3`)
 
   ## Returns

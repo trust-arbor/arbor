@@ -19,7 +19,7 @@ defmodule Arbor.Checkpoint.Store.ETS do
 
   use GenServer
 
-  @behaviour Arbor.Checkpoint.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
   @default_table :arbor_checkpoints
   @default_name __MODULE__
@@ -28,27 +28,27 @@ defmodule Arbor.Checkpoint.Store.ETS do
   # Store Behaviour
   # ============================================================================
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def put(id, checkpoint, _opts) do
     GenServer.call(@default_name, {:put, id, checkpoint})
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def get(id, _opts) do
     GenServer.call(@default_name, {:get, id})
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def delete(id, _opts) do
     GenServer.call(@default_name, {:delete, id})
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def list(_opts) do
     GenServer.call(@default_name, :list)
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def exists?(id, _opts) do
     GenServer.call(@default_name, {:exists?, id})
   end

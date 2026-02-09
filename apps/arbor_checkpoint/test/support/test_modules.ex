@@ -49,7 +49,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
   A storage backend that simulates eventual consistency by
   returning :not_found for the first N attempts.
   """
-  @behaviour Arbor.Checkpoint.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
   use Agent
 
@@ -65,7 +65,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
 
   def stop(name \\ __MODULE__), do: Agent.stop(name)
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def put(id, checkpoint, _opts \\ []) do
     Agent.update(__MODULE__, fn state ->
       %{state | data: Map.put(state.data, id, checkpoint), attempts: Map.put(state.attempts, id, 0)}
@@ -74,7 +74,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
     :ok
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def get(id, _opts \\ []) do
     Agent.get_and_update(__MODULE__, fn state ->
       attempts = Map.get(state.attempts, id, 0)
@@ -97,7 +97,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
     end
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def delete(id, _opts \\ []) do
     Agent.update(__MODULE__, fn state ->
       %{state | data: Map.delete(state.data, id)}
@@ -106,7 +106,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
     :ok
   end
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def list(_opts \\ []) do
     ids = Agent.get(__MODULE__, fn state -> Map.keys(state.data) end)
     {:ok, ids}
@@ -121,17 +121,17 @@ defmodule Arbor.Checkpoint.Test.FailingStorage do
   @moduledoc """
   A storage backend that always fails.
   """
-  @behaviour Arbor.Checkpoint.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def put(_id, _checkpoint, _opts \\ []), do: {:error, :storage_unavailable}
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def get(_id, _opts \\ []), do: {:error, :storage_unavailable}
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def delete(_id, _opts \\ []), do: {:error, :storage_unavailable}
 
-  @impl Arbor.Checkpoint.Store
+  @impl true
   def list(_opts \\ []), do: {:error, :storage_unavailable}
 end

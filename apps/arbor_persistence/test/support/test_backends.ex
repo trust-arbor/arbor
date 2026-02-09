@@ -5,7 +5,7 @@ defmodule Arbor.Persistence.TestBackends do
 
   defmodule FailingStore do
     @moduledoc false
-    @behaviour Arbor.Persistence.Store
+    @behaviour Arbor.Contracts.Persistence.Store
 
     @impl true
     def put(_key, _value, _opts), do: {:error, :write_failed}
