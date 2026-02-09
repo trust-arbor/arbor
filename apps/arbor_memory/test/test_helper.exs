@@ -19,6 +19,14 @@ for child <- [
   Supervisor.start_child(Arbor.Memory.Supervisor, child)
 end
 
+# Signal system — emit functions need Store + Bus running
+for child <- [
+      {Arbor.Signals.Store, []},
+      {Arbor.Signals.Bus, []}
+    ] do
+  Supervisor.start_child(Arbor.Signals.Supervisor, child)
+end
+
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database
 ExUnit.configure(exclude: [:database])

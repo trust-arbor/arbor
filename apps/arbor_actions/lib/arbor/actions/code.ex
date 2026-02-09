@@ -582,6 +582,7 @@ defmodule Arbor.Actions.Code do
     end
 
     defp format_error({:compile_error, msg}), do: "Compilation error: #{msg}"
+    defp format_error({:parse_error, msg}), do: "Compilation error: #{msg}"
     defp format_error(reason), do: "Hot-load failed: #{inspect(reason)}"
   end
 end

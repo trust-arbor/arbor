@@ -36,4 +36,31 @@ end
 # Deterministic evaluator tests need shell processes
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
 
+# Security processes — force_approve/force_reject check admin capabilities
+for child <- [
+      {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.CapabilityStore, []},
+      {Arbor.Security.Reflex.Registry, []}
+    ] do
+  Supervisor.start_child(Arbor.Security.Supervisor, child)
+end
+
+# Grant consensus admin capabilities to test agents used in force_approve/force_reject tests.
+# We create capabilities directly because Capability.new validates principal_id starts
+# with "agent_", but test agents use simple names like "admin" and "admin_1".
+for agent <- ["admin", "admin_1"] do
+  cap = %Arbor.Contracts.Security.Capability{
+    id: "cap_test_#{agent}_consensus_admin",
+    resource_uri: "arbor://consensus/admin",
+    principal_id: agent,
+    granted_at: DateTime.utc_now(),
+    expires_at: nil,
+    constraints: %{},
+    delegation_depth: 0,
+    metadata: %{test: true}
+  }
+
+  Arbor.Security.CapabilityStore.put(cap)
+end
+
 ExUnit.start()

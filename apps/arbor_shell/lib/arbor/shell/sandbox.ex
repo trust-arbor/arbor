@@ -103,17 +103,63 @@ defmodule Arbor.Shell.Sandbox do
   Parse a command string into executable and arguments list.
 
   Used by the executor to split commands for `{:spawn_executable, path}`.
+  Respects single and double quoting so that e.g. `sh -c 'echo hello'`
+  produces `{"sh", ["-c", "echo hello"]}`.
+
   Returns `{executable, [arg1, arg2, ...]}`.
   """
   @spec parse_command(String.t()) :: {String.t(), [String.t()]}
   def parse_command(command) do
-    parts = String.split(command, ~r/\s+/, parts: 2)
+    args = shell_split(String.trim(command))
 
-    case parts do
+    case args do
+      [] -> {"", []}
       [cmd] -> {cmd, []}
-      [cmd, rest] -> {cmd, String.split(rest)}
+      [cmd | rest] -> {cmd, rest}
     end
   end
+
+  # Simple shell-style argument splitting that respects single and double quotes.
+  defp shell_split(str), do: shell_split(str, [], [])
+
+  defp shell_split(<<>>, current, acc) do
+    case current do
+      [] -> Enum.reverse(acc)
+      _ -> Enum.reverse([IO.iodata_to_binary(Enum.reverse(current)) | acc])
+    end
+  end
+
+  defp shell_split(<<"'", rest::binary>>, current, acc) do
+    {content, remaining} = consume_until(rest, ?')
+    shell_split(remaining, [content | current], acc)
+  end
+
+  defp shell_split(<<"\"", rest::binary>>, current, acc) do
+    {content, remaining} = consume_until(rest, ?")
+    shell_split(remaining, [content | current], acc)
+  end
+
+  defp shell_split(<<c, rest::binary>>, current, acc) when c in ~c[ \t] do
+    case current do
+      [] -> shell_split(rest, [], acc)
+      _ -> shell_split(rest, [], [IO.iodata_to_binary(Enum.reverse(current)) | acc])
+    end
+  end
+
+  defp shell_split(<<c, rest::binary>>, current, acc) do
+    shell_split(rest, [<<c>> | current], acc)
+  end
+
+  defp consume_until(str, quote_char), do: consume_until(str, quote_char, [])
+
+  defp consume_until(<<>>, _quote_char, acc),
+    do: {IO.iodata_to_binary(Enum.reverse(acc)), <<>>}
+
+  defp consume_until(<<c, rest::binary>>, quote_char, acc) when c == quote_char,
+    do: {IO.iodata_to_binary(Enum.reverse(acc)), rest}
+
+  defp consume_until(<<c, rest::binary>>, quote_char, acc),
+    do: consume_until(rest, quote_char, [<<c>> | acc])
 
   @doc """
   Resolve a command name to its full executable path.

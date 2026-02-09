@@ -224,10 +224,9 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
     end
 
     test "detects invalid test paths with traversal", %{proposal: proposal} do
-      # Path traversal is detected by sanitize_test_paths, which causes the
-      # command to become an echo fallback. The echo command itself succeeds
-      # (exit code 0) due to Erlang port execution, but the output contains
-      # the error message, confirming the path was rejected by validation.
+      # Path traversal is detected by sanitize_test_paths, which returns an
+      # error that build_command propagates. The evaluator rejects the proposal
+      # without executing any shell command.
       {:ok, evaluation} =
         Deterministic.evaluate(proposal, :mix_test,
           test_paths: ["../../etc/passwd"],
@@ -238,14 +237,13 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
       assert %Evaluation{} = evaluation
       assert evaluation.perspective == :mix_test
       assert evaluation.sealed == true
-      # The echo fallback produces output containing the invalid path message
-      assert String.contains?(evaluation.reasoning, "passed")
+      assert evaluation.vote == :reject
+      assert String.contains?(evaluation.reasoning, "invalid_test_path")
     end
 
     test "detects test paths with special characters", %{proposal: proposal} do
       # Special characters are detected by sanitize_test_paths regex check.
-      # Similar to traversal, the echo fallback command succeeds but the
-      # path was correctly rejected by the validation layer.
+      # The evaluator rejects the proposal without executing any shell command.
       {:ok, evaluation} =
         Deterministic.evaluate(proposal, :mix_test,
           test_paths: ["test; rm -rf /"],
@@ -256,6 +254,7 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
       assert %Evaluation{} = evaluation
       assert evaluation.perspective == :mix_test
       assert evaluation.sealed == true
+      assert evaluation.vote == :reject
     end
 
     @tag :slow

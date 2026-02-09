@@ -128,8 +128,12 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       response = Jason.decode!(conn.resp_body)
       assert response["status"] == "ok"
       assert response["working_memory"]["agent_id"] == agent_id
-      assert response["working_memory"]["recent_thoughts"] == ["Test thought"]
-      assert response["working_memory"]["active_goals"] == ["Test goal"]
+      thoughts = response["working_memory"]["recent_thoughts"]
+      assert is_list(thoughts) and length(thoughts) == 1
+      assert hd(thoughts)["content"] == "Test thought"
+      goals = response["working_memory"]["active_goals"]
+      assert is_list(goals) and length(goals) == 1
+      assert hd(goals)["description"] == "Test goal"
     end
 
     test "returns 404 if no working memory exists", %{agent_id: agent_id} do
@@ -165,8 +169,10 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       # Verify it was saved
       loaded = Memory.get_working_memory(agent_id)
       assert loaded.agent_id == agent_id
-      assert loaded.recent_thoughts == ["New thought"]
-      assert loaded.active_goals == ["New goal"]
+      assert length(loaded.recent_thoughts) == 1
+      assert hd(loaded.recent_thoughts).content == "New thought"
+      assert length(loaded.active_goals) == 1
+      assert hd(loaded.active_goals).description == "New goal"
       assert loaded.engagement_level == 0.7
     end
 
@@ -181,7 +187,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
   end
 
   describe "POST /summarize" do
-    test "returns 503 when LLM not configured", %{agent_id: agent_id} do
+    test "returns fallback summary when LLM unavailable", %{agent_id: agent_id} do
       body = %{
         agent_id: agent_id,
         text:
@@ -194,11 +200,11 @@ defmodule Arbor.Gateway.Memory.RouterTest do
         |> put_req_header("content-type", "application/json")
         |> Router.call(@opts)
 
-      # Currently returns 503 because LLM is not configured
-      assert conn.status == 503
+      # Summarizer falls back to extractive summary when LLM unavailable
+      assert conn.status == 200
       response = Jason.decode!(conn.resp_body)
-      assert response["status"] == "error"
-      assert response["reason"] =~ "not configured"
+      assert response["status"] == "ok"
+      assert is_binary(response["summary"])
     end
 
     test "returns 400 if required fields missing" do
