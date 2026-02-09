@@ -149,16 +149,20 @@ defmodule Arbor.Agent.DebugAgent do
     poll_interval = Keyword.get(opts, :poll_interval, @poll_interval_ms)
 
     # Create agent from Diagnostician template
+    # Lifecycle.create takes display_name as first arg, returns crypto agent_id in profile
     case Lifecycle.create(agent_id, template: Diagnostician) do
-      {:ok, _profile} ->
+      {:ok, profile} ->
+        # Use the crypto-derived agent_id from the profile
+        crypto_agent_id = profile.agent_id
+
         # Start executor
-        case Lifecycle.start(agent_id) do
+        case Lifecycle.start(crypto_agent_id) do
           {:ok, _pid} ->
             # Start circuit breaker for this agent
             circuit_breaker = start_circuit_breaker(agent_id)
 
             state = %{
-              agent_id: agent_id,
+              agent_id: crypto_agent_id,
               poll_interval: poll_interval,
               phase: :idle,
               current_lease: nil,
