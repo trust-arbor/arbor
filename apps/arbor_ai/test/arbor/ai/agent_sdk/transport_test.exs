@@ -21,8 +21,8 @@ defmodule Arbor.AI.AgentSDK.TransportTest do
 
     # Read stdin lines and respond
     while IFS= read -r line; do
-      # Parse the user_input type
-      if echo "$line" | grep -q "user_input"; then
+      # Parse the user message type
+      if echo "$line" | grep -q '"type":"user"'; then
         # Output assistant message
         echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Mock response"}],"model":"claude-test"}}'
         # Output result
@@ -191,7 +191,7 @@ defmodule Arbor.AI.AgentSDK.TransportTest do
 
       # Read stdin lines and respond
       while IFS= read -r line; do
-        if echo "$line" | grep -q "user_input"; then
+        if echo "$line" | grep -q '"type":"user"'; then
           echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Fresh response"}],"model":"claude-test"}}'
           echo '{"type":"result","usage":{"input_tokens":10,"output_tokens":5},"session_id":"new-session"}'
         fi
@@ -222,7 +222,10 @@ defmodule Arbor.AI.AgentSDK.TransportTest do
 
       # Should receive the query's response, not the init result
       assert_receive {:claude_message, ^ref, %{"type" => "assistant"}}, 5_000
-      assert_receive {:claude_message, ^ref, %{"type" => "result", "session_id" => "new-session"}}, 5_000
+
+      assert_receive {:claude_message, ^ref,
+                      %{"type" => "result", "session_id" => "new-session"}},
+                     5_000
 
       Transport.close(transport)
     end
