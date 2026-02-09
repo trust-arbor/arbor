@@ -11,7 +11,7 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
 
   @behaviour Arbor.Persistence.QueryableStore
 
-  alias Arbor.Persistence.Filter
+  alias Arbor.Contracts.Persistence.Filter
 
   # --- Client API ---
 

@@ -1,18 +1,30 @@
 defmodule Arbor.Security.CapabilityStore do
   @moduledoc """
-  In-memory storage for capabilities.
+  Capability storage with pluggable persistence.
 
   Stores capabilities indexed by ID and by principal for fast lookup.
   Handles expiration cleanup automatically.
+
+  Capabilities are persisted via a configurable storage backend
+  (implementing `Arbor.Contracts.Persistence.Store`) and restored on startup.
+
+  ## Configuration
+
+      config :arbor_security, :storage_backend, Arbor.Security.Store.JSONFile
+
+  Set to `nil` to disable persistence (in-memory only).
   """
 
   use GenServer
+
+  require Logger
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
 
   @cleanup_interval_ms 60_000
+  @collection "capabilities"
 
   # Client API
 
@@ -104,22 +116,25 @@ defmodule Arbor.Security.CapabilityStore do
   # Server callbacks
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    backend = Keyword.get(opts, :storage_backend, storage_backend())
     schedule_cleanup()
 
-    {:ok,
-     %{
-       by_id: %{},
-       by_principal: %{},
-       by_issuer: %{},
-       by_parent: %{},
-       stats: %{
-         total_granted: 0,
-         total_revoked: 0,
-         total_expired: 0,
-         total_cascade_revoked: 0
-       }
-     }}
+    state = %{
+      by_id: %{},
+      by_principal: %{},
+      by_issuer: %{},
+      by_parent: %{},
+      storage_backend: backend,
+      stats: %{
+        total_granted: 0,
+        total_revoked: 0,
+        total_expired: 0,
+        total_cascade_revoked: 0
+      }
+    }
+
+    {:ok, restore_all(state)}
   end
 
   @impl true
@@ -137,6 +152,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> index_by_parent(cap)
           |> update_in([:stats, :total_granted], &(&1 + 1))
 
+        persist_capability(state, cap)
         {:reply, {:ok, :stored}, state}
 
       {:error, _} = error ->
@@ -205,6 +221,7 @@ defmodule Arbor.Security.CapabilityStore do
           end)
           |> update_in([:stats, :total_revoked], &(&1 + 1))
 
+        delete_persisted_capability(state, capability_id)
         {:reply, :ok, state}
     end
   end
@@ -213,6 +230,8 @@ defmodule Arbor.Security.CapabilityStore do
   def handle_call({:revoke_all, principal_id}, _from, state) do
     cap_ids = Map.get(state.by_principal, principal_id, [])
     count = length(cap_ids)
+
+    Enum.each(cap_ids, &delete_persisted_capability(state, &1))
 
     state =
       state
@@ -250,6 +269,8 @@ defmodule Arbor.Security.CapabilityStore do
         # Collect all capability IDs to revoke (this one + all children recursively)
         all_ids = collect_cascade_ids(state, [capability_id], [])
         count = length(all_ids)
+
+        Enum.each(all_ids, &delete_persisted_capability(state, &1))
 
         state =
           state
@@ -348,6 +369,8 @@ defmodule Arbor.Security.CapabilityStore do
     if expired_ids == [] do
       state
     else
+      Enum.each(expired_ids, &delete_persisted_capability(state, &1))
+
       state
       |> remove_expired_capabilities(expired_ids)
       |> remove_expired_from_principals(expired_ids)
@@ -443,8 +466,7 @@ defmodule Arbor.Security.CapabilityStore do
           %{depth: depth, limit: max_depth, reason: :negative_depth}}}
 
       depth > max_depth ->
-        {:error,
-         {:quota_exceeded, :delegation_depth_limit, %{depth: depth, limit: max_depth}}}
+        {:error, {:quota_exceeded, :delegation_depth_limit, %{depth: depth, limit: max_depth}}}
 
       true ->
         :ok
@@ -471,10 +493,207 @@ defmodule Arbor.Security.CapabilityStore do
 
     if current_count >= max_global do
       {:error,
-       {:quota_exceeded, :global_capability_limit,
-        %{current: current_count, limit: max_global}}}
+       {:quota_exceeded, :global_capability_limit, %{current: current_count, limit: max_global}}}
     else
       :ok
+    end
+  end
+
+  # ===========================================================================
+  # Pluggable Persistence
+  # ===========================================================================
+
+  defp storage_backend do
+    Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+  end
+
+  defp persist_capability(%{storage_backend: nil}, _cap), do: :ok
+
+  defp persist_capability(%{storage_backend: backend}, cap) do
+    data = serialize_capability(cap)
+    key = "#{@collection}:#{cap.id}"
+
+    case backend.put(key, data, []) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist capability #{cap.id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp delete_persisted_capability(%{storage_backend: nil}, _cap_id), do: :ok
+
+  defp delete_persisted_capability(%{storage_backend: backend}, cap_id) do
+    key = "#{@collection}:#{cap_id}"
+
+    case backend.delete(key, []) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to delete persisted capability #{cap_id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp restore_all(%{storage_backend: nil} = state), do: state
+
+  defp restore_all(%{storage_backend: backend} = state) do
+    case backend.list(namespace: @collection) do
+      {:ok, keys} ->
+        Enum.reduce(keys, state, fn key, acc ->
+          case backend.get(key, []) do
+            {:ok, data} ->
+              restore_capability(acc, data)
+
+            {:error, reason} ->
+              Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
+              acc
+          end
+        end)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp restore_capability(state, data) do
+    case deserialize_capability(data) do
+      {:ok, cap} ->
+        # Skip expired capabilities during restore
+        if cap.expires_at && DateTime.compare(DateTime.utc_now(), cap.expires_at) == :gt do
+          state
+        else
+          state
+          |> put_in([:by_id, cap.id], cap)
+          |> update_in([:by_principal, cap.principal_id], fn
+            nil -> [cap.id]
+            ids -> [cap.id | ids]
+          end)
+          |> index_by_issuer(cap)
+          |> index_by_parent(cap)
+          |> update_in([:stats, :total_granted], &(&1 + 1))
+        end
+
+      {:error, reason} ->
+        Logger.warning("Failed to deserialize capability: #{inspect(reason)}")
+        state
+    end
+  rescue
+    e ->
+      Logger.warning("Failed to restore capability entry: #{inspect(e)}")
+      state
+  end
+
+  # ===========================================================================
+  # Serialization (binary fields ↔ hex strings for JSON)
+  # ===========================================================================
+
+  defp serialize_capability(%Capability{} = cap) do
+    %{
+      "id" => cap.id,
+      "resource_uri" => cap.resource_uri,
+      "principal_id" => cap.principal_id,
+      "granted_at" => DateTime.to_iso8601(cap.granted_at),
+      "expires_at" => encode_optional_datetime(cap.expires_at),
+      "parent_capability_id" => cap.parent_capability_id,
+      "delegation_depth" => cap.delegation_depth,
+      "constraints" => serialize_constraints(cap.constraints),
+      "signature" => encode_optional_binary(cap.signature),
+      "issuer_id" => cap.issuer_id,
+      "issuer_signature" => encode_optional_binary(cap.issuer_signature),
+      "delegation_chain" => serialize_delegation_chain(cap.delegation_chain),
+      "metadata" => cap.metadata
+    }
+  end
+
+  defp deserialize_capability(data) when is_map(data) do
+    cap = %Capability{
+      id: data["id"],
+      resource_uri: data["resource_uri"],
+      principal_id: data["principal_id"],
+      granted_at: parse_datetime(data["granted_at"]),
+      expires_at: parse_optional_datetime(data["expires_at"]),
+      parent_capability_id: data["parent_capability_id"],
+      delegation_depth: data["delegation_depth"] || 3,
+      constraints: deserialize_constraints(data["constraints"] || %{}),
+      signature: decode_optional_binary(data["signature"]),
+      issuer_id: data["issuer_id"],
+      issuer_signature: decode_optional_binary(data["issuer_signature"]),
+      delegation_chain: deserialize_delegation_chain(data["delegation_chain"] || []),
+      metadata: data["metadata"] || %{}
+    }
+
+    {:ok, cap}
+  rescue
+    e -> {:error, e}
+  end
+
+  # Constraints may have atom keys — serialize to string keys
+  defp serialize_constraints(constraints) when is_map(constraints) do
+    Map.new(constraints, fn {k, v} -> {to_string(k), v} end)
+  end
+
+  # Constraints come back with string keys — keep as-is (atom keys would need SafeAtom)
+  defp deserialize_constraints(constraints) when is_map(constraints), do: constraints
+
+  # Delegation chain entries may contain binary signatures
+  defp serialize_delegation_chain(chain) when is_list(chain) do
+    Enum.map(chain, fn record ->
+      record
+      |> Enum.map(fn {k, v} -> {to_string(k), serialize_chain_value(v)} end)
+      |> Map.new()
+    end)
+  end
+
+  defp serialize_delegation_chain(_), do: []
+
+  defp serialize_chain_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp serialize_chain_value(v) when is_atom(v), do: Atom.to_string(v)
+
+  defp serialize_chain_value(v) when is_binary(v) do
+    if String.valid?(v), do: v, else: Base.encode16(v, case: :lower)
+  end
+
+  defp serialize_chain_value(v), do: v
+
+  # Delegation chain records come back with string keys
+  defp deserialize_delegation_chain(chain) when is_list(chain), do: chain
+  defp deserialize_delegation_chain(_), do: []
+
+  defp encode_optional_binary(nil), do: nil
+  defp encode_optional_binary(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)
+
+  defp decode_optional_binary(nil), do: nil
+  defp decode_optional_binary(""), do: nil
+
+  defp decode_optional_binary(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :mixed) do
+      {:ok, bin} -> bin
+      :error -> nil
+    end
+  end
+
+  defp encode_optional_datetime(nil), do: nil
+  defp encode_optional_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp parse_datetime(nil), do: DateTime.utc_now()
+
+  defp parse_datetime(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _offset} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp parse_optional_datetime(nil), do: nil
+
+  defp parse_optional_datetime(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
     end
   end
 end

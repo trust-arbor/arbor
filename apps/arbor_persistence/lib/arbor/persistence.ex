@@ -24,7 +24,9 @@ defmodule Arbor.Persistence do
 
   @behaviour Arbor.Contracts.API.Persistence
 
-  alias Arbor.Persistence.{Event, Filter, Record}
+  alias Arbor.Contracts.Persistence.Filter
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.Event
 
   # ---------------------------------------------------------------
   # Authorized API (for agent callers)

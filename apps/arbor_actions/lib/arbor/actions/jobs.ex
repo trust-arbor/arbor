@@ -21,7 +21,9 @@ defmodule Arbor.Actions.Jobs do
   """
 
   alias Arbor.Actions
-  alias Arbor.Persistence.{Event, Filter, Record}
+  alias Arbor.Contracts.Persistence.Filter
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.Event
 
   @namespace :jobs
   @event_stream_prefix "jobs"
