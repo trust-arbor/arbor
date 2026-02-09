@@ -44,9 +44,11 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "sets environment variables" do
+      # Use printenv instead of echo $VAR — spawn_executable bypasses shell
+      # expansion, so $TEST_VAR would be passed as a literal string.
       assert {:ok, result} =
                Shell.Execute.run(
-                 %{command: "echo $TEST_VAR", env: %{"TEST_VAR" => "test_value"}},
+                 %{command: "printenv TEST_VAR", env: %{"TEST_VAR" => "test_value"}},
                  %{}
                )
 

@@ -111,28 +111,33 @@ defmodule Arbor.Consensus.Evaluator.Deterministic do
   end
 
   defp run_command(proposal, perspective, evaluator_id, project_path, opts) do
-    command = build_command(perspective, proposal, opts)
-    timeout = Keyword.get(opts, :timeout, Config.deterministic_evaluator_timeout())
-    sandbox = Keyword.get(opts, :sandbox, Config.deterministic_evaluator_sandbox())
-    env = get_env(proposal, perspective, opts)
-
-    shell_opts = [
-      timeout: timeout,
-      sandbox: sandbox,
-      cwd: project_path,
-      env: env
-    ]
-
-    Logger.debug(
-      "Deterministic evaluator running: #{command} in #{project_path} (timeout: #{timeout}ms)"
-    )
-
-    case Arbor.Shell.execute(command, shell_opts) do
-      {:ok, result} ->
-        build_evaluation_from_result(proposal, perspective, evaluator_id, result, command)
-
+    case build_command(perspective, proposal, opts) do
       {:error, reason} ->
-        build_error_evaluation(proposal, perspective, evaluator_id, reason, command)
+        build_error_evaluation(proposal, perspective, evaluator_id, reason, "build_command")
+
+      {:ok, command} ->
+        timeout = Keyword.get(opts, :timeout, Config.deterministic_evaluator_timeout())
+        sandbox = Keyword.get(opts, :sandbox, Config.deterministic_evaluator_sandbox())
+        env = get_env(proposal, perspective, opts)
+
+        shell_opts = [
+          timeout: timeout,
+          sandbox: sandbox,
+          cwd: project_path,
+          env: env
+        ]
+
+        Logger.debug(
+          "Deterministic evaluator running: #{command} in #{project_path} (timeout: #{timeout}ms)"
+        )
+
+        case Arbor.Shell.execute(command, shell_opts) do
+          {:ok, result} ->
+            build_evaluation_from_result(proposal, perspective, evaluator_id, result, command)
+
+          {:error, reason} ->
+            build_error_evaluation(proposal, perspective, evaluator_id, reason, command)
+        end
     end
   end
 
@@ -145,33 +150,32 @@ defmodule Arbor.Consensus.Evaluator.Deterministic do
 
     case sanitize_test_paths(test_paths) do
       {:ok, []} ->
-        "mix test"
+        {:ok, "mix test"}
 
       {:ok, safe_paths} ->
         escaped = Enum.map(safe_paths, &ShellEscape.escape_arg!/1)
-        "mix test #{Enum.join(escaped, " ")}"
+        {:ok, "mix test #{Enum.join(escaped, " ")}"}
 
       {:error, invalid_path} ->
-        # Return a command that will fail safely with a clear message
         Logger.warning("Invalid test path rejected: #{inspect(invalid_path)}")
-        "echo 'Invalid test path in proposal' && exit 1"
+        {:error, {:invalid_test_path, invalid_path}}
     end
   end
 
   defp build_command(:mix_credo, _proposal, _opts) do
-    "mix credo --strict"
+    {:ok, "mix credo --strict"}
   end
 
   defp build_command(:mix_compile, _proposal, _opts) do
-    "mix compile --warnings-as-errors"
+    {:ok, "mix compile --warnings-as-errors"}
   end
 
   defp build_command(:mix_format_check, _proposal, _opts) do
-    "mix format --check-formatted"
+    {:ok, "mix format --check-formatted"}
   end
 
   defp build_command(:mix_dialyzer, _proposal, _opts) do
-    "mix dialyzer"
+    {:ok, "mix dialyzer"}
   end
 
   # ============================================================================
