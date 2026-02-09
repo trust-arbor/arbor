@@ -176,6 +176,7 @@ defmodule Arbor.Agent.Profile do
   defp maybe_hex_encode(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)
 
   defp maybe_hex_decode(nil), do: nil
+
   defp maybe_hex_decode(str) when is_binary(str) do
     case Base.decode16(str, case: :mixed) do
       {:ok, bin} -> bin
