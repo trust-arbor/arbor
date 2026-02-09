@@ -62,6 +62,52 @@ defmodule Arbor.Shell.Executor do
   end
 
   @doc """
+  Execute a command with pre-parsed executable and arguments.
+
+  Unlike `run/2`, this skips shell string parsing — the executable name
+  and args are passed directly to Port.open. Use this when you already
+  have structured {cmd, args} and want to avoid the parse round-trip.
+
+  ## Options
+
+  Same as `run/2`:
+  - `:timeout` - Timeout in milliseconds (default: 30_000)
+  - `:cwd` - Working directory
+  - `:env` - Environment variables map
+  - `:stdin` - Input to send to the process
+  """
+  @spec run_direct(String.t(), [String.t()], keyword()) :: {:ok, result()} | {:error, term()}
+  def run_direct(cmd, args, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    cwd = Keyword.get(opts, :cwd)
+    env = Keyword.get(opts, :env, %{})
+    stdin = Keyword.get(opts, :stdin)
+
+    start_time = System.monotonic_time(:millisecond)
+
+    with :ok <- validate_cwd(cwd),
+         {:ok, executable} <- Sandbox.resolve_executable(cmd) do
+      port_opts = build_port_opts(executable, args, cwd, env)
+
+      try do
+        port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
+
+        if stdin do
+          Port.command(port, stdin)
+        end
+
+        collect_output(port, timeout, start_time)
+      catch
+        :error, reason ->
+          {:error, reason}
+      end
+    else
+      {:error, :executable_not_found} -> {:error, {:executable_not_found, cmd}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Kill a port/process by port reference.
   """
   @spec kill_port(port()) :: :ok | {:error, term()}
