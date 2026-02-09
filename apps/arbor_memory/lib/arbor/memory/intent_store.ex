@@ -27,6 +27,7 @@ defmodule Arbor.Memory.IntentStore do
 
   alias Arbor.Contracts.Memory.Intent
   alias Arbor.Contracts.Memory.Percept
+  alias Arbor.Memory.DurableStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -145,6 +146,7 @@ defmodule Arbor.Memory.IntentStore do
   @spec clear(String.t()) :: :ok
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
+    DurableStore.delete("intents", agent_id)
     :ok
   end
 
@@ -156,6 +158,7 @@ defmodule Arbor.Memory.IntentStore do
   def init(opts) do
     ensure_ets_table()
     buffer_size = Keyword.get(opts, :buffer_size, @default_buffer_size)
+    load_from_postgres(buffer_size)
     {:ok, %{buffer_size: buffer_size}}
   end
 
@@ -167,6 +170,10 @@ defmodule Arbor.Memory.IntentStore do
 
     updated = Map.put(data, :intents, intents)
     :ets.insert(@ets_table, {agent_id, updated})
+    persist_agent_data_async(agent_id, updated)
+
+    DurableStore.embed_async("intents", agent_id, intent_to_text(intent),
+      agent_id: agent_id, type: :intent)
 
     Signals.emit_intent_formed(agent_id, intent)
     Logger.debug("Intent recorded for #{agent_id}: #{intent.id} (#{intent.type})")
@@ -182,6 +189,7 @@ defmodule Arbor.Memory.IntentStore do
 
     updated = Map.put(data, :percepts, percepts)
     :ets.insert(@ets_table, {agent_id, updated})
+    persist_agent_data_async(agent_id, updated)
 
     Signals.emit_percept_received(agent_id, percept)
     Logger.debug("Percept recorded for #{agent_id}: #{percept.id} (#{percept.outcome})")
@@ -217,5 +225,132 @@ defmodule Arbor.Memory.IntentStore do
 
   defp maybe_filter_since(items, since) do
     Enum.filter(items, &(DateTime.compare(&1.created_at, since) in [:gt, :eq]))
+  end
+
+  # ============================================================================
+  # Persistence Helpers
+  # ============================================================================
+
+  defp persist_agent_data_async(agent_id, data) do
+    serialized = serialize_agent_data(data)
+    DurableStore.persist_async("intents", agent_id, serialized)
+  end
+
+  defp serialize_agent_data(data) do
+    %{
+      "intents" => Enum.map(Map.get(data, :intents, []), &serialize_intent/1),
+      "percepts" => Enum.map(Map.get(data, :percepts, []), &serialize_percept/1)
+    }
+  end
+
+  defp serialize_intent(%Intent{} = intent) do
+    %{
+      "id" => intent.id,
+      "type" => to_string(intent.type),
+      "action" => if(intent.action, do: to_string(intent.action)),
+      "params" => intent.params,
+      "reasoning" => intent.reasoning,
+      "goal_id" => intent.goal_id,
+      "confidence" => intent.confidence,
+      "urgency" => intent.urgency,
+      "created_at" => DateTime.to_iso8601(intent.created_at),
+      "metadata" => intent.metadata
+    }
+  end
+
+  defp serialize_percept(%Percept{} = percept) do
+    %{
+      "id" => percept.id,
+      "type" => to_string(percept.type),
+      "intent_id" => percept.intent_id,
+      "outcome" => to_string(percept.outcome),
+      "data" => percept.data,
+      "error" => if(percept.error, do: inspect(percept.error)),
+      "duration_ms" => percept.duration_ms,
+      "created_at" => DateTime.to_iso8601(percept.created_at),
+      "metadata" => percept.metadata
+    }
+  end
+
+  defp deserialize_agent_data(data) when is_map(data) do
+    %{
+      intents: Enum.map(data["intents"] || [], &deserialize_intent/1),
+      percepts: Enum.map(data["percepts"] || [], &deserialize_percept/1)
+    }
+  end
+
+  defp deserialize_intent(map) do
+    %Intent{
+      id: map["id"],
+      type: safe_atom(map["type"]) || :act,
+      action: safe_atom(map["action"]),
+      params: map["params"] || %{},
+      reasoning: map["reasoning"],
+      goal_id: map["goal_id"],
+      confidence: map["confidence"] || 0.5,
+      urgency: map["urgency"] || 50,
+      created_at: parse_datetime(map["created_at"]),
+      metadata: map["metadata"] || %{}
+    }
+  end
+
+  defp deserialize_percept(map) do
+    %Percept{
+      id: map["id"],
+      type: safe_atom(map["type"]) || :action_result,
+      intent_id: map["intent_id"],
+      outcome: safe_atom(map["outcome"]) || :unknown,
+      data: map["data"] || %{},
+      error: map["error"],
+      duration_ms: map["duration_ms"],
+      created_at: parse_datetime(map["created_at"]),
+      metadata: map["metadata"] || %{}
+    }
+  end
+
+  defp safe_atom(nil), do: nil
+  defp safe_atom(val) when is_atom(val), do: val
+  defp safe_atom(val) when is_binary(val) do
+    String.to_existing_atom(val)
+  rescue
+    ArgumentError -> val
+  end
+
+  defp parse_datetime(nil), do: DateTime.utc_now()
+  defp parse_datetime(%DateTime{} = dt), do: dt
+  defp parse_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp intent_to_text(%Intent{} = intent) do
+    "Intent: #{intent.type} #{intent.action} #{inspect(intent.params)}"
+  end
+
+  defp load_from_postgres(buffer_size) do
+    if DurableStore.available?() do
+      case DurableStore.load_all("intents") do
+        {:ok, pairs} ->
+          Enum.each(pairs, fn {agent_id, data} ->
+            agent_data = deserialize_agent_data(data)
+            # Respect buffer size limits
+            trimmed = %{
+              intents: Enum.take(agent_data.intents, buffer_size),
+              percepts: Enum.take(agent_data.percepts, buffer_size)
+            }
+            :ets.insert(@ets_table, {agent_id, trimmed})
+          end)
+
+          Logger.info("IntentStore: loaded #{length(pairs)} agent records from Postgres")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("IntentStore: failed to load from Postgres: #{inspect(e)}")
   end
 end

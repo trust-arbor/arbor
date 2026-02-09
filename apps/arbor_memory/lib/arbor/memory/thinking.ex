@@ -24,6 +24,7 @@ defmodule Arbor.Memory.Thinking do
 
   use GenServer
 
+  alias Arbor.Memory.DurableStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -127,6 +128,7 @@ defmodule Arbor.Memory.Thinking do
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
     :ets.delete(@ets_table, {:stream, agent_id})
+    DurableStore.delete("thinking", agent_id)
     :ok
   end
 
@@ -138,6 +140,7 @@ defmodule Arbor.Memory.Thinking do
   def init(opts) do
     ensure_ets_table()
     buffer_size = Keyword.get(opts, :buffer_size, @default_buffer_size)
+    load_from_postgres(buffer_size)
     {:ok, %{buffer_size: buffer_size}}
   end
 
@@ -148,6 +151,10 @@ defmodule Arbor.Memory.Thinking do
     entries = [entry | get_agent_entries(agent_id)]
     entries = Enum.take(entries, state.buffer_size)
     :ets.insert(@ets_table, {agent_id, entries})
+    persist_entries_async(agent_id, entries)
+
+    DurableStore.embed_async("thinking", "#{agent_id}:#{entry.id}", text,
+      agent_id: agent_id, type: :thought)
 
     Signals.emit_thinking_recorded(agent_id, text)
     Logger.debug("Thinking recorded for #{agent_id}: #{String.slice(text, 0, 50)}...")
@@ -178,6 +185,10 @@ defmodule Arbor.Memory.Thinking do
         entries = [entry | get_agent_entries(agent_id)]
         entries = Enum.take(entries, state.buffer_size)
         :ets.insert(@ets_table, {agent_id, entries})
+        persist_entries_async(agent_id, entries)
+
+        DurableStore.embed_async("thinking", "#{agent_id}:#{entry.id}", full_text,
+          agent_id: agent_id, type: :thought)
 
         Signals.emit_thinking_recorded(agent_id, full_text)
         {:reply, {:ok, entry}, state}
@@ -234,6 +245,70 @@ defmodule Arbor.Memory.Thinking do
 
   defp maybe_filter_since(entries, since) do
     Enum.filter(entries, &(DateTime.compare(&1.created_at, since) in [:gt, :eq]))
+  end
+
+  # ============================================================================
+  # Persistence Helpers
+  # ============================================================================
+
+  defp persist_entries_async(agent_id, entries) do
+    serialized = %{"entries" => Enum.map(entries, &serialize_entry/1)}
+    DurableStore.persist_async("thinking", agent_id, serialized)
+  end
+
+  defp serialize_entry(entry) do
+    %{
+      "id" => entry.id,
+      "agent_id" => entry.agent_id,
+      "text" => entry.text,
+      "significant" => entry.significant,
+      "created_at" => DateTime.to_iso8601(entry.created_at),
+      "metadata" => entry.metadata
+    }
+  end
+
+  defp deserialize_entry(map) do
+    %{
+      id: map["id"],
+      agent_id: map["agent_id"],
+      text: map["text"],
+      significant: map["significant"] || false,
+      created_at: parse_dt(map["created_at"]),
+      metadata: map["metadata"] || %{}
+    }
+  end
+
+  defp parse_dt(nil), do: DateTime.utc_now()
+  defp parse_dt(%DateTime{} = dt), do: dt
+  defp parse_dt(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp load_from_postgres(buffer_size) do
+    if DurableStore.available?() do
+      case DurableStore.load_all("thinking") do
+        {:ok, pairs} ->
+          Enum.each(pairs, fn {agent_id, data} ->
+            entries =
+              (data["entries"] || [])
+              |> Enum.map(&deserialize_entry/1)
+              |> Enum.take(buffer_size)
+
+            if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
+          end)
+
+          Logger.info("Thinking: loaded #{length(pairs)} agent records from Postgres")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("Thinking: failed to load from Postgres: #{inspect(e)}")
   end
 
   # ============================================================================

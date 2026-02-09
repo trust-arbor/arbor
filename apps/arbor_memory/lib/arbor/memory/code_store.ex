@@ -27,6 +27,8 @@ defmodule Arbor.Memory.CodeStore do
 
   use GenServer
 
+  alias Arbor.Memory.DurableStore
+
   require Logger
 
   @ets_table :arbor_memory_code_store
@@ -93,6 +95,11 @@ defmodule Arbor.Memory.CodeStore do
 
     entries = get_agent_entries(agent_id)
     :ets.insert(@ets_table, {agent_id, [entry | entries]})
+
+    persist_entry_async(agent_id, entry)
+    DurableStore.embed_async("code_patterns", "#{agent_id}:#{entry.id}",
+      "#{purpose} (#{language}): #{String.slice(code, 0, 200)}",
+      agent_id: agent_id, type: :code_pattern)
 
     Logger.debug("Code pattern stored for #{agent_id}: #{String.slice(purpose, 0, 50)}")
     {:ok, entry}
@@ -174,6 +181,7 @@ defmodule Arbor.Memory.CodeStore do
       |> Enum.reject(&(&1.id == entry_id))
 
     :ets.insert(@ets_table, {agent_id, entries})
+    DurableStore.delete("code_patterns", "#{agent_id}:#{entry_id}")
     :ok
   end
 
@@ -183,6 +191,7 @@ defmodule Arbor.Memory.CodeStore do
   @spec clear(String.t()) :: :ok
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
+    DurableStore.delete_by_prefix("code_patterns", agent_id)
     :ok
   end
 
@@ -193,6 +202,7 @@ defmodule Arbor.Memory.CodeStore do
   @impl true
   def init(_opts) do
     ensure_ets_table()
+    load_from_postgres()
     {:ok, %{}}
   end
 
@@ -217,5 +227,70 @@ defmodule Arbor.Memory.CodeStore do
 
   defp generate_id do
     "code_" <> Base.encode32(:crypto.strong_rand_bytes(8), case: :lower, padding: false)
+  end
+
+  # ============================================================================
+  # Persistence Helpers
+  # ============================================================================
+
+  defp persist_entry_async(agent_id, entry) do
+    serialized = %{
+      "id" => entry.id,
+      "agent_id" => entry.agent_id,
+      "code" => entry.code,
+      "language" => entry.language,
+      "purpose" => entry.purpose,
+      "created_at" => DateTime.to_iso8601(entry.created_at),
+      "metadata" => entry.metadata
+    }
+
+    DurableStore.persist_async("code_patterns", "#{agent_id}:#{entry.id}", serialized)
+  end
+
+  defp deserialize_entry(map) do
+    %{
+      id: map["id"],
+      agent_id: map["agent_id"],
+      code: map["code"],
+      language: map["language"],
+      purpose: map["purpose"],
+      created_at: parse_dt(map["created_at"]),
+      metadata: map["metadata"] || %{}
+    }
+  end
+
+  defp parse_dt(nil), do: DateTime.utc_now()
+  defp parse_dt(%DateTime{} = dt), do: dt
+  defp parse_dt(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp load_from_postgres do
+    if DurableStore.available?() do
+      case DurableStore.load_all("code_patterns") do
+        {:ok, pairs} ->
+          # Group by agent_id (keys are "agent_id:entry_id")
+          grouped =
+            Enum.group_by(pairs, fn {key, _data} ->
+              key |> String.split(":", parts: 2) |> List.first()
+            end)
+
+          Enum.each(grouped, fn {agent_id, agent_pairs} ->
+            entries = Enum.map(agent_pairs, fn {_key, data} -> deserialize_entry(data) end)
+            if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
+          end)
+
+          Logger.info("CodeStore: loaded #{length(pairs)} entries from Postgres")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("CodeStore: failed to load from Postgres: #{inspect(e)}")
   end
 end
