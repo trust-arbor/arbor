@@ -364,22 +364,38 @@ defmodule Arbor.Agent.APIAgent do
 
     case execute_query(enhanced_prompt, state, opts) do
       {:ok, response, new_state} ->
-        # Seed: finalize query (index, update WM, consolidate, context window)
-        new_state =
-          if index do
-            finalize_query(prompt, response[:text] || "", new_state)
-          else
-            new_state
-          end
+        text = response[:text] || ""
+        tool_calls = response[:tool_calls] || []
 
-        enhanced_response =
-          response
-          |> Map.put(:recalled_memories, recalled)
-          |> Map.put(:session_id, nil)
+        if text == "" and tool_calls == [] do
+          # Empty response with no tool calls — likely a rate limit or API error
+          # that was swallowed by the provider. Surface as error rather than
+          # returning an empty message to the user.
+          Logger.warning("Empty response from API (no text, no tool calls)",
+            agent_id: state.id,
+            model: state.model,
+            provider: state.provider
+          )
 
-        new_state = %{new_state | recalled_memories: recalled}
+          {:reply, {:error, :empty_response}, state}
+        else
+          # Seed: finalize query (index, update WM, consolidate, context window)
+          new_state =
+            if index do
+              finalize_query(prompt, text, new_state)
+            else
+              new_state
+            end
 
-        {:reply, {:ok, enhanced_response}, new_state}
+          enhanced_response =
+            response
+            |> Map.put(:recalled_memories, recalled)
+            |> Map.put(:session_id, nil)
+
+          new_state = %{new_state | recalled_memories: recalled}
+
+          {:reply, {:ok, enhanced_response}, new_state}
+        end
 
       {:error, _} = error ->
         {:reply, error, state}
