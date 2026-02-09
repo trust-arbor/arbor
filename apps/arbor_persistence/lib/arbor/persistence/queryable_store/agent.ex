@@ -9,20 +9,20 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
       ]
   """
 
-  @behaviour Arbor.Persistence.QueryableStore
+  @behaviour Arbor.Contracts.Persistence.Store
 
   alias Arbor.Contracts.Persistence.Filter
 
   # --- Client API ---
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def put(key, record, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.put(&1, key, record))
     :ok
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
 
@@ -32,26 +32,26 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
     end
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.delete(&1, key))
     :ok
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
     {:ok, Agent.get(name, &Map.keys/1)}
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.get(name, &Map.has_key?(&1, key))
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def query(%Filter{} = filter, opts) do
     name = Keyword.fetch!(opts, :name)
 
@@ -62,13 +62,13 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
     {:ok, records}
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def count(%Filter{} = filter, opts) do
     {:ok, records} = query(filter, opts)
     {:ok, length(records)}
   end
 
-  @impl Arbor.Persistence.QueryableStore
+  @impl true
   def aggregate(%Filter{} = filter, field, operation, opts)
       when operation in [:sum, :avg, :min, :max] do
     {:ok, records} = query(filter, opts)

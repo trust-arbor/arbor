@@ -76,7 +76,7 @@ config :arbor_persistence, :backup,
 
 # Signal store checkpoint integration
 # Uses runtime configuration to avoid compile-time dependency cycle.
-# The checkpoint_store must implement Arbor.Checkpoint.Store behaviour.
+# The checkpoint_store must implement Arbor.Contracts.Persistence.Store behaviour.
 config :arbor_signals,
   checkpoint_module: Arbor.Checkpoint,
   checkpoint_store: Arbor.Checkpoint.Store.ETS,

@@ -9,18 +9,18 @@ defmodule Arbor.Persistence.Store.Agent do
       ]
   """
 
-  @behaviour Arbor.Persistence.Store
+  @behaviour Arbor.Contracts.Persistence.Store
 
   # --- Client API (Store behaviour) ---
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def put(key, value, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.put(&1, key, value))
     :ok
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def get(key, opts) do
     name = Keyword.fetch!(opts, :name)
 
@@ -30,20 +30,20 @@ defmodule Arbor.Persistence.Store.Agent do
     end
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.update(name, &Map.delete(&1, key))
     :ok
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
     {:ok, Agent.get(name, &Map.keys/1)}
   end
 
-  @impl Arbor.Persistence.Store
+  @impl true
   def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     Agent.get(name, &Map.has_key?(&1, key))

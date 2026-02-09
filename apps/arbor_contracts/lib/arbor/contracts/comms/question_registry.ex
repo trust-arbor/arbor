@@ -8,7 +8,7 @@ defmodule Arbor.Contracts.Comms.QuestionRegistry do
 
   ## Persistence
 
-  Implementations should use `Arbor.Persistence.QueryableStore`
+  Implementations should use `Arbor.Contracts.Persistence.Store`
   for backing storage, making the persistence layer pluggable
   (ETS for dev, Postgres for production).
 
