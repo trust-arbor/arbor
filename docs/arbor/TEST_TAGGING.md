@@ -25,7 +25,7 @@ Tests are categorized along three dimensions:
 | Tag | When to use |
 |-----|-------------|
 | `:database` | Requires PostgreSQL or other database |
-| `:external` | Calls external HTTP APIs (non-LLM) |
+| `:external` | Requires external services or tools (HTTP APIs, CLI binaries like Claude) |
 | `:llm` | Makes LLM API calls (paid, rate-limited) |
 
 ## Common Patterns
