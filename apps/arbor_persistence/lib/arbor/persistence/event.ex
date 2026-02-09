@@ -21,6 +21,7 @@ defmodule Arbor.Persistence.Event do
     field :type, String.t(), enforce: true
     field :data, map(), default: %{}
     field :metadata, map(), default: %{}
+    field :agent_id, String.t()
     field :causation_id, String.t()
     field :correlation_id, String.t()
     field :timestamp, DateTime.t()
@@ -40,6 +41,7 @@ defmodule Arbor.Persistence.Event do
       type: type,
       data: data,
       metadata: Keyword.get(opts, :metadata, %{}),
+      agent_id: Keyword.get(opts, :agent_id),
       causation_id: Keyword.get(opts, :causation_id),
       correlation_id: Keyword.get(opts, :correlation_id),
       timestamp: Keyword.get(opts, :timestamp, DateTime.utc_now())

@@ -21,11 +21,11 @@ defmodule Arbor.Security.CapabilityStore do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
 
   @cleanup_interval_ms 60_000
-  @collection "capabilities"
 
   # Client API
 
@@ -117,8 +117,7 @@ defmodule Arbor.Security.CapabilityStore do
   # Server callbacks
 
   @impl true
-  def init(opts) do
-    backend = Keyword.get(opts, :storage_backend, storage_backend())
+  def init(_opts) do
     schedule_cleanup()
 
     state = %{
@@ -126,7 +125,6 @@ defmodule Arbor.Security.CapabilityStore do
       by_principal: %{},
       by_issuer: %{},
       by_parent: %{},
-      storage_backend: backend,
       stats: %{
         total_granted: 0,
         total_revoked: 0,
@@ -135,7 +133,7 @@ defmodule Arbor.Security.CapabilityStore do
       }
     }
 
-    {:ok, restore_all(state)}
+    {:ok, restore_from_store(state)}
   end
 
   @impl true
@@ -153,7 +151,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> index_by_parent(cap)
           |> update_in([:stats, :total_granted], &(&1 + 1))
 
-        persist_capability(state, cap)
+        persist_capability(cap)
         {:reply, {:ok, :stored}, state}
 
       {:error, _} = error ->
@@ -222,7 +220,7 @@ defmodule Arbor.Security.CapabilityStore do
           end)
           |> update_in([:stats, :total_revoked], &(&1 + 1))
 
-        delete_persisted_capability(state, capability_id)
+        delete_persisted_capability(capability_id)
         {:reply, :ok, state}
     end
   end
@@ -232,7 +230,7 @@ defmodule Arbor.Security.CapabilityStore do
     cap_ids = Map.get(state.by_principal, principal_id, [])
     count = length(cap_ids)
 
-    Enum.each(cap_ids, &delete_persisted_capability(state, &1))
+    Enum.each(cap_ids, &delete_persisted_capability/1)
 
     state =
       state
@@ -271,7 +269,7 @@ defmodule Arbor.Security.CapabilityStore do
         all_ids = collect_cascade_ids(state, [capability_id], [])
         count = length(all_ids)
 
-        Enum.each(all_ids, &delete_persisted_capability(state, &1))
+        Enum.each(all_ids, &delete_persisted_capability/1)
 
         state =
           state
@@ -370,7 +368,7 @@ defmodule Arbor.Security.CapabilityStore do
     if expired_ids == [] do
       state
     else
-      Enum.each(expired_ids, &delete_persisted_capability(state, &1))
+      Enum.each(expired_ids, &delete_persisted_capability/1)
 
       state
       |> remove_expired_capabilities(expired_ids)
@@ -501,61 +499,62 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   # ===========================================================================
-  # Pluggable Persistence
+  # Persistence via BufferedStore
   # ===========================================================================
 
-  defp storage_backend do
-    Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+  @cap_store :arbor_security_capabilities
+
+  defp persist_capability(cap) do
+    if Process.whereis(@cap_store) do
+      data = serialize_capability(cap)
+      record = Record.new(cap.id, data)
+      BufferedStore.put(cap.id, record, name: @cap_store)
+    end
+
+    :ok
+  catch
+    _, reason ->
+      Logger.warning("Failed to persist capability #{cap.id}: #{inspect(reason)}")
+      :ok
   end
 
-  defp persist_capability(%{storage_backend: nil}, _cap), do: :ok
-
-  defp persist_capability(%{storage_backend: backend}, cap) do
-    data = serialize_capability(cap)
-    record = Record.new(cap.id, data)
-
-    case backend.put(cap.id, record, name: @collection) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to persist capability #{cap.id}: #{inspect(reason)}")
-        :ok
+  defp delete_persisted_capability(cap_id) do
+    if Process.whereis(@cap_store) do
+      BufferedStore.delete(cap_id, name: @cap_store)
     end
+
+    :ok
+  catch
+    _, reason ->
+      Logger.warning("Failed to delete persisted capability #{cap_id}: #{inspect(reason)}")
+      :ok
   end
 
-  defp delete_persisted_capability(%{storage_backend: nil}, _cap_id), do: :ok
+  defp restore_from_store(state) do
+    if Process.whereis(@cap_store) do
+      case BufferedStore.list(name: @cap_store) do
+        {:ok, keys} ->
+          Enum.reduce(keys, state, fn key, acc ->
+            case BufferedStore.get(key, name: @cap_store) do
+              {:ok, %Record{data: data}} ->
+                restore_capability(acc, data)
 
-  defp delete_persisted_capability(%{storage_backend: backend}, cap_id) do
-    case backend.delete(cap_id, name: @collection) do
-      :ok ->
-        :ok
+              {:error, reason} ->
+                Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
+                acc
+            end
+          end)
 
-      {:error, reason} ->
-        Logger.warning("Failed to delete persisted capability #{cap_id}: #{inspect(reason)}")
-        :ok
+        {:error, _reason} ->
+          state
+      end
+    else
+      state
     end
-  end
-
-  defp restore_all(%{storage_backend: nil} = state), do: state
-
-  defp restore_all(%{storage_backend: backend} = state) do
-    case backend.list(name: @collection) do
-      {:ok, keys} ->
-        Enum.reduce(keys, state, fn key, acc ->
-          case backend.get(key, name: @collection) do
-            {:ok, %Record{data: data}} ->
-              restore_capability(acc, data)
-
-            {:error, reason} ->
-              Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
-              acc
-          end
-        end)
-
-      {:error, _reason} ->
-        state
-    end
+  catch
+    _, reason ->
+      Logger.warning("Failed to restore capabilities: #{inspect(reason)}")
+      state
   end
 
   defp restore_capability(state, data) do

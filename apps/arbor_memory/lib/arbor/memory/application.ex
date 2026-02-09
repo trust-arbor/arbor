@@ -19,6 +19,10 @@ defmodule Arbor.Memory.Application do
         ensure_ets(@proposals_ets)
 
         [
+          {Arbor.Persistence.BufferedStore,
+           name: :arbor_memory_durable,
+           backend: Application.get_env(:arbor_memory, :persistence_backend),
+           write_mode: :async},
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
           {Arbor.Memory.IndexSupervisor, []},
           {Arbor.Persistence.EventLog.ETS, name: :memory_events},

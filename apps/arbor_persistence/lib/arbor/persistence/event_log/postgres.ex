@@ -150,19 +150,22 @@ defmodule Arbor.Persistence.EventLog.Postgres do
   - `:repo` - Ecto Repo to use (default: `Arbor.Persistence.Repo`)
   - `:from` - Start from this global_position (inclusive, default: 0)
   - `:limit` - Maximum events to return
+  - `:agent_id` - Filter by agent_id (optional)
   """
   @impl true
   def read_all(opts \\ []) do
     repo = Keyword.get(opts, :repo, Repo)
-    from = Keyword.get(opts, :from, 0)
+    from_pos = Keyword.get(opts, :from, 0)
     limit = Keyword.get(opts, :limit)
+    agent_id = Keyword.get(opts, :agent_id)
 
     query =
       from(e in EventSchema,
-        where: e.global_position >= ^from,
+        where: e.global_position >= ^from_pos,
         order_by: [asc: e.global_position]
       )
 
+    query = if agent_id, do: where(query, [e], e.agent_id == ^agent_id), else: query
     query = if limit, do: limit(query, ^limit), else: query
 
     events =
@@ -173,6 +176,43 @@ defmodule Arbor.Persistence.EventLog.Postgres do
   rescue
     e ->
       Logger.error("Failed to read all events: #{inspect(e)}")
+      {:error, {:read_failed, e}}
+  end
+
+  @doc """
+  Read events for a specific agent across all streams.
+
+  ## Options
+
+  - `:repo` - Ecto Repo to use (default: `Arbor.Persistence.Repo`)
+  - `:from` - Start from this global_position (inclusive, default: 0)
+  - `:limit` - Maximum events to return
+  - `:type` - Filter by event type (optional)
+  """
+  @impl true
+  def read_agent_events(agent_id, opts \\ []) do
+    repo = Keyword.get(opts, :repo, Repo)
+    from_pos = Keyword.get(opts, :from, 0)
+    limit = Keyword.get(opts, :limit)
+    type = Keyword.get(opts, :type)
+
+    query =
+      from(e in EventSchema,
+        where: e.agent_id == ^agent_id and e.global_position >= ^from_pos,
+        order_by: [asc: e.global_position]
+      )
+
+    query = if type, do: where(query, [e], e.type == ^type), else: query
+    query = if limit, do: limit(query, ^limit), else: query
+
+    events =
+      repo.all(query)
+      |> Enum.map(&EventSchema.to_event/1)
+
+    {:ok, events}
+  rescue
+    e ->
+      Logger.error("Failed to read agent events for #{agent_id}: #{inspect(e)}")
       {:error, {:read_failed, e}}
   end
 

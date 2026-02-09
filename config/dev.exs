@@ -29,6 +29,10 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   check_origin: false,
   server: true
 
+# Memory — Postgres backend for durable memory persistence
+config :arbor_memory,
+  persistence_backend: Arbor.Persistence.QueryableStore.Postgres
+
 # Actions — use Postgres backends for durable job tracking
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,

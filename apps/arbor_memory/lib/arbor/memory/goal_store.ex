@@ -23,6 +23,7 @@ defmodule Arbor.Memory.GoalStore do
   use GenServer
 
   alias Arbor.Contracts.Memory.Goal
+  alias Arbor.Memory.DurableStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -56,6 +57,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec add_goal(String.t(), Goal.t()) :: {:ok, Goal.t()}
   def add_goal(agent_id, %Goal{} = goal) do
     :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+    persist_goal_async(agent_id, goal)
 
     Signals.emit_goal_created(agent_id, goal)
     Logger.debug("Goal added for #{agent_id}: #{goal.id} - #{goal.description}")
@@ -93,6 +95,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} ->
         updated = Goal.update_progress(goal, progress)
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
 
         Signals.emit_goal_progress(agent_id, goal_id, progress)
         {:ok, updated}
@@ -114,6 +117,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} ->
         updated = Goal.achieve(goal)
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
 
         Signals.emit_goal_achieved(agent_id, goal_id)
         {:ok, updated}
@@ -135,6 +139,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} ->
         updated = Goal.abandon(goal, reason)
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
 
         Signals.emit_goal_abandoned(agent_id, goal_id, reason)
         {:ok, updated}
@@ -157,6 +162,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} ->
         updated = Goal.fail(goal, reason)
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
 
         Signals.emit_goal_abandoned(agent_id, goal_id, reason || "failed")
         {:ok, updated}
@@ -178,6 +184,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} ->
         updated = Goal.add_note(goal, note)
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
         {:ok, updated}
 
       error ->
@@ -202,6 +209,7 @@ defmodule Arbor.Memory.GoalStore do
         updated_metadata = Map.put(goal.metadata || %{}, :blockers, blockers || [])
         updated = %{goal | status: :blocked, metadata: updated_metadata}
         :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
 
         Signals.emit_goal_abandoned(agent_id, goal_id, "blocked")
         {:ok, updated}
@@ -257,6 +265,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec delete_goal(String.t(), String.t()) :: :ok
   def delete_goal(agent_id, goal_id) do
     :ets.delete(@ets_table, {agent_id, goal_id})
+    DurableStore.delete("goals", "#{agent_id}:#{goal_id}")
     :ok
   end
 
@@ -267,6 +276,7 @@ defmodule Arbor.Memory.GoalStore do
   def clear_goals(agent_id) do
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
     :ets.select_delete(@ets_table, match_spec)
+    DurableStore.delete_by_prefix("goals", agent_id)
     :ok
   end
 
@@ -363,6 +373,7 @@ defmodule Arbor.Memory.GoalStore do
   @impl true
   def init(_opts) do
     ensure_ets_table()
+    load_goals_from_postgres()
     {:ok, %{}}
   end
 
@@ -376,6 +387,46 @@ defmodule Arbor.Memory.GoalStore do
     end
   rescue
     ArgumentError -> :ok
+  end
+
+  defp persist_goal_async(agent_id, %Goal{} = goal) do
+    key = "#{agent_id}:#{goal.id}"
+
+    goal_map =
+      goal
+      |> Map.from_struct()
+      |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
+      |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
+      |> Map.update(:deadline, nil, &maybe_to_iso8601/1)
+
+    DurableStore.persist_async("goals", key, goal_map)
+    DurableStore.embed_async("goals", key, goal.description, agent_id: agent_id, type: :goal)
+  end
+
+  defp load_goals_from_postgres do
+    if DurableStore.available?() do
+      case DurableStore.load_all("goals") do
+        {:ok, pairs} ->
+          Enum.each(pairs, fn {key, goal_map} ->
+            case String.split(key, ":", parts: 2) do
+              [agent_id, _goal_id] ->
+                goal = goal_from_map(goal_map)
+                :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+
+              _ ->
+                Logger.warning("GoalStore: invalid key format from Postgres: #{key}")
+            end
+          end)
+
+          Logger.info("GoalStore: loaded #{length(pairs)} goals from Postgres")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("GoalStore: failed to load from Postgres: #{inspect(e)}")
   end
 
   defp build_tree(goal, all_goals) do

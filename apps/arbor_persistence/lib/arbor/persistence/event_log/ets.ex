@@ -82,6 +82,12 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, :event_count)
   end
 
+  @impl Arbor.Persistence.EventLog
+  def read_agent_events(agent_id, opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, {:read_agent_events, agent_id, opts})
+  end
+
   # --- GenServer ---
 
   def start_link(opts) do
@@ -178,6 +184,21 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   def handle_call(:event_count, _from, state) do
     {:reply, {:ok, state.global_position}, state}
+  end
+
+  def handle_call({:read_agent_events, agent_id, opts}, _from, state) do
+    limit = Keyword.get(opts, :limit)
+    type = Keyword.get(opts, :type)
+
+    events =
+      do_read_all(state.global_table, 0, nil)
+      |> Enum.filter(fn event ->
+        event.agent_id == agent_id and
+          (type == nil or event.type == type)
+      end)
+
+    events = if limit, do: Enum.take(events, limit), else: events
+    {:reply, {:ok, events}, state}
   end
 
   @impl GenServer
