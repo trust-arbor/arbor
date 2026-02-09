@@ -995,16 +995,43 @@ defmodule Arbor.Agent.AgentSeed do
   # ============================================================================
 
   defp determine_cognitive_mode(state) do
+    heartbeat_count = state[:heartbeat_count] || 0
+
     cond do
+      # User waiting — always conversation mode
       user_waiting?(state) ->
         :conversation
 
+      # Maintenance floor: every 5th cycle, consolidate regardless (council: stability)
+      rem(heartbeat_count, 5) == 0 and heartbeat_count > 0 ->
+        :consolidation
+
+      # Goal pursuit when active goals exist (council: adaptive goal-first)
+      has_active_goals?(state) ->
+        :goal_pursuit
+
+      # No goals — reflect or consolidate
       idle_reflection_enabled?() and :rand.uniform() < idle_reflection_chance() ->
         Enum.random([:introspection, :reflection, :pattern_analysis, :insight_detection])
 
       true ->
         :consolidation
     end
+  end
+
+  defp has_active_goals?(state) do
+    agent_id = state[:id] || state[:agent_id]
+
+    goals =
+      try do
+        Arbor.Memory.get_active_goals(agent_id)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    is_list(goals) and goals != []
   end
 
   defp user_waiting?(state) do
