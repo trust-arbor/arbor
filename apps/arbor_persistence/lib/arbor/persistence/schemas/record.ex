@@ -12,7 +12,7 @@ defmodule Arbor.Persistence.Schemas.Record do
 
   import Ecto.Changeset
 
-  alias Arbor.Persistence.Record
+  alias Arbor.Contracts.Persistence.Record
 
   @primary_key {:id, :string, autogenerate: false}
   @timestamps_opts [type: :utc_datetime_usec]
