@@ -1,19 +1,30 @@
 defmodule Arbor.Security.Identity.Registry do
   @moduledoc """
-  In-memory registry for agent identities.
+  Registry for agent identities with pluggable persistence.
 
   Stores public keys indexed by agent ID for fast lookup during signature
   verification. Private keys are never stored — only the public portion
   of an identity is retained.
 
-  Follows the same GenServer pattern as `CapabilityStore`.
+  Identity entries are persisted via a configurable storage backend
+  (implementing `Arbor.Contracts.Persistence.Store`) and restored on startup.
+
+  ## Configuration
+
+      config :arbor_security, :storage_backend, Arbor.Security.Store.JSONFile
+
+  Set to `nil` to disable persistence (in-memory only).
   """
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
+
+  @collection "identities"
 
   # Client API
 
@@ -181,14 +192,18 @@ defmodule Arbor.Security.Identity.Registry do
   # Server callbacks
 
   @impl true
-  def init(_opts) do
-    {:ok,
-     %{
-       by_agent_id: %{},
-       by_public_key_hash: %{},
-       by_name: %{},
-       stats: %{total_registered: 0, total_deregistered: 0}
-     }}
+  def init(opts) do
+    backend = Keyword.get(opts, :storage_backend, storage_backend())
+
+    state = %{
+      by_agent_id: %{},
+      by_public_key_hash: %{},
+      by_name: %{},
+      stats: %{total_registered: 0, total_deregistered: 0},
+      storage_backend: backend
+    }
+
+    {:ok, restore_all(state)}
   end
 
   @impl true
@@ -225,6 +240,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> index_by_name(identity.name, identity.agent_id)
           |> update_in([:stats, :total_registered], &(&1 + 1))
 
+        persist(state, identity.agent_id, entry)
         {:reply, :ok, state}
     end
   end
@@ -233,17 +249,10 @@ defmodule Arbor.Security.Identity.Registry do
   def handle_call({:lookup, agent_id}, _from, state) do
     result =
       case Map.get(state.by_agent_id, agent_id) do
-        nil ->
-          {:error, :not_found}
-
-        %{status: :suspended} ->
-          {:error, :identity_suspended}
-
-        %{status: :revoked} ->
-          {:error, :identity_revoked}
-
-        %{public_key: pk} ->
-          {:ok, pk}
+        nil -> {:error, :not_found}
+        %{status: :suspended} -> {:error, :identity_suspended}
+        %{status: :revoked} -> {:error, :identity_revoked}
+        %{public_key: pk} -> {:ok, pk}
       end
 
     {:reply, result, state}
@@ -253,20 +262,11 @@ defmodule Arbor.Security.Identity.Registry do
   def handle_call({:lookup_encryption_key, agent_id}, _from, state) do
     result =
       case Map.get(state.by_agent_id, agent_id) do
-        nil ->
-          {:error, :not_found}
-
-        %{status: :suspended} ->
-          {:error, :identity_suspended}
-
-        %{status: :revoked} ->
-          {:error, :identity_revoked}
-
-        %{encryption_public_key: nil} ->
-          {:error, :no_encryption_key}
-
-        %{encryption_public_key: key} ->
-          {:ok, key}
+        nil -> {:error, :not_found}
+        %{status: :suspended} -> {:error, :identity_suspended}
+        %{status: :revoked} -> {:error, :identity_revoked}
+        %{encryption_public_key: nil} -> {:error, :no_encryption_key}
+        %{encryption_public_key: key} -> {:ok, key}
       end
 
     {:reply, result, state}
@@ -293,6 +293,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> deindex_by_name(name, agent_id)
           |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
+        delete_persisted(state, agent_id)
         {:reply, :ok, state}
     end
   end
@@ -339,6 +340,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        persist(state, agent_id, updated_entry)
         {:reply, :ok, state}
     end
   end
@@ -361,6 +363,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        persist(state, agent_id, updated_entry)
         {:reply, :ok, state}
     end
   end
@@ -380,6 +383,7 @@ defmodule Arbor.Security.Identity.Registry do
         }
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        persist(state, agent_id, updated_entry)
 
         # Revoke all capabilities for this agent
         {:ok, revoked_count} = CapabilityStore.revoke_all(agent_id)
@@ -394,15 +398,16 @@ defmodule Arbor.Security.Identity.Registry do
       case Map.get(state.by_agent_id, agent_id) do
         nil -> {:error, :not_found}
         %{status: status} -> {:ok, status}
-        # L7: Old entries without status field default to :unknown (not :active)
-        # to avoid granting active status to legacy unverified entries
+        # Old entries without status field default to :unknown
         _entry -> {:ok, :unknown}
       end
 
     {:reply, result, state}
   end
 
+  # ===========================================================================
   # Private helpers
+  # ===========================================================================
 
   defp index_by_name(state, nil, _agent_id), do: state
 
@@ -420,5 +425,150 @@ defmodule Arbor.Security.Identity.Registry do
       nil -> nil
       ids -> List.delete(ids, agent_id)
     end)
+  end
+
+  # ===========================================================================
+  # Pluggable Persistence
+  # ===========================================================================
+
+  defp storage_backend do
+    Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+  end
+
+  defp persist(%{storage_backend: nil}, _agent_id, _entry), do: :ok
+
+  defp persist(%{storage_backend: backend}, agent_id, entry) do
+    data = serialize_entry(agent_id, entry)
+    key = "#{@collection}:#{agent_id}"
+
+    case backend.put(key, data, []) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist identity #{agent_id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp delete_persisted(%{storage_backend: nil}, _agent_id), do: :ok
+
+  defp delete_persisted(%{storage_backend: backend}, agent_id) do
+    key = "#{@collection}:#{agent_id}"
+
+    case backend.delete(key, []) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to delete persisted identity #{agent_id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp restore_all(%{storage_backend: nil} = state), do: state
+
+  defp restore_all(%{storage_backend: backend} = state) do
+    case backend.list(namespace: @collection) do
+      {:ok, keys} ->
+        Enum.reduce(keys, state, fn key, acc ->
+          case backend.get(key, []) do
+            {:ok, data} ->
+              restore_entry(acc, data)
+
+            {:error, reason} ->
+              Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
+              acc
+          end
+        end)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp restore_entry(state, data) do
+    case deserialize_entry(data) do
+      {:ok, agent_id, entry} ->
+        pk_hash = Crypto.hash(entry.public_key)
+
+        state
+        |> put_in([:by_agent_id, agent_id], entry)
+        |> put_in([:by_public_key_hash, pk_hash], agent_id)
+        |> index_by_name(entry.name, agent_id)
+        |> update_in([:stats, :total_registered], &(&1 + 1))
+
+      {:error, reason} ->
+        Logger.warning("Failed to deserialize identity: #{inspect(reason)}")
+        state
+    end
+  rescue
+    e ->
+      Logger.warning("Failed to restore identity entry: #{inspect(e)}")
+      state
+  end
+
+  # ===========================================================================
+  # Serialization (binary keys ↔ hex strings for JSON)
+  # ===========================================================================
+
+  defp serialize_entry(agent_id, entry) do
+    %{
+      "agent_id" => agent_id,
+      "public_key" => Base.encode16(entry.public_key, case: :lower),
+      "encryption_public_key" => encode_optional_key(entry.encryption_public_key),
+      "name" => entry.name,
+      "key_version" => entry.key_version,
+      "created_at" => DateTime.to_iso8601(entry.created_at),
+      "metadata" => entry.metadata,
+      "status" => Atom.to_string(entry.status),
+      "status_changed_at" => encode_optional_datetime(entry.status_changed_at),
+      "status_reason" => entry.status_reason
+    }
+  end
+
+  defp deserialize_entry(data) when is_map(data) do
+    entry = %{
+      public_key: Base.decode16!(data["public_key"], case: :mixed),
+      encryption_public_key: decode_optional_key(data["encryption_public_key"]),
+      name: data["name"],
+      key_version: data["key_version"] || 1,
+      created_at: parse_datetime(data["created_at"]),
+      metadata: data["metadata"] || %{},
+      status: String.to_existing_atom(data["status"] || "active"),
+      status_changed_at: parse_optional_datetime(data["status_changed_at"]),
+      status_reason: data["status_reason"]
+    }
+
+    {:ok, data["agent_id"], entry}
+  rescue
+    e -> {:error, e}
+  end
+
+  defp encode_optional_key(nil), do: nil
+  defp encode_optional_key(key) when is_binary(key), do: Base.encode16(key, case: :lower)
+
+  defp decode_optional_key(nil), do: nil
+  defp decode_optional_key(hex) when is_binary(hex), do: Base.decode16!(hex, case: :mixed)
+
+  defp encode_optional_datetime(nil), do: nil
+  defp encode_optional_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp parse_datetime(nil), do: DateTime.utc_now()
+
+  defp parse_datetime(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _offset} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp parse_optional_datetime(nil), do: nil
+
+  defp parse_optional_datetime(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
   end
 end

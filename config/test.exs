@@ -13,6 +13,8 @@ config :arbor_trust, start_children: false
 
 config :arbor_security,
   start_children: false,
+  # Disable file persistence in tests — everything in-memory only
+  storage_backend: nil,
   # Tests that bypass Security.grant/1 create unsigned capabilities.
   # Only the grant facade signs via SystemAuthority — direct CapabilityStore.put
   # stores unsigned caps. Require signing in prod, not in tests.

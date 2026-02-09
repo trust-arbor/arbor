@@ -33,7 +33,9 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
   import Ecto.Query
 
-  alias Arbor.Persistence.{Filter, Record, Repo}
+  alias Arbor.Contracts.Persistence.Filter
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Record, as: RecordSchema
 
   require Logger
