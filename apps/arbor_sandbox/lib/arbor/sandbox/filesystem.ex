@@ -63,11 +63,16 @@ defmodule Arbor.Sandbox.Filesystem do
     # Remove leading slash if present
     clean_path = String.trim_leading(relative_path, "/")
 
-    # H8: Use SafePath for symlink-safe resolution within sandbox boundary
-    case SafePath.resolve_within(clean_path, fs.base_path) do
-      {:ok, resolved} -> {:ok, resolved}
-      {:error, :path_traversal} -> {:error, :path_traversal_blocked}
-      {:error, reason} -> {:error, reason}
+    # "/" trimmed to "" means root of sandbox — resolve to base_path directly
+    if clean_path == "" do
+      {:ok, fs.base_path}
+    else
+      # H8: Use SafePath for symlink-safe resolution within sandbox boundary
+      case SafePath.resolve_within(clean_path, fs.base_path) do
+        {:ok, resolved} -> {:ok, resolved}
+        {:error, :path_traversal} -> {:error, :path_traversal_blocked}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 

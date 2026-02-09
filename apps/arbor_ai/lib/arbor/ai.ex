@@ -74,11 +74,8 @@ defmodule Arbor.AI do
     UsageStats
   }
 
-  alias Arbor.Memory.GoalStore
-  alias Arbor.Memory.IdentityConsolidator
-  alias Arbor.Memory.KnowledgeGraph
-  alias Arbor.Memory.SelfKnowledge
-  alias Arbor.Memory.WorkingMemory
+  # Note: Arbor.Memory.* and Arbor.Actions are higher in the hierarchy than arbor_ai (Standalone).
+  # All calls use Code.ensure_loaded?/apply to avoid compile-time dependency.
 
   alias Jido.AI.Actions.ToolCalling.CallWithTools
   alias Jido.AI.Executor
@@ -255,7 +252,11 @@ defmodule Arbor.AI do
     model_struct = build_model_spec(provider, model)
 
     # Build jido_ai tools map from Arbor.Actions
-    action_modules = Keyword.get(opts, :tools, Arbor.Actions.all_actions())
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    default_tools =
+      if Code.ensure_loaded?(Arbor.Actions), do: apply(Arbor.Actions, :all_actions, []), else: []
+
+    action_modules = Keyword.get(opts, :tools, default_tools)
     tools_map = Executor.build_tools_map(action_modules)
 
     # Auto-build rich system prompt if none provided and agent_id is available
@@ -350,11 +351,12 @@ defmodule Arbor.AI do
   end
 
   defp build_self_knowledge_section(agent_id) do
-    if Code.ensure_loaded?(IdentityConsolidator) and
-         function_exported?(IdentityConsolidator, :get_self_knowledge, 1) do
-      agent_id
-      |> IdentityConsolidator.get_self_knowledge()
-      |> format_self_knowledge()
+    mod = Arbor.Memory.IdentityConsolidator
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :get_self_knowledge, 1) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      sk = apply(mod, :get_self_knowledge, [agent_id])
+      format_self_knowledge(sk)
     end
   rescue
     _ -> nil
@@ -365,16 +367,19 @@ defmodule Arbor.AI do
   defp format_self_knowledge(nil), do: nil
 
   defp format_self_knowledge(sk) do
-    summary = SelfKnowledge.summarize(sk)
+    mod = Arbor.Memory.SelfKnowledge
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    summary = if Code.ensure_loaded?(mod), do: apply(mod, :summarize, [sk])
     if summary not in ["", nil], do: "## Self-Awareness\n#{summary}"
   end
 
   defp build_goals_section(agent_id) do
-    if Code.ensure_loaded?(GoalStore) and
-         function_exported?(GoalStore, :get_active_goals, 1) do
-      agent_id
-      |> GoalStore.get_active_goals()
-      |> format_goals()
+    mod = Arbor.Memory.GoalStore
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :get_active_goals, 1) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      goals = apply(mod, :get_active_goals, [agent_id])
+      format_goals(goals)
     end
   rescue
     _ -> nil
@@ -401,9 +406,9 @@ defmodule Arbor.AI do
   defp build_working_memory_section(agent_id) do
     if Code.ensure_loaded?(Arbor.Memory) and
          function_exported?(Arbor.Memory, :get_working_memory, 1) do
-      agent_id
-      |> Arbor.Memory.get_working_memory()
-      |> format_working_memory()
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      wm = apply(Arbor.Memory, :get_working_memory, [agent_id])
+      format_working_memory(wm)
     end
   rescue
     _ -> nil
@@ -415,7 +420,9 @@ defmodule Arbor.AI do
 
   defp format_working_memory(wm) do
     filtered_wm = filter_heartbeat_entries(wm)
-    text = WorkingMemory.to_prompt_text(filtered_wm)
+    mod = Arbor.Memory.WorkingMemory
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    text = if Code.ensure_loaded?(mod), do: apply(mod, :to_prompt_text, [filtered_wm])
     if text not in ["", nil], do: "## Working Memory\n#{text}"
   end
 
@@ -460,7 +467,12 @@ defmodule Arbor.AI do
   defp format_knowledge_graph(nil), do: nil
 
   defp format_knowledge_graph(graph) do
-    case KnowledgeGraph.to_prompt_text(graph, max_nodes: 20) do
+    mod = Arbor.Memory.KnowledgeGraph
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    text = if Code.ensure_loaded?(mod), do: apply(mod, :to_prompt_text, [graph, [max_nodes: 20]])
+
+    case text do
+      nil -> nil
       "" -> nil
       text -> "## Knowledge\n#{text}"
     end

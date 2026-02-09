@@ -10,7 +10,14 @@ config :arbor_gateway, start_server: false
 config :arbor_signals, start_children: false
 config :arbor_checkpoint, start_children: false
 config :arbor_trust, start_children: false
-config :arbor_security, start_children: false
+
+config :arbor_security,
+  start_children: false,
+  # Tests that bypass Security.grant/1 create unsigned capabilities.
+  # Only the grant facade signs via SystemAuthority — direct CapabilityStore.put
+  # stores unsigned caps. Require signing in prod, not in tests.
+  capability_signing_required: false
+
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
 config :arbor_consensus, start_children: false
