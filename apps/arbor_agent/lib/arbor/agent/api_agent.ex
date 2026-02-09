@@ -156,8 +156,8 @@ defmodule Arbor.Agent.APIAgent do
       max_tokens: config.max_tokens,
       temperature: config.temperature,
       max_turns: config.max_turns,
-      # Heartbeat model (separate from query model)
-      heartbeat_model: Keyword.get(opts, :heartbeat_model, Keyword.get(opts, :model)),
+      # Heartbeat model (separate from query model — defaults to trinity for JSON compliance)
+      heartbeat_model: Keyword.get(opts, :heartbeat_model),
       heartbeat_provider:
         Keyword.get(opts, :heartbeat_provider, Keyword.get(opts, :provider, :openrouter))
     }

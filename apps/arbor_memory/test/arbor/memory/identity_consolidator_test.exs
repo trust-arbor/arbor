@@ -1,7 +1,7 @@
 defmodule Arbor.Memory.IdentityConsolidatorTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{IdentityConsolidator, KnowledgeGraph, SelfKnowledge}
+  alias Arbor.Memory.{IdentityConsolidator, KnowledgeGraph, Proposal, SelfKnowledge}
 
   @moduletag :fast
 
@@ -11,7 +11,8 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
           :arbor_identity_rate_limits,
           :arbor_self_knowledge,
           :arbor_memory_graphs,
-          :arbor_consolidation_state
+          :arbor_consolidation_state,
+          :arbor_memory_proposals
         ] do
       if :ets.whereis(table) == :undefined do
         try do
@@ -30,7 +31,8 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
             :arbor_identity_rate_limits,
             :arbor_self_knowledge,
             :arbor_memory_graphs,
-            :arbor_consolidation_state
+            :arbor_consolidation_state,
+            :arbor_memory_proposals
           ] do
         if :ets.whereis(table) != :undefined do
           try do
@@ -490,10 +492,10 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
         {:ok, sk, result} ->
           assert %SelfKnowledge{} = sk
           assert is_map(result)
-          assert Map.has_key?(result, :promoted_count)
+          assert Map.has_key?(result, :proposals_created)
           assert Map.has_key?(result, :deferred_count)
           assert Map.has_key?(result, :blocked_count)
-          assert Map.has_key?(result, :changes_made)
+          assert Map.has_key?(result, :proposed_changes)
           assert Map.has_key?(result, :consolidation_number)
 
         {:ok, :no_changes} ->
@@ -517,7 +519,7 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
       case IdentityConsolidator.consolidate(agent_id) do
         {:ok, _sk, result} ->
-          if result.promoted_count > 0 do
+          if result.proposals_created > 0 do
             {:ok, updated_graph} = get_stored_graph(agent_id)
             {:ok, promoted_node} = KnowledgeGraph.get_node(updated_graph, node.id)
             assert promoted_node.metadata[:promoted_at] != nil
@@ -570,7 +572,7 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
       case IdentityConsolidator.consolidate(agent_id) do
         {:ok, _sk, result} ->
-          assert result.promoted_count == 0
+          assert result.proposals_created == 0
           assert result.blocked_count >= 1
 
         {:ok, :no_changes} ->
@@ -616,7 +618,7 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       case IdentityConsolidator.consolidate(agent_id) do
         {:ok, _sk, result} ->
           # One promoted (old, high confidence), one deferred (too young)
-          assert result.promoted_count + result.deferred_count >= 1
+          assert result.proposals_created + result.deferred_count >= 1
 
         {:ok, :no_changes} ->
           :ok
@@ -679,8 +681,18 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       store_graph(agent_id, graph)
 
       case IdentityConsolidator.consolidate(agent_id) do
-        {:ok, sk, result} ->
-          if result.promoted_count > 0 do
+        {:ok, _sk, result} ->
+          if result.proposals_created > 0 do
+            # Changes now go through proposals — verify proposals were created
+            {:ok, proposals} = Proposal.list_pending(agent_id)
+            identity_proposals = Enum.filter(proposals, &(&1.type == :identity))
+            assert identity_proposals != []
+
+            # Accept and verify the change applies
+            proposal = hd(identity_proposals)
+            Proposal.accept(agent_id, proposal.id)
+            IdentityConsolidator.apply_accepted_change(agent_id, proposal.metadata)
+            sk = IdentityConsolidator.get_self_knowledge(agent_id)
             traits = Enum.map(sk.personality_traits, & &1.trait)
             assert :curious in traits
           end
@@ -690,7 +702,7 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       end
     end
 
-    test "capability insight adds capability to SelfKnowledge", %{agent_id: agent_id} do
+    test "capability insight creates proposal for SelfKnowledge", %{agent_id: agent_id} do
       graph = setup_graph_with_insight(agent_id, %{
         content: "Agent shows evidence based reasoning capabilities",
         confidence: 0.85,
@@ -703,17 +715,20 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       store_graph(agent_id, graph)
 
       case IdentityConsolidator.consolidate(agent_id) do
-        {:ok, sk, _result} ->
-          caps = Enum.map(sk.capabilities, & &1.name)
-          # Should have extracted "evidence_based_reasoning" from content
-          assert "evidence_based_reasoning" in caps or caps != []
+        {:ok, _sk, result} ->
+          # Changes go through proposals, not direct modification
+          if result.proposals_created > 0 do
+            {:ok, proposals} = Proposal.list_pending(agent_id)
+            identity_proposals = Enum.filter(proposals, &(&1.type == :identity))
+            assert identity_proposals != []
+          end
 
         {:ok, :no_changes} ->
           :ok
       end
     end
 
-    test "value insight adds value to SelfKnowledge", %{agent_id: agent_id} do
+    test "value insight creates proposal for SelfKnowledge", %{agent_id: agent_id} do
       graph = setup_graph_with_insight(agent_id, %{
         content: "Agent values learning and growth mindset",
         confidence: 0.85,
@@ -726,9 +741,12 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       store_graph(agent_id, graph)
 
       case IdentityConsolidator.consolidate(agent_id) do
-        {:ok, sk, _result} ->
-          values = Enum.map(sk.values, & &1.value)
-          assert :learning in values or :growth in values or values != []
+        {:ok, _sk, result} ->
+          if result.proposals_created > 0 do
+            {:ok, proposals} = Proposal.list_pending(agent_id)
+            identity_proposals = Enum.filter(proposals, &(&1.type == :identity))
+            assert identity_proposals != []
+          end
 
         {:ok, :no_changes} ->
           :ok

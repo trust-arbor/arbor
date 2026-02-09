@@ -30,8 +30,8 @@ defmodule Arbor.Agent.HeartbeatLLM do
     prompt = HeartbeatPrompt.build_prompt(state)
     system = HeartbeatPrompt.system_prompt(state)
 
-    model = Keyword.get(opts, :model, heartbeat_model())
-    provider = Keyword.get(opts, :provider, heartbeat_provider())
+    model = Keyword.get(opts, :model) || heartbeat_model()
+    provider = Keyword.get(opts, :provider) || heartbeat_provider()
 
     ai_opts = [
       model: model,
