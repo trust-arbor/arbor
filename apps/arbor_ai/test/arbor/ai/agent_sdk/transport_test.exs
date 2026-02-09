@@ -176,6 +176,58 @@ defmodule Arbor.AI.AgentSDK.TransportTest do
     end
   end
 
+  describe "init-phase result events" do
+    @init_result_script Path.expand("../../../support/mock_claude_init_result.sh", __DIR__)
+
+    setup do
+      # CLI that outputs a result event during init (before any query),
+      # simulating leftover session data. Then responds normally to queries.
+      script = """
+      #!/bin/bash
+      # Output system init event
+      echo '{"type":"system","subtype":"init","apiKey":"test"}'
+      # Output a stale result event from previous session (the bug trigger)
+      echo '{"type":"result","usage":{"input_tokens":5,"output_tokens":3},"session_id":"old-session"}'
+
+      # Read stdin lines and respond
+      while IFS= read -r line; do
+        if echo "$line" | grep -q "user_input"; then
+          echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Fresh response"}],"model":"claude-test"}}'
+          echo '{"type":"result","usage":{"input_tokens":10,"output_tokens":5},"session_id":"new-session"}'
+        fi
+      done
+      """
+
+      File.write!(@init_result_script, script)
+      File.chmod!(@init_result_script, 0o755)
+
+      on_exit(fn -> File.rm(@init_result_script) end)
+      :ok
+    end
+
+    test "init-phase result does not consume query slot" do
+      {:ok, transport} =
+        Transport.start_link(
+          cli_path: @init_result_script,
+          receiver: self()
+        )
+
+      assert_receive {:transport_ready}, 2_000
+
+      # Should NOT receive a claude_message from the init result
+      refute_receive {:claude_message, _, %{"type" => "result"}}, 500
+
+      # Now send a real query
+      {:ok, ref} = Transport.send_query(transport, "hello")
+
+      # Should receive the query's response, not the init result
+      assert_receive {:claude_message, ^ref, %{"type" => "assistant"}}, 5_000
+      assert_receive {:claude_message, ^ref, %{"type" => "result", "session_id" => "new-session"}}, 5_000
+
+      Transport.close(transport)
+    end
+  end
+
   describe "CLI not found" do
     test "returns error when no CLI available" do
       result =
