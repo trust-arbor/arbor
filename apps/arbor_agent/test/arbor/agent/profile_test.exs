@@ -102,14 +102,15 @@ defmodule Arbor.Agent.ProfileTest do
       profile = %Profile{
         agent_id: "scout-1",
         character: @character,
-        identity: %{agent_id: "agent_abc123", private_key: "SECRET"},
+        identity: %{agent_id: "agent_abc123", public_key: "deadbeef", private_key: "SECRET"},
         created_at: DateTime.utc_now()
       }
 
       serialized = Profile.serialize(profile)
-      # Only the identity_ref (agent_id) is included, not the full identity map
-      assert serialized["identity_ref"] == "agent_abc123"
-      refute Map.has_key?(serialized, "identity")
+      # Full identity map is included with public data, but private_key is excluded
+      assert serialized["identity"]["agent_id"] == "agent_abc123"
+      assert serialized["identity"]["public_key"] == "deadbeef"
+      refute get_in(serialized, ["identity", "private_key"])
     end
   end
 
