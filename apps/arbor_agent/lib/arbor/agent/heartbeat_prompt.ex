@@ -34,10 +34,12 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       cognitive_section(mode),
       self_knowledge_section(state),
       conversation_section(state),
-      goals_section(state),
+      goals_section(state, mode),
+      tools_section(),
       proposals_section(state),
       percepts_section(state),
       pending_section(state),
+      directive_section(mode, state),
       response_format_section()
     ]
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
@@ -70,8 +72,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       ]
     }
 
-    If you have nothing to do, return empty arrays for actions, memory_notes, goal_updates, and proposal_decisions.
-    Always include your thinking.
+    Always include your thinking. Use actions to interact with the world.
+    Use goal_updates to report progress on active goals (include goal_id and new progress 0.0-1.0).
 
     When pending proposals are shown, review them and decide whether to accept (integrate into
     your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
@@ -91,19 +93,38 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     if prompt == "", do: nil, else: prompt
   end
 
-  defp goals_section(state) do
+  defp goals_section(state, mode) do
     agent_id = state[:id] || state[:agent_id]
     goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
 
     if goals == [] do
-      "## Active Goals\nNo active goals."
+      "## Active Goals\nNo active goals. Consider suggesting goals or reflecting on your situation."
     else
       goal_lines =
         goals
         |> Enum.take(5)
         |> Enum.map_join("\n", fn goal ->
           progress_pct = round((goal.progress || 0) * 100)
-          "- [#{progress_pct}%] #{goal.description} (priority: #{goal.priority})"
+
+          base =
+            "- [#{progress_pct}%] #{goal.description} (id: #{goal.id}, priority: #{goal.priority})"
+
+          # In goal_pursuit mode, show richer context
+          if mode == :goal_pursuit do
+            extras =
+              [
+                if(goal.success_criteria, do: "  Success: #{goal.success_criteria}"),
+                if(goal.notes != [] and goal.notes != nil,
+                  do: "  Notes: #{Enum.join(goal.notes, "; ")}"
+                )
+              ]
+              |> Enum.reject(&is_nil/1)
+              |> Enum.join("\n")
+
+            if extras == "", do: base, else: base <> "\n" <> extras
+          else
+            base
+          end
         end)
 
       "## Active Goals\n#{goal_lines}"
@@ -183,6 +204,49 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       nil
     else
       "## Pending Messages\n#{length(pending)} message(s) waiting to be processed."
+    end
+  end
+
+  defp tools_section do
+    """
+    ## Available Actions
+    You can take these actions via the "actions" array in your response:
+    - `shell_execute` — Run a shell command. Params: {"command": "..."}
+    - `file_read` — Read a file. Params: {"path": "..."}
+    - `file_write` — Write to a file. Params: {"path": "...", "content": "..."}
+    - `ai_analyze` — Ask an AI to analyze something. Params: {"prompt": "..."}
+    - `memory_consolidate` — Trigger memory consolidation
+    - `memory_index` — Index new information into memory
+    - `think` — Extended internal reasoning (no external effect)
+    - `reflect` — Deeper reflection on a topic (no external effect)
+    """
+  end
+
+  defp directive_section(:goal_pursuit, _state) do
+    """
+    ## Your Turn
+    You have active goals. Focus on making concrete progress toward the highest
+    priority goal. Choose ONE external action that advances a goal, and report
+    your progress via goal_updates. Do not just think — act.
+    """
+  end
+
+  defp directive_section(:conversation, _state), do: nil
+
+  defp directive_section(_mode, state) do
+    # For reflection/consolidation modes, still nudge toward goals if they exist
+    agent_id = state[:id] || state[:agent_id]
+    goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
+
+    if goals != [] do
+      """
+      ## Note
+      You are in a reflection/maintenance cycle, but you have active goals.
+      You may take an action if something urgent stands out, or focus on the
+      current mode's purpose and pursue goals next cycle.
+      """
+    else
+      nil
     end
   end
 

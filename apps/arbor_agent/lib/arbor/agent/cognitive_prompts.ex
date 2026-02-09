@@ -10,6 +10,7 @@ defmodule Arbor.Agent.CognitivePrompts do
 
   @type cognitive_mode ::
           :conversation
+          | :goal_pursuit
           | :introspection
           | :consolidation
           | :pattern_analysis
@@ -21,6 +22,22 @@ defmodule Arbor.Agent.CognitivePrompts do
   """
   @spec prompt_for(cognitive_mode()) :: String.t()
   def prompt_for(:conversation), do: ""
+
+  def prompt_for(:goal_pursuit) do
+    """
+    ## Current Mode: Goal Pursuit
+
+    You have active goals to work on. This is your time to make progress.
+
+    - Review your active goals below and pick the highest priority one
+    - Identify the single most impactful action you can take right now
+    - Use available tools to make concrete progress (read files, run commands, analyze code)
+    - Report progress via goal_updates with the goal_id and new progress value
+    - If blocked on a goal, note what's blocking you and try a different approach
+
+    Be proactive. Take action. Goals don't advance through reflection alone.
+    """
+  end
 
   def prompt_for(:introspection) do
     """
@@ -116,6 +133,7 @@ defmodule Arbor.Agent.CognitivePrompts do
   def modes do
     [
       :conversation,
+      :goal_pursuit,
       :introspection,
       :consolidation,
       :pattern_analysis,
