@@ -28,9 +28,9 @@ defmodule Arbor.Agent.ClaudeTest do
       assert length(caps) >= 5
 
       resources = Enum.map(caps, & &1.resource)
-      assert "arbor://fs/**" in resources
-      assert "arbor://memory/**" in resources
-      assert "arbor://ai/**" in resources
+      assert "arbor://fs/read/**" in resources
+      assert "arbor://memory/read/**" in resources
+      assert "arbor://ai/generate/**" in resources
       assert "arbor://actions/execute/**" in resources
     end
 

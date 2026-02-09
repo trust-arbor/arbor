@@ -166,8 +166,7 @@ defmodule Arbor.Agent.AgentSeed do
         nil
       end
 
-    # Grant capabilities from template (non-fatal)
-    grant_template_capabilities(id)
+    # Note: capabilities are granted by Lifecycle.create — no need to re-grant here
 
     # Initialize context window
     {:ok, context_window} = ContextManager.init_context(id, opts)
@@ -788,38 +787,6 @@ defmodule Arbor.Agent.AgentSeed do
   # Private: Security
   # ============================================================================
 
-  defp grant_template_capabilities(agent_id) do
-    if security_available?() do
-      alias Arbor.Agent.Templates.ClaudeCode
-
-      capabilities = ClaudeCode.required_capabilities()
-
-      Enum.each(capabilities, fn cap ->
-        grant_single_capability(agent_id, cap.resource)
-      end)
-
-      Logger.info("Granted #{length(capabilities)} capabilities", agent_id: agent_id)
-    else
-      Logger.debug("Security system not available, skipping capability grants")
-    end
-  rescue
-    e ->
-      Logger.debug("Capability grant failed: #{Exception.message(e)}")
-  end
-
-  defp grant_single_capability(agent_id, resource) do
-    case Arbor.Security.grant(principal: agent_id, resource: resource) do
-      {:ok, _cap} ->
-        Logger.debug("Granted capability", agent_id: agent_id, resource: resource)
-        :ok
-
-      {:error, reason} ->
-        Logger.debug("Failed to grant capability: #{inspect(reason)}")
-        :error
-    end
-  rescue
-    _ -> :error
-  end
 
   # ============================================================================
   # Private: Executor & Actions
