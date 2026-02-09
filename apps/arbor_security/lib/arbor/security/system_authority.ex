@@ -19,6 +19,7 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.Capability.Signer
+  alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
 
   # Client API
@@ -68,6 +69,28 @@ defmodule Arbor.Security.SystemAuthority do
           :ok | {:error, :invalid_capability_signature}
   def verify_capability_signature(%Capability{} = cap) do
     GenServer.call(__MODULE__, {:verify_capability_signature, cap})
+  end
+
+  @doc """
+  Endorse an agent's identity by signing their public key.
+
+  Returns an endorsement map that proves the system authority authorized
+  this agent to operate in this cluster.
+  """
+  @spec endorse_agent(Identity.t()) :: {:ok, map()}
+  def endorse_agent(%Identity{} = identity) do
+    GenServer.call(__MODULE__, {:endorse_agent, identity})
+  end
+
+  @doc """
+  Verify an agent endorsement signed by the system authority.
+
+  Checks that the endorsement signature is valid for the agent's public key
+  and agent_id, signed by the current system authority.
+  """
+  @spec verify_agent_endorsement(map()) :: :ok | {:error, :invalid_endorsement}
+  def verify_agent_endorsement(endorsement) do
+    GenServer.call(__MODULE__, {:verify_agent_endorsement, endorsement})
   end
 
   # Server callbacks
@@ -120,6 +143,31 @@ defmodule Arbor.Security.SystemAuthority do
         end
       end
 
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:endorse_agent, agent_identity}, _from, %{identity: authority} = state) do
+    payload = agent_identity.public_key <> agent_identity.agent_id
+    signature = Crypto.sign(payload, authority.private_key)
+
+    endorsement = %{
+      agent_id: agent_identity.agent_id,
+      agent_public_key: agent_identity.public_key,
+      authority_id: authority.agent_id,
+      authority_signature: signature,
+      endorsed_at: DateTime.utc_now()
+    }
+
+    {:reply, {:ok, endorsement}, state}
+  end
+
+  @impl true
+  def handle_call({:verify_agent_endorsement, endorsement}, _from, %{identity: authority} = state) do
+    payload = endorsement.agent_public_key <> endorsement.agent_id
+    valid? = Crypto.verify(payload, endorsement.authority_signature, authority.public_key)
+
+    result = if valid?, do: :ok, else: {:error, :invalid_endorsement}
     {:reply, result, state}
   end
 end

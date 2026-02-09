@@ -24,6 +24,7 @@ defmodule Arbor.Agent.Profile do
 
   typedstruct do
     field(:agent_id, String.t(), enforce: true)
+    field(:display_name, String.t(), default: nil)
     field(:character, Character.t(), enforce: true)
     field(:trust_tier, atom(), default: :untrusted)
     field(:template, atom(), default: nil)
@@ -54,6 +55,7 @@ defmodule Arbor.Agent.Profile do
     %{
       "version" => profile.version,
       "agent_id" => profile.agent_id,
+      "display_name" => profile.display_name,
       "trust_tier" => Atom.to_string(profile.trust_tier),
       "template" => if(profile.template, do: Atom.to_string(profile.template)),
       "character" => Character.to_map(profile.character),
@@ -73,6 +75,7 @@ defmodule Arbor.Agent.Profile do
   def deserialize(map) when is_map(map) do
     profile = %__MODULE__{
       agent_id: map["agent_id"],
+      display_name: map["display_name"],
       character: deserialize_character(map),
       trust_tier: safe_to_atom(map["trust_tier"] || "untrusted"),
       template: maybe_to_atom(map["template"]),

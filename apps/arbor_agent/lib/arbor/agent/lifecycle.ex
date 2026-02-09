@@ -8,11 +8,13 @@ defmodule Arbor.Agent.Lifecycle do
 
   ## Examples
 
-      # From template
-      {:ok, profile} = Lifecycle.create("scout-1", template: Arbor.Agent.Templates.Scout)
+      # From template (first arg is display name, not agent_id)
+      {:ok, profile} = Lifecycle.create("Scout", template: Arbor.Agent.Templates.Scout)
+      profile.agent_id  #=> "agent_a4f2..."  (crypto-derived)
+      profile.display_name  #=> "Scout"
 
       # From options (inline character)
-      {:ok, profile} = Lifecycle.create("custom-agent",
+      {:ok, profile} = Lifecycle.create("My Agent",
         character: Character.new(name: "My Agent", values: ["helpfulness"]),
         trust_tier: :probationary,
         initial_goals: [%{type: :achieve, description: "Complete the review"}],
@@ -36,29 +38,35 @@ defmodule Arbor.Agent.Lifecycle do
   @doc """
   Create a new agent from a template or options.
 
+  The first argument is the human-readable display name (e.g., "Claude").
+  The cryptographic identity generates the actual agent_id ("agent_<hex>").
+
   ## Steps
 
   1. Resolve template → character + security opts
-  2. Generate cryptographic identity
+  2. Generate cryptographic identity (derives agent_id from public key)
   3. Register identity (public key only)
-  4. Create keychain
-  5. Grant initial capabilities
-  6. Initialize memory
-  7. Set initial goals
-  8. Build and persist profile
-  9. Emit creation signal
+  4. System authority endorses the identity
+  5. Create keychain
+  6. Grant initial capabilities
+  7. Initialize memory
+  8. Set initial goals
+  9. Build and persist profile
+  10. Emit creation signal
   """
   @spec create(String.t(), keyword()) :: {:ok, Profile.t()} | {:error, term()}
-  def create(agent_id, opts \\ []) do
+  def create(display_name, opts \\ []) do
     with {:ok, character, opts} <- resolve_template(opts),
-         {:ok, identity} <- generate_identity(agent_id),
+         {:ok, identity} <- generate_identity(display_name),
          :ok <- register_identity(identity),
+         {:ok, endorsement} <- endorse_identity(identity),
          keychain <- create_keychain(identity),
+         agent_id = identity.agent_id,
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []) do
       profile =
-        build_profile(agent_id, identity, keychain, character, opts)
+        build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts)
 
       case persist_profile(profile) do
         :ok ->
@@ -219,12 +227,16 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp generate_identity(agent_id) do
-    Arbor.Security.generate_identity(name: agent_id)
+  defp generate_identity(display_name) do
+    Arbor.Security.generate_identity(name: display_name)
   end
 
   defp register_identity(identity) do
     Arbor.Security.register_identity(identity)
+  end
+
+  defp endorse_identity(identity) do
+    Arbor.Security.endorse_agent(identity)
   end
 
   defp create_keychain(identity) do
@@ -267,15 +279,20 @@ defmodule Arbor.Agent.Lifecycle do
     :ok
   end
 
-  defp build_profile(agent_id, identity, keychain, character, opts) do
+  defp build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts) do
     %Profile{
       agent_id: agent_id,
+      display_name: display_name,
       character: character,
       trust_tier: Keyword.get(opts, :trust_tier, :untrusted),
       template: Keyword.get(opts, :template),
       initial_goals: Keyword.get(opts, :initial_goals, []),
       initial_capabilities: Keyword.get(opts, :capabilities, []),
-      identity: %{agent_id: identity.agent_id},
+      identity: %{
+        agent_id: identity.agent_id,
+        public_key: Base.encode16(identity.public_key, case: :lower),
+        endorsement: endorsement
+      },
       keychain_ref: keychain.agent_id,
       metadata: Keyword.get(opts, :metadata, %{}),
       created_at: DateTime.utc_now(),
