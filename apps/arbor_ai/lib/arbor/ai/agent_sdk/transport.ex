@@ -154,7 +154,7 @@ defmodule Arbor.AI.AgentSDK.Transport do
   @impl true
   def handle_call({:send_query, prompt, _opts}, _from, %{status: :ready} = state) do
     ref = make_ref()
-    message = build_stdin_message(prompt)
+    message = build_stdin_message(prompt, state.session_id)
 
     try do
       Port.command(state.port, message)
@@ -325,8 +325,13 @@ defmodule Arbor.AI.AgentSDK.Transport do
   # Stdin Message Construction
   # ============================================================================
 
-  defp build_stdin_message(prompt) do
-    message = %{"type" => "user_input", "content" => prompt}
+  defp build_stdin_message(prompt, session_id) do
+    message = %{
+      "type" => "user",
+      "message" => %{"role" => "user", "content" => prompt},
+      "session_id" => session_id || "default"
+    }
+
     Jason.encode!(message) <> "\n"
   end
 
