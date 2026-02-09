@@ -534,6 +534,16 @@ defmodule Arbor.Security do
   # ===========================================================================
 
   @doc """
+  Endorse an agent's identity by signing their public key with the system authority.
+  """
+  defdelegate endorse_agent(identity), to: SystemAuthority
+
+  @doc """
+  Verify an agent endorsement signed by the system authority.
+  """
+  defdelegate verify_agent_endorsement(endorsement), to: SystemAuthority
+
+  @doc """
   Create a new keychain for an agent (signing + encryption keypairs).
   """
   defdelegate new_keychain(agent_id), to: Keychain, as: :new

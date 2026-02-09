@@ -176,6 +176,7 @@ defmodule Arbor.Agent.Claude do
     # Host-specific state
     host_state = %{
       default_model: Keyword.get(opts, :model, :sonnet),
+      display_name: Keyword.get(opts, :display_name, "Claude"),
       capture_thinking: Keyword.get(opts, :capture_thinking, true),
       last_session_id: nil,
       thinking_cache: [],
