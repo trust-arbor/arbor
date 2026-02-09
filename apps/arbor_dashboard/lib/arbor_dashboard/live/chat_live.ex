@@ -23,7 +23,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {subscription_ids, existing_agent} =
       if connected?(socket) do
         AgentManager.subscribe()
-        {safe_subscribe(), AgentManager.find_agent()}
+        {safe_subscribe(), AgentManager.find_first_agent()}
       else
         {nil, :not_found}
       end
@@ -37,6 +37,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         page_title: "Chat",
         agent: nil,
         agent_id: nil,
+        display_name: nil,
         session_id: nil,
         input: "",
         loading: false,
@@ -106,8 +107,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # Reconnect to existing agent if one is running
     socket =
       case existing_agent do
-        {:ok, pid, metadata} ->
-          reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+        {:ok, agent_id, pid, metadata} ->
+          reconnect_to_agent(socket, agent_id, pid, metadata)
 
         :not_found ->
           socket
@@ -545,7 +546,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     <%!-- Stats bar --%>
     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.4rem 0.75rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; font-size: 0.85em;">
-      <.badge :if={@agent} label={"Agent: #{@agent_id}"} color={:green} />
+      <.badge :if={@agent} label={"Agent: #{@display_name || @agent_id}"} color={:green} />
       <.badge :if={!@agent} label="No Agent" color={:gray} />
       <.badge
         :if={@session_id}
@@ -1418,9 +1419,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Agent already exists — just reconnect to the running instance
   defp reconnect_existing_agent(socket) do
-    case AgentManager.find_agent() do
-      {:ok, pid, metadata} ->
-        reconnect_to_agent(socket, AgentManager.default_agent_id(), pid, metadata)
+    case AgentManager.find_first_agent() do
+      {:ok, agent_id, pid, metadata} ->
+        reconnect_to_agent(socket, agent_id, pid, metadata)
 
       :not_found ->
         assign(socket, error: "Agent reported running but not found")
@@ -1432,6 +1433,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     model_config = metadata[:model_config] || %{}
     backend = metadata[:backend] || model_config[:backend]
+    display_name = metadata[:display_name]
 
     memory_stats = get_memory_stats(pid)
     tokens = ChatState.get_tokens(agent_id)
@@ -1445,6 +1447,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> assign(
       agent: pid,
       agent_id: agent_id,
+      display_name: display_name,
       error: nil,
       memory_stats: memory_stats,
       current_model: model_config,
@@ -1488,6 +1491,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     assign(socket,
       agent: nil,
       agent_id: nil,
+      display_name: nil,
       session_id: nil,
       memory_stats: nil,
       agent_goals: [],

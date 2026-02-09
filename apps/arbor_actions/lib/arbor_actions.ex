@@ -249,6 +249,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.MemoryCode.ListCode,
         Arbor.Actions.MemoryCode.DeleteCode,
         Arbor.Actions.MemoryCode.ViewCode
+      ],
+      identity: [
+        Arbor.Actions.Identity.RequestEndorsement,
+        Arbor.Actions.Identity.SignPublicKey
       ]
     }
   end
