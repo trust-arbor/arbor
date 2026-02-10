@@ -1,0 +1,49 @@
+// Benchmark Pipeline — Orchestrator Overhead Measurement
+// No LLM nodes. Only tool + conditional + structural nodes.
+// Used by mix arbor.pipeline.benchmark to measure engine overhead.
+
+digraph Benchmark {
+  graph [
+    goal="Measure orchestrator overhead with fast tool commands",
+    label="Overhead Benchmark"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Fast tool commands that complete in microseconds
+  step_a [
+    type="tool",
+    tool_command="echo step_a_output",
+    max_retries="1"
+  ]
+
+  step_b [
+    type="tool",
+    tool_command="echo step_b_output",
+    max_retries="1"
+  ]
+
+  // Conditional routing
+  check [shape=diamond]
+
+  step_c [
+    type="tool",
+    tool_command="echo step_c_output",
+    max_retries="1"
+  ]
+
+  step_d [
+    type="tool",
+    tool_command="echo step_d_output",
+    max_retries="1"
+  ]
+
+  done [shape=Msquare]
+
+  // Linear flow with a conditional branch
+  start -> step_a -> step_b -> check
+  check -> step_c [condition="outcome=success"]
+  check -> step_d [condition="outcome=fail"]
+  step_c -> done
+  step_d -> done
+}
