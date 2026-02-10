@@ -72,7 +72,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   @spec from_env(keyword()) :: t()
   def from_env(opts \\ []) do
-    discovered_adapters = discover_env_adapters()
+    discovered_adapters = discover_env_adapters(opts)
     adapters = Map.merge(discovered_adapters, Keyword.get(opts, :adapters, %{}))
 
     configured_default =
@@ -614,7 +614,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     |> Enum.filter(fn {_provider, value} -> is_binary(value) and value != "" end)
   end
 
-  defp discover_env_adapters do
+  defp discover_env_adapters(opts) do
     api_adapters =
       env_provider_keys()
       |> Enum.reduce(%{}, fn {provider, _value}, acc ->
@@ -629,7 +629,23 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
         if adapter, do: Map.put(acc, provider, adapter), else: acc
       end)
 
-    maybe_add_arborcli(api_adapters)
+    if Keyword.get(opts, :discover_cli, true) do
+      api_adapters
+      |> maybe_add_claude_cli()
+      |> maybe_add_arborcli()
+    else
+      api_adapters
+    end
+  end
+
+  defp maybe_add_claude_cli(adapters) do
+    cli_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli
+
+    if cli_mod.available?() do
+      Map.put(adapters, "claude_cli", cli_mod)
+    else
+      adapters
+    end
   end
 
   defp maybe_add_arborcli(adapters) do
