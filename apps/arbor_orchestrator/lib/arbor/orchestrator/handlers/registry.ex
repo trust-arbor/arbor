@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     FanInHandler,
     FileWriteHandler,
     ManagerLoopHandler,
+    PipelineValidateHandler,
     ParallelHandler,
     StartHandler,
     ToolHandler,
@@ -37,7 +38,8 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "parallel.fan_in" => FanInHandler,
     "stack.manager_loop" => ManagerLoopHandler,
     "codergen" => CodergenHandler,
-    "file.write" => FileWriteHandler
+    "file.write" => FileWriteHandler,
+    "pipeline.validate" => PipelineValidateHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
