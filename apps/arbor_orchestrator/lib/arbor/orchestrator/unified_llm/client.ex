@@ -95,7 +95,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
     catalog = Keyword.get(opts, :model_catalog, @default_model_catalog)
 
-    if default_provider in [nil, ""] and adapters == %{} and env_provider_keys() == [] do
+    if default_provider in [nil, ""] and adapters == %{} do
       raise ConfigurationError,
         message:
           "No provider configured. Set UNIFIED_LLM_DEFAULT_PROVIDER or pass adapters/default_provider."
@@ -615,18 +615,31 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   end
 
   defp discover_env_adapters do
-    env_provider_keys()
-    |> Enum.reduce(%{}, fn {provider, _value}, acc ->
-      adapter =
-        case provider do
-          "openai" -> OpenAI
-          "anthropic" -> Anthropic
-          "gemini" -> Gemini
-          _ -> nil
-        end
+    api_adapters =
+      env_provider_keys()
+      |> Enum.reduce(%{}, fn {provider, _value}, acc ->
+        adapter =
+          case provider do
+            "openai" -> OpenAI
+            "anthropic" -> Anthropic
+            "gemini" -> Gemini
+            _ -> nil
+          end
 
-      if adapter, do: Map.put(acc, provider, adapter), else: acc
-    end)
+        if adapter, do: Map.put(acc, provider, adapter), else: acc
+      end)
+
+    maybe_add_arborcli(api_adapters)
+  end
+
+  defp maybe_add_arborcli(adapters) do
+    arborcli_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.Arborcli
+
+    if Code.ensure_loaded?(arborcli_mod) and arborcli_mod.available?() do
+      Map.put(adapters, "arborcli", arborcli_mod)
+    else
+      adapters
+    end
   end
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil

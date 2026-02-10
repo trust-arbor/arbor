@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request}
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -17,7 +18,6 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     base_updates = %{
       "last_stage" => node.id,
       "last_prompt" => prompt,
-      "last_response" => "[Simulated] Response for stage: #{node.id}",
       "context.previous_outcome" => Arbor.Orchestrator.Engine.Context.get(context, "outcome"),
       "llm.model" => Map.get(node.attrs, "llm_model"),
       "llm.provider" => Map.get(node.attrs, "llm_provider"),
@@ -25,22 +25,19 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       "score" => parse_score(Map.get(node.attrs, "score"))
     }
 
-    response = "[Simulated] Response for stage: #{node.id}"
-    _ = write_stage_artifacts(opts, node.id, prompt, response)
-
     case Map.get(node.attrs, "simulate") do
       "fail" ->
         %Outcome{
           status: :fail,
           failure_reason: "simulated failure",
-          context_updates: base_updates
+          context_updates: Map.put(base_updates, "last_response", "[Simulated] failure")
         }
 
       "retry" ->
         %Outcome{
           status: :retry,
           failure_reason: "simulated retry",
-          context_updates: base_updates
+          context_updates: Map.put(base_updates, "last_response", "[Simulated] retry")
         }
 
       "fail_once" ->
@@ -51,13 +48,19 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
           %Outcome{
             status: :fail,
             failure_reason: "simulated fail once",
-            context_updates: Map.put(base_updates, key, 1)
+            context_updates:
+              base_updates
+              |> Map.put("last_response", "[Simulated] fail once")
+              |> Map.put(key, 1)
           }
         else
+          response = "[Simulated] Response for stage: #{node.id}"
+          _ = write_stage_artifacts(opts, node.id, prompt, response)
+
           %Outcome{
             status: :success,
             notes: "Stage completed: #{node.id}",
-            context_updates: base_updates
+            context_updates: Map.put(base_updates, "last_response", response)
           }
         end
 
@@ -67,14 +70,104 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       "raise_terminal" ->
         raise "401 unauthorized"
 
-      _ ->
+      simulate when simulate in [nil, "true", true] ->
+        # Simulation mode — no real LLM call
+        response = "[Simulated] Response for stage: #{node.id}"
+        _ = write_stage_artifacts(opts, node.id, prompt, response)
+
         %Outcome{
           status: :success,
           notes: "Stage completed: #{node.id}",
-          context_updates: base_updates
+          context_updates: Map.put(base_updates, "last_response", response)
+        }
+
+      "false" ->
+        # Real LLM call
+        call_llm_and_respond(prompt, node, context, graph, base_updates, opts)
+    end
+  end
+
+  defp call_llm_and_respond(prompt, node, _context, graph, base_updates, opts) do
+    case call_llm(prompt, node, graph, opts) do
+      {:ok, response_text} ->
+        _ = write_stage_artifacts(opts, node.id, prompt, response_text)
+
+        %Outcome{
+          status: :success,
+          notes: response_text,
+          context_updates: Map.put(base_updates, "last_response", response_text)
+        }
+
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "LLM call failed: #{inspect(reason)}",
+          context_updates: Map.put(base_updates, "last_response", nil)
         }
     end
   end
+
+  defp call_llm(prompt, node, graph, opts) do
+    client = Keyword.get(opts, :llm_client) || Client.default_client()
+
+    previous_outcome =
+      case Map.get(node.attrs, "context.previous_outcome") do
+        nil -> ""
+        outcome -> "\n\nPrevious stage outcome: #{outcome}"
+      end
+
+    goal = Map.get(graph.attrs, "goal", "")
+
+    system_content =
+      case Map.get(node.attrs, "system_prompt") do
+        nil -> "You are a coding agent working on the following goal: #{goal}"
+        sys -> sys
+      end
+
+    user_content = prompt <> previous_outcome
+
+    request = %Request{
+      provider: Map.get(node.attrs, "llm_provider"),
+      model: Map.get(node.attrs, "llm_model"),
+      messages: [
+        Message.new(:system, system_content),
+        Message.new(:user, user_content)
+      ],
+      max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
+      temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
+      provider_options: Map.get(node.attrs, "provider_options", %{})
+    }
+
+    case Client.complete(client, request, opts) do
+      {:ok, response} -> {:ok, response.text}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp parse_int(nil, default), do: default
+  defp parse_int(value, _default) when is_integer(value), do: value
+
+  defp parse_int(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, _} -> parsed
+      :error -> default
+    end
+  end
+
+  defp parse_int(_, default), do: default
+
+  defp parse_float(nil, default), do: default
+  defp parse_float(value, _default) when is_float(value), do: value
+  defp parse_float(value, _default) when is_integer(value), do: value / 1
+
+  defp parse_float(value, default) when is_binary(value) do
+    case Float.parse(value) do
+      {parsed, _} -> parsed
+      :error -> default
+    end
+  end
+
+  defp parse_float(_, default), do: default
 
   defp parse_score(nil), do: nil
   defp parse_score(value) when is_integer(value), do: value / 1
