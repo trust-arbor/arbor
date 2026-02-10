@@ -168,14 +168,17 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   defp detect_cycles(%TypedGraph{nodes: nodes} = graph) do
     node_ids = Map.keys(nodes)
-    {cycles, _} = Enum.reduce(node_ids, {[], MapSet.new()}, fn id, {found, visited} ->
-      if MapSet.member?(visited, id) do
-        {found, visited}
-      else
-        {new_cycles, new_visited} = dfs_cycles(graph, id, [], MapSet.new(), visited)
-        {found ++ new_cycles, new_visited}
-      end
-    end)
+
+    {cycles, _} =
+      Enum.reduce(node_ids, {[], MapSet.new()}, fn id, {found, visited} ->
+        if MapSet.member?(visited, id) do
+          {found, visited}
+        else
+          {new_cycles, new_visited} = dfs_cycles(graph, id, [], MapSet.new(), visited)
+          {found ++ new_cycles, new_visited}
+        end
+      end)
+
     cycles
   end
 
@@ -193,8 +196,11 @@ defmodule Arbor.Orchestrator.IR.Validator do
         neighbors = TypedGraph.outgoing_edges(graph, node_id) |> Enum.map(& &1.to)
 
         {cycles, final_visited} =
-          Enum.reduce(neighbors, {[], MapSet.put(visited, node_id)}, fn neighbor, {acc_cycles, acc_visited} ->
-            {new_cycles, new_visited} = dfs_cycles(graph, neighbor, new_path, new_stack, acc_visited)
+          Enum.reduce(neighbors, {[], MapSet.put(visited, node_id)}, fn neighbor,
+                                                                        {acc_cycles, acc_visited} ->
+            {new_cycles, new_visited} =
+              dfs_cycles(graph, neighbor, new_path, new_stack, acc_visited)
+
             {acc_cycles ++ new_cycles, new_visited}
           end)
 
@@ -215,7 +221,9 @@ defmodule Arbor.Orchestrator.IR.Validator do
     end)
   end
 
-  defp has_retry_limit?(%TypedNode{resource_bounds: %{max_retries: n}}) when is_integer(n) and n > 0, do: true
+  defp has_retry_limit?(%TypedNode{resource_bounds: %{max_retries: n}})
+       when is_integer(n) and n > 0, do: true
+
   defp has_retry_limit?(%TypedNode{attrs: attrs}) do
     Map.get(attrs, "max_retries") not in [nil, "", 0]
   end

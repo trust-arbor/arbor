@@ -22,8 +22,14 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
   defp taint_leak_graph do
     %Graph{id: "TaintLeak"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "secret_work", attrs: %{"prompt" => "Handle secrets", "data_class" => "secret"}})
-    |> Graph.add_node(%Node{id: "public_output", attrs: %{"prompt" => "Publish result", "data_class" => "public"}})
+    |> Graph.add_node(%Node{
+      id: "secret_work",
+      attrs: %{"prompt" => "Handle secrets", "data_class" => "secret"}
+    })
+    |> Graph.add_node(%Node{
+      id: "public_output",
+      attrs: %{"prompt" => "Publish result", "data_class" => "public"}
+    })
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "secret_work"})
     |> Graph.add_edge(%Edge{from: "secret_work", to: "public_output"})
@@ -48,7 +54,11 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
     |> Graph.add_edge(%Edge{from: "start", to: "step_a"})
     |> Graph.add_edge(%Edge{from: "step_a", to: "step_b"})
     |> Graph.add_edge(%Edge{from: "step_b", to: "step_a"})
-    |> Graph.add_edge(%Edge{from: "step_b", to: "done", attrs: %{"condition" => "outcome=success"}})
+    |> Graph.add_edge(%Edge{
+      from: "step_b",
+      to: "done",
+      attrs: %{"condition" => "outcome=success"}
+    })
   end
 
   defp bounded_loop_graph do
@@ -60,7 +70,11 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
     |> Graph.add_edge(%Edge{from: "start", to: "step_a"})
     |> Graph.add_edge(%Edge{from: "step_a", to: "step_b"})
     |> Graph.add_edge(%Edge{from: "step_b", to: "step_a"})
-    |> Graph.add_edge(%Edge{from: "step_b", to: "done", attrs: %{"condition" => "outcome=success"}})
+    |> Graph.add_edge(%Edge{
+      from: "step_b",
+      to: "done",
+      attrs: %{"condition" => "outcome=success"}
+    })
   end
 
   defp conditional_missing_fail_graph do
@@ -223,7 +237,11 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
         %Graph{id: "BadCondition"}
         |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
         |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
-        |> Graph.add_edge(%Edge{from: "start", to: "done", attrs: %{"condition" => "???badcondition???"}})
+        |> Graph.add_edge(%Edge{
+          from: "start",
+          to: "done",
+          attrs: %{"condition" => "???badcondition???"}
+        })
 
       diags = graph |> compile!() |> Validator.validate()
       parse_errors = Enum.filter(diags, &(&1.rule == "condition_parse"))

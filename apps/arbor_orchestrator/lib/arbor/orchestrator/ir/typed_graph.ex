@@ -72,6 +72,8 @@ defmodule Arbor.Orchestrator.IR.TypedGraph do
   @doc "Returns the higher of two data classifications."
   @spec max_classification(data_class(), data_class()) :: data_class()
   def max_classification(a, b) do
-    if Map.get(@classification_order, a, 0) >= Map.get(@classification_order, b, 0), do: a, else: b
+    if Map.get(@classification_order, a, 0) >= Map.get(@classification_order, b, 0),
+      do: a,
+      else: b
   end
 end

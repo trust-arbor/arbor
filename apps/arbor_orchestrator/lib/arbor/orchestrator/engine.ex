@@ -270,7 +270,9 @@ defmodule Arbor.Orchestrator.Engine do
       |> Context.set("outcome", to_string(outcome.status))
       |> maybe_set_preferred_label(outcome)
 
-    checkpoint = Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes)
+    checkpoint =
+      Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes)
+
     :ok = Checkpoint.write(checkpoint, logs_root)
     :ok = write_node_status(node.id, outcome, logs_root)
 
