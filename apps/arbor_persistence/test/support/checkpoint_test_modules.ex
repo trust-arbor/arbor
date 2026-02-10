@@ -1,10 +1,10 @@
-defmodule Arbor.Checkpoint.Test.StatefulModule do
+defmodule Arbor.Persistence.Checkpoint.Test.StatefulModule do
   @moduledoc """
   A test module that implements the Checkpoint behaviour.
   """
-  @behaviour Arbor.Checkpoint
+  @behaviour Arbor.Persistence.Checkpoint
 
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def extract_checkpoint_data(state) do
     %{
       counter: state.counter,
@@ -12,7 +12,7 @@ defmodule Arbor.Checkpoint.Test.StatefulModule do
     }
   end
 
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def restore_from_checkpoint(checkpoint_data, initial_state) do
     initial_state
     |> Map.put(:counter, checkpoint_data.counter)
@@ -21,7 +21,7 @@ defmodule Arbor.Checkpoint.Test.StatefulModule do
   end
 end
 
-defmodule Arbor.Checkpoint.Test.NoCheckpointModule do
+defmodule Arbor.Persistence.Checkpoint.Test.NoCheckpointModule do
   @moduledoc """
   A test module that does NOT implement the Checkpoint behaviour.
   """
@@ -29,22 +29,22 @@ defmodule Arbor.Checkpoint.Test.NoCheckpointModule do
   def some_function, do: :ok
 end
 
-defmodule Arbor.Checkpoint.Test.FailingRestoreModule do
+defmodule Arbor.Persistence.Checkpoint.Test.FailingRestoreModule do
   @moduledoc """
   A test module that raises during restore.
   """
-  @behaviour Arbor.Checkpoint
+  @behaviour Arbor.Persistence.Checkpoint
 
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def extract_checkpoint_data(state), do: state
 
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def restore_from_checkpoint(_checkpoint_data, _initial_state) do
     raise "Restore failed!"
   end
 end
 
-defmodule Arbor.Checkpoint.Test.DelayedStorage do
+defmodule Arbor.Persistence.Checkpoint.Test.DelayedStorage do
   @moduledoc """
   A storage backend that simulates eventual consistency by
   returning :not_found for the first N attempts.
@@ -117,7 +117,7 @@ defmodule Arbor.Checkpoint.Test.DelayedStorage do
   end
 end
 
-defmodule Arbor.Checkpoint.Test.FailingStorage do
+defmodule Arbor.Persistence.Checkpoint.Test.FailingStorage do
   @moduledoc """
   A storage backend that always fails.
   """

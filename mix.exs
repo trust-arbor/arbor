@@ -37,7 +37,7 @@ defmodule Arbor.MixProject do
 
       # These are umbrella apps now, auto-discovered via apps_path
       # arbor_eval — code quality evaluation (dev/test only via its mix.exs)
-      # arbor_checkpoint — generic checkpoint/restore
+      # arbor_checkpoint — merged into arbor_persistence as Arbor.Persistence.Checkpoint
     ]
   end
 

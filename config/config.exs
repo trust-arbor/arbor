@@ -78,8 +78,8 @@ config :arbor_persistence, :backup,
 # Uses runtime configuration to avoid compile-time dependency cycle.
 # The checkpoint_store must implement Arbor.Contracts.Persistence.Store behaviour.
 config :arbor_signals,
-  checkpoint_module: Arbor.Checkpoint,
-  checkpoint_store: Arbor.Checkpoint.Store.ETS,
+  checkpoint_module: Arbor.Persistence.Checkpoint,
+  checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
   # Signal bus authorization — OpenAuthorizer allows all (backward compatible).
   # M5: WARNING — OpenAuthorizer permits any agent to emit/subscribe to any signal topic,
   # including :security and :identity restricted topics. Switch to SecurityAuthorizer
@@ -174,7 +174,7 @@ config :arbor_agent,
   checkpoint_enabled: true,
   checkpoint_interval_ms: 300_000,
   checkpoint_query_threshold: 5,
-  checkpoint_store: Arbor.Checkpoint.Store.ETS,
+  checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
   # Context summarization — dual-model approach (Phase 3)
   context_summarization_enabled: true,
   summarizer_model: "claude-haiku",

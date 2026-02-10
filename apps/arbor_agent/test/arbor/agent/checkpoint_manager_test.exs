@@ -42,7 +42,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
         agent_module: TestAgent,
         jido_agent: agent,
         metadata: %{module: TestAgent, started_at: System.system_time(:millisecond)},
-        checkpoint_storage: Arbor.Checkpoint.Store.Agent,
+        checkpoint_storage: Arbor.Persistence.Checkpoint.Store.Agent,
         auto_checkpoint_interval: nil,
         checkpoint_timer: nil
       },
@@ -51,7 +51,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
   end
 
   defp start_agent_store do
-    case Arbor.Checkpoint.Store.Agent.start_link() do
+    case Arbor.Persistence.Checkpoint.Store.Agent.start_link() do
       {:ok, pid} -> pid
       {:error, {:already_started, pid}} -> pid
     end
@@ -86,7 +86,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Checkpoint.Store.Agent.stop()
+        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
       end)
 
       :ok
@@ -94,14 +94,18 @@ defmodule Arbor.Agent.CheckpointManagerTest do
 
     test "saves seed agent state to store" do
       state = seed_state()
-      result = CheckpointManager.save_checkpoint(state, store: Arbor.Checkpoint.Store.Agent)
+
+      result =
+        CheckpointManager.save_checkpoint(state, store: Arbor.Persistence.Checkpoint.Store.Agent)
 
       assert result == :ok
     end
 
     test "handles missing subsystems gracefully" do
       state = seed_state(%{context_window: nil, working_memory: nil})
-      result = CheckpointManager.save_checkpoint(state, store: Arbor.Checkpoint.Store.Agent)
+
+      result =
+        CheckpointManager.save_checkpoint(state, store: Arbor.Persistence.Checkpoint.Store.Agent)
 
       assert result == :ok
     end
@@ -111,7 +115,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
 
       result =
         CheckpointManager.save_checkpoint(state,
-          store: Arbor.Checkpoint.Store.Agent,
+          store: Arbor.Persistence.Checkpoint.Store.Agent,
           async: true
         )
 
@@ -130,7 +134,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Checkpoint.Store.Agent.stop()
+        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
       end)
 
       :ok
@@ -160,7 +164,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Checkpoint.Store.Agent.stop()
+        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
       end)
 
       :ok
@@ -169,11 +173,17 @@ defmodule Arbor.Agent.CheckpointManagerTest do
     test "loads from configured store" do
       # Save something first
       data = %{agent_id: "load-test", version: 1}
-      :ok = Arbor.Checkpoint.save("load-test", data, Arbor.Checkpoint.Store.Agent)
+
+      :ok =
+        Arbor.Persistence.Checkpoint.save(
+          "load-test",
+          data,
+          Arbor.Persistence.Checkpoint.Store.Agent
+        )
 
       assert {:ok, loaded} =
                CheckpointManager.load_checkpoint("load-test",
-                 store: Arbor.Checkpoint.Store.Agent
+                 store: Arbor.Persistence.Checkpoint.Store.Agent
                )
 
       assert loaded.agent_id == "load-test"
@@ -182,7 +192,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
     test "returns {:error, :not_found} when missing" do
       assert {:error, :not_found} =
                CheckpointManager.load_checkpoint("nonexistent",
-                 store: Arbor.Checkpoint.Store.Agent,
+                 store: Arbor.Persistence.Checkpoint.Store.Agent,
                  retries: 0
                )
     end
@@ -317,16 +327,20 @@ defmodule Arbor.Agent.CheckpointManagerTest do
     test "provides sensible defaults" do
       config = CheckpointManager.config()
 
-      assert config.store == Arbor.Checkpoint.Store.ETS
+      assert config.store == Arbor.Persistence.Checkpoint.Store.ETS
       assert config.interval_ms == 300_000
       assert config.enabled == true
       assert config.query_threshold == 5
     end
 
     test "merges per-agent opts with application config" do
-      config = CheckpointManager.config(store: Arbor.Checkpoint.Store.Agent, interval_ms: 1000)
+      config =
+        CheckpointManager.config(
+          store: Arbor.Persistence.Checkpoint.Store.Agent,
+          interval_ms: 1000
+        )
 
-      assert config.store == Arbor.Checkpoint.Store.Agent
+      assert config.store == Arbor.Persistence.Checkpoint.Store.Agent
       assert config.interval_ms == 1000
     end
   end
@@ -340,7 +354,7 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Checkpoint.Store.Agent.stop()
+        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
       end)
 
       :ok
@@ -350,14 +364,16 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       seed = Seed.new("direct-save-test", name: "Direct Save")
 
       result =
-        CheckpointManager.save_seed_checkpoint(seed, store: Arbor.Checkpoint.Store.Agent)
+        CheckpointManager.save_seed_checkpoint(seed,
+          store: Arbor.Persistence.Checkpoint.Store.Agent
+        )
 
       assert result == :ok
 
       assert {:ok, data} =
-               Arbor.Checkpoint.load(
+               Arbor.Persistence.Checkpoint.load(
                  "direct-save-test",
-                 Arbor.Checkpoint.Store.Agent,
+                 Arbor.Persistence.Checkpoint.Store.Agent,
                  retries: 0
                )
 

@@ -37,10 +37,12 @@ defmodule Arbor.Persistence.Application do
   end
 
   defp build_children do
+    checkpoint = [{Arbor.Persistence.Checkpoint.Store.ETS, []}]
     stores = default_stores()
     repo = if Application.get_env(:arbor_persistence, :start_repo, false), do: [Arbor.Persistence.Repo], else: []
     scheduler = if backup_scheduler_enabled?(), do: [Arbor.Persistence.Backup.Scheduler], else: []
-    stores ++ repo ++ scheduler
+    snapshotter = if snapshotter_enabled?(), do: [snapshotter_spec()], else: []
+    checkpoint ++ stores ++ repo ++ scheduler ++ snapshotter
   end
 
   defp backup_scheduler_enabled? do
@@ -49,6 +51,25 @@ defmodule Arbor.Persistence.Application do
     backup_config = Application.get_env(:arbor_persistence, :backup, [])
     backup_enabled = Keyword.get(backup_config, :enabled, false)
     start_repo and backup_enabled
+  end
+
+  defp snapshotter_enabled? do
+    config = Application.get_env(:arbor_persistence, :event_log_snapshot, [])
+    Keyword.get(config, :enabled, false)
+  end
+
+  defp snapshotter_spec do
+    config = Application.get_env(:arbor_persistence, :event_log_snapshot, [])
+
+    {Arbor.Persistence.EventLog.Snapshotter,
+     [
+       event_log_name: Keyword.get(config, :event_log_name, :event_log),
+       store: Keyword.get(config, :store),
+       store_opts: Keyword.get(config, :store_opts, []),
+       interval_ms: Keyword.get(config, :interval_ms, 300_000),
+       event_threshold: Keyword.get(config, :event_threshold, 1_000),
+       retention: Keyword.get(config, :retention, 5)
+     ]}
   end
 
   defp default_stores do

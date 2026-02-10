@@ -38,7 +38,7 @@ defmodule Arbor.Agent do
   Enable durable state by providing a checkpoint storage backend:
 
       {:ok, pid} = Arbor.Agent.start("agent-001", MyAgent, %{counter: 0},
-        checkpoint_storage: Arbor.Checkpoint.Store.ETS,
+        checkpoint_storage: Arbor.Persistence.Checkpoint.Store.ETS,
         auto_checkpoint_interval: 30_000
       )
 
@@ -187,7 +187,7 @@ defmodule Arbor.Agent do
 
   ## Options
 
-  - `:checkpoint_storage` - Storage backend module (e.g., `Arbor.Checkpoint.Store.ETS`)
+  - `:checkpoint_storage` - Storage backend module (e.g., `Arbor.Persistence.Checkpoint.Store.ETS`)
   - `:auto_checkpoint_interval` - Auto-save interval in ms (e.g., 30_000)
   - `:metadata` - Additional metadata map
   - `:restart` - Supervision restart strategy (default: `:transient`)

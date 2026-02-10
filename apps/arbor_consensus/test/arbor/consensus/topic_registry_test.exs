@@ -1,7 +1,7 @@
 defmodule Arbor.Consensus.TopicRegistryTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Checkpoint.Store.ETS, as: CheckpointETS
+  alias Arbor.Persistence.Checkpoint.Store.ETS, as: CheckpointETS
   alias Arbor.Consensus.{TopicRegistry, TopicRule}
 
   setup do
@@ -234,7 +234,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: ctx.registry_name,
           table_name: ctx.table_name,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS
         )
 
       # Get the verify key from the GenServer state
@@ -258,7 +258,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: new_name,
           table_name: new_table,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
           signing_key: state.signing_key,
           verify_key: state.verify_key
         )
@@ -276,7 +276,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: ctx.registry_name,
           table_name: ctx.table_name,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS
         )
 
       state = :sys.get_state(pid)
@@ -305,7 +305,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: new_name,
           table_name: new_table,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
           signing_key: state.signing_key,
           verify_key: state.verify_key
         )
@@ -333,7 +333,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
         }
       }
 
-      :ok = Arbor.Checkpoint.save(ctx.checkpoint_id, unsigned_data, Arbor.Checkpoint.Store.ETS)
+      :ok = Arbor.Persistence.Checkpoint.save(ctx.checkpoint_id, unsigned_data, Arbor.Persistence.Checkpoint.Store.ETS)
 
       # Start registry with signing — should accept unsigned checkpoint
       {:ok, _pid} =
@@ -341,7 +341,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: ctx.registry_name,
           table_name: ctx.table_name,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS
         )
 
       # The unsigned topic should be restored (migration compat)
@@ -355,7 +355,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: ctx.registry_name,
           table_name: ctx.table_name,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
           enable_signing: false
         )
 
@@ -380,7 +380,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
           name: new_name,
           table_name: new_table,
           checkpoint_id: ctx.checkpoint_id,
-          checkpoint_store: Arbor.Checkpoint.Store.ETS,
+          checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
           enable_signing: false
         )
 

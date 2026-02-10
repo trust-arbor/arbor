@@ -1,10 +1,10 @@
-defmodule Arbor.Checkpoint.EdgeCasesTest do
+defmodule Arbor.Persistence.Checkpoint.EdgeCasesTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Checkpoint
-  alias Arbor.Checkpoint.Store.Agent, as: AgentStorage
+  alias Arbor.Persistence.Checkpoint
+  alias Arbor.Persistence.Checkpoint.Store.Agent, as: AgentStorage
 
-  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+  import Arbor.Persistence.Checkpoint.TestHelpers, only: [safe_stop: 1]
 
   @moduletag :fast
 
@@ -133,7 +133,7 @@ defmodule Arbor.Checkpoint.EdgeCasesTest do
   end
 
   describe "attempt_recovery with various initial_args" do
-    alias Arbor.Checkpoint.Test.StatefulModule
+    alias Arbor.Persistence.Checkpoint.Test.StatefulModule
 
     test "handles empty map initial_args" do
       checkpoint_data = %{counter: 42, important_data: "test"}

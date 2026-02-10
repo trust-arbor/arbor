@@ -584,7 +584,7 @@ defmodule Arbor.Agent.SeedTest do
   # Checkpoint Behaviour
   # ============================================================================
 
-  describe "Arbor.Checkpoint behaviour" do
+  describe "Arbor.Persistence.Checkpoint behaviour" do
     test "extract_checkpoint_data returns serializable map" do
       data = Seed.extract_checkpoint_data(@agent_id)
 

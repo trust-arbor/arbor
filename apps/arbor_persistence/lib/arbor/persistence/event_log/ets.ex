@@ -110,17 +110,31 @@ defmodule Arbor.Persistence.EventLog.ETS do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       :ets.new(:"#{name}_global", [:ordered_set, :protected, read_concurrency: true])
 
-    {:ok,
-     %{
-       stream_table: stream_table,
-       global_table: global_table,
-       global_position: 0,
-       max_events: max_events,
-       warning_logged: false,
-       stream_versions: %{},
-       subscribers: %{},
-       monitors: %{}
-     }}
+    base_state = %{
+      stream_table: stream_table,
+      global_table: global_table,
+      global_position: 0,
+      max_events: max_events,
+      warning_logged: false,
+      stream_versions: %{},
+      subscribers: %{},
+      monitors: %{}
+    }
+
+    # Attempt to restore from snapshot if configured
+    snapshot_store = Keyword.get(opts, :snapshot_store)
+    snapshot_store_opts = Keyword.get(opts, :snapshot_store_opts, [])
+    snapshot_namespace = Keyword.get(opts, :snapshot_namespace, "eventlog_snapshots")
+
+    state =
+      maybe_restore_from_snapshot(
+        base_state,
+        snapshot_store,
+        snapshot_store_opts,
+        snapshot_namespace
+      )
+
+    {:ok, state}
   end
 
   @impl GenServer
@@ -184,6 +198,20 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   def handle_call(:event_count, _from, state) do
     {:reply, {:ok, state.global_position}, state}
+  end
+
+  def handle_call(:export_state, _from, state) do
+    events = do_read_all(state.global_table, 0, nil)
+    serialized = Enum.map(events, &serialize_event/1)
+
+    snapshot = %{
+      global_position: state.global_position,
+      stream_versions: state.stream_versions,
+      max_events: state.max_events,
+      events: serialized
+    }
+
+    {:reply, {:ok, snapshot}, state}
   end
 
   def handle_call({:read_agent_events, agent_id, opts}, _from, state) do
@@ -352,5 +380,123 @@ defmodule Arbor.Persistence.EventLog.ETS do
     else
       state
     end
+  end
+
+  # --- Snapshot Serialization ---
+
+  defp serialize_event(%Event{} = event) do
+    %{
+      "id" => event.id,
+      "stream_id" => event.stream_id,
+      "event_number" => event.event_number,
+      "global_position" => event.global_position,
+      "type" => event.type,
+      "data" => event.data,
+      "metadata" => event.metadata,
+      "agent_id" => event.agent_id,
+      "causation_id" => event.causation_id,
+      "correlation_id" => event.correlation_id,
+      "timestamp" => if(event.timestamp, do: DateTime.to_iso8601(event.timestamp))
+    }
+  end
+
+  @doc false
+  def deserialize_event(map) when is_map(map) do
+    timestamp =
+      case map["timestamp"] do
+        nil -> nil
+        ts when is_binary(ts) ->
+          case DateTime.from_iso8601(ts) do
+            {:ok, dt, _} -> dt
+            _ -> nil
+          end
+        %DateTime{} = dt -> dt
+      end
+
+    %Event{
+      id: map["id"],
+      stream_id: map["stream_id"],
+      event_number: map["event_number"],
+      global_position: map["global_position"],
+      type: map["type"],
+      data: map["data"] || %{},
+      metadata: map["metadata"] || %{},
+      agent_id: map["agent_id"],
+      causation_id: map["causation_id"],
+      correlation_id: map["correlation_id"],
+      timestamp: timestamp
+    }
+  end
+
+  # --- Snapshot Restore ---
+
+  defp maybe_restore_from_snapshot(state, nil, _opts, _namespace), do: state
+
+  defp maybe_restore_from_snapshot(state, store, store_opts, namespace) do
+    meta_key = "#{namespace}:meta"
+
+    case store.get(meta_key, store_opts) do
+      {:ok, %{data: meta}} ->
+        do_restore_snapshot(state, store, store_opts, namespace, meta)
+
+      {:ok, meta} when is_map(meta) ->
+        do_restore_snapshot(state, store, store_opts, namespace, meta)
+
+      _ ->
+        Logger.debug("EventLog.ETS: no snapshot meta found, starting fresh")
+        state
+    end
+  rescue
+    e ->
+      Logger.warning("EventLog.ETS: snapshot restore failed: #{inspect(e)}, starting fresh")
+      state
+  catch
+    :exit, _ ->
+      Logger.debug("EventLog.ETS: snapshot store not available, starting fresh")
+      state
+  end
+
+  defp do_restore_snapshot(state, store, store_opts, namespace, meta) do
+    latest_id = meta["latest_id"]
+
+    if latest_id do
+      snapshot_key = "#{namespace}:snapshot:#{latest_id}"
+
+      case store.get(snapshot_key, store_opts) do
+        {:ok, %{data: snapshot}} ->
+          import_snapshot(state, snapshot)
+
+        {:ok, snapshot} when is_map(snapshot) ->
+          import_snapshot(state, snapshot)
+
+        _ ->
+          Logger.warning("EventLog.ETS: snapshot #{latest_id} not found, starting fresh")
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp import_snapshot(state, snapshot) do
+    events = Map.get(snapshot, "events", [])
+    global_position = Map.get(snapshot, "global_position", 0)
+    stream_versions = restore_stream_versions(Map.get(snapshot, "stream_versions", %{}))
+
+    Enum.each(events, fn event_map ->
+      event = deserialize_event(event_map)
+      :ets.insert(state.stream_table, {{event.stream_id, event.event_number}, event})
+      :ets.insert(state.global_table, {event.global_position, event})
+    end)
+
+    event_count = length(events)
+    Logger.info("EventLog.ETS: restored #{event_count} events from snapshot (pos: #{global_position})")
+
+    %{state | global_position: global_position, stream_versions: stream_versions}
+  end
+
+  # Stream version keys may be atoms or strings depending on serialization
+  defp restore_stream_versions(versions) when is_map(versions) do
+    Map.new(versions, fn {k, v} -> {k, v} end)
   end
 end
