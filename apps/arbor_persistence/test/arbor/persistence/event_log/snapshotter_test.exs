@@ -40,7 +40,9 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "snapshot capture" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"snapshot_test_log_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"snapshot_test_store_#{System.unique_integer([:positive])}"
 
       start_event_log(log_name)
@@ -54,6 +56,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(ctx.log_name, "stream_b", 2)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -79,6 +82,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(ctx.log_name, "stream_a", 2)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -99,10 +103,12 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
     end
 
     test "no-op when store is nil" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"noop_log_#{System.unique_integer([:positive])}"
       start_event_log(log_name)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: log_name,
         store: nil,
@@ -120,6 +126,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "restore from snapshot on EventLog.ETS init" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"restore_store_#{System.unique_integer([:positive])}"
       start_snapshot_store(store_name)
 
@@ -128,6 +135,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
     test "restored state matches full replay state", ctx do
       # Phase 1: Create an event log, append events, take snapshot
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log1_name = :"log1_#{System.unique_integer([:positive])}"
       start_event_log(log1_name)
 
@@ -135,6 +143,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(log1_name, "users", 3)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: log1_name,
         store: SnapshotStore,
@@ -150,6 +159,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       {:ok, original_count} = EventLogETS.event_count(name: log1_name)
 
       # Phase 2: Start a new event log from the snapshot
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log2_name = :"log2_#{System.unique_integer([:positive])}"
 
       start_supervised!(
@@ -197,6 +207,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
     end
 
     test "starts empty when no snapshot exists", ctx do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"no_snap_#{System.unique_integer([:positive])}"
 
       start_supervised!(
@@ -213,6 +224,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
     end
 
     test "starts empty when snapshot store unavailable" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"unavail_#{System.unique_integer([:positive])}"
 
       # Use a module that doesn't exist / isn't started
@@ -244,7 +256,9 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "event threshold trigger" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"threshold_log_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"threshold_store_#{System.unique_integer([:positive])}"
 
       start_event_log(log_name)
@@ -255,6 +269,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
     test "takes snapshot after event_threshold events", ctx do
       _snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -279,6 +294,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
     test "counter resets after snapshot", ctx do
       _snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -306,7 +322,9 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "timer trigger" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"timer_log_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"timer_store_#{System.unique_integer([:positive])}"
 
       start_event_log(log_name)
@@ -319,6 +337,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(ctx.log_name, "stream_a", 2)
 
       _snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -342,7 +361,9 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "retention" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"retention_log_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"retention_store_#{System.unique_integer([:positive])}"
 
       start_event_log(log_name)
@@ -355,6 +376,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(ctx.log_name, "stream_a", 3)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -398,6 +420,7 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
       append_events(ctx.log_name, "stream_a", 1)
 
       snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: ctx.log_name,
         store: SnapshotStore,
@@ -423,13 +446,16 @@ defmodule Arbor.Persistence.EventLog.SnapshotterTest do
 
   describe "resilience" do
     test "retries subscription if EventLog not started" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       store_name = :"resilience_store_#{System.unique_integer([:positive])}"
       start_snapshot_store(store_name)
 
       # Start snapshotter BEFORE the event log
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       log_name = :"late_log_#{System.unique_integer([:positive])}"
 
       _snapshotter = start_snapshotter(
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name: :"snapshotter_#{System.unique_integer([:positive])}",
         event_log_name: log_name,
         store: SnapshotStore,

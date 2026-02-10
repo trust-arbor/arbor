@@ -55,12 +55,14 @@ defmodule Arbor.Persistence.BufferedStoreTest do
     defp agent_name(opts) do
       # Use the collection name as agent process name
       name = Keyword.get(opts, :name, "default")
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       String.to_atom("memory_backend_#{name}")
     end
   end
 
   describe "ETS-only mode (nil backend)" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_test_#{System.unique_integer([:positive])}"
 
       start_supervised!({BufferedStore, name: name, backend: nil})
@@ -121,6 +123,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
   describe "query operations" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_query_#{System.unique_integer([:positive])}"
       start_supervised!({BufferedStore, name: name, backend: nil})
 
@@ -184,7 +187,9 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
   describe "with backend" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_backend_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       backend_agent = String.to_atom("memory_backend_#{name}")
 
       start_supervised!({MemoryBackend, backend_agent})
@@ -227,7 +232,9 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
   describe "backend load on init" do
     test "loads existing data from backend into ETS" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_preload_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       backend_agent = String.to_atom("memory_backend_#{name}")
 
       start_supervised!({MemoryBackend, backend_agent})
@@ -253,6 +260,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
   describe "graceful degradation" do
     test "starts successfully even when backend fails to list" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_fail_#{System.unique_integer([:positive])}"
 
       start_supervised!(
@@ -269,6 +277,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
     end
 
     test "put succeeds even when backend write fails" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_fail_put_#{System.unique_integer([:positive])}"
 
       start_supervised!(
@@ -287,7 +296,9 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
   describe "async write mode" do
     test "put returns immediately in async mode" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buffered_async_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       backend_agent = String.to_atom("memory_backend_#{name}")
 
       start_supervised!({MemoryBackend, backend_agent})
