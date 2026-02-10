@@ -141,6 +141,118 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @doc """
+  Get pending intents linked to a specific goal.
+
+  Returns intents that have `goal_id` matching and are not completed or failed
+  (based on metadata status). Used by the BDI loop to determine if a goal
+  needs decomposition.
+
+  ## Examples
+
+      pending = IntentStore.pending_intents_for_goal("agent_001", "goal_abc")
+  """
+  @spec pending_intents_for_goal(String.t(), String.t()) :: [Intent.t()]
+  def pending_intents_for_goal(agent_id, goal_id) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+
+    data
+    |> Map.get(:intents, [])
+    |> Enum.filter(fn intent ->
+      intent.goal_id == goal_id and
+        not intent_terminal?(intent.id, statuses)
+    end)
+  end
+
+  defp intent_terminal?(intent_id, statuses) do
+    status_info = Map.get(statuses, intent_id, %{})
+    Map.get(status_info, :status, :pending) == :completed
+  end
+
+  # ============================================================================
+  # Peek-Lock-Ack API (BDI Intent Lifecycle)
+  # ============================================================================
+
+  @doc """
+  Get a specific intent by ID.
+  """
+  @spec get_intent(String.t(), String.t()) :: {:ok, Intent.t(), map()} | {:error, :not_found}
+  def get_intent(agent_id, intent_id) do
+    data = get_agent_data(agent_id)
+
+    case Enum.find(data.intents, &(&1.id == intent_id)) do
+      nil ->
+        {:error, :not_found}
+
+      intent ->
+        status_info = get_intent_status(data, intent_id)
+        {:ok, intent, status_info}
+    end
+  end
+
+  @doc """
+  Get pending intents sorted by urgency (highest first).
+
+  Returns intents with `:pending` status, optionally limited.
+  """
+  @spec pending_intentions(String.t(), keyword()) :: [{Intent.t(), map()}]
+  def pending_intentions(agent_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 10)
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+
+    data.intents
+    |> Enum.filter(fn intent ->
+      status = Map.get(statuses, intent.id, %{})
+      Map.get(status, :status, :pending) == :pending
+    end)
+    |> Enum.sort_by(& &1.urgency, :desc)
+    |> Enum.take(limit)
+    |> Enum.map(fn intent ->
+      {intent, get_intent_status(data, intent.id)}
+    end)
+  end
+
+  @doc """
+  Lock an intent for execution. Prevents other consumers from picking it up.
+
+  Returns `{:ok, intent}` if successfully locked, `{:error, reason}` otherwise.
+  """
+  @spec lock_intent(String.t(), String.t()) :: {:ok, Intent.t()} | {:error, term()}
+  def lock_intent(agent_id, intent_id) do
+    GenServer.call(server_name(), {:lock_intent, agent_id, intent_id})
+  end
+
+  @doc """
+  Mark an intent as completed. Terminal state.
+  """
+  @spec complete_intent(String.t(), String.t()) :: :ok | {:error, :not_found}
+  def complete_intent(agent_id, intent_id) do
+    GenServer.call(server_name(), {:complete_intent, agent_id, intent_id})
+  end
+
+  @doc """
+  Mark an intent as failed. Increments retry_count.
+
+  Returns the updated retry count.
+  """
+  @spec fail_intent(String.t(), String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :not_found}
+  def fail_intent(agent_id, intent_id, reason \\ "unknown") do
+    GenServer.call(server_name(), {:fail_intent, agent_id, intent_id, reason})
+  end
+
+  @doc """
+  Unlock intents that have been locked longer than `timeout_ms`.
+
+  Returns the count of unlocked intents.
+  """
+  @spec unlock_stale_intents(String.t(), pos_integer()) :: non_neg_integer()
+  def unlock_stale_intents(agent_id, timeout_ms \\ 60_000) do
+    GenServer.call(server_name(), {:unlock_stale, agent_id, timeout_ms})
+  end
+
+  @doc """
   Clear all intents and percepts for an agent.
   """
   @spec clear(String.t()) :: :ok
@@ -197,6 +309,108 @@ defmodule Arbor.Memory.IntentStore do
     {:reply, {:ok, percept}, state}
   end
 
+  @impl true
+  def handle_call({:lock_intent, agent_id, intent_id}, _from, state) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+    current = Map.get(statuses, intent_id, %{status: :pending})
+
+    case current.status do
+      :pending ->
+        status_info = %{
+          status: :locked,
+          locked_at: DateTime.utc_now(),
+          retry_count: Map.get(current, :retry_count, 0)
+        }
+
+        updated_statuses = Map.put(statuses, intent_id, status_info)
+        updated = Map.put(data, :statuses, updated_statuses)
+        :ets.insert(@ets_table, {agent_id, updated})
+        persist_agent_data_async(agent_id, updated)
+
+        intent = Enum.find(data.intents, &(&1.id == intent_id))
+        {:reply, {:ok, intent}, state}
+
+      other ->
+        {:reply, {:error, {:not_lockable, other}}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:complete_intent, agent_id, intent_id}, _from, state) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+
+    if Enum.any?(data.intents, &(&1.id == intent_id)) do
+      status_info = %{
+        status: :completed,
+        completed_at: DateTime.utc_now(),
+        retry_count: Map.get(Map.get(statuses, intent_id, %{}), :retry_count, 0)
+      }
+
+      updated_statuses = Map.put(statuses, intent_id, status_info)
+      updated = Map.put(data, :statuses, updated_statuses)
+      :ets.insert(@ets_table, {agent_id, updated})
+      persist_agent_data_async(agent_id, updated)
+
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:fail_intent, agent_id, intent_id, reason}, _from, state) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+
+    if Enum.any?(data.intents, &(&1.id == intent_id)) do
+      current = Map.get(statuses, intent_id, %{})
+      retry_count = Map.get(current, :retry_count, 0) + 1
+
+      status_info = %{
+        status: :pending,
+        failed_at: DateTime.utc_now(),
+        last_failure_reason: reason,
+        retry_count: retry_count
+      }
+
+      updated_statuses = Map.put(statuses, intent_id, status_info)
+      updated = Map.put(data, :statuses, updated_statuses)
+      :ets.insert(@ets_table, {agent_id, updated})
+      persist_agent_data_async(agent_id, updated)
+
+      {:reply, {:ok, retry_count}, state}
+    else
+      {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:unlock_stale, agent_id, timeout_ms}, _from, state) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+    now = DateTime.utc_now()
+
+    {updated_statuses, count} =
+      Enum.reduce(statuses, {statuses, 0}, fn {id, info}, {acc, n} ->
+        if info[:status] == :locked and stale_lock?(info[:locked_at], now, timeout_ms) do
+          unlocked = %{info | status: :pending}
+          {Map.put(acc, id, Map.delete(unlocked, :locked_at)), n + 1}
+        else
+          {acc, n}
+        end
+      end)
+
+    if count > 0 do
+      updated = Map.put(data, :statuses, updated_statuses)
+      :ets.insert(@ets_table, {agent_id, updated})
+      persist_agent_data_async(agent_id, updated)
+    end
+
+    {:reply, count, state}
+  end
+
   # ============================================================================
   # Private Helpers
   # ============================================================================
@@ -213,9 +427,21 @@ defmodule Arbor.Memory.IntentStore do
 
   defp get_agent_data(agent_id) do
     case :ets.lookup(@ets_table, agent_id) do
-      [{^agent_id, data}] -> data
-      [] -> %{intents: [], percepts: []}
+      [{^agent_id, data}] -> Map.put_new(data, :statuses, %{})
+      [] -> %{intents: [], percepts: [], statuses: %{}}
     end
+  end
+
+  defp get_intent_status(data, intent_id) do
+    statuses = Map.get(data, :statuses, %{})
+    Map.get(statuses, intent_id, %{status: :pending, retry_count: 0})
+  end
+
+  defp stale_lock?(nil, _now, _timeout_ms), do: true
+
+  defp stale_lock?(locked_at, now, timeout_ms) do
+    diff_ms = DateTime.diff(now, locked_at, :millisecond)
+    diff_ms > timeout_ms
   end
 
   defp maybe_filter_type(items, nil), do: items
@@ -239,8 +465,22 @@ defmodule Arbor.Memory.IntentStore do
   defp serialize_agent_data(data) do
     %{
       "intents" => Enum.map(Map.get(data, :intents, []), &serialize_intent/1),
-      "percepts" => Enum.map(Map.get(data, :percepts, []), &serialize_percept/1)
+      "percepts" => Enum.map(Map.get(data, :percepts, []), &serialize_percept/1),
+      "statuses" => serialize_statuses(Map.get(data, :statuses, %{}))
     }
+  end
+
+  defp serialize_statuses(statuses) do
+    Map.new(statuses, fn {id, info} ->
+      serialized =
+        info
+        |> Map.new(fn
+          {k, %DateTime{} = dt} -> {to_string(k), DateTime.to_iso8601(dt)}
+          {k, v} -> {to_string(k), v}
+        end)
+
+      {id, serialized}
+    end)
   end
 
   defp serialize_intent(%Intent{} = intent) do
@@ -275,9 +515,29 @@ defmodule Arbor.Memory.IntentStore do
   defp deserialize_agent_data(data) when is_map(data) do
     %{
       intents: Enum.map(data["intents"] || [], &deserialize_intent/1),
-      percepts: Enum.map(data["percepts"] || [], &deserialize_percept/1)
+      percepts: Enum.map(data["percepts"] || [], &deserialize_percept/1),
+      statuses: deserialize_statuses(data["statuses"] || %{})
     }
   end
+
+  defp deserialize_statuses(statuses) when is_map(statuses) do
+    Map.new(statuses, fn {id, info} ->
+      deserialized =
+        Map.new(info, fn
+          {"status", v} -> {:status, safe_atom(v) || :pending}
+          {"locked_at", v} -> {:locked_at, parse_datetime(v)}
+          {"completed_at", v} -> {:completed_at, parse_datetime(v)}
+          {"failed_at", v} -> {:failed_at, parse_datetime(v)}
+          {"retry_count", v} -> {:retry_count, v}
+          {"last_failure_reason", v} -> {:last_failure_reason, v}
+          {k, v} -> {safe_atom(k) || k, v}
+        end)
+
+      {id, deserialized}
+    end)
+  end
+
+  defp deserialize_statuses(_), do: %{}
 
   defp deserialize_intent(map) do
     %Intent{

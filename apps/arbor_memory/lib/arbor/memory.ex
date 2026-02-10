@@ -1887,6 +1887,52 @@ defmodule Arbor.Memory do
           {:ok, struct()} | {:error, :not_found}
   defdelegate get_percept_for_intent(agent_id, intent_id), to: IntentStore
 
+  @doc """
+  Get pending intents linked to a specific goal.
+
+  Returns intents that have the given `goal_id` and are not completed or failed.
+  Used by the BDI loop to determine if a goal needs decomposition.
+  """
+  @spec pending_intents_for_goal(String.t(), String.t()) :: [struct()]
+  defdelegate pending_intents_for_goal(agent_id, goal_id), to: IntentStore
+
+  @doc """
+  Get a specific intent by ID, with its status info.
+  """
+  @spec get_intent(String.t(), String.t()) :: {:ok, struct(), map()} | {:error, :not_found}
+  defdelegate get_intent(agent_id, intent_id), to: IntentStore
+
+  @doc """
+  Get pending intents sorted by urgency (highest first).
+  """
+  @spec pending_intentions(String.t(), keyword()) :: [{struct(), map()}]
+  defdelegate pending_intentions(agent_id, opts \\ []), to: IntentStore
+
+  @doc """
+  Lock an intent for execution (peek-lock-ack pattern).
+  """
+  @spec lock_intent(String.t(), String.t()) :: {:ok, struct()} | {:error, term()}
+  defdelegate lock_intent(agent_id, intent_id), to: IntentStore
+
+  @doc """
+  Mark an intent as completed (terminal state).
+  """
+  @spec complete_intent(String.t(), String.t()) :: :ok | {:error, :not_found}
+  defdelegate complete_intent(agent_id, intent_id), to: IntentStore
+
+  @doc """
+  Mark an intent as failed. Increments retry_count, returns to pending.
+  """
+  @spec fail_intent(String.t(), String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :not_found}
+  defdelegate fail_intent(agent_id, intent_id, reason \\ "unknown"), to: IntentStore
+
+  @doc """
+  Unlock intents locked longer than timeout_ms (stale lock recovery).
+  """
+  @spec unlock_stale_intents(String.t(), pos_integer()) :: non_neg_integer()
+  defdelegate unlock_stale_intents(agent_id, timeout_ms \\ 60_000), to: IntentStore
+
   # ============================================================================
   # Bridge (Seed/Host Phase 3)
   # ============================================================================

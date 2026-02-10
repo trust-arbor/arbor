@@ -210,10 +210,15 @@ defmodule Arbor.Agent.AgentSeed do
   Call from your agent's `handle_info/2` chain.
   """
   @spec seed_handle_info(term(), map()) :: {:noreply, map()} | :not_handled
+  @max_intent_retries 3
+
   def seed_handle_info({:percept_result, percept}, state) do
     Logger.debug("Percept received: #{percept.id}, outcome=#{percept.outcome}",
       agent_id: state.id
     )
+
+    # Update intent status based on percept outcome
+    handle_percept_intent_status(state.id, percept)
 
     seed_emit_signal(:percept_received, %{
       id: state.id,
@@ -342,12 +347,21 @@ defmodule Arbor.Agent.AgentSeed do
       ExecutorIntegration.route_actions(state.id, llm_actions)
     end
 
+    # 3.5. Route pending intentions from IntentStore to Executor (BDI pull-based)
+    if state[:executor_pid] do
+      ExecutorIntegration.route_pending_intentions(state.id)
+    end
+
     # 4. Process goal updates
     process_goal_updates(state.id, goal_updates)
 
     # 4.5. Create new goals suggested by the LLM
     new_goals = Map.get(llm_result, :new_goals, [])
     create_suggested_goals(state.id, new_goals)
+
+    # 4.75. Process decompositions (goal -> intentions)
+    decompositions = Map.get(llm_result, :decompositions, [])
+    process_decompositions(state.id, decompositions)
 
     # 5. Index memory notes
     index_memory_notes(state.id, memory_notes)
@@ -965,16 +979,17 @@ defmodule Arbor.Agent.AgentSeed do
       rem(heartbeat_count, 5) == 0 and heartbeat_count > 0 ->
         :consolidation
 
+      # Plan execution: goals exist but have no pending intentions — need decomposition
+      has_undecomposed_goals?(state) ->
+        :plan_execution
+
       # Goal pursuit when active goals exist (council: adaptive goal-first)
       has_active_goals?(state) ->
         :goal_pursuit
 
-      # No goals — reflect or consolidate
-      idle_reflection_enabled?() and :rand.uniform() < idle_reflection_chance() ->
-        Enum.random([:introspection, :reflection, :pattern_analysis, :insight_detection])
-
+      # No goals — idle mode
       true ->
-        :consolidation
+        idle_mode()
     end
   end
 
@@ -993,9 +1008,58 @@ defmodule Arbor.Agent.AgentSeed do
     is_list(goals) and goals != []
   end
 
+  defp has_undecomposed_goals?(state) do
+    agent_id = state[:id] || state[:agent_id]
+
+    goals =
+      try do
+        Arbor.Memory.get_active_goals(agent_id)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    if is_list(goals) and goals != [] do
+      # Check if any goal has no pending intentions (needs decomposition)
+      # Skip goals flagged as decomposition_failed
+      Enum.any?(goals, fn goal ->
+        not decomposition_failed?(goal) and not has_pending_intents?(agent_id, goal.id)
+      end)
+    else
+      false
+    end
+  end
+
+  defp decomposition_failed?(goal) do
+    meta = goal.metadata || %{}
+    meta[:decomposition_failed] == true or meta["decomposition_failed"] == true
+  end
+
+  defp has_pending_intents?(agent_id, goal_id) do
+    pending =
+      try do
+        Arbor.Memory.pending_intents_for_goal(agent_id, goal_id)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    is_list(pending) and pending != []
+  end
+
   defp user_waiting?(state) do
     timing = TimingContext.compute(state)
     timing.user_waiting
+  end
+
+  defp idle_mode do
+    if idle_reflection_enabled?() and :rand.uniform() < idle_reflection_chance() do
+      Enum.random([:introspection, :reflection, :pattern_analysis, :insight_detection])
+    else
+      :consolidation
+    end
   end
 
   defp idle_reflection_enabled? do
@@ -1104,6 +1168,106 @@ defmodule Arbor.Agent.AgentSeed do
         })
       end
     end)
+  end
+
+  defp handle_percept_intent_status(_agent_id, %{intent_id: nil}), do: :ok
+  defp handle_percept_intent_status(_agent_id, %{intent_id: ""}), do: :ok
+
+  defp handle_percept_intent_status(agent_id, percept) do
+    intent_id = percept.intent_id
+
+    case percept.outcome do
+      :success ->
+        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
+
+      outcome when outcome in [:failure, :error] ->
+        handle_intent_failure(agent_id, intent_id, percept)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp handle_intent_failure(agent_id, intent_id, percept) do
+    reason = inspect(percept.error || percept.outcome)
+
+    case safe_memory_call(fn -> Arbor.Memory.fail_intent(agent_id, intent_id, reason) end) do
+      {:ok, retry_count} when retry_count >= @max_intent_retries ->
+        # Abandon this intent — too many retries
+        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
+
+        # Look up the goal_id for signaling
+        goal_id = get_intent_goal_id(agent_id, intent_id)
+
+        seed_emit_signal(:agent_intent_abandoned, %{
+          agent_id: agent_id,
+          intent_id: intent_id,
+          goal_id: goal_id,
+          retry_count: retry_count,
+          reason: reason
+        })
+
+        Logger.warning("Intent #{intent_id} abandoned after #{retry_count} retries",
+          agent_id: agent_id,
+          goal_id: goal_id
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp get_intent_goal_id(agent_id, intent_id) do
+    case safe_memory_call(fn -> Arbor.Memory.get_intent(agent_id, intent_id) end) do
+      {:ok, intent, _status} -> intent.goal_id
+      _ -> nil
+    end
+  end
+
+  defp process_decompositions(_agent_id, []), do: :ok
+
+  defp process_decompositions(agent_id, decompositions) do
+    Enum.each(decompositions, fn decomp ->
+      goal_id = decomp[:goal_id]
+      intentions = decomp[:intentions] || []
+
+      if goal_id do
+        Enum.each(intentions, &record_decomposed_intent(agent_id, goal_id, &1))
+      end
+    end)
+  end
+
+  defp record_decomposed_intent(agent_id, goal_id, intention) do
+    alias Arbor.Contracts.Memory.Intent
+    action = intention[:action]
+
+    if action do
+      intent =
+        Intent.action(action, intention[:params] || %{},
+          goal_id: goal_id,
+          reasoning: intention[:reasoning],
+          metadata: %{
+            preconditions: intention[:preconditions],
+            success_criteria: intention[:success_criteria],
+            status: :pending
+          }
+        )
+
+      safe_memory_call(fn -> Arbor.Memory.record_intent(agent_id, intent) end)
+
+      seed_emit_signal(:intent_decomposed, %{
+        agent_id: agent_id,
+        intent_id: intent.id,
+        goal_id: goal_id,
+        action: action
+      })
+
+      Logger.debug("Decomposed intention for goal #{goal_id}: #{action}",
+        agent_id: agent_id
+      )
+    end
   end
 
   defp index_memory_notes(_agent_id, []), do: :ok

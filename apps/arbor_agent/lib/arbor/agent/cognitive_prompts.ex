@@ -11,6 +11,7 @@ defmodule Arbor.Agent.CognitivePrompts do
   @type cognitive_mode ::
           :conversation
           | :goal_pursuit
+          | :plan_execution
           | :introspection
           | :consolidation
           | :pattern_analysis
@@ -36,6 +37,26 @@ defmodule Arbor.Agent.CognitivePrompts do
     - If blocked on a goal, note what's blocking you and try a different approach
 
     Be proactive. Take action. Goals don't advance through reflection alone.
+    """
+  end
+
+  def prompt_for(:plan_execution) do
+    """
+    ## Current Mode: Plan Execution — Goal Decomposition
+
+    You have an active goal that needs to be broken into actionable steps.
+
+    Your job is to decompose this goal into concrete intentions (max 3).
+    Each intention must:
+    - Map to a known action type (shell_execute, file_read, file_write, ai_analyze, etc.)
+    - Have clear params that the executor can run immediately
+    - Include reasoning for why this step advances the goal
+    - Include preconditions (what must be true before this step)
+    - Include success_criteria (how to verify this step worked)
+
+    Return your decomposition in the "decompositions" array in your response.
+    Focus only on the target goal shown below — ignore other goals this cycle.
+    Prefer small, verifiable steps over ambitious leaps.
     """
   end
 
@@ -134,6 +155,7 @@ defmodule Arbor.Agent.CognitivePrompts do
     [
       :conversation,
       :goal_pursuit,
+      :plan_execution,
       :introspection,
       :consolidation,
       :pattern_analysis,

@@ -17,7 +17,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           memory_notes: [String.t()],
           goal_updates: [map()],
           new_goals: [map()],
-          proposal_decisions: [map()]
+          proposal_decisions: [map()],
+          decompositions: [map()]
         }
 
   @doc """
@@ -42,7 +43,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           memory_notes: parse_memory_notes(data),
           goal_updates: parse_goal_updates(data),
           new_goals: parse_new_goals(data),
-          proposal_decisions: parse_proposal_decisions(data)
+          proposal_decisions: parse_proposal_decisions(data),
+          decompositions: parse_decompositions(data)
         }
 
       _ ->
@@ -55,7 +57,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           memory_notes: [],
           goal_updates: [],
           new_goals: [],
-          proposal_decisions: []
+          proposal_decisions: [],
+          decompositions: []
         }
     end
   end
@@ -71,7 +74,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
       memory_notes: [],
       goal_updates: [],
       new_goals: [],
-      proposal_decisions: []
+      proposal_decisions: [],
+      decompositions: []
     }
   end
 
@@ -217,6 +221,62 @@ defmodule Arbor.Agent.HeartbeatResponse do
     memory_consolidate memory_index
     run_consolidation check_health
   )a
+
+  @doc false
+  def known_action_types, do: @known_action_types
+
+  @max_intentions_per_decomposition 3
+
+  defp parse_decompositions(data) do
+    case Map.get(data, "decompositions") do
+      decomps when is_list(decomps) ->
+        decomps
+        |> Enum.map(&parse_single_decomposition/1)
+        |> Enum.reject(&is_nil/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp parse_single_decomposition(%{"goal_id" => goal_id, "intentions" => intentions} = decomp)
+       when is_binary(goal_id) and is_list(intentions) do
+    parsed_intentions =
+      intentions
+      |> Enum.map(&parse_decomposition_intention/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.take(@max_intentions_per_decomposition)
+
+    if parsed_intentions == [] do
+      nil
+    else
+      %{
+        goal_id: goal_id,
+        intentions: parsed_intentions,
+        contingency: Map.get(decomp, "contingency")
+      }
+    end
+  end
+
+  defp parse_single_decomposition(_), do: nil
+
+  defp parse_decomposition_intention(%{"action" => action} = intent)
+       when is_binary(action) do
+    if action in Enum.map(known_action_types(), &Atom.to_string/1) do
+      %{
+        action: String.to_existing_atom(action),
+        params: Map.get(intent, "params", %{}),
+        reasoning: Map.get(intent, "reasoning", ""),
+        preconditions: Map.get(intent, "preconditions"),
+        success_criteria: Map.get(intent, "success_criteria")
+      }
+    else
+      Logger.warning("Unknown action in decomposition: #{action}, skipping")
+      nil
+    end
+  end
+
+  defp parse_decomposition_intention(_), do: nil
 
   # Convert string to atom safely — only allows known action types
   defp safe_to_atom(nil), do: :unknown
