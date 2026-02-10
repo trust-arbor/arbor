@@ -220,6 +220,29 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   @doc """
+  Update metadata for a goal, merging with existing metadata.
+
+  ## Examples
+
+      {:ok, goal} = GoalStore.update_goal_metadata("agent_001", goal_id, %{decomposition_failed: true})
+  """
+  @spec update_goal_metadata(String.t(), String.t(), map()) ::
+          {:ok, Goal.t()} | {:error, :not_found}
+  def update_goal_metadata(agent_id, goal_id, new_metadata) when is_map(new_metadata) do
+    case get_goal(agent_id, goal_id) do
+      {:ok, goal} ->
+        merged = Map.merge(goal.metadata || %{}, new_metadata)
+        updated = %{goal | metadata: merged}
+        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
+        persist_goal_async(agent_id, updated)
+        {:ok, updated}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
   Get all active goals for an agent, sorted by priority (highest first).
   """
   @spec get_active_goals(String.t()) :: [Goal.t()]
