@@ -40,7 +40,6 @@ defmodule Mix.Tasks.Arbor.Pipeline.List do
       info("No .dot files found in #{dir}")
       :ok
     else
-
       pipelines = Enum.map(files, fn file -> analyze_file(Path.join(dir, file), file) end)
 
       if json_output do
@@ -165,5 +164,4 @@ defmodule Mix.Tasks.Arbor.Pipeline.List do
       str
     end
   end
-
 end

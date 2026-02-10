@@ -60,14 +60,24 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           "exit",
           [],
           ["goal_gate", "retry_target", "fallback_retry_target"],
-          %{"goal_gate" => :boolean, "retry_target" => :string, "fallback_retry_target" => :string},
+          %{
+            "goal_gate" => :boolean,
+            "retry_target" => :string,
+            "fallback_retry_target" => :string
+          },
           [],
           :public,
           [port("context", :any, :public)],
           []
         ),
       "conditional" =>
-        schema("conditional", [], ["condition_key"], %{"condition_key" => :string}, [], :public,
+        schema(
+          "conditional",
+          [],
+          ["condition_key"],
+          %{"condition_key" => :string},
+          [],
+          :public,
           [port("outcome", :any, :public)],
           [port("branch", :string, :public)]
         ),
@@ -88,24 +98,46 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [port("tool.output", :string, :internal)]
         ),
       "wait.human" =>
-        schema("wait.human", [], ["prompt", "question"],
+        schema(
+          "wait.human",
+          [],
+          ["prompt", "question"],
           %{"prompt" => :string, "question" => :string},
-          ["human_interaction"], :internal,
+          ["human_interaction"],
+          :internal,
           [port("context", :any, :public)],
           [port("human.answer", :string, :internal)]
         ),
       "parallel" =>
-        schema("parallel", [], ["fail_fast"], %{"fail_fast" => :boolean}, [], :public,
+        schema(
+          "parallel",
+          [],
+          ["fail_fast"],
+          %{"fail_fast" => :boolean},
+          [],
+          :public,
           [port("context", :any, :public)],
           [port("parallel.results", :any, :public)]
         ),
       "parallel.fan_in" =>
-        schema("parallel.fan_in", [], ["merge_strategy"], %{"merge_strategy" => :string}, [], :public,
+        schema(
+          "parallel.fan_in",
+          [],
+          ["merge_strategy"],
+          %{"merge_strategy" => :string},
+          [],
+          :public,
           [port("parallel.results", :any, :public)],
           [port("context", :any, :public)]
         ),
       "stack.manager_loop" =>
-        schema("stack.manager_loop", [], ["max_iterations"], %{"max_iterations" => :integer}, [], :public,
+        schema(
+          "stack.manager_loop",
+          [],
+          ["max_iterations"],
+          %{"max_iterations" => :integer},
+          [],
+          :public,
           [port("context", :any, :public)],
           [port("context", :any, :public)]
         ),
@@ -113,7 +145,15 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
         schema(
           "codergen",
           ["prompt"],
-          ["llm_model", "llm_provider", "reasoning_effort", "simulate", "score", "system_prompt", "temperature"],
+          [
+            "llm_model",
+            "llm_provider",
+            "reasoning_effort",
+            "simulate",
+            "score",
+            "system_prompt",
+            "temperature"
+          ],
           %{
             "prompt" => :string,
             "llm_model" => :string,
@@ -134,23 +174,36 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           "file.write",
           ["content_key", "output"],
           ["format", "append"],
-          %{"content_key" => :string, "output" => :string, "format" => :string, "append" => :boolean},
+          %{
+            "content_key" => :string,
+            "output" => :string,
+            "format" => :string,
+            "append" => :boolean
+          },
           ["file_write"],
           :internal,
           [port("content_key", :string, :internal)],
           [port("file.written", :string, :internal)]
         ),
       "pipeline.validate" =>
-        schema("pipeline.validate", [], ["source_key", "file"],
+        schema(
+          "pipeline.validate",
+          [],
+          ["source_key", "file"],
           %{"source_key" => :string, "file" => :string},
-          [], :public,
+          [],
+          :public,
           [port("context", :any, :public)],
           [port("pipeline.valid", :boolean, :public)]
         ),
       "pipeline.run" =>
-        schema("pipeline.run", [], ["source_key", "file", "workdir"],
+        schema(
+          "pipeline.run",
+          [],
+          ["source_key", "file", "workdir"],
           %{"source_key" => :string, "file" => :string, "workdir" => :string},
-          [], :public,
+          [],
+          :public,
           [port("context", :any, :public)],
           [port("pipeline.child_status", :string, :public)]
         )

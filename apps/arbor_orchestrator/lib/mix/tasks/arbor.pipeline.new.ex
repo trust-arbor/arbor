@@ -50,9 +50,14 @@ defmodule Mix.Tasks.Arbor.Pipeline.New do
 
     name =
       case positional do
-        [name | _] -> name
+        [name | _] ->
+          name
+
         [] ->
-          error("Usage: mix arbor.pipeline.new <name> [--template linear|sdlc|eval|branching|parallel|looping]")
+          error(
+            "Usage: mix arbor.pipeline.new <name> [--template linear|sdlc|eval|branching|parallel|looping]"
+          )
+
           System.halt(1)
       end
 

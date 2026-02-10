@@ -17,7 +17,10 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
   defp tool_graph do
     %Graph{id: "ToolPipeline"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "run_tests", attrs: %{"type" => "tool", "tool_command" => "mix test", "max_retries" => 3}})
+    |> Graph.add_node(%Node{
+      id: "run_tests",
+      attrs: %{"type" => "tool", "tool_command" => "mix test", "max_retries" => 3}
+    })
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "run_tests"})
     |> Graph.add_edge(%Edge{from: "run_tests", to: "done"})
@@ -26,8 +29,14 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
   defp classified_graph do
     %Graph{id: "Classified"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "secret_work", attrs: %{"prompt" => "Handle secrets", "data_class" => "secret"}})
-    |> Graph.add_node(%Node{id: "public_output", attrs: %{"prompt" => "Publish", "data_class" => "public"}})
+    |> Graph.add_node(%Node{
+      id: "secret_work",
+      attrs: %{"prompt" => "Handle secrets", "data_class" => "secret"}
+    })
+    |> Graph.add_node(%Node{
+      id: "public_output",
+      attrs: %{"prompt" => "Publish", "data_class" => "public"}
+    })
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "secret_work"})
     |> Graph.add_edge(%Edge{from: "secret_work", to: "public_output"})
@@ -42,8 +51,16 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
     |> Graph.add_node(%Node{id: "no_path", attrs: %{"prompt" => "No"}})
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "check"})
-    |> Graph.add_edge(%Edge{from: "check", to: "yes_path", attrs: %{"condition" => "outcome=success"}})
-    |> Graph.add_edge(%Edge{from: "check", to: "no_path", attrs: %{"condition" => "outcome=fail"}})
+    |> Graph.add_edge(%Edge{
+      from: "check",
+      to: "yes_path",
+      attrs: %{"condition" => "outcome=success"}
+    })
+    |> Graph.add_edge(%Edge{
+      from: "check",
+      to: "no_path",
+      attrs: %{"condition" => "outcome=fail"}
+    })
     |> Graph.add_edge(%Edge{from: "yes_path", to: "done"})
     |> Graph.add_edge(%Edge{from: "no_path", to: "done"})
   end
@@ -187,7 +204,10 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
       graph =
         %Graph{id: "ExplicitCaps"}
         |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-        |> Graph.add_node(%Node{id: "work", attrs: %{"prompt" => "x", "capabilities" => "custom_cap,another_cap"}})
+        |> Graph.add_node(%Node{
+          id: "work",
+          attrs: %{"prompt" => "x", "capabilities" => "custom_cap,another_cap"}
+        })
         |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
         |> Graph.add_edge(%Edge{from: "start", to: "work"})
         |> Graph.add_edge(%Edge{from: "work", to: "done"})

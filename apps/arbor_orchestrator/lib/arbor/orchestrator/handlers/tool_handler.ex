@@ -75,7 +75,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
       else
         %Outcome{
           status: :fail,
-          failure_reason: "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
+          failure_reason:
+            "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
           context_updates: %{"tool.output" => output}
         }
       end

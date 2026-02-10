@@ -84,7 +84,9 @@ defmodule Arbor.Orchestrator do
 
   def validate_typed(source_or_graph, opts) do
     case compile(source_or_graph, opts) do
-      {:ok, typed} -> IR.Validator.validate(typed)
+      {:ok, typed} ->
+        IR.Validator.validate(typed)
+
       {:error, reason} ->
         [
           Arbor.Orchestrator.Validation.Diagnostic.error(

@@ -52,7 +52,9 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
     end
 
     test "returns type warnings for wrong types" do
-      errors = HandlerSchema.validate_attrs("tool", %{"tool_command" => "ok", "max_retries" => "not_int"})
+      errors =
+        HandlerSchema.validate_attrs("tool", %{"tool_command" => "ok", "max_retries" => "not_int"})
+
       assert [{:warning, msg}] = errors
       assert msg =~ "max_retries"
       assert msg =~ "integer"
