@@ -3,11 +3,11 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.ToolHooks
 
   @impl true
-  def execute(node, _context, graph, opts) do
+  def execute(node, context, graph, opts) do
     command = Map.get(node.attrs, "tool_command", "")
     hooks = resolve_hooks(node, graph, opts)
     pre_payload = %{phase: "pre", tool_name: node.id, tool_call_id: node.id, command: command}
@@ -26,20 +26,20 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
         }
 
       true ->
-        output =
+        outcome =
           case Keyword.get(opts, :tool_command_runner) do
             runner when is_function(runner, 1) ->
-              runner.(command)
+              output = runner.(command)
+
+              %Outcome{
+                status: :success,
+                notes: "Tool completed: #{command}",
+                context_updates: %{"tool.output" => output}
+              }
 
             _ ->
-              "simulated"
+              run_command(command, node, context, opts)
           end
-
-        outcome = %Outcome{
-          status: :success,
-          notes: "Tool completed: #{command}",
-          context_updates: %{"tool.output" => output}
-        }
 
         post_payload = %{
           phase: "post",
@@ -54,6 +54,43 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
 
         outcome
     end
+  end
+
+  defp run_command(command, node, context, opts) do
+    try do
+      [executable | args] = OptionParser.split(command)
+      cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
+
+      {output, exit_code} = System.cmd(executable, args, cmd_opts)
+
+      if exit_code == 0 do
+        %Outcome{
+          status: :success,
+          notes: "Tool completed: #{command}",
+          context_updates: %{"tool.output" => output}
+        }
+      else
+        %Outcome{
+          status: :fail,
+          failure_reason: "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
+          context_updates: %{"tool.output" => output}
+        }
+      end
+    rescue
+      e ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "Tool execution error: #{Exception.message(e)}"
+        }
+    end
+  end
+
+  defp workdir_opt(context, opts) do
+    workdir =
+      Context.get(context, "workdir") ||
+        Keyword.get(opts, :workdir)
+
+    if workdir && workdir != "", do: [cd: workdir], else: []
   end
 
   defp resolve_hooks(node, graph, opts) do
