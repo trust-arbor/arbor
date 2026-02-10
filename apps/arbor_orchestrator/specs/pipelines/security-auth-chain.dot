@@ -1,0 +1,100 @@
+// Security Authorization Chain Pipeline
+// Policy-visible, gate-based authorization for agent actions.
+// Council recommendation: "Security as Data" — authorization gates explicit and auditable.
+//
+// Pattern: Request -> Classify -> Check capability -> Check trust -> Authorize/Deny
+
+digraph SecurityAuth {
+  graph [
+    goal="Evaluate an agent action request through the security authorization chain",
+    label="Security Authorization Chain"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Parse and classify the action request
+  classify_request [
+    prompt="Classify the action request. Determine: 1) Action type (file_read, file_write, shell_exec, network, memory_access), 2) Required capability level (basic, elevated, admin), 3) Data sensitivity (public, internal, sensitive, restricted), 4) Reversibility (reversible, irreversible). Output classification as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 2: Capability check
+  check_capability [
+    type="tool",
+    tool_command="mix arbor.security.check_capability",
+    max_retries="0"
+  ]
+
+  capability_gate [
+    shape=diamond
+  ]
+
+  // Phase 3: Trust tier check
+  check_trust [
+    type="tool",
+    tool_command="mix arbor.security.check_trust_tier",
+    max_retries="0"
+  ]
+
+  trust_gate [
+    shape=diamond
+  ]
+
+  // Phase 4: Rate limit check
+  check_rate [
+    type="tool",
+    tool_command="mix arbor.security.check_rate_limit",
+    max_retries="0"
+  ]
+
+  rate_gate [
+    shape=diamond
+  ]
+
+  // Phase 5: Authorization decision
+  authorize [
+    prompt="All security checks passed. Generate an authorization token with: agent_id, action, capability_used, trust_tier, timestamp, expiry (5 minutes). Output as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Denial paths
+  deny_capability [
+    prompt="Authorization DENIED: insufficient capability. Generate denial record with: agent_id, requested_action, required_capability, agent_capabilities, denial_reason. Output as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  deny_trust [
+    prompt="Authorization DENIED: insufficient trust tier. Generate denial record with: agent_id, requested_action, required_trust_tier, agent_trust_tier, denial_reason. Output as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  deny_rate [
+    prompt="Authorization DENIED: rate limit exceeded. Generate denial record with: agent_id, requested_action, rate_limit, current_rate, retry_after. Output as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 6: Record decision
+  record_decision [
+    type="file.write",
+    content_key="last_response",
+    output="auth_decision.json",
+    format="json"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> classify_request -> check_capability -> capability_gate
+  capability_gate -> check_trust [condition="outcome=success"]
+  capability_gate -> deny_capability [condition="outcome=fail"]
+  check_trust -> trust_gate
+  trust_gate -> check_rate [condition="outcome=success"]
+  trust_gate -> deny_trust [condition="outcome=fail"]
+  check_rate -> rate_gate
+  rate_gate -> authorize [condition="outcome=success"]
+  rate_gate -> deny_rate [condition="outcome=fail"]
+  authorize -> record_decision -> done
+  deny_capability -> record_decision
+  deny_trust -> record_decision
+  deny_rate -> record_decision
+}

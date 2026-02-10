@@ -1,0 +1,80 @@
+// SDLC Pipeline — Software Development Lifecycle
+// First real graph-based workflow for Arbor.
+// Council recommendation: medium-frequency, high-governance, non-latency-critical.
+//
+// Phases: plan -> implement -> test -> review -> merge
+// Human gates at review and merge for governance.
+// Retry on test failures with max 3 attempts.
+
+digraph SDLC {
+  graph [
+    goal="Execute a complete software development lifecycle for a task",
+    label="SDLC Pipeline",
+    retry_policy="standard"
+  ]
+
+  // Entry
+  start [shape=Mdiamond]
+
+  // Phase 1: Planning
+  plan [
+    prompt="Given the task described in $goal, create a detailed implementation plan. Include: 1) Files to modify or create, 2) Key design decisions, 3) Test strategy, 4) Risk assessment. Output a structured plan.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high"
+  ]
+
+  // Phase 2: Implementation
+  implement [
+    prompt="Implement the plan from the previous step. Write clean, tested code following existing patterns. Use the plan from context key 'last_response'. Write each file using file.write nodes or tool commands.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  // Phase 3: Testing
+  run_tests [
+    type="tool",
+    tool_command="mix test --trace",
+    max_retries="2",
+    retry_target="fix_tests"
+  ]
+
+  // Phase 3b: Fix test failures (retry loop)
+  fix_tests [
+    prompt="The tests failed. Analyze the test output in $tool.output and fix the issues. Focus on the root cause, not symptoms.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  rerun_tests [
+    type="tool",
+    tool_command="mix test --trace",
+    max_retries="1",
+    retry_target="review"
+  ]
+
+  // Phase 4: Review gate
+  review [
+    shape=hexagon,
+    prompt="Review the implementation. Check for: 1) Correctness, 2) Security (OWASP top 10), 3) Performance, 4) Code style. Approve or request changes.",
+    question="Implementation complete. Approve for merge?"
+  ]
+
+  // Phase 5: Quality check
+  quality_check [
+    type="tool",
+    tool_command="mix quality"
+  ]
+
+  // Phase 6: Done
+  done [shape=Msquare, goal_gate="true", retry_target="implement"]
+
+  // Flow
+  start -> plan -> implement -> run_tests
+  run_tests -> review [condition="outcome=success"]
+  run_tests -> fix_tests [condition="outcome=fail"]
+  fix_tests -> rerun_tests
+  rerun_tests -> review [condition="outcome=success"]
+  rerun_tests -> review [condition="outcome=fail", label="skip to review on persistent failure"]
+  review -> quality_check [condition="outcome=success"]
+  review -> implement [condition="outcome=fail", label="changes requested"]
+  quality_check -> done [condition="outcome=success"]
+  quality_check -> implement [condition="outcome=fail", label="quality issues"]
+}
