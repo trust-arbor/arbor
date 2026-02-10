@@ -7,4 +7,7 @@ defmodule Arbor.Orchestrator.Handlers.StartHandler do
 
   @impl true
   def execute(_node, _context, _graph, _opts), do: %Outcome{status: :success}
+
+  @impl true
+  def idempotency, do: :idempotent
 end

@@ -63,6 +63,9 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :idempotent_with_key
+
   defp resolve_path(path, workdir) do
     resolved =
       if Path.type(path) == :absolute do

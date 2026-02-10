@@ -31,6 +31,9 @@ defmodule Arbor.Orchestrator.Handlers.FanInHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp choose_best(results, node, opts) do
     prompt = Map.get(node.attrs, "prompt", "")
 

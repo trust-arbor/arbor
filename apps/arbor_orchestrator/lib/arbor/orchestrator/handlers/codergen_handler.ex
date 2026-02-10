@@ -87,6 +87,9 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :idempotent_with_key
+
   defp call_llm_and_respond(prompt, node, _context, graph, base_updates, opts) do
     case call_llm(prompt, node, graph, opts) do
       {:ok, response_text} ->
