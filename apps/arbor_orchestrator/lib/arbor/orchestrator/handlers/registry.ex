@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     ConditionalHandler,
     ExitHandler,
     FanInHandler,
+    FileWriteHandler,
     ManagerLoopHandler,
     ParallelHandler,
     StartHandler,
@@ -35,7 +36,8 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "parallel" => ParallelHandler,
     "parallel.fan_in" => FanInHandler,
     "stack.manager_loop" => ManagerLoopHandler,
-    "codergen" => CodergenHandler
+    "codergen" => CodergenHandler,
+    "file.write" => FileWriteHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
