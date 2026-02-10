@@ -12,7 +12,7 @@ defmodule Arbor.Signals.Store do
 
   ## Checkpoint Configuration (application env)
 
-  - `:checkpoint_module` - Module implementing save/load (e.g., `Arbor.Checkpoint`)
+  - `:checkpoint_module` - Module implementing save/load (e.g., `Arbor.Persistence.Checkpoint`)
   - `:checkpoint_store` - Storage backend for checkpoints
   - `:checkpoint_interval_ms` - Save interval in milliseconds (default: 60_000)
   """

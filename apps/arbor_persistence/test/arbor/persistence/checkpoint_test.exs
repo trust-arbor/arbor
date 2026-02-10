@@ -1,11 +1,11 @@
-defmodule Arbor.CheckpointTest do
+defmodule Arbor.Persistence.CheckpointTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Checkpoint
-  alias Arbor.Checkpoint.Store.Agent, as: AgentStorage
-  alias Arbor.Checkpoint.Test.{FailingRestoreModule, NoCheckpointModule, StatefulModule}
+  alias Arbor.Persistence.Checkpoint
+  alias Arbor.Persistence.Checkpoint.Store.Agent, as: AgentStorage
+  alias Arbor.Persistence.Checkpoint.Test.{FailingRestoreModule, NoCheckpointModule, StatefulModule}
 
-  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+  import Arbor.Persistence.Checkpoint.TestHelpers, only: [safe_stop: 1]
 
   @moduletag :fast
 

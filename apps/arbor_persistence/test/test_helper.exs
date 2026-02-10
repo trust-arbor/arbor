@@ -1,5 +1,6 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 for child <- [
+      {Arbor.Persistence.Checkpoint.Store.ETS, []},
       {Arbor.Persistence.QueryableStore.ETS, name: :jobs},
       {Arbor.Persistence.EventLog.ETS, name: :event_log}
     ] do

@@ -31,7 +31,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
   Application env under `:arbor_agent`:
 
-  - `:checkpoint_store` — Storage backend (default: `Arbor.Checkpoint.Store.ETS`)
+  - `:checkpoint_store` — Storage backend (default: `Arbor.Persistence.Checkpoint.Store.ETS`)
   - `:checkpoint_interval_ms` — Auto-checkpoint interval (default: 300_000)
   - `:checkpoint_enabled` — Enable checkpointing (default: true)
   - `:checkpoint_query_threshold` — Query count delta for seed agents (default: 5)
@@ -75,7 +75,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = resolve_store(opts)
     data = Seed.to_map(seed)
 
-    case safe_call(fn -> Arbor.Checkpoint.save(seed.agent_id, data, store) end) do
+    case safe_call(fn -> Arbor.Persistence.Checkpoint.save(seed.agent_id, data, store) end) do
       :ok ->
         Logger.debug("Seed checkpoint saved for #{seed.agent_id}")
         :ok
@@ -106,7 +106,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = resolve_store(opts)
     retries = Keyword.get(opts, :retries, 1)
 
-    case safe_call(fn -> Arbor.Checkpoint.load(agent_id, store, retries: retries) end) do
+    case safe_call(fn -> Arbor.Persistence.Checkpoint.load(agent_id, store, retries: retries) end) do
       {:ok, data} when is_map(data) ->
         Logger.info("Checkpoint loaded for #{agent_id}")
         {:ok, data}
@@ -232,7 +232,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
     checkpoint_data = extract_seed_state(state, opts)
 
-    case safe_call(fn -> Arbor.Checkpoint.save(agent_id, checkpoint_data, store) end) do
+    case safe_call(fn -> Arbor.Persistence.Checkpoint.save(agent_id, checkpoint_data, store) end) do
       :ok ->
         Logger.debug("Checkpoint saved for #{agent_id}")
         :ok
@@ -252,7 +252,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = Keyword.get(opts, :store) || state.checkpoint_storage
     data = extract_jido_state(state)
 
-    case Arbor.Checkpoint.save(state.agent_id, data, store) do
+    case Arbor.Persistence.Checkpoint.save(state.agent_id, data, store) do
       :ok ->
         Logger.debug("Checkpoint saved for agent #{state.agent_id}")
         :ok
@@ -473,7 +473,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
   defp resolve_store(opts) do
     Keyword.get(opts, :store) ||
-      Application.get_env(:arbor_agent, :checkpoint_store, Arbor.Checkpoint.Store.ETS)
+      Application.get_env(:arbor_agent, :checkpoint_store, Arbor.Persistence.Checkpoint.Store.ETS)
   end
 
   defp checkpoint_config(:checkpoint_interval_ms) do

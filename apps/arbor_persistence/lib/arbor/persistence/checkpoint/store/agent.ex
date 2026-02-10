@@ -1,4 +1,4 @@
-defmodule Arbor.Checkpoint.Store.Agent do
+defmodule Arbor.Persistence.Checkpoint.Store.Agent do
   @moduledoc """
   Agent-based checkpoint store backend.
 
@@ -7,8 +7,8 @@ defmodule Arbor.Checkpoint.Store.Agent do
 
   ## Usage
 
-      {:ok, _pid} = Arbor.Checkpoint.Store.Agent.start_link()
-      Arbor.Checkpoint.save("id", state, Arbor.Checkpoint.Store.Agent)
+      {:ok, _pid} = Arbor.Persistence.Checkpoint.Store.Agent.start_link()
+      Arbor.Persistence.Checkpoint.save("id", state, Arbor.Persistence.Checkpoint.Store.Agent)
   """
 
   @behaviour Arbor.Contracts.Persistence.Store

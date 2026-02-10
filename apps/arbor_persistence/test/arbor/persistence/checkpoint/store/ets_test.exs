@@ -1,16 +1,15 @@
-defmodule Arbor.Checkpoint.Store.ETSTest do
+defmodule Arbor.Persistence.Checkpoint.Store.ETSTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Checkpoint.Store.ETS
-
-  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+  alias Arbor.Persistence.Checkpoint.Store.ETS
 
   @moduletag :fast
 
   setup do
-    {:ok, pid} = ETS.start_link()
-    on_exit(fn -> safe_stop(pid) end)
-    {:ok, pid: pid}
+    # The global Checkpoint.Store.ETS is already started by test_helper.exs
+    # Just clear it before each test for isolation
+    ETS.clear()
+    :ok
   end
 
   describe "put/3" do
