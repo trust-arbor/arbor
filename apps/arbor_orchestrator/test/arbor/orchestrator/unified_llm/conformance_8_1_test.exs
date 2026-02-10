@@ -25,7 +25,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
       },
       fn ->
         assert_raise ConfigurationError, fn ->
-          Client.from_env()
+          Client.from_env(discover_cli: false)
         end
       end
     )
