@@ -92,6 +92,56 @@ defmodule Arbor.Agent.ExecutorIntegration do
     :ok
   end
 
+  @doc """
+  Route pending intentions from IntentStore to the Executor.
+
+  Implements pull-based routing:
+  1. Unlock stale intents (locked > 60s — likely crashed)
+  2. Peek pending intents (sorted by urgency, limit 3)
+  3. Lock each intent
+  4. Emit via Bridge for Executor to pick up
+
+  Returns the list of routed intent IDs.
+  """
+  @spec route_pending_intentions(String.t(), keyword()) :: [String.t()]
+  def route_pending_intentions(agent_id, opts \\ []) do
+    timeout_ms = Keyword.get(opts, :stale_timeout_ms, 60_000)
+    limit = Keyword.get(opts, :limit, 3)
+
+    # 1. Unlock stale locks
+    unlocked = safe_call(fn -> Arbor.Memory.unlock_stale_intents(agent_id, timeout_ms) end) || 0
+
+    if unlocked > 0 do
+      Logger.debug("Unlocked #{unlocked} stale intents", agent_id: agent_id)
+    end
+
+    # 2. Get pending intents
+    pending =
+      safe_call(fn -> Arbor.Memory.pending_intentions(agent_id, limit: limit) end) || []
+
+    # 3. Lock and route each
+    Enum.flat_map(pending, fn {intent, _status} ->
+      lock_and_route_intent(agent_id, intent)
+    end)
+  end
+
+  defp lock_and_route_intent(agent_id, intent) do
+    case safe_call(fn -> Arbor.Memory.lock_intent(agent_id, intent.id) end) do
+      {:ok, locked_intent} ->
+        safe_call(fn -> Arbor.Memory.emit_intent(agent_id, locked_intent) end)
+
+        Logger.debug("Routed pending intent #{intent.id} (#{intent.action})",
+          agent_id: agent_id,
+          goal_id: intent.goal_id
+        )
+
+        [intent.id]
+
+      _ ->
+        []
+    end
+  end
+
   # -- Private --
 
   defp build_intent(%{type: type} = action) do
