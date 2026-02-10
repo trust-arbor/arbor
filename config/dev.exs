@@ -8,7 +8,8 @@ config :arbor_persistence, Arbor.Persistence.Repo,
   username: "arbor_dev",
   hostname: "localhost",
   pool_size: 10,
-  log: false
+  log: false,
+  types: Arbor.Persistence.PostgrexTypes
 
 config :arbor_persistence,
   start_repo: true,
