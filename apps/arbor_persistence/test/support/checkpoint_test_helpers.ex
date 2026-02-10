@@ -1,6 +1,6 @@
-defmodule Arbor.Checkpoint.TestHelpers do
+defmodule Arbor.Persistence.Checkpoint.TestHelpers do
   @moduledoc """
-  Shared test utilities for arbor_checkpoint.
+  Shared test utilities for checkpoint tests.
   """
 
   @doc """

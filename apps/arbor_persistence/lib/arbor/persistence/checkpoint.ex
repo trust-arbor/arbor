@@ -1,4 +1,4 @@
-defmodule Arbor.Checkpoint do
+defmodule Arbor.Persistence.Checkpoint do
   @moduledoc """
   Generic checkpoint/restore library for Elixir processes.
 
@@ -10,13 +10,13 @@ defmodule Arbor.Checkpoint do
   ## Checkpoint Behaviour
 
   Modules that want custom checkpoint extraction/restoration should implement
-  the `Arbor.Checkpoint` behaviour:
+  the `Arbor.Persistence.Checkpoint` behaviour:
 
       defmodule MyStatefulProcess do
         use GenServer
-        @behaviour Arbor.Checkpoint
+        @behaviour Arbor.Persistence.Checkpoint
 
-        @impl Arbor.Checkpoint
+        @impl Arbor.Persistence.Checkpoint
         def extract_checkpoint_data(state) do
           # Return only essential data for persistence
           %{
@@ -25,7 +25,7 @@ defmodule Arbor.Checkpoint do
           }
         end
 
-        @impl Arbor.Checkpoint
+        @impl Arbor.Persistence.Checkpoint
         def restore_from_checkpoint(checkpoint_data, initial_state) do
           # Merge checkpoint data into initial state
           %{initial_state |
@@ -45,16 +45,16 @@ defmodule Arbor.Checkpoint do
   ## Usage
 
       # Save a checkpoint
-      :ok = Arbor.Checkpoint.save("process_1", state, MyStore)
+      :ok = Arbor.Persistence.Checkpoint.save("process_1", state, MyStore)
 
       # Load a checkpoint (with retry)
-      {:ok, state} = Arbor.Checkpoint.load("process_1", MyStore)
+      {:ok, state} = Arbor.Persistence.Checkpoint.load("process_1", MyStore)
 
       # Enable auto-save (sends :checkpoint message periodically)
-      Arbor.Checkpoint.enable_auto_save(self(), 30_000)
+      Arbor.Persistence.Checkpoint.enable_auto_save(self(), 30_000)
 
       # Attempt recovery for a module implementing the behaviour
-      {:ok, recovered_state} = Arbor.Checkpoint.attempt_recovery(
+      {:ok, recovered_state} = Arbor.Persistence.Checkpoint.attempt_recovery(
         MyStatefulProcess, "process_1", initial_args, MyStorage
       )
 
@@ -283,20 +283,6 @@ defmodule Arbor.Checkpoint do
 
   ## Returns
   - `:ok` after scheduling the first message
-
-  ## Example
-
-      def init(args) do
-        Arbor.Checkpoint.enable_auto_save(self(), 30_000)
-        {:ok, initial_state}
-      end
-
-      def handle_info(:checkpoint, state) do
-        Arbor.Checkpoint.save(state.id, state, MyStorage)
-        # Re-schedule for next checkpoint
-        Arbor.Checkpoint.enable_auto_save(self(), 30_000)
-        {:noreply, state}
-      end
   """
   @spec enable_auto_save(pid(), pos_integer()) :: :ok
   def enable_auto_save(pid, interval_ms) when is_pid(pid) and interval_ms > 0 do
@@ -313,7 +299,7 @@ defmodule Arbor.Checkpoint do
   3. Calls the module's `restore_from_checkpoint/2` to reconstruct state
 
   ## Parameters
-  - `module` - Module implementing `Arbor.Checkpoint` behaviour
+  - `module` - Module implementing `Arbor.Persistence.Checkpoint` behaviour
   - `id` - The checkpoint identifier
   - `initial_args` - Arguments to construct initial state for recovery
   - `store` - Module implementing `Arbor.Contracts.Persistence.Store`

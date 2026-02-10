@@ -8,7 +8,6 @@ config :arbor_gateway, start_server: false
 # Don't start application supervision trees in tests —
 # tests use start_supervised! for what they need
 config :arbor_signals, start_children: false
-config :arbor_checkpoint, start_children: false
 config :arbor_trust, start_children: false
 
 config :arbor_security,

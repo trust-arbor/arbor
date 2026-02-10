@@ -14,7 +14,7 @@ defmodule Arbor.Agent.Seed do
   - **File I/O** — save/load seeds to disk
   - **Identity evolution** — rate-limited self-model updates with rollback
   - **Learned capabilities** — track action outcomes over time
-  - **Checkpoint integration** — implements `Arbor.Checkpoint` behaviour
+  - **Checkpoint integration** — implements `Arbor.Persistence.Checkpoint` behaviour
 
   ## Example
 
@@ -29,7 +29,7 @@ defmodule Arbor.Agent.Seed do
       {:ok, _seed} = Arbor.Agent.Seed.restore(seed)
   """
 
-  @behaviour Arbor.Checkpoint
+  @behaviour Arbor.Persistence.Checkpoint
 
   require Logger
 
@@ -547,7 +547,7 @@ defmodule Arbor.Agent.Seed do
   @doc """
   Extract checkpoint data by capturing current agent state.
   """
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def extract_checkpoint_data(agent_id) when is_binary(agent_id) do
     case capture(agent_id, reason: :checkpoint) do
       {:ok, seed} -> to_map(seed)
@@ -558,7 +558,7 @@ defmodule Arbor.Agent.Seed do
   @doc """
   Restore state from checkpoint data.
   """
-  @impl Arbor.Checkpoint
+  @impl Arbor.Persistence.Checkpoint
   def restore_from_checkpoint(checkpoint_data, _initial_state) do
     {:ok, seed} = from_map(checkpoint_data)
     seed

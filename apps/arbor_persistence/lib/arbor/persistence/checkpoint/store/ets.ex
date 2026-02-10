@@ -1,4 +1,4 @@
-defmodule Arbor.Checkpoint.Store.ETS do
+defmodule Arbor.Persistence.Checkpoint.Store.ETS do
   @moduledoc """
   ETS-based checkpoint store backend.
 
@@ -7,13 +7,13 @@ defmodule Arbor.Checkpoint.Store.ETS do
 
   ## Usage
 
-      {:ok, _pid} = Arbor.Checkpoint.Store.ETS.start_link()
-      Arbor.Checkpoint.save("id", state, Arbor.Checkpoint.Store.ETS)
-      {:ok, state} = Arbor.Checkpoint.load("id", Arbor.Checkpoint.Store.ETS)
+      {:ok, _pid} = Arbor.Persistence.Checkpoint.Store.ETS.start_link()
+      Arbor.Persistence.Checkpoint.save("id", state, Arbor.Persistence.Checkpoint.Store.ETS)
+      {:ok, state} = Arbor.Persistence.Checkpoint.load("id", Arbor.Persistence.Checkpoint.Store.ETS)
 
   ## Options
 
-  - `:name` - Name for the GenServer (default: `Arbor.Checkpoint.Store.ETS`)
+  - `:name` - Name for the GenServer (default: `Arbor.Persistence.Checkpoint.Store.ETS`)
   - `:table_name` - Name for the ETS table (default: `:arbor_checkpoints`)
   """
 

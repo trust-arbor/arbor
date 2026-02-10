@@ -1,10 +1,10 @@
-defmodule Arbor.Checkpoint.RetryTest do
+defmodule Arbor.Persistence.Checkpoint.RetryTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Checkpoint
-  alias Arbor.Checkpoint.Test.{DelayedStorage, FailingStorage}
+  alias Arbor.Persistence.Checkpoint
+  alias Arbor.Persistence.Checkpoint.Test.{DelayedStorage, FailingStorage}
 
-  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+  import Arbor.Persistence.Checkpoint.TestHelpers, only: [safe_stop: 1]
 
   @moduletag :fast
 

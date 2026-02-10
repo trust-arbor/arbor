@@ -1,9 +1,9 @@
-defmodule Arbor.Checkpoint.Store.AgentTest do
+defmodule Arbor.Persistence.Checkpoint.Store.AgentTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Checkpoint.Store.Agent, as: AgentStore
+  alias Arbor.Persistence.Checkpoint.Store.Agent, as: AgentStore
 
-  import Arbor.Checkpoint.TestHelpers, only: [safe_stop: 1]
+  import Arbor.Persistence.Checkpoint.TestHelpers, only: [safe_stop: 1]
 
   @moduletag :fast
 

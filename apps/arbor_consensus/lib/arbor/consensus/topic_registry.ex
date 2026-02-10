@@ -26,7 +26,7 @@ defmodule Arbor.Consensus.TopicRegistry do
 
   ## Persistence
 
-  Uses Arbor.Checkpoint for persistence. On startup, attempts to restore
+  Uses Arbor.Persistence.Checkpoint for persistence. On startup, attempts to restore
   from checkpoint (verifying Ed25519 signature). If invalid, falls back
   to bootstrap topics only.
 
@@ -44,7 +44,7 @@ defmodule Arbor.Consensus.TopicRegistry do
 
   @table_name :consensus_topic_registry
   @checkpoint_id "consensus:topic_registry"
-  @default_checkpoint_store Arbor.Checkpoint.Store.ETS
+  @default_checkpoint_store Arbor.Persistence.Checkpoint.Store.ETS
 
   # Bootstrap topics that are always present
   @bootstrap_topics %{
@@ -345,7 +345,7 @@ defmodule Arbor.Consensus.TopicRegistry do
   defp restore_from_checkpoint(_checkpoint_id, nil, _verify_key, _opts), do: %{}
 
   defp restore_from_checkpoint(checkpoint_id, checkpoint_store, verify_key, _opts) do
-    Arbor.Checkpoint.load(checkpoint_id, checkpoint_store, retries: 0)
+    Arbor.Persistence.Checkpoint.load(checkpoint_id, checkpoint_store, retries: 0)
   rescue
     e ->
       Logger.warning("TopicRegistry: checkpoint load exception: #{inspect(e)}, starting fresh")
@@ -411,7 +411,7 @@ defmodule Arbor.Consensus.TopicRegistry do
     payload = sign_checkpoint(topics, state.signing_key)
 
     try do
-      case Arbor.Checkpoint.save(state.checkpoint_id, payload, state.checkpoint_store) do
+      case Arbor.Persistence.Checkpoint.save(state.checkpoint_id, payload, state.checkpoint_store) do
         :ok ->
           Logger.debug("TopicRegistry: checkpointed #{map_size(topics)} topics")
 
