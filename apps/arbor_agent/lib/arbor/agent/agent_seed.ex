@@ -386,6 +386,11 @@ defmodule Arbor.Agent.AgentSeed do
 
     llm_output = Map.get(llm_result, :output, "")
 
+    bg_suggestions =
+      if is_map(background_result),
+        do: Map.get(background_result, :suggestions, []),
+        else: []
+
     metadata = %{
       cognitive_mode: mode,
       background_actions: length(bg_actions),
@@ -395,7 +400,8 @@ defmodule Arbor.Agent.AgentSeed do
       goal_updates_count: length(goal_updates),
       heartbeat_count: heartbeat_count,
       usage: llm_usage,
-      output: llm_output
+      output: llm_output,
+      background_suggestions: bg_suggestions
     }
 
     # Only pass context window back if there's meaningful user-facing output
@@ -1354,7 +1360,8 @@ defmodule Arbor.Agent.AgentSeed do
 
   defp run_background_checks(state) do
     if background_checks_available?() do
-      result = BackgroundChecks.run(state.id, skip_patterns: true)
+      action_history = gather_action_history(state)
+      result = BackgroundChecks.run(state.id, action_history: action_history)
 
       Enum.each(result.warnings, fn warning ->
         Logger.info("Background check warning: #{warning.message}",
@@ -1388,6 +1395,40 @@ defmodule Arbor.Agent.AgentSeed do
     :exit, reason ->
       Logger.warning("Background checks timeout: #{inspect(reason)}")
       %{actions: [], warnings: [], suggestions: []}
+  end
+
+  defp gather_action_history(state) do
+    agent_id = state.id
+
+    percepts = safe_memory_call(fn -> Arbor.Memory.recent_percepts(agent_id, limit: 50) end)
+    percepts = if is_list(percepts), do: percepts, else: []
+
+    Enum.map(percepts, fn p ->
+      tool = get_tool_from_percept(p, agent_id)
+      status = if p.outcome == :success, do: :success, else: :error
+
+      %{tool: tool, status: status, timestamp: p.created_at}
+    end)
+  end
+
+  defp get_tool_from_percept(percept, agent_id) do
+    cond do
+      is_map(percept.data) && Map.has_key?(percept.data, :tool) ->
+        to_string(percept.data.tool)
+
+      is_map(percept.data) && Map.has_key?(percept.data, "tool") ->
+        percept.data["tool"]
+
+      percept.intent_id ->
+        case safe_memory_call(fn -> Arbor.Memory.get_intent(agent_id, percept.intent_id) end) do
+          {:ok, intent, _status} when not is_nil(intent) -> to_string(intent.action || "unknown")
+          {:ok, intent} when not is_nil(intent) -> to_string(Map.get(intent, :action, "unknown"))
+          _ -> "unknown"
+        end
+
+      true ->
+        "unknown"
+    end
   end
 
   defp dispatch_background_action(%{type: :run_consolidation}, agent_id) do

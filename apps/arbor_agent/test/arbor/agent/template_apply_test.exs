@@ -29,20 +29,25 @@ defmodule Arbor.Agent.TemplateApplyTest do
       assert String.length(config[:domain_context]) > 0
     end
 
-    test "provides defaults for templates without optional callbacks" do
+    test "extracts all callbacks from Scout template" do
       config = Template.apply(Scout)
 
       assert config[:name] == "Scout"
       assert config[:character].name == "Scout"
       assert config[:trust_tier] == :probationary
 
-      # Optional callbacks default to empty values
-      assert config[:nature] == ""
-      assert config[:values] == []
-      assert config[:interests] == []
-      assert config[:initial_thoughts] == []
-      assert config[:relationship_style] == %{}
-      assert config[:domain_context] == ""
+      # Optional callbacks now present on Scout
+      assert is_binary(config[:nature])
+      assert String.contains?(config[:nature], "reconnaissance")
+      assert is_list(config[:values])
+      assert length(config[:values]) >= 3
+      assert is_list(config[:interests])
+      assert length(config[:interests]) >= 2
+      assert [_ | _] = config[:initial_thoughts]
+      assert is_map(config[:relationship_style])
+      assert Map.has_key?(config[:relationship_style], :approach)
+      assert is_binary(config[:domain_context])
+      assert String.length(config[:domain_context]) > 0
     end
 
     test "includes meta-awareness about template origin" do
