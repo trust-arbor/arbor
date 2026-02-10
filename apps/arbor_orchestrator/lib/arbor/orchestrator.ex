@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Graph
+  alias Arbor.Orchestrator.IR
   alias Arbor.Orchestrator.Transforms.ModelStylesheet
   alias Arbor.Orchestrator.Transforms.VariableExpansion
   alias Arbor.Orchestrator.Validation.Validator
@@ -50,6 +51,47 @@ defmodule Arbor.Orchestrator do
   def run_file(path, opts \\ []) do
     with {:ok, source} <- File.read(path) do
       run(source, opts)
+    end
+  end
+
+  @doc """
+  Compile a DOT source or Graph into a typed intermediate representation.
+
+  The typed IR resolves handler types, validates attribute schemas, computes
+  capabilities, data classifications, and parses edge conditions — enabling
+  security analysis (taint tracking, capability requirements, loop bounds).
+  """
+  @spec compile(String.t() | Graph.t(), keyword()) ::
+          {:ok, IR.TypedGraph.t()} | {:error, term()}
+  def compile(source_or_graph, opts \\ []) do
+    with {:ok, graph} <- ensure_graph(source_or_graph, opts) do
+      IR.Compiler.compile(graph)
+    end
+  end
+
+  @doc """
+  Run typed validation passes on a compiled IR graph.
+
+  Returns diagnostics from schema validation, capability analysis,
+  taint reachability, loop detection, and resource bounds checking.
+  These passes complement the structural validation from `validate/2`.
+  """
+  @spec validate_typed(String.t() | Graph.t() | IR.TypedGraph.t(), keyword()) ::
+          [Arbor.Orchestrator.Validation.Diagnostic.t()]
+  def validate_typed(%IR.TypedGraph{} = typed, _opts) do
+    IR.Validator.validate(typed)
+  end
+
+  def validate_typed(source_or_graph, opts) do
+    case compile(source_or_graph, opts) do
+      {:ok, typed} -> IR.Validator.validate(typed)
+      {:error, reason} ->
+        [
+          Arbor.Orchestrator.Validation.Diagnostic.error(
+            "compile_error",
+            "Could not compile to typed IR: #{inspect(reason)}"
+          )
+        ]
     end
   end
 
