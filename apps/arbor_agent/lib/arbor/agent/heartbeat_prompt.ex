@@ -73,6 +73,12 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       ],
       "proposal_decisions": [
         {"proposal_id": "prop_abc123", "decision": "accept|reject|defer", "reason": "why"}
+      ],
+      "decompositions": [
+        {"goal_id": "goal_abc", "intentions": [
+          {"action": "file_read", "params": {"path": "/x"}, "reasoning": "why",
+           "preconditions": "what must be true", "success_criteria": "how to verify"}
+        ], "contingency": "fallback plan if steps fail"}
       ]
     }
 
@@ -102,38 +108,82 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     agent_id = state[:id] || state[:agent_id]
     goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
 
-    if goals == [] do
-      "## Active Goals\nNo active goals. Consider suggesting goals or reflecting on your situation."
-    else
-      goal_lines =
-        goals
-        |> Enum.take(5)
-        |> Enum.map_join("\n", fn goal ->
-          progress_pct = round((goal.progress || 0) * 100)
+    cond do
+      goals == [] ->
+        "## Active Goals\nNo active goals. Consider suggesting goals or reflecting on your situation."
 
-          base =
-            "- [#{progress_pct}%] #{goal.description} (id: #{goal.id}, priority: #{goal.priority})"
+      mode == :plan_execution ->
+        format_decomposition_target(goals, agent_id, mode)
 
-          # In goal_pursuit mode, show richer context
-          if mode == :goal_pursuit do
-            extras =
-              [
-                if(goal.success_criteria, do: "  Success: #{goal.success_criteria}"),
-                if(goal.notes != [] and goal.notes != nil,
-                  do: "  Notes: #{Enum.join(goal.notes, "; ")}"
-                )
-              ]
-              |> Enum.reject(&is_nil/1)
-              |> Enum.join("\n")
-
-            if extras == "", do: base, else: base <> "\n" <> extras
-          else
-            base
-          end
-        end)
-
-      "## Active Goals\n#{goal_lines}"
+      true ->
+        format_goals_default(goals, mode)
     end
+  end
+
+  defp format_decomposition_target(goals, agent_id, mode) do
+    target = find_decomposition_target(goals, agent_id)
+
+    if target do
+      [
+        "## Target Goal for Decomposition",
+        "- **ID:** #{target.id}",
+        "- **Description:** #{target.description}",
+        "- **Priority:** #{target.priority}",
+        "- **Progress:** #{round((target.progress || 0) * 100)}%",
+        if(target.success_criteria,
+          do: "- **Success Criteria:** #{target.success_criteria}"
+        ),
+        if(target.notes != [] and target.notes != nil,
+          do: "- **Notes:** #{Enum.join(target.notes, "; ")}"
+        ),
+        "",
+        "Break this goal into 1-3 concrete, executable steps.",
+        "Each step must map to a known action type."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+    else
+      format_goals_default(goals, mode)
+    end
+  end
+
+  defp format_goals_default(goals, mode) do
+    goal_lines =
+      goals
+      |> Enum.take(5)
+      |> Enum.map_join("\n", fn goal ->
+        progress_pct = round((goal.progress || 0) * 100)
+
+        base =
+          "- [#{progress_pct}%] #{goal.description} (id: #{goal.id}, priority: #{goal.priority})"
+
+        # In goal_pursuit mode, show richer context
+        if mode == :goal_pursuit do
+          extras =
+            [
+              if(goal.success_criteria, do: "  Success: #{goal.success_criteria}"),
+              if(goal.notes != [] and goal.notes != nil,
+                do: "  Notes: #{Enum.join(goal.notes, "; ")}"
+              )
+            ]
+            |> Enum.reject(&is_nil/1)
+            |> Enum.join("\n")
+
+          if extras == "", do: base, else: base <> "\n" <> extras
+        else
+          base
+        end
+      end)
+
+    "## Active Goals\n#{goal_lines}"
+  end
+
+  defp find_decomposition_target(goals, agent_id) do
+    # Find highest-priority goal that has no pending intentions
+    Enum.find(goals, fn goal ->
+      pending = safe_call(fn -> Arbor.Memory.pending_intents_for_goal(agent_id, goal.id) end)
+      pending == [] or pending == nil
+    end)
   end
 
   defp proposals_section(state) do
@@ -236,6 +286,16 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     """
   end
 
+  defp directive_section(:plan_execution, _state) do
+    """
+    ## Your Turn
+    You are in plan execution mode. Decompose the target goal above into
+    1-3 concrete intentions using the "decompositions" array. Each intention
+    must have an action type, params, reasoning, preconditions, and success_criteria.
+    Do not take actions directly — just plan the steps.
+    """
+  end
+
   defp directive_section(:conversation, _state), do: nil
 
   defp directive_section(_mode, state) do
@@ -260,8 +320,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     ## Response Format
     Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
     Required keys: "thinking", "actions", "memory_notes", "goal_updates".
-    Optional keys: "new_goals", "proposal_decisions".
+    Optional keys: "new_goals", "proposal_decisions", "decompositions".
     If you have no active goals, use "new_goals" to create some.
+    In plan_execution mode, use "decompositions" to break goals into executable steps.
     """
   end
 

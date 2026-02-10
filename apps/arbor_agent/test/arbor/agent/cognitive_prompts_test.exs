@@ -65,12 +65,13 @@ defmodule Arbor.Agent.CognitivePromptsTest do
       modes = CognitivePrompts.modes()
       assert :conversation in modes
       assert :goal_pursuit in modes
+      assert :plan_execution in modes
       assert :introspection in modes
       assert :consolidation in modes
       assert :pattern_analysis in modes
       assert :reflection in modes
       assert :insight_detection in modes
-      assert length(modes) == 7
+      assert length(modes) == 8
     end
   end
 end
