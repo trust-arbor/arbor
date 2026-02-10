@@ -33,7 +33,9 @@ defmodule Arbor.Orchestrator.Engine do
     case initial_state(graph, logs_root, opts) do
       {:ok,
        %{next_node_id: nil, context: context, completed_nodes: completed, outcomes: outcomes}} ->
-        final_outcome = List.last(completed) && Map.get(outcomes, List.last(completed))
+        completed = Enum.reverse(completed)
+        last_id = List.last(completed)
+        final_outcome = last_id && Map.get(outcomes, last_id)
         emit(opts, %{type: :pipeline_completed, completed_nodes: completed})
 
         {:ok,
@@ -259,7 +261,7 @@ defmodule Arbor.Orchestrator.Engine do
     handler_opts = Keyword.put_new(opts, :logs_root, logs_root)
     {outcome, retries} = execute_with_retry(node, context, graph, retries, handler_opts)
 
-    completed = completed ++ [node.id]
+    completed = [node.id | completed]
     outcomes = Map.put(outcomes, node.id, outcome)
 
     context =
@@ -268,7 +270,7 @@ defmodule Arbor.Orchestrator.Engine do
       |> Context.set("outcome", to_string(outcome.status))
       |> maybe_set_preferred_label(outcome)
 
-    checkpoint = Checkpoint.from_state(node.id, completed, retries, context, outcomes)
+    checkpoint = Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes)
     :ok = Checkpoint.write(checkpoint, logs_root)
     :ok = write_node_status(node.id, outcome, logs_root)
 
@@ -282,12 +284,13 @@ defmodule Arbor.Orchestrator.Engine do
       terminal?(node) ->
         case resolve_goal_gate_retry_target(graph, outcomes) do
           {:ok, nil} ->
-            emit(opts, %{type: :pipeline_completed, completed_nodes: completed})
+            ordered = Enum.reverse(completed)
+            emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
 
             {:ok,
              %{
                final_outcome: outcome,
-               completed_nodes: completed,
+               completed_nodes: ordered,
                context: Context.snapshot(context)
              }}
 
@@ -315,12 +318,13 @@ defmodule Arbor.Orchestrator.Engine do
       true ->
         case select_next_step(node, outcome, context, graph) do
           nil ->
-            emit(opts, %{type: :pipeline_completed, completed_nodes: completed})
+            ordered = Enum.reverse(completed)
+            emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
 
             {:ok,
              %{
                final_outcome: outcome,
-               completed_nodes: completed,
+               completed_nodes: ordered,
                context: Context.snapshot(context)
              }}
 
