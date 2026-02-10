@@ -1,0 +1,61 @@
+// SDLC Pipeline — Real execution mode (not simulated)
+// Uses Claude CLI adapter for LLM calls, real tool commands.
+// Scoped to arbor_orchestrator app.
+
+digraph SDLC {
+  graph [
+    goal="Add a mix arbor.pipeline.eval task that runs an eval pipeline from a DOT file and JSONL dataset",
+    label="SDLC Pipeline (Real)",
+    retry_policy="standard"
+  ]
+
+  // Entry
+  start [shape=Mdiamond]
+
+  // Phase 1: Planning
+  plan [
+    simulate="false",
+    prompt="You are working in an Elixir umbrella app. The orchestrator app is at apps/arbor_orchestrator/. Create a detailed implementation plan for a `mix arbor.pipeline.eval` mix task. It should: 1) Accept a DOT pipeline file and a JSONL dataset file, 2) Run the eval pipeline (load dataset, run eval with graders, aggregate metrics, report), 3) Support --graders flag (default: exact_match), 4) Support --format flag (terminal/json/markdown). Look at existing mix tasks in lib/mix/tasks/ for the pattern. The eval modules are in lib/arbor/orchestrator/eval/. Output a structured plan.",
+    llm_model="haiku"
+  ]
+
+  // Phase 2: Implementation
+  implement [
+    simulate="false",
+    prompt="Implement the mix task based on the plan. Write the code for lib/mix/tasks/arbor.pipeline.eval.ex. Follow the pattern of existing mix tasks like arbor.pipeline.run and arbor.pipeline.validate. Use Arbor.Orchestrator.Eval for dataset loading and eval running. The task should be self-contained and compile cleanly. Output the COMPLETE file contents.",
+    llm_model="haiku"
+  ]
+
+  // Phase 3: Compile check
+  compile_check [
+    type="tool",
+    tool_command="mix compile --no-deps-check --warnings-as-errors",
+    max_retries="2",
+    retry_target="implement"
+  ]
+
+  // Phase 4: Test
+  run_tests [
+    type="tool",
+    tool_command="mix test test/ --no-deps-check",
+    max_retries="1",
+    retry_target="review"
+  ]
+
+  // Phase 5: Review
+  review [
+    shape=diamond,
+    condition_key="outcome"
+  ]
+
+  // Done
+  done [shape=Msquare]
+
+  // Flow
+  start -> plan -> implement -> compile_check
+  compile_check -> run_tests [condition="outcome=success"]
+  compile_check -> implement [condition="outcome=fail"]
+  run_tests -> review
+  review -> done [condition="outcome=success"]
+  review -> implement [condition="outcome=fail"]
+}

@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
 
   require Logger
 
-  @default_timeout 300_000
+  @default_timeout 600_000
   @default_model "sonnet"
 
   @session_vars_to_clear ~w(
@@ -77,13 +77,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
         args
       end
 
-    # Max tokens
-    args =
-      if request.max_tokens do
-        ["--max-tokens", to_string(request.max_tokens) | args]
-      else
-        args
-      end
+    # Note: Claude CLI does not support --max-tokens flag.
+    # Token limits are managed by the subscription/model defaults.
 
     # Session resumption
     session_id = Keyword.get(opts, :session_id)
@@ -115,15 +110,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     working_dir = Keyword.get(opts, :working_dir)
 
-    port_opts =
-      [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        :stderr_to_stdout,
-        {:args, args},
-        {:env, safe_env_charlist()}
-      ]
+    # Build shell command string with </dev/null to close stdin.
+    # Claude CLI blocks on open stdin pipes (checks for piped input).
+    shell_cmd = build_shell_command(cmd, args)
+
+    port_opts = [
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      {:env, safe_env_charlist()}
+    ]
 
     port_opts =
       if working_dir do
@@ -132,8 +128,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
         port_opts
       end
 
-    port = Port.open({:spawn_executable, to_charlist(cmd)}, port_opts)
+    port = Port.open({:spawn, shell_cmd}, port_opts)
     collect_output(port, <<>>, timeout)
+  end
+
+  defp build_shell_command(cmd, args) do
+    escaped_args = Enum.map(args, &shell_escape/1)
+    Enum.join([cmd | escaped_args], " ") <> " </dev/null"
+  end
+
+  defp shell_escape(arg) do
+    # Single-quote the arg, escaping any internal single quotes
+    "'" <> String.replace(arg, "'", "'\\''") <> "'"
   end
 
   defp collect_output(port, acc, timeout) do
