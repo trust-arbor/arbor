@@ -8,16 +8,22 @@ defmodule Arbor.Security.Application do
     children =
       if Application.get_env(:arbor_security, :start_children, true) do
         [
-          {Arbor.Persistence.BufferedStore,
-           name: :arbor_security_capabilities,
-           backend: security_backend(),
-           write_mode: :sync,
-           collection: "capabilities"},
-          {Arbor.Persistence.BufferedStore,
-           name: :arbor_security_identities,
-           backend: security_backend(),
-           write_mode: :sync,
-           collection: "identities"},
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: :arbor_security_capabilities,
+             backend: security_backend(),
+             write_mode: :sync,
+             collection: "capabilities"},
+            id: :arbor_security_capabilities
+          ),
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: :arbor_security_identities,
+             backend: security_backend(),
+             write_mode: :sync,
+             collection: "identities"},
+            id: :arbor_security_identities
+          ),
           {Arbor.Security.Identity.Registry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
