@@ -46,6 +46,13 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @spec run_file(String.t(), keyword()) :: run_result()
+  def run_file(path, opts \\ []) do
+    with {:ok, source} <- File.read(path) do
+      run(source, opts)
+    end
+  end
+
   @spec conformance_matrix() :: map()
   def conformance_matrix, do: Arbor.Orchestrator.Conformance.Matrix.summary()
 
