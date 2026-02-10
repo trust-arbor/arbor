@@ -63,8 +63,8 @@ defmodule Arbor.Memory.Embedding do
       content: content,
       content_hash: content_hash,
       embedding: Pgvector.new(embedding),
-      memory_type: get_in(metadata, [:type]) || Map.get(metadata, "type"),
-      source: get_in(metadata, [:source]) || Map.get(metadata, "source"),
+      memory_type: safe_to_string(get_in(metadata, [:type]) || Map.get(metadata, "type")),
+      source: safe_to_string(get_in(metadata, [:source]) || Map.get(metadata, "source")),
       metadata: metadata
     }
 
@@ -285,8 +285,8 @@ defmodule Arbor.Memory.Embedding do
           content: content,
           content_hash: content_hash,
           embedding: Pgvector.new(embedding),
-          memory_type: get_in(metadata, [:type]) || Map.get(metadata, "type"),
-          source: get_in(metadata, [:source]) || Map.get(metadata, "source"),
+          memory_type: safe_to_string(get_in(metadata, [:type]) || Map.get(metadata, "type")),
+          source: safe_to_string(get_in(metadata, [:source]) || Map.get(metadata, "source")),
           metadata: metadata,
           inserted_at: now,
           updated_at: now
@@ -373,4 +373,9 @@ defmodule Arbor.Memory.Embedding do
   defp compute_content_hash(content) do
     :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   end
+
+  defp safe_to_string(nil), do: nil
+  defp safe_to_string(val) when is_binary(val), do: val
+  defp safe_to_string(val) when is_atom(val), do: Atom.to_string(val)
+  defp safe_to_string(val), do: to_string(val)
 end
