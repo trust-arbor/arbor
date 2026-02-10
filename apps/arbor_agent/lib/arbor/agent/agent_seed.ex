@@ -107,6 +107,7 @@ defmodule Arbor.Agent.AgentSeed do
           seed_handle_info: 2,
           seed_terminate: 2,
           prepare_query: 2,
+          prepare_query: 3,
           finalize_query: 3,
           seed_heartbeat_cycle: 2,
           seed_heartbeat_async: 1,
@@ -267,12 +268,18 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   @doc """
-  Prepare a query by recalling memories and adding timing/self-knowledge context.
+  Prepare a query by recalling memories and optionally adding timing/self-knowledge context.
 
   Returns `{enhanced_prompt, recalled_memories, updated_state}`.
+
+  ## Options
+
+  - `:enhance_prompt` — Whether to add timing and self-knowledge context to the prompt.
+    Defaults to `true`. Set to `false` when the caller handles context injection separately
+    (e.g., APIAgent uses the split stable/volatile prompt builders).
   """
-  @spec prepare_query(String.t(), map()) :: {String.t(), [map()], map()}
-  def prepare_query(prompt, state) do
+  @spec prepare_query(String.t(), map(), keyword()) :: {String.t(), [map()], map()}
+  def prepare_query(prompt, state, opts \\ []) do
     state = TimingContext.on_user_message(state)
 
     recalled =
@@ -282,7 +289,10 @@ defmodule Arbor.Agent.AgentSeed do
         []
       end
 
-    enhanced_prompt = maybe_add_timing_context(prompt, state)
+    enhanced_prompt =
+      if Keyword.get(opts, :enhance_prompt, true),
+        do: maybe_add_timing_context(prompt, state),
+        else: prompt
 
     {enhanced_prompt, recalled, state}
   end

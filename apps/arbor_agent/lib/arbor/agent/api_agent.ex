@@ -357,8 +357,8 @@ defmodule Arbor.Agent.APIAgent do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    # Seed: prepare query (recall memories, add timing/self-knowledge)
-    {enhanced_prompt, recalled, state} = prepare_query(prompt, state)
+    # Seed: prepare query (recall memories, skip timing/self-knowledge — handled by split prompt)
+    {enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
 
     recalled = if recall, do: recalled, else: []
 
@@ -403,8 +403,19 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   defp execute_query(prompt, state, _opts) do
-    # Build rich system prompt from memory subsystems
-    system_prompt = Arbor.AI.build_rich_system_prompt(state.id, state: state)
+    prompt_opts = [state: state, model: state.model, provider: state.provider]
+
+    # Stable system prompt (identity, self-knowledge, tools — cacheable)
+    system_prompt = Arbor.AI.build_stable_system_prompt(state.id, prompt_opts)
+
+    # Volatile context (goals, WM, KG, timing — changes each query)
+    volatile_context = Arbor.AI.build_volatile_context(state.id, prompt_opts)
+
+    # Prepend volatile context to user message
+    full_prompt =
+      if volatile_context not in ["", nil],
+        do: volatile_context <> "\n\n---\n\n## User Message\n" <> prompt,
+        else: prompt
 
     api_opts = [
       provider: state.provider,
@@ -417,7 +428,7 @@ defmodule Arbor.Agent.APIAgent do
       max_turns: state.max_turns
     ]
 
-    case Arbor.AI.generate_text_with_tools(prompt, api_opts) do
+    case Arbor.AI.generate_text_with_tools(full_prompt, api_opts) do
       {:ok, response} ->
         new_state = %{state | query_count: state.query_count + 1}
 
