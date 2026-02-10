@@ -311,6 +311,78 @@ defmodule Arbor.AI do
 
   # ── Rich System Prompt ──
 
+  # Per-section token budgets. {:fixed, N} for static sections,
+  # {:min_max, min, max, pct} for dynamic sections sized to context window.
+  @section_budgets %{
+    identity: {:fixed, 400},
+    self_knowledge: {:min_max, 500, 4000, 0.05},
+    tool_guidance: {:fixed, 400},
+    goals: {:min_max, 200, 4000, 0.05},
+    working_memory: {:min_max, 500, 8000, 0.10},
+    knowledge_graph: {:min_max, 200, 4000, 0.05},
+    timing: {:fixed, 200}
+  }
+
+  # Safety cap for total system prompt (stable + volatile combined)
+  @max_total_prompt_chars 80_000
+
+  # Approximate chars per token for budget→char conversion
+  @chars_per_token 4
+
+  @doc """
+  Build the stable (cacheable) system prompt for API-backend agents.
+
+  Contains sections that rarely change: identity, self-knowledge, and tool
+  guidance. Suitable for Anthropic prompt caching since these sections
+  remain constant across queries within a session.
+
+  ## Options
+
+  - `:context_size` - Model context window size in tokens (default: 100_000)
+  """
+  @spec build_stable_system_prompt(String.t(), keyword()) :: String.t()
+  def build_stable_system_prompt(agent_id, opts \\ []) do
+    budgets = resolve_section_budgets(opts)
+
+    sections = [
+      truncate_section(build_identity_section(), budgets.identity),
+      truncate_section(build_self_knowledge_section(agent_id), budgets.self_knowledge),
+      truncate_section(build_tool_guidance_section(), budgets.tool_guidance)
+    ]
+
+    sections
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  @doc """
+  Build the volatile (per-turn) context for API-backend agents.
+
+  Contains sections that change frequently: goals, working memory,
+  knowledge graph, and timing context. This should be prepended to
+  the user message rather than included in the system prompt.
+
+  ## Options
+
+  - `:state` - Agent state map (for timing context)
+  - `:context_size` - Model context window size in tokens (default: 100_000)
+  """
+  @spec build_volatile_context(String.t(), keyword()) :: String.t()
+  def build_volatile_context(agent_id, opts \\ []) do
+    budgets = resolve_section_budgets(opts)
+
+    sections = [
+      truncate_section(build_goals_section(agent_id), budgets.goals),
+      truncate_section(build_working_memory_section(agent_id), budgets.working_memory),
+      truncate_section(build_knowledge_graph_section(agent_id), budgets.knowledge_graph),
+      truncate_section(build_timing_section(opts), budgets.timing)
+    ]
+
+    sections
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.join("\n\n")
+  end
+
   @doc """
   Build a rich system prompt for API-backend agents.
 
@@ -318,25 +390,77 @@ defmodule Arbor.AI do
   timing context, and tool guidance from the agent's memory subsystems.
   Each section gracefully degrades if the data isn't available.
 
+  This is a backward-compatible wrapper that joins the stable system prompt
+  and volatile context into a single string. New callers should prefer
+  `build_stable_system_prompt/2` + `build_volatile_context/2` for better
+  size control and prompt caching.
+
   ## Options
 
   - `:state` - Agent state map (for timing context)
   """
   @spec build_rich_system_prompt(String.t(), keyword()) :: String.t()
   def build_rich_system_prompt(agent_id, opts \\ []) do
-    sections = [
-      build_identity_section(),
-      build_self_knowledge_section(agent_id),
-      build_goals_section(agent_id),
-      build_working_memory_section(agent_id),
-      build_knowledge_graph_section(agent_id),
-      build_timing_section(opts),
-      build_tool_guidance_section()
-    ]
+    stable = build_stable_system_prompt(agent_id, opts)
+    volatile = build_volatile_context(agent_id, opts)
 
-    sections
-    |> Enum.reject(&(is_nil(&1) or &1 == ""))
-    |> Enum.join("\n\n")
+    prompt =
+      [stable, volatile]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+
+    truncate_total_prompt(prompt, @max_total_prompt_chars)
+  end
+
+  # Truncate a section to fit within its token budget (converted to chars).
+  # Returns nil for nil/empty input.
+  defp truncate_section(nil, _budget_tokens), do: nil
+  defp truncate_section("", _budget_tokens), do: ""
+
+  defp truncate_section(text, budget_tokens) do
+    max_chars = budget_tokens * @chars_per_token
+
+    if String.length(text) <= max_chars do
+      text
+    else
+      truncated_length = max(0, max_chars - 40)
+
+      String.slice(text, 0, truncated_length) <>
+        "\n[...truncated to #{budget_tokens} token budget]"
+    end
+  end
+
+  # Resolve section budgets using TokenBudget if available, otherwise use fixed fallbacks.
+  defp resolve_section_budgets(opts) do
+    context_size = Keyword.get(opts, :context_size, 100_000)
+    token_budget_mod = Arbor.Memory.TokenBudget
+
+    if Code.ensure_loaded?(token_budget_mod) and
+         function_exported?(token_budget_mod, :allocate, 2) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(token_budget_mod, :allocate, [@section_budgets, context_size])
+    else
+      # Fixed fallbacks when TokenBudget isn't available
+      %{
+        identity: 400,
+        self_knowledge: 2000,
+        tool_guidance: 400,
+        goals: 1000,
+        working_memory: 4000,
+        knowledge_graph: 1000,
+        timing: 200
+      }
+    end
+  end
+
+  # Safety cap on total combined prompt size
+  defp truncate_total_prompt(prompt, max_chars) when byte_size(prompt) <= max_chars, do: prompt
+
+  defp truncate_total_prompt(prompt, max_chars) do
+    truncated = String.slice(prompt, 0, max_chars)
+
+    truncated <>
+      "\n\n[System prompt truncated — #{byte_size(prompt)} chars exceeded #{max_chars} limit]"
   end
 
   defp build_identity_section do
