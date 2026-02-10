@@ -52,7 +52,10 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
     file = List.first(files)
 
     unless file do
-      error("Usage: mix arbor.pipeline.eval <file.dot> [--dataset path] [--output path] [--workdir dir]")
+      error(
+        "Usage: mix arbor.pipeline.eval <file.dot> [--dataset path] [--output path] [--workdir dir]"
+      )
+
       System.halt(1)
     end
 
