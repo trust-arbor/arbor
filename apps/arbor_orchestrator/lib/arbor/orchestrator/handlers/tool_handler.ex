@@ -56,7 +56,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     end
   end
 
-  defp run_command(command, node, context, opts) do
+  defp run_command(command, _node, context, opts) do
     try do
       [executable | args] = OptionParser.split(command)
       cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
