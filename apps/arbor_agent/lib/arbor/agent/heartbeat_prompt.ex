@@ -37,6 +37,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       goals_section(state, mode),
       tools_section(),
       proposals_section(state),
+      patterns_section(state),
       percepts_section(state),
       pending_section(state),
       directive_section(mode, state),
@@ -207,6 +208,24 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         end)
 
       "## Pending Proposals\nReview and decide: accept, reject, or defer.\n#{lines}"
+    end
+  end
+
+  defp patterns_section(state) do
+    suggestions = Map.get(state, :background_suggestions, [])
+    pattern_suggestions = Enum.filter(suggestions, &(Map.get(&1, :type) == :learning))
+
+    if pattern_suggestions == [] do
+      nil
+    else
+      lines =
+        Enum.map_join(pattern_suggestions, "\n", fn s ->
+          conf = round((Map.get(s, :confidence, 0.5) || 0.5) * 100)
+          "- (#{conf}% confidence) #{Map.get(s, :content, "")}"
+        end)
+
+      "## Detected Action Patterns\n" <>
+        "These patterns were detected in your recent tool usage:\n#{lines}"
     end
   end
 
