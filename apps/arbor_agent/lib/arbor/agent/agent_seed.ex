@@ -1135,7 +1135,25 @@ defmodule Arbor.Agent.AgentSeed do
 
     if goal_id && progress do
       safe_memory_call(fn -> Arbor.Memory.update_goal_progress(agent_id, goal_id, progress) end)
+
+      # Goal milestone: when progress reaches 1.0, achieve and checkpoint
+      if progress >= 1.0 do
+        achieve_and_checkpoint_goal(agent_id, goal_id)
+      end
     end
+  end
+
+  defp achieve_and_checkpoint_goal(agent_id, goal_id) do
+    safe_memory_call(fn -> Arbor.Memory.achieve_goal(agent_id, goal_id) end)
+
+    seed_emit_signal(:goal_milestone, %{
+      agent_id: agent_id,
+      goal_id: goal_id,
+      milestone: :achieved,
+      timestamp: DateTime.utc_now()
+    })
+
+    Logger.info("Goal achieved: #{goal_id}", agent_id: agent_id)
   end
 
   defp create_suggested_goals(_agent_id, []), do: :ok
@@ -1214,8 +1232,37 @@ defmodule Arbor.Agent.AgentSeed do
           goal_id: goal_id
         )
 
+        # Dead-letter check: if all intents for this goal are terminal, flag it
+        maybe_flag_dead_letter_goal(agent_id, goal_id)
+
       _ ->
         :ok
+    end
+  end
+
+  defp maybe_flag_dead_letter_goal(_agent_id, nil), do: :ok
+
+  defp maybe_flag_dead_letter_goal(agent_id, goal_id) do
+    pending =
+      safe_memory_call(fn ->
+        Arbor.Memory.pending_intents_for_goal(agent_id, goal_id)
+      end)
+
+    # If no pending intents remain, all were completed or abandoned — goal is a dead letter
+    if (is_list(pending) and pending == []) or pending == nil do
+      safe_memory_call(fn ->
+        Arbor.Memory.update_goal_metadata(agent_id, goal_id, %{decomposition_failed: true})
+      end)
+
+      seed_emit_signal(:goal_dead_letter, %{
+        agent_id: agent_id,
+        goal_id: goal_id,
+        reason: "all_intents_abandoned"
+      })
+
+      Logger.warning("Goal #{goal_id} flagged as dead letter — all intents abandoned",
+        agent_id: agent_id
+      )
     end
   end
 
