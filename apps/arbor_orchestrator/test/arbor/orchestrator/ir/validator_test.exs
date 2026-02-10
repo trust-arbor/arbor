@@ -259,6 +259,16 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
       assert_pipeline_compiles_and_validates(path)
     end
 
+    test "eval-framework.dot compiles and validates" do
+      path = Path.join(@specs_dir, "eval-framework.dot")
+      assert_pipeline_compiles_and_validates(path)
+    end
+
+    test "dotgen.dot compiles and validates" do
+      path = Path.join(@specs_dir, "dotgen.dot")
+      assert_pipeline_compiles_and_validates(path)
+    end
+
     defp assert_pipeline_compiles_and_validates(path) do
       source = File.read!(path)
       {:ok, graph} = Arbor.Orchestrator.parse(source)

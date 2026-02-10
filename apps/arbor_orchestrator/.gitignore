@@ -24,5 +24,8 @@ arbor_orchestrator-*.tar
 
 # Specs directory — contains large provider SDK snapshots (~95MB)
 # and cloned repos with nested .git dirs. Reference material only.
-/specs/
+# Ignore everything in specs except pipelines and attractor subdirs.
+/specs/*
+!/specs/pipelines/
+!/specs/attractor/
 
