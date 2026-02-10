@@ -105,9 +105,51 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
   end
 
   defp extract_dot(response) do
-    response
-    |> String.replace(~r/\A\s*```(?:dot|graphviz)?\n/, "")
-    |> String.replace(~r/\n```\s*\z/, "")
+    # First try: strip markdown code fences
+    stripped =
+      response
+      |> String.replace(~r/\A\s*```(?:dot|graphviz)?\n/, "")
+      |> String.replace(~r/\n```\s*\z/, "")
+      |> String.trim()
+
+    if String.starts_with?(stripped, "digraph") do
+      stripped
+    else
+      # Extract embedded digraph from narrative text using balanced braces
+      case Regex.run(~r/digraph\s+\w+\s*\{/s, response) do
+        [match] ->
+          start_idx = :binary.match(response, match) |> elem(0)
+          rest = binary_part(response, start_idx, byte_size(response) - start_idx)
+          extract_balanced_braces(rest)
+
+        nil ->
+          stripped
+      end
+    end
+  end
+
+  defp extract_balanced_braces(text) do
+    text
+    |> String.graphemes()
+    |> Enum.reduce_while({0, []}, fn char, {depth, acc} ->
+      new_depth =
+        case char do
+          "{" -> depth + 1
+          "}" -> depth - 1
+          _ -> depth
+        end
+
+      new_acc = [char | acc]
+
+      if new_depth == 0 and depth > 0 do
+        {:halt, {0, new_acc}}
+      else
+        {:cont, {new_depth, new_acc}}
+      end
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+    |> Enum.join()
     |> String.trim()
   end
 end
