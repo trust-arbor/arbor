@@ -332,7 +332,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_info({:query_result, _backend, {:error, reason}}, socket) do
-    {:noreply, assign(socket, loading: false, error: "Query failed: #{inspect(reason)}")}
+    error_msg = format_query_error(reason)
+    {:noreply, assign(socket, loading: false, error: error_msg)}
   end
 
   def handle_info({:signal_received, signal}, socket) do
@@ -1567,6 +1568,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp format_time(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_time(_), do: ""
+
+  defp format_query_error(:string_too_long) do
+    "Conversation too long for the model's context window. Try starting a new conversation."
+  end
+
+  defp format_query_error(:empty_response) do
+    "Model returned an empty response (may be rate-limited). Try again in a moment."
+  end
+
+  defp format_query_error(reason) do
+    "Query failed: #{inspect(reason)}"
+  end
 
   defp signal_matches_agent?(signal, agent_id) do
     matches_in?(signal.metadata, agent_id) or matches_in?(signal.data, agent_id)
