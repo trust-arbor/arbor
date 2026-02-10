@@ -78,10 +78,16 @@ defmodule Arbor.Orchestrator.Engine do
         {:ok, state}
       end
     else
+      workdir = Keyword.get(opts, :workdir)
+
       context =
-        Context.new(%{
-          "graph.goal" => Map.get(graph.attrs, "goal", "")
-        })
+        Context.new(
+          %{
+            "graph.goal" => Map.get(graph.attrs, "goal", ""),
+            "graph.label" => Map.get(graph.attrs, "label", "")
+          }
+          |> then(fn ctx -> if workdir, do: Map.put(ctx, "workdir", workdir), else: ctx end)
+        )
 
       with {:ok, start_id} <- find_start_node(graph) do
         {:ok,
