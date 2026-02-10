@@ -1,13 +1,13 @@
-defmodule Mix.Tasks.Attractor.Run do
+defmodule Mix.Tasks.Arbor.Pipeline.Run do
   @shortdoc "Execute a pipeline from a .dot file"
   @moduledoc """
   Parses, validates, and executes a pipeline with live progress display.
 
   ## Usage
 
-      mix attractor.run pipeline.dot
-      mix attractor.run pipeline.dot --logs-root /tmp/run1
-      mix attractor.run pipeline.dot --workdir ./my_project
+      mix arbor.pipeline.run pipeline.dot
+      mix arbor.pipeline.run pipeline.dot --logs-root /tmp/run1
+      mix arbor.pipeline.run pipeline.dot --workdir ./my_project
   """
 
   use Mix.Task
@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Attractor.Run do
     file = List.first(files)
 
     unless file do
-      error("Usage: mix attractor.run <file.dot> [--logs-root dir] [--workdir dir]")
+      error("Usage: mix arbor.pipeline.run <file.dot> [--logs-root dir] [--workdir dir]")
       System.halt(1)
     end
 

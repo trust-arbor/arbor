@@ -1,12 +1,12 @@
-defmodule Mix.Tasks.Attractor.Validate do
+defmodule Mix.Tasks.Arbor.Pipeline.Validate do
   @shortdoc "Parse and lint a .dot pipeline file"
   @moduledoc """
   Validates one or more .dot files, reporting errors and warnings.
 
   ## Usage
 
-      mix attractor.validate pipeline.dot
-      mix attractor.validate *.dot
+      mix arbor.pipeline.validate pipeline.dot
+      mix arbor.pipeline.validate *.dot
   """
 
   use Mix.Task
@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Attractor.Validate do
     Mix.Task.run("app.start")
 
     if files == [] do
-      error("Usage: mix attractor.validate <file.dot> [file2.dot ...]")
+      error("Usage: mix arbor.pipeline.validate <file.dot> [file2.dot ...]")
       System.halt(1)
     end
 
