@@ -61,7 +61,8 @@ config :arbor_persistence, Arbor.Persistence.Repo,
   database: "arbor_persistence_test",
   username: "arbor_dev",
   hostname: "localhost",
-  pool: Ecto.Adapters.SQL.Sandbox
+  pool: Ecto.Adapters.SQL.Sandbox,
+  types: Arbor.Persistence.PostgrexTypes
 
 # Memory tests use ETS by default (no database required)
 config :arbor_memory,
