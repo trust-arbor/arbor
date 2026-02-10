@@ -77,6 +77,9 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp ask_interviewer(question, opts) do
     interviewer = opts[:interviewer]
 

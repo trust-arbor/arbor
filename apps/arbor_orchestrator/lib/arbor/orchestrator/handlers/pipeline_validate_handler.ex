@@ -85,6 +85,9 @@ defmodule Arbor.Orchestrator.Handlers.PipelineValidateHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :read_only
+
   defp get_source(node, context, opts) do
     cond do
       Map.get(node.attrs, "source_file") ->

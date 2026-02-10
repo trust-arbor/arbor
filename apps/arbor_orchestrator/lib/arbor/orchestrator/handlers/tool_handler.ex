@@ -56,6 +56,9 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp run_command(command, _node, context, opts) do
     try do
       [executable | args] = OptionParser.split(command)

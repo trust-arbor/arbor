@@ -90,6 +90,9 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp execute_branch(branch_node_id, join_target, context, graph, opts, branch_executor) do
     branch_context = Context.new(Context.snapshot(context))
 

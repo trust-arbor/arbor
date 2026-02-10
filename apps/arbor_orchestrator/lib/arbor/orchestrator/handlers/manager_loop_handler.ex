@@ -21,6 +21,9 @@ defmodule Arbor.Orchestrator.Handlers.ManagerLoopHandler do
     run_cycles(node, local, actions, stop_condition, poll_interval_ms, max_cycles, opts)
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp run_cycles(_node, local, _actions, _stop_condition, _poll_interval_ms, max_cycles, _opts)
        when max_cycles <= 0 do
     %Outcome{

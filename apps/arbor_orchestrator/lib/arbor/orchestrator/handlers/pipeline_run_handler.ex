@@ -69,6 +69,9 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
     end
   end
 
+  @impl true
+  def idempotency, do: :side_effecting
+
   defp get_source(node, context, opts) do
     cond do
       Map.get(node.attrs, "source_file") ->
