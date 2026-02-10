@@ -13,6 +13,7 @@ defmodule Arbor.Memory.DurableStore do
   """
 
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Memory.Embedding
   alias Arbor.Persistence.BufferedStore
 
   require Logger
@@ -35,7 +36,10 @@ defmodule Arbor.Memory.DurableStore do
     :ok
   catch
     kind, reason ->
-      Logger.warning("DurableStore.persist failed for #{namespace}/#{key}: #{inspect({kind, reason})}")
+      Logger.warning(
+        "DurableStore.persist failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+      )
+
       :ok
   end
 
@@ -70,7 +74,10 @@ defmodule Arbor.Memory.DurableStore do
     end
   catch
     kind, reason ->
-      Logger.warning("DurableStore.load failed for #{namespace}/#{key}: #{inspect({kind, reason})}")
+      Logger.warning(
+        "DurableStore.load failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+      )
+
       {:error, :not_found}
   end
 
@@ -142,7 +149,10 @@ defmodule Arbor.Memory.DurableStore do
     end
   catch
     kind, reason ->
-      Logger.warning("DurableStore.load_by_prefix failed for #{namespace}/#{prefix}: #{inspect({kind, reason})}")
+      Logger.warning(
+        "DurableStore.load_by_prefix failed for #{namespace}/#{prefix}: #{inspect({kind, reason})}"
+      )
+
       {:ok, []}
   end
 
@@ -159,7 +169,10 @@ defmodule Arbor.Memory.DurableStore do
     :ok
   catch
     kind, reason ->
-      Logger.warning("DurableStore.delete failed for #{namespace}/#{key}: #{inspect({kind, reason})}")
+      Logger.warning(
+        "DurableStore.delete failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+      )
+
       :ok
   end
 
@@ -190,14 +203,15 @@ defmodule Arbor.Memory.DurableStore do
   end
 
   # ============================================================================
-  # Embedding Stubs — Phase 4 will fill these in
+  # Embedding — semantic memory via pgvector
   # ============================================================================
 
   @doc """
-  Queue an embedding for a memory record (async stub).
+  Queue an embedding for a memory record (async).
 
-  Phase 4 will implement actual embedding generation via LLM or local model,
-  writing to the `memory_embeddings` table for semantic search.
+  Generates an embedding via `Arbor.AI.embed/2` and stores it in the
+  `memory_embeddings` table for semantic search. Fire-and-forget —
+  failures are logged at debug level and never affect the caller.
 
   ## Parameters
 
@@ -209,19 +223,84 @@ defmodule Arbor.Memory.DurableStore do
     - `:type` - Semantic type hint (e.g., :goal, :thought, :intent)
   """
   @spec embed_async(String.t(), String.t(), String.t(), keyword()) :: :ok
-  def embed_async(_namespace, _key, _content, _opts \\ []) do
-    # TODO: Phase 4 — generate embedding and write to memory_embeddings table
+  def embed_async(namespace, key, content, opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id)
+    type = Keyword.get(opts, :type)
+
+    if agent_id && content && content != "" do
+      Task.start(fn ->
+        try do
+          case Arbor.AI.embed(content) do
+            {:ok, %{embedding: embedding}} ->
+              metadata = %{
+                type: type && to_string(type),
+                source: namespace
+              }
+
+              Embedding.store(agent_id, content, embedding, metadata)
+
+            {:error, reason} ->
+              Logger.debug("Embedding failed for #{namespace}/#{key}: #{inspect(reason)}")
+          end
+        rescue
+          e -> Logger.debug("embed_async error: #{Exception.message(e)}")
+        catch
+          kind, reason -> Logger.debug("embed_async #{kind}: #{inspect(reason)}")
+        end
+      end)
+    end
+
     :ok
   end
 
   @doc """
-  Search memory by semantic similarity (stub).
+  Search memory by semantic similarity.
 
-  Phase 4 will implement vector similarity search against `memory_embeddings`.
+  Embeds the query text, then searches `memory_embeddings` using pgvector
+  cosine distance. Returns `{:ok, results}` or `{:ok, []}` on any failure.
+
+  ## Options
+
+  - `:agent_id` - Required. Scopes search to this agent's embeddings.
+  - `:limit` - Max results (default 10)
+  - `:threshold` - Minimum similarity 0.0–1.0 (default 0.3)
   """
   @spec semantic_search(String.t(), String.t(), keyword()) :: {:ok, [map()]}
-  def semantic_search(_query_text, _namespace, _opts \\ []) do
-    # TODO: Phase 4 — embed query, search memory_embeddings with DiskANN
-    {:ok, []}
+  def semantic_search(query_text, namespace, opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id)
+
+    if agent_id && query_text && query_text != "" do
+      do_semantic_search(query_text, agent_id, namespace, opts)
+    else
+      {:ok, []}
+    end
+  catch
+    kind, reason ->
+      Logger.debug("semantic_search #{kind}: #{inspect(reason)}")
+      {:ok, []}
+  end
+
+  defp do_semantic_search(query_text, agent_id, namespace, opts) do
+    case Arbor.AI.embed(query_text) do
+      {:ok, %{embedding: embedding}} ->
+        search_opts = [
+          limit: Keyword.get(opts, :limit, 10),
+          threshold: Keyword.get(opts, :threshold, 0.3),
+          type_filter: namespace
+        ]
+
+        case Embedding.search(agent_id, embedding, search_opts) do
+          {:ok, results} ->
+            {:ok, results}
+
+          {:error, reason} ->
+            Logger.debug("Semantic search query failed: #{inspect(reason)}")
+            {:ok, []}
+        end
+
+      {:error, reason} ->
+        Logger.debug("Semantic search embedding failed: #{inspect(reason)}")
+        {:ok, []}
+    end
   end
 end
