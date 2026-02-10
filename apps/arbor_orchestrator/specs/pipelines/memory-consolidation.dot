@@ -1,0 +1,69 @@
+// Memory Consolidation Pipeline
+// Compresses and archives agent working memory.
+// Council recommendation: strategy selection should be adaptive, visible as graph choices.
+//
+// Pattern: Analyze -> Classify -> Choose strategy -> Execute -> Verify
+
+digraph MemoryConsolidation {
+  graph [
+    goal="Consolidate working memory by compressing old entries and archiving important ones",
+    label="Memory Consolidation"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Analyze current memory state
+  analyze [
+    prompt="Analyze the current working memory entries. For each entry, determine: 1) Age (recent/old/ancient), 2) Access frequency (hot/warm/cold), 3) Importance (critical/useful/ephemeral), 4) Dependencies (does anything reference this?). Output analysis as JSON array.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 2: Classify entries into consolidation buckets
+  classify [
+    prompt="Based on the memory analysis, classify each entry into one of: KEEP (critical, recently accessed), COMPRESS (useful but old, can be summarized), ARCHIVE (important for long-term but not needed in working memory), DISCARD (ephemeral, old, unreferenced). Output classification as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 3: Choose compression strategy
+  choose_strategy [
+    shape=diamond,
+    prompt="Based on the classification results, choose the best compression strategy: 'summarize' (LLM-based summary of related entries), 'merge' (combine duplicate/overlapping entries), 'extract' (pull key facts into compact format). Consider memory budget and entry types."
+  ]
+
+  // Phase 3a: Summarize strategy
+  summarize [
+    prompt="For each COMPRESS entry, generate a concise summary that preserves the key information. Group related entries and summarize them together. Aim for 3:1 compression ratio. Output summaries as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 3b: Merge strategy
+  merge [
+    prompt="For each set of overlapping COMPRESS entries, merge them into a single consolidated entry. Preserve all unique information, remove duplicates. Output merged entries as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 4: Archive entries marked for archival
+  archive [
+    prompt="For ARCHIVE entries, prepare them for durable storage. Add metadata: original_timestamp, consolidation_timestamp, importance_score, access_count. Output archive-ready entries as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  // Phase 5: Write consolidated memory
+  write_consolidated [
+    type="file.write",
+    content_key="last_response",
+    output="consolidated_memory.json",
+    format="json"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> analyze -> classify -> choose_strategy
+  choose_strategy -> summarize [condition="context.strategy=summarize"]
+  choose_strategy -> merge [condition="context.strategy=merge"]
+  choose_strategy -> summarize [label="default"]
+  summarize -> archive
+  merge -> archive
+  archive -> write_consolidated -> done
+}

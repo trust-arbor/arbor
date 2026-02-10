@@ -1,0 +1,74 @@
+// BDI Goal Decomposition Pipeline
+// Decomposes high-level goals into actionable subgoals and intents.
+// Council recommendation: agent reasoning visible as graph, auditable decisions.
+//
+// Pattern: Receive goal -> Analyze -> Decompose -> Prioritize -> Execute -> Verify
+
+digraph BDI {
+  graph [
+    goal="Decompose a high-level goal into executable subgoals",
+    label="BDI Goal Decomposition"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Goal analysis
+  analyze_goal [
+    prompt="Analyze the goal: $goal. Determine: 1) Is this goal achievable with current capabilities? 2) What are the preconditions? 3) What resources are needed? 4) Estimate complexity (simple/moderate/complex). Output structured analysis as JSON.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high"
+  ]
+
+  // Phase 2: Decomposition
+  check_complexity [
+    shape=diamond,
+    condition_key="complexity"
+  ]
+
+  decompose_simple [
+    prompt="The goal is simple. Create a single actionable intent with: action, parameters, expected_outcome, verification_criteria. Output as JSON.",
+    llm_model="claude-haiku-4-5-20251001"
+  ]
+
+  decompose_complex [
+    prompt="The goal is complex. Decompose into 2-5 ordered subgoals. Each subgoal needs: description, dependencies (which other subgoals must complete first), estimated_effort, verification_criteria. Output as JSON array.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high"
+  ]
+
+  // Phase 3: Prioritization
+  prioritize [
+    prompt="Given the subgoals from the previous step, create an execution order. Consider: dependencies, resource constraints, risk (do risky things early to fail fast). Output ordered list with rationale.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  // Phase 4: Intent creation
+  create_intents [
+    prompt="Convert the prioritized subgoals into concrete intents. Each intent must have: action_type (one of: code_change, tool_use, query, file_operation), parameters (specific enough to execute), preconditions, postconditions. Output as JSON array.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  // Phase 5: Write plan artifact
+  write_plan [
+    type="file.write",
+    content_key="last_response",
+    output="bdi_plan.json",
+    format="json"
+  ]
+
+  // Phase 6: Validate
+  validate_plan [
+    type="pipeline.validate",
+    source_key="last_response"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> analyze_goal -> check_complexity
+  check_complexity -> decompose_simple [condition="context.complexity=simple"]
+  check_complexity -> decompose_complex [condition="context.complexity!=simple"]
+  decompose_simple -> create_intents
+  decompose_complex -> prioritize -> create_intents
+  create_intents -> write_plan -> validate_plan -> done
+}

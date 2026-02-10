@@ -1,0 +1,85 @@
+// Consensus Flow Pipeline
+// Multi-party decision coordination with auditable voting.
+// Council recommendation: reasoning-heavy, needs deterministic replay and provenance.
+//
+// Pattern: Propose -> Evaluate (parallel) -> Aggregate -> Decide -> Record
+
+digraph Consensus {
+  graph [
+    goal="Reach consensus on a proposal through multi-perspective evaluation",
+    label="Consensus Flow"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Proposal formulation
+  formulate [
+    prompt="Given the topic: $goal, formulate a clear proposal. Include: 1) What is being decided, 2) Available options (2-4), 3) Evaluation criteria, 4) Constraints. Output structured proposal as JSON.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high"
+  ]
+
+  // Phase 2: Parallel evaluation from multiple perspectives
+  evaluate [
+    shape=component,
+    max_parallel="4",
+    join_policy="wait_all",
+    error_policy="continue"
+  ]
+
+  eval_technical [
+    prompt="Evaluate the proposal from a TECHNICAL perspective. Consider: feasibility, complexity, maintenance burden, performance impact. Score each option 1-10 with rationale.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  eval_security [
+    prompt="Evaluate the proposal from a SECURITY perspective. Consider: attack surface, data exposure, capability requirements, trust implications. Score each option 1-10 with rationale.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  eval_user [
+    prompt="Evaluate the proposal from a USER EXPERIENCE perspective. Consider: simplicity, discoverability, consistency with existing patterns, learning curve. Score each option 1-10 with rationale.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  eval_stability [
+    prompt="Evaluate the proposal from a STABILITY perspective. Consider: backwards compatibility, failure modes, testing requirements, rollback strategy. Score each option 1-10 with rationale.",
+    llm_model="claude-sonnet-4-5-20250929"
+  ]
+
+  // Phase 3: Aggregation
+  aggregate [
+    shape=tripleoctagon,
+    join_policy="wait_all",
+    prompt="Aggregate the evaluation results from all perspectives. Compute weighted scores (technical: 30%, security: 25%, user: 25%, stability: 20%). Identify the winning option and any dissenting views. Output synthesis as JSON."
+  ]
+
+  // Phase 4: Decision
+  decide [
+    prompt="Based on the aggregated scores and synthesis, make a final recommendation. If scores are close (within 10%), flag for human review. Include: chosen option, confidence level, key tradeoffs, dissenting perspective summary.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high"
+  ]
+
+  // Phase 5: Record decision
+  record [
+    type="file.write",
+    content_key="last_response",
+    output="consensus_decision.json",
+    format="json"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> formulate -> evaluate
+  evaluate -> eval_technical
+  evaluate -> eval_security
+  evaluate -> eval_user
+  evaluate -> eval_stability
+  eval_technical -> aggregate
+  eval_security -> aggregate
+  eval_user -> aggregate
+  eval_stability -> aggregate
+  aggregate -> decide -> record -> done
+}
