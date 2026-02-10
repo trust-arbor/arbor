@@ -1,0 +1,115 @@
+// Evaluation Framework Pipeline
+// Tier 2 from orchestrator-homelab-merge roadmap.
+// Council: eval framework needed for Phase 4 "adapt" node fitness functions.
+//
+// Pattern: load dataset -> run subjects -> grade results -> aggregate metrics -> report
+// Supports: exact_match, contains, json_valid, regex, threshold, composite, llm_judge graders
+// Metrics: accuracy, mean_score, pass_at_k
+
+digraph EvalFramework {
+  graph [
+    goal="Run an evaluation pipeline: load dataset, execute subjects, grade results, compute metrics, and generate a report",
+    label="Eval Framework"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Load and validate dataset
+  load_dataset [
+    prompt="Load the evaluation dataset from the JSONL file specified in $eval.dataset_path. Parse each line as a JSON object with fields: id, input, expected_output, metadata (optional). Validate the schema and report any malformed entries. Output as JSON array of validated samples.",
+    llm_model="claude-haiku-4-5-20251001",
+    data_class="internal"
+  ]
+
+  validate_dataset [
+    shape=diamond,
+    data_class="internal"
+  ]
+
+  // Phase 2: Execute subjects on each sample
+  // Two subject types: "llm" (call an LLM with the input) or "function" (call an Elixir function)
+  run_subjects [
+    prompt="For each validated sample, execute the subject under evaluation. Subject type is $eval.subject_type. For 'llm' subjects: send sample.input as prompt to the specified model and record the response. For 'function' subjects: describe the expected function call and output. Record: {sample_id, input, expected_output, actual_output, latency_ms}. Output results as JSON array.",
+    llm_model="claude-sonnet-4-5-20250929",
+    data_class="internal"
+  ]
+
+  // Phase 3: Grade each result
+  // Apply graders: exact_match, contains, json_valid, regex, threshold, composite, llm_judge
+  grade_results [
+    prompt="Grade each result by comparing actual_output vs expected_output. Apply the graders specified in $eval.graders (default: exact_match, contains). For each grader, produce a score between 0.0 and 1.0. Grader definitions: exact_match (1.0 if exact string match), contains (1.0 if expected is substring of actual), json_valid (1.0 if actual is valid JSON matching expected schema), regex (1.0 if actual matches expected regex pattern), threshold (1.0 if numeric value meets threshold). Output graded results as JSON: [{sample_id, scores: {grader_name: score}, passed: bool}].",
+    llm_model="claude-haiku-4-5-20251001",
+    data_class="internal"
+  ]
+
+  // Phase 3b: LLM judge grader (optional, higher-quality grading)
+  llm_judge [
+    prompt="As an expert evaluator, grade each result using nuanced judgment. For each sample, assess: correctness (does the actual output satisfy the intent of the expected output?), completeness (are all expected elements present?), quality (is the output well-formed and useful?). Score each dimension 0.0-1.0. Output as JSON: [{sample_id, judge_scores: {correctness, completeness, quality}, overall_score, reasoning}].",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high",
+    data_class="internal"
+  ]
+
+  // Phase 3c: Choose grading path
+  select_grading [
+    shape=diamond,
+    data_class="internal"
+  ]
+
+  // Phase 4: Merge grading results
+  merge_grades [
+    prompt="Merge the grading results from the selected grading path. If both programmatic and LLM judge grades exist, combine them with configurable weights (default: 0.6 programmatic, 0.4 judge). Output unified graded results as JSON.",
+    llm_model="claude-haiku-4-5-20251001",
+    data_class="internal"
+  ]
+
+  // Phase 5: Aggregate metrics
+  aggregate_metrics [
+    prompt="Compute aggregate metrics over all graded results. Metrics to compute: accuracy (fraction of samples with passed=true), mean_score (average of overall scores), pass_at_k (probability of at least one correct in k samples, for k=1,3,5). Also compute per-grader breakdown and confidence intervals. Output metrics summary as JSON: {accuracy, mean_score, pass_at_k: {1, 3, 5}, per_grader: {grader_name: {mean, std, min, max}}, total_samples, passed_samples}.",
+    llm_model="claude-haiku-4-5-20251001",
+    data_class="internal"
+  ]
+
+  // Phase 6: Generate report
+  generate_report [
+    prompt="Generate a comprehensive evaluation report from the metrics. Include: executive summary (1-2 sentences), overall metrics table, per-grader breakdown, sample-level details for failures, recommendations for improvement. Format as Markdown.",
+    llm_model="claude-sonnet-4-5-20250929",
+    data_class="internal"
+  ]
+
+  write_report [
+    type="file.write",
+    content_key="last_response",
+    output="eval_report.md",
+    format="text",
+    data_class="internal"
+  ]
+
+  write_metrics [
+    type="file.write",
+    content_key="context.metrics_json",
+    output="eval_metrics.json",
+    format="json",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> load_dataset -> validate_dataset
+  validate_dataset -> run_subjects [condition="outcome=success"]
+  validate_dataset -> done [condition="outcome=fail", label="invalid dataset"]
+  run_subjects -> select_grading
+
+  // Grading path selection
+  select_grading -> grade_results [condition="context.use_llm_judge=false"]
+  select_grading -> grade_results [label="default"]
+  grade_results -> merge_grades
+
+  // Optional LLM judge path (when enabled)
+  select_grading -> llm_judge [condition="context.use_llm_judge=true"]
+  llm_judge -> merge_grades
+
+  // Aggregation and reporting
+  merge_grades -> aggregate_metrics -> generate_report -> write_report -> write_metrics -> done
+}

@@ -1,0 +1,103 @@
+// DOT Pipeline Generator — Self-Hosting Pipeline
+// Tier 3 from orchestrator-homelab-merge roadmap.
+// Analyzes Elixir source, generates DOT pipeline specs, validates them.
+//
+// Pattern: analyze source -> extract metadata -> generate DOT -> validate -> write
+// This pipeline creates other pipelines — self-hosting at its purest.
+
+digraph DotGen {
+  graph [
+    goal="Analyze Elixir source files and generate self-contained DOT pipeline specs that implement, test, and verify the analyzed module",
+    label="DOT Pipeline Generator"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Phase 1: Source analysis
+  analyze_source [
+    prompt="Analyze the Elixir source file at $dotgen.source_path. Extract: module name, public functions (name/arity/spec/doc), private functions, use/import/alias declarations, struct definitions, callback implementations, case branches and pattern matches, test examples if available. Output as structured JSON with fields: module, functions, specs, structs, patterns, test_hints.",
+    llm_model="claude-sonnet-4-5-20250929",
+    reasoning_effort="high",
+    data_class="internal"
+  ]
+
+  // Phase 2: Determine implementation strategy
+  choose_strategy [
+    shape=diamond,
+    data_class="internal"
+  ]
+
+  // Phase 2a: Module implementation pipeline (for new modules)
+  gen_implementation [
+    prompt="Generate a DOT pipeline spec that implements the analyzed module. For each public function: create a codergen node with a prompt describing the function's purpose, inputs, outputs, and edge cases. Add tool nodes for compilation and testing after each implementation step. Add a quality gate at the end. Use data_class=internal for all codergen nodes. Reference the source analysis from $last_response. Output valid DOT syntax.",
+    llm_model="claude-sonnet-4-5-20250929",
+    data_class="internal"
+  ]
+
+  // Phase 2b: Test generation pipeline (for existing modules needing tests)
+  gen_tests [
+    prompt="Generate a DOT pipeline spec that creates tests for the analyzed module. For each public function: create a codergen node that generates test cases covering happy path, edge cases, and error cases. Use the specs and patterns from source analysis to derive test scenarios. Add compilation verification between test groups. Output valid DOT syntax.",
+    llm_model="claude-sonnet-4-5-20250929",
+    data_class="internal"
+  ]
+
+  // Phase 2c: Refactor pipeline (for modules needing improvement)
+  gen_refactor [
+    prompt="Generate a DOT pipeline spec that refactors the analyzed module. Identify: dead code, duplicated logic, missing specs, overly complex functions. Create codergen nodes for each refactoring step, with compilation and test verification between steps. Add a human review gate before final commit. Output valid DOT syntax.",
+    llm_model="claude-sonnet-4-5-20250929",
+    data_class="internal"
+  ]
+
+  // Phase 3: Validate generated DOT
+  validate_generated [
+    type="pipeline.validate",
+    data_class="internal"
+  ]
+
+  check_validation [
+    shape=diamond,
+    data_class="internal"
+  ]
+
+  // Phase 3b: Fix validation errors
+  fix_dot [
+    prompt="The generated DOT pipeline has validation errors: $validation.errors. Fix the DOT syntax and structure. Common issues: missing start/exit nodes, invalid edge conditions, missing required attributes on handler nodes. Output corrected DOT.",
+    llm_model="claude-sonnet-4-5-20250929",
+    max_retries="3",
+    data_class="internal"
+  ]
+
+  // Phase 4: Write output
+  write_pipeline [
+    type="file.write",
+    content_key="last_response",
+    output="generated_pipeline.dot",
+    format="text",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> analyze_source -> choose_strategy
+
+  // Strategy branches
+  choose_strategy -> gen_implementation [condition="context.strategy=implement"]
+  choose_strategy -> gen_tests [condition="context.strategy=test"]
+  choose_strategy -> gen_refactor [condition="context.strategy=refactor"]
+  choose_strategy -> gen_implementation [label="default"]
+
+  // All branches converge at validation
+  gen_implementation -> validate_generated
+  gen_tests -> validate_generated
+  gen_refactor -> validate_generated
+
+  // Validation check with retry loop
+  validate_generated -> check_validation
+  check_validation -> write_pipeline [condition="outcome=success"]
+  check_validation -> fix_dot [condition="outcome=fail"]
+  fix_dot -> validate_generated
+
+  // Output
+  write_pipeline -> done
+}
