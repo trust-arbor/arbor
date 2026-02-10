@@ -253,6 +253,51 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @doc """
+  Export non-completed intents with their status info for Seed capture.
+
+  Returns a list of maps suitable for serialization and later import.
+  Each map includes the intent fields plus status/retry_count.
+
+  ## Examples
+
+      intents = IntentStore.export_pending_intents("agent_001")
+  """
+  @spec export_pending_intents(String.t()) :: [map()]
+  def export_pending_intents(agent_id) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+
+    data
+    |> Map.get(:intents, [])
+    |> Enum.reject(fn intent ->
+      status_info = Map.get(statuses, intent.id, %{})
+      Map.get(status_info, :status, :pending) == :completed
+    end)
+    |> Enum.map(fn intent ->
+      status_info = Map.get(statuses, intent.id, %{status: :pending, retry_count: 0})
+
+      serialize_intent(intent)
+      |> Map.put("status", to_string(Map.get(status_info, :status, :pending)))
+      |> Map.put("retry_count", Map.get(status_info, :retry_count, 0))
+    end)
+  end
+
+  @doc """
+  Import intents from a previous export, restoring them with their status.
+
+  Used during Seed restore to recover pending work after a restart.
+  Already-existing intents (by ID) are skipped.
+
+  ## Examples
+
+      :ok = IntentStore.import_intents("agent_001", exported_intents)
+  """
+  @spec import_intents(String.t(), [map()]) :: :ok
+  def import_intents(agent_id, intent_maps) when is_list(intent_maps) do
+    GenServer.call(server_name(), {:import_intents, agent_id, intent_maps})
+  end
+
+  @doc """
   Clear all intents and percepts for an agent.
   """
   @spec clear(String.t()) :: :ok
@@ -384,6 +429,40 @@ defmodule Arbor.Memory.IntentStore do
     else
       {:reply, {:error, :not_found}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:import_intents, agent_id, intent_maps}, _from, state) do
+    data = get_agent_data(agent_id)
+    existing_ids = MapSet.new(Enum.map(data.intents, & &1.id))
+    statuses = Map.get(data, :statuses, %{})
+
+    {new_intents, new_statuses} =
+      Enum.reduce(intent_maps, {[], statuses}, fn intent_map, {intents_acc, statuses_acc} ->
+        intent = deserialize_intent(intent_map)
+
+        if MapSet.member?(existing_ids, intent.id) do
+          {intents_acc, statuses_acc}
+        else
+          status = safe_atom(intent_map["status"]) || :pending
+          retry_count = intent_map["retry_count"] || 0
+
+          status_info = %{status: status, retry_count: retry_count}
+          {[intent | intents_acc], Map.put(statuses_acc, intent.id, status_info)}
+        end
+      end)
+
+    if new_intents != [] do
+      all_intents = new_intents ++ data.intents
+      trimmed = Enum.take(all_intents, state.buffer_size)
+      updated = %{data | intents: trimmed, statuses: new_statuses}
+      :ets.insert(@ets_table, {agent_id, updated})
+      persist_agent_data_async(agent_id, updated)
+
+      Logger.info("Imported #{length(new_intents)} intents for #{agent_id}")
+    end
+
+    {:reply, :ok, state}
   end
 
   @impl true

@@ -1822,6 +1822,17 @@ defmodule Arbor.Memory do
   defdelegate fail_goal(agent_id, goal_id, reason \\ nil), to: GoalStore
 
   @doc """
+  Update metadata for a goal, merging with existing metadata.
+
+  ## Examples
+
+      {:ok, goal} = Arbor.Memory.update_goal_metadata("agent_001", goal_id, %{decomposition_failed: true})
+  """
+  @spec update_goal_metadata(String.t(), String.t(), map()) ::
+          {:ok, struct()} | {:error, :not_found}
+  defdelegate update_goal_metadata(agent_id, goal_id, metadata), to: GoalStore
+
+  @doc """
   Add a note to a goal's notes list.
   """
   @spec add_goal_note(String.t(), String.t(), String.t()) ::
@@ -1932,6 +1943,22 @@ defmodule Arbor.Memory do
   """
   @spec unlock_stale_intents(String.t(), pos_integer()) :: non_neg_integer()
   defdelegate unlock_stale_intents(agent_id, timeout_ms \\ 60_000), to: IntentStore
+
+  @doc """
+  Export non-completed intents with status info for Seed capture.
+
+  Returns serializable maps suitable for `import_intents/2`.
+  """
+  @spec export_pending_intents(String.t()) :: [map()]
+  defdelegate export_pending_intents(agent_id), to: IntentStore
+
+  @doc """
+  Import intents from a previous export, restoring pending work.
+
+  Skips intents that already exist (by ID).
+  """
+  @spec import_intents(String.t(), [map()]) :: :ok
+  defdelegate import_intents(agent_id, intent_maps), to: IntentStore
 
   # ============================================================================
   # Bridge (Seed/Host Phase 3)
