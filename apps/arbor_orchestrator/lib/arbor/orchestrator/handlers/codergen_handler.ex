@@ -141,7 +141,13 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       provider_options: Map.get(node.attrs, "provider_options", %{})
     }
 
-    case Client.complete(client, request, opts) do
+    call_opts =
+      case parse_int(Map.get(node.attrs, "timeout"), nil) do
+        nil -> opts
+        timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
+      end
+
+    case Client.complete(client, request, call_opts) do
       {:ok, response} -> {:ok, response.text}
       {:error, _} = error -> error
     end
