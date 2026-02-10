@@ -6,6 +6,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   alias Arbor.Orchestrator.Handlers.{
     CodergenHandler,
     ConditionalHandler,
+    EvalAggregateHandler,
+    EvalDatasetHandler,
+    EvalReportHandler,
+    EvalRunHandler,
     ExitHandler,
     FanInHandler,
     FileWriteHandler,
@@ -41,7 +45,11 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "codergen" => CodergenHandler,
     "file.write" => FileWriteHandler,
     "pipeline.validate" => PipelineValidateHandler,
-    "pipeline.run" => PipelineRunHandler
+    "pipeline.run" => PipelineRunHandler,
+    "eval.dataset" => EvalDatasetHandler,
+    "eval.run" => EvalRunHandler,
+    "eval.aggregate" => EvalAggregateHandler,
+    "eval.report" => EvalReportHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 

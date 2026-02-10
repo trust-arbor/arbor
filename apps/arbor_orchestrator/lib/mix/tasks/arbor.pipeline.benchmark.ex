@@ -119,9 +119,19 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
     info("Direct mean:           #{format_us(direct_mean)}")
     info("Orchestrator mean:     #{format_us(orch_mean)}")
     info("  Parse overhead:      #{format_us(parse_mean)} (#{format_pct(parse_mean, orch_mean)})")
-    info("  Engine overhead:     #{format_us(overhead_engine)} (#{format_pct(overhead_engine, orch_mean)})")
-    info("  Command execution:   #{format_us(direct_mean)} (#{format_pct(direct_mean, orch_mean)})")
-    info("Total overhead:        #{format_us(overhead_full)} (#{format_x(orch_mean / max(direct_mean, 1))}x slower)")
+
+    info(
+      "  Engine overhead:     #{format_us(overhead_engine)} (#{format_pct(overhead_engine, orch_mean)})"
+    )
+
+    info(
+      "  Command execution:   #{format_us(direct_mean)} (#{format_pct(direct_mean, orch_mean)})"
+    )
+
+    info(
+      "Total overhead:        #{format_us(overhead_full)} (#{format_x(orch_mean / max(direct_mean, 1))}x slower)"
+    )
+
     info("")
   end
 
@@ -175,7 +185,11 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
 
     info("Direct mean:       #{format_ms(direct_mean)}")
     info("Orchestrator mean: #{format_ms(orch_mean)}")
-    info("Overhead:          #{format_ms(overhead)} (#{format_x(orch_mean / max(direct_mean, 1))}x)")
+
+    info(
+      "Overhead:          #{format_ms(overhead)} (#{format_x(orch_mean / max(direct_mean, 1))}x)"
+    )
+
     info("")
   end
 
@@ -244,7 +258,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
 
   defp percentile(times, p) do
     sorted = Enum.sort(times)
-    k = (p / 100.0) * (length(sorted) - 1)
+    k = p / 100.0 * (length(sorted) - 1)
     f = floor(k)
     c = ceil(k)
 

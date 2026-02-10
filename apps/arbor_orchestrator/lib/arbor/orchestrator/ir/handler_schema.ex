@@ -206,6 +206,69 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           :public,
           [port("context", :any, :public)],
           [port("pipeline.child_status", :string, :public)]
+        ),
+      "eval.dataset" =>
+        schema(
+          "eval.dataset",
+          ["dataset"],
+          ["limit", "shuffle", "seed"],
+          %{
+            "dataset" => :string,
+            "limit" => :integer,
+            "shuffle" => :boolean,
+            "seed" => :integer
+          },
+          ["file_read"],
+          :internal,
+          [],
+          [port("eval.dataset", :any, :internal)]
+        ),
+      "eval.run" =>
+        schema(
+          "eval.run",
+          ["graders"],
+          ["subject", "subject_module", "subject_function"],
+          %{
+            "graders" => :string,
+            "subject" => :string,
+            "subject_module" => :string,
+            "subject_function" => :string
+          },
+          [],
+          :internal,
+          [port("eval.dataset", :any, :internal)],
+          [port("eval.results", :any, :internal)]
+        ),
+      "eval.aggregate" =>
+        schema(
+          "eval.aggregate",
+          [],
+          ["source", "metrics", "threshold"],
+          %{
+            "source" => :string,
+            "metrics" => :string,
+            "threshold" => :float
+          },
+          [],
+          :public,
+          [port("eval.results", :any, :internal)],
+          [port("eval.metrics", :any, :public)]
+        ),
+      "eval.report" =>
+        schema(
+          "eval.report",
+          [],
+          ["format", "output", "source", "metrics_source"],
+          %{
+            "format" => :string,
+            "output" => :string,
+            "source" => :string,
+            "metrics_source" => :string
+          },
+          [],
+          :public,
+          [port("eval.results", :any, :internal), port("eval.metrics", :any, :public)],
+          [port("eval.report", :string, :public)]
         )
     }
   end
