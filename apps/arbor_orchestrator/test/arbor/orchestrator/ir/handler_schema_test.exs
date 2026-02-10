@@ -20,9 +20,9 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
       assert schema.capabilities == []
     end
 
-    test "covers all 12 handler types" do
+    test "covers all 16 handler types" do
       types = HandlerSchema.known_types()
-      assert length(types) == 12
+      assert length(types) == 16
 
       assert "start" in types
       assert "exit" in types
