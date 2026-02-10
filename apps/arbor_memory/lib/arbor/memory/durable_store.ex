@@ -264,6 +264,7 @@ defmodule Arbor.Memory.DurableStore do
   - `:agent_id` - Required. Scopes search to this agent's embeddings.
   - `:limit` - Max results (default 10)
   - `:threshold` - Minimum similarity 0.0–1.0 (default 0.3)
+  - `:type_filter` - Filter by memory_type (e.g., "goal", "intent", "thought")
   """
   @spec semantic_search(String.t(), String.t(), keyword()) :: {:ok, [map()]}
   def semantic_search(query_text, namespace, opts \\ []) do
@@ -280,14 +281,15 @@ defmodule Arbor.Memory.DurableStore do
       {:ok, []}
   end
 
-  defp do_semantic_search(query_text, agent_id, namespace, opts) do
+  defp do_semantic_search(query_text, agent_id, _namespace, opts) do
     case Arbor.AI.embed(query_text) do
       {:ok, %{embedding: embedding}} ->
-        search_opts = [
-          limit: Keyword.get(opts, :limit, 10),
-          threshold: Keyword.get(opts, :threshold, 0.3),
-          type_filter: namespace
-        ]
+        search_opts =
+          [
+            limit: Keyword.get(opts, :limit, 10),
+            threshold: Keyword.get(opts, :threshold, 0.3)
+          ]
+          |> maybe_add_type_filter(opts)
 
         case Embedding.search(agent_id, embedding, search_opts) do
           {:ok, results} ->
@@ -301,6 +303,13 @@ defmodule Arbor.Memory.DurableStore do
       {:error, reason} ->
         Logger.debug("Semantic search embedding failed: #{inspect(reason)}")
         {:ok, []}
+    end
+  end
+
+  defp maybe_add_type_filter(search_opts, opts) do
+    case Keyword.get(opts, :type_filter) do
+      nil -> search_opts
+      filter -> Keyword.put(search_opts, :type_filter, to_string(filter))
     end
   end
 end
