@@ -268,6 +268,7 @@ defmodule Arbor.Agent.HeartbeatLoop do
     state
     |> maybe_put_metadata(:heartbeat_count, metadata)
     |> maybe_put_metadata(:cognitive_mode, metadata)
+    |> maybe_put_metadata(:background_suggestions, metadata)
   end
 
   defp maybe_put_metadata(state, key, metadata) do
