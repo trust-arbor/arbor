@@ -163,8 +163,7 @@ defmodule Arbor.Behavioral.ConsensusAdvisoryTest do
   describe "scenario: topic routing" do
     test "registered topics are found by TopicRegistry" do
       # :test_topic was registered in BehavioralCase setup
-      result = Arbor.Consensus.TopicRegistry.get(:test_topic)
-      assert result != nil
+      assert {:ok, _rule} = Arbor.Consensus.TopicRegistry.get(:test_topic)
     end
 
     test "TopicRegistry.exists?/1 returns true for registered topics" do

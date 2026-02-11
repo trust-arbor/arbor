@@ -84,7 +84,7 @@ defmodule Arbor.Behavioral.SecureCommsTest do
     end
 
     test "seal/unseal provides one-shot ECDH encryption" do
-      {pub_alice, priv_alice} = Crypto.generate_encryption_keypair()
+      {_pub_alice, priv_alice} = Crypto.generate_encryption_keypair()
       {pub_bob, priv_bob} = Crypto.generate_encryption_keypair()
 
       sealed = Crypto.seal("Hello Bob!", pub_bob, priv_alice)
@@ -139,7 +139,7 @@ defmodule Arbor.Behavioral.SecureCommsTest do
 
     test "messages encrypt and decrypt correctly", %{sender: sender, receiver: receiver} do
       # Sender encrypts
-      {sender2, header, ciphertext} = DoubleRatchet.encrypt(sender, "Hello from sender!")
+      {_sender2, header, ciphertext} = DoubleRatchet.encrypt(sender, "Hello from sender!")
 
       assert is_map(header)
       assert Map.has_key?(header, :dh_public)
