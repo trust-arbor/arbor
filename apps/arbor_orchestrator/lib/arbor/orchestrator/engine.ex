@@ -81,6 +81,7 @@ defmodule Arbor.Orchestrator.Engine do
       end
     else
       workdir = Keyword.get(opts, :workdir)
+      initial_values = Keyword.get(opts, :initial_values, %{})
 
       context =
         Context.new(
@@ -89,6 +90,7 @@ defmodule Arbor.Orchestrator.Engine do
             "graph.label" => Map.get(graph.attrs, "label", "")
           }
           |> then(fn ctx -> if workdir, do: Map.put(ctx, "workdir", workdir), else: ctx end)
+          |> Map.merge(initial_values)
         )
 
       with {:ok, start_id} <- find_start_node(graph) do

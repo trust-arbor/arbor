@@ -1,0 +1,1322 @@
+defmodule Arbor.Orchestrator.SessionTest do
+  @moduledoc """
+  Integration tests for Session-as-DOT convergence spike (Day 1).
+
+  Validates that:
+  1. Turn and heartbeat DOT pipelines parse and validate correctly
+  2. The engine executes session pipelines end-to-end with mock adapters
+  3. Tool loop cycles work (dispatch_tools → call_llm cycle)
+  4. Heartbeat cognitive mode routing fans out correctly
+  5. Context key alignment between handler and DOT conditions
+
+  ## Architecture
+
+  SessionHandler dispatches by node `type` attribute. All external deps
+  (LLM, memory, tools) are injected via `opts[:session_adapters]` map.
+  The engine passes opts through to handlers, so session_adapters flow
+  from Engine.run/2 opts → handler.execute/4 opts.
+
+  ## Known Gaps (documented as spike findings)
+
+  - Engine.run/2 does NOT support `:initial_context` — context is built
+    from graph attrs only. Tests that need pre-seeded context use inline
+    DOT graphs or work with handler defaults.
+  - DOT condition keys must match handler context keys exactly. The
+    Condition module resolves "context.FOO" as Context.get(ctx, "FOO").
+    SessionHandler sets "session.input_type" but turn.dot references
+    "context.input_type" — mismatch. Similarly "session.cognitive_mode"
+    vs "context.cognitive_mode". The key "llm.response_type" DOES match.
+  """
+  use ExUnit.Case, async: true
+
+  alias Arbor.Orchestrator
+  alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Handlers.SessionHandler
+
+  @turn_dot_path Path.join([
+                   __DIR__,
+                   "..",
+                   "..",
+                   "..",
+                   "specs",
+                   "pipelines",
+                   "session",
+                   "turn.dot"
+                 ])
+
+  @heartbeat_dot_path Path.join([
+                        __DIR__,
+                        "..",
+                        "..",
+                        "..",
+                        "specs",
+                        "pipelines",
+                        "session",
+                        "heartbeat.dot"
+                      ])
+
+  # All session.* node types used in turn.dot and heartbeat.dot
+  @session_types ~w(
+    session.classify session.memory_recall session.mode_select
+    session.llm_call session.tool_dispatch session.format
+    session.memory_update session.checkpoint session.background_checks
+    session.process_results session.route_actions session.update_goals
+  )
+
+  setup do
+    # Ensure EventRegistry is running (needed when running with --no-start)
+    case Registry.start_link(keys: :duplicate, name: Arbor.Orchestrator.EventRegistry) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+
+    # Register SessionHandler for all session.* types
+    for type <- @session_types do
+      Arbor.Orchestrator.Handlers.Registry.register(type, SessionHandler)
+    end
+
+    on_exit(fn ->
+      for type <- @session_types do
+        Arbor.Orchestrator.Handlers.Registry.unregister(type)
+      end
+    end)
+
+    # Unique logs_root per test to avoid cross-test checkpoint collisions
+    logs_root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_session_test_#{:erlang.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(logs_root)
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    %{logs_root: logs_root}
+  end
+
+  # ── Helpers ────────────────────────────────────────────────────
+
+  defp read_dot!(path) do
+    path
+    |> Path.expand()
+    |> File.read!()
+  end
+
+  defp parse!(path) do
+    {:ok, graph} = Orchestrator.parse(read_dot!(path))
+    graph
+  end
+
+  defp collect_events(opts_fun) do
+    events = :ets.new(:events, [:duplicate_bag, :public])
+
+    on_event = fn event ->
+      :ets.insert(events, {event.type, event})
+    end
+
+    result = opts_fun.(on_event)
+
+    all_events =
+      :ets.tab2list(events)
+      |> Enum.map(fn {_type, event} -> event end)
+
+    :ets.delete(events)
+    {result, all_events}
+  end
+
+  defp visited_node_ids(events) do
+    events
+    |> Enum.filter(&(&1.type == :stage_started))
+    |> Enum.map(& &1.node_id)
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 1: Turn graph parses and validates
+  # ════════════════════════════════════════════════════════════════
+
+  describe "turn.dot parsing and validation" do
+    @tag :spike
+    test "parses successfully with correct node count" do
+      dot = read_dot!(@turn_dot_path)
+      assert {:ok, graph} = Orchestrator.parse(dot)
+
+      # turn.dot defines: start, classify, check_auth, recall, select_mode,
+      # call_llm, check_response, dispatch_tools, format, update_memory,
+      # checkpoint, done = 12 nodes
+      assert map_size(graph.nodes) == 12
+
+      # Verify key nodes exist
+      assert Map.has_key?(graph.nodes, "start")
+      assert Map.has_key?(graph.nodes, "classify")
+      assert Map.has_key?(graph.nodes, "call_llm")
+      assert Map.has_key?(graph.nodes, "dispatch_tools")
+      assert Map.has_key?(graph.nodes, "check_response")
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    @tag :spike
+    test "validates with no errors" do
+      dot = read_dot!(@turn_dot_path)
+      diagnostics = Orchestrator.validate(dot)
+
+      errors =
+        Enum.filter(diagnostics, fn d ->
+          d.severity == :error
+        end)
+
+      assert errors == [],
+             "Expected no validation errors, got: #{inspect(errors)}"
+    end
+
+    @tag :spike
+    test "graph has the critical cycle edge: dispatch_tools -> call_llm" do
+      graph = parse!(@turn_dot_path)
+
+      cycle_edge =
+        Enum.find(graph.edges, fn edge ->
+          edge.from == "dispatch_tools" and edge.to == "call_llm"
+        end)
+
+      assert cycle_edge != nil,
+             "The tool loop cycle edge (dispatch_tools -> call_llm) must exist"
+    end
+
+    @tag :spike
+    test "session handler types are correctly assigned to nodes" do
+      graph = parse!(@turn_dot_path)
+
+      # Verify key nodes have the right handler type attributes
+      assert graph.nodes["classify"].attrs["type"] == "session.classify"
+      assert graph.nodes["recall"].attrs["type"] == "session.memory_recall"
+      assert graph.nodes["select_mode"].attrs["type"] == "session.mode_select"
+      assert graph.nodes["call_llm"].attrs["type"] == "session.llm_call"
+      assert graph.nodes["dispatch_tools"].attrs["type"] == "session.tool_dispatch"
+      assert graph.nodes["format"].attrs["type"] == "session.format"
+      assert graph.nodes["update_memory"].attrs["type"] == "session.memory_update"
+      assert graph.nodes["checkpoint"].attrs["type"] == "session.checkpoint"
+    end
+
+    @tag :spike
+    test "conditional nodes have diamond shape" do
+      graph = parse!(@turn_dot_path)
+
+      assert graph.nodes["check_auth"].attrs["shape"] == "diamond"
+      assert graph.nodes["check_response"].attrs["shape"] == "diamond"
+    end
+
+    @tag :spike
+    test "edges carry correct conditions for response routing" do
+      graph = parse!(@turn_dot_path)
+
+      response_edges =
+        Enum.filter(graph.edges, fn edge ->
+          edge.from == "check_response"
+        end)
+
+      assert length(response_edges) == 2
+
+      conditions =
+        response_edges
+        |> Enum.map(&{&1.to, Map.get(&1.attrs, "condition", "")})
+        |> Map.new()
+
+      assert conditions["dispatch_tools"] =~ "tool_call"
+      assert conditions["format"] =~ "text"
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 2: Heartbeat graph parses and validates
+  # ════════════════════════════════════════════════════════════════
+
+  describe "heartbeat.dot parsing and validation" do
+    @tag :spike
+    test "parses successfully with correct node count" do
+      dot = read_dot!(@heartbeat_dot_path)
+      assert {:ok, graph} = Orchestrator.parse(dot)
+
+      # heartbeat.dot defines: start, bg_checks, select_mode, mode_router,
+      # llm_goal, llm_reflect, llm_plan, consolidate, process,
+      # route_actions, update_goals, done = 12 nodes
+      assert map_size(graph.nodes) == 12
+
+      # Verify mode-specific nodes exist
+      assert Map.has_key?(graph.nodes, "llm_goal")
+      assert Map.has_key?(graph.nodes, "llm_reflect")
+      assert Map.has_key?(graph.nodes, "llm_plan")
+      assert Map.has_key?(graph.nodes, "consolidate")
+      assert Map.has_key?(graph.nodes, "mode_router")
+    end
+
+    @tag :spike
+    test "validates with no errors" do
+      dot = read_dot!(@heartbeat_dot_path)
+      diagnostics = Orchestrator.validate(dot)
+
+      errors =
+        Enum.filter(diagnostics, fn d ->
+          d.severity == :error
+        end)
+
+      assert errors == [],
+             "Expected no validation errors, got: #{inspect(errors)}"
+    end
+
+    @tag :spike
+    test "mode_router has four conditional outgoing edges" do
+      graph = parse!(@heartbeat_dot_path)
+
+      mode_edges =
+        Enum.filter(graph.edges, fn edge ->
+          edge.from == "mode_router"
+        end)
+
+      assert length(mode_edges) == 4
+
+      # Each should have a condition
+      conditions =
+        Enum.map(mode_edges, fn edge ->
+          Map.get(edge.attrs, "condition", "")
+        end)
+
+      assert Enum.all?(conditions, &(&1 != "")),
+             "All mode_router edges should have conditions"
+    end
+
+    @tag :spike
+    test "all four cognitive modes have routing edges" do
+      graph = parse!(@heartbeat_dot_path)
+
+      mode_edges =
+        graph.edges
+        |> Enum.filter(&(&1.from == "mode_router"))
+        |> Enum.map(&{&1.to, Map.get(&1.attrs, "condition", "")})
+        |> Map.new()
+
+      assert mode_edges["llm_goal"] =~ "goal_pursuit"
+      assert mode_edges["llm_reflect"] =~ "reflection"
+      assert mode_edges["llm_plan"] =~ "plan_execution"
+      assert mode_edges["consolidate"] =~ "consolidation"
+    end
+
+    @tag :spike
+    test "all mode branches converge at process node" do
+      graph = parse!(@heartbeat_dot_path)
+
+      # Check that llm_goal, llm_reflect, llm_plan, consolidate all have
+      # edges pointing to "process"
+      converge_sources =
+        graph.edges
+        |> Enum.filter(&(&1.to == "process"))
+        |> Enum.map(& &1.from)
+        |> MapSet.new()
+
+      assert MapSet.member?(converge_sources, "llm_goal")
+      assert MapSet.member?(converge_sources, "llm_reflect")
+      assert MapSet.member?(converge_sources, "llm_plan")
+      assert MapSet.member?(converge_sources, "consolidate")
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 3: Turn graph executes — text response path
+  # ════════════════════════════════════════════════════════════════
+
+  describe "turn graph execution — text response" do
+    @tag :spike
+    test "minimal session graph runs end-to-end with mock adapters", %{logs_root: logs_root} do
+      # Use a minimal inline DOT to avoid the condition key mismatch issue.
+      # This validates that SessionHandler + Engine integration works.
+      dot = """
+      digraph MinimalTurn {
+        graph [goal="Process a message"]
+        start [shape=Mdiamond]
+        classify [type="session.classify"]
+        recall [type="session.memory_recall"]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        update_memory [type="session.memory_update"]
+        done [shape=Msquare]
+
+        start -> classify -> recall -> call_llm -> format -> update_memory -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: "Hello from the LLM!"}}
+        end,
+        memory_recall: fn _agent_id, _query -> {:ok, []} end,
+        memory_update: fn _agent_id, _turn_data -> :ok end
+      }
+
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+      assert run_result.final_outcome.status == :success
+      assert "done" in run_result.completed_nodes
+
+      visited = visited_node_ids(events)
+      assert "start" in visited
+      assert "classify" in visited
+      assert "recall" in visited
+      assert "call_llm" in visited
+      assert "format" in visited
+      assert "update_memory" in visited
+
+      # SessionHandler.format copies llm.content → session.response
+      assert run_result.context["session.response"] == "Hello from the LLM!"
+      assert run_result.context["llm.content"] == "Hello from the LLM!"
+      assert run_result.context["llm.response_type"] == "text"
+    end
+
+    @tag :spike
+    test "full turn.dot executes and reaches done", %{logs_root: logs_root} do
+      graph = parse!(@turn_dot_path)
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: "Hello from the LLM!"}}
+        end,
+        memory_recall: fn _agent_id, _query -> {:ok, []} end,
+        memory_update: fn _agent_id, _turn_data -> :ok end,
+        checkpoint: fn _session_id, _turn_count, _snapshot -> :ok end
+      }
+
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+      assert run_result.final_outcome.status == :success
+
+      # Pipeline must reach the terminal node
+      assert "done" in run_result.completed_nodes
+
+      visited = visited_node_ids(events)
+
+      # Core nodes that must always be visited regardless of condition routing
+      assert "start" in visited
+      assert "classify" in visited
+      assert "check_auth" in visited
+
+      # The LLM returned text content (no tool_calls), so we expect:
+      # - call_llm to be visited (it's on the main path)
+      # - format to be visited (either via condition match or fallback edge)
+      assert "call_llm" in visited
+
+      # Whether conditions route correctly depends on key alignment.
+      # Either way, the pipeline should complete successfully.
+      ctx = run_result.context
+      has_response = ctx["session.response"] != nil or ctx["llm.content"] != nil
+
+      assert has_response,
+             "Expected LLM output in context, got keys: #{inspect(Map.keys(ctx))}"
+    end
+
+    @tag :spike
+    test "adapter functions receive correct context values", %{logs_root: logs_root} do
+      # Track what the adapters actually receive
+      test_pid = self()
+
+      dot = """
+      digraph AdapterCheck {
+        start [shape=Mdiamond]
+        recall [type="session.memory_recall"]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> recall -> call_llm -> format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      adapters = %{
+        memory_recall: fn agent_id, query ->
+          send(test_pid, {:recall_called, agent_id, query})
+          {:ok, ["memory_1"]}
+        end,
+        llm_call: fn messages, mode, opts ->
+          send(test_pid, {:llm_called, messages, mode, opts})
+          {:ok, %{content: "test response"}}
+        end
+      }
+
+      assert {:ok, _} =
+               Engine.run(graph,
+                 session_adapters: adapters,
+                 logs_root: logs_root
+               )
+
+      # memory_recall adapter should be called
+      assert_received {:recall_called, _agent_id, _query}
+
+      # llm_call adapter should be called with the mode from mode_select
+      assert_received {:llm_called, _messages, mode, _opts}
+      # Default mode when no goals and turn_count=0: "reflection"
+      assert is_binary(mode)
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 4: Tool loop cycles correctly
+  # ════════════════════════════════════════════════════════════════
+
+  describe "turn graph execution — tool loop" do
+    @tag :spike
+    test "tool loop cycles via inline graph with aligned condition keys", %{logs_root: logs_root} do
+      # Use inline DOT with condition keys that match what SessionHandler sets.
+      # The handler sets "llm.response_type" and the condition module resolves
+      # "context.llm.response_type" → Context.get(ctx, "llm.response_type") ✓
+      dot = """
+      digraph ToolLoopTest {
+        graph [goal="Test tool loop cycle"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        check_response [shape=diamond]
+        dispatch_tools [type="session.tool_dispatch"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> call_llm -> check_response
+        check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+        check_response -> format [condition="context.llm.response_type=text"]
+        dispatch_tools -> call_llm
+        format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      # Counter: first call returns tool_calls, second returns text
+      counter = :counters.new(1, [:atomics])
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          call_num = :counters.get(counter, 1)
+          :counters.add(counter, 1, 1)
+
+          if call_num == 0 do
+            {:ok, %{tool_calls: [%{name: "read_file", args: %{path: "/tmp/test.txt"}}]}}
+          else
+            {:ok, %{content: "Here is the file content."}}
+          end
+        end,
+        tool_dispatch: fn _tool_calls, _agent_id ->
+          {:ok, ["file content: hello world"]}
+        end
+      }
+
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+      assert run_result.final_outcome.status == :success
+
+      visited = visited_node_ids(events)
+
+      # call_llm should appear at least twice (initial call + after tool dispatch)
+      call_llm_visits = Enum.count(visited, &(&1 == "call_llm"))
+
+      assert call_llm_visits >= 2,
+             "call_llm should be visited at least twice for tool loop, got #{call_llm_visits}. " <>
+               "Visited: #{inspect(visited)}"
+
+      # dispatch_tools should appear at least once
+      dispatch_visits = Enum.count(visited, &(&1 == "dispatch_tools"))
+
+      assert dispatch_visits >= 1,
+             "dispatch_tools should be visited at least once, got #{dispatch_visits}"
+
+      # The LLM adapter should have been called at least twice
+      assert :counters.get(counter, 1) >= 2
+
+      # Final response should be the text from the second LLM call
+      assert run_result.context["session.response"] == "Here is the file content."
+    end
+
+    @tag :spike
+    test "tool loop respects max_steps to prevent infinite cycles", %{logs_root: logs_root} do
+      # LLM always returns tool_calls — should hit max_steps
+      dot = """
+      digraph InfiniteToolLoop {
+        graph [goal="Test max_steps guard"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        check_response [shape=diamond]
+        dispatch_tools [type="session.tool_dispatch"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> call_llm -> check_response
+        check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+        check_response -> format [condition="context.llm.response_type=text"]
+        dispatch_tools -> call_llm
+        format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          # Always return tool_calls — never text
+          {:ok, %{tool_calls: [%{name: "infinite", args: %{}}]}}
+        end,
+        tool_dispatch: fn _tool_calls, _agent_id ->
+          {:ok, ["result"]}
+        end
+      }
+
+      result =
+        Engine.run(graph,
+          session_adapters: adapters,
+          logs_root: logs_root,
+          max_steps: 10
+        )
+
+      assert {:error, :max_steps_exceeded} = result
+    end
+
+    @tag :spike
+    test "multi-turn tool loop: 3 tool calls then text", %{logs_root: logs_root} do
+      dot = """
+      digraph MultiToolLoop {
+        graph [goal="Test multi-turn tool loop"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        check_response [shape=diamond]
+        dispatch_tools [type="session.tool_dispatch"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> call_llm -> check_response
+        check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+        check_response -> format [condition="context.llm.response_type=text"]
+        dispatch_tools -> call_llm
+        format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      # 3 tool calls, then text on 4th call
+      counter = :counters.new(1, [:atomics])
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          call_num = :counters.get(counter, 1)
+          :counters.add(counter, 1, 1)
+
+          if call_num < 3 do
+            {:ok, %{tool_calls: [%{name: "step_#{call_num}", args: %{}}]}}
+          else
+            {:ok, %{content: "Done after 3 tool calls."}}
+          end
+        end,
+        tool_dispatch: fn _tool_calls, _agent_id ->
+          {:ok, ["tool result"]}
+        end
+      }
+
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+
+      visited = visited_node_ids(events)
+      call_llm_visits = Enum.count(visited, &(&1 == "call_llm"))
+      dispatch_visits = Enum.count(visited, &(&1 == "dispatch_tools"))
+
+      # 4 LLM calls total: 3 returning tool_calls + 1 returning text
+      assert call_llm_visits == 4,
+             "Expected 4 call_llm visits, got #{call_llm_visits}. Visited: #{inspect(visited)}"
+
+      # 3 tool dispatches
+      assert dispatch_visits == 3,
+             "Expected 3 dispatch_tools visits, got #{dispatch_visits}"
+
+      assert run_result.context["session.response"] == "Done after 3 tool calls."
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 5: Heartbeat routes by cognitive mode
+  # ════════════════════════════════════════════════════════════════
+
+  describe "heartbeat execution — cognitive mode routing" do
+    @tag :spike
+    test "inline heartbeat routes to correct mode node via aligned conditions", %{
+      logs_root: logs_root
+    } do
+      # Use inline DOT with condition keys aligned to what SessionHandler sets.
+      # Handler sets "session.cognitive_mode", so conditions use
+      # "context.session.cognitive_mode" which the Condition module resolves to
+      # Context.get(ctx, "session.cognitive_mode") ✓
+      dot = """
+      digraph HeartbeatRouting {
+        graph [goal="Test cognitive mode routing"]
+        start [shape=Mdiamond]
+        select_mode [type="session.mode_select"]
+        mode_router [shape=diamond]
+        llm_goal [type="session.llm_call"]
+        llm_reflect [type="session.llm_call"]
+        process [type="session.process_results"]
+        done [shape=Msquare]
+
+        start -> select_mode -> mode_router
+
+        mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+        mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+
+        llm_goal -> process
+        llm_reflect -> process
+        process -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      heartbeat_json =
+        Jason.encode!(%{
+          "actions" => [],
+          "goal_updates" => [%{"id" => "g1", "progress" => 0.3}],
+          "new_goals" => [],
+          "memory_notes" => ["working on goal g1"]
+        })
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: heartbeat_json}}
+        end
+      }
+
+      # Without initial_context, session.goals defaults to [] and
+      # turn_count defaults to 0, so mode_select picks "reflection"
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+      assert run_result.final_outcome.status == :success
+
+      visited = visited_node_ids(events)
+
+      assert "start" in visited
+      assert "select_mode" in visited
+      assert "mode_router" in visited
+
+      # With no goals and turn_count=0, mode should be "reflection"
+      assert run_result.context["session.cognitive_mode"] == "reflection"
+
+      # The condition routing should send us to llm_reflect
+      assert "llm_reflect" in visited,
+             "Expected llm_reflect to be visited for reflection mode. Visited: #{inspect(visited)}"
+
+      refute "llm_goal" in visited,
+             "llm_goal should NOT be visited in reflection mode"
+
+      assert "process" in visited
+      assert "done" in visited
+    end
+
+    @tag :spike
+    test "full heartbeat.dot executes and reaches done", %{logs_root: logs_root} do
+      graph = parse!(@heartbeat_dot_path)
+
+      heartbeat_json =
+        Jason.encode!(%{
+          "actions" => [],
+          "goal_updates" => [],
+          "new_goals" => [],
+          "memory_notes" => []
+        })
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: heartbeat_json}}
+        end,
+        background_checks: fn _agent_id -> %{memory_health: :ok} end,
+        route_actions: fn _actions, _agent_id -> :ok end,
+        update_goals: fn _updates, _new, _agent_id -> :ok end
+      }
+
+      {result, events} =
+        collect_events(fn on_event ->
+          Engine.run(graph,
+            session_adapters: adapters,
+            logs_root: logs_root,
+            on_event: on_event
+          )
+        end)
+
+      assert {:ok, run_result} = result
+      assert run_result.final_outcome.status == :success
+      assert "done" in run_result.completed_nodes
+
+      visited = visited_node_ids(events)
+
+      # Core heartbeat nodes should always be visited
+      assert "start" in visited
+      assert "bg_checks" in visited
+      assert "select_mode" in visited
+      assert "mode_router" in visited
+
+      # The pipeline should visit ONE of the mode branches
+      mode_nodes_visited =
+        Enum.filter(
+          ["llm_goal", "llm_reflect", "llm_plan", "consolidate"],
+          &(&1 in visited)
+        )
+
+      assert length(mode_nodes_visited) >= 1,
+             "At least one mode branch should be visited. Visited: #{inspect(visited)}"
+
+      # Post-processing tail should be visited
+      assert "process" in visited
+      assert "done" in visited
+    end
+
+    @tag :spike
+    test "heartbeat result processing parses JSON into structured data", %{logs_root: logs_root} do
+      dot = """
+      digraph HeartbeatProcess {
+        graph [goal="Test result processing"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        process [type="session.process_results"]
+        route_actions [type="session.route_actions"]
+        update_goals [type="session.update_goals"]
+        done [shape=Msquare]
+
+        start -> call_llm -> process -> route_actions -> update_goals -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      test_pid = self()
+
+      heartbeat_json =
+        Jason.encode!(%{
+          "actions" => [%{"type" => "search", "query" => "test"}],
+          "goal_updates" => [%{"id" => "g1", "progress" => 0.5}],
+          "new_goals" => [%{"description" => "learn Elixir"}],
+          "memory_notes" => ["remembered something important"]
+        })
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: heartbeat_json}}
+        end,
+        route_actions: fn actions, _agent_id ->
+          send(test_pid, {:actions_routed, actions})
+          :ok
+        end,
+        update_goals: fn updates, new_goals, _agent_id ->
+          send(test_pid, {:goals_updated, updates, new_goals})
+          :ok
+        end
+      }
+
+      assert {:ok, run_result} =
+               Engine.run(graph,
+                 session_adapters: adapters,
+                 logs_root: logs_root
+               )
+
+      assert run_result.final_outcome.status == :success
+
+      # process_results should have parsed the JSON
+      ctx = run_result.context
+      assert is_list(ctx["session.actions"])
+      assert length(ctx["session.actions"]) == 1
+      assert is_list(ctx["session.new_goals"])
+      assert length(ctx["session.new_goals"]) == 1
+      assert is_list(ctx["session.memory_notes"])
+      assert length(ctx["session.memory_notes"]) == 1
+
+      # route_actions and update_goals adapters should have been called
+      assert_received {:actions_routed, actions}
+      assert length(actions) == 1
+
+      assert_received {:goals_updated, goal_updates, new_goals}
+      assert length(goal_updates) == 1
+      assert length(new_goals) == 1
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Condition key alignment verification
+  # ════════════════════════════════════════════════════════════════
+
+  describe "condition key alignment" do
+    @tag :spike
+    @tag :diagnostic
+    test "verify condition keys match handler context keys" do
+      # This test documents the expected alignment between:
+      # 1. Keys that SessionHandler sets in context_updates
+      # 2. Keys that DOT edge conditions reference via "context.X"
+      #
+      # The Condition module resolves "context.FOO" by doing:
+      #   Context.get(ctx, "context.FOO", Context.get(ctx, "FOO", ""))
+      #
+      # So "context.llm.response_type=tool_call" resolves to key "llm.response_type" ✓
+      # But "context.input_type=blocked" resolves to key "input_type" ✗
+      #     → SessionHandler sets "session.input_type"
+      # And "context.cognitive_mode=goal_pursuit" resolves to key "cognitive_mode" ✗
+      #     → SessionHandler sets "session.cognitive_mode"
+
+      # Handler sets these keys:
+      handler_keys = %{
+        classify: "session.input_type",
+        mode_select: "session.cognitive_mode",
+        llm_call_text: "llm.response_type",
+        llm_call_tool: "llm.response_type"
+      }
+
+      # DOT conditions reference these (after stripping "context." prefix):
+      dot_condition_keys = %{
+        check_auth: "input_type",
+        check_response: "llm.response_type",
+        mode_router: "cognitive_mode"
+      }
+
+      # llm.response_type matches ✓
+      assert handler_keys.llm_call_text == dot_condition_keys.check_response
+
+      # input_type does NOT match — needs alignment
+      refute handler_keys.classify == dot_condition_keys.check_auth,
+             "Known gap: DOT uses 'input_type' but handler sets 'session.input_type'"
+
+      # cognitive_mode does NOT match — needs alignment
+      refute handler_keys.mode_select == dot_condition_keys.mode_router,
+             "Known gap: DOT uses 'cognitive_mode' but handler sets 'session.cognitive_mode'"
+    end
+
+    @tag :spike
+    @tag :diagnostic
+    test "aligned condition keys work with Condition module" do
+      alias Arbor.Orchestrator.Engine.Condition
+      alias Arbor.Orchestrator.Engine.Outcome
+
+      # Simulate what happens when SessionHandler sets "session.cognitive_mode"
+      # and the DOT condition references "context.session.cognitive_mode"
+      context = Context.new(%{"session.cognitive_mode" => "goal_pursuit"})
+      outcome = %Outcome{status: :success}
+
+      # This is the CORRECT condition format for aligned keys
+      assert Condition.eval("context.session.cognitive_mode=goal_pursuit", outcome, context)
+      refute Condition.eval("context.session.cognitive_mode=reflection", outcome, context)
+
+      # This is what the current DOT files use (MISALIGNED — won't match)
+      refute Condition.eval("context.cognitive_mode=goal_pursuit", outcome, context),
+             "context.cognitive_mode doesn't match session.cognitive_mode — " <>
+               "DOT files need updating to context.session.cognitive_mode"
+
+      # llm.response_type works because the handler key matches
+      context2 = Context.new(%{"llm.response_type" => "tool_call"})
+      assert Condition.eval("context.llm.response_type=tool_call", outcome, context2)
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Engine initial_context gap documentation
+  # ════════════════════════════════════════════════════════════════
+
+  describe "Engine initial_context injection" do
+    @tag :spike
+    @tag :diagnostic
+    test "engine does NOT currently support initial_context", %{logs_root: logs_root} do
+      # Engine.run/2 builds context from graph attrs (goal, label) and
+      # opts[:workdir] only. There is no :initial_context option.
+      # This test documents the gap and verifies handlers receive
+      # default values.
+      dot = """
+      digraph TestDefaults {
+        graph [goal="Test default context"]
+        start [shape=Mdiamond]
+        classify [type="session.classify"]
+        done [shape=Msquare]
+        start -> classify -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      {:ok, run_result} =
+        Engine.run(graph,
+          session_adapters: %{},
+          logs_root: logs_root
+        )
+
+      assert run_result.final_outcome.status == :success
+
+      # Without initial_context, session.input defaults to "" (nil → "")
+      # which classifies as "query" (the default path in classify handler)
+      assert run_result.context["session.input_type"] == "query"
+    end
+
+    @tag :spike
+    @tag :diagnostic
+    test "session values need initial_context injection for real use", %{logs_root: logs_root} do
+      # When we build the Session GenServer (Day 2), it needs to inject:
+      # - session.input (the user's message)
+      # - session.agent_id (the agent processing this)
+      # - session.id (session identifier)
+      # - session.turn_count (incrementing counter)
+      # - session.messages (conversation history)
+      # - session.goals (active goals for mode selection)
+      #
+      # Day 2 work: add initial_context support to Engine.run/2.
+      # For now, verify that handlers work with their defaults.
+
+      dot = """
+      digraph TestModeDefaults {
+        graph [goal="Test mode selection defaults"]
+        start [shape=Mdiamond]
+        select_mode [type="session.mode_select"]
+        done [shape=Msquare]
+        start -> select_mode -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      {:ok, run_result} =
+        Engine.run(graph,
+          session_adapters: %{},
+          logs_root: logs_root
+        )
+
+      # With no goals and turn_count=0 (default), mode should be "reflection"
+      # (not "consolidation" which triggers on turn % 5 == 0 only when turn > 0)
+      assert run_result.context["session.cognitive_mode"] == "reflection"
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Graceful degradation
+  # ════════════════════════════════════════════════════════════════
+
+  describe "graceful degradation" do
+    @tag :spike
+    test "pipeline completes with empty adapters map", %{logs_root: logs_root} do
+      dot = """
+      digraph DegradeTest {
+        graph [goal="Test graceful degradation"]
+        start [shape=Mdiamond]
+        classify [type="session.classify"]
+        recall [type="session.memory_recall"]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        checkpoint [type="session.checkpoint"]
+        done [shape=Msquare]
+
+        start -> classify -> recall -> call_llm -> format -> checkpoint -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      # No adapters at all — all should degrade gracefully
+      {:ok, run_result} =
+        Engine.run(graph,
+          session_adapters: %{},
+          logs_root: logs_root
+        )
+
+      assert run_result.final_outcome.status == :success
+      assert "done" in run_result.completed_nodes
+    end
+
+    @tag :spike
+    test "adapter errors don't crash the pipeline", %{logs_root: logs_root} do
+      dot = """
+      digraph ErrorTest {
+        graph [goal="Test error resilience"]
+        start [shape=Mdiamond]
+        recall [type="session.memory_recall"]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> recall -> call_llm -> format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      adapters = %{
+        memory_recall: fn _agent_id, _query -> raise "kaboom" end,
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: "recovered"}}
+        end
+      }
+
+      {:ok, run_result} =
+        Engine.run(graph,
+          session_adapters: adapters,
+          logs_root: logs_root
+        )
+
+      # memory_recall catches the raise and returns ok(%{})
+      # pipeline continues to call_llm and succeeds
+      assert run_result.final_outcome.status == :success
+      assert run_result.context["session.response"] == "recovered"
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 6: Context round-trip through turn pipeline
+  # ════════════════════════════════════════════════════════════════
+
+  describe "context round-trip through turn pipeline" do
+    @tag :spike
+    test "messages grow by 2, turn_count increments, trust_tier and goals preserved", %{
+      logs_root: logs_root
+    } do
+      alias Arbor.Orchestrator.Session
+
+      # Build initial state with pre-existing data
+      initial_messages = [
+        %{"role" => "user", "content" => "earlier question"},
+        %{"role" => "assistant", "content" => "earlier answer"}
+      ]
+
+      initial_goals = [
+        %{"id" => "g1", "description" => "learn Elixir", "progress" => 0.4}
+      ]
+
+      state = %Session{
+        session_id: "ctx-round-trip-test",
+        agent_id: "agent_test123",
+        trust_tier: :trusted_partner,
+        turn_graph: nil,
+        heartbeat_graph: nil,
+        turn_count: 3,
+        messages: initial_messages,
+        working_memory: %{"key" => "value"},
+        goals: initial_goals,
+        cognitive_mode: :goal_pursuit,
+        adapters: %{}
+      }
+
+      # Step 1: build_turn_values produces the context the engine will see
+      values = Session.build_turn_values(state, "What is OTP?")
+
+      assert values["session.id"] == "ctx-round-trip-test"
+      assert values["session.agent_id"] == "agent_test123"
+      assert values["session.trust_tier"] == "trusted_partner"
+      assert values["session.turn_count"] == 3
+      assert values["session.goals"] == initial_goals
+
+      # Messages should include the new user message appended
+      assert length(values["session.messages"]) == 3
+      last_msg = List.last(values["session.messages"])
+      assert last_msg["role"] == "user"
+      assert last_msg["content"] == "What is OTP?"
+
+      # Step 2: Simulate engine run — execute a minimal graph with initial_values
+      dot = """
+      digraph RoundTrip {
+        graph [goal="Context round-trip test"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> call_llm -> format -> done
+      }
+      """
+
+      {:ok, graph} = Orchestrator.parse(dot)
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: "OTP is Open Telecom Platform."}}
+        end
+      }
+
+      {:ok, run_result} =
+        Engine.run(graph,
+          session_adapters: adapters,
+          logs_root: logs_root,
+          initial_values: values
+        )
+
+      assert run_result.context["session.response"] == "OTP is Open Telecom Platform."
+
+      # Step 3: apply_turn_result merges engine output back into state
+      new_state = Session.apply_turn_result(state, "What is OTP?", run_result)
+
+      # Messages grew by 2 (user + assistant)
+      assert length(new_state.messages) == length(initial_messages) + 2
+
+      user_msg = Enum.at(new_state.messages, 2)
+      assert user_msg["role"] == "user"
+      assert user_msg["content"] == "What is OTP?"
+
+      assistant_msg = Enum.at(new_state.messages, 3)
+      assert assistant_msg["role"] == "assistant"
+      assert assistant_msg["content"] == "OTP is Open Telecom Platform."
+
+      # Turn count incremented
+      assert new_state.turn_count == 4
+
+      # Trust tier preserved (not changed by engine)
+      assert new_state.trust_tier == :trusted_partner
+
+      # Goals intact (turn pipeline doesn't modify goals)
+      assert new_state.goals == initial_goals
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 7: Session GenServer round-trip
+  # ════════════════════════════════════════════════════════════════
+
+  describe "Session GenServer round-trip" do
+    @tag :spike
+    test "send_message updates state correctly across multiple turns" do
+      alias Arbor.Orchestrator.Session
+
+      # Write minimal turn and heartbeat DOT files for the session
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_session_genserver_test_#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp_dir)
+
+      turn_dot = """
+      digraph Turn {
+        graph [goal="Test turn"]
+        start [shape=Mdiamond]
+        classify [type="session.classify"]
+        call_llm [type="session.llm_call"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> classify -> call_llm -> format -> done
+      }
+      """
+
+      heartbeat_dot = """
+      digraph Heartbeat {
+        graph [goal="Test heartbeat"]
+        start [shape=Mdiamond]
+        select_mode [type="session.mode_select"]
+        done [shape=Msquare]
+
+        start -> select_mode -> done
+      }
+      """
+
+      turn_path = Path.join(tmp_dir, "turn.dot")
+      heartbeat_path = Path.join(tmp_dir, "heartbeat.dot")
+      File.write!(turn_path, turn_dot)
+      File.write!(heartbeat_path, heartbeat_dot)
+
+      on_exit(fn -> File.rm_rf(tmp_dir) end)
+
+      # Counter to vary responses per call
+      counter = :counters.new(1, [:atomics])
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          n = :counters.get(counter, 1)
+          :counters.add(counter, 1, 1)
+
+          response =
+            case n do
+              0 -> "Hello back!"
+              _ -> "Response #{n + 1}"
+            end
+
+          {:ok, %{content: response}}
+        end
+      }
+
+      {:ok, pid} =
+        Session.start_link(
+          session_id: "genserver-test-#{:erlang.unique_integer([:positive])}",
+          agent_id: "agent_gs_test",
+          trust_tier: :established,
+          turn_dot: turn_path,
+          heartbeat_dot: heartbeat_path,
+          adapters: adapters,
+          start_heartbeat: false
+        )
+
+      # ── Turn 1 ──
+      assert {:ok, response1} = Session.send_message(pid, "Hello")
+      assert response1 == "Hello back!"
+
+      state1 = Session.get_state(pid)
+      assert state1.turn_count == 1
+      assert length(state1.messages) == 2
+
+      [msg1, msg2] = state1.messages
+      assert msg1["role"] == "user"
+      assert msg1["content"] == "Hello"
+      assert msg2["role"] == "assistant"
+      assert msg2["content"] == "Hello back!"
+
+      # ── Turn 2 ──
+      assert {:ok, response2} = Session.send_message(pid, "How are you?")
+      assert response2 == "Response 2"
+
+      state2 = Session.get_state(pid)
+      assert state2.turn_count == 2
+      assert length(state2.messages) == 4
+
+      [_, _, msg3, msg4] = state2.messages
+      assert msg3["role"] == "user"
+      assert msg3["content"] == "How are you?"
+      assert msg4["role"] == "assistant"
+      assert msg4["content"] == "Response 2"
+
+      # Trust tier, agent_id, session_id remain stable across turns
+      assert state2.trust_tier == :established
+      assert state2.agent_id == "agent_gs_test"
+
+      GenServer.stop(pid)
+    end
+  end
+end

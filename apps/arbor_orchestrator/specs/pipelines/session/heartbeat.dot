@@ -1,0 +1,86 @@
+// Heartbeat Pipeline — One Autonomous Heartbeat Cycle
+//
+// Runs background checks, selects a cognitive mode, then routes to
+// mode-specific processing before updating goals and finishing.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  COGNITIVE MODE ROUTING                                                │
+// │                                                                        │
+// │  The mode_router diamond node inspects context.cognitive_mode          │
+// │  (set by select_mode) and fans out to one of four branches:            │
+// │                                                                        │
+// │    goal_pursuit    — LLM call focused on advancing active goals        │
+// │    reflection      — LLM call for self-reflection and learning         │
+// │    plan_execution  — LLM call to decompose goals into intentions       │
+// │    consolidation   — memory maintenance (decay, prune, summarize)      │
+// │                                                                        │
+// │  Mode selection logic (in session.mode_select handler):                │
+// │    - Active goals exist         → goal_pursuit                         │
+// │    - turn_count % 5 == 0        → consolidation (maintenance floor)    │
+// │    - Undecomposed goals exist   → plan_execution                       │
+// │    - Otherwise                  → reflection                           │
+// │                                                                        │
+// │  All four branches converge at process, which parses the LLM/memory   │
+// │  result into structured actions, goal updates, and memory notes.       │
+// │  The post-processing tail (route_actions → update_goals → done) is    │
+// │  shared across all modes.                                              │
+// └─────────────────────────────────────────────────────────────────────────┘
+
+digraph Heartbeat {
+  graph [
+    goal="Execute one autonomous heartbeat cycle with cognitive mode routing",
+    label="Heartbeat Cycle"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Background checks (memory health, timing, etc.) ───────
+  bg_checks [type="session.background_checks"]
+
+  // ── Cognitive mode selection ──────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── Mode routing (conditional fan-out) ────────────────────
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ── Mode-specific LLM calls ──────────────────────────────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+
+  // ── Consolidation (memory maintenance, no LLM call) ──────
+  consolidate [type="session.memory_update", mode="consolidation"]
+
+  // ── Result processing ────────────────────────────────────
+  process [type="session.process_results"]
+
+  // ── Action routing and goal updates ──────────────────────
+  route_actions [type="session.route_actions"]
+  update_goals [type="session.update_goals"]
+
+  // ── Exit ─────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  // Linear lead-in: checks → mode selection → routing
+  start -> bg_checks -> select_mode -> mode_router
+
+  // Conditional fan-out by cognitive mode
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  // All mode branches converge at result processing
+  llm_goal -> process
+  llm_reflect -> process
+  llm_plan -> process
+  consolidate -> process
+
+  // Shared post-processing tail
+  process -> route_actions -> update_goals -> done
+}
