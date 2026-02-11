@@ -35,8 +35,46 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     }
   end
 
-  @spec write(t(), String.t()) :: :ok | {:error, term()}
-  def write(%__MODULE__{} = checkpoint, logs_root) do
+  @doc """
+  Signs checkpoint data with HMAC-SHA256.
+
+  Returns the data map with an `"__hmac"` field containing the hex-encoded
+  HMAC of the JSON-encoded data (computed without the `__hmac` field).
+  """
+  @spec sign(map(), binary()) :: map()
+  def sign(data, secret) when is_map(data) and is_binary(secret) do
+    clean = Map.delete(data, "__hmac")
+    {:ok, canonical} = Jason.encode(clean, pretty: true)
+    hmac = :crypto.mac(:hmac, :sha256, secret, canonical) |> Base.encode16(case: :lower)
+    Map.put(clean, "__hmac", hmac)
+  end
+
+  @doc """
+  Verifies HMAC integrity of checkpoint data.
+
+  Recomputes the HMAC and compares using constant-time comparison.
+  Returns `{:ok, data_without_hmac}` or `{:error, :tampered}`.
+  """
+  @spec verify(map(), binary()) :: {:ok, map()} | {:error, :tampered}
+  def verify(data, secret) when is_map(data) and is_binary(secret) do
+    case Map.pop(data, "__hmac") do
+      {nil, _} ->
+        {:error, :tampered}
+
+      {stored_hmac, clean} ->
+        {:ok, canonical} = Jason.encode(clean, pretty: true)
+        computed = :crypto.mac(:hmac, :sha256, secret, canonical) |> Base.encode16(case: :lower)
+
+        if :crypto.hash_equals(stored_hmac, computed) do
+          {:ok, clean}
+        else
+          {:error, :tampered}
+        end
+    end
+  end
+
+  @spec write(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def write(%__MODULE__{} = checkpoint, logs_root, opts \\ []) do
     encoded_outcomes =
       checkpoint.node_outcomes
       |> Enum.map(fn {node_id, outcome} -> {node_id, Map.from_struct(outcome)} end)
@@ -47,16 +85,23 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       |> Map.from_struct()
       |> Map.put(:node_outcomes, encoded_outcomes)
 
+    payload_map =
+      case Keyword.get(opts, :hmac_secret) do
+        nil -> payload_map
+        secret -> sign(payload_map, secret)
+      end
+
     with :ok <- File.mkdir_p(logs_root),
          {:ok, payload} <- Jason.encode(payload_map, pretty: true) do
       File.write(Path.join(logs_root, "checkpoint.json"), payload)
     end
   end
 
-  @spec load(String.t()) :: {:ok, t()} | {:error, term()}
-  def load(path) do
+  @spec load(String.t(), keyword()) :: {:ok, t()} | {:error, term()}
+  def load(path, opts \\ []) do
     with {:ok, payload} <- File.read(path),
-         {:ok, decoded} <- Jason.decode(payload) do
+         {:ok, decoded} <- Jason.decode(payload),
+         {:ok, decoded} <- maybe_verify(decoded, Keyword.get(opts, :hmac_secret)) do
       outcomes =
         decoded
         |> Map.get("node_outcomes", %{})
@@ -84,6 +129,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
        }}
     end
   end
+
+  defp maybe_verify(decoded, nil), do: {:ok, decoded}
+  defp maybe_verify(decoded, secret), do: verify(decoded, secret)
 
   defp parse_status("success"), do: :success
   defp parse_status("partial_success"), do: :partial_success

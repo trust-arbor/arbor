@@ -19,6 +19,14 @@ defmodule Arbor.Orchestrator.Session do
   The `SessionHandler` provides all node implementations; adapters bridge to
   real infrastructure (LLM providers, memory stores, tool servers).
 
+  ## Contracts
+
+  When `Arbor.Contracts.Session.Config`, `Arbor.Contracts.Session.State`, and
+  `Arbor.Contracts.Session.Behavior` are available, the Session uses them as
+  the source of truth for immutable config, mutable state, and phase transitions.
+  All existing flat fields are kept in sync for backward compatibility — callers
+  can still access `state.turn_count`, `state.phase`, etc. directly.
+
   ## Turn vs Heartbeat execution
 
   **Turns** run synchronously via `GenServer.call` — the caller blocks until the
@@ -49,6 +57,8 @@ defmodule Arbor.Orchestrator.Session do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Handlers.{Registry, SessionHandler}
 
@@ -72,7 +82,16 @@ defmodule Arbor.Orchestrator.Session do
     session.update_goals
   )
 
+  # ── Contract module availability (runtime bridge) ──────────────────
+  # Checked at runtime so the orchestrator works standalone without
+  # arbor_contracts in the dependency tree.
+
   # ── State ────────────────────────────────────────────────────────────
+  #
+  # All existing flat fields are preserved for backward compatibility.
+  # When contracts are available, `session_config`, `session_state`, and
+  # `behavior` hold the canonical typed structs. The flat fields are
+  # kept in sync so callers (tests, get_state/1) can access them directly.
 
   defstruct [
     :session_id,
@@ -83,6 +102,10 @@ defmodule Arbor.Orchestrator.Session do
     :trace_id,
     :seed_ref,
     :signal_topic,
+    # Contract structs (nil when contracts unavailable)
+    :session_config,
+    :session_state,
+    :behavior,
     phase: :idle,
     session_type: :primary,
     config: %{},
@@ -120,7 +143,10 @@ defmodule Arbor.Orchestrator.Session do
           adapters: map(),
           heartbeat_interval: pos_integer(),
           heartbeat_ref: reference() | nil,
-          heartbeat_in_flight: boolean()
+          heartbeat_in_flight: boolean(),
+          session_config: struct() | nil,
+          session_state: struct() | nil,
+          behavior: struct() | nil
         }
 
   # ── Public API ───────────────────────────────────────────────────────
@@ -217,6 +243,18 @@ defmodule Arbor.Orchestrator.Session do
          {:ok, heartbeat_graph} <- parse_dot_file(heartbeat_dot_path) do
       ensure_session_handler_registered()
 
+      # Build contract structs if available (runtime bridge)
+      {session_config, session_state, behavior} =
+        build_contract_structs(
+          session_id: session_id,
+          agent_id: agent_id,
+          trust_tier: trust_tier,
+          session_type: session_type,
+          trace_id: trace_id,
+          config: config,
+          behavior: Keyword.get(opts, :behavior)
+        )
+
       state = %__MODULE__{
         session_id: session_id,
         agent_id: agent_id,
@@ -229,7 +267,10 @@ defmodule Arbor.Orchestrator.Session do
         config: config,
         seed_ref: seed_ref,
         signal_topic: signal_topic,
-        trace_id: trace_id
+        trace_id: trace_id,
+        session_config: session_config,
+        session_state: session_state,
+        behavior: behavior
       }
 
       state =
@@ -247,23 +288,29 @@ defmodule Arbor.Orchestrator.Session do
 
   @impl true
   def handle_call({:send_message, message}, _from, state) do
-    state = %{state | phase: :processing}
+    state = transition_phase(state, :idle, :input_received, :processing)
     values = build_turn_values(state, message)
     engine_opts = build_engine_opts(state, values)
 
     try do
       case Engine.run(state.turn_graph, engine_opts) do
         {:ok, result} ->
-          new_state = apply_turn_result(%{state | phase: :idle}, message, result)
+          new_state =
+            state
+            |> transition_phase(:processing, :complete, :idle)
+            |> apply_turn_result(message, result)
+
           response = Map.get(result.context, "session.response", "")
           {:reply, {:ok, response}, new_state}
 
         {:error, reason} ->
-          {:reply, {:error, reason}, %{state | phase: :idle}}
+          new_state = transition_phase(state, :processing, :complete, :idle)
+          {:reply, {:error, reason}, new_state}
       end
     rescue
       e ->
-        {:reply, {:error, {:engine_crash, Exception.message(e)}}, %{state | phase: :idle}}
+        new_state = transition_phase(state, :processing, :complete, :idle)
+        {:reply, {:error, {:engine_crash, Exception.message(e)}}, new_state}
     end
   end
 
@@ -285,13 +332,22 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:heartbeat_result, {:ok, result}}, state) do
-    new_state = apply_heartbeat_result(%{state | heartbeat_in_flight: false}, result)
+    new_state =
+      state
+      |> Map.put(:heartbeat_in_flight, false)
+      |> apply_heartbeat_result(result)
+
     {:noreply, new_state}
   end
 
   def handle_info({:heartbeat_result, {:error, _reason}}, state) do
     # Heartbeat failures are non-fatal — continue with current state
-    {:noreply, %{state | heartbeat_in_flight: false}}
+    new_state =
+      state
+      |> Map.put(:heartbeat_in_flight, false)
+      |> maybe_increment_errors()
+
+    {:noreply, new_state}
   end
 
   # Handle Task DOWN messages (normal exits from heartbeat Tasks)
@@ -316,7 +372,8 @@ defmodule Arbor.Orchestrator.Session do
   @spec build_turn_values(t(), String.t() | map()) :: map()
   def build_turn_values(state, message) do
     user_msg = %{"role" => "user", "content" => normalize_message(message)}
-    messages_with_input = state.messages ++ [user_msg]
+    messages = get_messages(state)
+    messages_with_input = messages ++ [user_msg]
 
     base = session_base_values(state)
 
@@ -330,19 +387,21 @@ defmodule Arbor.Orchestrator.Session do
   @spec build_heartbeat_values(t()) :: map()
   def build_heartbeat_values(state) do
     base = session_base_values(state)
-    Map.put(base, "session.messages", state.messages)
+    Map.put(base, "session.messages", get_messages(state))
   end
 
   defp session_base_values(state) do
+    # Read from contract structs when available, fall back to flat fields.
+    # This keeps the context map identical regardless of contract availability.
     %{
       "session.id" => state.session_id,
       "session.agent_id" => state.agent_id,
       "session.trust_tier" => to_string(state.trust_tier),
-      "session.turn_count" => state.turn_count,
-      "session.working_memory" => state.working_memory,
-      "session.goals" => state.goals,
-      "session.cognitive_mode" => to_string(state.cognitive_mode),
-      "session.phase" => to_string(state.phase),
+      "session.turn_count" => get_turn_count(state),
+      "session.working_memory" => get_working_memory(state),
+      "session.goals" => get_goals(state),
+      "session.cognitive_mode" => to_string(get_cognitive_mode(state)),
+      "session.phase" => to_string(get_phase(state)),
       "session.session_type" => to_string(state.session_type),
       "session.trace_id" => state.trace_id,
       "session.config" => state.config,
@@ -367,21 +426,32 @@ defmodule Arbor.Orchestrator.Session do
           msgs ++ [assistant_msg]
 
         _ ->
-          state.messages ++ [user_msg, assistant_msg]
+          get_messages(state) ++ [user_msg, assistant_msg]
       end
 
     updated_wm =
       case Map.get(result_ctx, "session.working_memory") do
         wm when is_map(wm) -> wm
-        _ -> state.working_memory
+        _ -> get_working_memory(state)
       end
 
-    %{
+    new_turn_count = get_turn_count(state) + 1
+
+    # Update flat fields (backward compat)
+    state = %{
       state
       | messages: updated_messages,
         working_memory: updated_wm,
-        turn_count: state.turn_count + 1
+        turn_count: new_turn_count
     }
+
+    # Sync contract session_state if available
+    update_session_state(state, fn ss ->
+      ss
+      |> Map.put(:messages, updated_messages)
+      |> Map.put(:working_memory, updated_wm)
+      |> maybe_call_increment_turn()
+    end)
   end
 
   @doc false
@@ -391,18 +461,28 @@ defmodule Arbor.Orchestrator.Session do
     cognitive_mode =
       case Map.get(result_ctx, "session.cognitive_mode") do
         mode when is_binary(mode) and mode != "" ->
-          safe_to_atom(mode, state.cognitive_mode)
+          safe_to_atom(mode, get_cognitive_mode(state))
 
         _ ->
-          state.cognitive_mode
+          get_cognitive_mode(state)
       end
 
     # Goal updates from process_results handler
     goal_updates = Map.get(result_ctx, "session.goal_updates", [])
     new_goals = Map.get(result_ctx, "session.new_goals", [])
-    goals = apply_goal_changes(state.goals, goal_updates, new_goals)
+    current_goals = get_goals(state)
+    goals = apply_goal_changes(current_goals, goal_updates, new_goals)
 
-    %{state | cognitive_mode: cognitive_mode, goals: goals}
+    # Update flat fields (backward compat)
+    state = %{state | cognitive_mode: cognitive_mode, goals: goals}
+
+    # Sync contract session_state if available
+    update_session_state(state, fn ss ->
+      ss
+      |> Map.put(:cognitive_mode, cognitive_mode)
+      |> Map.put(:goals, goals)
+      |> maybe_call_touch()
+    end)
   end
 
   # ── Private helpers ──────────────────────────────────────────────────
@@ -417,17 +497,25 @@ defmodule Arbor.Orchestrator.Session do
       engine_opts = build_engine_opts(state, values)
       heartbeat_graph = state.heartbeat_graph
 
-      {:ok, _pid} =
-        Task.start(fn ->
-          result =
-            try do
-              Engine.run(heartbeat_graph, engine_opts)
-            rescue
-              e -> {:error, {:engine_crash, Exception.message(e)}}
-            end
+      task_sup = Arbor.Orchestrator.Session.TaskSupervisor
 
-          send(session_pid, {:heartbeat_result, result})
-        end)
+      task_fn = fn ->
+        result =
+          try do
+            Engine.run(heartbeat_graph, engine_opts)
+          rescue
+            e -> {:error, {:engine_crash, Exception.message(e)}}
+          end
+
+        send(session_pid, {:heartbeat_result, result})
+      end
+
+      {:ok, _pid} =
+        if Process.whereis(task_sup) do
+          Task.Supervisor.start_child(task_sup, task_fn)
+        else
+          Task.start(task_fn)
+        end
 
       %{state | heartbeat_in_flight: true}
     end
@@ -516,5 +604,198 @@ defmodule Arbor.Orchestrator.Session do
       end)
 
     updated ++ List.wrap(new_goals)
+  end
+
+  # ── Contract struct helpers ─────────────────────────────────────────
+  #
+  # Runtime bridge: build and manage contract structs when available.
+  # All functions check module availability at runtime so the orchestrator
+  # works standalone without arbor_contracts in the dependency tree.
+
+  @doc false
+  def contracts_available? do
+    Code.ensure_loaded?(config_module()) and
+      Code.ensure_loaded?(state_module()) and
+      Code.ensure_loaded?(behavior_module())
+  end
+
+  defp build_contract_structs(opts) do
+    if contracts_available?() do
+      session_config = build_session_config(opts)
+      session_state = build_session_state(opts)
+      behavior = build_behavior(opts)
+      {session_config, session_state, behavior}
+    else
+      {nil, nil, nil}
+    end
+  end
+
+  defp build_session_config(opts) do
+    case apply(config_module(), :new, [
+           [
+             session_id: Keyword.fetch!(opts, :session_id),
+             agent_id: Keyword.fetch!(opts, :agent_id),
+             trust_tier: Keyword.fetch!(opts, :trust_tier),
+             session_type: Keyword.get(opts, :session_type, :primary),
+             metadata: Keyword.get(opts, :config, %{})
+           ]
+         ]) do
+      {:ok, config} ->
+        config
+
+      {:error, reason} ->
+        Logger.warning("[Session] Failed to create Session.Config: #{inspect(reason)}, using nil")
+
+        nil
+    end
+  end
+
+  defp build_session_state(opts) do
+    case apply(state_module(), :new, [[trace_id: Keyword.get(opts, :trace_id)]]) do
+      {:ok, session_state} ->
+        session_state
+
+      {:error, reason} ->
+        Logger.warning("[Session] Failed to create Session.State: #{inspect(reason)}, using nil")
+
+        nil
+    end
+  end
+
+  defp build_behavior(opts) do
+    case Keyword.get(opts, :behavior) do
+      nil ->
+        case apply(behavior_module(), :default, []) do
+          {:ok, behavior} -> behavior
+          _ -> nil
+        end
+
+      %{__struct__: _} = behavior ->
+        # Already a Behavior struct — use as-is
+        behavior
+
+      _other ->
+        Logger.warning("[Session] Invalid behavior option, using default")
+
+        case apply(behavior_module(), :default, []) do
+          {:ok, behavior} -> behavior
+          _ -> nil
+        end
+    end
+  end
+
+  # Module references via functions to avoid compile-time warnings
+  # when arbor_contracts is not in the dependency tree.
+  defp config_module, do: Arbor.Contracts.Session.Config
+  defp state_module, do: Arbor.Contracts.Session.State
+  defp behavior_module, do: Arbor.Contracts.Session.Behavior
+
+  # ── Contract-aware state accessors ──────────────────────────────────
+  #
+  # These read from session_state when available, falling back to flat fields.
+  # This ensures session_base_values/1 always produces the same context map.
+
+  defp get_messages(%{session_state: %{messages: msgs}} = _state) when is_list(msgs), do: msgs
+  defp get_messages(state), do: state.messages
+
+  defp get_turn_count(%{session_state: %{turn_count: tc}} = _state)
+       when is_integer(tc),
+       do: tc
+
+  defp get_turn_count(state), do: state.turn_count
+
+  defp get_working_memory(%{session_state: %{working_memory: wm}} = _state) when is_map(wm),
+    do: wm
+
+  defp get_working_memory(state), do: state.working_memory
+
+  defp get_goals(%{session_state: %{goals: goals}} = _state) when is_list(goals), do: goals
+  defp get_goals(state), do: state.goals
+
+  defp get_cognitive_mode(%{session_state: %{cognitive_mode: cm}} = _state) when is_atom(cm),
+    do: cm
+
+  defp get_cognitive_mode(state), do: state.cognitive_mode
+
+  defp get_phase(%{session_state: %{phase: phase}} = _state) when is_atom(phase), do: phase
+  defp get_phase(state), do: state.phase
+
+  # ── Contract-aware state mutation ───────────────────────────────────
+
+  # Update session_state struct and keep flat fields in sync.
+  # The update_fn receives the current session_state struct and must return
+  # the updated struct.
+  defp update_session_state(%{session_state: nil} = state, _update_fn), do: state
+
+  defp update_session_state(%{session_state: ss} = state, update_fn) when not is_nil(ss) do
+    updated_ss = update_fn.(ss)
+    %{state | session_state: updated_ss}
+  end
+
+  # Calls State.increment_turn/1 if the module is available, otherwise
+  # just increments turn_count manually on the struct.
+  defp maybe_call_increment_turn(ss) do
+    if contracts_available?() do
+      apply(state_module(), :increment_turn, [ss])
+    else
+      %{ss | turn_count: ss.turn_count + 1}
+    end
+  end
+
+  # Calls State.touch/1 if available.
+  defp maybe_call_touch(ss) do
+    if contracts_available?() do
+      apply(state_module(), :touch, [ss])
+    else
+      ss
+    end
+  end
+
+  # Increment error count on heartbeat failures (when session_state is available).
+  defp maybe_increment_errors(%{session_state: nil} = state), do: state
+
+  defp maybe_increment_errors(%{session_state: ss} = state) when not is_nil(ss) do
+    if contracts_available?() do
+      %{state | session_state: apply(state_module(), :increment_errors, [ss])}
+    else
+      state
+    end
+  end
+
+  # ── Phase transition with behavior validation ──────────────────────
+  #
+  # Validates the transition against the Behavior state machine before
+  # applying it. In Phase 2 this is advisory (log warning, don't block).
+  # The flat `phase` field and `session_state.phase` are both updated.
+
+  defp transition_phase(state, expected_from, event, to_phase) do
+    # Validate against behavior if available
+    validate_transition(state.behavior, expected_from, event)
+
+    # Update flat field (backward compat)
+    state = %{state | phase: to_phase}
+
+    # Update contract session_state if available
+    update_session_state(state, fn ss ->
+      %{ss | phase: to_phase}
+    end)
+  end
+
+  defp validate_transition(nil, _from, _event), do: :ok
+
+  defp validate_transition(behavior, from, event) do
+    if contracts_available?() do
+      valid? = apply(behavior_module(), :valid_transition?, [behavior, from, event])
+
+      unless valid? do
+        Logger.warning(
+          "[Session] Invalid phase transition: #{inspect(from)} --#{inspect(event)}--> " <>
+            "(not defined in behavior #{inspect(behavior.name)}). " <>
+            "Proceeding anyway — enforcement deferred to Phase 2."
+        )
+      end
+    end
+
+    :ok
   end
 end

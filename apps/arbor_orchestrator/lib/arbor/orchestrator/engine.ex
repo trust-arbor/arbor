@@ -9,7 +9,7 @@ defmodule Arbor.Orchestrator.Engine do
   - event callback stream
   """
 
-  alias Arbor.Orchestrator.Engine.{Checkpoint, Condition, Context, Fidelity, Outcome}
+  alias Arbor.Orchestrator.Engine.{Authorization, Checkpoint, Condition, Context, Fidelity, Outcome}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
@@ -382,7 +382,7 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp do_execute_with_retry(handler, node, context, graph, retries, opts, attempt, max_attempts) do
     try do
-      outcome = handler.execute(node, context, graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, context, graph, opts)
 
       case outcome.status do
         status when status in [:success, :partial_success] ->
