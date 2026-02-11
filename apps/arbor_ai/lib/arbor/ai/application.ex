@@ -10,11 +10,12 @@ defmodule Arbor.AI.Application do
 
     children =
       if Application.get_env(:arbor_ai, :start_children, true) do
-        [
-          Arbor.AI.BackendRegistry,
-          Arbor.AI.QuotaTracker,
-          Arbor.AI.SessionRegistry
-        ] ++ budget_tracker_child() ++ usage_stats_child()
+        buffered_store_child() ++
+          [
+            Arbor.AI.BackendRegistry,
+            Arbor.AI.QuotaTracker,
+            Arbor.AI.SessionRegistry
+          ] ++ budget_tracker_child() ++ usage_stats_child()
       else
         []
       end
@@ -40,6 +41,24 @@ defmodule Arbor.AI.Application do
         value -> ReqLLM.put_key(config_key, value)
       end
     end)
+  end
+
+  # BufferedStore for quota + budget persistence.
+  # Must start before QuotaTracker and BudgetTracker so they can restore on init.
+  defp buffered_store_child do
+    backend = Application.get_env(:arbor_ai, :persistence_backend)
+
+    if backend do
+      [
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_ai_tracking, backend: backend, write_mode: :async, collection: "ai_tracking"}
+      ]
+    else
+      [
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_ai_tracking, backend: nil, write_mode: :async, collection: "ai_tracking"}
+      ]
+    end
   end
 
   # Conditionally add BudgetTracker based on config

@@ -53,10 +53,13 @@ defmodule Arbor.AI.BudgetTracker do
   use GenServer
   require Logger
 
+  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Signals
 
   # ETS table name
   @table __MODULE__
+  @store_name :arbor_ai_tracking
 
   # Default cost per million tokens (can be overridden via config)
   @default_costs %{
@@ -279,8 +282,8 @@ defmodule Arbor.AI.BudgetTracker do
     # Schedule midnight reset
     schedule_daily_reset()
 
-    # Load persisted state if enabled
-    maybe_load_persistence()
+    # Load persisted state from BufferedStore (or legacy JSON file)
+    restore_from_store()
 
     Logger.info("BudgetTracker started",
       daily_budget: daily_budget(),
@@ -615,67 +618,113 @@ defmodule Arbor.AI.BudgetTracker do
     end
   end
 
-  # Persistence helpers
+  # ── BufferedStore persistence ──
 
-  defp maybe_load_persistence do
-    if persistence_enabled?() do
-      load_persistence_file(persistence_path())
+  defp restore_from_store do
+    if Process.whereis(@store_name) do
+      case BufferedStore.get("budget:summary", name: @store_name) do
+        {:ok, %{data: data}} ->
+          if data["date"] == Date.to_iso8601(Date.utc_today()) do
+            :ets.insert(@table, {:total_spent, data["spent"] || 0.0})
+            :ets.insert(@table, {:total_requests, data["requests"] || 0})
+            :ets.insert(@table, {:total_tokens, data["tokens"] || 0})
+            restore_backend_stats()
+            Logger.info("Loaded budget state from BufferedStore")
+          end
+
+        _ ->
+          # No stored state or store unavailable — try legacy JSON
+          maybe_load_legacy_persistence()
+      end
+    else
+      maybe_load_legacy_persistence()
     end
+  catch
+    _, _ -> maybe_load_legacy_persistence()
   end
 
-  defp load_persistence_file(path) do
-    unless File.exists?(path), do: :ok
+  defp restore_backend_stats do
+    case BufferedStore.list(name: @store_name) do
+      {:ok, keys} ->
+        keys
+        |> Enum.filter(&String.starts_with?(&1, "budget:backend:"))
+        |> Enum.each(fn key ->
+          case BufferedStore.get(key, name: @store_name) do
+            {:ok, %{data: data}} ->
+              backend =
+                key
+                |> String.replace_prefix("budget:backend:", "")
+                |> String.to_existing_atom()
 
-    with {:ok, content} <- File.read(path),
-         {:ok, data} <- Jason.decode(content) do
-      restore_if_same_date(data)
-    else
-      {:error, %Jason.DecodeError{}} ->
-        Logger.warning("Failed to parse budget persistence file")
+              :ets.insert(
+                @table,
+                {{:backend, backend},
+                 %{
+                   requests: data["requests"] || 0,
+                   tokens: data["tokens"] || 0,
+                   cost: data["cost"] || 0.0
+                 }}
+              )
 
-      {:error, reason} ->
-        Logger.warning("Failed to read budget persistence file", reason: reason)
+            _ ->
+              :ok
+          end
+        end)
 
       _ ->
         :ok
     end
-  end
-
-  defp restore_if_same_date(data) do
-    if Map.get(data, "date") == Date.to_iso8601(Date.utc_today()) do
-      :ets.insert(@table, {:total_spent, Map.get(data, "spent", 0.0)})
-      :ets.insert(@table, {:total_requests, Map.get(data, "requests", 0)})
-      :ets.insert(@table, {:total_tokens, Map.get(data, "tokens", 0)})
-      Logger.info("Loaded budget state from persistence")
-    end
+  catch
+    _, _ -> :ok
   end
 
   defp maybe_save_persistence do
+    persist_to_store()
+  end
+
+  defp persist_to_store do
+    [{:total_spent, spent}] = :ets.lookup(@table, :total_spent)
+    [{:total_requests, requests}] = :ets.lookup(@table, :total_requests)
+    [{:total_tokens, tokens}] = :ets.lookup(@table, :total_tokens)
+
+    summary = %{
+      "date" => Date.to_iso8601(Date.utc_today()),
+      "spent" => spent,
+      "requests" => requests,
+      "tokens" => tokens
+    }
+
+    record = Record.new("budget:summary", summary)
+    BufferedStore.put("budget:summary", record, name: @store_name)
+
+    # Persist per-backend stats
+    collect_backend_stats()
+    |> Enum.each(fn {backend, stats} ->
+      key = "budget:backend:#{backend}"
+      data = %{"requests" => stats.requests, "tokens" => stats.tokens, "cost" => stats.cost}
+      BufferedStore.put(key, Record.new(key, data), name: @store_name)
+    end)
+  catch
+    _, _ -> :ok
+  end
+
+  # Legacy JSON file persistence (fallback for migration)
+  defp maybe_load_legacy_persistence do
     if persistence_enabled?() do
-      [{:total_spent, spent}] = :ets.lookup(@table, :total_spent)
-      [{:total_requests, requests}] = :ets.lookup(@table, :total_requests)
-      [{:total_tokens, tokens}] = :ets.lookup(@table, :total_tokens)
-
-      data = %{
-        date: Date.to_iso8601(Date.utc_today()),
-        spent: spent,
-        requests: requests,
-        tokens: tokens
-      }
-
       path = persistence_path()
-      dir = Path.dirname(path)
 
-      unless File.exists?(dir) do
-        File.mkdir_p!(dir)
-      end
-
-      case Jason.encode(data) do
-        {:ok, json} ->
-          File.write(path, json)
-
-        {:error, reason} ->
-          Logger.warning("Failed to encode budget state", reason: reason)
+      if File.exists?(path) do
+        with {:ok, content} <- File.read(path),
+             {:ok, data} <- Jason.decode(content) do
+          if data["date"] == Date.to_iso8601(Date.utc_today()) do
+            :ets.insert(@table, {:total_spent, data["spent"] || 0.0})
+            :ets.insert(@table, {:total_requests, data["requests"] || 0})
+            :ets.insert(@table, {:total_tokens, data["tokens"] || 0})
+            Logger.info("Loaded budget state from legacy JSON file")
+          end
+        else
+          _ -> :ok
+        end
       end
     end
   end
