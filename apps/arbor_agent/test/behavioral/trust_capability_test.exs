@@ -122,7 +122,8 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
     test "SSRF metadata endpoint blocked" do
       # Pattern-based reflexes match against :command context key
-      result = Arbor.Security.check_reflex(%{command: "curl http://169.254.169.254/latest/meta-data/"})
+      result =
+        Arbor.Security.check_reflex(%{command: "curl http://169.254.169.254/latest/meta-data/"})
 
       assert {:blocked, _reflex, _reason} = result
     end
@@ -153,6 +154,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
     test "all tiers have defined sandbox levels" do
       for tier <- TrustBounds.tiers() do
         sandbox = TrustBounds.sandbox_for_tier(tier)
+
         assert sandbox in [:strict, :standard, :permissive, :none],
                "Tier #{inspect(tier)} has sandbox #{inspect(sandbox)}"
       end
@@ -197,12 +199,14 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
       for tier <- strict_tiers do
         sandbox = TrustBounds.sandbox_for_tier(tier)
+
         assert sandbox in [:strict, :standard],
                "Low-trust tier #{inspect(tier)} should have strict/standard sandbox"
       end
 
       for tier <- permissive_tiers do
         sandbox = TrustBounds.sandbox_for_tier(tier)
+
         assert sandbox in [:permissive, :none],
                "High-trust tier #{inspect(tier)} should have permissive/none sandbox"
       end
