@@ -5,7 +5,11 @@ defmodule Arbor.Orchestrator.Application do
 
   @impl true
   def start(_type, _args) do
-    children = []
+    children = [
+      {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
+      {DynamicSupervisor, name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one}
+    ]
+
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Orchestrator.Supervisor)
   end
 end
