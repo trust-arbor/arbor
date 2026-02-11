@@ -86,7 +86,11 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ok
@@ -134,7 +138,11 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ok
@@ -164,7 +172,11 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ok
@@ -354,7 +366,11 @@ defmodule Arbor.Agent.CheckpointManagerTest do
       pid = start_agent_store()
 
       on_exit(fn ->
-        if Process.alive?(pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ok
