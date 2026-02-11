@@ -404,11 +404,13 @@ defmodule Arbor.Signals.Bus do
 
   # Private functions — Encryption
 
-  # Encrypt signal data for restricted topics
+  # Encrypt signal data for restricted topics.
+  # Skips if already encrypted (e.g., pre-encrypted by emit_preconstructed_signal).
   defp maybe_encrypt_signal(%Signal{category: category, data: data} = signal) do
     restricted_topics = Config.restricted_topics()
 
-    if category in restricted_topics and data != %{} do
+    if category in restricted_topics and data != %{} and
+         not match?(%{__encrypted__: true}, data) do
       with {:ok, json} <- Jason.encode(data),
            {:ok, encrypted_payload} <- TopicKeys.encrypt(category, json) do
         # Store encrypted payload in data, mark as encrypted

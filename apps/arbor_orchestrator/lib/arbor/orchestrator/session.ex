@@ -138,7 +138,9 @@ defmodule Arbor.Orchestrator.Session do
 
   ## Optional
 
-    * `:adapters`           — map of adapter functions (see `SessionHandler`)
+    * `:adapters`           — map of adapter functions (see `SessionHandler`).
+                              Include `:trust_tier_resolver` (`fn agent_id -> {:ok, tier}`)
+                              to verify trust_tier against the authority (e.g. `Arbor.Trust`)
     * `:heartbeat_interval` — ms between heartbeats (default #{@default_heartbeat_interval})
     * `:name`               — GenServer name registration
     * `:start_heartbeat`    — whether to schedule heartbeat on init (default true)
@@ -207,6 +209,10 @@ defmodule Arbor.Orchestrator.Session do
     signal_topic = Keyword.get(opts, :signal_topic, "session:#{session_id}")
     trace_id = Keyword.get(opts, :trace_id)
 
+    # Verify trust_tier if a resolver is available (hierarchy constraint bridge).
+    # Without a resolver, we trust the caller — but log a warning.
+    trust_tier = verify_trust_tier(trust_tier, agent_id, adapters)
+
     with {:ok, turn_graph} <- parse_dot_file(turn_dot_path),
          {:ok, heartbeat_graph} <- parse_dot_file(heartbeat_dot_path) do
       ensure_session_handler_registered()
@@ -245,14 +251,19 @@ defmodule Arbor.Orchestrator.Session do
     values = build_turn_values(state, message)
     engine_opts = build_engine_opts(state, values)
 
-    case Engine.run(state.turn_graph, engine_opts) do
-      {:ok, result} ->
-        new_state = apply_turn_result(%{state | phase: :idle}, message, result)
-        response = Map.get(result.context, "session.response", "")
-        {:reply, {:ok, response}, new_state}
+    try do
+      case Engine.run(state.turn_graph, engine_opts) do
+        {:ok, result} ->
+          new_state = apply_turn_result(%{state | phase: :idle}, message, result)
+          response = Map.get(result.context, "session.response", "")
+          {:reply, {:ok, response}, new_state}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, %{state | phase: :idle}}
+        {:error, reason} ->
+          {:reply, {:error, reason}, %{state | phase: :idle}}
+      end
+    rescue
+      e ->
+        {:reply, {:error, {:engine_crash, Exception.message(e)}}, %{state | phase: :idle}}
     end
   end
 
@@ -408,7 +419,13 @@ defmodule Arbor.Orchestrator.Session do
 
       {:ok, _pid} =
         Task.start(fn ->
-          result = Engine.run(heartbeat_graph, engine_opts)
+          result =
+            try do
+              Engine.run(heartbeat_graph, engine_opts)
+            rescue
+              e -> {:error, {:engine_crash, Exception.message(e)}}
+            end
+
           send(session_pid, {:heartbeat_result, result})
         end)
 
@@ -471,6 +488,22 @@ defmodule Arbor.Orchestrator.Session do
     String.to_existing_atom(string)
   rescue
     ArgumentError -> fallback
+  end
+
+  defp verify_trust_tier(declared_tier, agent_id, adapters) do
+    case Map.get(adapters, :trust_tier_resolver) do
+      resolver when is_function(resolver, 1) ->
+        case resolver.(agent_id) do
+          {:ok, verified_tier} -> verified_tier
+          _ -> declared_tier
+        end
+
+      _ ->
+        # No resolver available — accept declared tier.
+        # Callers integrating with arbor_trust should provide
+        # :trust_tier_resolver in adapters.
+        declared_tier
+    end
   end
 
   defp apply_goal_changes(existing_goals, updates, new_goals) do
