@@ -21,6 +21,7 @@ defmodule Arbor.Actions do
   | Code | `Arbor.Actions.Code` | Code compilation, testing, and hot-loading |
   | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
   | Council | `Arbor.Actions.Council` | Advisory council consultation |
+  | Web | `Arbor.Actions.Web` | Web browsing, search, and page snapshots |
 
   ## Quick Start
 

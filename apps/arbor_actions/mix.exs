@@ -41,6 +41,7 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_consensus, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:jido_action, path: "../../../jido_action", override: true},
+      {:jido_browser, git: "https://github.com/agentjido/jido_browser.git", branch: "main"},
       {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
