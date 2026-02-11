@@ -876,10 +876,8 @@ defmodule Arbor.Orchestrator.Engine do
   defp valid_target?(_graph, _target), do: false
 
   defp emit(opts, event) do
-    case Keyword.get(opts, :on_event) do
-      nil -> :ok
-      callback when is_function(callback, 1) -> callback.(event)
-    end
+    pipeline_id = Keyword.get(opts, :pipeline_id, :all)
+    Arbor.Orchestrator.EventEmitter.emit(pipeline_id, event, opts)
   end
 
   defp sleep(opts, delay_ms) do
