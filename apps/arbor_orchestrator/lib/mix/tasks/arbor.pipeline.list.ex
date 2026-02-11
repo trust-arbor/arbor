@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.List do
   def run(args) do
     {opts, _files, _} = OptionParser.parse(args, strict: [dir: :string, json: :boolean])
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     dir = Keyword.get(opts, :dir, @default_dir)
     json_output = Keyword.get(opts, :json, false)

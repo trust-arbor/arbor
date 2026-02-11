@@ -21,7 +21,11 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
         strict: [logs_root: :string, workdir: :string]
       )
 
-    Mix.Task.run("app.start")
+    # Start only the orchestrator and its deps — not the full umbrella.
+    # This avoids port conflicts when the dev server is already running
+    # (e.g., gateway's :ranch listener on port 4002).
+    Mix.Task.run("compile")
+    ensure_orchestrator_started()
 
     file = List.first(files)
 

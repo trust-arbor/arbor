@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Viz do
         aliases: [f: :format, t: :typed]
       )
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     case files do
       [] ->
