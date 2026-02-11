@@ -47,7 +47,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
         ]
       )
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     file = List.first(files)
 

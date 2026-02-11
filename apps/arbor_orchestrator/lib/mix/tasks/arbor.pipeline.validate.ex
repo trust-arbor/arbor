@@ -17,7 +17,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Validate do
   def run(args) do
     {_opts, files, _} = OptionParser.parse(args, strict: [])
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     if files == [] do
       error("Usage: mix arbor.pipeline.validate <file.dot> [file2.dot ...]")

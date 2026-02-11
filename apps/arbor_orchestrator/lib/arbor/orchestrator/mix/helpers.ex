@@ -47,6 +47,23 @@ defmodule Arbor.Orchestrator.Mix.Helpers do
     info("+" <> separator <> "+")
   end
 
+  # Application startup
+
+  @doc """
+  Start the orchestrator without the full umbrella app tree.
+
+  Avoids port conflicts when the dev server is already running
+  (e.g., gateway's :ranch listener). Only starts the orchestrator
+  and its minimal deps (logger, jason).
+  """
+  def ensure_orchestrator_started do
+    Mix.Task.run("compile")
+
+    for app <- [:logger, :jason, :arbor_orchestrator] do
+      Application.ensure_all_started(app)
+    end
+  end
+
   # Progress
 
   @doc "Show a spinner while running a function."

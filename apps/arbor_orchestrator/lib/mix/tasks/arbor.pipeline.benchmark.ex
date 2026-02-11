@@ -40,7 +40,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
         aliases: [n: :iterations, p: :pipeline]
       )
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     iterations = Keyword.get(opts, :iterations, 10)
     pipeline_path = Keyword.get(opts, :pipeline, @default_pipeline)

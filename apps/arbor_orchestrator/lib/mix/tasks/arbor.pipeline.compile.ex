@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Compile do
   def run(args) do
     {opts, files, _} = OptionParser.parse(args, strict: [verbose: :boolean])
 
-    Mix.Task.run("app.start")
+    ensure_orchestrator_started()
 
     if files == [] do
       error("Usage: mix arbor.pipeline.compile <file.dot> [file2.dot ...] [--verbose]")
