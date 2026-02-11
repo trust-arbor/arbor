@@ -30,10 +30,24 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
     goal = input["goal"] || "Implement the specified subsystem"
     files = input["files"] || []
 
+    file_count = length(files)
+
     files_section =
       case files do
         [] -> "Not specified"
         list -> Enum.join(list, "\n")
+      end
+
+    node_guidance =
+      cond do
+        file_count <= 3 ->
+          "Use 1 impl node that implements all #{file_count} files together."
+
+        file_count <= 6 ->
+          "Use 2 impl nodes, grouping related files together (e.g., impl_1 for core modules, impl_2 for supporting modules)."
+
+        true ->
+          "Use 3 impl nodes, grouping related files by concern (e.g., core, support, utilities). Do NOT create one node per file."
       end
 
     """
@@ -41,7 +55,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
 
     GOAL: #{goal}
 
-    FILES TO IMPLEMENT:
+    FILES TO IMPLEMENT (#{file_count} files):
     #{files_section}
 
     SPECIFICATION:
@@ -50,13 +64,20 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
     Generate a complete digraph following this DSL:
     - graph [goal="..."] attribute matching the goal
     - start [shape=Mdiamond] entry point
-    - impl_N [prompt="..."] nodes with detailed prompts for each file
-    - write_tests [prompt="Write comprehensive ExUnit tests..."]
-    - compile [type="tool", tool_command="mix compile --warnings-as-errors"]
-    - run_tests [type="tool", tool_command="mix test"]
+    - impl_N [shape=box, prompt="..."] implementation nodes. #{node_guidance}
+    - write_tests [shape=box, prompt="Write comprehensive ExUnit tests..."]
+    - compile [shape=parallelogram, tool_command="mix compile --warnings-as-errors"]
+    - run_tests [shape=parallelogram, tool_command="mix test"]
     - quality [shape=diamond, goal_gate=true, retry_target="impl_1"]
     - done [shape=Msquare]
-    - Edges chaining start -> impl_1 -> ... -> write_tests -> compile -> run_tests -> quality -> done
+    - Edges: the forward chain PLUS the retry back-edge:
+      start -> impl_1 -> ... -> write_tests -> compile -> run_tests -> quality
+      quality -> done [condition="outcome=success"]
+      quality -> impl_1 [condition="outcome=fail", label="retry"]
+
+    IMPORTANT: Match the expected structure — use exactly the node types listed above.
+    Group related modules into fewer impl nodes rather than splitting per-file.
+    You MUST include both quality gate edges (success forward + fail retry).
 
     Output ONLY the DOT file content, no markdown fences or commentary.\
     """

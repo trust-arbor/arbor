@@ -1,7 +1,6 @@
 defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
   @moduledoc """
   Grader that structurally compares two DOT pipeline files.
-
   Parses both actual and expected as DOT strings, then scores similarity
   across 4 dimensions: node count, edge count, handler type distribution,
   and prompt keyword coverage.
@@ -24,7 +23,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
   @stopwords MapSet.new(~w(
     a an the and or but in on at to for of with is it as by
     be do if so no not are was has had will can may this that
-    from each all any its you your use new file
+    from each all any its you your use new file the
   ))
 
   @impl true
@@ -39,7 +38,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
       handler_sim = handler_distribution_similarity(actual_graph, expected_graph)
       keyword_sim = keyword_coverage(actual_graph, expected_graph)
 
-      w = Map.merge(default_weights(), Map.new(Keyword.get(opts, :weights, %{})))
+      w = Map.merge(default_weights(), Keyword.get(opts, :weights, %{}))
 
       score =
         w.node_count * node_sim +
@@ -68,12 +67,14 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
     end
   end
 
-  # -- Similarity functions --
-
   defp count_similarity(a, b) when a == 0 and b == 0, do: 1.0
 
   defp count_similarity(a, b) do
-    1.0 - abs(a - b) / Enum.max([a, b, 1])
+    1.0 - abs(a - b) / max(a, b, 1)
+  end
+
+  defp max(a, b, minimum) do
+    Enum.max([a, b, minimum])
   end
 
   defp handler_distribution_similarity(graph_a, graph_b) do
@@ -81,7 +82,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
     nodes_b = Map.values(graph_b.nodes)
 
     if nodes_a == [] and nodes_b == [] do
-      0.0
+      1.0
     else
       freq_a = build_handler_freq(nodes_a)
       freq_b = build_handler_freq(nodes_b)
@@ -152,12 +153,12 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
   defp stopword?(word), do: MapSet.member?(@stopwords, word)
 
   defp resolve_handler_type(node) do
-    type = Map.get(node.attrs, "type")
+    type = Map.get(node.attrs, "type", "")
+    shape = Map.get(node.attrs, "shape", "")
 
-    if type && type != "" do
+    if type != "" and type != nil do
       type
     else
-      shape = Map.get(node.attrs, "shape", "box")
       Map.get(@shape_to_handler, shape, "codergen")
     end
   end
