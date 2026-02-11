@@ -92,7 +92,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
     end
 
     test "heartbeat response with new goals creates goals in store" do
-      agent_id = "agent_test_goal_creation"
+      _agent_id = "agent_test_goal_creation"
 
       goals = [
         %{
