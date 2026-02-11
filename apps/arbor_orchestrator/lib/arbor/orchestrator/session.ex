@@ -80,6 +80,12 @@ defmodule Arbor.Orchestrator.Session do
     :trust_tier,
     :turn_graph,
     :heartbeat_graph,
+    :trace_id,
+    :seed_ref,
+    :signal_topic,
+    phase: :idle,
+    session_type: :primary,
+    config: %{},
     turn_count: 0,
     messages: [],
     working_memory: %{},
@@ -91,12 +97,21 @@ defmodule Arbor.Orchestrator.Session do
     heartbeat_in_flight: false
   ]
 
+  @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
+  @type session_type :: :primary | :background | :delegation | :consultation
+
   @type t :: %__MODULE__{
           session_id: String.t(),
           agent_id: String.t(),
           trust_tier: atom(),
           turn_graph: Arbor.Orchestrator.Graph.t(),
           heartbeat_graph: Arbor.Orchestrator.Graph.t(),
+          phase: phase(),
+          session_type: session_type(),
+          trace_id: String.t() | nil,
+          config: map(),
+          seed_ref: term() | nil,
+          signal_topic: String.t() | nil,
           turn_count: non_neg_integer(),
           messages: [map()],
           working_memory: map(),
@@ -127,6 +142,11 @@ defmodule Arbor.Orchestrator.Session do
     * `:heartbeat_interval` — ms between heartbeats (default #{@default_heartbeat_interval})
     * `:name`               — GenServer name registration
     * `:start_heartbeat`    — whether to schedule heartbeat on init (default true)
+    * `:session_type`       — `:primary | :background | :delegation | :consultation` (default `:primary`)
+    * `:config`             — session-level settings map (max_turns, model, temperature, etc.)
+    * `:seed_ref`           — reference to the agent's Seed for identity continuity
+    * `:signal_topic`       — dedicated signal topic for this session's observability
+    * `:trace_id`           — distributed tracing correlation ID
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -181,6 +201,11 @@ defmodule Arbor.Orchestrator.Session do
     adapters = Keyword.get(opts, :adapters, %{})
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval, @default_heartbeat_interval)
     start_heartbeat = Keyword.get(opts, :start_heartbeat, true)
+    session_type = Keyword.get(opts, :session_type, :primary)
+    config = Keyword.get(opts, :config, %{})
+    seed_ref = Keyword.get(opts, :seed_ref)
+    signal_topic = Keyword.get(opts, :signal_topic, "session:#{session_id}")
+    trace_id = Keyword.get(opts, :trace_id)
 
     with {:ok, turn_graph} <- parse_dot_file(turn_dot_path),
          {:ok, heartbeat_graph} <- parse_dot_file(heartbeat_dot_path) do
@@ -193,7 +218,12 @@ defmodule Arbor.Orchestrator.Session do
         turn_graph: turn_graph,
         heartbeat_graph: heartbeat_graph,
         adapters: adapters,
-        heartbeat_interval: heartbeat_interval
+        heartbeat_interval: heartbeat_interval,
+        session_type: session_type,
+        config: config,
+        seed_ref: seed_ref,
+        signal_topic: signal_topic,
+        trace_id: trace_id
       }
 
       state =
@@ -211,17 +241,18 @@ defmodule Arbor.Orchestrator.Session do
 
   @impl true
   def handle_call({:send_message, message}, _from, state) do
+    state = %{state | phase: :processing}
     values = build_turn_values(state, message)
     engine_opts = build_engine_opts(state, values)
 
     case Engine.run(state.turn_graph, engine_opts) do
       {:ok, result} ->
-        new_state = apply_turn_result(state, message, result)
+        new_state = apply_turn_result(%{state | phase: :idle}, message, result)
         response = Map.get(result.context, "session.response", "")
         {:reply, {:ok, response}, new_state}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:reply, {:error, reason}, %{state | phase: :idle}}
     end
   end
 
@@ -276,31 +307,35 @@ defmodule Arbor.Orchestrator.Session do
     user_msg = %{"role" => "user", "content" => normalize_message(message)}
     messages_with_input = state.messages ++ [user_msg]
 
-    %{
-      "session.id" => state.session_id,
-      "session.agent_id" => state.agent_id,
-      "session.trust_tier" => to_string(state.trust_tier),
-      "session.turn_count" => state.turn_count,
+    base = session_base_values(state)
+
+    Map.merge(base, %{
       "session.messages" => messages_with_input,
-      "session.working_memory" => state.working_memory,
-      "session.goals" => state.goals,
-      "session.input" => normalize_message(message),
-      "session.cognitive_mode" => to_string(state.cognitive_mode)
-    }
+      "session.input" => normalize_message(message)
+    })
   end
 
   @doc false
   @spec build_heartbeat_values(t()) :: map()
   def build_heartbeat_values(state) do
+    base = session_base_values(state)
+    Map.put(base, "session.messages", state.messages)
+  end
+
+  defp session_base_values(state) do
     %{
       "session.id" => state.session_id,
       "session.agent_id" => state.agent_id,
       "session.trust_tier" => to_string(state.trust_tier),
       "session.turn_count" => state.turn_count,
-      "session.messages" => state.messages,
       "session.working_memory" => state.working_memory,
       "session.goals" => state.goals,
-      "session.cognitive_mode" => to_string(state.cognitive_mode)
+      "session.cognitive_mode" => to_string(state.cognitive_mode),
+      "session.phase" => to_string(state.phase),
+      "session.session_type" => to_string(state.session_type),
+      "session.trace_id" => state.trace_id,
+      "session.config" => state.config,
+      "session.signal_topic" => state.signal_topic
     }
   end
 
