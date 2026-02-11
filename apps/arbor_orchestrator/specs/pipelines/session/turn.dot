@@ -1,0 +1,90 @@
+// Session Turn Pipeline — Single User Message Processing
+//
+// Processes one user message through the full agent turn lifecycle:
+//   classify → authorize → recall → mode select → LLM → response routing → memory → checkpoint
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  GRAPH CYCLE: dispatch_tools → call_llm                                │
+// │                                                                        │
+// │  This is the key validation target of the Session-as-DOT spike.        │
+// │  When the LLM returns tool_call responses, dispatch_tools executes     │
+// │  the tools and feeds results BACK to call_llm via a cycle edge.        │
+// │  The engine handles this correctly — it does NOT track visited nodes,  │
+// │  so re-entering call_llm is legal. max_steps (default 500) prevents    │
+// │  infinite loops. Each cycle iteration:                                 │
+// │    call_llm → check_response → dispatch_tools → call_llm → ...        │
+// │  continues until the LLM returns a text response, which routes        │
+// │  through check_response → format to exit the loop.                     │
+// └─────────────────────────────────────────────────────────────────────────┘
+//
+// Condition routing:
+//   check_auth: blocked input → skip to format (error response)
+//   check_response: tool_call → dispatch_tools (cycle), text → format (exit)
+
+digraph SessionTurn {
+  graph [
+    goal="Process a single user message through the agent turn lifecycle",
+    label="Session Turn"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Input classification ───────────────────────────────────
+  classify [type="session.classify"]
+
+  // ── Authorization gate ─────────────────────────────────────
+  check_auth [shape=diamond, condition_key="input_type"]
+
+  // ── Memory recall ──────────────────────────────────────────
+  recall [type="session.memory_recall"]
+
+  // ── Cognitive mode selection ────────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── LLM call (re-entered on tool loop cycles) ──────────────
+  call_llm [type="session.llm_call"]
+
+  // ── Response type routing ──────────────────────────────────
+  check_response [shape=diamond, condition_key="llm.response_type"]
+
+  // ── Tool dispatch (cycles back to call_llm) ────────────────
+  dispatch_tools [type="session.tool_dispatch"]
+
+  // ── Response formatting ────────────────────────────────────
+  format [type="session.format"]
+
+  // ── Post-response: memory + checkpoint ─────────────────────
+  update_memory [type="session.memory_update"]
+  checkpoint [type="session.checkpoint"]
+
+  // ── Exit ───────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  // Input processing
+  start -> classify -> check_auth
+
+  // Authorization routing
+  check_auth -> recall [condition="context.session.input_type!=blocked"]
+  check_auth -> format [condition="context.session.input_type=blocked"]
+
+  // Core processing pipeline
+  recall -> select_mode -> call_llm -> check_response
+
+  // Response type routing (tool loop vs text exit)
+  check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+  check_response -> format [condition="context.llm.response_type=text"]
+
+  // ── THE CYCLE ──────────────────────────────────────────────
+  // Tool results feed back to LLM for next iteration.
+  // Engine re-enters call_llm without visited-node checking.
+  // Loop terminates when LLM returns text instead of tool_call.
+  dispatch_tools -> call_llm
+
+  // Post-response pipeline
+  format -> update_memory -> checkpoint -> done
+}
