@@ -29,6 +29,10 @@ defmodule Arbor.AI.QuotaTracker do
   """
 
   use GenServer
+
+  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Contracts.Persistence.Record
+
   require Logger
 
   @default_cooldown_hours 6
@@ -41,6 +45,8 @@ defmodule Arbor.AI.QuotaTracker do
     ~r/too many requests/i,
     ~r/resource exhausted/i
   ]
+
+  @store_name :arbor_ai_tracking
 
   defstruct backends: %{}
 
@@ -129,11 +135,11 @@ defmodule Arbor.AI.QuotaTracker do
 
   @impl true
   def init(_opts) do
-    # Schedule periodic cleanup of expired cooldowns
     schedule_cleanup()
 
-    Logger.info("QuotaTracker started")
-    {:ok, %__MODULE__{backends: %{}}}
+    backends = restore_from_store()
+    Logger.info("QuotaTracker started, restored #{map_size(backends)} cooldowns")
+    {:ok, %__MODULE__{backends: backends}}
   end
 
   @impl true
@@ -194,6 +200,7 @@ defmodule Arbor.AI.QuotaTracker do
     }
 
     new_backends = Map.put(state.backends, backend, info)
+    persist_quota(backend, info)
     {:noreply, %{state | backends: new_backends}}
   end
 
@@ -201,6 +208,7 @@ defmodule Arbor.AI.QuotaTracker do
   def handle_cast({:clear, backend}, state) do
     Logger.info("Clearing quota status", backend: backend)
     new_backends = Map.delete(state.backends, backend)
+    delete_quota(backend)
     {:noreply, %{state | backends: new_backends}}
   end
 
@@ -208,16 +216,17 @@ defmodule Arbor.AI.QuotaTracker do
   def handle_info(:cleanup, state) do
     now = DateTime.utc_now()
 
-    # Remove expired entries
-    new_backends =
-      state.backends
-      |> Enum.reject(fn {_backend, info} ->
+    # Find expired entries
+    {expired, active} =
+      Enum.split_with(state.backends, fn {_backend, info} ->
         DateTime.compare(now, info.available_at) != :lt
       end)
-      |> Map.new()
+
+    # Clean up expired from store
+    Enum.each(expired, fn {backend, _info} -> delete_quota(backend) end)
 
     schedule_cleanup()
-    {:noreply, %{state | backends: new_backends}}
+    {:noreply, %{state | backends: Map.new(active)}}
   end
 
   # ============================================================================
@@ -253,6 +262,90 @@ defmodule Arbor.AI.QuotaTracker do
       # Default cooldown
       true ->
         DateTime.add(DateTime.utc_now(), @default_cooldown_hours * 3600, :second)
+    end
+  end
+
+  # ── BufferedStore persistence ──
+
+  defp persist_quota(backend, info) do
+    key = "quota:#{backend}"
+
+    data = %{
+      "available_at" => DateTime.to_iso8601(info.available_at),
+      "marked_at" => DateTime.to_iso8601(info.marked_at),
+      "reason" => info.reason
+    }
+
+    record = Record.new(key, data)
+    BufferedStore.put(key, record, name: @store_name)
+  catch
+    _, _ -> :ok
+  end
+
+  defp delete_quota(backend) do
+    key = "quota:#{backend}"
+    BufferedStore.delete(key, name: @store_name)
+  catch
+    _, _ -> :ok
+  end
+
+  defp restore_from_store do
+    if Process.whereis(@store_name) do
+      case BufferedStore.list(name: @store_name) do
+        {:ok, keys} ->
+          now = DateTime.utc_now()
+
+          keys
+          |> Enum.filter(&String.starts_with?(&1, "quota:"))
+          |> Enum.reduce(%{}, fn key, acc ->
+            case BufferedStore.get(key, name: @store_name) do
+              {:ok, %{data: data}} ->
+                with {:ok, available_at, _} <- DateTime.from_iso8601(data["available_at"]),
+                     true <- DateTime.compare(available_at, now) == :gt do
+                  backend =
+                    key |> String.replace_prefix("quota:", "") |> String.to_existing_atom()
+
+                  info = %{
+                    available_at: available_at,
+                    marked_at: parse_datetime(data["marked_at"]),
+                    reason: data["reason"] || "quota exhausted"
+                  }
+
+                  Map.put(acc, backend, info)
+                else
+                  _ ->
+                    # Expired or unparseable — clean up
+                    delete_quota_key(key)
+                    acc
+                end
+
+              _ ->
+                acc
+            end
+          end)
+
+        _ ->
+          %{}
+      end
+    else
+      %{}
+    end
+  catch
+    _, _ -> %{}
+  end
+
+  defp delete_quota_key(key) do
+    BufferedStore.delete(key, name: @store_name)
+  catch
+    _, _ -> :ok
+  end
+
+  defp parse_datetime(nil), do: DateTime.utc_now()
+
+  defp parse_datetime(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _} -> dt
+      _ -> DateTime.utc_now()
     end
   end
 
