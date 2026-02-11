@@ -1,50 +1,78 @@
 defmodule Arbor.Orchestrator.Dot.Parser do
   @moduledoc """
-  Parser for a strict subset of Graphviz DOT used by Attractor.
+  Recursive-descent parser for a strict subset of Graphviz DOT used by Attractor.
 
-  Supported in this first conformance milestone:
+  Supported features:
   - `digraph Name { ... }`
   - graph attrs (`key=value` and `graph [k=v,...]`)
   - node/edge defaults (`node [k=v,...]`, `edge [k=v,...]`)
   - node statements (`node_id [k=v,...]`)
-  - edge statements (`a -> b`, `a -> b -> c`, optional attrs)
-  - subgraph flattening (`subgraph x { ... }`)
+  - edge chains (`a -> b -> c [attrs]`)
+  - subgraph flattening (`subgraph x { ... }`) with CSS class derivation
+  - bare attributes (`[nullable]` → `%{"nullable" => "true"}`)
+  - qualified/dotted keys (`manager.actions="observe"`)
+  - full string escapes (`\\n`, `\\t`, `\\\\`, `\\"`)
   - `//` and `/* */` comments
+  - duration parsing utility
   """
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
 
-  @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, term()}
+  # ── ParseState ────────────────────────────────────────────────────
+
+  defmodule ParseState do
+    @moduledoc false
+    defstruct rest: "",
+              graph_id: "",
+              graph_attrs: %{},
+              node_defaults: %{},
+              edge_defaults: %{},
+              nodes: %{},
+              edges: [],
+              subgraphs: [],
+              errors: []
+  end
+
+  # ── Public API ────────────────────────────────────────────────────
+
+  @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, String.t()}
   def parse(source) when is_binary(source) do
-    cleaned = source |> strip_comments() |> String.trim()
-
-    with {:ok, graph_id, body} <- split_graph(cleaned) do
-      initial = %{graph: %Graph{id: graph_id}, node_defaults: %{}, edge_defaults: %{}}
-
-      body
-      |> statements()
-      |> Enum.reduce_while({:ok, initial}, fn statement, {:ok, state} ->
-        case parse_statement(statement, state) do
-          {:ok, next_state} -> {:cont, {:ok, next_state}}
-          {:error, _} = error -> {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, %{graph: graph}} -> {:ok, graph}
-        {:error, _} = error -> error
-      end
+    source
+    |> strip_comments()
+    |> String.trim()
+    |> parse_digraph()
+    |> case do
+      {:ok, state} -> {:ok, build_graph(state)}
+      {:error, _} = err -> err
     end
   end
 
-  defp split_graph(source) do
-    regex = ~r/^digraph\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*)\}$/
-
-    case Regex.run(regex, source) do
-      [_, graph_id, body] -> {:ok, graph_id, body}
-      _ -> {:error, :invalid_graph_header}
+  @doc "Parse a duration string like \"900s\", \"5m\", \"2h\" into seconds."
+  @spec parse_duration(String.t()) :: {:ok, number()} | :error
+  def parse_duration(str) when is_binary(str) do
+    case Regex.run(~r/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)$/, str) do
+      [_, num, "ms"] -> {:ok, parse_number(num) / 1000}
+      [_, num, "s"] -> {:ok, parse_number(num)}
+      [_, num, "m"] -> {:ok, parse_number(num) * 60}
+      [_, num, "h"] -> {:ok, parse_number(num) * 3600}
+      _ -> :error
     end
   end
+
+  @doc "Unescape a DOT string: \\\" → \", \\n → newline, \\t → tab, \\\\\\\\ → backslash."
+  @spec unescape_string(String.t()) :: String.t()
+  def unescape_string(str), do: do_unescape(str, [])
+
+  @doc false
+  def derive_class(label) do
+    label
+    |> String.downcase()
+    |> String.replace(~r/\s+/, "-")
+    |> String.replace(~r/[^a-z0-9\-]/, "")
+  end
+
+  # ── Comment Stripping ────────────────────────────────────────────
 
   defp strip_comments(source) do
     source
@@ -52,230 +80,564 @@ defmodule Arbor.Orchestrator.Dot.Parser do
     |> String.replace(~r/\/\/.*$/m, "")
   end
 
-  defp statements(body) do
-    {parts, current, _depth, _in_quote, _escaped} =
-      body
-      |> String.graphemes()
-      |> Enum.reduce({[], "", 0, false, false}, fn ch,
-                                                   {parts, current, depth, in_quote, escaped} ->
-        cond do
-          escaped ->
-            {parts, current <> ch, depth, in_quote, false}
+  # ── Top-Level: digraph ───────────────────────────────────────────
 
-          ch == "\\" and in_quote ->
-            {parts, current <> ch, depth, in_quote, true}
+  defp parse_digraph(source) do
+    with {:ok, rest} <- consume_keyword(source, "digraph"),
+         {id, rest} when id != "" <- read_identifier(skip_ws(rest)),
+         {:ok, rest} <- consume_char(skip_ws(rest), ?{, "Expected '{' after digraph identifier") do
+      state = %ParseState{rest: rest, graph_id: id}
+      finish_digraph(parse_statements(state))
+    else
+      {"", _rest} -> {:error, "Expected digraph identifier"}
+      {:error, _} = err -> err
+    end
+  end
 
-          ch == "\"" ->
-            {parts, current <> ch, depth, not in_quote, false}
+  defp finish_digraph({:ok, %ParseState{rest: rest} = state}) do
+    case consume_char(skip_ws(rest), ?}, "Expected closing '}' for digraph") do
+      {:ok, rest} -> {:ok, %{state | rest: rest}}
+      {:error, _} = err -> err
+    end
+  end
 
-          ch == "[" and not in_quote ->
-            {parts, current <> ch, depth + 1, in_quote, false}
+  defp finish_digraph({:error, _} = err), do: err
 
-          ch == "]" and not in_quote and depth > 0 ->
-            {parts, current <> ch, depth - 1, in_quote, false}
+  # ── Statement Loop ───────────────────────────────────────────────
 
-          (ch == ";" or ch == "\n") and not in_quote and depth == 0 ->
-            next_parts = if String.trim(current) == "", do: parts, else: parts ++ [current]
-            {next_parts, "", depth, in_quote, false}
+  defp parse_statements(%ParseState{} = state) do
+    rest = skip_ws(state.rest)
 
-          true ->
-            {parts, current <> ch, depth, in_quote, false}
+    cond do
+      rest == "" ->
+        # Reached EOF — let the caller check for closing brace
+        {:ok, %{state | rest: rest}}
+
+      String.starts_with?(rest, "}") ->
+        # End of block — leave the '}' for the caller to consume
+        {:ok, %{state | rest: rest}}
+
+      true ->
+        case parse_statement(%{state | rest: rest}) do
+          {:ok, next_state} ->
+            next_state = %{next_state | rest: skip_separator(next_state.rest)}
+            parse_statements(next_state)
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  # ── Statement Dispatch ───────────────────────────────────────────
+
+  defp parse_statement(%ParseState{rest: rest} = state) do
+    trimmed = skip_ws(rest)
+
+    cond do
+      keyword_match?(trimmed, "graph") -> parse_graph_defaults(%{state | rest: trimmed})
+      keyword_match?(trimmed, "node") -> parse_node_defaults(%{state | rest: trimmed})
+      keyword_match?(trimmed, "edge") -> parse_edge_defaults(%{state | rest: trimmed})
+      keyword_match?(trimmed, "subgraph") -> parse_subgraph(%{state | rest: trimmed})
+      true -> parse_node_or_edge_or_attr(%{state | rest: trimmed})
+    end
+  end
+
+  # ── graph [attrs] ────────────────────────────────────────────────
+
+  defp parse_graph_defaults(%ParseState{rest: rest} = state) do
+    {_, rest} = consume_word(rest, "graph")
+
+    case parse_attrs(skip_ws(rest)) do
+      {:ok, attrs, rest} ->
+        {:ok, %{state | rest: rest, graph_attrs: Map.merge(state.graph_attrs, attrs)}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # ── node [attrs] / edge [attrs] ──────────────────────────────────
+
+  defp parse_node_defaults(%ParseState{rest: rest} = state) do
+    {_, rest} = consume_word(rest, "node")
+
+    case parse_attrs(skip_ws(rest)) do
+      {:ok, attrs, rest} ->
+        {:ok, %{state | rest: rest, node_defaults: Map.merge(state.node_defaults, attrs)}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp parse_edge_defaults(%ParseState{rest: rest} = state) do
+    {_, rest} = consume_word(rest, "edge")
+
+    case parse_attrs(skip_ws(rest)) do
+      {:ok, attrs, rest} ->
+        {:ok, %{state | rest: rest, edge_defaults: Map.merge(state.edge_defaults, attrs)}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # ── Subgraph ─────────────────────────────────────────────────────
+
+  defp parse_subgraph(%ParseState{rest: rest} = state) do
+    {_, rest} = consume_word(rest, "subgraph")
+    {sub_id, rest} = read_identifier(skip_ws(rest))
+
+    case consume_char(skip_ws(rest), ?{, "Expected '{' after subgraph identifier") do
+      {:ok, rest} ->
+        sub_state = %ParseState{
+          rest: rest,
+          graph_id: sub_id,
+          node_defaults: state.node_defaults,
+          edge_defaults: state.edge_defaults
+        }
+
+        with {:ok, sub_done} <- parse_statements(sub_state),
+             {:ok, after_brace} <-
+               consume_char(
+                 skip_ws(sub_done.rest),
+                 ?},
+                 "Expected closing '}' for subgraph"
+               ) do
+          merge_subgraph(state, sub_done, sub_id, after_brace)
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp merge_subgraph(state, sub_done, sub_id, rest_after) do
+    sub_attrs = sub_done.graph_attrs
+    label = sub_attrs["label"] || sub_id
+    derived_class = derive_class(label)
+
+    # Apply derived class to child nodes that lack an explicit class
+    nodes_with_class =
+      Map.new(sub_done.nodes, fn {nid, node} ->
+        if Map.has_key?(node.attrs, "class") do
+          {nid, node}
+        else
+          {nid, %{node | attrs: Map.put(node.attrs, "class", derived_class)}}
         end
       end)
 
-    final_parts =
-      if String.trim(current) == "", do: parts, else: parts ++ [current]
+    subgraph_meta = %{
+      id: sub_id,
+      label: label,
+      derived_class: derived_class,
+      attrs: sub_attrs
+    }
 
-    final_parts
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 in ["", "{", "}"]))
+    {:ok,
+     %{
+       state
+       | rest: rest_after,
+         nodes: Map.merge(state.nodes, nodes_with_class),
+         edges: state.edges ++ sub_done.edges,
+         node_defaults: Map.merge(state.node_defaults, sub_done.node_defaults),
+         edge_defaults: Map.merge(state.edge_defaults, sub_done.edge_defaults),
+         subgraphs: state.subgraphs ++ [subgraph_meta]
+     }}
   end
 
-  defp parse_statement("subgraph " <> _rest, state), do: {:ok, state}
+  # ── Node / Edge / Bare Graph Attr ────────────────────────────────
 
-  defp parse_statement("node " <> attrs_part, %{node_defaults: current} = state) do
-    with {:ok, attrs} <- parse_attrs_block(attrs_part) do
-      {:ok, %{state | node_defaults: Map.merge(current, attrs)}}
+  defp parse_node_or_edge_or_attr(%ParseState{rest: rest} = state) do
+    {id, after_id} = read_identifier(skip_ws(rest))
+
+    if id == "" do
+      {:ok, %{state | rest: skip_to_next_statement(rest)}}
+    else
+      dispatch_after_id(state, id, after_id)
     end
   end
 
-  defp parse_statement("edge " <> attrs_part, %{edge_defaults: current} = state) do
-    with {:ok, attrs} <- parse_attrs_block(attrs_part) do
-      {:ok, %{state | edge_defaults: Map.merge(current, attrs)}}
-    end
-  end
+  defp dispatch_after_id(state, id, after_id) do
+    trimmed = skip_ws(after_id)
 
-  defp parse_statement("graph " <> attrs_part, %{graph: graph} = state) do
-    with {:ok, attrs} <- parse_attrs_block(attrs_part) do
-      {:ok, %{state | graph: %{graph | attrs: Map.merge(graph.attrs, attrs)}}}
-    end
-  end
-
-  defp parse_statement(statement, state) do
     cond do
-      String.contains?(statement, "->") ->
-        parse_edge_statement(statement, state)
+      # Edge chain: id -> ...
+      match?("->" <> _, trimmed) ->
+        parse_edge_chain(state, [id], trimmed)
 
-      String.contains?(statement, "=") and not String.contains?(statement, "[") ->
-        parse_graph_attr_decl(statement, state)
+      # Qualified key at graph level: key.sub = value
+      match?("." <> _, trimmed) ->
+        {qualified, rest2} = read_qualified_key_continuation(id, trimmed)
+        rest2 = skip_ws(rest2)
 
+        if match?("=" <> _, rest2) do
+          parse_bare_graph_attr(state, qualified, rest2)
+        else
+          {:ok, %{state | rest: skip_to_next_statement(after_id)}}
+        end
+
+      # Bare graph attr: key = value (not key=[...)
+      match?("=" <> _, trimmed) and not match?("=[" <> _, trimmed) ->
+        parse_bare_graph_attr(state, id, trimmed)
+
+      # Node: id [attrs] or just id
       true ->
-        parse_node_statement(statement, state)
+        parse_node(state, id, trimmed)
     end
   end
 
-  defp parse_graph_attr_decl(statement, %{graph: graph} = state) do
-    case String.split(statement, "=", parts: 2) do
-      [key, value] ->
-        key = String.trim(key)
-        value = parse_value(String.trim(value))
-        {:ok, %{state | graph: %{graph | attrs: Map.put(graph.attrs, key, value)}}}
+  # ── Edge Chain Parsing ───────────────────────────────────────────
 
-      _ ->
-        {:error, {:invalid_graph_attr, statement}}
+  defp parse_edge_chain(state, chain, rest) do
+    # consume "->"
+    <<"->"::binary, rest::binary>> = rest
+    rest = skip_ws(rest)
+    {next_id, after_next} = read_identifier(rest)
+
+    if next_id == "" do
+      {:error, "Expected node identifier after '->'"}
+    else
+      chain = chain ++ [next_id]
+      after_next_trimmed = skip_ws(after_next)
+
+      if match?("->" <> _, after_next_trimmed) do
+        parse_edge_chain(state, chain, after_next_trimmed)
+      else
+        finish_edge_chain(state, chain, after_next_trimmed)
+      end
     end
   end
 
-  defp parse_node_statement(statement, %{graph: graph, node_defaults: defaults} = state) do
-    {node_id, attrs_part} = split_identifier_and_attrs(statement)
+  defp finish_edge_chain(state, chain, rest) do
+    {attrs, rest} = try_parse_attrs(rest)
+    edge_attrs = Map.merge(state.edge_defaults, attrs)
 
-    if valid_identifier?(node_id) do
-      with {:ok, attrs} <- parse_attrs_block(attrs_part) do
-        merged_attrs = Map.merge(defaults, attrs)
-        node = %Node{id: node_id, attrs: merged_attrs}
-        {:ok, %{state | graph: Graph.add_node(graph, node)}}
+    # Ensure all nodes in chain exist (auto-create with node_defaults)
+    nodes =
+      Enum.reduce(chain, state.nodes, fn nid, acc ->
+        if Map.has_key?(acc, nid) do
+          acc
+        else
+          Map.put(acc, nid, %Node{id: nid, attrs: state.node_defaults})
+        end
+      end)
+
+    # Build pairwise edges
+    edges =
+      chain
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.map(fn [from, to] -> %Edge{from: from, to: to, attrs: edge_attrs} end)
+
+    {:ok, %{state | rest: rest, nodes: nodes, edges: state.edges ++ edges}}
+  end
+
+  # ── Bare Graph Attribute (key = value at top level) ──────────────
+
+  defp parse_bare_graph_attr(state, key, rest) do
+    <<"="::binary, rest::binary>> = rest
+    rest = skip_ws(rest)
+    {value, rest} = read_value(rest)
+    {:ok, %{state | rest: rest, graph_attrs: Map.put(state.graph_attrs, key, value)}}
+  end
+
+  # ── Node Statement ───────────────────────────────────────────────
+
+  defp parse_node(state, id, rest) do
+    {attrs, rest} = try_parse_attrs(rest)
+    merged = Map.merge(state.node_defaults, attrs)
+    node = %Node{id: id, attrs: merged}
+    {:ok, %{state | rest: rest, nodes: Map.put(state.nodes, id, node)}}
+  end
+
+  # ── Attribute Block Parsing ──────────────────────────────────────
+
+  defp try_parse_attrs(rest) do
+    if match?("[" <> _, rest) do
+      case parse_attrs(rest) do
+        {:ok, attrs, rest} -> {attrs, rest}
+        {:error, _} -> {%{}, rest}
       end
     else
-      {:error, {:invalid_node_id, node_id}}
+      {%{}, rest}
     end
   end
 
-  defp parse_edge_statement(statement, %{edge_defaults: edge_defaults} = state) do
-    {chain_part, attrs_part} = split_edge_chain_and_attrs(statement)
+  defp parse_attrs(rest) do
+    case rest do
+      "[" <> inner ->
+        parse_attr_pairs(skip_ws(inner), %{})
 
-    with {:ok, attrs} <- parse_attrs_block(attrs_part) do
-      ids =
-        chain_part
-        |> String.split("->")
-        |> Enum.map(&String.trim/1)
-
-      if Enum.all?(ids, &valid_identifier?/1) and length(ids) >= 2 do
-        graph = ensure_nodes_exist(state, ids)
-        edge_attrs = Map.merge(edge_defaults, attrs)
-
-        graph =
-          ids
-          |> Enum.chunk_every(2, 1, :discard)
-          |> Enum.reduce(graph, fn [from, to], acc ->
-            Graph.add_edge(acc, %Edge{from: from, to: to, attrs: edge_attrs})
-          end)
-
-        {:ok, %{state | graph: graph}}
-      else
-        {:error, {:invalid_edge_chain, statement}}
-      end
+      _ ->
+        {:ok, %{}, rest}
     end
   end
 
-  defp ensure_nodes_exist(%{graph: graph, node_defaults: defaults}, ids) do
-    Enum.reduce(ids, graph, fn id, acc ->
-      if Map.has_key?(acc.nodes, id) do
-        acc
-      else
-        Graph.add_node(acc, %Node{id: id, attrs: defaults})
-      end
-    end)
-  end
-
-  defp split_identifier_and_attrs(statement) do
-    case Regex.run(~r/^([A-Za-z_][A-Za-z0-9_]*)(\s*\[[\s\S]*\])?$/, statement) do
-      [_, node_id, attrs] -> {node_id, attrs || ""}
-      [_, node_id] -> {node_id, ""}
-      _ -> {statement, ""}
-    end
-  end
-
-  defp split_edge_chain_and_attrs(statement) do
-    case Regex.run(~r/^(.*?)(\s*\[[\s\S]*\])?$/, statement) do
-      [_, chain, attrs] -> {String.trim(chain), attrs || ""}
-      [_, chain] -> {String.trim(chain), ""}
-      _ -> {statement, ""}
-    end
-  end
-
-  defp parse_attrs_block(attrs_part) do
-    trimmed = String.trim(attrs_part || "")
+  defp parse_attr_pairs(rest, acc) do
+    rest = skip_ws(rest)
 
     cond do
-      trimmed == "" ->
-        {:ok, %{}}
+      rest == "" ->
+        {:ok, acc, rest}
 
-      String.starts_with?(trimmed, "[") and String.ends_with?(trimmed, "]") ->
-        inner = trimmed |> String.trim_leading("[") |> String.trim_trailing("]")
-
-        attrs =
-          inner
-          |> split_attr_pairs()
-          |> Enum.map(&String.trim/1)
-          |> Enum.reject(&(&1 == ""))
-          |> Enum.reduce_while(%{}, fn pair, acc ->
-            case String.split(pair, "=", parts: 2) do
-              [k, v] -> {:cont, Map.put(acc, String.trim(k), parse_value(String.trim(v)))}
-              _ -> {:halt, :error}
-            end
-          end)
-
-        if attrs == :error, do: {:error, {:invalid_attrs, attrs_part}}, else: {:ok, attrs}
+      match?("]" <> _, rest) ->
+        "]" <> rest = rest
+        {:ok, acc, rest}
 
       true ->
-        {:error, {:invalid_attrs_block, attrs_part}}
-    end
-  end
+        case parse_one_attr(rest) do
+          {:ok, key, value, rest} ->
+            rest = rest |> skip_ws() |> skip_attr_separator()
+            parse_attr_pairs(rest, Map.put(acc, key, value))
 
-  defp split_attr_pairs(inner) do
-    {parts, current, _in_quote, _escaped} =
-      inner
-      |> String.graphemes()
-      |> Enum.reduce({[], "", false, false}, fn ch, {parts, current, in_quote, escaped} ->
-        cond do
-          escaped ->
-            {parts, current <> ch, in_quote, false}
-
-          ch == "\\" and in_quote ->
-            {parts, current <> ch, in_quote, true}
-
-          ch == "\"" ->
-            {parts, current <> ch, not in_quote, false}
-
-          ch == "," and not in_quote ->
-            {parts ++ [current], "", in_quote, false}
-
-          true ->
-            {parts, current <> ch, in_quote, false}
+          {:error, _} = err ->
+            err
         end
-      end)
-
-    parts ++ [current]
-  end
-
-  defp parse_value(value) do
-    cond do
-      String.starts_with?(value, "\"") and String.ends_with?(value, "\"") ->
-        value |> String.slice(1, String.length(value) - 2) |> String.replace("\\\"", "\"")
-
-      value in ["true", "false"] ->
-        value == "true"
-
-      Regex.match?(~r/^-?\d+$/, value) ->
-        String.to_integer(value)
-
-      Regex.match?(~r/^-?\d+\.\d+$/, value) ->
-        String.to_float(value)
-
-      true ->
-        value
     end
   end
 
-  defp valid_identifier?(id), do: Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, id)
+  defp parse_one_attr(rest) do
+    {key, rest} = read_qualified_key(rest)
+
+    if key == "" do
+      {:error, "Expected attribute key"}
+    else
+      rest = skip_ws(rest)
+
+      if match?("=" <> _, rest) do
+        <<"="::binary, rest::binary>> = rest
+        rest = skip_ws(rest)
+        {value, rest} = read_value(rest)
+        {:ok, key, value, rest}
+      else
+        # Bare attribute: key without =value → "true"
+        {:ok, key, "true", rest}
+      end
+    end
+  end
+
+  # ── Qualified Key Reading ────────────────────────────────────────
+
+  defp read_qualified_key(rest) do
+    {id, rest} = read_identifier(rest)
+
+    if id == "" do
+      {"", rest}
+    else
+      read_qualified_key_continuation(id, rest)
+    end
+  end
+
+  defp read_qualified_key_continuation(prefix, "." <> rest) do
+    {next, rest} = read_identifier(rest)
+
+    if next == "" do
+      {prefix, "." <> rest}
+    else
+      read_qualified_key_continuation(prefix <> "." <> next, rest)
+    end
+  end
+
+  defp read_qualified_key_continuation(prefix, rest), do: {prefix, rest}
+
+  # ── Value Reading ────────────────────────────────────────────────
+
+  defp read_value("\"" <> rest), do: read_string(rest, [])
+  defp read_value(rest), do: read_bare_value(rest)
+
+  # Quoted string — collects chars between opening and closing quote
+  defp read_string("", acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), ""}
+  defp read_string("\\\\" <> rest, acc), do: read_string(rest, ["\\" | acc])
+  defp read_string("\\\"" <> rest, acc), do: read_string(rest, ["\"" | acc])
+  defp read_string("\\n" <> rest, acc), do: read_string(rest, ["\n" | acc])
+  defp read_string("\\t" <> rest, acc), do: read_string(rest, ["\t" | acc])
+  defp read_string("\"" <> rest, acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), rest}
+
+  defp read_string(<<ch::utf8, rest::binary>>, acc),
+    do: read_string(rest, [<<ch::utf8>> | acc])
+
+  # Bare value — read until delimiter, then coerce type
+  defp read_bare_value(rest) do
+    {token, rest} = collect_bare_value(rest, [])
+
+    value =
+      case token do
+        "true" -> true
+        "false" -> false
+        _ -> maybe_parse_number(token)
+      end
+
+    {value, rest}
+  end
+
+  defp collect_bare_value("", acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), ""}
+
+  defp collect_bare_value(<<ch::utf8, _::binary>> = str, acc)
+       when ch in [?,, ?;, ?], ?}, ?\s, ?\t, ?\n, ?\r] do
+    {acc |> Enum.reverse() |> IO.iodata_to_binary(), str}
+  end
+
+  defp collect_bare_value(<<ch::utf8, rest::binary>>, acc),
+    do: collect_bare_value(rest, [<<ch::utf8>> | acc])
+
+  defp maybe_parse_number(str) do
+    cond do
+      match?({_, ""}, Integer.parse(str)) ->
+        {n, ""} = Integer.parse(str)
+        n
+
+      match?({_, ""}, Float.parse(str)) ->
+        {f, ""} = Float.parse(str)
+        f
+
+      true ->
+        str
+    end
+  end
+
+  # ── String Unescape (standalone utility) ─────────────────────────
+
+  defp do_unescape("", acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp do_unescape("\\\\" <> rest, acc), do: do_unescape(rest, ["\\" | acc])
+  defp do_unescape("\\\"" <> rest, acc), do: do_unescape(rest, ["\"" | acc])
+  defp do_unescape("\\n" <> rest, acc), do: do_unescape(rest, ["\n" | acc])
+  defp do_unescape("\\t" <> rest, acc), do: do_unescape(rest, ["\t" | acc])
+
+  defp do_unescape(<<ch::utf8, rest::binary>>, acc),
+    do: do_unescape(rest, [<<ch::utf8>> | acc])
+
+  # ── Helper: Whitespace & Separators ──────────────────────────────
+
+  defp skip_ws(str), do: String.trim_leading(str)
+
+  defp skip_separator(rest) do
+    rest = skip_ws(rest)
+
+    case rest do
+      ";" <> rest -> skip_ws(rest)
+      "\n" <> _ -> skip_ws(rest)
+      _ -> rest
+    end
+  end
+
+  defp skip_attr_separator(rest) do
+    case rest do
+      "," <> rest -> skip_ws(rest)
+      ";" <> rest -> skip_ws(rest)
+      _ -> rest
+    end
+  end
+
+  # ── Helper: Consume ──────────────────────────────────────────────
+
+  defp consume_keyword(source, keyword) do
+    trimmed = skip_ws(source)
+    klen = byte_size(keyword)
+
+    if String.starts_with?(trimmed, keyword) do
+      after_kw = binary_part(trimmed, klen, byte_size(trimmed) - klen)
+
+      case after_kw do
+        "" ->
+          {:ok, ""}
+
+        <<ch::utf8, _::binary>>
+        when ch in ?A..?Z or ch in ?a..?z or ch in ?0..?9 or ch == ?_ ->
+          {:error, "Expected '#{keyword}' keyword"}
+
+        _ ->
+          {:ok, after_kw}
+      end
+    else
+      {:error, "Expected '#{keyword}' keyword"}
+    end
+  end
+
+  defp consume_char(str, char, error_msg) when is_integer(char) do
+    trimmed = skip_ws(str)
+
+    case trimmed do
+      <<^char::utf8, rest::binary>> -> {:ok, rest}
+      _ -> {:error, error_msg}
+    end
+  end
+
+  defp consume_word(str, word) do
+    trimmed = skip_ws(str)
+
+    if String.starts_with?(trimmed, word) do
+      {word, binary_part(trimmed, byte_size(word), byte_size(trimmed) - byte_size(word))}
+    else
+      {"", trimmed}
+    end
+  end
+
+  # ── Helper: Identifier Reading ───────────────────────────────────
+
+  defp read_identifier(str) do
+    case Regex.run(~r/^([A-Za-z_][A-Za-z0-9_]*)/, str) do
+      [match, id] ->
+        rest = binary_part(str, byte_size(match), byte_size(str) - byte_size(match))
+        {id, rest}
+
+      _ ->
+        {"", str}
+    end
+  end
+
+  # ── Helper: Keyword Detection ────────────────────────────────────
+
+  defp keyword_match?(str, keyword) do
+    klen = byte_size(keyword)
+
+    String.starts_with?(str, keyword) and
+      (byte_size(str) == klen or
+         not identifier_char?(binary_part(str, klen, 1)))
+  end
+
+  defp identifier_char?(<<ch::utf8>>)
+       when ch in ?A..?Z or ch in ?a..?z or ch in ?0..?9 or ch == ?_,
+       do: true
+
+  defp identifier_char?(_), do: false
+
+  # ── Helper: Skip Unknown ─────────────────────────────────────────
+
+  defp skip_to_next_statement(rest) do
+    case :binary.match(rest, [";", "\n"]) do
+      {pos, 1} -> binary_part(rest, pos + 1, byte_size(rest) - pos - 1)
+      :nomatch -> ""
+    end
+  end
+
+  # ── Helper: Number Parsing ───────────────────────────────────────
+
+  defp parse_number(str) do
+    case Float.parse(str) do
+      {f, ""} -> f
+      _ -> 0
+    end
+  end
+
+  # ── Graph Construction ───────────────────────────────────────────
+
+  defp build_graph(%ParseState{} = state) do
+    base = %Graph{
+      id: state.graph_id,
+      attrs: state.graph_attrs,
+      subgraphs: state.subgraphs,
+      node_defaults: state.node_defaults,
+      edge_defaults: state.edge_defaults
+    }
+
+    graph =
+      state.nodes
+      |> Map.values()
+      |> Enum.reduce(base, fn node, g -> Graph.add_node(g, node) end)
+
+    # Graph.add_edge prepends to adjacency; outgoing_edges reverses.
+    # Iterate in declaration order so adjacency ends up reversed (as expected).
+    Enum.reduce(state.edges, graph, fn edge, g -> Graph.add_edge(g, edge) end)
+  end
 end

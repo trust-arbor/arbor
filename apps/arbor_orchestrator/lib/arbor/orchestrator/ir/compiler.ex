@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   Design: generic attrs at parse → typed IR at compile → validate on typed IR → execute
   """
 
+  alias Arbor.Orchestrator.Dot.Duration
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Node, Edge}
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
@@ -119,7 +120,7 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   defp extract_resource_bounds(%Node{attrs: attrs}) do
     %{
       max_retries: parse_int(Map.get(attrs, "max_retries")),
-      timeout_ms: parse_int(Map.get(attrs, "timeout")),
+      timeout_ms: Duration.parse(Map.get(attrs, "timeout")),
       max_tokens: parse_int(Map.get(attrs, "max_tokens"))
     }
   end
