@@ -156,8 +156,12 @@ defmodule Arbor.Signals do
   @impl true
   def emit_preconstructed_signal(%Signal{} = signal) do
     if healthy?() do
-      Store.put(signal)
-      Bus.publish(signal)
+      # Encrypt restricted-topic signals BEFORE storing to prevent
+      # plaintext sensitive data in the Store. Bus.publish will skip
+      # re-encryption if already encrypted (__encrypted__: true marker).
+      protected = protect_restricted_signal(signal)
+      Store.put(protected)
+      Bus.publish(protected)
 
       :telemetry.execute(
         [:arbor, :signals, :emitted],
@@ -170,6 +174,28 @@ defmodule Arbor.Signals do
       {:error, :signal_system_not_ready}
     end
   end
+
+  # Encrypt signal data for restricted topics before storage.
+  # This prevents plaintext sensitive payloads from sitting in the Store.
+  defp protect_restricted_signal(%Signal{category: category, data: data} = signal) do
+    restricted_topics = Arbor.Signals.Config.restricted_topics()
+
+    if category in restricted_topics and data != %{} and not already_encrypted?(data) do
+      with {:ok, json} <- Jason.encode(data),
+           {:ok, encrypted} <- Arbor.Signals.TopicKeys.encrypt(category, json) do
+        %{signal | data: %{__encrypted__: true, payload: encrypted}}
+      else
+        {:error, _reason} ->
+          # If encryption fails, redact data rather than store plaintext
+          %{signal | data: %{__redacted__: true, reason: :encryption_failed}}
+      end
+    else
+      signal
+    end
+  end
+
+  defp already_encrypted?(%{__encrypted__: true}), do: true
+  defp already_encrypted?(_), do: false
 
   @impl true
   def subscribe_to_signals_matching_pattern(pattern, handler, opts) do

@@ -1065,7 +1065,9 @@ defmodule Arbor.Orchestrator.SessionTest do
     end
 
     @tag :spike
-    test "adapter errors don't crash the pipeline", %{logs_root: logs_root} do
+    test "adapter errors surface as pipeline failures (no silent degradation)", %{
+      logs_root: logs_root
+    } do
       dot = """
       digraph ErrorTest {
         graph [goal="Test error resilience"]
@@ -1094,10 +1096,10 @@ defmodule Arbor.Orchestrator.SessionTest do
           logs_root: logs_root
         )
 
-      # memory_recall catches the raise and returns ok(%{})
-      # pipeline continues to call_llm and succeeds
-      assert run_result.final_outcome.status == :success
-      assert run_result.context["session.response"] == "recovered"
+      # Adapter raises are caught and surfaced as failures —
+      # no silent degradation on security-critical paths.
+      assert run_result.final_outcome.status == :fail
+      assert run_result.final_outcome.failure_reason =~ "memory_recall"
     end
   end
 

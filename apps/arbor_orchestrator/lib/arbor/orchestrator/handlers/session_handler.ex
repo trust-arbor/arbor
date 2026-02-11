@@ -21,7 +21,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
   If an adapter key is missing, the handler returns success with empty
   context_updates (graceful degradation). If an adapter raises or throws,
-  the handler returns success with empty context_updates (graceful degradation).
+  the handler returns a failure outcome with the error details — no silent
+  degradation on security-critical paths.
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
@@ -74,7 +75,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           other -> ok(%{"session.recalled_memories" => other})
         end
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("memory_recall: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -111,7 +112,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
             fail("llm_call: #{inspect(reason)}")
         end
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("llm_call: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -132,7 +133,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
             fail("tool_dispatch: #{inspect(reason)}")
         end
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("tool_dispatch: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -146,7 +147,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         memory_update.(agent_id, turn_data)
         ok(%{})
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("memory_update: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -161,7 +162,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         checkpoint.(session_id, turn_count, snapshot)
         ok(%{"session.last_checkpoint" => turn_count})
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("checkpoint: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -179,7 +180,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         results = bg.(agent_id)
         ok(%{"session.background_check_results" => results})
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("background_checks: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -215,7 +216,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         route.(actions, agent_id)
         ok(%{"session.actions_routed" => true})
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("route_actions: #{inspect({kind, reason})}")
       end
     end)
   end
@@ -230,7 +231,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         update.(goal_updates, new_goals, agent_id)
         ok(%{"session.goals_updated" => true})
       catch
-        _kind, _reason -> ok(%{})
+        kind, reason -> fail("update_goals: #{inspect({kind, reason})}")
       end
     end)
   end
