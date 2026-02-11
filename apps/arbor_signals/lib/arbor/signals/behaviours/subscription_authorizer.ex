@@ -10,8 +10,9 @@ defmodule Arbor.Signals.Behaviours.SubscriptionAuthorizer do
 
   ## Implementations
 
-  - `Arbor.Signals.Adapters.OpenAuthorizer` — allows all subscriptions (default)
-  - `Arbor.Signals.Adapters.SecurityAuthorizer` — checks capabilities via the security kernel
+  - `Arbor.Signals.Adapters.OpenAuthorizer` — allows all subscriptions (test default)
+  - `Arbor.Signals.Adapters.CapabilityAuthorizer` — fast ETS capability check via `can?/3` (dev/prod default)
+  - `Arbor.Signals.Adapters.SecurityAuthorizer` — full authorization pipeline via `authorize/4`
   """
 
   @type principal_id :: String.t()

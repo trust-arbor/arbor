@@ -80,12 +80,10 @@ config :arbor_persistence, :backup,
 config :arbor_signals,
   checkpoint_module: Arbor.Persistence.Checkpoint,
   checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
-  # Signal bus authorization — OpenAuthorizer allows all (backward compatible).
-  # M5: WARNING — OpenAuthorizer permits any agent to emit/subscribe to any signal topic,
-  # including :security and :identity restricted topics. Switch to SecurityAuthorizer
-  # when the security kernel is fully running in production.
-  # TODO: Change to Arbor.Signals.Adapters.SecurityAuthorizer
-  authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
+  # Signal bus authorization — CapabilityAuthorizer uses fast ETS capability checks
+  # via Arbor.Security.can?/3 (runtime bridge, no compile-time dep on arbor_security).
+  # Test env overrides to OpenAuthorizer for isolated testing.
+  authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
   restricted_topics: [:security, :identity]
 
 # AI routing defaults

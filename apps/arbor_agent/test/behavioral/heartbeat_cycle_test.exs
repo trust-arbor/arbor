@@ -56,6 +56,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
     test "CognitivePrompts.prompt_for/1 returns mode-specific instructions" do
       # Each mode has a distinct prompt
       assert Arbor.Agent.CognitivePrompts.prompt_for(:goal_pursuit) =~ "Goal"
+
       assert Arbor.Agent.CognitivePrompts.prompt_for(:consolidation) =~ "consolidat" or
                Arbor.Agent.CognitivePrompts.prompt_for(:consolidation) =~ "Consolidat"
 

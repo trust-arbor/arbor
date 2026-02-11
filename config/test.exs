@@ -42,10 +42,12 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   server: false,
   secret_key_base: String.duplicate("test_secret_", 8)
 
-# Disable checkpoint integration in tests (module may not be available)
+# Disable checkpoint integration in tests (module may not be available).
+# Use OpenAuthorizer — tests don't have the security kernel running.
 config :arbor_signals,
   checkpoint_module: nil,
-  checkpoint_store: nil
+  checkpoint_store: nil,
+  authorizer: Arbor.Signals.Adapters.OpenAuthorizer
 
 # Postgres tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo

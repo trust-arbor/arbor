@@ -27,6 +27,11 @@ defmodule Arbor.Agent.Executor do
 
   require Logger
 
+  # Shadow mode: when true, both can?/3 and authorize/4 are called but only
+  # can?/3 result drives the decision (safe fallback). Divergences are logged.
+  # Set to false for hard cutover to authorize/4 as the sole authority.
+  @shadow_mode true
+
   @type state :: %{
           agent_id: String.t(),
           status: :running | :paused | :stopped,
@@ -604,12 +609,40 @@ defmodule Arbor.Agent.Executor do
   defp check_capabilities(%Intent{action: action}, state) do
     # Check agent has capability to execute this action
     resource = "arbor://agent/action/#{action}"
+    agent_id = state.agent_id
 
-    case safe_call(fn -> Arbor.Security.can?(state.agent_id, resource, :execute) end) do
+    can_result = check_can(agent_id, resource)
+    authorize_result = check_authorize(agent_id, resource)
+    maybe_log_shadow_divergence(agent_id, resource, can_result, authorize_result)
+
+    if @shadow_mode, do: can_result, else: authorize_result
+  end
+
+  # Fast ETS-only capability check (boolean → :authorized | {:blocked, _})
+  defp check_can(agent_id, resource) do
+    case safe_call(fn -> Arbor.Security.can?(agent_id, resource, :execute) end) do
       true -> :authorized
       false -> {:blocked, :unauthorized}
-      # If security service unavailable, block by default
       _ -> {:blocked, :security_unavailable}
+    end
+  end
+
+  # Full authorization pipeline (reflexes, identity, constraints, escalation, audit)
+  defp check_authorize(agent_id, resource) do
+    case safe_call(fn -> Arbor.Security.authorize(agent_id, resource, :execute) end) do
+      {:ok, :authorized} -> :authorized
+      {:ok, :pending_approval, _ref} -> {:blocked, :pending_approval}
+      {:error, reason} -> {:blocked, reason}
+      _ -> {:blocked, :security_unavailable}
+    end
+  end
+
+  defp maybe_log_shadow_divergence(agent_id, resource, can_result, authorize_result) do
+    if can_result != authorize_result do
+      Logger.warning(
+        "[Executor] Security shadow-mode divergence for agent=#{agent_id} resource=#{resource}: " <>
+          "can?=#{inspect(can_result)} authorize=#{inspect(authorize_result)}"
+      )
     end
   end
 

@@ -214,8 +214,12 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
         end
 
       case result do
-        {:ok, _} -> :ok
-        {:error, _} -> :ok
+        {:ok, _} ->
+          :ok
+
+        {:error, _} ->
+          :ok
+
         {:exception, e} ->
           flunk("generate_text raised #{inspect(e)} for simple prompt")
       end
@@ -231,8 +235,12 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
         end
 
       case result do
-        {:ok, _} -> :ok
-        {:error, _} -> :ok
+        {:ok, _} ->
+          :ok
+
+        {:error, _} ->
+          :ok
+
         {:exception, _e} ->
           # Known limitation: empty string causes provider-level errors
           # that may not be caught. Flagged for migration.

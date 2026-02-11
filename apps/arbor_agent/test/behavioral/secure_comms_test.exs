@@ -260,7 +260,10 @@ defmodule Arbor.Behavioral.SecureCommsTest do
       assert {:error, :unknown_peer} = Keychain.seal_for_peer(alice, "agent_unknown", "msg")
     end
 
-    test "ratchet session establishment enables forward-secret messaging", %{alice: alice, bob: bob} do
+    test "ratchet session establishment enables forward-secret messaging", %{
+      alice: alice,
+      bob: bob
+    } do
       # Initialize ratchet sessions
       {:ok, alice} = Keychain.init_ratchet_sender(alice, bob.agent_id)
       {:ok, bob} = Keychain.init_ratchet_receiver(bob, alice.agent_id)

@@ -8,13 +8,13 @@ defmodule Arbor.Signals.Config do
   ## Configuration Keys
 
       config :arbor_signals,
-        authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
+        authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
         restricted_topics: [:security, :identity],
         channel_auto_rotate_interval_ms: 86_400_000,
         channel_rotate_on_leave: true
   """
 
-  @default_authorizer Arbor.Signals.Adapters.OpenAuthorizer
+  @default_authorizer Arbor.Signals.Adapters.CapabilityAuthorizer
   @default_restricted_topics [:security, :identity]
   @default_auto_rotate_interval_ms 86_400_000
   @default_rotate_on_leave true
@@ -22,7 +22,8 @@ defmodule Arbor.Signals.Config do
   @doc """
   Return the configured subscription authorizer module.
 
-  Defaults to `OpenAuthorizer` which allows all subscriptions.
+  Defaults to `CapabilityAuthorizer` which checks capabilities via ETS lookup.
+  Test env overrides to `OpenAuthorizer` for isolated testing.
   """
   @spec authorizer() :: module()
   def authorizer do

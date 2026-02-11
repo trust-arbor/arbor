@@ -23,8 +23,8 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
     use Arbor.AI.AgentSDK.Tool
 
     deftool :greet, "Greet someone by name" do
-      param :name, :string, required: true, description: "Person to greet"
-      param :formal, :boolean, description: "Use formal greeting"
+      param(:name, :string, required: true, description: "Person to greet")
+      param(:formal, :boolean, description: "Use formal greeting")
 
       def execute(%{name: name} = args) do
         if Map.get(args, :formal, false) do
@@ -36,8 +36,8 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
     end
 
     deftool :add, "Add two numbers" do
-      param :a, :number, required: true, description: "First number"
-      param :b, :number, required: true, description: "Second number"
+      param(:a, :number, required: true, description: "First number")
+      param(:b, :number, required: true, description: "Second number")
 
       def execute(%{a: a, b: b}) do
         {:ok, "#{a + b}"}
@@ -50,7 +50,7 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
     use Arbor.AI.AgentSDK.Tool
 
     deftool :fail, "Always fails" do
-      param :reason, :string, description: "Failure reason"
+      param(:reason, :string, description: "Failure reason")
 
       def execute(%{reason: reason}) do
         {:error, reason}
