@@ -117,12 +117,14 @@ defmodule Arbor.Test.BehavioralCase do
   end
 
   defp ensure_started(supervisor, children) do
-    for child <- children do
-      case Supervisor.start_child(supervisor, child) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-        {:error, :already_present} -> :ok
-        other -> other
+    if Process.whereis(supervisor) do
+      for child <- children do
+        case Supervisor.start_child(supervisor, child) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, :already_present} -> :ok
+          _other -> :ok
+        end
       end
     end
   end
