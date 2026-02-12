@@ -88,9 +88,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
 
   describe "llm_call adapter" do
     test "returns {:ok, %{content: text}} for text response" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "hello world", finish_reason: :stop}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "hello world", finish_reason: :stop}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -103,9 +104,11 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         %{"name" => "read_file", "arguments" => %{"path" => "/tmp/foo"}}
       ]
 
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "", finish_reason: :tool_calls, raw: %{"tool_calls" => tool_calls}}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok,
+           %Response{text: "", finish_reason: :tool_calls, raw: %{"tool_calls" => tool_calls}}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -114,9 +117,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "returns {:ok, %{content: ''}} when response text is nil" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: nil, finish_reason: :stop}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: nil, finish_reason: :stop}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -125,9 +129,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "returns {:error, reason} on client failure" do
-      client = build_mock_client(fn _req, _opts ->
-        {:error, :rate_limited}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:error, :rate_limited}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -144,9 +149,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "returns {:error, {:llm_exit, _}} when client adapter exits" do
-      client = build_mock_client(fn _req, _opts ->
-        exit(:timeout)
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          exit(:timeout)
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -155,14 +161,15 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "converts string-keyed message maps to Message structs" do
-      client = build_mock_client(fn req, _opts ->
-        msgs = req.messages
-        assert length(msgs) >= 1
-        user_msg = List.last(msgs)
-        assert %Message{role: :user, content: "hello"} = user_msg
+      client =
+        build_mock_client(fn req, _opts ->
+          msgs = req.messages
+          assert length(msgs) >= 1
+          user_msg = List.last(msgs)
+          assert %Message{role: :user, content: "hello"} = user_msg
 
-        {:ok, %Response{text: "ok"}}
-      end)
+          {:ok, %Response{text: "ok"}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -171,11 +178,12 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "prepends system_prompt as system message when provided" do
-      client = build_mock_client(fn req, _opts ->
-        [first | _] = req.messages
-        assert %Message{role: :system, content: "You are helpful."} = first
-        {:ok, %Response{text: "ok"}}
-      end)
+      client =
+        build_mock_client(fn req, _opts ->
+          [first | _] = req.messages
+          assert %Message{role: :system, content: "You are helpful."} = first
+          {:ok, %Response{text: "ok"}}
+        end)
 
       adapters =
         Adapters.build(
@@ -192,6 +200,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       # Use the mock provider so the client can resolve its adapter
       test_id = :erlang.unique_integer([:positive])
       provider_name = "mock_provider_#{test_id}"
+
       Process.put({:mock_adapter_fn, provider_name}, fn req, _opts ->
         assert req.provider == provider_name
         assert req.model == "test-model"
@@ -217,11 +226,12 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "passes temperature and max_tokens from call_opts" do
-      client = build_mock_client(fn req, _opts ->
-        assert req.temperature == 0.5
-        assert req.max_tokens == 100
-        {:ok, %Response{text: "ok"}}
-      end)
+      client =
+        build_mock_client(fn req, _opts ->
+          assert req.temperature == 0.5
+          assert req.max_tokens == 100
+          {:ok, %Response{text: "ok"}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -231,9 +241,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "empty tool_calls list returns content response" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "no tools", raw: %{"tool_calls" => []}}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "no tools", raw: %{"tool_calls" => []}}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -242,9 +253,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "raw response without tool_calls key returns content" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "plain", raw: %{"id" => "resp_123"}}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "plain", raw: %{"id" => "resp_123"}}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -253,9 +265,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
 
     test "nil raw response returns content" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "simple", raw: nil}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "simple", raw: nil}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -479,9 +492,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
 
   describe "client resolution" do
     test "uses provided Client struct" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "from mock"}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "from mock"}}
+        end)
 
       adapters = Adapters.build(agent_id: "test-agent", llm_client: client)
 
@@ -534,9 +548,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
 
   describe "full adapter map integration" do
     test "adapters built with all options can be passed to a map consumer" do
-      client = build_mock_client(fn _req, _opts ->
-        {:ok, %Response{text: "integrated"}}
-      end)
+      client =
+        build_mock_client(fn _req, _opts ->
+          {:ok, %Response{text: "integrated"}}
+        end)
 
       adapters =
         Adapters.build(
@@ -552,7 +567,8 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
                adapters.llm_call.([Message.new(:user, "hi")], :default, %{})
 
       # All other adapters return without crashing
-      assert {:ok, _} = adapters.tool_dispatch.([%{"name" => "t", "arguments" => %{}}], "int-agent")
+      assert {:ok, _} =
+               adapters.tool_dispatch.([%{"name" => "t", "arguments" => %{}}], "int-agent")
 
       # Skip memory_recall — Arbor.Memory.recall raises ArgumentError
       # when Registry isn't started (bridge/4 only catches :exit).
