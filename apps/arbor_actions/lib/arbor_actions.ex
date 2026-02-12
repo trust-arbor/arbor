@@ -22,6 +22,7 @@ defmodule Arbor.Actions do
   | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
   | Council | `Arbor.Actions.Council` | Advisory council consultation |
   | Web | `Arbor.Actions.Web` | Web browsing, search, and page snapshots |
+  | CLI Agent | `Arbor.Actions.CliAgent` | CLI agent execution (Claude, OpenCode, Codex, etc.) |
 
   ## Quick Start
 
@@ -254,6 +255,9 @@ defmodule Arbor.Actions do
       identity: [
         Arbor.Actions.Identity.RequestEndorsement,
         Arbor.Actions.Identity.SignPublicKey
+      ],
+      cli_agent: [
+        Arbor.Actions.CliAgent.Execute
       ]
     }
   end
