@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   alias Arbor.Orchestrator.Handlers.{
     CodergenHandler,
     ConditionalHandler,
+    ConsensusHandler,
     EvalAggregateHandler,
     EvalDatasetHandler,
     EvalReportHandler,
@@ -14,10 +15,12 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     FanInHandler,
     FileWriteHandler,
     ManagerLoopHandler,
+    MemoryHandler,
     PipelineRunHandler,
     PipelineValidateHandler,
     ParallelHandler,
     StartHandler,
+    SubgraphHandler,
     ToolHandler,
     WaitHumanHandler
   }
@@ -49,7 +52,22 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "eval.dataset" => EvalDatasetHandler,
     "eval.run" => EvalRunHandler,
     "eval.aggregate" => EvalAggregateHandler,
-    "eval.report" => EvalReportHandler
+    "eval.report" => EvalReportHandler,
+    # Consensus
+    "consensus.propose" => ConsensusHandler,
+    "consensus.ask" => ConsensusHandler,
+    "consensus.await" => ConsensusHandler,
+    "consensus.check" => ConsensusHandler,
+    # Memory
+    "memory.recall" => MemoryHandler,
+    "memory.consolidate" => MemoryHandler,
+    "memory.index" => MemoryHandler,
+    "memory.working_load" => MemoryHandler,
+    "memory.working_save" => MemoryHandler,
+    "memory.stats" => MemoryHandler,
+    # Sub-graph composition
+    "graph.invoke" => SubgraphHandler,
+    "graph.compose" => SubgraphHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
