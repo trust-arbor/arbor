@@ -9,6 +9,7 @@ defmodule Arbor.Gateway.Router do
   - `/api/memory/*` — memory operations for bridged agents
   - `/api/dev/*` — development tools (eval, recompile, info)
   - `/api/signals/*` — signal ingestion from external sources (hooks, etc.)
+  - `/mcp` — MCP server for progressive-disclosure Arbor tools
   """
 
   use Plug.Router
@@ -17,8 +18,8 @@ defmodule Arbor.Gateway.Router do
 
   plug(Plug.Logger)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
-  plug(:require_auth_unless_health)
+  plug(:conditional_parsers)
+  plug(:require_auth_unless_health_or_mcp)
   # H13: Rate limiting on all authenticated endpoints
   plug(Arbor.Gateway.RateLimiter)
   plug(:dispatch)
@@ -28,6 +29,17 @@ defmodule Arbor.Gateway.Router do
     |> put_resp_content_type("application/json")
     |> send_resp(200, Jason.encode!(%{status: "ok", service: "arbor_gateway"}))
   end
+
+  # MCP endpoint — ExMCP handles its own body parsing
+  forward("/mcp",
+    to: ExMCP.HttpPlug,
+    init_opts: [
+      handler: Arbor.Gateway.MCP.Handler,
+      server_info: %{name: "arbor", version: "0.1.0"},
+      sse_enabled: true,
+      cors_enabled: true
+    ]
+  )
 
   forward("/api/bridge", to: Arbor.Gateway.Bridge.Router)
   forward("/api/memory", to: Arbor.Gateway.Memory.Router)
@@ -41,7 +53,13 @@ defmodule Arbor.Gateway.Router do
     send_resp(conn, 404, "Not found")
   end
 
-  # Skip auth for health check, require it for everything else
-  defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
-  defp require_auth_unless_health(conn, _opts), do: Auth.call(conn, [])
+  # Skip body parsing for MCP routes (ExMCP handles its own parsing)
+  @parsers_opts Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+  defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
+  defp conditional_parsers(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
+
+  # Skip auth for health check and MCP (MCP has its own auth if needed)
+  defp require_auth_unless_health_or_mcp(%{request_path: "/health"} = conn, _opts), do: conn
+  defp require_auth_unless_health_or_mcp(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
+  defp require_auth_unless_health_or_mcp(conn, _opts), do: Auth.call(conn, [])
 end
