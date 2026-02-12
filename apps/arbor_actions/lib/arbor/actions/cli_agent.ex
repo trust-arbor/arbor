@@ -21,6 +21,18 @@ defmodule Arbor.Actions.CliAgent do
   Currently supported: `"claude"`
   Planned: `"opencode"`, `"codex"`, `"gemini"`, `"qwen"`
 
+  ## Adapter Notes (for future implementation)
+
+  | Agent | Binary | One-shot | JSON output | Session resume |
+  |-------|--------|----------|-------------|----------------|
+  | claude | `claude` | `-p` + `--output-format json` | `{"type":"result",...}` | `--resume ID` |
+  | opencode | `opencode` | `run [msg]` + `--format json` | JSON events | `-s ID` |
+  | codex | `codex` | `exec [prompt]` | TBD | `exec resume --last` |
+  | gemini | `gemini` | positional prompt | TBD | TBD |
+  | qwen | `qwen` | positional prompt | TBD | TBD |
+
+  Gemini and Qwen share the same CLI framework (identical flag structure).
+
   ## Capability Scoping (Claude)
 
   When using the Claude adapter, the calling agent's Arbor capabilities

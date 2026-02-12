@@ -35,11 +35,17 @@ defmodule Mix.Tasks.Arbor.Start do
     project_dir = File.cwd!()
     log_file = Config.log_file()
 
+    # Resolve the real elixir and mix paths from the running Elixir installation.
+    # This avoids mise/asdf shim binaries which are Mach-O executables that
+    # crash when loaded by `elixir -S mix` (Code.require_file tries to parse
+    # the binary as Elixir source).
+    {elixir_path, mix_path} = resolve_real_paths()
+
     # Background via shell so stdout/stderr flow to the log file for `mix arbor.logs`.
     # The shell returns the PID immediately via `echo $!`.
     elixir_cmd =
-      "elixir --sname #{Config.node_name()}@localhost " <>
-        "--cookie #{Config.cookie()} -S mix run --no-halt " <>
+      "#{elixir_path} --sname #{Config.node_name()}@localhost " <>
+        "--cookie #{Config.cookie()} #{mix_path} run --no-halt " <>
         "> #{log_file} 2>&1 & echo $!"
 
     # Inherit the full environment so API keys, PATH, etc. are available.
@@ -103,5 +109,21 @@ defmodule Mix.Tasks.Arbor.Start do
 
   defp write_pid_file(pid) do
     File.write!(Config.pid_file(), to_string(pid))
+  end
+
+  defp resolve_real_paths do
+    # Derive the real elixir and mix scripts from the Elixir installation
+    # powering this VM. :code.lib_dir(:elixir) returns e.g. ".../lib/elixir",
+    # so we go up to the installation root and find bin/elixir and bin/mix —
+    # guaranteed to be the real scripts, not version-manager shim binaries.
+    elixir_lib = :code.lib_dir(:elixir) |> to_string() |> Path.expand()
+    elixir_root = elixir_lib |> Path.dirname() |> Path.dirname()
+    real_elixir = Path.join([elixir_root, "bin", "elixir"])
+    real_mix = Path.join([elixir_root, "bin", "mix"])
+
+    elixir_path = if File.exists?(real_elixir), do: real_elixir, else: "elixir"
+    mix_path = if File.exists?(real_mix), do: real_mix, else: "-S mix"
+
+    {elixir_path, mix_path}
   end
 end
