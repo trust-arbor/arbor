@@ -163,11 +163,22 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
       # Source: Stripe API documentation
       ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
-      # Private keys (PEM format marker)
-      ~r/-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
+      # Private keys (PEM format marker — RSA, EC, DSA, OPENSSH)
+      ~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/,
       # JWT tokens (three base64 segments)
       # Source: RFC 7519
-      ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/
+      ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/,
+      # GitLab Personal Access Token
+      # Source: GitLab documentation
+      ~r/glpat-[a-zA-Z0-9\-_]{20,}/,
+      # GitHub Fine-Grained PAT
+      # Source: GitHub token formats documentation
+      ~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/,
+      # Database connection strings with embedded credentials
+      # Source: OWASP credential detection guidelines
+      ~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/,
+      # Bearer tokens in authorization headers
+      ~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/
     ]
   end
 
@@ -195,6 +206,49 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       # Lines with 13+ digit sequences are likely credit card numbers, not phones
       ~r/\d{13,}/
     ]
+  end
+
+  @doc """
+  Scan arbitrary text for secrets and sensitive data patterns.
+
+  Unlike `run/1` which operates on Elixir source code with line-level
+  analysis and allowlisting, this function scans raw text (e.g., LLM
+  responses, context values) and returns a list of findings.
+
+  Returns a list of `{label, matched_text}` tuples.
+
+  ## Options
+
+    * `:additional_patterns` - extra `{regex, label}` tuples to check
+    * `:entropy_threshold` - minimum Shannon entropy for base64 detection (default: 4.5)
+
+  ## Examples
+
+      # arbor:allow pii
+      iex> PIIDetection.scan_text("My key is AKIAIOSFODNN7EXAMPLE")
+      # arbor:allow pii
+      [{"AWS Access Key", "AKIAIOSFODNN7EXAMPLE"}]
+
+      iex> PIIDetection.scan_text("No secrets here")
+      []
+
+  """
+  @spec scan_text(String.t(), keyword()) :: [{String.t(), String.t()}]
+  def scan_text(text, opts \\ []) when is_binary(text) do
+    extra = Keyword.get(opts, :additional_patterns, [])
+    entropy_threshold = Keyword.get(opts, :entropy_threshold, 4.5)
+
+    base_findings =
+      for {regex, label} <- labeled_secret_patterns() ++ extra,
+          match <- find_all_matches(regex, text),
+          do: {label, match}
+
+    entropy_findings =
+      for match <- find_all_matches(~r/[a-zA-Z0-9+\/]{40,}={0,2}/, text),
+          shannon_entropy(match) > entropy_threshold,
+          do: {"High-Entropy Base64", match}
+
+    Enum.uniq(base_findings ++ entropy_findings)
   end
 
   @impl Arbor.Eval
@@ -225,6 +279,7 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       |> check_credit_cards(lines, allowlisted_lines, credit_card_patterns)
       |> check_ssn(lines, allowlisted_lines)
       |> check_secrets(lines, allowlisted_lines, secret_patterns)
+      |> check_high_entropy_secrets(lines, allowlisted_lines)
       |> check_ips(lines, allowlisted_lines)
       |> check_names(lines, allowlisted_lines, additional_names)
       |> check_additional_patterns(lines, allowlisted_lines, additional_patterns)
@@ -757,4 +812,95 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp luhn_digit_value(digit, _idx), do: digit
+
+  # ============================================================================
+  # Labeled Secret Patterns (for scan_text/2)
+  # ============================================================================
+
+  defp labeled_secret_patterns do
+    [
+      {~r/(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/, "AWS Access Key"},
+      {~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/, "AWS Secret Key"},
+      {~r/sk-ant-[A-Za-z0-9\-_]{20,}/, "Anthropic API Key"},
+      {~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/, "OpenAI API Key"},
+      {~r/gh[pousr]_[a-zA-Z0-9]{36,}/, "GitHub Token"},
+      {~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/, "GitHub Fine-Grained PAT"},
+      {~r/glpat-[a-zA-Z0-9\-_]{20,}/, "GitLab PAT"},
+      {~r/xox[baprs]-[a-zA-Z0-9-]+/, "Slack Token"},
+      {~r/AIza[0-9A-Za-z\-_]{35}/, "Google API Key"},
+      {~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/, "Stripe Key"},
+      {~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/, "Private Key"},
+      {~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/, "JWT Token"},
+      {~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/, "Database Connection String"},
+      {~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/, "Bearer Token"},
+      {~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']{8,}["']/, "Password in Config"}
+    ]
+  end
+
+  defp find_all_matches(regex, text) do
+    regex
+    |> Regex.scan(text)
+    |> Enum.map(&hd/1)
+  end
+
+  # ============================================================================
+  # Shannon Entropy (for high-entropy base64 detection)
+  # ============================================================================
+
+  @doc false
+  def shannon_entropy(string) when is_binary(string) do
+    freq = string |> String.graphemes() |> Enum.frequencies()
+    len = String.length(string)
+
+    if len == 0 do
+      0.0
+    else
+      -Enum.reduce(freq, 0.0, fn {_char, count}, acc ->
+        p = count / len
+        acc + p * :math.log2(p)
+      end)
+    end
+  end
+
+  # ============================================================================
+  # High-Entropy Secret Detection (line-based, for run/1)
+  # ============================================================================
+
+  @high_entropy_pattern ~r/[a-zA-Z0-9+\/]{40,}={0,2}/
+
+  defp check_high_entropy_secrets(violations, lines, allowlisted) do
+    new_violations =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {line, idx} ->
+        if skip_line?(idx, allowlisted),
+          do: [],
+          else: check_high_entropy_line(line, idx)
+      end)
+
+    violations ++ new_violations
+  end
+
+  defp check_high_entropy_line(line, idx) do
+    case Regex.run(@high_entropy_pattern, line) do
+      [match | _] ->
+        if shannon_entropy(match) > 4.5 do
+          [
+            %{
+              type: :high_entropy_secret,
+              message: "High-entropy base64 blob detected (possible encoded secret)",
+              line: idx,
+              column: nil,
+              severity: :warning,
+              suggestion: "Review whether this base64 string contains sensitive data"
+            }
+          ]
+        else
+          []
+        end
+
+      nil ->
+        []
+    end
+  end
 end

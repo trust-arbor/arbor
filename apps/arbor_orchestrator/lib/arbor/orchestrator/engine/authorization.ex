@@ -150,11 +150,50 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     {:error, "authorizer must be a function/2"}
   end
 
-  defp call_handler(handler, node, context, graph, opts) when is_function(handler, 4) do
+  defp call_handler(handler, node, context, graph, opts) do
+    chain = Arbor.Orchestrator.Middleware.Chain.build(opts, graph, node)
+
+    if chain == [] do
+      # No middleware — direct handler call (zero overhead)
+      do_call_handler(handler, node, context, graph, opts)
+    else
+      execute_with_middleware(handler, node, context, graph, opts, chain)
+    end
+  end
+
+  defp execute_with_middleware(handler, node, context, graph, opts, chain) do
+    alias Arbor.Orchestrator.Middleware.{Chain, Token}
+
+    token = %Token{
+      node: node,
+      context: context,
+      graph: graph,
+      logs_root: Keyword.get(opts, :logs_root, "")
+    }
+
+    # Run before_node middleware
+    token = Chain.run_before(chain, token)
+
+    if token.halted do
+      # Middleware halted — return the outcome (Chain.run_before ensures one exists)
+      token.outcome || %Outcome{status: :fail, failure_reason: token.halt_reason}
+    else
+      # Execute the actual handler
+      outcome = do_call_handler(handler, node, context, graph, opts)
+
+      # Run after_node middleware with the outcome
+      token = %{token | outcome: outcome}
+      token = Chain.run_after(chain, token)
+
+      token.outcome || outcome
+    end
+  end
+
+  defp do_call_handler(handler, node, context, graph, opts) when is_function(handler, 4) do
     handler.(node, context, graph, opts)
   end
 
-  defp call_handler(handler, node, context, graph, opts) when is_atom(handler) do
+  defp do_call_handler(handler, node, context, graph, opts) when is_atom(handler) do
     handler.execute(node, context, graph, opts)
   end
 end

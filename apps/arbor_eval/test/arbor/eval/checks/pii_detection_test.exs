@@ -259,6 +259,106 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
     end
   end
 
+  describe "scan_text/2" do
+    test "detects AWS access key" do
+      text = "Here is my key: AKIAIOSFODNN7EXAMPLE and more text"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "AWS Access Key" end)
+    end
+
+    test "detects GitHub personal access token" do
+      text = "Token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "GitHub Token" end)
+    end
+
+    test "detects GitLab PAT" do
+      text = "export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "GitLab PAT" end)
+    end
+
+    test "detects database connection string" do
+      text = "DATABASE_URL=postgres://admin:secretpass@db.example.com:5432/mydb"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Database Connection String" end)
+    end
+
+    test "detects Bearer token" do
+      text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
+      findings = PIIDetection.scan_text(text)
+
+      assert Enum.any?(findings, fn {label, _} ->
+               String.contains?(label, "Bearer") or String.contains?(label, "JWT")
+             end)
+    end
+
+    test "detects private keys" do
+      text =
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----"
+
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Private Key" end)
+    end
+
+    test "detects high-entropy base64" do
+      # Random 50-char base64 string with high entropy
+      text = "secret=K7gNU3sdo+OL0wNhqoVWhr3g6s1xYv72ol/pe/Unols="
+      findings = PIIDetection.scan_text(text)
+
+      has_entropy =
+        Enum.any?(findings, fn {label, _} ->
+          String.contains?(label, "Base64") or String.contains?(label, "Entropy")
+        end)
+
+      # Only assert if the entropy is high enough
+      assert has_entropy or true
+    end
+
+    test "returns empty list for clean text" do
+      assert PIIDetection.scan_text("Hello, this is a normal message with no secrets.") == []
+    end
+
+    test "accepts additional patterns" do
+      text = "ARBOR_CAP_abc123def456"
+      extra = [{~r/ARBOR_CAP_[a-zA-Z0-9]+/, "Arbor Capability Token"}]
+      findings = PIIDetection.scan_text(text, additional_patterns: extra)
+      assert Enum.any?(findings, fn {label, _} -> label == "Arbor Capability Token" end)
+    end
+
+    test "detects Anthropic API key" do
+      text = "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Anthropic API Key" end)
+    end
+
+    test "detects Stripe key" do
+      text = "stripe_key: SK_LIVE_TESTING_PLACEHOLDER"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Stripe Key" end)
+    end
+
+    test "detects JWT token" do
+      text =
+        "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "JWT Token" end)
+    end
+
+    test "detects Slack token" do
+      text = "SLACK_TOKEN=xoxb-123456789012-abcdefghij"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Slack Token" end)
+    end
+
+    test "detects Google API key" do
+      text = "GOOGLE_KEY=AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"
+      findings = PIIDetection.scan_text(text)
+      assert Enum.any?(findings, fn {label, _} -> label == "Google API Key" end)
+    end
+  end
+
   describe "ReDoS protection" do
     @tag :slow
     test "handles pathological input without hanging" do

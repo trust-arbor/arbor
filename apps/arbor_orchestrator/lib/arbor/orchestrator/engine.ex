@@ -9,7 +9,15 @@ defmodule Arbor.Orchestrator.Engine do
   - event callback stream
   """
 
-  alias Arbor.Orchestrator.Engine.{Authorization, Checkpoint, Condition, Context, Fidelity, Outcome}
+  alias Arbor.Orchestrator.Engine.{
+    Authorization,
+    Checkpoint,
+    Condition,
+    Context,
+    Fidelity,
+    Outcome
+  }
+
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
