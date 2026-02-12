@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   alias Arbor.Orchestrator.Graph.Node
 
   alias Arbor.Orchestrator.Handlers.{
+    AdaptHandler,
     CodergenHandler,
     ConditionalHandler,
     ConsensusHandler,
@@ -33,7 +34,8 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "hexagon" => "wait.human",
     "component" => "parallel",
     "tripleoctagon" => "parallel.fan_in",
-    "house" => "stack.manager_loop"
+    "house" => "stack.manager_loop",
+    "octagon" => "graph.adapt"
   }
 
   @handlers %{
@@ -67,7 +69,9 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "memory.stats" => MemoryHandler,
     # Sub-graph composition
     "graph.invoke" => SubgraphHandler,
-    "graph.compose" => SubgraphHandler
+    "graph.compose" => SubgraphHandler,
+    # Graph adaptation (self-modifying pipelines)
+    "graph.adapt" => AdaptHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 

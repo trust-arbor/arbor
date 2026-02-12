@@ -73,17 +73,29 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
+  # Keys that contain non-serializable structs (e.g., %Graph{}) and must be
+  # stripped before JSON encoding.
+  @internal_keys ~w(__adapted_graph__ __completed_nodes__)
+
   @spec write(t(), String.t(), keyword()) :: :ok | {:error, term()}
   def write(%__MODULE__{} = checkpoint, logs_root, opts \\ []) do
     encoded_outcomes =
       checkpoint.node_outcomes
-      |> Enum.map(fn {node_id, outcome} -> {node_id, Map.from_struct(outcome)} end)
+      |> Enum.map(fn {node_id, outcome} ->
+        sanitized =
+          outcome
+          |> Map.from_struct()
+          |> Map.update(:context_updates, %{}, &Map.drop(&1, @internal_keys))
+
+        {node_id, sanitized}
+      end)
       |> Map.new()
 
     payload_map =
       checkpoint
       |> Map.from_struct()
       |> Map.put(:node_outcomes, encoded_outcomes)
+      |> Map.update(:context_values, %{}, &Map.drop(&1, @internal_keys))
 
     payload_map =
       case Keyword.get(opts, :hmac_secret) do
