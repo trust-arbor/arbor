@@ -15,7 +15,6 @@ defmodule Arbor.Gateway.MCP.Handler do
   """
 
   use ExMCP.Server.Handler
-  use GenServer
 
   require Logger
 
@@ -26,12 +25,12 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Handler Callbacks
   # ===========================================================================
 
-  @impl true
+  @impl ExMCP.Server.Handler
   def init(_args) do
     {:ok, %{}}
   end
 
-  @impl true
+  @impl ExMCP.Server.Handler
   def handle_initialize(params, state) do
     {:ok,
      %{
@@ -43,7 +42,7 @@ defmodule Arbor.Gateway.MCP.Handler do
      }, state}
   end
 
-  @impl true
+  @impl ExMCP.Server.Handler
   def handle_list_tools(_cursor, state) do
     tools = [
       %{
@@ -130,7 +129,7 @@ defmodule Arbor.Gateway.MCP.Handler do
     {:ok, tools, nil, state}
   end
 
-  @impl true
+  @impl ExMCP.Server.Handler
   def handle_call_tool("arbor_actions", args, state) do
     category = args["category"]
     result = list_actions(category)
@@ -164,48 +163,6 @@ defmodule Arbor.Gateway.MCP.Handler do
        content: [%{type: "text", text: "Unknown tool: #{name}"}],
        isError: true
      }, state}
-  end
-
-  # ===========================================================================
-  # GenServer Bridge
-  #
-  # ExMCP.HttpPlug starts the handler as a GenServer and dispatches MCP
-  # protocol messages via GenServer.call. These clauses bridge to the
-  # behaviour callbacks above.
-  # ===========================================================================
-
-  @impl GenServer
-  def handle_call({:initialize, params}, _from, state) do
-    case handle_initialize(params, state) do
-      {:ok, result, new_state} -> {:reply, {:ok, result}, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  def handle_call({:list_tools, cursor}, _from, state) do
-    case handle_list_tools(cursor, state) do
-      {:ok, tools, next_cursor, new_state} -> {:reply, {:ok, tools, next_cursor, new_state}, new_state}
-      {:ok, tools, new_state} -> {:reply, {:ok, tools, nil, new_state}, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  def handle_call({:call_tool, name, args}, _from, state) do
-    case handle_call_tool(name, args, state) do
-      {:ok, result, new_state} -> {:reply, {:ok, result}, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  def handle_call({:execute_tool, name, args}, _from, state) do
-    case handle_call_tool(name, args, state) do
-      {:ok, result, new_state} -> {:reply, {:ok, result}, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  def handle_call(_msg, _from, state) do
-    {:reply, {:error, "Not implemented"}, state}
   end
 
   # ===========================================================================
