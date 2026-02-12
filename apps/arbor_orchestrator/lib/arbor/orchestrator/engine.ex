@@ -278,7 +278,11 @@ defmodule Arbor.Orchestrator.Engine do
       context
       |> Context.apply_updates(outcome.context_updates || %{})
       |> Context.set("outcome", to_string(outcome.status))
+      |> Context.set("__completed_nodes__", completed)
       |> maybe_set_preferred_label(outcome)
+
+    # Check for graph adaptation (graph.adapt handler stores mutated graph in context)
+    {graph, context} = check_graph_adaptation(graph, context)
 
     checkpoint =
       Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes)
@@ -866,6 +870,20 @@ defmodule Arbor.Orchestrator.Engine do
     Map.get(node.attrs, "shape") == "Msquare" or String.downcase(node.id) in ["exit", "end"]
   end
 
+  # --- Graph adaptation (self-modifying pipelines) ---
+
+  defp check_graph_adaptation(graph, context) do
+    case Context.get(context, "__adapted_graph__") do
+      %Graph{} = new_graph ->
+        # Clear the adaptation key so it doesn't re-trigger on next iteration
+        context = Context.set(context, "__adapted_graph__", nil)
+        {new_graph, context}
+
+      _ ->
+        {graph, context}
+    end
+  end
+
   defp normalize_label(label) do
     label
     |> to_string()
@@ -909,16 +927,21 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
+  # Internal context keys that contain non-JSON-serializable values (e.g., %Graph{}).
+  @internal_context_keys ~w(__adapted_graph__ __completed_nodes__)
+
   defp write_node_status(node_id, %Outcome{} = outcome, logs_root) do
     node_dir = Path.join(logs_root, node_id)
     status_path = Path.join(node_dir, "status.json")
+
+    sanitized_updates = Map.drop(outcome.context_updates || %{}, @internal_context_keys)
 
     payload =
       %{
         outcome: to_string(outcome.status),
         preferred_next_label: outcome.preferred_label || "",
         suggested_next_ids: outcome.suggested_next_ids || [],
-        context_updates: outcome.context_updates || %{},
+        context_updates: sanitized_updates,
         notes: outcome.notes,
         failure_reason: outcome.failure_reason,
         timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
