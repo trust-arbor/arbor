@@ -318,8 +318,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
       Registry.register("session.classify", SessionHandler)
       node = %Node{id: "n1", attrs: %{"type" => "session.classify"}}
       assert Registry.resolve(node) == SessionHandler
-
-      Registry.unregister("session.classify")
+      # Don't unregister — persistent_term is global and other async tests depend on it
     end
   end
 end

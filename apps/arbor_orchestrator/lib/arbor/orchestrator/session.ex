@@ -27,6 +27,15 @@ defmodule Arbor.Orchestrator.Session do
   All existing flat fields are kept in sync for backward compatibility — callers
   can still access `state.turn_count`, `state.phase`, etc. directly.
 
+  ## Execution Modes
+
+  The `:execution_mode` option controls the strangler fig migration:
+
+    * `:legacy`  — Session rejects `send_message/2` with `{:error, :legacy_mode}`.
+                   Callers (Claude GenServer, APIAgent) use their native path.
+    * `:session` — Session handles turns and heartbeats through DOT graphs (default).
+    * `:graph`   — Full DOT graph execution with no fallback path.
+
   ## Turn vs Heartbeat execution
 
   **Turns** run synchronously via `GenServer.call` — the caller blocks until the
@@ -108,6 +117,7 @@ defmodule Arbor.Orchestrator.Session do
     :behavior,
     phase: :idle,
     session_type: :primary,
+    execution_mode: :session,
     config: %{},
     turn_count: 0,
     messages: [],
@@ -122,6 +132,7 @@ defmodule Arbor.Orchestrator.Session do
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
   @type session_type :: :primary | :background | :delegation | :consultation
+  @type execution_mode :: :legacy | :session | :graph
 
   @type t :: %__MODULE__{
           session_id: String.t(),
@@ -131,6 +142,7 @@ defmodule Arbor.Orchestrator.Session do
           heartbeat_graph: Arbor.Orchestrator.Graph.t(),
           phase: phase(),
           session_type: session_type(),
+          execution_mode: execution_mode(),
           trace_id: String.t() | nil,
           config: map(),
           seed_ref: term() | nil,
@@ -171,10 +183,12 @@ defmodule Arbor.Orchestrator.Session do
     * `:name`               — GenServer name registration
     * `:start_heartbeat`    — whether to schedule heartbeat on init (default true)
     * `:session_type`       — `:primary | :background | :delegation | :consultation` (default `:primary`)
+    * `:execution_mode`     — `:legacy | :session | :graph` (default `:session`)
     * `:config`             — session-level settings map (max_turns, model, temperature, etc.)
     * `:seed_ref`           — reference to the agent's Seed for identity continuity
     * `:signal_topic`       — dedicated signal topic for this session's observability
     * `:trace_id`           — distributed tracing correlation ID
+    * `:checkpoint`         — map of checkpoint data to restore on init (crash recovery)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -216,6 +230,27 @@ defmodule Arbor.Orchestrator.Session do
     GenServer.call(session, :get_state)
   end
 
+  @doc """
+  Return the current execution mode.
+  """
+  @spec execution_mode(GenServer.server()) :: execution_mode()
+  def execution_mode(session) do
+    GenServer.call(session, :execution_mode)
+  end
+
+  @doc """
+  Restore session state from a checkpoint map.
+
+  The checkpoint map should have string keys matching the session context
+  namespace (e.g. `"session.messages"`, `"session.turn_count"`). This is
+  used for crash recovery — the supervisor restarts the session and passes
+  the last checkpoint to restore state.
+  """
+  @spec restore_checkpoint(GenServer.server(), map()) :: :ok
+  def restore_checkpoint(session, checkpoint) when is_map(checkpoint) do
+    GenServer.call(session, {:restore_checkpoint, checkpoint})
+  end
+
   # ── GenServer callbacks ──────────────────────────────────────────────
 
   @impl true
@@ -230,10 +265,12 @@ defmodule Arbor.Orchestrator.Session do
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval, @default_heartbeat_interval)
     start_heartbeat = Keyword.get(opts, :start_heartbeat, true)
     session_type = Keyword.get(opts, :session_type, :primary)
+    execution_mode = Keyword.get(opts, :execution_mode, :session)
     config = Keyword.get(opts, :config, %{})
     seed_ref = Keyword.get(opts, :seed_ref)
     signal_topic = Keyword.get(opts, :signal_topic, "session:#{session_id}")
     trace_id = Keyword.get(opts, :trace_id)
+    checkpoint = Keyword.get(opts, :checkpoint)
 
     # Verify trust_tier if a resolver is available (hierarchy constraint bridge).
     # Without a resolver, we trust the caller — but log a warning.
@@ -264,6 +301,7 @@ defmodule Arbor.Orchestrator.Session do
         adapters: adapters,
         heartbeat_interval: heartbeat_interval,
         session_type: session_type,
+        execution_mode: execution_mode,
         config: config,
         seed_ref: seed_ref,
         signal_topic: signal_topic,
@@ -272,6 +310,14 @@ defmodule Arbor.Orchestrator.Session do
         session_state: session_state,
         behavior: behavior
       }
+
+      # Restore from checkpoint if provided (crash recovery)
+      state =
+        if checkpoint do
+          apply_checkpoint(state, checkpoint)
+        else
+          state
+        end
 
       state =
         if start_heartbeat do
@@ -287,6 +333,10 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @impl true
+  def handle_call({:send_message, _message}, _from, %{execution_mode: :legacy} = state) do
+    {:reply, {:error, :legacy_mode}, state}
+  end
+
   def handle_call({:send_message, message}, _from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
     values = build_turn_values(state, message)
@@ -316,6 +366,14 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_call(:get_state, _from, state) do
     {:reply, state, state}
+  end
+
+  def handle_call(:execution_mode, _from, state) do
+    {:reply, state.execution_mode, state}
+  end
+
+  def handle_call({:restore_checkpoint, checkpoint}, _from, state) do
+    {:reply, :ok, apply_checkpoint(state, checkpoint)}
   end
 
   @impl true
@@ -576,6 +634,40 @@ defmodule Arbor.Orchestrator.Session do
     String.to_existing_atom(string)
   rescue
     ArgumentError -> fallback
+  end
+
+  defp apply_checkpoint(state, checkpoint) when is_map(checkpoint) do
+    state
+    |> maybe_restore(:messages, Map.get(checkpoint, "session.messages"))
+    |> maybe_restore(:working_memory, Map.get(checkpoint, "session.working_memory"))
+    |> maybe_restore(:goals, Map.get(checkpoint, "session.goals"))
+    |> maybe_restore(:turn_count, Map.get(checkpoint, "session.turn_count"))
+    |> maybe_restore_cognitive_mode(Map.get(checkpoint, "session.cognitive_mode"))
+    |> sync_checkpoint_to_session_state()
+  end
+
+  defp maybe_restore(state, _field, nil), do: state
+  defp maybe_restore(state, field, value), do: %{state | field => value}
+
+  defp maybe_restore_cognitive_mode(state, nil), do: state
+
+  defp maybe_restore_cognitive_mode(state, mode) when is_atom(mode),
+    do: %{state | cognitive_mode: mode}
+
+  defp maybe_restore_cognitive_mode(state, mode) when is_binary(mode),
+    do: %{state | cognitive_mode: safe_to_atom(mode, state.cognitive_mode)}
+
+  defp sync_checkpoint_to_session_state(%{session_state: nil} = state), do: state
+
+  defp sync_checkpoint_to_session_state(state) do
+    update_session_state(state, fn ss ->
+      ss
+      |> Map.put(:messages, state.messages)
+      |> Map.put(:working_memory, state.working_memory)
+      |> Map.put(:goals, state.goals)
+      |> Map.put(:turn_count, state.turn_count)
+      |> Map.put(:cognitive_mode, state.cognitive_mode)
+    end)
   end
 
   defp verify_trust_tier(declared_tier, agent_id, adapters) do

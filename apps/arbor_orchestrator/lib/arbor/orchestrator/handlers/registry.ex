@@ -78,6 +78,21 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   @spec reset_custom_handlers() :: :ok
   def reset_custom_handlers, do: put_custom_handlers(%{})
 
+  @doc """
+  Returns the current custom handlers map.
+  Use with `restore_custom_handlers/1` for test save/restore.
+  """
+  @spec snapshot_custom_handlers() :: map()
+  def snapshot_custom_handlers, do: custom_handlers()
+
+  @doc """
+  Restores custom handlers from a previous snapshot.
+  """
+  @spec restore_custom_handlers(map()) :: :ok
+  def restore_custom_handlers(handlers) when is_map(handlers) do
+    put_custom_handlers(handlers)
+  end
+
   defp custom_handlers do
     :persistent_term.get(@custom_handlers_key, %{})
   end

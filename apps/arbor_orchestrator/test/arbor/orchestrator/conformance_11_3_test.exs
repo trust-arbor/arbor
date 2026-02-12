@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.Conformance113Test do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Handlers.Registry
@@ -35,8 +35,9 @@ defmodule Arbor.Orchestrator.Conformance113Test do
   end
 
   setup do
+    saved = Registry.snapshot_custom_handlers()
     Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.reset_custom_handlers() end)
+    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
     :ok
   end
 

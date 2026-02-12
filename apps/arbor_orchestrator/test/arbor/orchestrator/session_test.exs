@@ -1,6 +1,6 @@
 defmodule Arbor.Orchestrator.SessionTest do
   @moduledoc """
-  Integration tests for Session-as-DOT convergence spike (Day 1).
+  Integration tests for Session-as-DOT convergence.
 
   Validates that:
   1. Turn and heartbeat DOT pipelines parse and validate correctly
@@ -16,16 +16,14 @@ defmodule Arbor.Orchestrator.SessionTest do
   The engine passes opts through to handlers, so session_adapters flow
   from Engine.run/2 opts → handler.execute/4 opts.
 
-  ## Known Gaps (documented as spike findings)
+  ## Context Key Alignment
 
-  - Engine.run/2 does NOT support `:initial_context` — context is built
-    from graph attrs only. Tests that need pre-seeded context use inline
-    DOT graphs or work with handler defaults.
-  - DOT condition keys must match handler context keys exactly. The
-    Condition module resolves "context.FOO" as Context.get(ctx, "FOO").
-    SessionHandler sets "session.input_type" but turn.dot references
-    "context.input_type" — mismatch. Similarly "session.cognitive_mode"
-    vs "context.cognitive_mode". The key "llm.response_type" DOES match.
+  DOT condition keys are aligned with SessionHandler context keys:
+  - Handler sets `"session.input_type"`, DOT uses `context.session.input_type` ✓
+  - Handler sets `"session.cognitive_mode"`, DOT uses `context.session.cognitive_mode` ✓
+  - Handler sets `"llm.response_type"`, DOT uses `context.llm.response_type` ✓
+
+  Engine supports `:initial_values` for pre-seeding context (added during spike).
   """
   use ExUnit.Case, async: true
 
@@ -64,24 +62,23 @@ defmodule Arbor.Orchestrator.SessionTest do
     session.process_results session.route_actions session.update_goals
   )
 
-  setup do
+  setup_all do
     # Ensure EventRegistry is running (needed when running with --no-start)
     case Registry.start_link(keys: :duplicate, name: Arbor.Orchestrator.EventRegistry) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end
 
-    # Register SessionHandler for all session.* types
+    # Register SessionHandler for all session.* types once for the whole module.
+    # Using setup_all prevents race conditions with other async test modules.
     for type <- @session_types do
       Arbor.Orchestrator.Handlers.Registry.register(type, SessionHandler)
     end
 
-    on_exit(fn ->
-      for type <- @session_types do
-        Arbor.Orchestrator.Handlers.Registry.unregister(type)
-      end
-    end)
+    :ok
+  end
 
+  setup do
     # Unique logs_root per test to avoid cross-test checkpoint collisions
     logs_root =
       Path.join(
@@ -886,69 +883,44 @@ defmodule Arbor.Orchestrator.SessionTest do
 
   describe "condition key alignment" do
     @tag :spike
-    @tag :diagnostic
-    test "verify condition keys match handler context keys" do
-      # This test documents the expected alignment between:
-      # 1. Keys that SessionHandler sets in context_updates
-      # 2. Keys that DOT edge conditions reference via "context.X"
-      #
-      # The Condition module resolves "context.FOO" by doing:
-      #   Context.get(ctx, "context.FOO", Context.get(ctx, "FOO", ""))
-      #
-      # So "context.llm.response_type=tool_call" resolves to key "llm.response_type" ✓
-      # But "context.input_type=blocked" resolves to key "input_type" ✗
-      #     → SessionHandler sets "session.input_type"
-      # And "context.cognitive_mode=goal_pursuit" resolves to key "cognitive_mode" ✗
-      #     → SessionHandler sets "session.cognitive_mode"
-
+    test "handler context keys match DOT condition keys" do
       # Handler sets these keys:
       handler_keys = %{
         classify: "session.input_type",
         mode_select: "session.cognitive_mode",
-        llm_call_text: "llm.response_type",
-        llm_call_tool: "llm.response_type"
+        llm_call: "llm.response_type"
       }
 
-      # DOT conditions reference these (after stripping "context." prefix):
-      dot_condition_keys = %{
-        check_auth: "input_type",
+      # DOT conditions reference "context.KEY" which resolves to Context.get(ctx, "KEY")
+      # After stripping the "context." prefix:
+      dot_resolved_keys = %{
+        check_auth: "session.input_type",
         check_response: "llm.response_type",
-        mode_router: "cognitive_mode"
+        mode_router: "session.cognitive_mode"
       }
 
-      # llm.response_type matches ✓
-      assert handler_keys.llm_call_text == dot_condition_keys.check_response
-
-      # input_type does NOT match — needs alignment
-      refute handler_keys.classify == dot_condition_keys.check_auth,
-             "Known gap: DOT uses 'input_type' but handler sets 'session.input_type'"
-
-      # cognitive_mode does NOT match — needs alignment
-      refute handler_keys.mode_select == dot_condition_keys.mode_router,
-             "Known gap: DOT uses 'cognitive_mode' but handler sets 'session.cognitive_mode'"
+      # All keys are now aligned
+      assert handler_keys.classify == dot_resolved_keys.check_auth
+      assert handler_keys.llm_call == dot_resolved_keys.check_response
+      assert handler_keys.mode_select == dot_resolved_keys.mode_router
     end
 
     @tag :spike
-    @tag :diagnostic
     test "aligned condition keys work with Condition module" do
       alias Arbor.Orchestrator.Engine.Condition
       alias Arbor.Orchestrator.Engine.Outcome
 
-      # Simulate what happens when SessionHandler sets "session.cognitive_mode"
-      # and the DOT condition references "context.session.cognitive_mode"
       context = Context.new(%{"session.cognitive_mode" => "goal_pursuit"})
       outcome = %Outcome{status: :success}
 
-      # This is the CORRECT condition format for aligned keys
+      # DOT files use "context.session.cognitive_mode" which resolves correctly
       assert Condition.eval("context.session.cognitive_mode=goal_pursuit", outcome, context)
       refute Condition.eval("context.session.cognitive_mode=reflection", outcome, context)
 
-      # This is what the current DOT files use (MISALIGNED — won't match)
-      refute Condition.eval("context.cognitive_mode=goal_pursuit", outcome, context),
-             "context.cognitive_mode doesn't match session.cognitive_mode — " <>
-               "DOT files need updating to context.session.cognitive_mode"
+      # Unqualified key does NOT match — confirms alignment is required
+      refute Condition.eval("context.cognitive_mode=goal_pursuit", outcome, context)
 
-      # llm.response_type works because the handler key matches
+      # llm.response_type also aligned
       context2 = Context.new(%{"llm.response_type" => "tool_call"})
       assert Condition.eval("context.llm.response_type=tool_call", outcome, context2)
     end
@@ -958,14 +930,11 @@ defmodule Arbor.Orchestrator.SessionTest do
   # Engine initial_context gap documentation
   # ════════════════════════════════════════════════════════════════
 
-  describe "Engine initial_context injection" do
+  describe "Engine initial_values injection" do
     @tag :spike
-    @tag :diagnostic
-    test "engine does NOT currently support initial_context", %{logs_root: logs_root} do
-      # Engine.run/2 builds context from graph attrs (goal, label) and
-      # opts[:workdir] only. There is no :initial_context option.
-      # This test documents the gap and verifies handlers receive
-      # default values.
+    test "engine context defaults without initial_values", %{logs_root: logs_root} do
+      # Without initial_values, handlers receive default values.
+      # With initial_values (added during spike), callers can pre-seed context.
       dot = """
       digraph TestDefaults {
         graph [goal="Test default context"]
@@ -992,19 +961,7 @@ defmodule Arbor.Orchestrator.SessionTest do
     end
 
     @tag :spike
-    @tag :diagnostic
-    test "session values need initial_context injection for real use", %{logs_root: logs_root} do
-      # When we build the Session GenServer (Day 2), it needs to inject:
-      # - session.input (the user's message)
-      # - session.agent_id (the agent processing this)
-      # - session.id (session identifier)
-      # - session.turn_count (incrementing counter)
-      # - session.messages (conversation history)
-      # - session.goals (active goals for mode selection)
-      #
-      # Day 2 work: add initial_context support to Engine.run/2.
-      # For now, verify that handlers work with their defaults.
-
+    test "mode_select defaults to reflection without initial_values", %{logs_root: logs_root} do
       dot = """
       digraph TestModeDefaults {
         graph [goal="Test mode selection defaults"]

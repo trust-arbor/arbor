@@ -17,8 +17,9 @@ defmodule Arbor.Orchestrator.Conformance116Test do
   end
 
   setup do
+    saved = Registry.snapshot_custom_handlers()
     Registry.reset_custom_handlers()
-    on_exit(fn -> Registry.reset_custom_handlers() end)
+    on_exit(fn -> Registry.restore_custom_handlers(saved) end)
     :ok
   end
 
