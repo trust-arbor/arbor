@@ -64,6 +64,7 @@ defmodule Arbor.Orchestrator.Engine do
           state.completed_nodes,
           state.retries,
           state.outcomes,
+          _pending = [],
           opts
         )
 
@@ -230,6 +231,7 @@ defmodule Arbor.Orchestrator.Engine do
          _done,
          _retries,
          _outcomes,
+         _pending,
          opts
        )
        when max_steps <= 0 do
@@ -247,6 +249,7 @@ defmodule Arbor.Orchestrator.Engine do
          completed,
          retries,
          outcomes,
+         pending,
          opts
        ) do
     node = Map.fetch!(graph.nodes, node_id)
@@ -300,15 +303,40 @@ defmodule Arbor.Orchestrator.Engine do
       terminal?(node) ->
         case resolve_goal_gate_retry_target(graph, outcomes) do
           {:ok, nil} ->
-            ordered = Enum.reverse(completed)
-            emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+            # Before completing, check if there are pending fan-out branches
+            case find_next_ready(pending, graph, completed) do
+              {next_id, next_edge, remaining} ->
+                emit(opts, %{
+                  type: :fan_out_branch_resuming,
+                  node_id: next_id,
+                  pending_count: length(remaining)
+                })
 
-            {:ok,
-             %{
-               final_outcome: outcome,
-               completed_nodes: ordered,
-               context: Context.snapshot(context)
-             }}
+                loop(
+                  graph,
+                  next_id,
+                  next_edge,
+                  context,
+                  logs_root,
+                  max_steps - 1,
+                  completed,
+                  retries,
+                  outcomes,
+                  remaining,
+                  opts
+                )
+
+              nil ->
+                ordered = Enum.reverse(completed)
+                emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+
+                {:ok,
+                 %{
+                   final_outcome: outcome,
+                   completed_nodes: ordered,
+                   context: Context.snapshot(context)
+                 }}
+            end
 
           {:ok, retry_target} ->
             emit(opts, %{type: :goal_gate_retrying, target: retry_target})
@@ -323,6 +351,7 @@ defmodule Arbor.Orchestrator.Engine do
               completed,
               retries,
               outcomes,
+              pending,
               opts
             )
 
@@ -332,7 +361,120 @@ defmodule Arbor.Orchestrator.Engine do
         end
 
       true ->
-        case select_next_step(node, outcome, context, graph) do
+        advance_with_fan_in(
+          graph,
+          node,
+          outcome,
+          context,
+          logs_root,
+          max_steps,
+          completed,
+          retries,
+          outcomes,
+          pending,
+          opts
+        )
+    end
+  end
+
+  # Fan-in aware advancement: uses existing select_next_step for routing,
+  # but also detects implicit fan-out (multiple unconditional edges) and
+  # queues sibling branches in pending. Before executing any node, checks
+  # that all predecessors are complete (fan-in gate).
+  defp advance_with_fan_in(
+         graph,
+         node,
+         outcome,
+         context,
+         logs_root,
+         max_steps,
+         completed,
+         retries,
+         outcomes,
+         pending,
+         opts
+       ) do
+    # Use existing routing logic to pick the preferred next target
+    preferred = select_next_step(node, outcome, context, graph)
+
+    preferred_id =
+      case preferred do
+        {:edge, edge} -> edge.to
+        {:node_id, id} -> id
+        nil -> nil
+      end
+
+    # Detect fan-out: collect sibling unconditional edges (excluding preferred)
+    fan_out_edges = collect_fan_out_siblings(node, outcome, context, graph)
+
+    extra_targets =
+      fan_out_edges
+      |> Enum.map(fn e -> {e.to, e} end)
+      |> Enum.reject(fn {id, _} -> id == preferred_id or id in completed end)
+
+    new_pending = merge_pending(extra_targets, pending)
+
+    if extra_targets != [] do
+      emit(opts, %{
+        type: :fan_out_detected,
+        node_id: node.id,
+        branch_count: length(extra_targets) + 1,
+        targets: [preferred_id | Enum.map(extra_targets, fn {id, _} -> id end)]
+      })
+    end
+
+    # Try the preferred target, with fan-in gate check
+    case preferred do
+      {:edge, edge} ->
+        advance_to_target(
+          edge.to,
+          edge,
+          graph,
+          context,
+          logs_root,
+          max_steps,
+          completed,
+          retries,
+          outcomes,
+          new_pending,
+          outcome,
+          opts
+        )
+
+      {:node_id, target_id} ->
+        advance_to_target(
+          target_id,
+          nil,
+          graph,
+          context,
+          logs_root,
+          max_steps,
+          completed,
+          retries,
+          outcomes,
+          new_pending,
+          outcome,
+          opts
+        )
+
+      nil ->
+        # No preferred target — check pending for ready nodes
+        case find_next_ready(new_pending, graph, completed) do
+          {next_id, next_edge, remaining} ->
+            loop(
+              graph,
+              next_id,
+              next_edge,
+              context,
+              logs_root,
+              max_steps - 1,
+              completed,
+              retries,
+              outcomes,
+              remaining,
+              opts
+            )
+
           nil ->
             ordered = Enum.reverse(completed)
             emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
@@ -343,35 +485,87 @@ defmodule Arbor.Orchestrator.Engine do
                completed_nodes: ordered,
                context: Context.snapshot(context)
              }}
-
-          {:edge, edge} ->
-            loop(
-              graph,
-              edge.to,
-              edge,
-              context,
-              logs_root,
-              max_steps - 1,
-              completed,
-              retries,
-              outcomes,
-              opts
-            )
-
-          {:node_id, target_id} ->
-            loop(
-              graph,
-              target_id,
-              nil,
-              context,
-              logs_root,
-              max_steps - 1,
-              completed,
-              retries,
-              outcomes,
-              opts
-            )
         end
+    end
+  end
+
+  # Advance to a specific target node, checking fan-in readiness first.
+  # The fan-in gate only activates when we're actively tracking fan-out
+  # branches (pending is non-empty). This avoids blocking targets whose
+  # predecessors were executed internally by handlers (e.g., ParallelHandler).
+  defp advance_to_target(
+         target_id,
+         edge,
+         graph,
+         context,
+         logs_root,
+         max_steps,
+         completed,
+         retries,
+         outcomes,
+         pending,
+         last_outcome,
+         opts
+       ) do
+    fan_in_ready =
+      pending == [] or all_predecessors_complete?(graph, target_id, completed)
+
+    if fan_in_ready do
+      loop(
+        graph,
+        target_id,
+        edge,
+        context,
+        logs_root,
+        max_steps - 1,
+        completed,
+        retries,
+        outcomes,
+        pending,
+        opts
+      )
+    else
+      # Target not ready — add to pending and find next ready node
+      emit(opts, %{
+        type: :fan_in_deferred,
+        node_id: target_id,
+        waiting_for:
+          graph
+          |> Graph.incoming_edges(target_id)
+          |> Enum.map(& &1.from)
+          |> Enum.reject(&(&1 in completed))
+      })
+
+      all_pending = [{target_id, edge} | pending]
+
+      case find_next_ready(all_pending, graph, completed) do
+        {next_id, next_edge, remaining} ->
+          loop(
+            graph,
+            next_id,
+            next_edge,
+            context,
+            logs_root,
+            max_steps - 1,
+            completed,
+            retries,
+            outcomes,
+            remaining,
+            opts
+          )
+
+        nil ->
+          # Nothing ready — pipeline complete or deadlock
+          ordered = Enum.reverse(completed)
+          emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+
+          {:ok,
+           %{
+             final_outcome: last_outcome,
+             completed_nodes: ordered,
+             context: Context.snapshot(context)
+           }}
+      end
     end
   end
 
@@ -533,6 +727,57 @@ defmodule Arbor.Orchestrator.Engine do
       String.contains?(message, "validation") -> false
       true -> false
     end
+  end
+
+  # --- Fan-in/fan-out helpers ---
+
+  # Returns sibling fan-out edges (unconditional parallel branches) from a node.
+  # Only activates for nodes explicitly marked with fan_out="true" attribute.
+  # This opt-in design preserves existing single-path selection for decision
+  # nodes while enabling implicit parallel execution for fan-out nodes.
+  defp collect_fan_out_siblings(node, outcome, _context, graph) do
+    fan_out_enabled = Map.get(node.attrs, "fan_out", "false") == "true"
+
+    if not fan_out_enabled or outcome.status == :fail do
+      []
+    else
+      edges = Graph.outgoing_edges(graph, node.id)
+      Enum.filter(edges, &(Map.get(&1.attrs, "condition", "") in ["", nil]))
+    end
+  end
+
+  # Check if all predecessor nodes (incoming edges) are in the completed list.
+  defp all_predecessors_complete?(graph, node_id, completed) do
+    graph
+    |> Graph.incoming_edges(node_id)
+    |> Enum.all?(fn edge -> edge.from in completed end)
+  end
+
+  # Find the first ready node from candidates where all predecessors are complete.
+  # Returns {node_id, edge, remaining_candidates} or nil.
+  defp find_next_ready(candidates, graph, completed) do
+    {ready, not_ready} =
+      Enum.split_with(candidates, fn {id, _edge} ->
+        id not in completed and all_predecessors_complete?(graph, id, completed)
+      end)
+
+    case ready do
+      [{next_id, next_edge} | rest] ->
+        {next_id, next_edge, rest ++ not_ready}
+
+      [] ->
+        nil
+    end
+  end
+
+  # Merge new targets into pending, avoiding duplicates by node_id.
+  defp merge_pending(new_targets, existing_pending) do
+    existing_ids = MapSet.new(existing_pending, fn {id, _} -> id end)
+
+    new_unique =
+      Enum.reject(new_targets, fn {id, _} -> MapSet.member?(existing_ids, id) end)
+
+    existing_pending ++ new_unique
   end
 
   defp select_next_step(node, outcome, context, graph) do

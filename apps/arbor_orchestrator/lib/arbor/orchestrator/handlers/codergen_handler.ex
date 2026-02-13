@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.Outcome
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request}
+  alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request, ToolLoop}
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -147,9 +147,58 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
       end
 
-    case Client.complete(client, request, call_opts) do
-      {:ok, response} -> {:ok, response.text}
-      {:error, _} = error -> error
+    use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
+
+    if use_tools do
+      workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
+      max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
+
+      case ToolLoop.run(client, request,
+             workdir: workdir,
+             max_turns: max_turns,
+             on_tool_call: build_tool_callback(opts, node.id)
+           ) do
+        {:ok, result} ->
+          {:ok, result.text}
+
+        {:error, {:max_turns_reached, turns, _}} ->
+          {:error, "Tool loop hit #{turns} turn limit without completing"}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      case Client.complete(client, request, call_opts) do
+        {:ok, response} -> {:ok, response.text}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp build_tool_callback(opts, node_id) do
+    case Keyword.get(opts, :logs_root) do
+      nil ->
+        nil
+
+      logs_root ->
+        fn name, args, result ->
+          tool_log_dir = Path.join([logs_root, node_id, "tool_calls"])
+          File.mkdir_p!(tool_log_dir)
+          timestamp = System.system_time(:millisecond)
+          status = if match?({:ok, _}, result), do: "ok", else: "error"
+
+          entry = %{
+            "tool" => name,
+            "args" => args,
+            "status" => status,
+            "timestamp" => timestamp
+          }
+
+          File.write!(
+            Path.join(tool_log_dir, "#{timestamp}_#{name}.json"),
+            Jason.encode!(entry, pretty: true)
+          )
+        end
     end
   end
 
