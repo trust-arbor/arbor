@@ -22,6 +22,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     Gemini,
     OpenAI,
     OpenRouter,
+    XAI,
     Zai,
     ZaiCodingPlan
   }
@@ -620,7 +621,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       {"gemini", System.get_env("GEMINI_API_KEY")},
       {"zai", System.get_env("ZAI_API_KEY")},
       {"zai_coding_plan", System.get_env("ZAI_CODING_PLAN_API_KEY")},
-      {"openrouter", System.get_env("OPENROUTER_API_KEY")}
+      {"openrouter", System.get_env("OPENROUTER_API_KEY")},
+      {"xai", System.get_env("XAI_API_KEY")}
     ]
     |> Enum.filter(fn {_provider, value} -> is_binary(value) and value != "" end)
   end
@@ -637,6 +639,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
             "zai" -> Zai
             "zai_coding_plan" -> ZaiCodingPlan
             "openrouter" -> OpenRouter
+            "xai" -> XAI
             _ -> nil
           end
 
