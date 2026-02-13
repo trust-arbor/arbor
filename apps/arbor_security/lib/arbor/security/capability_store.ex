@@ -21,9 +21,11 @@ defmodule Arbor.Security.CapabilityStore do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
+
+  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
+  @buffered_store Arbor.Persistence.BufferedStore
 
   @cleanup_interval_ms 60_000
 
@@ -508,7 +510,7 @@ defmodule Arbor.Security.CapabilityStore do
     if Process.whereis(@cap_store) do
       data = serialize_capability(cap)
       record = Record.new(cap.id, data)
-      BufferedStore.put(cap.id, record, name: @cap_store)
+      apply(@buffered_store, :put, [cap.id, record, [name: @cap_store]])
     end
 
     :ok
@@ -520,7 +522,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp delete_persisted_capability(cap_id) do
     if Process.whereis(@cap_store) do
-      BufferedStore.delete(cap_id, name: @cap_store)
+      apply(@buffered_store, :delete, [cap_id, [name: @cap_store]])
     end
 
     :ok
@@ -532,10 +534,10 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp restore_from_store(state) do
     if Process.whereis(@cap_store) do
-      case BufferedStore.list(name: @cap_store) do
+      case apply(@buffered_store, :list, [[name: @cap_store]]) do
         {:ok, keys} ->
           Enum.reduce(keys, state, fn key, acc ->
-            case BufferedStore.get(key, name: @cap_store) do
+            case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
               {:ok, %Record{data: data}} ->
                 restore_capability(acc, data)
 

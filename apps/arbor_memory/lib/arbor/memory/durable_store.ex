@@ -91,23 +91,19 @@ defmodule Arbor.Memory.DurableStore do
     if available?() do
       prefix = "#{namespace}:"
 
-      case BufferedStore.list(name: @store_name) do
-        {:ok, keys} ->
-          records =
-            keys
-            |> Enum.filter(&String.starts_with?(&1, prefix))
-            |> Enum.reduce([], fn composite_key, acc ->
-              case BufferedStore.get(composite_key, name: @store_name) do
-                {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
-                _ -> acc
-              end
-            end)
+      {:ok, keys} = BufferedStore.list(name: @store_name)
 
-          {:ok, Enum.reverse(records)}
+      records =
+        keys
+        |> Enum.filter(&String.starts_with?(&1, prefix))
+        |> Enum.reduce([], fn composite_key, acc ->
+          case BufferedStore.get(composite_key, name: @store_name) do
+            {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
+            _ -> acc
+          end
+        end)
 
-        {:error, _} ->
-          {:ok, []}
-      end
+      {:ok, Enum.reverse(records)}
     else
       {:ok, []}
     end
@@ -127,23 +123,19 @@ defmodule Arbor.Memory.DurableStore do
     if available?() do
       full_prefix = "#{namespace}:#{prefix}"
 
-      case BufferedStore.list(name: @store_name) do
-        {:ok, keys} ->
-          records =
-            keys
-            |> Enum.filter(&String.starts_with?(&1, full_prefix))
-            |> Enum.reduce([], fn composite_key, acc ->
-              case BufferedStore.get(composite_key, name: @store_name) do
-                {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
-                _ -> acc
-              end
-            end)
+      {:ok, keys} = BufferedStore.list(name: @store_name)
 
-          {:ok, Enum.reverse(records)}
+      records =
+        keys
+        |> Enum.filter(&String.starts_with?(&1, full_prefix))
+        |> Enum.reduce([], fn composite_key, acc ->
+          case BufferedStore.get(composite_key, name: @store_name) do
+            {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
+            _ -> acc
+          end
+        end)
 
-        {:error, _} ->
-          {:ok, []}
-      end
+      {:ok, Enum.reverse(records)}
     else
       {:ok, []}
     end

@@ -25,7 +25,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Handler Callbacks
   # ===========================================================================
 
-  @impl ExMCP.Server.Handler
+  @impl GenServer
   def init(_args) do
     {:ok, %{}}
   end

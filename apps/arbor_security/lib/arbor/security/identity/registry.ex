@@ -22,9 +22,11 @@ defmodule Arbor.Security.Identity.Registry do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
+
+  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
+  @buffered_store Arbor.Persistence.BufferedStore
 
 
   # Client API
@@ -435,7 +437,7 @@ defmodule Arbor.Security.Identity.Registry do
     if Process.whereis(@id_store) do
       data = serialize_entry(agent_id, entry)
       record = Record.new(agent_id, data)
-      BufferedStore.put(agent_id, record, name: @id_store)
+      apply(@buffered_store, :put, [agent_id, record, [name: @id_store]])
     end
 
     :ok
@@ -447,7 +449,7 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp delete_from_store(agent_id) do
     if Process.whereis(@id_store) do
-      BufferedStore.delete(agent_id, name: @id_store)
+      apply(@buffered_store, :delete, [agent_id, [name: @id_store]])
     end
 
     :ok
@@ -459,10 +461,10 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp restore_from_store(state) do
     if Process.whereis(@id_store) do
-      case BufferedStore.list(name: @id_store) do
+      case apply(@buffered_store, :list, [[name: @id_store]]) do
         {:ok, keys} ->
           Enum.reduce(keys, state, fn key, acc ->
-            case BufferedStore.get(key, name: @id_store) do
+            case apply(@buffered_store, :get, [key, [name: @id_store]]) do
               {:ok, %Record{data: data}} ->
                 restore_entry(acc, data)
 
