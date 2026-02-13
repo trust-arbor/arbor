@@ -21,7 +21,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
         "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
         "OPENAI_API_KEY" => nil,
         "ANTHROPIC_API_KEY" => nil,
-        "GEMINI_API_KEY" => nil
+        "GEMINI_API_KEY" => nil,
+        "ZAI_API_KEY" => nil,
+        "ZAI_CODING_PLAN_API_KEY" => nil,
+        "OPENROUTER_API_KEY" => nil,
+        "XAI_API_KEY" => nil
       },
       fn ->
         assert_raise ConfigurationError, fn ->
@@ -35,8 +39,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
     :ok = Client.clear_default_client()
     on_exit(fn -> Client.clear_default_client() end)
 
+    catalog = %{
+      "conformance81" => [
+        %{id: "gpt-5", family: "gpt-5", modalities: [:text, :tools]}
+      ]
+    }
+
     client =
-      Client.new(default_provider: "conformance81")
+      Client.new(default_provider: "conformance81", model_catalog: catalog)
       |> Client.register_adapter(Conformance81Adapter)
 
     assert :ok = Client.set_default_client(client)

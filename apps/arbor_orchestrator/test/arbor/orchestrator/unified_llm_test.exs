@@ -183,7 +183,11 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
         "OPENAI_API_KEY" => nil,
         "ANTHROPIC_API_KEY" => nil,
-        "GEMINI_API_KEY" => nil
+        "GEMINI_API_KEY" => nil,
+        "ZAI_API_KEY" => nil,
+        "ZAI_CODING_PLAN_API_KEY" => nil,
+        "OPENROUTER_API_KEY" => nil,
+        "XAI_API_KEY" => nil
       },
       fn ->
         assert_raise ConfigurationError, fn ->
@@ -199,7 +203,11 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         "UNIFIED_LLM_DEFAULT_PROVIDER" => "test",
         "OPENAI_API_KEY" => nil,
         "ANTHROPIC_API_KEY" => nil,
-        "GEMINI_API_KEY" => nil
+        "GEMINI_API_KEY" => nil,
+        "ZAI_API_KEY" => nil,
+        "ZAI_CODING_PLAN_API_KEY" => nil,
+        "OPENROUTER_API_KEY" => nil,
+        "XAI_API_KEY" => nil
       },
       fn ->
         client = Client.from_env()
@@ -214,7 +222,11 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
         "OPENAI_API_KEY" => "sk-live",
         "ANTHROPIC_API_KEY" => nil,
-        "GEMINI_API_KEY" => nil
+        "GEMINI_API_KEY" => nil,
+        "ZAI_API_KEY" => nil,
+        "ZAI_CODING_PLAN_API_KEY" => nil,
+        "OPENROUTER_API_KEY" => nil,
+        "XAI_API_KEY" => nil
       },
       fn ->
         client = Client.from_env(discover_cli: false, discover_local: false)
@@ -234,13 +246,65 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   test "list_models and get_model_info expose model catalog" do
-    client = Client.new()
+    # With explicit catalog (non-LLMDB mode)
+    catalog = %{
+      "test" => [
+        %{id: "gpt-5", family: "gpt-5", modalities: [:text, :tools]},
+        %{id: "gpt-5-mini", family: "gpt-5", modalities: [:text, :tools]}
+      ]
+    }
+
+    client = Client.new(model_catalog: catalog)
     models = Client.list_models(client)
 
     assert Enum.any?(models, &(&1.id == "gpt-5"))
     assert {:ok, info} = Client.get_model_info(client, "gpt-5")
     assert info.family == "gpt-5"
     assert {:error, :model_not_found} = Client.get_model_info(client, "missing-model")
+  end
+
+  test "list_models queries LLMDB when catalog is :llmdb" do
+    # Register an adapter so LLMDB knows which providers to query
+    client =
+      Client.new()
+      |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+
+    models = Client.list_models(client, provider: "xai")
+    assert length(models) > 0
+    assert Enum.any?(models, &(&1.id == "grok-4-1-fast"))
+
+    # Each model has the expected fields from LLMDB
+    model = Enum.find(models, &(&1.id == "grok-4-1-fast"))
+    assert model.provider == "xai"
+    assert is_map(model.capabilities)
+    assert is_map(model.cost)
+  end
+
+  test "get_model_info queries LLMDB for registered providers" do
+    client =
+      Client.new()
+      |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+
+    assert {:ok, info} = Client.get_model_info(client, "grok-4-1-fast")
+    assert info.id == "grok-4-1-fast"
+    assert info.provider == "xai"
+    assert {:error, :model_not_found} = Client.get_model_info(client, "nonexistent-model-xyz")
+  end
+
+  test "select_model finds best model matching capabilities" do
+    client =
+      Client.new()
+      |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+
+    assert {:ok, result} = Client.select_model(client, require: [chat: true], provider: "xai")
+    assert result.provider == "xai"
+    assert is_binary(result.model)
+    assert result.info != nil
+  end
+
+  test "select_model returns error for unmapped provider" do
+    client = Client.new()
+    assert {:error, :no_matching_model} = Client.select_model(client, provider: "nonexistent")
   end
 
   test "middleware wraps adapter call" do
