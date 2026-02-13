@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   alias Arbor.Orchestrator.Graph.Node
 
   alias Arbor.Orchestrator.Handlers.{
+    AccumulatorHandler,
     AdaptHandler,
     CodergenHandler,
     ConditionalHandler,
@@ -14,12 +15,17 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     EvalRunHandler,
     ExitHandler,
     FanInHandler,
+    FeedbackLoopHandler,
     FileWriteHandler,
     ManagerLoopHandler,
+    MapHandler,
     MemoryHandler,
+    OutputValidateHandler,
     PipelineRunHandler,
     PipelineValidateHandler,
     ParallelHandler,
+    RetryEscalateHandler,
+    ShellHandler,
     StartHandler,
     SubgraphHandler,
     ToolHandler,
@@ -49,6 +55,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "stack.manager_loop" => ManagerLoopHandler,
     "codergen" => CodergenHandler,
     "file.write" => FileWriteHandler,
+    "output.validate" => OutputValidateHandler,
     "pipeline.validate" => PipelineValidateHandler,
     "pipeline.run" => PipelineRunHandler,
     "eval.dataset" => EvalDatasetHandler,
@@ -71,7 +78,17 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "graph.invoke" => SubgraphHandler,
     "graph.compose" => SubgraphHandler,
     # Graph adaptation (self-modifying pipelines)
-    "graph.adapt" => AdaptHandler
+    "graph.adapt" => AdaptHandler,
+    # Shell command execution
+    "shell" => ShellHandler,
+    # Stateful accumulation
+    "accumulator" => AccumulatorHandler,
+    # Model escalation
+    "retry.escalate" => RetryEscalateHandler,
+    # Iterative feedback loops
+    "feedback.loop" => FeedbackLoopHandler,
+    # Collection fan-out
+    "map" => MapHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
