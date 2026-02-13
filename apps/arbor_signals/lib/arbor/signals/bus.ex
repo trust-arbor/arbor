@@ -411,19 +411,24 @@ defmodule Arbor.Signals.Bus do
 
     if category in restricted_topics and data != %{} and
          not match?(%{__encrypted__: true}, data) do
-      with {:ok, json} <- Jason.encode(data),
-           {:ok, encrypted_payload} <- TopicKeys.encrypt(category, json) do
-        # Store encrypted payload in data, mark as encrypted
-        %{
-          signal
-          | data: %{
-              __encrypted__: true,
-              payload: encrypted_payload
-            }
-        }
-      else
-        # If serialization or encryption fails, don't deliver at all for security
-        {:error, _reason} ->
+      try do
+        with {:ok, json} <- Jason.encode(data),
+             {:ok, encrypted_payload} <- TopicKeys.encrypt(category, json) do
+          # Store encrypted payload in data, mark as encrypted
+          %{
+            signal
+            | data: %{
+                __encrypted__: true,
+                payload: encrypted_payload
+              }
+          }
+        else
+          # If serialization or encryption fails, don't deliver at all for security
+          {:error, _reason} ->
+            %{signal | data: %{__encryption_failed__: true}}
+        end
+      catch
+        :exit, _ ->
           %{signal | data: %{__encryption_failed__: true}}
       end
     else
@@ -435,11 +440,16 @@ defmodule Arbor.Signals.Bus do
   defp maybe_decrypt_signal(%Signal{category: category, data: data} = signal) do
     case data do
       %{__encrypted__: true, payload: encrypted_payload} ->
-        with {:ok, json} <- TopicKeys.decrypt(category, encrypted_payload),
-             {:ok, decoded_data} <- Jason.decode(json) do
-          %{signal | data: decoded_data}
-        else
-          {:error, _reason} ->
+        try do
+          with {:ok, json} <- TopicKeys.decrypt(category, encrypted_payload),
+               {:ok, decoded_data} <- Jason.decode(json) do
+            %{signal | data: decoded_data}
+          else
+            {:error, _reason} ->
+              %{signal | data: %{__decryption_failed__: true}}
+          end
+        catch
+          :exit, _ ->
             %{signal | data: %{__decryption_failed__: true}}
         end
 
