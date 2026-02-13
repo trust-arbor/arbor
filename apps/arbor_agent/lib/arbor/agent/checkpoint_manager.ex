@@ -40,7 +40,7 @@ defmodule Arbor.Agent.CheckpointManager do
   require Logger
 
   alias Arbor.Agent.Seed
-  alias Arbor.Memory.ContextWindow
+  alias Arbor.Memory
 
   # ============================================================================
   # Save
@@ -390,9 +390,9 @@ defmodule Arbor.Agent.CheckpointManager do
   # ============================================================================
 
   defp serialize_context_window(window) do
-    if Code.ensure_loaded?(ContextWindow) and
-         function_exported?(ContextWindow, :serialize, 1) do
-      ContextWindow.serialize(window)
+    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
+         function_exported?(Arbor.Memory.ContextWindow, :serialize, 1) do
+      Memory.serialize_context_window(window)
     else
       window
     end
@@ -404,9 +404,9 @@ defmodule Arbor.Agent.CheckpointManager do
   defp maybe_restore_context_window(state, cw_map) when map_size(cw_map) == 0, do: state
 
   defp maybe_restore_context_window(state, cw_map) do
-    if Code.ensure_loaded?(ContextWindow) and
-         function_exported?(ContextWindow, :deserialize, 1) do
-      restored = ContextWindow.deserialize(cw_map)
+    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
+         function_exported?(Arbor.Memory.ContextWindow, :deserialize, 1) do
+      restored = Memory.deserialize_context_window(cw_map)
       %{state | context_window: restored}
     else
       state

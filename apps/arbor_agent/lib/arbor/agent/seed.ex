@@ -35,7 +35,6 @@ defmodule Arbor.Agent.Seed do
 
   alias Arbor.Common.SafeAtom
   alias Arbor.Memory
-  alias Arbor.Memory.{GoalStore, IntentStore, Preferences, SelfKnowledge, WorkingMemory}
 
   @seed_version 1
 
@@ -571,7 +570,7 @@ defmodule Arbor.Agent.Seed do
   defp capture_working_memory(agent_id) do
     case Memory.get_working_memory(agent_id) do
       nil -> nil
-      wm -> WorkingMemory.serialize(wm)
+      wm -> Memory.serialize_working_memory(wm)
     end
   rescue
     _ -> nil
@@ -589,7 +588,7 @@ defmodule Arbor.Agent.Seed do
   defp capture_self_knowledge(agent_id) do
     case Memory.get_self_knowledge(agent_id) do
       nil -> nil
-      sk -> SelfKnowledge.serialize(sk)
+      sk -> Memory.serialize_self_knowledge(sk)
     end
   rescue
     _ -> nil
@@ -598,27 +597,27 @@ defmodule Arbor.Agent.Seed do
   defp capture_preferences(agent_id) do
     case Memory.get_preferences(agent_id) do
       nil -> nil
-      prefs -> Preferences.serialize(prefs)
+      prefs -> Memory.serialize_preferences(prefs)
     end
   rescue
     _ -> nil
   end
 
   defp capture_goals(agent_id) do
-    GoalStore.export_all_goals(agent_id)
+    Memory.export_all_goals(agent_id)
   rescue
     _ -> []
   end
 
   defp capture_intents(agent_id, limit) do
-    IntentStore.recent_intents(agent_id, limit: limit)
+    Memory.recent_intents(agent_id, limit: limit)
     |> Enum.map(&safe_from_struct/1)
   rescue
     _ -> []
   end
 
   defp capture_percepts(agent_id, limit) do
-    IntentStore.recent_percepts(agent_id, limit: limit)
+    Memory.recent_percepts(agent_id, limit: limit)
     |> Enum.map(&safe_from_struct/1)
   rescue
     _ -> []
@@ -634,7 +633,7 @@ defmodule Arbor.Agent.Seed do
   defp restore_working_memory(_agent_id, nil), do: :ok
 
   defp restore_working_memory(agent_id, wm_map) do
-    wm = WorkingMemory.deserialize(wm_map)
+    wm = Memory.deserialize_working_memory(wm_map)
     Memory.save_working_memory(agent_id, wm)
   rescue
     e ->
@@ -655,7 +654,7 @@ defmodule Arbor.Agent.Seed do
   defp restore_preferences(_agent_id, nil), do: :ok
 
   defp restore_preferences(agent_id, prefs_map) do
-    prefs = Preferences.deserialize(prefs_map)
+    prefs = Memory.deserialize_preferences(prefs_map)
     Memory.save_preferences_for_agent(agent_id, prefs)
   rescue
     e ->
@@ -666,7 +665,7 @@ defmodule Arbor.Agent.Seed do
   defp restore_goals(_agent_id, []), do: :ok
 
   defp restore_goals(agent_id, goals) do
-    GoalStore.import_goals(agent_id, goals)
+    Memory.import_goals(agent_id, goals)
   rescue
     e ->
       Logger.warning("Failed to restore goals for #{agent_id}: #{inspect(e)}")

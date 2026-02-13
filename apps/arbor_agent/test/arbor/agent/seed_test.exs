@@ -3,7 +3,8 @@ defmodule Arbor.Agent.SeedTest do
 
   alias Arbor.Agent.Seed
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{GoalStore, KnowledgeGraph, Preferences, WorkingMemory}
+  alias Arbor.Memory
+  alias Arbor.Memory.{KnowledgeGraph, Preferences, WorkingMemory}
 
   @agent_id "test_seed_agent"
 
@@ -183,7 +184,7 @@ defmodule Arbor.Agent.SeedTest do
   describe "restore/2" do
     test "restores working_memory via Memory facade" do
       wm = WorkingMemory.new(@agent_id)
-      wm_map = WorkingMemory.serialize(wm)
+      wm_map = Memory.serialize_working_memory(wm)
 
       seed = %Seed{
         id: "seed_test",
@@ -236,14 +237,14 @@ defmodule Arbor.Agent.SeedTest do
 
       {:ok, _} = Seed.restore(seed)
 
-      {:ok, restored} = GoalStore.get_goal(@agent_id, "goal_test1")
+      {:ok, restored} = Memory.get_goal(@agent_id, "goal_test1")
       assert restored.description == "Restored goal"
       assert restored.priority == 75
     end
 
     test "skips subsystems in opts[:skip]" do
       wm = WorkingMemory.new(@agent_id)
-      wm_map = WorkingMemory.serialize(wm)
+      wm_map = Memory.serialize_working_memory(wm)
 
       seed = %Seed{
         id: "seed_test",
@@ -268,7 +269,7 @@ defmodule Arbor.Agent.SeedTest do
       {:ok, _} = Seed.restore(seed, skip: [:working_memory, :goals])
 
       assert Arbor.Memory.get_working_memory(@agent_id) == nil
-      assert GoalStore.get_goal(@agent_id, "goal_skip") == {:error, :not_found}
+      assert Memory.get_goal(@agent_id, "goal_skip") == {:error, :not_found}
     end
 
     test "handles nil subsystem snapshots gracefully" do
