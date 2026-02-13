@@ -133,13 +133,13 @@ defmodule Arbor.Gateway.MCP.Handler do
   def handle_call_tool("arbor_actions", args, state) do
     category = args["category"]
     result = list_actions(category)
-    {:ok, [%{type: "text", text: result}], state}
+    {:ok, %{content: [%{type: "text", text: result}]}, state}
   end
 
   def handle_call_tool("arbor_help", args, state) do
     action_name = args["action"]
     result = get_action_help(action_name)
-    {:ok, [%{type: "text", text: result}], state}
+    {:ok, %{content: [%{type: "text", text: result}]}, state}
   end
 
   def handle_call_tool("arbor_run", args, state) do
@@ -147,14 +147,14 @@ defmodule Arbor.Gateway.MCP.Handler do
     params = args["params"] || %{}
     agent_id = args["agent_id"]
     result = run_action(action_name, params, agent_id)
-    {:ok, [%{type: "text", text: result}], state}
+    {:ok, %{content: [%{type: "text", text: result}]}, state}
   end
 
   def handle_call_tool("arbor_status", args, state) do
     component = args["component"]
     agent_id = args["agent_id"]
     result = get_status(component, agent_id)
-    {:ok, [%{type: "text", text: result}], state}
+    {:ok, %{content: [%{type: "text", text: result}]}, state}
   end
 
   def handle_call_tool(name, _args, state) do
