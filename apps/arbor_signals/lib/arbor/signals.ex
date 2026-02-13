@@ -181,13 +181,19 @@ defmodule Arbor.Signals do
     restricted_topics = Arbor.Signals.Config.restricted_topics()
 
     if category in restricted_topics and data != %{} and not already_encrypted?(data) do
-      with {:ok, json} <- Jason.encode(data),
-           {:ok, encrypted} <- Arbor.Signals.TopicKeys.encrypt(category, json) do
-        %{signal | data: %{__encrypted__: true, payload: encrypted}}
-      else
-        {:error, _reason} ->
-          # If encryption fails, redact data rather than store plaintext
-          %{signal | data: %{__redacted__: true, reason: :encryption_failed}}
+      try do
+        with {:ok, json} <- Jason.encode(data),
+             {:ok, encrypted} <- Arbor.Signals.TopicKeys.encrypt(category, json) do
+          %{signal | data: %{__encrypted__: true, payload: encrypted}}
+        else
+          {:error, _reason} ->
+            # If encryption fails, redact data rather than store plaintext
+            %{signal | data: %{__redacted__: true, reason: :encryption_failed}}
+        end
+      catch
+        :exit, _ ->
+          # TopicKeys process not running — redact rather than crash
+          %{signal | data: %{__redacted__: true, reason: :encryption_unavailable}}
       end
     else
       signal
