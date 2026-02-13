@@ -29,6 +29,7 @@ defmodule Arbor.Orchestrator.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:req, "~> 0.5"},
       {:arbor_eval, in_umbrella: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

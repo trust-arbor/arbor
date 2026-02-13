@@ -380,7 +380,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         end
 
       _ ->
-        {:error, ErrorMapper.from_transport(config.provider, :no_http_client_configured)}
+        default_http_call(req, config)
     end
   end
 
@@ -393,9 +393,67 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         end
 
       _ ->
-        {:error, ErrorMapper.from_transport(config.provider, :no_stream_client_configured)}
+        default_stream_call(req, config)
     end
   end
+
+  defp default_http_call(req, config) do
+    Req.post(req.url,
+      headers: req.headers,
+      json: req.body,
+      receive_timeout: 60_000
+    )
+    |> case do
+      {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
+        {:ok,
+         normalize_response(%{status: status, body: body, headers: flatten_headers(headers)})}
+
+      {:error, reason} ->
+        {:error, ErrorMapper.from_transport(config.provider, reason)}
+    end
+  end
+
+  defp default_stream_call(req, config) do
+    # For streaming, use Req's async response which implements Enumerable
+    case Req.post(req.url,
+           headers: req.headers,
+           json: req.body,
+           into: :self,
+           receive_timeout: 120_000
+         ) do
+      {:ok, resp} ->
+        stream =
+          resp.body
+          |> Stream.flat_map(fn chunk ->
+            chunk
+            |> String.split("\n")
+            |> Enum.filter(&String.starts_with?(&1, "data: "))
+            |> Enum.flat_map(fn line ->
+              payload = String.trim_leading(line, "data: ")
+
+              if payload == "[DONE]" do
+                []
+              else
+                case Jason.decode(payload) do
+                  {:ok, parsed} -> [parsed]
+                  _ -> []
+                end
+              end
+            end)
+          end)
+
+        {:ok, stream}
+
+      {:error, reason} ->
+        {:error, ErrorMapper.from_transport(config.provider, reason)}
+    end
+  end
+
+  defp flatten_headers(headers) when is_map(headers) do
+    Enum.flat_map(headers, fn {k, vs} -> Enum.map(List.wrap(vs), &{k, &1}) end)
+  end
+
+  defp flatten_headers(headers) when is_list(headers), do: headers
 
   defp normalize_response(%{status: status} = response) do
     %{
