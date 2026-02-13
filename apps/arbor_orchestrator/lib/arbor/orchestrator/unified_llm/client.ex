@@ -33,20 +33,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   @default_client_key {__MODULE__, :default_client}
 
-  @default_model_catalog %{
-    "openai" => [
-      %{id: "gpt-5", family: "gpt-5", modalities: [:text, :tools]},
-      %{id: "gpt-5-mini", family: "gpt-5", modalities: [:text, :tools]}
-    ],
-    "anthropic" => [
-      %{id: "claude-opus-4-1", family: "claude-4", modalities: [:text, :tools]},
-      %{id: "claude-sonnet-4-0", family: "claude-4", modalities: [:text, :tools]}
-    ],
-    "gemini" => [
-      %{id: "gemini-2.5-pro", family: "gemini-2.5", modalities: [:text, :tools]},
-      %{id: "gemini-2.5-flash", family: "gemini-2.5", modalities: [:text, :tools]}
-    ]
+  # Mapping between our adapter string IDs and LLMDB atom provider IDs.
+  # Only providers where the names differ need entries.
+  @llmdb_provider_map %{
+    "openai" => :openai,
+    "anthropic" => :anthropic,
+    "gemini" => :google,
+    "zai" => :zai,
+    "zai_coding_plan" => :zai_coding_plan,
+    "openrouter" => :openrouter,
+    "xai" => :xai,
+    "lm_studio" => :lmstudio,
+    "ollama" => :ollama_cloud
   }
+
+  @llmdb_provider_reverse_map Map.new(@llmdb_provider_map, fn {k, v} -> {v, k} end)
 
   @type complete_middleware ::
           (Request.t(), (Request.t() -> {:ok, Response.t()} | {:error, term()}) ->
@@ -59,14 +60,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   @type t :: %__MODULE__{
           adapters: %{String.t() => module()},
           default_provider: String.t() | nil,
-          model_catalog: %{String.t() => [map()]},
+          model_catalog: :llmdb | %{String.t() => [map()]},
           middleware: [complete_middleware()],
           stream_middleware: [stream_middleware()]
         }
 
   defstruct adapters: %{},
             default_provider: nil,
-            model_catalog: @default_model_catalog,
+            model_catalog: :llmdb,
             middleware: [],
             stream_middleware: []
 
@@ -75,7 +76,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     %__MODULE__{
       adapters: Keyword.get(opts, :adapters, %{}),
       default_provider: Keyword.get(opts, :default_provider),
-      model_catalog: Keyword.get(opts, :model_catalog, @default_model_catalog),
+      model_catalog: Keyword.get(opts, :model_catalog, :llmdb),
       middleware: Keyword.get(opts, :middleware, []),
       stream_middleware: Keyword.get(opts, :stream_middleware, [])
     }
@@ -104,7 +105,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
           nil
       end
 
-    catalog = Keyword.get(opts, :model_catalog, @default_model_catalog)
+    catalog = Keyword.get(opts, :model_catalog, :llmdb)
 
     if default_provider in [nil, ""] and adapters == %{} do
       raise ConfigurationError,
@@ -150,20 +151,99 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   def list_models(%__MODULE__{} = client, opts \\ []) do
     provider = Keyword.get(opts, :provider)
 
-    if is_binary(provider) do
-      Map.get(client.model_catalog, provider, [])
-    else
-      client.model_catalog
-      |> Map.values()
-      |> List.flatten()
+    case client.model_catalog do
+      :llmdb ->
+        list_models_from_llmdb(provider, Map.keys(client.adapters))
+
+      catalog when is_map(catalog) ->
+        if is_binary(provider) do
+          Map.get(catalog, provider, [])
+        else
+          catalog |> Map.values() |> List.flatten()
+        end
     end
   end
 
   @spec get_model_info(t(), String.t()) :: {:ok, map()} | {:error, :model_not_found}
   def get_model_info(%__MODULE__{} = client, model_id) when is_binary(model_id) do
-    case Enum.find(list_models(client), &(&1.id == model_id)) do
-      nil -> {:error, :model_not_found}
-      model -> {:ok, model}
+    case client.model_catalog do
+      :llmdb ->
+        get_model_from_llmdb(model_id, Map.keys(client.adapters))
+
+      _catalog ->
+        case Enum.find(list_models(client), &(&1.id == model_id)) do
+          nil -> {:error, :model_not_found}
+          model -> {:ok, model}
+        end
+    end
+  end
+
+  @doc """
+  Select the best model matching capability requirements.
+
+  Uses LLMDB's capability-based selection when available. Options:
+
+      Client.select_model(client,
+        require: [chat: true, tools: true],
+        provider: "xai"
+      )
+
+  Returns `{:ok, %{provider: "xai", model: "grok-4-1-fast", info: %LLMDB.Model{}}}` or
+  `{:error, :no_matching_model}`.
+  """
+  @spec select_model(t(), keyword()) :: {:ok, map()} | {:error, :no_matching_model}
+  def select_model(%__MODULE__{} = client, opts \\ []) do
+    provider_filter = Keyword.get(opts, :provider)
+    require = Keyword.get(opts, :require, chat: true)
+    forbid = Keyword.get(opts, :forbid, [])
+
+    llmdb_opts = [require: require, forbid: forbid]
+
+    llmdb_opts =
+      if is_binary(provider_filter) do
+        case Map.get(@llmdb_provider_map, provider_filter) do
+          nil -> Keyword.put(llmdb_opts, :scope, :none)
+          llmdb_id -> Keyword.put(llmdb_opts, :scope, llmdb_id)
+        end
+      else
+        # Prefer providers we have adapters for
+        prefer =
+          client.adapters
+          |> Map.keys()
+          |> Enum.flat_map(fn name ->
+            case Map.get(@llmdb_provider_map, name) do
+              nil -> []
+              id -> [id]
+            end
+          end)
+
+        if prefer != [], do: Keyword.put(llmdb_opts, :prefer, prefer), else: llmdb_opts
+      end
+
+    cond do
+      Keyword.get(llmdb_opts, :scope) == :none ->
+        {:error, :no_matching_model}
+
+      not llmdb_available?() ->
+        {:error, :no_matching_model}
+
+      true ->
+        case llmdb_select(llmdb_opts) do
+          {:ok, {llmdb_provider, model_id}} ->
+            adapter_name =
+              Map.get(@llmdb_provider_reverse_map, llmdb_provider, to_string(llmdb_provider))
+
+            info =
+              case llmdb_model(llmdb_provider, model_id) do
+                {:ok, model} -> model
+                _ -> nil
+              end
+
+            {:ok, %{provider: adapter_name, model: model_id, info: info}}
+
+          _ ->
+            {:error, :no_matching_model}
+        end
     end
   end
 
@@ -685,6 +765,93 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       adapters
     end
   end
+
+  # --- LLMDB Integration ---
+  # LLMDB is a transitive dep (via req_llm) — use apply/3 to avoid compile warnings.
+
+  @llmdb_module LLMDB
+
+  defp llmdb_available? do
+    Code.ensure_loaded?(@llmdb_module)
+  end
+
+  defp llmdb_models(provider_id) do
+    apply(@llmdb_module, :models, [provider_id])
+  end
+
+  defp llmdb_model(provider_id, model_id) do
+    apply(@llmdb_module, :model, [provider_id, model_id])
+  end
+
+  defp llmdb_select(opts) do
+    apply(@llmdb_module, :select, [opts])
+  end
+
+  defp list_models_from_llmdb(provider, _adapter_keys) when is_binary(provider) do
+    if llmdb_available?() do
+      case Map.get(@llmdb_provider_map, provider) do
+        nil -> []
+        llmdb_id -> llmdb_models(llmdb_id) |> Enum.map(&model_to_map/1)
+      end
+    else
+      []
+    end
+  end
+
+  defp list_models_from_llmdb(nil, adapter_keys) do
+    if llmdb_available?() do
+      adapter_keys
+      |> Enum.flat_map(fn name ->
+        case Map.get(@llmdb_provider_map, name) do
+          nil -> []
+          llmdb_id -> llmdb_models(llmdb_id) |> Enum.map(&model_to_map/1)
+        end
+      end)
+    else
+      []
+    end
+  end
+
+  defp get_model_from_llmdb(model_id, adapter_keys) do
+    if llmdb_available?() do
+      result =
+        Enum.find_value(adapter_keys, fn name ->
+          case Map.get(@llmdb_provider_map, name) do
+            nil ->
+              nil
+
+            llmdb_id ->
+              case llmdb_model(llmdb_id, model_id) do
+                {:ok, model} -> {:ok, model_to_map(model)}
+                _ -> nil
+              end
+          end
+        end)
+
+      result || {:error, :model_not_found}
+    else
+      {:error, :model_not_found}
+    end
+  end
+
+  defp model_to_map(%{__struct__: _} = model) do
+    %{
+      id: model.id,
+      name: model.name,
+      family: model.family || get_in(Map.get(model, :extra, nil) || %{}, [:family]),
+      provider: to_string(Map.get(@llmdb_provider_reverse_map, model.provider, model.provider)),
+      capabilities: model.capabilities,
+      modalities: model.modalities,
+      cost: model.cost,
+      limits: model.limits,
+      deprecated: model.deprecated,
+      knowledge: model.knowledge,
+      release_date: model.release_date,
+      aliases: model.aliases || []
+    }
+  end
+
+  defp model_to_map(map) when is_map(map), do: map
 
   defp maybe_add_local(adapters, name, module) do
     if module.available?() do

@@ -199,8 +199,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ZaiTest do
     end
 
     test "error message references correct env var" do
-      {:error, error} = ZaiCodingPlan.complete(request(), [])
-      assert String.contains?(error.message, "ZAI_CODING_PLAN_API_KEY")
+      original = System.get_env("ZAI_CODING_PLAN_API_KEY")
+      if original, do: System.delete_env("ZAI_CODING_PLAN_API_KEY")
+
+      try do
+        {:error, error} = ZaiCodingPlan.complete(request(), [])
+        assert String.contains?(error.message, "ZAI_CODING_PLAN_API_KEY")
+      after
+        if original, do: System.put_env("ZAI_CODING_PLAN_API_KEY", original)
+      end
     end
 
     test "streams through coding plan endpoint" do
