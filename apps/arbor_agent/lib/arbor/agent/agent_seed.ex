@@ -61,13 +61,7 @@ defmodule Arbor.Agent.AgentSeed do
     TimingContext
   }
 
-  alias Arbor.Memory.BackgroundChecks
-  alias Arbor.Memory.ContextWindow
-  alias Arbor.Memory.IdentityConsolidator
-  alias Arbor.Memory.Proposal
-  alias Arbor.Memory.ReflectionProcessor
-  alias Arbor.Memory.SelfKnowledge
-  alias Arbor.Memory.WorkingMemory
+  alias Arbor.Memory
 
   # Constants
   @default_id "agent"
@@ -540,8 +534,8 @@ defmodule Arbor.Agent.AgentSeed do
   @doc false
   @spec background_checks_available?() :: boolean()
   def background_checks_available? do
-    Code.ensure_loaded?(BackgroundChecks) and
-      function_exported?(BackgroundChecks, :run, 2)
+    Code.ensure_loaded?(Arbor.Memory.BackgroundChecks) and
+      function_exported?(Arbor.Memory.BackgroundChecks, :run, 2)
   end
 
   @doc false
@@ -685,7 +679,7 @@ defmodule Arbor.Agent.AgentSeed do
           "I responded: #{String.slice(response, 0..200)}..."
 
       working_memory =
-        WorkingMemory.add_thought(
+        Arbor.Memory.WorkingMemory.add_thought(
           state.working_memory,
           thought,
           priority: :medium
@@ -749,13 +743,13 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp identity_consolidator_available?(fun, arity) do
-    Code.ensure_loaded?(IdentityConsolidator) and
-      function_exported?(IdentityConsolidator, fun, arity)
+    Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
+      function_exported?(Arbor.Memory.IdentityConsolidator, fun, arity)
   end
 
   defp fetch_self_knowledge(agent_id) do
     agent_id
-    |> IdentityConsolidator.get_self_knowledge()
+    |> Memory.get_self_knowledge()
     |> format_self_knowledge()
   rescue
     _ -> nil
@@ -766,7 +760,7 @@ defmodule Arbor.Agent.AgentSeed do
   defp format_self_knowledge(nil), do: nil
 
   defp format_self_knowledge(sk) do
-    case SelfKnowledge.summarize(sk) do
+    case Memory.summarize_self_knowledge(sk) do
       summary when summary != "" and not is_nil(summary) ->
         "## Self-Awareness\n#{summary}"
 
@@ -782,12 +776,12 @@ defmodule Arbor.Agent.AgentSeed do
   defp add_to_context_window(%{context_window: nil} = state, _prompt, _response), do: state
 
   defp add_to_context_window(%{context_window: window} = state, prompt, response) do
-    if Code.ensure_loaded?(ContextWindow) and
-         function_exported?(ContextWindow, :add_entry, 3) do
+    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
+         function_exported?(Arbor.Memory.ContextWindow, :add_entry, 3) do
       window =
         window
-        |> ContextWindow.add_entry(:message, "Human: #{prompt}")
-        |> ContextWindow.add_entry(:message, "Assistant: #{response}")
+        |> Memory.add_context_entry(:message, "Human: #{prompt}")
+        |> Memory.add_context_entry(:message, "Assistant: #{response}")
 
       %{state | context_window: window}
     else
@@ -1107,33 +1101,33 @@ defmodule Arbor.Agent.AgentSeed do
 
   defp execute_proposal_action(agent_id, proposal_id, :accept, _reason) do
     # Get the proposal first to check its type and metadata
-    case Proposal.get(agent_id, proposal_id) do
+    case Memory.get_proposal(agent_id, proposal_id) do
       {:ok, proposal} ->
         # Accept the proposal (marks it in ETS)
-        Proposal.accept(agent_id, proposal_id)
+        Memory.accept_proposal(agent_id, proposal_id)
 
         # Type-specific post-acceptance handling
         apply_accepted_proposal(agent_id, proposal)
 
       _ ->
-        Proposal.accept(agent_id, proposal_id)
+        Memory.accept_proposal(agent_id, proposal_id)
     end
   end
 
   defp execute_proposal_action(agent_id, proposal_id, :reject, reason) do
     opts = if reason, do: [reason: reason], else: []
-    Proposal.reject(agent_id, proposal_id, opts)
+    Memory.reject_proposal(agent_id, proposal_id, opts)
   end
 
   defp execute_proposal_action(agent_id, proposal_id, :defer, _reason),
-    do: Proposal.defer(agent_id, proposal_id)
+    do: Memory.defer_proposal(agent_id, proposal_id)
 
   defp execute_proposal_action(_agent_id, _proposal_id, _action, _reason), do: :ok
 
   defp apply_accepted_proposal(agent_id, %{type: :identity, metadata: metadata})
        when is_map(metadata) do
     safe_memory_call(fn ->
-      IdentityConsolidator.apply_accepted_change(agent_id, metadata)
+      Memory.apply_accepted_change(agent_id, metadata)
     end)
   end
 
@@ -1357,7 +1351,7 @@ defmodule Arbor.Agent.AgentSeed do
 
       updated_wm =
         Enum.reduce(notes, wm, fn note, acc ->
-          WorkingMemory.add_thought(
+          Arbor.Memory.WorkingMemory.add_thought(
             acc,
             "[hb] #{String.slice(note, 0..120)}",
             priority: :low
@@ -1371,7 +1365,7 @@ defmodule Arbor.Agent.AgentSeed do
   defp run_background_checks(state) do
     if background_checks_available?() do
       action_history = gather_action_history(state)
-      result = BackgroundChecks.run(state.id, action_history: action_history)
+      result = Memory.run_background_checks(state.id, action_history: action_history)
 
       Enum.each(result.warnings, fn warning ->
         Logger.info("Background check warning: #{warning.message}",
@@ -1478,7 +1472,7 @@ defmodule Arbor.Agent.AgentSeed do
       safe_memory_call(fn ->
         wm =
           state.working_memory
-          |> WorkingMemory.add_curiosity(
+          |> Arbor.Memory.WorkingMemory.add_curiosity(
             "[hb] [#{suggestion[:type]}] #{summary}",
             max_curiosity: 5
           )
@@ -1498,7 +1492,7 @@ defmodule Arbor.Agent.AgentSeed do
     if identity_consolidator_available?(:consolidate, 2) do
       safe_memory_call(fn ->
         handle_consolidation_result(
-          IdentityConsolidator.consolidate(agent_id),
+          Memory.consolidate_identity(agent_id),
           agent_id,
           heartbeat_count
         )
@@ -1531,7 +1525,7 @@ defmodule Arbor.Agent.AgentSeed do
     if reflection_processor_available?() do
       safe_memory_call(fn ->
         handle_reflection_result(
-          ReflectionProcessor.periodic_reflection(agent_id),
+          Memory.periodic_reflection(agent_id),
           agent_id,
           heartbeat_count
         )
@@ -1540,8 +1534,8 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp reflection_processor_available? do
-    Code.ensure_loaded?(ReflectionProcessor) and
-      function_exported?(ReflectionProcessor, :periodic_reflection, 1)
+    Code.ensure_loaded?(Arbor.Memory.ReflectionProcessor) and
+      function_exported?(Arbor.Memory.ReflectionProcessor, :periodic_reflection, 1)
   end
 
   defp handle_reflection_result({:ok, reflection}, agent_id, heartbeat_count) do

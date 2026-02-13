@@ -115,7 +115,6 @@ defmodule Arbor.Gateway.Memory.Router do
   alias Arbor.Common.SafeAtom
   alias Arbor.Gateway.Schemas
   alias Arbor.Memory
-  alias Arbor.Memory.WorkingMemory
 
   require Logger
 
@@ -184,7 +183,7 @@ defmodule Arbor.Gateway.Memory.Router do
         json_response(conn, 404, %{status: "error", reason: "No working memory found"})
 
       wm ->
-        json_response(conn, 200, %{status: "ok", working_memory: WorkingMemory.serialize(wm)})
+        json_response(conn, 200, %{status: "ok", working_memory: Memory.serialize_working_memory(wm)})
     end
   end
 
@@ -194,7 +193,7 @@ defmodule Arbor.Gateway.Memory.Router do
       {:ok, validated} ->
         # Ensure agent_id in data matches the URL
         wm_data = Map.put(validated["working_memory"], "agent_id", agent_id)
-        wm = WorkingMemory.deserialize(wm_data)
+        wm = Memory.deserialize_working_memory(wm_data)
         Memory.save_working_memory(agent_id, wm)
         json_response(conn, 200, %{status: "ok"})
 

@@ -2,7 +2,7 @@ defmodule Arbor.Agent.HeartbeatLoopTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.HeartbeatLoop
-  alias Arbor.Memory.ContextWindow
+  alias Arbor.Memory
 
   # A test agent module that uses HeartbeatLoop
   defmodule TestAgent do
@@ -225,7 +225,7 @@ defmodule Arbor.Agent.HeartbeatLoopTest do
     test "processes pending messages with context window" do
       # Only works when ContextWindow module is available
       if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
-        window = ContextWindow.new("test")
+        window = Memory.new_context_window("test")
 
         state = %{
           pending_messages: [{"hello", [speaker: "User"]}],

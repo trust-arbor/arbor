@@ -2,7 +2,7 @@ defmodule Arbor.Agent.ContextManagerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.ContextManager
-  alias Arbor.Memory.ContextWindow
+  alias Arbor.Memory
 
   # Use a temp directory for test persistence
   @test_dir System.tmp_dir!() |> Path.join("arbor_context_manager_test_#{:rand.uniform(10_000)}")
@@ -30,7 +30,7 @@ defmodule Arbor.Agent.ContextManagerTest do
       {:ok, window} =
         ContextManager.init_context("preset-test-#{:rand.uniform(10_000)}", preset: :conservative)
 
-      if is_struct(window, ContextWindow) do
+      if is_struct(window, Arbor.Memory.ContextWindow) do
         assert window.max_tokens == 5_000
       end
     end
@@ -41,16 +41,16 @@ defmodule Arbor.Agent.ContextManagerTest do
       # Create and save a context window
       {:ok, window} = ContextManager.init_context(agent_id)
 
-      if Code.ensure_loaded?(ContextWindow) do
-        window = ContextWindow.add_entry(window, :message, "Hello")
+      if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
+        window = Memory.add_context_entry(window, :message, "Hello")
         :ok = ContextManager.save_context(agent_id, window)
 
         # Restore it
         {:ok, restored} = ContextManager.init_context(agent_id)
         assert restored != nil
 
-        if is_struct(restored, ContextWindow) do
-          assert ContextWindow.entry_count(restored) == 1
+        if is_struct(restored, Arbor.Memory.ContextWindow) do
+          assert Memory.context_entry_count(restored) == 1
         end
       end
     end
@@ -61,7 +61,7 @@ defmodule Arbor.Agent.ContextManagerTest do
       window = ContextManager.create_context("test-agent", :balanced)
       assert window != nil
 
-      if is_struct(window, ContextWindow) do
+      if is_struct(window, Arbor.Memory.ContextWindow) do
         assert window.max_tokens == 10_000
         assert window.summary_threshold == 0.7
       end
@@ -70,7 +70,7 @@ defmodule Arbor.Agent.ContextManagerTest do
     test "creates conservative context" do
       window = ContextManager.create_context("test-agent", :conservative)
 
-      if is_struct(window, ContextWindow) do
+      if is_struct(window, Arbor.Memory.ContextWindow) do
         assert window.max_tokens == 5_000
         assert window.summary_threshold == 0.6
       end
@@ -79,7 +79,7 @@ defmodule Arbor.Agent.ContextManagerTest do
     test "creates expansive context" do
       window = ContextManager.create_context("test-agent", :expansive)
 
-      if is_struct(window, ContextWindow) do
+      if is_struct(window, Arbor.Memory.ContextWindow) do
         assert window.max_tokens == 50_000
         assert window.summary_threshold == 0.8
       end
@@ -88,7 +88,7 @@ defmodule Arbor.Agent.ContextManagerTest do
     test "opts override preset values" do
       window = ContextManager.create_context("test-agent", :balanced, max_tokens: 99_999)
 
-      if is_struct(window, ContextWindow) do
+      if is_struct(window, Arbor.Memory.ContextWindow) do
         assert window.max_tokens == 99_999
       end
     end
@@ -98,16 +98,16 @@ defmodule Arbor.Agent.ContextManagerTest do
     test "round-trips context through JSON" do
       agent_id = "roundtrip-#{:rand.uniform(10_000)}"
 
-      if Code.ensure_loaded?(ContextWindow) do
-        window = ContextWindow.new(agent_id, max_tokens: 5_000)
-        window = ContextWindow.add_entry(window, :message, "Test entry 1")
-        window = ContextWindow.add_entry(window, :message, "Test entry 2")
+      if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
+        window = Memory.new_context_window(agent_id, max_tokens: 5_000)
+        window = Memory.add_context_entry(window, :message, "Test entry 1")
+        window = Memory.add_context_entry(window, :message, "Test entry 2")
 
         assert :ok = ContextManager.save_context(agent_id, window)
         assert {:ok, restored} = ContextManager.restore_context(agent_id)
 
-        assert is_struct(restored, ContextWindow)
-        assert ContextWindow.entry_count(restored) == 2
+        assert is_struct(restored, Arbor.Memory.ContextWindow)
+        assert Memory.context_entry_count(restored) == 2
         assert restored.max_tokens == 5_000
       end
     end
@@ -143,9 +143,9 @@ defmodule Arbor.Agent.ContextManagerTest do
     end
 
     test "delegates to ContextWindow.should_summarize?" do
-      if Code.ensure_loaded?(ContextWindow) do
+      if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
         # A fresh window with no entries should not need compression
-        window = ContextWindow.new("test")
+        window = Memory.new_context_window("test")
         refute ContextManager.should_compress?(window)
       end
     end
