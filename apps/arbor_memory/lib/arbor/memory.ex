@@ -53,6 +53,7 @@ defmodule Arbor.Memory do
     Bridge,
     CodeStore,
     Consolidation,
+    ContextWindow,
     DurableStore,
     Embedding,
     Events,
@@ -752,6 +753,80 @@ defmodule Arbor.Memory do
   end
 
   # ============================================================================
+  # Working Memory Serialization
+  # ============================================================================
+
+  @doc """
+  Serialize a working memory struct to a JSON-safe map.
+  """
+  @spec serialize_working_memory(WorkingMemory.t()) :: map()
+  defdelegate serialize_working_memory(wm), to: WorkingMemory, as: :serialize
+
+  @doc """
+  Deserialize a map back into a WorkingMemory struct.
+  """
+  @spec deserialize_working_memory(map()) :: WorkingMemory.t()
+  defdelegate deserialize_working_memory(data), to: WorkingMemory, as: :deserialize
+
+  # ============================================================================
+  # Context Window
+  # ============================================================================
+
+  @doc """
+  Create a new context window for an agent.
+
+  ## Options
+
+  - `:max_tokens` — Maximum tokens (default: 10_000)
+  - `:summary_threshold` — Threshold for summarization (default: 0.7)
+  - `:preset` — Preset name (:balanced, :conservative, :expansive)
+  """
+  @spec new_context_window(String.t(), keyword()) :: ContextWindow.t()
+  defdelegate new_context_window(agent_id, opts \\ []), to: ContextWindow, as: :new
+
+  @doc """
+  Add an entry to a context window.
+
+  ## Entry Types
+
+  - `:message` — Conversation message
+  - `:system` — System prompt section
+  - `:summary` — Summarized content
+  """
+  @spec add_context_entry(ContextWindow.t(), atom(), String.t()) :: ContextWindow.t()
+  defdelegate add_context_entry(window, type, content), to: ContextWindow, as: :add_entry
+
+  @doc """
+  Serialize a context window to a JSON-safe map.
+  """
+  @spec serialize_context_window(ContextWindow.t()) :: map()
+  defdelegate serialize_context_window(window), to: ContextWindow, as: :serialize
+
+  @doc """
+  Deserialize a map back into a ContextWindow struct.
+  """
+  @spec deserialize_context_window(map()) :: ContextWindow.t()
+  defdelegate deserialize_context_window(data), to: ContextWindow, as: :deserialize
+
+  @doc """
+  Check if a context window should be summarized based on token usage.
+  """
+  @spec context_should_summarize?(ContextWindow.t()) :: boolean()
+  defdelegate context_should_summarize?(window), to: ContextWindow, as: :should_summarize?
+
+  @doc """
+  Get the number of entries in a context window.
+  """
+  @spec context_entry_count(ContextWindow.t()) :: non_neg_integer()
+  defdelegate context_entry_count(window), to: ContextWindow, as: :entry_count
+
+  @doc """
+  Convert a context window to formatted prompt text.
+  """
+  @spec context_to_prompt_text(ContextWindow.t()) :: String.t()
+  defdelegate context_to_prompt_text(window), to: ContextWindow, as: :to_prompt_text
+
+  # ============================================================================
   # Retrieval (Phase 2)
   # ============================================================================
 
@@ -1163,6 +1238,16 @@ defmodule Arbor.Memory do
   # ============================================================================
 
   @doc """
+  Get a specific proposal by ID.
+
+  ## Examples
+
+      {:ok, proposal} = Arbor.Memory.get_proposal("agent_001", "prop_abc123")
+  """
+  @spec get_proposal(String.t(), String.t()) :: {:ok, Proposal.t()} | {:error, :not_found}
+  defdelegate get_proposal(agent_id, proposal_id), to: Proposal, as: :get
+
+  @doc """
   Create a proposal for agent review.
 
   ## Types
@@ -1364,6 +1449,18 @@ defmodule Arbor.Memory do
   defdelegate get_self_knowledge(agent_id), to: IdentityConsolidator
 
   @doc """
+  Serialize a SelfKnowledge struct to a JSON-safe map.
+  """
+  @spec serialize_self_knowledge(SelfKnowledge.t()) :: map()
+  defdelegate serialize_self_knowledge(sk), to: SelfKnowledge, as: :serialize
+
+  @doc """
+  Get a human-readable summary of self-knowledge for prompt injection.
+  """
+  @spec summarize_self_knowledge(SelfKnowledge.t()) :: String.t()
+  defdelegate summarize_self_knowledge(sk), to: SelfKnowledge, as: :summarize
+
+  @doc """
   Add a self-insight for an agent.
 
   Maps category to the appropriate SelfKnowledge function:
@@ -1445,6 +1542,14 @@ defmodule Arbor.Memory do
   # ============================================================================
   # Identity Consolidation (Phase 5)
   # ============================================================================
+
+  @doc """
+  Apply an accepted identity change from a proposal.
+
+  Called after the LLM accepts an identity-type proposal.
+  """
+  @spec apply_accepted_change(String.t(), map()) :: :ok | {:error, term()}
+  defdelegate apply_accepted_change(agent_id, metadata), to: IdentityConsolidator
 
   @doc """
   Run identity consolidation for an agent.
@@ -1604,6 +1709,18 @@ defmodule Arbor.Memory do
   end
 
   @doc """
+  Serialize a Preferences struct to a JSON-safe map.
+  """
+  @spec serialize_preferences(Preferences.t()) :: map()
+  defdelegate serialize_preferences(prefs), to: Preferences, as: :serialize
+
+  @doc """
+  Deserialize a map back into a Preferences struct.
+  """
+  @spec deserialize_preferences(map()) :: Preferences.t()
+  defdelegate deserialize_preferences(data), to: Preferences, as: :deserialize
+
+  @doc """
   Get a summary of current preferences and usage.
 
   ## Examples
@@ -1674,6 +1791,15 @@ defmodule Arbor.Memory do
   # ============================================================================
   # Reflection (Phase 5)
   # ============================================================================
+
+  @doc """
+  Run a periodic reflection cycle for an agent.
+
+  Gathers recent activity, generates a reflection prompt, and
+  creates proposals from any insights found.
+  """
+  @spec periodic_reflection(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate periodic_reflection(agent_id), to: ReflectionProcessor
 
   @doc """
   Perform a structured reflection with a specific prompt.
@@ -1840,6 +1966,22 @@ defmodule Arbor.Memory do
   def add_goal_note(agent_id, goal_id, note) do
     GoalStore.add_note(agent_id, goal_id, note)
   end
+
+  @doc """
+  Export all goals for an agent as serializable maps.
+
+  Used by Seed capture to snapshot goal state.
+  """
+  @spec export_all_goals(String.t()) :: [map()]
+  defdelegate export_all_goals(agent_id), to: GoalStore
+
+  @doc """
+  Import goals from serializable maps.
+
+  Used by Seed restore to restore goal state.
+  """
+  @spec import_goals(String.t(), [map()]) :: :ok
+  defdelegate import_goals(agent_id, goal_maps), to: GoalStore
 
   @doc """
   Get the goal tree starting from a given goal (with children hierarchy).
