@@ -258,6 +258,9 @@ defmodule Arbor.Actions do
       ],
       cli_agent: [
         Arbor.Actions.CliAgent.Execute
+      ],
+      background_checks: [
+        Arbor.Actions.BackgroundChecks.Run
       ]
     }
   end
