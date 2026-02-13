@@ -275,11 +275,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         {events, new_acc}
 
       # Reasoning content delta (Z.ai, DeepSeek)
-      is_binary(Map.get(delta, "reasoning_content")) ->
+      is_binary(Map.get(delta, "reasoning_content")) and
+          Map.get(delta, "reasoning_content") != "" ->
         evt = %StreamEvent{
-          type: :delta,
+          type: :thinking_delta,
           data: %{
-            "thinking" => delta["reasoning_content"],
+            "text" => delta["reasoning_content"],
             "raw" => raw
           }
         }
