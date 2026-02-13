@@ -86,7 +86,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   describe "arbor_actions" do
     test "lists all categories with no filter", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{}, state)
 
       assert text =~ "# Arbor Actions"
@@ -96,7 +96,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "filters to a specific category", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{"category" => "shell"}, state)
 
       assert text =~ "shell"
@@ -104,7 +104,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "returns error for unknown category", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{"category" => "nonexistent_xyz"}, state)
 
       assert text =~ "Unknown category"
@@ -118,7 +118,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   describe "arbor_help" do
     test "returns schema for known action", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_help", %{"action" => "shell_execute"}, state)
 
       assert text =~ "# shell_execute"
@@ -128,7 +128,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "returns schema for file action", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_help", %{"action" => "file_exists"}, state)
 
       assert text =~ "# file_exists"
@@ -137,7 +137,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "returns not found for unknown action", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_help", %{"action" => "totally_fake_action"}, state)
 
       assert text =~ "not found"
@@ -145,7 +145,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "shows category and tags", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_help", %{"action" => "shell_execute"}, state)
 
       assert text =~ "## Category:"
@@ -159,7 +159,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   describe "arbor_run" do
     test "executes file_exists action successfully", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{"action" => "file_exists", "params" => %{"path" => "/tmp"}},
@@ -171,7 +171,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "handles action not found", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{"action" => "nonexistent_action", "params" => %{}},
@@ -182,7 +182,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "handles missing params gracefully", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{"action" => "file_exists"},
@@ -200,7 +200,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   describe "arbor_status" do
     test "overview returns structured status", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "overview"}, state)
 
       assert text =~ "# Arbor System Status"
@@ -210,21 +210,21 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "agents component works", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "agents"}, state)
 
       assert text =~ "Agent" or text =~ "running" or text =~ "unavailable"
     end
 
     test "signals component works", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "signals"}, state)
 
       assert text =~ "Signal"
     end
 
     test "unknown component returns helpful message", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "foobar"}, state)
 
       assert text =~ "Unknown component"
@@ -233,7 +233,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "memory component returns status", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "memory"}, state)
 
       # Might be "No agent running" or actual memory data
@@ -241,14 +241,14 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     test "goals component returns status", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "goals"}, state)
 
       assert is_binary(text) and byte_size(text) > 0
     end
 
     test "capabilities component returns status", %{state: state} do
-      {:ok, [%{type: "text", text: text}], _state} =
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_status", %{"component" => "capabilities"}, state)
 
       assert is_binary(text) and byte_size(text) > 0

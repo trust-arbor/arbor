@@ -3,13 +3,16 @@ defmodule Arbor.Security.Application do
 
   use Application
 
+  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
+  @buffered_store Arbor.Persistence.BufferedStore
+
   @impl true
   def start(_type, _args) do
     children =
       if Application.get_env(:arbor_security, :start_children, true) do
         [
           Supervisor.child_spec(
-            {Arbor.Persistence.BufferedStore,
+            {@buffered_store,
              name: :arbor_security_capabilities,
              backend: security_backend(),
              write_mode: :sync,
@@ -17,7 +20,7 @@ defmodule Arbor.Security.Application do
             id: :arbor_security_capabilities
           ),
           Supervisor.child_spec(
-            {Arbor.Persistence.BufferedStore,
+            {@buffered_store,
              name: :arbor_security_identities,
              backend: security_backend(),
              write_mode: :sync,
