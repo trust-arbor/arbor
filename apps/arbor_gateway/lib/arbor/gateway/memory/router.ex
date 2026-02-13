@@ -183,7 +183,10 @@ defmodule Arbor.Gateway.Memory.Router do
         json_response(conn, 404, %{status: "error", reason: "No working memory found"})
 
       wm ->
-        json_response(conn, 200, %{status: "ok", working_memory: Memory.serialize_working_memory(wm)})
+        json_response(conn, 200, %{
+          status: "ok",
+          working_memory: Memory.serialize_working_memory(wm)
+        })
     end
   end
 
