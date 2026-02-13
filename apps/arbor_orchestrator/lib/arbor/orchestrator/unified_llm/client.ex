@@ -20,6 +20,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Anthropic,
     Gemini,
+    LMStudio,
+    Ollama,
     OpenAI,
     OpenRouter,
     XAI,
@@ -646,12 +648,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
         if adapter, do: Map.put(acc, provider, adapter), else: acc
       end)
 
-    if Keyword.get(opts, :discover_cli, true) do
-      api_adapters
-      |> maybe_add_claude_cli()
-      |> maybe_add_arborcli()
+    adapters =
+      if Keyword.get(opts, :discover_cli, true) do
+        api_adapters
+        |> maybe_add_claude_cli()
+        |> maybe_add_arborcli()
+      else
+        api_adapters
+      end
+
+    if Keyword.get(opts, :discover_local, true) do
+      adapters
+      |> maybe_add_local("lm_studio", LMStudio)
+      |> maybe_add_local("ollama", Ollama)
     else
-      api_adapters
+      adapters
     end
   end
 
@@ -670,6 +681,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
     if Code.ensure_loaded?(arborcli_mod) and arborcli_mod.available?() do
       Map.put(adapters, "arborcli", arborcli_mod)
+    else
+      adapters
+    end
+  end
+
+  defp maybe_add_local(adapters, name, module) do
+    if module.available?() do
+      Map.put(adapters, name, module)
     else
       adapters
     end
