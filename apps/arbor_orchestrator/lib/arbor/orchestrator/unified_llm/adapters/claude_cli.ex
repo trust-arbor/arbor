@@ -25,6 +25,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
 
   @session_vars_to_clear ~w(
     CLAUDE_CODE_ENTRYPOINT CLAUDE_SESSION_ID CLAUDE_CONFIG_DIR
+    CLAUDECODE
     ARBOR_SDLC_SESSION_ID ARBOR_SDLC_ITEM_PATH ARBOR_SESSION_TYPE
   )
 

@@ -19,8 +19,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       "last_stage" => node.id,
       "last_prompt" => prompt,
       "context.previous_outcome" => Arbor.Orchestrator.Engine.Context.get(context, "outcome"),
-      "llm.model" => Map.get(node.attrs, "llm_model"),
-      "llm.provider" => Map.get(node.attrs, "llm_provider"),
+      "llm.model" => Map.get(node.attrs, "llm_model") || Map.get(node.attrs, "model"),
+      "llm.provider" => Map.get(node.attrs, "llm_provider") || Map.get(node.attrs, "handler"),
       "llm.reasoning_effort" => Map.get(node.attrs, "reasoning_effort"),
       "score" => parse_score(Map.get(node.attrs, "score"))
     }
@@ -130,8 +130,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     user_content = prompt <> previous_outcome
 
     request = %Request{
-      provider: Map.get(node.attrs, "llm_provider"),
-      model: Map.get(node.attrs, "llm_model"),
+      provider: Map.get(node.attrs, "llm_provider") || Map.get(node.attrs, "handler"),
+      model: Map.get(node.attrs, "llm_model") || Map.get(node.attrs, "model"),
       messages: [
         Message.new(:system, system_content),
         Message.new(:user, user_content)

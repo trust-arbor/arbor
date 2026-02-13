@@ -185,6 +185,41 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [port("content_key", :string, :internal)],
           [port("file.written", :string, :internal)]
         ),
+      "output.validate" =>
+        schema(
+          "output.validate",
+          [],
+          [
+            "source_key",
+            "format",
+            "max_length",
+            "min_length",
+            "must_contain",
+            "must_not_contain",
+            "json_schema",
+            "pattern",
+            "action"
+          ],
+          %{
+            "source_key" => :string,
+            "format" => :string,
+            "max_length" => :integer,
+            "min_length" => :integer,
+            "must_contain" => :string,
+            "must_not_contain" => :string,
+            "json_schema" => :string,
+            "pattern" => :string,
+            "action" => :string
+          },
+          [],
+          :public,
+          [port("source_key", :string, :public)],
+          [
+            port("validate.passed", :boolean, :public),
+            port("validate.errors", :any, :public),
+            port("validate.format", :string, :public)
+          ]
+        ),
       "pipeline.validate" =>
         schema(
           "pipeline.validate",
