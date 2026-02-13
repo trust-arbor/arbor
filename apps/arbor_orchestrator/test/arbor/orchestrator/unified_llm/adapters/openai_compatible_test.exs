@@ -443,9 +443,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       {:ok, stream} = OpenAICompatible.stream(request(), opts, @test_config)
       collected = Enum.to_list(stream)
 
-      deltas = Enum.filter(collected, &(&1.type == :delta))
-      thinking = Enum.find(deltas, &Map.has_key?(&1.data, "thinking"))
-      assert thinking.data["thinking"] == "Thinking..."
+      thinking_deltas = Enum.filter(collected, &(&1.type == :thinking_delta))
+      assert [%{data: %{"text" => "Thinking..."}}] = thinking_deltas
     end
 
     test "returns error for missing stream_client" do
