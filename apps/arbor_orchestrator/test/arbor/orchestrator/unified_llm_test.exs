@@ -187,7 +187,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
       },
       fn ->
         assert_raise ConfigurationError, fn ->
-          Client.from_env(discover_cli: false)
+          Client.from_env(discover_cli: false, discover_local: false)
         end
       end
     )
@@ -217,7 +217,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         "GEMINI_API_KEY" => nil
       },
       fn ->
-        client = Client.from_env(discover_cli: false)
+        client = Client.from_env(discover_cli: false, discover_local: false)
         assert client.default_provider == "openai"
         assert Map.has_key?(client.adapters, "openai")
       end
