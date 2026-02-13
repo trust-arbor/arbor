@@ -17,7 +17,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     ToolError
   }
 
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI, Zai, ZaiCodingPlan}
+  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
+    Anthropic,
+    Gemini,
+    OpenAI,
+    OpenRouter,
+    Zai,
+    ZaiCodingPlan
+  }
+
   alias Arbor.Orchestrator.ToolHooks
 
   @default_client_key {__MODULE__, :default_client}
@@ -611,7 +619,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       {"anthropic", System.get_env("ANTHROPIC_API_KEY")},
       {"gemini", System.get_env("GEMINI_API_KEY")},
       {"zai", System.get_env("ZAI_API_KEY")},
-      {"zai_coding_plan", System.get_env("ZAI_CODING_PLAN_API_KEY")}
+      {"zai_coding_plan", System.get_env("ZAI_CODING_PLAN_API_KEY")},
+      {"openrouter", System.get_env("OPENROUTER_API_KEY")}
     ]
     |> Enum.filter(fn {_provider, value} -> is_binary(value) and value != "" end)
   end
@@ -627,6 +636,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
             "gemini" -> Gemini
             "zai" -> Zai
             "zai_coding_plan" -> ZaiCodingPlan
+            "openrouter" -> OpenRouter
             _ -> nil
           end
 
