@@ -248,7 +248,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       assert [%{name: "get_weather", id: "call_abc", arguments: %{"city" => "NYC"}}] = tool_parts
     end
 
-    test "parses response with reasoning_content (Z.ai/DeepSeek)" do
+    test "ignores reasoning_content without parse_message hook" do
       response_body = %{
         status: 200,
         body: %{
@@ -268,11 +268,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       }
 
       opts = mock_http(response_body)
+      # Without a parse_message hook, reasoning_content is ignored
       {:ok, response} = OpenAICompatible.complete(request(), opts, @test_config)
 
       assert response.text == "The answer is 42."
       thinking_parts = Enum.filter(response.content_parts, &(&1.kind == :thinking))
-      assert [%{text: "Let me think step by step..."}] = thinking_parts
+      assert thinking_parts == []
     end
 
     test "handles HTTP error response" do
@@ -428,7 +429,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       assert [%{data: %{"reason" => :tool_calls}}] = finishes
     end
 
-    test "handles reasoning_content delta (Z.ai thinking)" do
+    test "ignores reasoning_content delta without parse_delta hook" do
       events = [
         %{
           "choices" => [
@@ -440,11 +441,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       ]
 
       opts = mock_stream(events)
+      # Without a parse_delta hook, reasoning_content deltas are skipped
       {:ok, stream} = OpenAICompatible.stream(request(), opts, @test_config)
       collected = Enum.to_list(stream)
 
       thinking_deltas = Enum.filter(collected, &(&1.type == :thinking_delta))
-      assert [%{data: %{"text" => "Thinking..."}}] = thinking_deltas
+      assert thinking_deltas == []
+      # Only text delta and finish
+      deltas = Enum.filter(collected, &(&1.type == :delta))
+      assert [%{data: %{"text" => "Answer"}}] = deltas
     end
 
     test "returns error for missing stream_client" do

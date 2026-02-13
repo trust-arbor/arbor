@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   For coding-specific workloads with a coding plan subscription,
   use the ZaiCodingPlan adapter instead.
 
-  Supports GLM models (4.5 through 4.7) with OpenAI-compatible
+  Supports GLM models (4.5 through 5) with OpenAI-compatible
   Chat Completions format. Includes thinking mode support via
   the reasoning_content response field.
   """
@@ -16,14 +16,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.Request
+  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Request, StreamEvent}
 
   @config %{
     provider: "zai",
     base_url: "https://api.z.ai/api/paas/v4",
     api_key_env: "ZAI_API_KEY",
     chat_path: "/chat/completions",
-    extra_headers: nil
+    extra_headers: nil,
+    parse_message: &__MODULE__.parse_reasoning_message/1,
+    parse_delta: &__MODULE__.parse_reasoning_delta/2
   }
 
   @impl true
@@ -38,4 +40,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   def stream(%Request{} = request, opts) do
     OpenAICompatible.stream(request, opts, @config)
   end
+
+  # --- Z.ai-specific: reasoning_content support ---
+
+  @doc false
+  def parse_reasoning_message(%{"reasoning_content" => reasoning} = msg)
+      when is_binary(reasoning) and reasoning != "" do
+    content = Map.get(msg, "content")
+    parts = [ContentPart.thinking(reasoning)]
+    if is_binary(content) and content != "", do: parts ++ [ContentPart.text(content)], else: parts
+  end
+
+  def parse_reasoning_message(_), do: nil
+
+  @doc false
+  def parse_reasoning_delta(%{"reasoning_content" => text}, raw)
+      when is_binary(text) and text != "" do
+    %StreamEvent{
+      type: :thinking_delta,
+      data: %{"text" => text, "raw" => raw}
+    }
+  end
+
+  def parse_reasoning_delta(_, _), do: nil
 end

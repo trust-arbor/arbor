@@ -12,7 +12,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ZaiCodingPlan do
 
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
+  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{OpenAICompatible, Zai}
   alias Arbor.Orchestrator.UnifiedLLM.Request
 
   @config %{
@@ -20,7 +20,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ZaiCodingPlan do
     base_url: "https://api.z.ai/api/coding/paas/v4",
     api_key_env: "ZAI_CODING_PLAN_API_KEY",
     chat_path: "/chat/completions",
-    extra_headers: nil
+    extra_headers: nil,
+    parse_message: &Zai.parse_reasoning_message/1,
+    parse_delta: &Zai.parse_reasoning_delta/2
   }
 
   @impl true

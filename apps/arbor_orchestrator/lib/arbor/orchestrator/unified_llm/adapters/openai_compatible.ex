@@ -6,15 +6,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
   a config map with provider-specific details:
 
       %{
-        provider: "zai",
-        base_url: "https://api.z.ai/api/coding/paas/v4",
-        api_key_env: "ZAI_API_KEY",
+        provider: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        api_key_env: "OPENROUTER_API_KEY",
         chat_path: "/chat/completions",     # default
         extra_headers: fn _request -> [] end # optional
       }
 
-  Handles the standard `/v1/chat/completions` format used by Z.ai, OpenRouter,
-  x.ai, LM Studio, Ollama, and many others.
+  Handles the standard `/v1/chat/completions` format: messages, tool calls,
+  streaming, and error mapping. Provider-specific extensions (e.g. thinking
+  mode) are injected via optional hooks:
+
+  - `parse_message` — `(message_map -> [ContentPart.t()] | nil)` for custom
+    response message parsing (return nil to use default)
+  - `parse_delta` — `(delta_map, raw -> StreamEvent.t() | nil)` for custom
+    streaming delta parsing (return nil to use default)
   """
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
@@ -175,7 +181,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
        when status >= 200 and status < 300 do
     choice = get_first_choice(body)
     message = Map.get(choice, "message", %{})
-    content_parts = parse_message_parts(message)
+    content_parts = parse_message_parts(message, config)
 
     text =
       case ContentPart.text_content(content_parts) do
@@ -203,7 +209,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
   defp get_first_choice(%{"choices" => [choice | _]}), do: choice
   defp get_first_choice(_), do: %{}
 
-  defp parse_message_parts(%{"content" => content, "tool_calls" => tool_calls})
+  defp parse_message_parts(message, config) do
+    # Let provider-specific hook parse first; fall back to generic
+    case Map.get(config, :parse_message) do
+      hook when is_function(hook, 1) ->
+        case hook.(message) do
+          parts when is_list(parts) and parts != [] -> parts
+          _ -> default_parse_message(message)
+        end
+
+      _ ->
+        default_parse_message(message)
+    end
+  end
+
+  defp default_parse_message(%{"content" => content, "tool_calls" => tool_calls})
        when is_list(tool_calls) and tool_calls != [] do
     text_parts =
       if is_binary(content) and content != "", do: [ContentPart.text(content)], else: []
@@ -212,18 +232,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     text_parts ++ tool_parts
   end
 
-  defp parse_message_parts(%{"reasoning_content" => reasoning} = msg)
-       when is_binary(reasoning) and reasoning != "" do
-    content = Map.get(msg, "content")
-    parts = [ContentPart.thinking(reasoning)]
-    if is_binary(content) and content != "", do: parts ++ [ContentPart.text(content)], else: parts
-  end
-
-  defp parse_message_parts(%{"content" => content}) when is_binary(content) do
+  defp default_parse_message(%{"content" => content}) when is_binary(content) do
     [ContentPart.text(content)]
   end
 
-  defp parse_message_parts(_), do: []
+  defp default_parse_message(_), do: []
 
   defp parse_tool_call(%{"id" => id, "function" => %{"name" => name, "arguments" => args}}) do
     ContentPart.tool_call(id, name, decode_args(args))
@@ -255,11 +268,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     end)
   end
 
-  defp translate_sse_event(%{"choices" => [choice | _]} = raw, acc, _config) do
+  defp translate_sse_event(%{"choices" => [choice | _]} = raw, acc, config) do
     delta = Map.get(choice, "delta", %{})
     finish_reason = Map.get(choice, "finish_reason")
 
+    # Let provider-specific hook handle the delta first
+    hook_result =
+      case Map.get(config, :parse_delta) do
+        hook when is_function(hook, 2) -> hook.(delta, raw)
+        _ -> nil
+      end
+
     cond do
+      # Provider-specific hook handled it
+      hook_result != nil ->
+        {hook_result, acc}
+
       # Text delta
       is_binary(Map.get(delta, "content")) and Map.get(delta, "content") != "" ->
         evt = %StreamEvent{
@@ -273,19 +297,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
       is_list(Map.get(delta, "tool_calls")) ->
         {events, new_acc} = accumulate_tool_call_deltas(delta["tool_calls"], acc, raw)
         {events, new_acc}
-
-      # Reasoning content delta (Z.ai, DeepSeek)
-      is_binary(Map.get(delta, "reasoning_content")) and
-          Map.get(delta, "reasoning_content") != "" ->
-        evt = %StreamEvent{
-          type: :thinking_delta,
-          data: %{
-            "text" => delta["reasoning_content"],
-            "raw" => raw
-          }
-        }
-
-        {evt, acc}
 
       # Finish
       finish_reason != nil ->
