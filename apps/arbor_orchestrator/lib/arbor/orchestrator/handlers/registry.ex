@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     CodergenHandler,
     ConditionalHandler,
     ConsensusHandler,
+    DriftDetectHandler,
     EvalAggregateHandler,
     EvalDatasetHandler,
     EvalReportHandler,
@@ -20,10 +21,13 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     ManagerLoopHandler,
     MapHandler,
     MemoryHandler,
+    MemoryRecallHandler,
+    MemoryStoreHandler,
     OutputValidateHandler,
     PipelineRunHandler,
     PipelineValidateHandler,
     ParallelHandler,
+    PromptAbTestHandler,
     RetryEscalateHandler,
     ShellHandler,
     StartHandler,
@@ -88,7 +92,12 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     # Iterative feedback loops
     "feedback.loop" => FeedbackLoopHandler,
     # Collection fan-out
-    "map" => MapHandler
+    "map" => MapHandler,
+    # Homelab-ported handlers
+    "drift_detect" => DriftDetectHandler,
+    "prompt.ab_test" => PromptAbTestHandler,
+    "memory.recall_store" => MemoryRecallHandler,
+    "memory.store_file" => MemoryStoreHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 

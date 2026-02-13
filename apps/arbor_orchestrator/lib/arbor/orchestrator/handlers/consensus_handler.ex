@@ -33,6 +33,9 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
     handle_type(type, node, context)
   rescue
     e -> fail("#{Map.get(node.attrs, "type")}: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      fail("#{Map.get(node.attrs, "type")}: process unavailable (#{inspect(reason)})")
   end
 
   @impl true
