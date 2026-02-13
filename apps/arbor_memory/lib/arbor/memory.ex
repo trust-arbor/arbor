@@ -1921,6 +1921,12 @@ defmodule Arbor.Memory do
   defdelegate get_all_goals(agent_id), to: GoalStore
 
   @doc """
+  Get a specific goal by ID.
+  """
+  @spec get_goal(String.t(), String.t()) :: {:ok, struct()} | {:error, :not_found}
+  defdelegate get_goal(agent_id, goal_id), to: GoalStore
+
+  @doc """
   Update goal progress (0.0 to 1.0).
   """
   @spec update_goal_progress(String.t(), String.t(), float()) ::
