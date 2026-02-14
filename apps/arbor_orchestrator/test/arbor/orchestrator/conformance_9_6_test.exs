@@ -5,8 +5,8 @@ defmodule Arbor.Orchestrator.Conformance96Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?"]
-      parallel [shape=component]
+      gate [shape=hexagon, label="Proceed?", fan_out="false"]
+      parallel [shape=component, fan_out="false"]
       a [label="A"]
       b [label="B"]
       join [shape=tripleoctagon]
@@ -84,7 +84,7 @@ defmodule Arbor.Orchestrator.Conformance96Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?", human.default_choice="exit", human.timeout_seconds=1.0]
+      gate [shape=hexagon, label="Proceed?", human.default_choice="exit", human.timeout_seconds=1.0, fan_out="false"]
       exit [shape=Msquare]
       start -> gate
       gate -> exit [label="[Y] Exit"]

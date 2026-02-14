@@ -732,13 +732,13 @@ defmodule Arbor.Orchestrator.Engine do
   # --- Fan-in/fan-out helpers ---
 
   # Returns sibling fan-out edges (unconditional parallel branches) from a node.
-  # Only activates for nodes explicitly marked with fan_out="true" attribute.
-  # This opt-in design preserves existing single-path selection for decision
-  # nodes while enabling implicit parallel execution for fan-out nodes.
+  # Fan-out is ON by default for unconditional edges — multiple outgoing edges
+  # without conditions are treated as parallel branches automatically.
+  # Set fan_out="false" to force single-path selection (decision nodes).
   defp collect_fan_out_siblings(node, outcome, _context, graph) do
-    fan_out_enabled = Map.get(node.attrs, "fan_out", "false") == "true"
+    fan_out_disabled = Map.get(node.attrs, "fan_out") == "false"
 
-    if not fan_out_enabled or outcome.status == :fail do
+    if fan_out_disabled or outcome.status == :fail do
       []
     else
       edges = Graph.outgoing_edges(graph, node.id)

@@ -74,7 +74,7 @@ defmodule Arbor.Orchestrator.Conformance113Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      chooser [type="priority.custom", simulate="fail"]
+      chooser [type="priority.custom", simulate="fail", fan_out="false"]
       condition_wins [label="Condition wins"]
       preferred [label="Preferred"]
       suggested [label="Suggested"]
@@ -109,7 +109,7 @@ defmodule Arbor.Orchestrator.Conformance113Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      chooser [type="priority.custom"]
+      chooser [type="priority.custom", fan_out="false"]
       preferred [label="Preferred", weight=1]
       suggested [label="Suggested", weight=999]
       weighted [label="Weighted", weight=50]
