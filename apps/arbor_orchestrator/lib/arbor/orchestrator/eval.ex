@@ -29,7 +29,11 @@ defmodule Arbor.Orchestrator.Eval do
     "regex" => Graders.RegexMatch,
     "json_valid" => Graders.JsonValid,
     "dot_diff" => Graders.DotDiff,
-    "composite" => Graders.Composite
+    "composite" => Graders.Composite,
+    "compile_check" => Graders.CompileCheck,
+    "functional_test" => Graders.FunctionalTest,
+    "code_quality" => Graders.CodeQuality,
+    "embedding_similarity" => Graders.EmbeddingSimilarity
   }
 
   @doc "Returns the grader module for a given name."

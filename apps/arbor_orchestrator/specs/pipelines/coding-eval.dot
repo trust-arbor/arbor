@@ -1,0 +1,64 @@
+// Coding Eval Pipeline
+// Evaluates LLM code generation quality using compile, functional, quality, and similarity graders.
+// Dataset: JSONL files with Elixir coding challenges.
+// Subject: LocalLLM (LM Studio/Ollama via UnifiedLLM adapters).
+//
+// Usage:
+//   Engine.run(graph, initial_values: %{
+//     "eval.dataset_path" => "priv/eval_datasets/elixir_coding.jsonl",
+//     "eval.provider" => "lm_studio",
+//     "eval.model" => "qwen/qwen3-coder-next"
+//   })
+
+digraph CodingEval {
+  graph [
+    goal="Evaluate code generation quality of an LLM model against Elixir coding challenges",
+    label="Coding Eval"
+  ]
+
+  start [shape=Mdiamond]
+
+  load_dataset [
+    type="eval.dataset",
+    dataset="priv/eval_datasets/elixir_coding.jsonl",
+    data_class="internal"
+  ]
+
+  run_compile [
+    type="eval.run",
+    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    graders="compile_check",
+    data_class="internal"
+  ]
+
+  run_functional [
+    type="eval.run",
+    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    graders="functional_test",
+    data_class="internal"
+  ]
+
+  run_quality [
+    type="eval.run",
+    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    graders="code_quality",
+    data_class="internal"
+  ]
+
+  aggregate [
+    type="eval.aggregate",
+    metrics="accuracy,mean_score,pass_at_k",
+    data_class="internal"
+  ]
+
+  report [
+    type="eval.report",
+    output="eval_report.md",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  // Flow: load dataset, then run each grader pass, aggregate, report
+  start -> load_dataset -> run_compile -> run_functional -> run_quality -> aggregate -> report -> done
+}
