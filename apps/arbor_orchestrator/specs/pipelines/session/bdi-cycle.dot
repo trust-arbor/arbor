@@ -1,0 +1,173 @@
+// BDI Cycle — Belief-Desire-Intention Reasoning Strategy
+//
+// A composable reasoning strategy expressed as graph topology over existing
+// session handler node types. Agents execute this graph to perform one
+// autonomous reasoning cycle using the BDI model.
+//
+// This replaces the hardcoded BDI logic in agent_seed.ex (seed_heartbeat_cycle)
+// with a graph that can be composed, swapped, or extended. Different agents
+// can use different strategy graphs — BDI is just one option.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  BDI REASONING MODEL                                                   │
+// │                                                                        │
+// │  Beliefs   = agent's model of the world (working memory, goals, state) │
+// │  Desires   = what the agent wants (active goals)                       │
+// │  Intentions = committed plans to achieve desires (intents in store)    │
+// │                                                                        │
+// │  The cycle:                                                            │
+// │    1. PERCEIVE  — background checks, load beliefs (goals + intents)    │
+// │    2. DELIBERATE — select cognitive mode based on belief state          │
+// │    3. REASON    — LLM call in the selected mode                        │
+// │    4. ACT       — route actions, execute pending intentions             │
+// │    5. UPDATE    — process results, update goals, store memories         │
+// │    6. MAINTAIN  — compression, consolidation, checkpointing            │
+// │                                                                        │
+// │  Graph cycles:                                                         │
+// │    - goal_pursuit branch has a tool loop (like turn.dot):              │
+// │      llm_goal → check_tools → dispatch_tools → llm_goal               │
+// │    - The outer cycle is driven by the heartbeat timer, not the graph   │
+// │                                                                        │
+// │  Handler extensions needed (attribute-driven, no new types):           │
+// │    - session.memory_recall: recall_type attr for "goals", "intents",   │
+// │      "beliefs" dispatch (currently hardcoded to session.input query)   │
+// │    - session.mode_select: read goals AND intents from context to       │
+// │      support plan_execution and conversation modes                     │
+// │    - session.process_results: extract decompositions and intents       │
+// │      from LLM response (already extracts actions/goals/memory)         │
+// └─────────────────────────────────────────────────────────────────────────┘
+
+digraph BDICycle {
+  graph [
+    goal="Execute one BDI reasoning cycle: perceive → deliberate → reason → act → update",
+    label="BDI Reasoning Cycle",
+    strategy="bdi"
+  ]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 1: PERCEIVE — Gather beliefs about the world
+  // ══════════════════════════════════════════════════════════════
+
+  start [shape=Mdiamond]
+
+  // Background checks: memory health, timing, system state
+  bg_checks [type="session.background_checks"]
+
+  // Load current goals (Desires in BDI terms)
+  // Extension: recall_type="goals" tells the handler to load goals, not query memory
+  load_goals [type="session.memory_recall", recall_type="goals"]
+
+  // Load pending intentions (committed plans)
+  // Extension: recall_type="intents" loads from IntentStore
+  load_intents [type="session.memory_recall", recall_type="intents"]
+
+  // Load relevant working memory (Beliefs)
+  // Extension: recall_type="beliefs" loads working memory context
+  load_beliefs [type="session.memory_recall", recall_type="beliefs"]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 2: DELIBERATE — Choose what to do based on beliefs
+  // ══════════════════════════════════════════════════════════════
+
+  // Mode selection reads goals + intents from context
+  // Extension: handler checks for undecomposed goals (→ plan_execution),
+  //   active goals with intents (→ goal_pursuit), maintenance floor,
+  //   user waiting (→ conversation), else reflection
+  select_mode [type="session.mode_select"]
+
+  // Route to the appropriate reasoning branch
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 3: REASON — Mode-specific LLM reasoning
+  // ══════════════════════════════════════════════════════════════
+
+  // ── Goal Pursuit: advance active goals, may use tools ───────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+
+  // Tool loop: if LLM requests tool calls, execute and re-enter
+  check_tools [shape=diamond, condition_key="llm.response_type"]
+  dispatch_tools [type="session.tool_dispatch"]
+
+  // ── Plan Execution: decompose goals into intentions ─────────
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+
+  // ── Reflection: self-reflection and learning ────────────────
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+
+  // ── Conversation: respond to waiting user ───────────────────
+  llm_converse [type="session.llm_call", cognitive_mode="conversation"]
+
+  // ── Consolidation: memory maintenance, no LLM ──────────────
+  consolidate [type="session.memory_update", mode="consolidation"]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 4: ACT — Execute actions and route intentions
+  // ══════════════════════════════════════════════════════════════
+
+  // Parse LLM response into structured actions, goals, intents, memory notes
+  // Extension: also extracts "decompositions" and "intents" from LLM JSON
+  process [type="session.process_results"]
+
+  // Route executable actions through Executor
+  route_actions [type="session.route_actions"]
+
+  // Route pending intentions from IntentStore (pull-based BDI dispatch)
+  // This reuses route_actions with intent_source="intent_store" attribute
+  route_intents [type="session.route_actions", intent_source="intent_store"]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 5: UPDATE — Persist changes to beliefs and desires
+  // ══════════════════════════════════════════════════════════════
+
+  // Update goals (progress, new goals, completions)
+  update_goals [type="session.update_goals"]
+
+  // Store memory notes from this cycle
+  update_memory [type="session.memory_update"]
+
+  // Checkpoint state for crash recovery
+  checkpoint [type="session.checkpoint"]
+
+  // ══════════════════════════════════════════════════════════════
+  // Exit
+  // ══════════════════════════════════════════════════════════════
+
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  // Phase 1: Perceive — sequential belief gathering
+  start -> bg_checks -> load_goals -> load_intents -> load_beliefs
+
+  // Phase 2: Deliberate — mode selection from loaded context
+  load_beliefs -> select_mode -> mode_router
+
+  // Phase 3: Reason — conditional fan-out by cognitive mode
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_converse [condition="context.session.cognitive_mode=conversation"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  // ── Goal pursuit tool loop (same pattern as turn.dot) ───────
+  // LLM may request tools to advance goals; cycle until text response
+  llm_goal -> check_tools
+  check_tools -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+  check_tools -> process [condition="context.llm.response_type=text"]
+  dispatch_tools -> llm_goal
+
+  // ── Other modes converge at process ─────────────────────────
+  llm_plan -> process
+  llm_reflect -> process
+  llm_converse -> process
+  consolidate -> process
+
+  // Phase 4: Act — route actions, then route pending intentions
+  process -> route_actions -> route_intents
+
+  // Phase 5: Update — goals, memory, checkpoint
+  route_intents -> update_goals -> update_memory -> checkpoint -> done
+}

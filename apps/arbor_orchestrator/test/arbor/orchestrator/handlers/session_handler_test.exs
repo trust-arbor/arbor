@@ -79,9 +79,29 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
   # --- mode_select ---
 
   describe "session.mode_select" do
-    test "selects goal_pursuit when goals exist" do
-      outcome = run("session.mode_select", %{"session.goals" => [%{id: "g1"}]})
+    test "selects goal_pursuit when goals and intents exist" do
+      outcome =
+        run("session.mode_select", %{
+          "session.goals" => [%{id: "g1"}],
+          "session.intents" => [%{id: "i1"}]
+        })
+
       assert outcome.context_updates["session.cognitive_mode"] == "goal_pursuit"
+    end
+
+    test "selects plan_execution when goals exist but no intents" do
+      outcome = run("session.mode_select", %{"session.goals" => [%{id: "g1"}]})
+      assert outcome.context_updates["session.cognitive_mode"] == "plan_execution"
+    end
+
+    test "selects conversation when user is waiting" do
+      outcome =
+        run("session.mode_select", %{
+          "session.goals" => [%{id: "g1"}],
+          "session.user_waiting" => true
+        })
+
+      assert outcome.context_updates["session.cognitive_mode"] == "conversation"
     end
 
     test "selects consolidation every 5th turn" do
