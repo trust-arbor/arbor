@@ -41,7 +41,22 @@ defmodule Arbor.Agent.HeartbeatLLM do
       system_prompt: system
     ]
 
-    case call_ai(prompt, ai_opts) do
+    llm_started_at = System.monotonic_time(:millisecond)
+    ai_result = call_ai(prompt, ai_opts)
+    llm_duration = System.monotonic_time(:millisecond) - llm_started_at
+
+    # Record LLM latency for fitness tracking
+    if agent_id = state[:agent_id] || Map.get(state, :agent_id) do
+      try do
+        Arbor.Agent.Fitness.record_llm_latency(agent_id, llm_duration)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    case ai_result do
       {:ok, %{text: text, usage: usage}} ->
         parsed = HeartbeatResponse.parse(text)
         {:ok, Map.put(parsed, :usage, usage)}

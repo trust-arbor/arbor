@@ -27,16 +27,23 @@ defmodule Arbor.Orchestrator.Engine do
   @type run_result :: %{
           final_outcome: Outcome.t() | nil,
           completed_nodes: [String.t()],
-          context: map()
+          context: map(),
+          node_durations: %{String.t() => non_neg_integer()}
         }
 
   @spec run(Graph.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(%Graph{} = graph, opts \\ []) do
     logs_root = Keyword.get(opts, :logs_root, Path.join(System.tmp_dir!(), "arbor_orchestrator"))
     max_steps = Keyword.get(opts, :max_steps, 500)
+    pipeline_started_at = System.monotonic_time(:millisecond)
 
     :ok = write_manifest(graph, logs_root)
-    emit(opts, %{type: :pipeline_started, graph_id: graph.id, logs_root: logs_root})
+    emit(opts, %{
+      type: :pipeline_started,
+      graph_id: graph.id,
+      logs_root: logs_root,
+      node_count: map_size(graph.nodes)
+    })
 
     case initial_state(graph, logs_root, opts) do
       {:ok,
@@ -44,13 +51,15 @@ defmodule Arbor.Orchestrator.Engine do
         completed = Enum.reverse(completed)
         last_id = List.last(completed)
         final_outcome = last_id && Map.get(outcomes, last_id)
-        emit(opts, %{type: :pipeline_completed, completed_nodes: completed})
+        duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+        emit(opts, %{type: :pipeline_completed, completed_nodes: completed, duration_ms: duration_ms})
 
         {:ok,
          %{
            final_outcome: final_outcome,
            completed_nodes: completed,
-           context: Context.snapshot(context)
+           context: Context.snapshot(context),
+           node_durations: %{}
          }}
 
       {:ok, state} ->
@@ -65,11 +74,14 @@ defmodule Arbor.Orchestrator.Engine do
           state.retries,
           state.outcomes,
           _pending = [],
-          opts
+          opts,
+          pipeline_started_at,
+          %{}
         )
 
       {:error, reason} = error ->
-        emit(opts, %{type: :pipeline_failed, reason: reason})
+        duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+        emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
         error
     end
   end
@@ -232,10 +244,13 @@ defmodule Arbor.Orchestrator.Engine do
          _retries,
          _outcomes,
          _pending,
-         opts
+         opts,
+         pipeline_started_at,
+         _node_durations
        )
        when max_steps <= 0 do
-    emit(opts, %{type: :pipeline_failed, reason: :max_steps_exceeded})
+    duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+    emit(opts, %{type: :pipeline_failed, reason: :max_steps_exceeded, duration_ms: duration_ms})
     {:error, :max_steps_exceeded}
   end
 
@@ -250,7 +265,9 @@ defmodule Arbor.Orchestrator.Engine do
          retries,
          outcomes,
          pending,
-         opts
+         opts,
+         pipeline_started_at,
+         node_durations
        ) do
     node = Map.fetch!(graph.nodes, node_id)
 
@@ -271,11 +288,14 @@ defmodule Arbor.Orchestrator.Engine do
       thread_id: fidelity.thread_id
     })
 
-    handler_opts = Keyword.put_new(opts, :logs_root, logs_root)
+    stage_started_at = System.monotonic_time(:millisecond)
+    handler_opts = opts |> Keyword.put_new(:logs_root, logs_root) |> Keyword.put(:stage_started_at, stage_started_at)
     {outcome, retries} = execute_with_retry(node, context, graph, retries, handler_opts)
 
     completed = [node.id | completed]
     outcomes = Map.put(outcomes, node.id, outcome)
+    stage_duration = System.monotonic_time(:millisecond) - stage_started_at
+    node_durations = Map.put(node_durations, node.id, stage_duration)
 
     context =
       context
@@ -323,18 +343,22 @@ defmodule Arbor.Orchestrator.Engine do
                   retries,
                   outcomes,
                   remaining,
-                  opts
+                  opts,
+                  pipeline_started_at,
+                  node_durations
                 )
 
               nil ->
                 ordered = Enum.reverse(completed)
-                emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+                duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+                emit(opts, %{type: :pipeline_completed, completed_nodes: ordered, duration_ms: duration_ms})
 
                 {:ok,
                  %{
                    final_outcome: outcome,
                    completed_nodes: ordered,
-                   context: Context.snapshot(context)
+                   context: Context.snapshot(context),
+                   node_durations: node_durations
                  }}
             end
 
@@ -352,11 +376,14 @@ defmodule Arbor.Orchestrator.Engine do
               retries,
               outcomes,
               pending,
-              opts
+              opts,
+              pipeline_started_at,
+              node_durations
             )
 
           {:error, reason} ->
-            emit(opts, %{type: :pipeline_failed, reason: reason})
+            duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+            emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
             {:error, reason}
         end
 
@@ -372,7 +399,9 @@ defmodule Arbor.Orchestrator.Engine do
           retries,
           outcomes,
           pending,
-          opts
+          opts,
+          pipeline_started_at,
+          node_durations
         )
     end
   end
@@ -392,7 +421,9 @@ defmodule Arbor.Orchestrator.Engine do
          retries,
          outcomes,
          pending,
-         opts
+         opts,
+         pipeline_started_at,
+         node_durations
        ) do
     # Use existing routing logic to pick the preferred next target
     preferred = select_next_step(node, outcome, context, graph)
@@ -438,7 +469,9 @@ defmodule Arbor.Orchestrator.Engine do
           outcomes,
           new_pending,
           outcome,
-          opts
+          opts,
+          pipeline_started_at,
+          node_durations
         )
 
       {:node_id, target_id} ->
@@ -454,7 +487,9 @@ defmodule Arbor.Orchestrator.Engine do
           outcomes,
           new_pending,
           outcome,
-          opts
+          opts,
+          pipeline_started_at,
+          node_durations
         )
 
       nil ->
@@ -472,18 +507,22 @@ defmodule Arbor.Orchestrator.Engine do
               retries,
               outcomes,
               remaining,
-              opts
+              opts,
+              pipeline_started_at,
+              node_durations
             )
 
           nil ->
             ordered = Enum.reverse(completed)
-            emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+            duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+            emit(opts, %{type: :pipeline_completed, completed_nodes: ordered, duration_ms: duration_ms})
 
             {:ok,
              %{
                final_outcome: outcome,
                completed_nodes: ordered,
-               context: Context.snapshot(context)
+               context: Context.snapshot(context),
+               node_durations: node_durations
              }}
         end
     end
@@ -505,7 +544,9 @@ defmodule Arbor.Orchestrator.Engine do
          outcomes,
          pending,
          last_outcome,
-         opts
+         opts,
+         pipeline_started_at,
+         node_durations
        ) do
     fan_in_ready =
       pending == [] or all_predecessors_complete?(graph, target_id, completed)
@@ -522,7 +563,9 @@ defmodule Arbor.Orchestrator.Engine do
         retries,
         outcomes,
         pending,
-        opts
+        opts,
+        pipeline_started_at,
+        node_durations
       )
     else
       # Target not ready — add to pending and find next ready node
@@ -551,19 +594,23 @@ defmodule Arbor.Orchestrator.Engine do
             retries,
             outcomes,
             remaining,
-            opts
+            opts,
+            pipeline_started_at,
+            node_durations
           )
 
         nil ->
           # Nothing ready — pipeline complete or deadlock
           ordered = Enum.reverse(completed)
-          emit(opts, %{type: :pipeline_completed, completed_nodes: ordered})
+          duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+          emit(opts, %{type: :pipeline_completed, completed_nodes: ordered, duration_ms: duration_ms})
 
           {:ok,
            %{
              final_outcome: last_outcome,
              completed_nodes: ordered,
-             context: Context.snapshot(context)
+             context: Context.snapshot(context),
+             node_durations: node_durations
            }}
       end
     end
@@ -592,7 +639,8 @@ defmodule Arbor.Orchestrator.Engine do
 
       case outcome.status do
         status when status in [:success, :partial_success] ->
-          emit(opts, %{type: :stage_completed, node_id: node.id, status: status})
+          duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+          emit(opts, %{type: :stage_completed, node_id: node.id, status: status, duration_ms: duration_ms})
           {outcome, Map.delete(retries, node.id)}
 
         status when status in [:retry, :fail] ->
@@ -651,7 +699,8 @@ defmodule Arbor.Orchestrator.Engine do
           end
 
         :skipped ->
-          emit(opts, %{type: :stage_completed, node_id: node.id, status: :skipped})
+          duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+          emit(opts, %{type: :stage_completed, node_id: node.id, status: :skipped, duration_ms: duration_ms})
           {outcome, retries}
       end
     rescue
@@ -684,12 +733,14 @@ defmodule Arbor.Orchestrator.Engine do
           )
         else
           outcome = %Outcome{status: :fail, failure_reason: Exception.message(exception)}
+          duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
           emit(opts, %{
             type: :stage_failed,
             node_id: node.id,
             error: Exception.message(exception),
-            will_retry: false
+            will_retry: false,
+            duration_ms: duration_ms
           })
 
           {outcome, retries}
@@ -698,11 +749,13 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
-    emit(opts, %{type: :stage_failed, node_id: node_id, error: reason, will_retry: false})
+    duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+    emit(opts, %{type: :stage_failed, node_id: node_id, error: reason, will_retry: false, duration_ms: duration_ms})
   end
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: status}) do
-    emit(opts, %{type: :stage_completed, node_id: node_id, status: status})
+    duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+    emit(opts, %{type: :stage_completed, node_id: node_id, status: status, duration_ms: duration_ms})
   end
 
   @doc false

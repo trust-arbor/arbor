@@ -25,15 +25,9 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Handler Callbacks
   # ===========================================================================
 
-  @impl GenServer
-  def init(_args) do
-    {:ok, %{}}
-  end
-
-  @impl GenServer
-  def terminate(_reason, state) do
-    state
-  end
+  # init/1 and terminate/2 use defaults from `use ExMCP.Server.Handler`
+  # (which injects `use GenServer`). Explicitly defining them here with
+  # @impl GenServer triggers "conflicting behaviours" warnings in Elixir 1.19+.
 
   @impl ExMCP.Server.Handler
   def handle_initialize(params, state) do
@@ -118,8 +112,8 @@ defmodule Arbor.Gateway.MCP.Handler do
             component: %{
               type: "string",
               description:
-                "What to inspect: 'agents', 'memory', 'signals', 'capabilities', 'goals', 'overview'",
-              enum: ["agents", "memory", "signals", "capabilities", "goals", "overview"]
+                "What to inspect: 'agents', 'memory', 'signals', 'capabilities', 'goals', 'pipelines', 'overview'",
+              enum: ["agents", "memory", "signals", "capabilities", "goals", "pipelines", "overview"]
             },
             agent_id: %{
               type: "string",
@@ -303,7 +297,9 @@ defmodule Arbor.Gateway.MCP.Handler do
       get_memory_summary(),
       "",
       "## Signals",
-      get_signal_summary()
+      get_signal_summary(),
+      "",
+      get_pipeline_status()
     ]
 
     Enum.join(sections, "\n")
@@ -351,8 +347,12 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  defp get_status("pipelines", _agent_id) do
+    get_pipeline_status()
+  end
+
   defp get_status(component, _agent_id) do
-    "Unknown component '#{component}'. Use: agents, memory, signals, capabilities, goals, overview"
+    "Unknown component '#{component}'. Use: agents, memory, signals, capabilities, goals, pipelines, overview"
   end
 
   # ===========================================================================
@@ -544,6 +544,66 @@ defmodule Arbor.Gateway.MCP.Handler do
       _ ->
         "## Goals\nGoal store unavailable."
     end
+  end
+
+  defp get_pipeline_status do
+    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
+      active = apply(Arbor.Orchestrator.JobRegistry, :list_active, [])
+      recent = apply(Arbor.Orchestrator.JobRegistry, :list_recent, [])
+      format_pipeline_status(active, recent)
+    else
+      "Pipeline registry not available (orchestrator not started)"
+    end
+  rescue
+    _ -> "Pipeline registry unavailable"
+  catch
+    :exit, _ -> "Pipeline registry unavailable"
+  end
+
+  defp format_pipeline_status(active, recent) do
+    sections = []
+
+    sections =
+      if active != [] do
+        header =
+          "## Active Pipelines\n\n| Pipeline | Progress | Current Node | Elapsed |\n|----------|----------|--------------|---------|\n"
+
+        rows =
+          Enum.map_join(active, "\n", fn entry ->
+            elapsed =
+              if entry.started_at,
+                do: DateTime.diff(DateTime.utc_now(), entry.started_at, :second),
+                else: 0
+
+            progress = "#{entry.completed_count || 0}/#{entry.total_nodes || "?"}"
+
+            "| #{entry.graph_id || entry.pipeline_id} | #{progress} | #{entry.current_node || "-"} | #{elapsed}s |"
+          end)
+
+        sections ++ [header <> rows]
+      else
+        sections ++ ["## Active Pipelines\n\nNo pipelines currently running."]
+      end
+
+    sections =
+      if recent != [] do
+        header =
+          "\n\n## Recent Pipelines\n\n| Pipeline | Status | Duration | Finished |\n|----------|--------|----------|----------|\n"
+
+        rows =
+          Enum.map_join(Enum.take(recent, 10), "\n", fn entry ->
+            status = to_string(entry.status || :unknown)
+            duration = if entry.duration_ms, do: "#{div(entry.duration_ms, 1000)}s", else: "-"
+            finished = if entry.finished_at, do: Calendar.strftime(entry.finished_at, "%H:%M:%S"), else: "-"
+            "| #{entry.graph_id || entry.pipeline_id} | #{status} | #{duration} | #{finished} |"
+          end)
+
+        sections ++ [header <> rows]
+      else
+        sections
+      end
+
+    Enum.join(sections, "\n")
   end
 
   # ===========================================================================
