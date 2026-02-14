@@ -47,6 +47,10 @@ defmodule Mix.Tasks.Arbor.Eval do
     - `--limit` — limit number of samples
     - `--stream` — use streaming mode for TTFT measurement
     - `--timeout` — per-request timeout in ms (default: 60000)
+    - `--set key=value` — store metadata (repeatable). Examples:
+      - `--set quantization=Q4_K_M --set params=4B --set context_length=8192`
+      - `--set gpu=RTX4090 --set vram_used=6.2GB`
+      - JSON values auto-parsed: `--set temperature=0.7` stores as number
   """
 
   use Mix.Task
@@ -79,7 +83,8 @@ defmodule Mix.Tasks.Arbor.Eval do
           stats: :boolean,
           limit: :integer,
           stream: :boolean,
-          timeout: :integer
+          timeout: :integer,
+          set: :keep
         ]
       )
 
@@ -135,11 +140,18 @@ defmodule Mix.Tasks.Arbor.Eval do
 
     graders = Map.get(@domain_graders, domain, ["contains"])
 
+    # Parse --set key=value pairs into metadata map
+    metadata = parse_set_flags(opts)
+
     Mix.shell().info("\nArbor Eval — #{domain}")
     Mix.shell().info("Models: #{Enum.join(models, ", ")}")
     Mix.shell().info("Provider: #{provider}")
     Mix.shell().info("Dataset: #{dataset}")
     Mix.shell().info("Graders: #{Enum.join(graders, ", ")}")
+
+    if map_size(metadata) > 0 do
+      Mix.shell().info("Metadata: #{inspect(metadata)}")
+    end
 
     if num_runs > 1 do
       Mix.shell().info("Runs: #{num_runs}")
@@ -190,7 +202,8 @@ defmodule Mix.Tasks.Arbor.Eval do
             dataset: dataset,
             graders: graders,
             status: "running",
-            config: config
+            config: config,
+            metadata: metadata
           })
 
           results = run_samples(samples, graders, subject_opts)
@@ -579,6 +592,15 @@ defmodule Mix.Tasks.Arbor.Eval do
     catch
       :exit, _ -> :ok
     end
+
+    # Start shell infrastructure for CLI-based providers
+    try do
+      Application.ensure_all_started(:arbor_shell)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   defp maybe_filter(filters, _key, nil), do: filters
@@ -600,6 +622,24 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   defp ensure_map(score) when is_struct(score), do: Map.from_struct(score)
   defp ensure_map(score) when is_map(score), do: score
+
+  defp parse_set_flags(opts) do
+    opts
+    |> Keyword.get_values(:set)
+    |> Enum.reduce(%{}, fn kv, acc ->
+      case String.split(kv, "=", parts: 2) do
+        [key, value] -> Map.put(acc, key, parse_set_value(value))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp parse_set_value(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} -> decoded
+      _ -> value
+    end
+  end
 
   defp encode_field(value) when is_binary(value), do: value
   defp encode_field(value) when is_map(value), do: Jason.encode!(value)
