@@ -37,7 +37,10 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
     file = List.first(files)
 
     unless file do
-      error("Usage: mix arbor.pipeline.run <file.dot> [--set key=value ...] [--logs-root dir] [--workdir dir]")
+      error(
+        "Usage: mix arbor.pipeline.run <file.dot> [--set key=value ...] [--logs-root dir] [--workdir dir]"
+      )
+
       System.halt(1)
     end
 
@@ -90,7 +93,9 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
     |> Keyword.get_values(:set)
     |> Enum.reduce(%{}, fn pair, acc ->
       case String.split(pair, "=", parts: 2) do
-        [key, value] -> Map.put(acc, key, maybe_parse_value(value))
+        [key, value] ->
+          Map.put(acc, key, maybe_parse_value(value))
+
         _ ->
           warn("Ignoring malformed --set: #{pair} (expected key=value)")
           acc

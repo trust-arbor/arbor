@@ -127,7 +127,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
 
   defp collect_stream(stream, start_time) do
     Enum.reduce(stream, {"", nil}, fn event, {text_acc, ttft} ->
-      ttft = ttft || (System.monotonic_time(:millisecond) - start_time)
+      ttft = ttft || System.monotonic_time(:millisecond) - start_time
 
       chunk_text =
         case event do

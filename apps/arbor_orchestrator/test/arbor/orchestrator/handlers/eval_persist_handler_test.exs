@@ -98,9 +98,27 @@ defmodule Arbor.Orchestrator.Handlers.EvalPersistHandlerTest do
 
     test "computes timing aggregates" do
       results = [
-        %{"id" => "s1", "passed" => true, "duration_ms" => 1000, "ttft_ms" => 100, "tokens_generated" => 50},
-        %{"id" => "s2", "passed" => true, "duration_ms" => 2000, "ttft_ms" => 200, "tokens_generated" => 100},
-        %{"id" => "s3", "passed" => false, "duration_ms" => 3000, "ttft_ms" => 300, "tokens_generated" => 75}
+        %{
+          "id" => "s1",
+          "passed" => true,
+          "duration_ms" => 1000,
+          "ttft_ms" => 100,
+          "tokens_generated" => 50
+        },
+        %{
+          "id" => "s2",
+          "passed" => true,
+          "duration_ms" => 2000,
+          "ttft_ms" => 200,
+          "tokens_generated" => 100
+        },
+        %{
+          "id" => "s3",
+          "passed" => false,
+          "duration_ms" => 3000,
+          "ttft_ms" => 300,
+          "tokens_generated" => 75
+        }
       ]
 
       context = Context.new(%{"eval.results.run" => results})
