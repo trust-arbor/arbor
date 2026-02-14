@@ -64,7 +64,7 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Approve?"]
+      gate [shape=hexagon, label="Approve?", fan_out="false"]
       yes_path [label="Yes"]
       no_path [label="No"]
       exit [shape=Msquare]
@@ -101,7 +101,7 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     digraph Flow {
       start [shape=Mdiamond]
       seed [shape=box]
-      cond [shape=diamond]
+      cond [shape=diamond, fan_out="false"]
       yes [label="Yes"]
       no [label="No"]
       exit [shape=Msquare]
@@ -123,7 +123,7 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      p [shape=component]
+      p [shape=component, fan_out="false"]
       a [label="A"]
       b [label="B"]
       j [shape=tripleoctagon]

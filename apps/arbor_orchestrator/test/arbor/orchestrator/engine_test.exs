@@ -266,7 +266,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?"]
+      gate [shape=hexagon, label="Proceed?", fan_out="false"]
       yes_path [label="Yes path"]
       no_path [label="No path"]
       exit [shape=Msquare]
@@ -290,7 +290,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?", human.default_choice="no_path", human.timeout_seconds=2.5]
+      gate [shape=hexagon, label="Proceed?", human.default_choice="no_path", human.timeout_seconds=2.5, fan_out="false"]
       yes_path [label="Yes path"]
       no_path [label="No path"]
       exit [shape=Msquare]
@@ -316,7 +316,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?", max_retries=1]
+      gate [shape=hexagon, label="Proceed?", max_retries=1, fan_out="false"]
       exit [shape=Msquare]
       start -> gate
       gate -> exit [label="[Y] Yes"]
@@ -336,7 +336,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Pick one"]
+      gate [shape=hexagon, label="Pick one", fan_out="false"]
       yes_path [label="Yes path"]
       no_path [label="No path"]
       exit [shape=Msquare]
@@ -424,7 +424,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      parallel [shape=component, join_policy="wait_all"]
+      parallel [shape=component, join_policy="wait_all", fan_out="false"]
       branch_a [label="A"]
       branch_b [label="B"]
       join [shape=tripleoctagon]
@@ -462,7 +462,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      parallel [shape=component, join_policy="wait_all"]
+      parallel [shape=component, join_policy="wait_all", fan_out="false"]
       branch_a [label="A"]
       branch_b [label="B"]
       join [shape=tripleoctagon]
@@ -580,7 +580,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      parallel [shape=component, join_policy="wait_all"]
+      parallel [shape=component, join_policy="wait_all", fan_out="false"]
       a1 [label="A1"]
       a2 [label="A2", score=0.2]
       b1 [label="B1"]
@@ -605,6 +605,177 @@ defmodule Arbor.Orchestrator.EngineTest do
     assert result.context["parallel.success_count"] == 2
     assert result.context["parallel.fan_in.best_id"] == "b2"
     assert result.context["parallel.fan_in.best_score"] == 0.9
+  end
+
+  test "unconditional edges fan out by default" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      a [label="A"]
+      b [label="B"]
+      done [label="Done"]
+      exit [shape=Msquare]
+
+      start -> a
+      start -> b
+      a -> done
+      b -> done
+      done -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # Both branches should execute
+    assert "a" in result.completed_nodes
+    assert "b" in result.completed_nodes
+    assert "done" in result.completed_nodes
+    assert "exit" in result.completed_nodes
+
+    # Fan-out event should be emitted
+    assert_receive {:event, %{type: :fan_out_detected, node_id: "start", branch_count: 2}}
+  end
+
+  test "fan_out=false forces single path selection" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond, fan_out="false"]
+      a [label="A"]
+      b [label="B"]
+      done [label="Done"]
+      exit [shape=Msquare]
+
+      start -> a
+      start -> b
+      a -> done
+      b -> done
+      done -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # Only one of a or b should execute (select_next_edge picks the first/preferred)
+    a_ran = "a" in result.completed_nodes
+    b_ran = "b" in result.completed_nodes
+    assert a_ran or b_ran, "At least one branch should execute"
+    refute a_ran and b_ran, "Only one branch should execute when fan_out=false"
+
+    assert "done" in result.completed_nodes
+    assert "exit" in result.completed_nodes
+
+    # No fan-out event should be emitted
+    refute_receive {:event, %{type: :fan_out_detected}}
+  end
+
+  test "fan-in gate waits for all branches before proceeding" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      fast [label="Fast"]
+      slow [label="Slow"]
+      join [label="Join"]
+      exit [shape=Msquare]
+
+      start -> fast
+      start -> slow
+      fast -> join
+      slow -> join
+      join -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # Both branches must complete before join
+    assert "fast" in result.completed_nodes
+    assert "slow" in result.completed_nodes
+    assert "join" in result.completed_nodes
+
+    # Join must come after both branches in execution order
+    fast_idx = Enum.find_index(result.completed_nodes, &(&1 == "fast"))
+    slow_idx = Enum.find_index(result.completed_nodes, &(&1 == "slow"))
+    join_idx = Enum.find_index(result.completed_nodes, &(&1 == "join"))
+
+    assert join_idx > fast_idx, "join should execute after fast"
+    assert join_idx > slow_idx, "join should execute after slow"
+
+    # Fan-in deferred event should fire for the second branch's target
+    assert_receive {:event, %{type: :fan_in_deferred, node_id: "join"}}
+  end
+
+  test "three-way fan-out executes all branches" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      a [label="A"]
+      b [label="B"]
+      c [label="C"]
+      merge [label="Merge"]
+      exit [shape=Msquare]
+
+      start -> a
+      start -> b
+      start -> c
+      a -> merge
+      b -> merge
+      c -> merge
+      merge -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    assert "a" in result.completed_nodes
+    assert "b" in result.completed_nodes
+    assert "c" in result.completed_nodes
+    assert "merge" in result.completed_nodes
+    assert "exit" in result.completed_nodes
+
+    # Fan-out detected with 3 branches
+    assert_receive {:event, %{type: :fan_out_detected, node_id: "start", branch_count: 3}}
+  end
+
+  test "fan-out with conditional edges does not fan out conditional branches" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      a [label="A"]
+      b [label="B"]
+      fail_path [label="Fail path"]
+      exit [shape=Msquare]
+
+      start -> a
+      start -> b
+      start -> fail_path [condition="outcome=fail"]
+      a -> exit
+      b -> exit
+      fail_path -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # Both unconditional branches should execute
+    assert "a" in result.completed_nodes
+    assert "b" in result.completed_nodes
+    # Conditional branch should NOT execute (start succeeds, so outcome=fail doesn't match)
+    refute "fail_path" in result.completed_nodes
   end
 
   test "tool handler respects pre-hook skip and emits hook events" do

@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.Conformance118Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [shape=hexagon, label="Proceed?"]
+      gate [shape=hexagon, label="Proceed?", fan_out="false"]
       yes_path [label="Yes path"]
       no_path [label="No path"]
       exit [shape=Msquare]
