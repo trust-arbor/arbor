@@ -69,7 +69,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Ollama do
       base_url: base_url(),
       api_key_env: nil,
       chat_path: "/chat/completions",
-      extra_headers: nil
+      extra_headers: nil,
+      # Cloud models need longer timeouts than local inference
+      receive_timeout: 180_000
     }
   end
 

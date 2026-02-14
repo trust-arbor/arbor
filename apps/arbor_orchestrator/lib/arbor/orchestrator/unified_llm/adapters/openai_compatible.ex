@@ -410,10 +410,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
   end
 
   defp default_http_call(req, config) do
+    timeout = Map.get(config, :receive_timeout, 60_000)
+
     Req.post(req.url,
       headers: req.headers,
       json: req.body,
-      receive_timeout: 60_000
+      receive_timeout: timeout
     )
     |> case do
       {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
