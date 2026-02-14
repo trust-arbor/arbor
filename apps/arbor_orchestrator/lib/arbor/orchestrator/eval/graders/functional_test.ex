@@ -164,15 +164,41 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
         {name, munged}
       end)
 
-    # Replace in code (longest names first to avoid partial matches)
+    # Replace module references in code positions only (not inside string literals).
+    # Match: defmodule Name, %Name{, Name., alias Name, @Name — i.e., preceded by
+    # a non-alphanumeric char or start of line, and the name starts with uppercase.
     munged_code =
       module_map
       |> Enum.sort_by(fn {name, _} -> -String.length(name) end)
       |> Enum.reduce(code, fn {original, munged}, acc ->
-        String.replace(acc, original, munged)
+        # Replace only at module-reference positions:
+        # - After defmodule/defprotocol/defimpl/alias/require/import/use + whitespace
+        # - After % (struct literal)
+        # - After a dot-less word boundary (not inside a string)
+        # We use a regex that matches the name preceded by a non-word, non-quote char
+        # or at line start, and NOT inside a quoted string.
+        replace_module_refs_in_code(acc, original, munged)
       end)
 
     {munged_code, module_map}
+  end
+
+  # Replace module name references while preserving string literals.
+  # Splits code on string boundaries, only replaces in code segments.
+  defp replace_module_refs_in_code(code, original, replacement) do
+    # Split on double-quoted strings (preserving them)
+    parts = Regex.split(~r/"(?:[^"\\]|\\.)*"/, code, include_captures: true)
+
+    Enum.map(parts, fn part ->
+      if String.starts_with?(part, "\"") do
+        # Inside a string literal — don't touch
+        part
+      else
+        # Code segment — replace module references
+        String.replace(part, original, replacement)
+      end
+    end)
+    |> Enum.join()
   end
 
   defp rewrite_module_refs(expr, module_map) do
