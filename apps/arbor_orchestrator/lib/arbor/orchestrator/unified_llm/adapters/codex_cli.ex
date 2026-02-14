@@ -142,7 +142,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
       output
       |> String.split("\n", trim: true)
       |> Enum.map(&String.trim/1)
-      |> Enum.filter(&(String.starts_with?(&1, "{")))
+      |> Enum.filter(&String.starts_with?(&1, "{"))
 
     events =
       Enum.flat_map(lines, fn line ->

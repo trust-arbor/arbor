@@ -55,29 +55,7 @@ defmodule Arbor.Contracts.SkillLibrary do
   tags, or source when listing and searching.
   """
 
-  @typedoc """
-  A skill definition containing metadata and implementation details.
-
-  Fields:
-  - `name` — unique identifier for the skill (e.g., "code_review", "test_runner")
-  - `description` — human-readable description of what the skill does
-  - `category` — grouping category (e.g., "development", "analysis", "communication")
-  - `tags` — list of searchable tags for discovery
-  - `source` — origin of the skill (:builtin, :plugin, :user, :generated)
-  - `version` — semantic version string
-  - `schema` — input/output schema for validation
-  - `metadata` — additional provider-specific or implementation-specific data
-  """
-  @type skill :: %{
-          name: String.t(),
-          description: String.t(),
-          category: String.t(),
-          tags: [String.t()],
-          source: atom(),
-          version: String.t(),
-          schema: map(),
-          metadata: map()
-        }
+  alias Arbor.Contracts.Skill
 
   @type opts :: keyword()
 
@@ -88,7 +66,7 @@ defmodule Arbor.Contracts.SkillLibrary do
 
   Returns `{:ok, skill}` if found, `{:error, :not_found}` otherwise.
   """
-  @callback get(name :: String.t()) :: {:ok, skill()} | {:error, :not_found}
+  @callback get(name :: String.t()) :: {:ok, Skill.t()} | {:error, :not_found}
 
   @doc """
   List skills matching the given filter options.
@@ -101,7 +79,7 @@ defmodule Arbor.Contracts.SkillLibrary do
 
   Returns all skills when no options are provided.
   """
-  @callback list(opts()) :: [skill()]
+  @callback list(opts()) :: [Skill.t()]
 
   @doc """
   Search for skills by keyword or semantic query.
@@ -118,7 +96,7 @@ defmodule Arbor.Contracts.SkillLibrary do
 
   Returns skills ordered by relevance (most relevant first).
   """
-  @callback search(query :: String.t(), opts()) :: [skill()]
+  @callback search(query :: String.t(), opts()) :: [Skill.t()]
 
   @doc """
   Register a new skill in the library.
@@ -127,7 +105,7 @@ defmodule Arbor.Contracts.SkillLibrary do
   is invalid or a skill with the same name already exists (depending
   on the backend's conflict policy).
   """
-  @callback register(skill()) :: :ok | {:error, term()}
+  @callback register(Skill.t()) :: :ok | {:error, term()}
 
   @doc """
   Scan a directory and index all skill definitions found.

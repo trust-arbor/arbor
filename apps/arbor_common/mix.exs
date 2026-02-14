@@ -42,6 +42,7 @@ defmodule ArborCommon.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:arbor_contracts, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

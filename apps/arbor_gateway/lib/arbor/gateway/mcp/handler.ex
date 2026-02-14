@@ -30,6 +30,11 @@ defmodule Arbor.Gateway.MCP.Handler do
     {:ok, %{}}
   end
 
+  @impl GenServer
+  def terminate(_reason, state) do
+    state
+  end
+
   @impl ExMCP.Server.Handler
   def handle_initialize(params, state) do
     {:ok,

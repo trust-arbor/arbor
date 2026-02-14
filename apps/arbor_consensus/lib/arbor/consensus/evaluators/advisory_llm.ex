@@ -1,6 +1,6 @@
 defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   @moduledoc """
-  LLM-based advisory evaluator with 12 focused perspectives.
+  LLM-based advisory evaluator with 13 focused perspectives.
 
   Each perspective is a distinct analytical lens — sharp enough to produce
   non-overlapping analysis, broad enough to apply to any design question.
@@ -19,18 +19,26 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   - `:generalization` — abstraction vs specificity, reuse, composability
   - `:resource_usage` — cost, API calls, processes, operational overhead
   - `:consistency` — alignment with existing patterns and conventions
+  - `:general` — broad analysis without a specific lens
 
   ## Model Diversity
 
-  Each perspective has a default CLI provider assignment, distributing
+  Each perspective has a default provider:model assignment, distributing
   evaluations across different models for genuine viewpoint diversity.
   Sessions persist per perspective via `session_context`, so a security
   evaluator remembers what it reviewed last time.
 
-  Provider assignments can be overridden per-call via opts:
+  Provider/model assignments can be overridden per-call via opts:
 
       AdvisoryLLM.evaluate(proposal, :security,
-        provider: :openai, backend: :cli)
+        provider_model: "openai:gpt-4.1")
+
+  ## Skill Library Integration
+
+  System prompts are loaded from the SkillLibrary when available. Each
+  perspective looks up a skill named `"<perspective>-perspective"` (e.g.,
+  `"security-perspective"`). Falls back to inline prompts when the
+  SkillLibrary is not populated.
 
   ## Usage
 
@@ -54,6 +62,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Consensus.Config
+  alias Arbor.Consensus.LLMBridge
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
   require Logger
@@ -70,26 +79,29 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     :performance,
     :generalization,
     :resource_usage,
-    :consistency
+    :consistency,
+    :general
   ]
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider per perspective — distributes across CLI backends
-  # for genuine model diversity. Override per-call via opts.
-  @perspective_providers %{
-    brainstorming: :opencode,
-    user_experience: :gemini,
-    security: :anthropic,
-    privacy: :openai,
-    stability: :anthropic,
-    capability: :gemini,
-    emergence: :opencode,
-    vision: :anthropic,
-    performance: :openai,
-    generalization: :gemini,
-    resource_usage: :opencode,
-    consistency: :openai
+  # Default provider:model per perspective — distributes across different
+  # providers and models for genuine viewpoint diversity.
+  # Override per-call via opts[:provider_model].
+  @perspective_models %{
+    brainstorming: "openrouter:deepseek/deepseek-r1",
+    user_experience: "gemini:gemini-2.5-flash",
+    security: "anthropic:claude-sonnet-4-5-20250929",
+    privacy: "openai:gpt-4.1",
+    stability: "xai:grok-4.1-fast",
+    capability: "zai:glm-5",
+    emergence: "openrouter:qwen/qwen3-coder",
+    vision: "anthropic:claude-sonnet-4-5-20250929",
+    performance: "lm_studio:qwen3-coder-8b",
+    generalization: "ollama:deepseek-v3.2:cloud",
+    resource_usage: "openrouter:arcee-ai/trinity-large-preview:free",
+    consistency: "openai:gpt-4.1-mini",
+    general: "anthropic:claude-sonnet-4-5-20250929"
   }
 
   # ============================================================================
@@ -106,13 +118,13 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   def strategy, do: :llm
 
   @doc """
-  Returns the default provider mapping for each perspective.
+  Returns the default provider:model mapping for each perspective.
 
-  Perspectives are distributed across CLI backends for model diversity.
-  Override per-call via `provider:` opt.
+  Perspectives are distributed across providers and models for diversity.
+  Override per-call via `provider_model:` opt.
   """
-  @spec provider_map() :: %{atom() => atom()}
-  def provider_map, do: @perspective_providers
+  @spec provider_map() :: %{atom() => String.t()}
+  def provider_map, do: @perspective_models
 
   @impl true
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
@@ -129,33 +141,38 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # ============================================================================
 
   defp do_evaluate(proposal, perspective, opts) do
-    ai_module = Keyword.get(opts, :ai_module, default_ai_module())
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
     evaluator_id = generate_evaluator_id(perspective)
 
-    system_prompt = system_prompt_for(perspective)
+    system_prompt = load_system_prompt(perspective)
     doc_paths = collect_doc_paths(proposal, perspective)
-    user_prompt = format_proposal(proposal, perspective)
+    user_prompt = format_proposal(proposal, perspective, doc_paths)
 
-    # CLI backends silently drop the system_prompt opt, so we prepend
-    # everything into one combined prompt for universal compatibility.
-    combined_prompt = build_combined_prompt(system_prompt, doc_paths, user_prompt)
-
-    ai_opts = build_ai_opts(perspective, opts)
+    {provider, model} = resolve_provider_model(perspective, opts)
 
     Logger.debug(
       "Advisory LLM evaluating #{perspective} " <>
-        "(provider: #{ai_opts[:provider] || "default"}, timeout: #{timeout}ms)"
+        "(provider: #{provider}, model: #{model}, timeout: #{timeout}ms)"
     )
 
-    task =
-      Task.async(fn ->
-        ai_module.generate_text(combined_prompt, ai_opts)
+    # Support :llm_fn override for testing (same pattern as orchestrator handlers)
+    llm_fn =
+      Keyword.get_lazy(opts, :llm_fn, fn ->
+        fn sys, usr ->
+          LLMBridge.complete(sys, usr,
+            provider: provider,
+            model: model,
+            max_tokens: Keyword.get(opts, :max_tokens, 4096),
+            temperature: Keyword.get(opts, :temperature, 0.7)
+          )
+        end
       end)
 
+    task = Task.async(fn -> llm_fn.(system_prompt, user_prompt) end)
+
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:ok, response}} ->
-        build_advisory_evaluation(response.text, proposal, perspective, evaluator_id)
+      {:ok, {:ok, response_text}} ->
+        build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
 
       {:ok, {:error, reason}} ->
         error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
@@ -165,39 +182,66 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     end
   end
 
-  defp build_ai_opts(perspective, caller_opts) do
-    default_provider = Map.get(@perspective_providers, perspective, :anthropic)
+  # ============================================================================
+  # Provider/Model Resolution
+  # ============================================================================
 
-    base_opts = [
-      max_tokens: 4096,
-      temperature: 0.7,
-      backend: :cli,
-      provider: default_provider,
-      session_context: "advisory_llm_#{perspective}"
-    ]
+  @doc """
+  Resolve the provider and model for a given perspective.
 
-    # Caller opts override defaults (e.g., provider: :gemini, ai_module: MockAI)
-    # Filter out keys that aren't AI opts
-    ai_overrides =
-      caller_opts
-      |> Keyword.drop([:ai_module, :timeout])
-      |> Keyword.take([
-        :backend,
-        :provider,
-        :model,
-        :temperature,
-        :max_tokens,
-        :session_context,
-        :session_id,
-        :new_session,
-        :working_dir
-      ])
+  Per-call override via `opts[:provider_model]` takes precedence over
+  the default mapping. The provider_model string is `"provider:model"`.
 
-    Keyword.merge(base_opts, ai_overrides)
+  Returns `{provider, model}` as string tuple.
+  """
+  @spec resolve_provider_model(atom(), keyword()) :: {String.t(), String.t()}
+  def resolve_provider_model(perspective, opts \\ []) do
+    provider_model =
+      Keyword.get(opts, :provider_model) ||
+        Map.get(@perspective_models, perspective, "anthropic:claude-sonnet-4-5-20250929")
+
+    parse_provider_model(provider_model)
+  end
+
+  defp parse_provider_model(provider_model) when is_binary(provider_model) do
+    case String.split(provider_model, ":", parts: 2) do
+      [provider, model] -> {provider, model}
+      [provider] -> {provider, "claude-sonnet-4-5-20250929"}
+    end
   end
 
   # ============================================================================
-  # System Prompts
+  # System Prompt Loading (SkillLibrary → fallback)
+  # ============================================================================
+
+  defp load_system_prompt(perspective) do
+    skill_name = to_string(perspective) <> "-perspective"
+
+    case load_from_skill_library(skill_name) do
+      {:ok, body} -> body
+      {:error, _} -> fallback_system_prompt(perspective)
+    end
+  end
+
+  defp load_from_skill_library(skill_name) do
+    if Code.ensure_loaded?(Arbor.Common.SkillLibrary) do
+      case Arbor.Common.SkillLibrary.get(skill_name) do
+        {:ok, skill} when is_binary(skill.body) and byte_size(skill.body) > 0 ->
+          {:ok, skill.body}
+
+        {:ok, _skill} ->
+          {:error, :empty_body}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:error, :skill_library_not_available}
+    end
+  end
+
+  # ============================================================================
+  # Fallback System Prompts (used when SkillLibrary not populated)
   # ============================================================================
 
   @response_format """
@@ -214,7 +258,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
                    "AI agent orchestration platform built on Elixir/OTP with capability-based " <>
                    "security, contract-first design, and a facade pattern."
 
-  defp system_prompt_for(:brainstorming) do
+  defp fallback_system_prompt(:brainstorming) do
     """
     #{@arbor_context}
 
@@ -233,7 +277,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:user_experience) do
+  defp fallback_system_prompt(:user_experience) do
     """
     #{@arbor_context}
 
@@ -253,7 +297,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:security) do
+  defp fallback_system_prompt(:security) do
     """
     #{@arbor_context}
 
@@ -273,7 +317,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:privacy) do
+  defp fallback_system_prompt(:privacy) do
     """
     #{@arbor_context}
 
@@ -293,7 +337,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:stability) do
+  defp fallback_system_prompt(:stability) do
     """
     #{@arbor_context}
 
@@ -313,7 +357,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:capability) do
+  defp fallback_system_prompt(:capability) do
     """
     #{@arbor_context}
 
@@ -332,7 +376,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:emergence) do
+  defp fallback_system_prompt(:emergence) do
     """
     #{@arbor_context}
 
@@ -351,7 +395,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:vision) do
+  defp fallback_system_prompt(:vision) do
     """
     #{@arbor_context}
 
@@ -371,7 +415,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:performance) do
+  defp fallback_system_prompt(:performance) do
     """
     #{@arbor_context}
 
@@ -391,7 +435,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:generalization) do
+  defp fallback_system_prompt(:generalization) do
     """
     #{@arbor_context}
 
@@ -411,7 +455,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:resource_usage) do
+  defp fallback_system_prompt(:resource_usage) do
     """
     #{@arbor_context}
 
@@ -431,7 +475,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp system_prompt_for(:consistency) do
+  defp fallback_system_prompt(:consistency) do
     """
     #{@arbor_context}
 
@@ -452,6 +496,26 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
+  defp fallback_system_prompt(:general) do
+    """
+    #{@arbor_context}
+
+    Your role is GENERAL ADVISORY: provide broad analysis across all dimensions.
+    Consider security, performance, usability, architecture, and alignment with
+    Arbor's patterns — whatever is most relevant to the question at hand.
+
+    Focus on:
+    - What are the most important considerations for this design?
+    - What trade-offs are being made, and are they the right ones?
+    - What would you want to know before approving this change?
+    - Are there risks or opportunities that a focused perspective might miss?
+    - Does this feel right for where Arbor is today and where it's heading?
+    - What's the simplest thing that could work?
+
+    #{@response_format}
+    """
+  end
+
   # ============================================================================
   # Document Path Collection
   # ============================================================================
@@ -467,44 +531,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   end
 
   # ============================================================================
-  # Combined Prompt Builder
-  # ============================================================================
-
-  # CLI backends silently drop the system_prompt opt, so we combine
-  # system prompt + reference doc paths + user prompt into one prompt.
-
-  defp build_combined_prompt(system_prompt, [], user_prompt) do
-    """
-    #{system_prompt}
-
-    ---
-
-    #{user_prompt}
-    """
-  end
-
-  defp build_combined_prompt(system_prompt, doc_paths, user_prompt) do
-    paths_section = Enum.map_join(doc_paths, "\n", &"- #{&1}")
-
-    """
-    #{system_prompt}
-
-    ## Reference Documents
-
-    Read the following files for additional context before responding:
-    #{paths_section}
-
-    ---
-
-    #{user_prompt}
-    """
-  end
-
-  # ============================================================================
   # Proposal Formatting
   # ============================================================================
 
-  defp format_proposal(proposal, perspective) do
+  defp format_proposal(proposal, perspective, doc_paths) do
     context_section =
       case format_context(proposal.context) do
         "" -> ""
@@ -513,6 +543,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
     new_code = Map.get(proposal.context, :new_code)
     code_diff = Map.get(proposal.context, :code_diff)
+
+    doc_section = format_doc_paths(doc_paths)
 
     """
     ## Advisory Request (#{perspective})
@@ -526,8 +558,22 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     ### Target Layer
     #{proposal.target_layer}
 
-    #{if new_code, do: "### Proposed Code\n```elixir\n#{new_code}\n```\n", else: ""}
+    #{doc_section}#{if new_code, do: "### Proposed Code\n```elixir\n#{new_code}\n```\n", else: ""}
     #{if code_diff, do: "### Code Diff\n```\n#{code_diff}\n```\n", else: ""}
+    """
+  end
+
+  defp format_doc_paths([]), do: ""
+
+  defp format_doc_paths(doc_paths) do
+    paths_section = Enum.map_join(doc_paths, "\n", &"- #{&1}")
+
+    """
+    ### Reference Documents
+
+    Read the following files for additional context before responding:
+    #{paths_section}
+
     """
   end
 
@@ -626,9 +672,5 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   defp generate_evaluator_id(perspective) do
     "advisory_llm_#{perspective}_" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
-  end
-
-  defp default_ai_module do
-    Application.get_env(:arbor_consensus, :llm_evaluator_ai_module, Arbor.AI)
   end
 end
