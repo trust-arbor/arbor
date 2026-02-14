@@ -202,6 +202,119 @@ defmodule Arbor.Persistence do
   end
 
   # ---------------------------------------------------------------
+  # Eval operations
+  # ---------------------------------------------------------------
+
+  alias Arbor.Persistence.Schemas.{EvalRun, EvalResult}
+
+  @doc "Insert a new eval run."
+  @spec insert_eval_run(map()) :: {:ok, EvalRun.t()} | {:error, Ecto.Changeset.t()}
+  def insert_eval_run(attrs) do
+    %EvalRun{}
+    |> EvalRun.changeset(attrs)
+    |> Arbor.Persistence.Repo.insert()
+  end
+
+  @doc "Update an existing eval run."
+  @spec update_eval_run(String.t(), map()) ::
+          {:ok, EvalRun.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def update_eval_run(run_id, attrs) do
+    case Arbor.Persistence.Repo.get(EvalRun, run_id) do
+      nil -> {:error, :not_found}
+      run -> run |> EvalRun.changeset(attrs) |> Arbor.Persistence.Repo.update()
+    end
+  end
+
+  @doc "Insert a single eval result."
+  @spec insert_eval_result(map()) :: {:ok, EvalResult.t()} | {:error, Ecto.Changeset.t()}
+  def insert_eval_result(attrs) do
+    %EvalResult{}
+    |> EvalResult.changeset(attrs)
+    |> Arbor.Persistence.Repo.insert()
+  end
+
+  @doc "Batch insert eval results. Returns {count, nil}."
+  @spec insert_eval_results_batch([map()]) :: {non_neg_integer(), nil}
+  def insert_eval_results_batch(results_attrs) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    entries =
+      Enum.map(results_attrs, fn attrs ->
+        attrs
+        |> Map.put_new(:inserted_at, now)
+        |> Map.put_new("inserted_at", now)
+      end)
+
+    Arbor.Persistence.Repo.insert_all(EvalResult, entries, on_conflict: :nothing)
+  end
+
+  @doc "List eval runs with optional filters: domain, model, provider, status."
+  @spec list_eval_runs(keyword()) :: {:ok, [EvalRun.t()]}
+  def list_eval_runs(filters \\ []) do
+    import Ecto.Query
+
+    query = from(r in EvalRun, order_by: [desc: r.inserted_at])
+    query = eval_apply_filters(query, filters)
+    {:ok, Arbor.Persistence.Repo.all(query)}
+  end
+
+  @doc "Get a single eval run with preloaded results."
+  @spec get_eval_run(String.t()) :: {:ok, EvalRun.t()} | {:error, :not_found}
+  def get_eval_run(run_id) do
+    import Ecto.Query
+
+    case Arbor.Persistence.Repo.one(
+           from(r in EvalRun, where: r.id == ^run_id, preload: [:results])
+         ) do
+      nil -> {:error, :not_found}
+      run -> {:ok, run}
+    end
+  end
+
+  @doc "Compare eval runs for models in a given domain."
+  @spec eval_model_comparison(String.t(), [String.t()]) :: {:ok, [EvalRun.t()]}
+  def eval_model_comparison(domain, models) do
+    import Ecto.Query
+
+    query =
+      from(r in EvalRun,
+        where: r.domain == ^domain and r.model in ^models and r.status == "completed",
+        order_by: [asc: r.model, desc: r.inserted_at]
+      )
+
+    {:ok, Arbor.Persistence.Repo.all(query)}
+  end
+
+  defp eval_apply_filters(query, []), do: query
+
+  defp eval_apply_filters(query, [{:domain, domain} | rest]) do
+    import Ecto.Query
+    eval_apply_filters(from(r in query, where: r.domain == ^domain), rest)
+  end
+
+  defp eval_apply_filters(query, [{:model, model} | rest]) do
+    import Ecto.Query
+    eval_apply_filters(from(r in query, where: r.model == ^model), rest)
+  end
+
+  defp eval_apply_filters(query, [{:provider, provider} | rest]) do
+    import Ecto.Query
+    eval_apply_filters(from(r in query, where: r.provider == ^provider), rest)
+  end
+
+  defp eval_apply_filters(query, [{:status, status} | rest]) do
+    import Ecto.Query
+    eval_apply_filters(from(r in query, where: r.status == ^status), rest)
+  end
+
+  defp eval_apply_filters(query, [{:limit, n} | rest]) do
+    import Ecto.Query
+    eval_apply_filters(from(r in query, limit: ^n), rest)
+  end
+
+  defp eval_apply_filters(query, [_ | rest]), do: eval_apply_filters(query, rest)
+
+  # ---------------------------------------------------------------
   # Store operations
   # ---------------------------------------------------------------
 
