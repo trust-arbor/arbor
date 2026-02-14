@@ -13,9 +13,13 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     * `:llm_call`          — `fn messages, mode, call_opts -> {:ok, response} | {:error, reason}`
     * `:tool_dispatch`     — `fn tool_calls, agent_id -> {:ok, results} | {:error, reason}`
     * `:memory_recall`     — `fn agent_id, query -> {:ok, memories} | {:error, reason} | [memories]`
+    * `:recall_goals`      — `fn agent_id -> {:ok, goals} | {:error, reason} | [goals]`
+    * `:recall_intents`    — `fn agent_id -> {:ok, intents} | {:error, reason} | [intents]`
+    * `:recall_beliefs`    — `fn agent_id -> {:ok, beliefs} | {:error, reason} | beliefs`
     * `:memory_update`     — `fn agent_id, turn_data -> :ok`
     * `:checkpoint`        — `fn session_id, turn_count, snapshot -> :ok`
     * `:route_actions`     — `fn actions, agent_id -> :ok`
+    * `:route_intents`     — `fn agent_id -> :ok`
     * `:update_goals`      — `fn goal_updates, new_goals, agent_id -> :ok`
     * `:background_checks` — `fn agent_id -> results`
 
@@ -23,6 +27,24 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   context_updates (graceful degradation). If an adapter raises or throws,
   the handler returns a failure outcome with the error details — no silent
   degradation on security-critical paths.
+
+  ## BDI Extensions
+
+  Several handler types support attribute-driven dispatch for BDI cycle graphs:
+
+    * `session.memory_recall` — reads `recall_type` node attribute:
+      `"goals"` (uses `:recall_goals`), `"intents"` (`:recall_intents`),
+      `"beliefs"` (`:recall_beliefs`), or default query (`:memory_recall`)
+
+    * `session.mode_select` — reads goals, intents, and user_waiting from
+      context for full BDI cognitive mode selection (conversation, consolidation,
+      plan_execution, goal_pursuit, reflection)
+
+    * `session.process_results` — also extracts `decompositions`, `new_intents`,
+      and `proposal_decisions` from LLM JSON response
+
+    * `session.route_actions` — reads `intent_source` node attribute:
+      `"intent_store"` uses `:route_intents` adapter, default uses `:route_actions`
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
@@ -62,33 +84,100 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     ok(%{"session.input_type" => input_type})
   end
 
-  defp handle_type("session.memory_recall", ctx, adapters, _meta) do
-    with_adapter(adapters, :memory_recall, fn recall ->
-      agent_id = Context.get(ctx, "session.agent_id")
-      query = Context.get(ctx, "session.input", "")
+  defp handle_type("session.memory_recall", ctx, adapters, meta) do
+    {node, _graph, _opts} = meta
+    recall_type = Map.get(node.attrs, "recall_type")
+    agent_id = Context.get(ctx, "session.agent_id")
 
-      try do
-        case recall.(agent_id, query) do
-          {:ok, memories} -> ok(%{"session.recalled_memories" => memories})
-          {:error, reason} -> fail("memory_recall: #{inspect(reason)}")
-          memories when is_list(memories) -> ok(%{"session.recalled_memories" => memories})
-          other -> ok(%{"session.recalled_memories" => other})
-        end
-      catch
-        kind, reason -> fail("memory_recall: #{inspect({kind, reason})}")
-      end
-    end)
+    case recall_type do
+      "goals" ->
+        with_adapter(adapters, :recall_goals, fn recall ->
+          try do
+            case recall.(agent_id) do
+              {:ok, goals} -> ok(%{"session.goals" => goals})
+              {:error, reason} -> fail("recall_goals: #{inspect(reason)}")
+              goals when is_list(goals) -> ok(%{"session.goals" => goals})
+              other -> ok(%{"session.goals" => other})
+            end
+          catch
+            kind, reason -> fail("recall_goals: #{inspect({kind, reason})}")
+          end
+        end)
+
+      "intents" ->
+        with_adapter(adapters, :recall_intents, fn recall ->
+          try do
+            case recall.(agent_id) do
+              {:ok, intents} -> ok(%{"session.intents" => intents})
+              {:error, reason} -> fail("recall_intents: #{inspect(reason)}")
+              intents when is_list(intents) -> ok(%{"session.intents" => intents})
+              other -> ok(%{"session.intents" => other})
+            end
+          catch
+            kind, reason -> fail("recall_intents: #{inspect({kind, reason})}")
+          end
+        end)
+
+      "beliefs" ->
+        with_adapter(adapters, :recall_beliefs, fn recall ->
+          try do
+            case recall.(agent_id) do
+              {:ok, beliefs} -> ok(%{"session.beliefs" => beliefs})
+              {:error, reason} -> fail("recall_beliefs: #{inspect(reason)}")
+              beliefs when is_map(beliefs) -> ok(%{"session.beliefs" => beliefs})
+              other -> ok(%{"session.beliefs" => other})
+            end
+          catch
+            kind, reason -> fail("recall_beliefs: #{inspect({kind, reason})}")
+          end
+        end)
+
+      _ ->
+        # default behavior - existing memory_recall
+        with_adapter(adapters, :memory_recall, fn recall ->
+          query = Context.get(ctx, "session.input", "")
+
+          try do
+            case recall.(agent_id, query) do
+              {:ok, memories} -> ok(%{"session.recalled_memories" => memories})
+              {:error, reason} -> fail("memory_recall: #{inspect(reason)}")
+              memories when is_list(memories) -> ok(%{"session.recalled_memories" => memories})
+              other -> ok(%{"session.recalled_memories" => other})
+            end
+          catch
+            kind, reason -> fail("memory_recall: #{inspect({kind, reason})}")
+          end
+        end)
+    end
   end
 
   defp handle_type("session.mode_select", ctx, _adapters, _meta) do
     goals = Context.get(ctx, "session.goals", [])
+    intents = Context.get(ctx, "session.intents", [])
     turn = Context.get(ctx, "session.turn_count", 0)
+    user_waiting = Context.get(ctx, "session.user_waiting", false)
 
     mode =
       cond do
-        length(List.wrap(goals)) > 0 -> "goal_pursuit"
-        rem(turn, 5) == 0 and turn > 0 -> "consolidation"
-        true -> "reflection"
+        # 1. User waiting → conversation (highest priority)
+        user_waiting ->
+          "conversation"
+
+        # 2. Maintenance floor → consolidation
+        rem(turn, 5) == 0 and turn > 0 ->
+          "consolidation"
+
+        # 3. Goals exist but no pending intents → plan_execution (need decomposition)
+        length(List.wrap(goals)) > 0 and length(List.wrap(intents)) == 0 ->
+          "plan_execution"
+
+        # 4. Goals exist (with or without intents) → goal_pursuit
+        length(List.wrap(goals)) > 0 ->
+          "goal_pursuit"
+
+        # 5. Otherwise → reflection
+        true ->
+          "reflection"
       end
 
     ok(%{"session.cognitive_mode" => mode})
@@ -194,7 +283,10 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.actions" => Map.get(parsed, "actions", []),
           "session.goal_updates" => Map.get(parsed, "goal_updates", []),
           "session.new_goals" => Map.get(parsed, "new_goals", []),
-          "session.memory_notes" => Map.get(parsed, "memory_notes", [])
+          "session.memory_notes" => Map.get(parsed, "memory_notes", []),
+          "session.decompositions" => Map.get(parsed, "decompositions", []),
+          "session.new_intents" => Map.get(parsed, "new_intents", []),
+          "session.proposal_decisions" => Map.get(parsed, "proposal_decisions", [])
         })
 
       _ ->
@@ -202,23 +294,42 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.actions" => [],
           "session.goal_updates" => [],
           "session.new_goals" => [],
-          "session.memory_notes" => []
+          "session.memory_notes" => [],
+          "session.decompositions" => [],
+          "session.new_intents" => [],
+          "session.proposal_decisions" => []
         })
     end
   end
 
-  defp handle_type("session.route_actions", ctx, adapters, _meta) do
-    with_adapter(adapters, :route_actions, fn route ->
-      actions = Context.get(ctx, "session.actions", [])
-      agent_id = Context.get(ctx, "session.agent_id")
+  defp handle_type("session.route_actions", ctx, adapters, meta) do
+    {node, _graph, _opts} = meta
+    intent_source = Map.get(node.attrs, "intent_source")
+    agent_id = Context.get(ctx, "session.agent_id")
 
-      try do
-        route.(actions, agent_id)
-        ok(%{"session.actions_routed" => true})
-      catch
-        kind, reason -> fail("route_actions: #{inspect({kind, reason})}")
-      end
-    end)
+    case intent_source do
+      "intent_store" ->
+        with_adapter(adapters, :route_intents, fn route ->
+          try do
+            route.(agent_id)
+            ok(%{"session.intents_routed" => true})
+          catch
+            kind, reason -> fail("route_intents: #{inspect({kind, reason})}")
+          end
+        end)
+
+      _ ->
+        with_adapter(adapters, :route_actions, fn route ->
+          actions = Context.get(ctx, "session.actions", [])
+
+          try do
+            route.(actions, agent_id)
+            ok(%{"session.actions_routed" => true})
+          catch
+            kind, reason -> fail("route_actions: #{inspect({kind, reason})}")
+          end
+        end)
+    end
   end
 
   defp handle_type("session.update_goals", ctx, adapters, _meta) do

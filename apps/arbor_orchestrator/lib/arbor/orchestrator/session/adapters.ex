@@ -21,6 +21,24 @@ defmodule Arbor.Orchestrator.Session.Adapters do
         heartbeat_dot: "specs/pipelines/session/heartbeat.dot"
       )
 
+  ## Adapter Contract
+
+  The `build/1` function returns a map of adapter functions matching the
+  `SessionHandler` adapter contract:
+
+    * `:llm_call`           -- `fn messages, mode, call_opts -> {:ok, response} | {:error, reason}`
+    * `:tool_dispatch`      -- `fn tool_calls, agent_id -> {:ok, results} | {:error, reason}`
+    * `:memory_recall`      -- `fn agent_id, query -> {:ok, memories} | {:error, reason}`
+    * `:recall_goals`       -- `fn agent_id -> {:ok, goals} | {:error, reason}`
+    * `:recall_intents`     -- `fn agent_id -> {:ok, intents} | {:error, reason}`
+    * `:recall_beliefs`     -- `fn agent_id -> {:ok, beliefs_map} | {:error, reason}`
+    * `:memory_update`      -- `fn agent_id, turn_data -> :ok`
+    * `:checkpoint`         -- `fn session_id, turn_count, snapshot -> :ok`
+    * `:route_actions`      -- `fn actions, agent_id -> :ok`
+    * `:route_intents`      -- `fn agent_id -> :ok`
+    * `:update_goals`       -- `fn goal_updates, new_goals, agent_id -> :ok`
+    * `:background_checks`  -- `fn agent_id -> results`
+
   ## Design
 
   - **No GenServer, no state** — pure factory function returning closures
@@ -74,9 +92,13 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       llm_call: build_llm_call(client, llm_provider, llm_model, tools, system_prompt, config),
       tool_dispatch: build_tool_dispatch(agent_id, trust_tier),
       memory_recall: build_memory_recall(),
+      recall_goals: build_recall_goals(),
+      recall_intents: build_recall_intents(),
+      recall_beliefs: build_recall_beliefs(),
       memory_update: build_memory_update(),
       checkpoint: build_checkpoint(),
       route_actions: build_route_actions(),
+      route_intents: build_route_intents(),
       update_goals: build_update_goals(),
       background_checks: build_background_checks(),
       trust_tier_resolver: build_trust_tier_resolver()
@@ -335,6 +357,67 @@ defmodule Arbor.Orchestrator.Session.Adapters do
         nil -> {:ok, :established}
         other -> {:ok, other}
       end
+    end
+  end
+
+  # ── Recall Goals ────────────────────────────────────────────────────
+  #
+  # SessionHandler calls: recall_goals.(agent_id)
+  # Returns: {:ok, goals_list}
+
+  defp build_recall_goals do
+    fn agent_id ->
+      case bridge(Arbor.Memory.GoalStore, :get_active_goals, [agent_id], []) do
+        {:ok, goals} -> {:ok, goals}
+        goals when is_list(goals) -> {:ok, goals}
+        _ -> {:ok, []}
+      end
+    end
+  end
+
+  # ── Recall Intents ──────────────────────────────────────────────────
+  #
+  # SessionHandler calls: recall_intents.(agent_id)
+  # Returns: {:ok, intents_list}
+
+  defp build_recall_intents do
+    fn agent_id ->
+      case bridge(Arbor.Memory.IntentStore, :pending_intents_for_agent, [agent_id], []) do
+        {:ok, intents} -> {:ok, intents}
+        intents when is_list(intents) -> {:ok, intents}
+        _ -> {:ok, []}
+      end
+    end
+  end
+
+  # ── Recall Beliefs ──────────────────────────────────────────────────
+  #
+  # SessionHandler calls: recall_beliefs.(agent_id)
+  # Returns: {:ok, beliefs_map}
+
+  defp build_recall_beliefs do
+    fn agent_id ->
+      wm = bridge(Arbor.Memory, :load_working_memory, [agent_id], %{})
+      beliefs = if is_map(wm), do: wm, else: %{}
+      {:ok, beliefs}
+    end
+  end
+
+  # ── Route Intents ───────────────────────────────────────────────────
+  #
+  # SessionHandler calls: route_intents.(agent_id)
+  # Returns: :ok
+
+  defp build_route_intents do
+    fn agent_id ->
+      bridge(
+        Arbor.Agent.ExecutorIntegration,
+        :route_pending_intentions,
+        [agent_id],
+        :ok
+      )
+
+      :ok
     end
   end
 

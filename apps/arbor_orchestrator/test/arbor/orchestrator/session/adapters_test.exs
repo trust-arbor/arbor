@@ -30,9 +30,13 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :llm_call,
         :tool_dispatch,
         :memory_recall,
+        :recall_goals,
+        :recall_intents,
+        :recall_beliefs,
         :memory_update,
         :checkpoint,
         :route_actions,
+        :route_intents,
         :update_goals,
         :background_checks,
         :trust_tier_resolver
