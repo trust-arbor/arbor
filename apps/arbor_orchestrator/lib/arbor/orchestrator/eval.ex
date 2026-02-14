@@ -89,7 +89,9 @@ defmodule Arbor.Orchestrator.Eval do
 
       actual =
         case subject_module.run(input, opts) do
-          {:ok, result} -> result
+          {:ok, %{text: text}} -> text
+          {:ok, result} when is_binary(result) -> result
+          {:ok, result} -> to_string(result)
           {:error, _} -> ""
         end
 
