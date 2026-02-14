@@ -7,6 +7,8 @@ defmodule Arbor.Orchestrator.Application do
   def start(_type, _args) do
     children = [
       {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
+      Arbor.Orchestrator.SignalsBridge,
+      Arbor.Orchestrator.JobRegistry,
       {DynamicSupervisor, name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one},
       {Registry, keys: :unique, name: Arbor.Orchestrator.SessionRegistry},
       Arbor.Orchestrator.Session.Supervisor,
