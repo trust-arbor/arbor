@@ -55,6 +55,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
       opts
       |> Keyword.take([:logs_root, :workdir])
       |> Keyword.put(:on_event, &print_event/1)
+      |> Keyword.put(:on_stream, &print_stream_event/1)
 
     run_opts =
       if initial_values != %{} do
@@ -133,4 +134,14 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
   end
 
   defp print_event(_), do: :ok
+
+  defp print_stream_event(%{type: :tool_use, name: name}) do
+    IO.write(" [#{name}]")
+  end
+
+  defp print_stream_event(%{type: :thinking}) do
+    IO.write(".")
+  end
+
+  defp print_stream_event(_), do: :ok
 end

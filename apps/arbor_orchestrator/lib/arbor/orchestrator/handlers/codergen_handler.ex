@@ -147,17 +147,31 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
       end
 
+    # Thread streaming callback through to the transport layer
+    on_stream = Keyword.get(opts, :on_stream)
+
+    call_opts =
+      if on_stream do
+        Keyword.put(call_opts, :stream_callback, on_stream)
+      else
+        call_opts
+      end
+
     use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
 
     if use_tools do
       workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
       max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
 
-      case ToolLoop.run(client, request,
-             workdir: workdir,
-             max_turns: max_turns,
-             on_tool_call: build_tool_callback(opts, node.id)
-           ) do
+      tool_loop_opts =
+        [
+          workdir: workdir,
+          max_turns: max_turns,
+          on_tool_call: build_tool_callback(opts, node.id)
+        ]
+        |> maybe_add_stream_callback(on_stream)
+
+      case ToolLoop.run(client, request, tool_loop_opts) do
         {:ok, result} ->
           {:ok, result.text}
 
@@ -173,6 +187,12 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         {:error, _} = error -> error
       end
     end
+  end
+
+  defp maybe_add_stream_callback(opts, nil), do: opts
+
+  defp maybe_add_stream_callback(opts, callback) do
+    Keyword.put(opts, :stream_callback, callback)
   end
 
   defp build_tool_callback(opts, node_id) do

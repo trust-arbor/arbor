@@ -30,15 +30,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCliTest do
           messages: [Message.new(:user, "hello")]
         }
 
-        # ClaudeCli checks System.find_executable which uses PATH
-        # When claude isn't in PATH, available? returns false
-        # but complete should still handle gracefully
+        # CliTransport.start_link will fail when claude isn't in PATH
         result = ClaudeCli.complete(request, [])
 
         case result do
-          {:error, :claude_not_found} -> :ok
+          {:error, {:transport_start_failed, _}} -> :ok
           {:error, _} -> :ok
-          # If claude somehow still found (unlikely), that's fine too
+          # If transport already cached from previous test, it may work
           {:ok, _} -> :ok
         end
       after
