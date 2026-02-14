@@ -303,24 +303,44 @@ defmodule Arbor.AI do
       |> maybe_put(:agent_id, agent_id)
       |> Map.merge(extra_context)
 
-    # Execute via jido_ai agentic loop
-    result = CallWithTools.run(params, context)
-    duration_ms = System.monotonic_time(:millisecond) - start_time
+    # ── SessionBridge (strangler fig) ──────────────────────────────
+    # Try the Session path first. If unavailable, fall back to CallWithTools.
+    # The Session path runs the turn.dot graph which handles tool loops
+    # internally via graph cycles (dispatch_tools → call_llm).
+    session_opts =
+      opts
+      |> Keyword.put(:system_prompt, system_prompt)
+      |> Keyword.put(:tools, action_modules)
 
-    case result do
-      {:ok, raw_result} ->
-        response = format_tools_response(raw_result, provider, model)
+    case Arbor.AI.SessionBridge.try_session_call(prompt, session_opts) do
+      {:ok, response} ->
+        # Session path succeeded — response is already in the right format
+        duration_ms = System.monotonic_time(:millisecond) - start_time
         emit_tool_request_completed(provider, model, duration_ms, response)
         record_tool_budget_usage(provider, opts, response)
         record_tool_usage_stats_success(provider, opts, response, duration_ms)
         {:ok, response}
 
-      {:error, reason} ->
-        duration_ms_err = System.monotonic_time(:millisecond) - start_time
-        emit_tool_request_failed(provider, model, reason)
-        record_tool_usage_stats_failure(provider, opts, reason, duration_ms_err)
-        Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
-        {:error, reason}
+      {:unavailable, _reason} ->
+        # Fall back to CallWithTools (the legacy path)
+        result = CallWithTools.run(params, context)
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        case result do
+          {:ok, raw_result} ->
+            response = format_tools_response(raw_result, provider, model)
+            emit_tool_request_completed(provider, model, duration_ms, response)
+            record_tool_budget_usage(provider, opts, response)
+            record_tool_usage_stats_success(provider, opts, response, duration_ms)
+            {:ok, response}
+
+          {:error, reason} ->
+            duration_ms_err = System.monotonic_time(:millisecond) - start_time
+            emit_tool_request_failed(provider, model, reason)
+            record_tool_usage_stats_failure(provider, opts, reason, duration_ms_err)
+            Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
+            {:error, reason}
+        end
     end
   end
 
