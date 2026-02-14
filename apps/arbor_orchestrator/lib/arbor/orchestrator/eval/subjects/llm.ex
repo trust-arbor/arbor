@@ -1,13 +1,17 @@
-defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
+defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   @moduledoc """
-  Subject that sends prompts to LLM providers via UnifiedLLM adapters.
+  Unified eval subject that routes prompts to any LLM provider.
+
+  Supports API providers (OpenRouter, Ollama, LM Studio, Anthropic, etc.)
+  and CLI backends (Claude Code, Codex, Gemini CLI, etc.) through the
+  UnifiedLLM adapter layer.
 
   Input can be:
     - A string (used as the user message)
     - A map with `"prompt"` and optional `"system"` keys
 
   Options:
-    - `:provider` — provider name (default: `"lm_studio"`)
+    - `:provider` — provider name (see @adapters for full list)
     - `:model` — model name (default: provider-specific)
     - `:temperature` — sampling temperature
     - `:max_tokens` — max response tokens (default: 4096)
@@ -24,6 +28,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Anthropic,
+    Arborcli,
     Gemini,
     LMStudio,
     Ollama,
@@ -34,6 +39,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
   }
 
   @adapters %{
+    # API providers
     "lm_studio" => LMStudio,
     "ollama" => Ollama,
     "anthropic" => Anthropic,
@@ -41,7 +47,22 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
     "openrouter" => OpenRouter,
     "zai" => Zai,
     "xai" => Xai,
-    "gemini" => Gemini
+    "gemini" => Gemini,
+    # CLI backends — route through Arborcli bridge to arbor_ai
+    "claude_cli" => Arborcli,
+    "codex_cli" => Arborcli,
+    "gemini_cli" => Arborcli,
+    "opencode_cli" => Arborcli,
+    "qwen_cli" => Arborcli
+  }
+
+  # Map CLI provider names to the atoms Arborcli expects
+  @cli_provider_map %{
+    "claude_cli" => :anthropic,
+    "codex_cli" => :openai,
+    "gemini_cli" => :gemini,
+    "opencode_cli" => :opencode,
+    "qwen_cli" => :qwen
   }
 
   @impl true
@@ -66,7 +87,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
         model: model,
         messages: messages,
         max_tokens: max_tokens,
-        temperature: temperature
+        temperature: temperature,
+        provider_options: build_provider_options(provider)
       }
 
       if use_streaming do
@@ -155,6 +177,15 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
   defp parse_input(%{prompt: prompt} = input), do: {prompt, input[:system]}
   defp parse_input(prompt) when is_binary(prompt), do: {prompt, nil}
 
+  # For CLI providers, pass the resolved backend atom so Arborcli routes correctly
+  defp build_provider_options(provider) do
+    case Map.get(@cli_provider_map, provider) do
+      nil -> %{}
+      cli_atom -> %{"cli_provider" => cli_atom}
+    end
+  end
+
+  # API providers
   defp default_model("lm_studio"), do: "qwen/qwen3-coder-next"
   defp default_model("ollama"), do: "llama3.2:latest"
   defp default_model("anthropic"), do: "claude-sonnet-4-5-20250929"
@@ -163,6 +194,12 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
   defp default_model("zai"), do: "aurora-alpha"
   defp default_model("xai"), do: "grok-4-1-fast"
   defp default_model("gemini"), do: "gemini-2.5-flash"
+  # CLI backends
+  defp default_model("claude_cli"), do: "sonnet"
+  defp default_model("codex_cli"), do: "gpt5"
+  defp default_model("gemini_cli"), do: "auto"
+  defp default_model("opencode_cli"), do: "opencode/big-pickle"
+  defp default_model("qwen_cli"), do: "qwen_code"
   defp default_model(_), do: ""
 
   defp extract_text(%{text: text}), do: text
@@ -181,6 +218,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LocalLLM do
       end
 
     # Fallback: rough estimate (~4 chars per token for English)
-    usage_tokens || div(String.length(text), 4)
+    usage_tokens || div(String.length(text || ""), 4)
   end
 end

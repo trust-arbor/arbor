@@ -32,7 +32,7 @@ digraph EvalMultiModel {
     item_key="map.current_item",
     collect_key="eval.all_model_results",
     handler_type="eval.run",
-    handler_attrs="{\"graders\": \"compile_check,functional_test\", \"subject\": \"Arbor.Orchestrator.Eval.Subjects.LocalLLM\"}",
+    handler_attrs="{\"graders\": \"compile_check,functional_test\", \"subject\": \"Arbor.Orchestrator.Eval.Subjects.LLM\"}",
     max_concurrency="1",
     on_item_error="collect_nil",
     data_class="internal"

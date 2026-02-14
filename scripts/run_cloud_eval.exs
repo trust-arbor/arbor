@@ -7,10 +7,11 @@ Application.ensure_all_started(:req)
 Application.ensure_all_started(:jason)
 
 alias Arbor.Orchestrator.Eval
-alias Arbor.Orchestrator.Eval.Subjects.LocalLLM
+alias Arbor.Orchestrator.Eval.Subjects.LLM
 alias Arbor.Orchestrator.Eval.RunStore
 
-{:ok, samples} = Eval.load_dataset("apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl")
+{:ok, samples} =
+  Eval.load_dataset("apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl")
 
 models = [
   {"glm-5:cloud", "ollama"},
@@ -28,7 +29,7 @@ for {model, provider} <- models do
       id = sample["id"]
       IO.write("  #{id}... ")
 
-      case LocalLLM.run(sample["input"], opts) do
+      case LLM.run(sample["input"], opts) do
         {:ok, %{text: text}} ->
           c = Eval.grader("compile_check").grade(text, sample["expected"])
 
@@ -95,7 +96,9 @@ for {model, provider} <- models do
     "accuracy" => pass_count / n
   }
 
-  IO.puts("  TOTALS: compile=#{metrics["compile_accuracy"]}, func_mean=#{metrics["functional_mean"]}, pass=#{metrics["full_pass_rate"]}")
+  IO.puts(
+    "  TOTALS: compile=#{metrics["compile_accuracy"]}, func_mean=#{metrics["functional_mean"]}, pass=#{metrics["full_pass_rate"]}"
+  )
 
   # Save run
   slug = model |> String.replace(":", "-") |> String.replace("/", "-")

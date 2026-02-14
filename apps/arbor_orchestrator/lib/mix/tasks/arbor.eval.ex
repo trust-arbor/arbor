@@ -374,7 +374,7 @@ defmodule Mix.Tasks.Arbor.Eval do
   defp fmt(val), do: inspect(val)
 
   defp run_samples(samples, grader_names, subject_opts) do
-    subject = Arbor.Orchestrator.Eval.Subjects.LocalLLM
+    subject = Arbor.Orchestrator.Eval.Subjects.LLM
     graders = Enum.map(grader_names, &Arbor.Orchestrator.Eval.grader/1) |> Enum.reject(&is_nil/1)
 
     Enum.map(samples, fn sample ->

@@ -23,7 +23,7 @@ digraph EvalHeartbeat {
 
   run_eval [
     type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
     graders="json_valid",
     data_class="internal"
   ]
