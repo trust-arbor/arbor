@@ -165,6 +165,92 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.LMStudioTest do
     end
   end
 
+  describe "parse_structured_message/1" do
+    test "extracts output from valid JSON-wrapped content" do
+      json =
+        Jason.encode!(%{
+          "thinking" => "analyzing",
+          "action" => "code",
+          "output" => "IO.puts(:hello)"
+        })
+
+      msg = %{"content" => json, "role" => "assistant"}
+
+      parts = LMStudio.parse_structured_message(msg)
+      assert [%{kind: :thinking}, %{kind: :text}] = parts
+      assert Enum.find(parts, &(&1.kind == :text)).text == "IO.puts(:hello)"
+    end
+
+    test "uses message-level reasoning for non-JSON content" do
+      msg = %{
+        "content" => "defmodule Foo, do: nil",
+        "reasoning" => "The user wants a module",
+        "role" => "assistant"
+      }
+
+      parts = LMStudio.parse_structured_message(msg)
+      assert [%{kind: :thinking}, %{kind: :text}] = parts
+      assert Enum.find(parts, &(&1.kind == :thinking)).text == "The user wants a module"
+      assert Enum.find(parts, &(&1.kind == :text)).text == "defmodule Foo, do: nil"
+    end
+
+    test "returns nil for normal text (falls through to default)" do
+      msg = %{"content" => "Hello, how can I help?", "role" => "assistant"}
+      assert LMStudio.parse_structured_message(msg) == nil
+    end
+
+    test "returns nil for non-map input" do
+      assert LMStudio.parse_structured_message("just a string") == nil
+      assert LMStudio.parse_structured_message(nil) == nil
+    end
+
+    test "handles JSON with only thinking field" do
+      json = Jason.encode!(%{"thinking" => "deep analysis of the problem"})
+      msg = %{"content" => json, "role" => "assistant"}
+
+      parts = LMStudio.parse_structured_message(msg)
+      assert parts != nil
+      assert Enum.any?(parts, &(&1.kind == :text))
+    end
+
+    test "strips malformed JSON prefix for broken long responses" do
+      # Simulates gpt-oss long response where thinking field runs forever
+      broken =
+        ~s|{"thinking":"analysis | <>
+          "Write code for GenServer. defmodule Counter do use GenServer end"
+
+      msg = %{"content" => broken, "role" => "assistant"}
+      parts = LMStudio.parse_structured_message(msg)
+      assert parts != nil
+      text = Enum.find(parts, &(&1.kind == :text))
+      assert text != nil
+      assert String.contains?(text.text, "defmodule Counter")
+    end
+
+    test "parse hook integrates with complete/2 via config" do
+      json_content = Jason.encode!(%{"thinking" => "ok", "output" => "defmodule X, do: nil"})
+
+      opts = [
+        http_client: fn _req ->
+          {:ok,
+           %{
+             status: 200,
+             body: %{
+               "choices" => [
+                 %{"message" => %{"content" => json_content}, "finish_reason" => "stop"}
+               ],
+               "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 10, "total_tokens" => 15}
+             },
+             headers: []
+           }}
+        end
+      ]
+
+      {:ok, resp} = LMStudio.complete(request(), opts)
+      assert resp.text == "defmodule X, do: nil"
+    end
+  end
+
   describe "client auto-discovery" do
     test "LM Studio adapter is discoverable" do
       Code.ensure_loaded!(LMStudio)
