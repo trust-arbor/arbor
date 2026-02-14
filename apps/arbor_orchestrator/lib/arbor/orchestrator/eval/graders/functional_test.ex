@@ -89,6 +89,9 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
 
     task =
       Task.async(fn ->
+        # Trap exits so GenServer crashes in eval'd code don't kill the task
+        Process.flag(:trap_exit, true)
+
         try do
           # Run setup if present
           bindings =
