@@ -9,16 +9,21 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Full review" --all --docs design.md --context "budget:low,timeline:2 weeks"
       $ mix arbor.consult "Build order?" --all --save --docs design.md
       $ mix arbor.consult "What is consciousness?" --multi-model --save
+      $ mix arbor.consult "Review this code" --provider anthropic:claude-sonnet-4-5-20250929
+      $ mix arbor.consult "Quick question" -g --provider ollama:deepseek-v3.2:cloud
+      $ mix arbor.consult "Analyze this" --skill security-perspective
 
   ## Options
 
     * `--perspective` / `-p`  — Ask a single perspective (default: brainstorming)
-    * `--all` / `-a`          — Ask all 12 perspectives (expensive: 12 LLM calls)
-    * `--multi-model` / `-m`  — Same perspective across all 4 providers (4 LLM calls)
+    * `--general` / `-g`      — Shorthand for --perspective general
+    * `--all` / `-a`          — Ask all perspectives (expensive: N LLM calls)
+    * `--multi-model` / `-m`  — Same perspective across all unique providers
     * `--save` / `-s`         — Save results to .arbor/council/<slug>/
     * `--docs` / `-d`         — Reference doc paths (comma-separated or repeated)
     * `--context` / `-c`      — Extra context as key:value pairs (comma-separated)
-    * `--provider`            — Override CLI provider (anthropic, gemini, openai, opencode)
+    * `--provider`            — Override provider:model (e.g. anthropic:claude-sonnet-4-5-20250929)
+    * `--skill` / `-k`        — Use a skill from the library as the system prompt
     * `--timeout`             — Per-perspective timeout in seconds (default: 180)
 
   ## Saving Results
@@ -43,9 +48,17 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Persistent agents vs spawned?" -p stability \\
         --docs .arbor/roadmap/3-in-progress/consensus-redesign.md
 
-  Full council with save (12 perspectives, ~$0.50-1.00):
+  Full council with save (all perspectives, ~$0.50-1.00):
 
       $ mix arbor.consult "Should we redesign the Coordinator?" --all --save
+
+  Use a specific provider:model:
+
+      $ mix arbor.consult "Quick question" -g --provider ollama:deepseek-v3.2:cloud
+
+  Use a skill as system prompt:
+
+      $ mix arbor.consult "Analyze this design" --skill security-perspective
   """
   use Mix.Task
 
@@ -57,22 +70,26 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   @switches [
     perspective: :string,
+    general: :boolean,
     all: :boolean,
     multi_model: :boolean,
     save: :boolean,
     docs: [:string],
     context: :string,
     provider: :string,
+    skill: :string,
     timeout: :integer
   ]
 
   @aliases [
     p: :perspective,
+    g: :general,
     a: :all,
     m: :multi_model,
     s: :save,
     d: :docs,
-    c: :context
+    c: :context,
+    k: :skill
   ]
 
   @impl Mix.Task
@@ -82,12 +99,14 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     Options:
       -p, --perspective NAME   Ask one perspective (default: brainstorming)
-      -a, --all                Ask all 12 perspectives
-      -m, --multi-model        Same perspective, all 4 providers (use with -p)
+      -g, --general            Shorthand for --perspective general
+      -a, --all                Ask all perspectives
+      -m, --multi-model        Same perspective, all unique providers (use with -p)
       -s, --save               Save results to .arbor/council/
       -d, --docs PATH          Reference doc paths
       -c, --context KV         Context as key:value pairs
-          --provider NAME      Override CLI provider
+      -k, --skill NAME         Use a skill from the library as system prompt
+          --provider P:M       Override provider:model (e.g. anthropic:claude-sonnet-4-5-20250929)
           --timeout SECONDS    Timeout per perspective (default: 180)
 
     Perspectives: #{Enum.join(@perspectives, ", ")}
@@ -106,6 +125,14 @@ defmodule Mix.Tasks.Arbor.Consult do
       exit({:shutdown, 1})
     end
 
+    # --general / -g is shorthand for --perspective general
+    opts =
+      if opts[:general] do
+        Keyword.put(opts, :perspective, "general")
+      else
+        opts
+      end
+
     # Start only what the council needs: AI backends, consensus config, and logger.
     # Using app.start boots the entire application tree including gateway/dashboard
     # HTTP servers, which fails with :eaddrinuse if they're already running.
@@ -113,13 +140,14 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     context = build_context(opts)
     eval_opts = build_eval_opts(opts)
-    provider_override = eval_opts[:provider]
+    provider_model_display = eval_opts[:provider_model]
     save? = opts[:save] || false
 
-    {results, mode} = dispatch_consultation(opts, question, context, eval_opts, provider_override)
+    {results, mode} =
+      dispatch_consultation(opts, question, context, eval_opts, provider_model_display)
 
     if save? and results != :error do
-      save_results(question, results, opts, provider_override, mode)
+      save_results(question, results, opts, provider_model_display, mode)
     end
   end
 
@@ -127,22 +155,22 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Dispatch
   # ============================================================================
 
-  defp dispatch_consultation(opts, question, context, eval_opts, provider_override) do
+  defp dispatch_consultation(opts, question, context, eval_opts, provider_model_display) do
     if opts[:multi_model] do
       perspective = parse_perspective(opts[:perspective] || "brainstorming")
       {ask_multi_model(question, perspective, context, eval_opts), :multi_model}
     else
-      results = dispatch_standard(opts, question, context, eval_opts, provider_override)
+      results = dispatch_standard(opts, question, context, eval_opts, provider_model_display)
       {results, :standard}
     end
   end
 
-  defp dispatch_standard(opts, question, context, eval_opts, provider_override) do
+  defp dispatch_standard(opts, question, context, eval_opts, provider_model_display) do
     if opts[:all] do
-      ask_all(question, context, eval_opts, provider_override)
+      ask_all(question, context, eval_opts, provider_model_display)
     else
       perspective = parse_perspective(opts[:perspective] || "brainstorming")
-      ask_one(question, perspective, context, eval_opts, provider_override)
+      ask_one(question, perspective, context, eval_opts, provider_model_display)
     end
   end
 
@@ -150,12 +178,12 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Single Perspective
   # ============================================================================
 
-  defp ask_one(question, perspective, context, eval_opts, provider_override) do
+  defp ask_one(question, perspective, context, eval_opts, provider_model_display) do
     Mix.shell().info("Consulting :#{perspective}...\n")
 
     case Consult.ask_one(AdvisoryLLM, question, perspective, [context: context] ++ eval_opts) do
       {:ok, eval} ->
-        print_evaluation(perspective, eval, provider_override)
+        print_evaluation(perspective, eval, provider_model_display)
         [{perspective, eval}]
 
       {:error, reason} ->
@@ -169,8 +197,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   # ============================================================================
 
   defp ask_multi_model(question, perspective, context, eval_opts) do
-    providers = [:anthropic, :gemini, :openai, :opencode]
-    Mix.shell().info("Consulting :#{perspective} across #{length(providers)} providers...\n")
+    Mix.shell().info("Consulting :#{perspective} across all unique providers...\n")
 
     case Consult.ask_multi_model(
            AdvisoryLLM,
@@ -185,16 +212,18 @@ defmodule Mix.Tasks.Arbor.Consult do
             _ -> true
           end)
 
-        Enum.each(successes, fn {provider, eval} ->
-          print_multi_model_evaluation(perspective, provider, eval)
+        total = length(successes) + length(failures)
+
+        Enum.each(successes, fn {provider_model, eval} ->
+          print_multi_model_evaluation(perspective, provider_model, eval)
         end)
 
-        Enum.each(failures, fn {provider, {:error, reason}} ->
-          Mix.shell().error("=== #{provider} === ERROR: #{inspect(reason)}\n")
+        Enum.each(failures, fn {provider_model, {:error, reason}} ->
+          Mix.shell().error("=== #{provider_model} === ERROR: #{inspect(reason)}\n")
         end)
 
         Mix.shell().info(
-          "--- Done: #{length(successes)}/#{length(providers)} providers responded" <>
+          "--- Done: #{length(successes)}/#{total} providers responded" <>
             if(failures != [], do: ", #{length(failures)} failed", else: "") <>
             " ---"
         )
@@ -211,7 +240,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   # All Perspectives
   # ============================================================================
 
-  defp ask_all(question, context, eval_opts, provider_override) do
+  defp ask_all(question, context, eval_opts, provider_model_display) do
     count = length(@perspectives)
     Mix.shell().info("Consulting all #{count} perspectives in parallel...\n")
 
@@ -224,7 +253,7 @@ defmodule Mix.Tasks.Arbor.Consult do
           end)
 
         Enum.each(successes, fn {perspective, eval} ->
-          print_evaluation(perspective, eval, provider_override)
+          print_evaluation(perspective, eval, provider_model_display)
         end)
 
         Enum.each(failures, fn {perspective, {:error, reason}} ->
@@ -250,23 +279,39 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Output
   # ============================================================================
 
-  defp print_evaluation(perspective, eval, provider_override) do
-    provider = provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
+  defp print_evaluation(perspective, eval, provider_model_display) do
+    provider_model =
+      provider_model_display ||
+        AdvisoryLLM.provider_map()[perspective] ||
+        "unknown"
+
+    label = to_string(perspective)
+    pm = to_string(provider_model)
+    # Dynamic box width: perspective + provider_model + decoration
+    inner = "  #{label} (#{pm})  "
+    width = max(62, String.length(inner) + 2)
+    pad = width - String.length(inner) - 2
 
     Mix.shell().info("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║  #{String.pad_trailing(to_string(perspective), 20)} (#{provider})#{String.duplicate(" ", max(0, 33 - String.length(to_string(provider))))}║
-    ╚══════════════════════════════════════════════════════════════╝
+    ╔#{String.duplicate("═", width)}╗
+    ║#{inner}#{String.duplicate(" ", pad)}║
+    ╚#{String.duplicate("═", width)}╝
 
     #{eval.reasoning}
     """)
   end
 
-  defp print_multi_model_evaluation(perspective, provider, eval) do
+  defp print_multi_model_evaluation(perspective, provider_model, eval) do
+    pm = to_string(provider_model)
+    label = "as :#{perspective}"
+    inner = "  #{pm} (#{label})  "
+    width = max(62, String.length(inner) + 2)
+    pad = width - String.length(inner) - 2
+
     Mix.shell().info("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║  #{String.pad_trailing(to_string(provider), 20)} (as :#{perspective})#{String.duplicate(" ", max(0, 30 - String.length(to_string(perspective))))}║
-    ╚══════════════════════════════════════════════════════════════╝
+    ╔#{String.duplicate("═", width)}╗
+    ║#{inner}#{String.duplicate(" ", pad)}║
+    ╚#{String.duplicate("═", width)}╝
 
     #{eval.reasoning}
     """)
@@ -276,25 +321,27 @@ defmodule Mix.Tasks.Arbor.Consult do
   # Save to .arbor/council/
   # ============================================================================
 
-  defp save_results(question, results, opts, provider_override, mode) do
+  defp save_results(question, results, opts, provider_model_display, mode) do
     slug = slugify(question)
     date = Date.utc_today() |> Date.to_string()
     dir = Path.join([".arbor", "council", "#{date}-#{slug}"])
 
     File.mkdir_p!(dir)
 
-    write_question_file(dir, question, results, opts, provider_override, mode)
-    write_perspectives_file(dir, question, results, provider_override, mode)
+    write_question_file(dir, question, results, opts, provider_model_display, mode)
+    write_perspectives_file(dir, question, results, provider_model_display, mode)
 
     Mix.shell().info("\nSaved to #{dir}/")
   end
 
-  defp write_question_file(dir, question, results, opts, provider_override, mode) do
+  defp write_question_file(dir, question, results, opts, provider_model_display, mode) do
     doc_paths = Keyword.get_values(opts, :docs) |> Enum.flat_map(&split_paths/1)
     perspectives_consulted = format_consulted(results, opts, mode)
 
     provider_line =
-      if provider_override, do: "provider: #{provider_override}\n", else: ""
+      if provider_model_display,
+        do: "provider_model: #{provider_model_display}\n",
+        else: ""
 
     docs_lines =
       case doc_paths do
@@ -323,14 +370,14 @@ defmodule Mix.Tasks.Arbor.Consult do
     File.write!(Path.join(dir, "question.md"), String.trim(content) <> "\n")
   end
 
-  defp write_perspectives_file(dir, question, results, provider_override, mode) do
+  defp write_perspectives_file(dir, question, results, provider_model_display, mode) do
     {title, body} =
       case mode do
         :multi_model ->
           {"# Multi-Model Responses",
-           Enum.map_join(results, "\n---\n\n", fn {provider, eval} ->
+           Enum.map_join(results, "\n---\n\n", fn {provider_model, eval} ->
              """
-             ## #{provider}
+             ## #{provider_model}
 
              #{eval.reasoning}
              """
@@ -339,11 +386,13 @@ defmodule Mix.Tasks.Arbor.Consult do
         _ ->
           {"# Council Perspectives",
            Enum.map_join(results, "\n---\n\n", fn {perspective, eval} ->
-             provider =
-               provider_override || AdvisoryLLM.provider_map()[perspective] || :unknown
+             pm =
+               provider_model_display ||
+                 AdvisoryLLM.provider_map()[perspective] ||
+                 "unknown"
 
              """
-             ## #{perspective} (#{provider})
+             ## #{perspective} (#{pm})
 
              #{eval.reasoning}
              """
@@ -475,26 +524,51 @@ defmodule Mix.Tasks.Arbor.Consult do
   defp build_eval_opts(opts) do
     eval_opts = []
 
+    # --provider accepts provider:model format (e.g. "anthropic:claude-sonnet-4-5-20250929")
+    # or just a provider name (e.g. "anthropic") — passed through as provider_model string
     eval_opts =
       case opts[:provider] do
+        nil -> eval_opts
+        p -> Keyword.put(eval_opts, :provider_model, p)
+      end
+
+    # --skill loads a skill from the library and passes its body as system_prompt
+    eval_opts =
+      case opts[:skill] do
         nil ->
           eval_opts
 
-        p ->
-          allowed = [:anthropic, :gemini, :openai, :opencode]
+        skill_name ->
+          case load_skill(skill_name) do
+            {:ok, body} ->
+              Keyword.put(eval_opts, :system_prompt, body)
 
-          provider =
-            case SafeAtom.to_allowed(p, allowed) do
-              {:ok, atom} -> atom
-              {:error, _} -> :anthropic
-            end
-
-          Keyword.put(eval_opts, :provider, provider)
+            {:error, reason} ->
+              Mix.shell().error("Error loading skill '#{skill_name}': #{inspect(reason)}")
+              exit({:shutdown, 1})
+          end
       end
 
     case opts[:timeout] do
       nil -> eval_opts
       t -> Keyword.put(eval_opts, :timeout, t * 1_000)
+    end
+  end
+
+  defp load_skill(skill_name) do
+    if Code.ensure_loaded?(Arbor.Common.SkillLibrary) do
+      case Arbor.Common.SkillLibrary.get(skill_name) do
+        {:ok, skill} when is_binary(skill.body) and byte_size(skill.body) > 0 ->
+          {:ok, skill.body}
+
+        {:ok, _} ->
+          {:error, :empty_skill_body}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:error, :skill_library_not_available}
     end
   end
 
@@ -513,5 +587,17 @@ defmodule Mix.Tasks.Arbor.Consult do
     {:ok, _} = Application.ensure_all_started(:jason)
     {:ok, _} = Application.ensure_all_started(:req)
     {:ok, _} = Application.ensure_all_started(:arbor_ai)
+
+    # Initialize UnifiedLLM client if available (for provider:model routing)
+    # Use apply/3 to avoid compile-time reference to orchestrator module
+    client_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Client])
+
+    if Code.ensure_loaded?(client_mod) do
+      try do
+        apply(client_mod, :default_client, [])
+      rescue
+        _ -> :ok
+      end
+    end
   end
 end

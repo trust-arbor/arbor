@@ -41,6 +41,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   - `:context` — map of additional context for the evaluator (default: `%{}`)
   - `:timeout` — per-perspective timeout in ms (default: 120_000)
   - `:ai_module` — override the AI module (useful for testing)
+  - `:provider_model` — override provider:model for all perspectives (e.g. `"anthropic:claude-sonnet-4-5-20250929"`)
 
   Returns `{:ok, [{perspective, evaluation}]}` sorted by perspective,
   or `{:error, reason}` if proposal creation fails.
@@ -85,7 +86,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
   ## Options
 
-  Same as `ask/3`.
+  Same as `ask/3`, including `:provider_model` for provider:model override.
   """
   @spec ask_one(module(), String.t(), atom(), keyword()) ::
           {:ok, Arbor.Contracts.Consensus.Evaluation.t()} | {:error, term()}
@@ -101,16 +102,17 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   @doc """
   Ask a single perspective across all providers simultaneously.
 
-  Runs the same perspective prompt through each CLI provider in parallel,
+  Runs the same perspective prompt through each provider in parallel,
   so diversity comes from model differences rather than prompt differences.
 
-  Returns `{:ok, [{provider, evaluation}]}` sorted by provider,
+  Provider list is derived dynamically from AdvisoryLLM's perspective_models map,
+  extracting the unique provider:model pairs.
+
+  Returns `{:ok, [{provider_model, evaluation}]}` sorted by provider_model,
   or `{:error, reason}` if proposal creation fails.
   """
-  @providers [:anthropic, :gemini, :openai, :opencode]
-
   @spec ask_multi_model(module(), String.t(), atom(), keyword()) ::
-          {:ok, [{atom(), Arbor.Contracts.Consensus.Evaluation.t()}]} | {:error, term()}
+          {:ok, [{String.t(), Arbor.Contracts.Consensus.Evaluation.t()}]} | {:error, term()}
   def ask_multi_model(evaluator_module, description, perspective, opts \\ []) do
     context = Keyword.get(opts, :context, %{})
     timeout = Keyword.get(opts, :timeout, @default_timeout)
@@ -118,26 +120,29 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     with {:ok, proposal} <- build_advisory_proposal(description, context) do
       eval_opts = Keyword.drop(opts, [:context])
 
-      tasks =
-        Enum.map(@providers, fn provider ->
-          provider_opts = Keyword.put(eval_opts, :provider, provider)
+      # Get unique provider:model pairs from the evaluator's perspective models
+      provider_models = unique_provider_models(evaluator_module)
 
-          {provider,
+      tasks =
+        Enum.map(provider_models, fn provider_model ->
+          pm_opts = Keyword.put(eval_opts, :provider_model, provider_model)
+
+          {provider_model,
            Task.async(fn ->
-             evaluator_module.evaluate(proposal, perspective, provider_opts)
+             evaluator_module.evaluate(proposal, perspective, pm_opts)
            end)}
         end)
 
       results =
         tasks
-        |> Enum.map(fn {provider, task} ->
+        |> Enum.map(fn {provider_model, task} ->
           case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-            {:ok, {:ok, evaluation}} -> {provider, evaluation}
-            {:ok, {:error, reason}} -> {provider, {:error, reason}}
-            nil -> {provider, {:error, :timeout}}
+            {:ok, {:ok, evaluation}} -> {provider_model, evaluation}
+            {:ok, {:error, reason}} -> {provider_model, {:error, reason}}
+            nil -> {provider_model, {:error, :timeout}}
           end
         end)
-        |> Enum.sort_by(fn {provider, _} -> provider end)
+        |> Enum.sort_by(fn {provider_model, _} -> provider_model end)
 
       {:ok, results}
     end
@@ -146,6 +151,18 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp unique_provider_models(evaluator_module) do
+    if function_exported?(evaluator_module, :provider_map, 0) do
+      evaluator_module.provider_map()
+      |> Map.values()
+      |> Enum.uniq()
+      |> Enum.sort()
+    else
+      # Fallback if evaluator doesn't expose provider_map
+      ["anthropic:claude-sonnet-4-5-20250929"]
+    end
+  end
 
   defp build_advisory_proposal(description, context) do
     Proposal.new(%{

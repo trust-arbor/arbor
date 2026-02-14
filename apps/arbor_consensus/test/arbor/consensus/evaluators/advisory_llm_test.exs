@@ -3,7 +3,6 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   alias Arbor.Consensus.Evaluators.AdvisoryLLM
   alias Arbor.Consensus.TestHelpers
-  alias Arbor.Consensus.TestHelpers.{ErrorAI, MockAI}
   alias Arbor.Contracts.Consensus.Proposal
 
   @moduletag :fast
@@ -20,17 +19,38 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     :performance,
     :generalization,
     :resource_usage,
-    :consistency
+    :consistency,
+    :general
   ]
+
+  # LLM function that returns a mock JSON response (replaces ai_module: MockAI)
+  defp mock_llm_fn do
+    fn _system_prompt, _user_prompt ->
+      {:ok,
+       Jason.encode!(%{
+         "analysis" => "Mock analysis of the design question",
+         "considerations" => ["Consider simplicity", "Consider composability"],
+         "alternatives" => ["Alternative approach A", "Alternative approach B"],
+         "recommendation" => "Start with the simplest approach"
+       })}
+    end
+  end
+
+  # LLM function that returns an error (replaces ai_module: ErrorAI)
+  defp error_llm_fn do
+    fn _system_prompt, _user_prompt ->
+      {:error, :api_error}
+    end
+  end
 
   describe "behaviour implementation" do
     test "name/0 returns :advisory_llm" do
       assert AdvisoryLLM.name() == :advisory_llm
     end
 
-    test "perspectives/0 returns all 12 perspectives" do
+    test "perspectives/0 returns all 13 perspectives" do
       perspectives = AdvisoryLLM.perspectives()
-      assert length(perspectives) == 12
+      assert length(perspectives) == 13
 
       for p <- @all_perspectives do
         assert p in perspectives, "missing perspective: #{p}"
@@ -55,13 +75,14 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
           :performance,
           :generalization,
           :resource_usage,
-          :consistency
+          :consistency,
+          :general
         ] do
       test "evaluates from #{perspective} perspective" do
         proposal = TestHelpers.build_proposal(%{description: "Test #{unquote(perspective)}"})
 
         assert {:ok, eval} =
-                 AdvisoryLLM.evaluate(proposal, unquote(perspective), ai_module: MockAI)
+                 AdvisoryLLM.evaluate(proposal, unquote(perspective), llm_fn: mock_llm_fn())
 
         assert eval.perspective == unquote(perspective)
         assert eval.vote == :approve
@@ -74,16 +95,16 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       proposal = TestHelpers.build_proposal()
 
       assert {:error, {:unsupported_perspective, :nonexistent, _}} =
-               AdvisoryLLM.evaluate(proposal, :nonexistent, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :nonexistent, llm_fn: mock_llm_fn())
     end
   end
 
   describe "evaluate/3 — error handling" do
-    test "handles AI error gracefully" do
+    test "handles LLM error gracefully" do
       proposal = TestHelpers.build_proposal(%{description: "Test error handling"})
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :brainstorming, ai_module: ErrorAI)
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: error_llm_fn())
 
       assert eval.vote == :abstain
       assert eval.confidence == 0.0
@@ -101,7 +122,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         })
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :stability, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :stability, llm_fn: mock_llm_fn())
 
       assert eval.vote == :approve
       assert eval.sealed == true
@@ -113,7 +134,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       proposal = TestHelpers.build_proposal(%{description: "Does this align with the vision?"})
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :vision, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :vision, llm_fn: mock_llm_fn())
 
       assert eval.perspective == :vision
       assert eval.sealed == true
@@ -130,7 +151,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         })
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :brainstorming, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: mock_llm_fn())
 
       assert eval.perspective == :brainstorming
       assert eval.sealed == true
@@ -147,7 +168,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         })
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :vision, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :vision, llm_fn: mock_llm_fn())
 
       assert eval.perspective == :vision
       assert eval.sealed == true
@@ -165,9 +186,43 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       # Paths are just listed in the prompt — no file I/O, no crash
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :brainstorming, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: mock_llm_fn())
 
       assert eval.perspective == :brainstorming
+    end
+
+    test "doc paths are passed in user prompt to llm_fn" do
+      doc_path = ".arbor/roadmap/consensus-redesign.md"
+
+      {:ok, proposal} =
+        Proposal.new(%{
+          proposer: "human",
+          change_type: :advisory,
+          description: "Test doc path forwarding",
+          target_layer: 4,
+          context: %{reference_docs: [doc_path]}
+        })
+
+      # Capture the user prompt to verify doc paths are included
+      test_pid = self()
+
+      capture_fn = fn _system_prompt, user_prompt ->
+        send(test_pid, {:user_prompt, user_prompt})
+
+        {:ok,
+         Jason.encode!(%{
+           "analysis" => "Mock analysis",
+           "considerations" => [],
+           "alternatives" => [],
+           "recommendation" => "ok"
+         })}
+      end
+
+      assert {:ok, _eval} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: capture_fn)
+
+      assert_receive {:user_prompt, user_prompt}
+      assert user_prompt =~ doc_path
     end
   end
 
@@ -188,55 +243,160 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       # Evaluate from a non-vision perspective to verify reference_docs
       # don't appear in the context section
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :brainstorming, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: mock_llm_fn())
 
       assert eval.sealed == true
     end
   end
 
   describe "model diversity" do
-    test "provider_map/0 returns provider for each perspective" do
+    test "provider_map/0 returns provider:model for each perspective" do
       map = AdvisoryLLM.provider_map()
-      assert map_size(map) == 12
+      assert map_size(map) == 13
 
-      # Each perspective has a provider
+      # Each perspective has a provider:model string
       for p <- @all_perspectives do
-        assert Map.has_key?(map, p), "missing provider for: #{p}"
+        assert Map.has_key?(map, p), "missing provider:model for: #{p}"
+        assert is_binary(Map.get(map, p)), "provider:model for #{p} should be a string"
       end
 
-      # Multiple providers are represented (not all the same model)
-      providers = map |> Map.values() |> Enum.uniq()
+      # Multiple providers are represented (not all the same)
+      providers =
+        map
+        |> Map.values()
+        |> Enum.map(&(String.split(&1, ":", parts: 2) |> hd()))
+        |> Enum.uniq()
 
       assert length(providers) >= 3,
              "expected at least 3 different providers, got: #{inspect(providers)}"
     end
 
-    test "each perspective has a default provider assignment" do
+    test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
       # Verify specific assignments
-      assert map[:security] == :anthropic
-      assert map[:privacy] == :openai
-      assert map[:emergence] == :opencode
-      assert map[:user_experience] == :gemini
-      assert map[:vision] == :anthropic
-      assert map[:brainstorming] == :opencode
+      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
+      assert map[:privacy] == "openai:gpt-4.1"
+      assert map[:emergence] == "openrouter:qwen/qwen3-coder"
+      assert map[:user_experience] == "gemini:gemini-2.5-flash"
+      assert map[:vision] == "anthropic:claude-sonnet-4-5-20250929"
+      assert map[:brainstorming] == "openrouter:deepseek/deepseek-r1"
+      assert map[:general] == "anthropic:claude-sonnet-4-5-20250929"
     end
 
-    test "caller can override provider via opts" do
-      # Verify the override mechanism works by checking that evaluate/3
-      # accepts provider opt without error (the actual routing happens in AI module)
+    test "caller can override provider_model via opts" do
       proposal = TestHelpers.build_proposal(%{description: "Override test"})
 
-      # provider: :gemini overrides the default — MockAI doesn't check it,
-      # but the opt passes through without error
+      # Capture the call to verify the right provider/model was resolved
+      test_pid = self()
+
+      capture_fn = fn system_prompt, _user_prompt ->
+        send(test_pid, {:system_prompt, system_prompt})
+
+        {:ok,
+         Jason.encode!(%{
+           "analysis" => "Mock analysis",
+           "considerations" => [],
+           "alternatives" => [],
+           "recommendation" => "ok"
+         })}
+      end
+
       assert {:ok, eval} =
                AdvisoryLLM.evaluate(proposal, :security,
-                 ai_module: MockAI,
-                 provider: :gemini
+                 llm_fn: capture_fn,
+                 provider_model: "gemini:gemini-2.5-flash"
                )
 
       assert eval.sealed == true
+    end
+  end
+
+  describe "resolve_provider_model/2" do
+    test "returns default provider and model for perspective" do
+      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+               AdvisoryLLM.resolve_provider_model(:security)
+
+      assert {"openai", "gpt-4.1"} = AdvisoryLLM.resolve_provider_model(:privacy)
+    end
+
+    test "per-call override via provider_model opt" do
+      assert {"gemini", "gemini-2.5-flash"} =
+               AdvisoryLLM.resolve_provider_model(:security,
+                 provider_model: "gemini:gemini-2.5-flash"
+               )
+    end
+
+    test "handles provider-only string with default model" do
+      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+               AdvisoryLLM.resolve_provider_model(:security, provider_model: "anthropic")
+    end
+
+    test "handles openrouter paths with slashes" do
+      assert {"openrouter", "deepseek/deepseek-r1"} =
+               AdvisoryLLM.resolve_provider_model(:brainstorming)
+    end
+
+    test "handles model names with colons (ollama tags)" do
+      assert {"ollama", "deepseek-v3.2:cloud"} =
+               AdvisoryLLM.resolve_provider_model(:generalization)
+    end
+
+    test "general perspective has a default" do
+      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+               AdvisoryLLM.resolve_provider_model(:general)
+    end
+  end
+
+  describe "system prompt loading" do
+    test "llm_fn receives a system prompt with perspective content" do
+      proposal = TestHelpers.build_proposal(%{description: "Prompt check"})
+      test_pid = self()
+
+      capture_fn = fn system_prompt, _user_prompt ->
+        send(test_pid, {:system_prompt, system_prompt})
+
+        {:ok,
+         Jason.encode!(%{
+           "analysis" => "Mock",
+           "considerations" => [],
+           "alternatives" => [],
+           "recommendation" => "ok"
+         })}
+      end
+
+      assert {:ok, _eval} =
+               AdvisoryLLM.evaluate(proposal, :security, llm_fn: capture_fn)
+
+      assert_receive {:system_prompt, system_prompt}
+      # Should contain security-related content (from fallback or skill)
+      assert system_prompt =~ "SECURITY"
+      assert system_prompt =~ "attack surface"
+    end
+
+    test "each fallback prompt includes response format" do
+      proposal = TestHelpers.build_proposal(%{description: "Format check"})
+      test_pid = self()
+
+      for perspective <- @all_perspectives do
+        capture_fn = fn system_prompt, _user_prompt ->
+          send(test_pid, {:system_prompt, perspective, system_prompt})
+
+          {:ok,
+           Jason.encode!(%{
+             "analysis" => "Mock",
+             "considerations" => [],
+             "alternatives" => [],
+             "recommendation" => "ok"
+           })}
+        end
+
+        assert {:ok, _eval} =
+                 AdvisoryLLM.evaluate(proposal, perspective, llm_fn: capture_fn)
+
+        assert_receive {:system_prompt, ^perspective, system_prompt}
+        assert system_prompt =~ "Respond with valid JSON only"
+      end
     end
   end
 
@@ -245,7 +405,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       proposal = TestHelpers.build_proposal(%{description: "Test parsing"})
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :brainstorming, ai_module: MockAI)
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: mock_llm_fn())
 
       assert eval.reasoning =~ "Considerations"
       assert eval.reasoning =~ "Alternatives"
@@ -253,22 +413,14 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     end
 
     test "handles non-JSON response as raw text" do
-      defmodule RawTextAI do
-        def generate_text(_prompt, _opts) do
-          {:ok,
-           %{
-             text: "This is just plain text analysis without JSON.",
-             model: "mock",
-             provider: :mock,
-             usage: %{}
-           }}
-        end
+      raw_text_fn = fn _system_prompt, _user_prompt ->
+        {:ok, "This is just plain text analysis without JSON."}
       end
 
       proposal = TestHelpers.build_proposal(%{description: "Test raw text"})
 
       assert {:ok, eval} =
-               AdvisoryLLM.evaluate(proposal, :security, ai_module: RawTextAI)
+               AdvisoryLLM.evaluate(proposal, :security, llm_fn: raw_text_fn)
 
       assert eval.reasoning == "This is just plain text analysis without JSON."
     end
