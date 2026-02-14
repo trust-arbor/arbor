@@ -308,7 +308,7 @@ defmodule Mix.Tasks.Arbor.Eval do
       graders: graders,
       metrics: metrics,
       sample_count: length(results),
-      results: Enum.map(results, &Map.from_struct/1)
+      results: Enum.map(results, &ensure_map/1)
     }
 
     slug = model |> String.replace(~r/[:\/.]+/, "-")
@@ -412,7 +412,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
       scores_map =
         Enum.zip(grader_names, scores)
-        |> Map.new(fn {name, score} -> {name, Map.from_struct(score)} end)
+        |> Map.new(fn {name, score} -> {name, ensure_map(score)} end)
 
       if actual != "" do
         score_strs =
@@ -597,6 +597,9 @@ defmodule Mix.Tasks.Arbor.Eval do
       end
     end)
   end
+
+  defp ensure_map(score) when is_struct(score), do: Map.from_struct(score)
+  defp ensure_map(score) when is_map(score), do: score
 
   defp encode_field(value) when is_binary(value), do: value
   defp encode_field(value) when is_map(value), do: Jason.encode!(value)
