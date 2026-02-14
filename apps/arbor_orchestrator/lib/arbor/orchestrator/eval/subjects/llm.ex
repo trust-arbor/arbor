@@ -30,7 +30,9 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     Anthropic,
     Arborcli,
     ClaudeCli,
+    CodexCli,
     Gemini,
+    GeminiCli,
     LMStudio,
     Ollama,
     OpenAI,
@@ -49,10 +51,11 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     "zai" => Zai,
     "xai" => Xai,
     "gemini" => Gemini,
-    # CLI backends — direct adapters where available, Arborcli bridge for others
+    # CLI backends — direct adapters with env cleanup and proper Port execution
     "claude_cli" => ClaudeCli,
-    "codex_cli" => Arborcli,
-    "gemini_cli" => Arborcli,
+    "codex_cli" => CodexCli,
+    "gemini_cli" => GeminiCli,
+    # Fallback through Arborcli bridge for others
     "opencode_cli" => Arborcli,
     "qwen_cli" => Arborcli
   }
