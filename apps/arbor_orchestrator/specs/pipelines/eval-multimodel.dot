@@ -1,0 +1,62 @@
+// Multi-Model Eval Pipeline
+// Evaluates multiple LLM models against a dataset, persists results to Postgres.
+// Uses the map handler to iterate over a list of {model, provider} pairs.
+//
+// Usage:
+//   Engine.run(graph, initial_values: %{
+//     "eval.models" => Jason.encode!([
+//       %{"model" => "kimi-k2.5:cloud", "provider" => "ollama"},
+//       %{"model" => "glm-5:cloud", "provider" => "ollama"}
+//     ]),
+//     "eval.dataset_path" => "priv/eval_datasets/elixir_coding.jsonl",
+//     "eval.domain" => "coding"
+//   })
+
+digraph EvalMultiModel {
+  graph [
+    goal="Evaluate coding quality across multiple models and persist to Postgres",
+    label="Multi-Model Eval"
+  ]
+
+  start [shape=Mdiamond]
+
+  load_dataset [
+    type="eval.dataset",
+    dataset="priv/eval_datasets/elixir_coding.jsonl",
+    data_class="internal"
+  ]
+
+  iterate_models [
+    type="map",
+    source_key="eval.models",
+    item_key="map.current_item",
+    collect_key="eval.all_model_results",
+    handler_type="eval.run",
+    handler_attrs="{\"graders\": \"compile_check,functional_test\", \"subject\": \"Arbor.Orchestrator.Eval.Subjects.LocalLLM\"}",
+    max_concurrency="1",
+    on_item_error="collect_nil",
+    data_class="internal"
+  ]
+
+  aggregate [
+    type="eval.aggregate",
+    metrics="accuracy,mean_score",
+    data_class="internal"
+  ]
+
+  persist [
+    type="eval.persist",
+    domain="coding",
+    data_class="internal"
+  ]
+
+  report [
+    type="eval.report",
+    output="eval_reports/multimodel_latest.md",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> load_dataset -> iterate_models -> aggregate -> persist -> report -> done
+}

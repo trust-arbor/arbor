@@ -1,0 +1,46 @@
+// Heartbeat JSON Compliance Eval Pipeline
+// Tests LLM ability to produce valid JSON responses for heartbeat/background tasks.
+//
+// Usage:
+//   Engine.run(graph, initial_values: %{
+//     "eval.provider" => "ollama",
+//     "eval.model" => "arcee-ai/trinity-large-preview:free"
+//   })
+
+digraph EvalHeartbeat {
+  graph [
+    goal="Evaluate heartbeat LLM JSON compliance and response speed",
+    label="Heartbeat Eval"
+  ]
+
+  start [shape=Mdiamond]
+
+  load_dataset [
+    type="eval.dataset",
+    dataset="priv/eval_datasets/heartbeat_json.jsonl",
+    data_class="internal"
+  ]
+
+  run_eval [
+    type="eval.run",
+    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    graders="json_valid",
+    data_class="internal"
+  ]
+
+  aggregate [
+    type="eval.aggregate",
+    metrics="accuracy,mean_score",
+    data_class="internal"
+  ]
+
+  persist [
+    type="eval.persist",
+    domain="heartbeat",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> load_dataset -> run_eval -> aggregate -> persist -> done
+}

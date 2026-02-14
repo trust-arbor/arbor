@@ -7,6 +7,11 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
     - `graders` — comma-separated grader names (required)
     - `subject_module` — module name for "function" subject (optional)
     - `subject_function` — function name for "function" subject (optional)
+    - `model` — model name (optional, reads from context)
+    - `provider` — provider name (optional, reads from context)
+
+  When running inside a map handler iteration, reads model/provider from
+  `map.current_item` context (expects `%{"model" => ..., "provider" => ...}`).
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
@@ -30,18 +35,37 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
       end
 
       subject = resolve_subject(node)
-      results = Eval.run_eval(samples, subject, grader_names)
+      {model, provider} = resolve_model_provider(node, context)
+
+      # Pass model/provider as opts to the subject
+      subject_opts =
+        []
+        |> maybe_add(:model, model)
+        |> maybe_add(:provider, provider)
+
+      results = Eval.run_eval(samples, subject, grader_names, subject_opts)
 
       passed_count = Enum.count(results, & &1["passed"])
+
+      context_updates = %{
+        "eval.results.#{node.id}" => results,
+        "eval.results.#{node.id}.count" => length(results),
+        "eval.results.#{node.id}.passed" => passed_count
+      }
+
+      # Propagate model/provider to downstream nodes
+      context_updates =
+        if model, do: Map.put(context_updates, "eval.model", model), else: context_updates
+
+      context_updates =
+        if provider,
+          do: Map.put(context_updates, "eval.provider", provider),
+          else: context_updates
 
       %Outcome{
         status: :success,
         notes: "Evaluated #{length(results)} samples: #{passed_count}/#{length(results)} passed",
-        context_updates: %{
-          "eval.results.#{node.id}" => results,
-          "eval.results.#{node.id}.count" => length(results),
-          "eval.results.#{node.id}.passed" => passed_count
-        }
+        context_updates: context_updates
       }
     rescue
       e ->
@@ -54,6 +78,43 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
 
   @impl true
   def idempotency, do: :read_only
+
+  # --- Model/provider resolution ---
+
+  defp resolve_model_provider(node, context) do
+    # Priority: node attrs > map.current_item > eval.model/eval.provider context
+    model =
+      Map.get(node.attrs, "model") ||
+        get_from_map_item(context, "model") ||
+        Context.get(context, "eval.model")
+
+    provider =
+      Map.get(node.attrs, "provider") ||
+        get_from_map_item(context, "provider") ||
+        Context.get(context, "eval.provider")
+
+    {model, provider}
+  end
+
+  defp get_from_map_item(context, key) do
+    case Context.get(context, "map.current_item") do
+      item when is_map(item) -> Map.get(item, key) || Map.get(item, String.to_atom(key))
+      item when is_binary(item) -> try_parse_json_item(item, key)
+      _ -> nil
+    end
+  end
+
+  defp try_parse_json_item(str, key) do
+    case Jason.decode(str) do
+      {:ok, map} when is_map(map) -> Map.get(map, key)
+      _ -> nil
+    end
+  end
+
+  defp maybe_add(opts, _key, nil), do: opts
+  defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # --- Subject resolution ---
 
   defp resolve_subject(node) do
     case Map.get(node.attrs, "subject") do
@@ -68,8 +129,6 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
     fun = Map.get(node.attrs, "subject_function", "run")
 
     if mod do
-      # Return an anonymous module-like struct that implements run/2
-      # by delegating to apply(mod, fun, [input])
       module = resolve_module(mod)
 
       if function_exported?(module, String.to_existing_atom(fun), 1) do

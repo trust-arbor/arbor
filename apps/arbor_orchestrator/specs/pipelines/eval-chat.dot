@@ -1,0 +1,46 @@
+// Chat Quality Eval Pipeline
+// Tests LLM conversational quality for the main chat interface.
+//
+// Usage:
+//   Engine.run(graph, initial_values: %{
+//     "eval.provider" => "anthropic",
+//     "eval.model" => "claude-sonnet-4-5-20250929"
+//   })
+
+digraph EvalChat {
+  graph [
+    goal="Evaluate chat response quality for conversational use cases",
+    label="Chat Quality Eval"
+  ]
+
+  start [shape=Mdiamond]
+
+  load_dataset [
+    type="eval.dataset",
+    dataset="priv/eval_datasets/chat_quality.jsonl",
+    data_class="internal"
+  ]
+
+  run_eval [
+    type="eval.run",
+    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    graders="contains",
+    data_class="internal"
+  ]
+
+  aggregate [
+    type="eval.aggregate",
+    metrics="accuracy,mean_score",
+    data_class="internal"
+  ]
+
+  persist [
+    type="eval.persist",
+    domain="chat",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> load_dataset -> run_eval -> aggregate -> persist -> done
+}

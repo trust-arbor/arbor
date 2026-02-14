@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     DriftDetectHandler,
     EvalAggregateHandler,
     EvalDatasetHandler,
+    EvalPersistHandler,
     EvalReportHandler,
     EvalRunHandler,
     ExitHandler,
@@ -65,6 +66,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "eval.dataset" => EvalDatasetHandler,
     "eval.run" => EvalRunHandler,
     "eval.aggregate" => EvalAggregateHandler,
+    "eval.persist" => EvalPersistHandler,
     "eval.report" => EvalReportHandler,
     # Consensus
     "consensus.propose" => ConsensusHandler,

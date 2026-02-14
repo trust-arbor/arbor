@@ -6,8 +6,15 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
   ## Usage
 
       mix arbor.pipeline.run pipeline.dot
+      mix arbor.pipeline.run pipeline.dot --set eval.model=kimi-k2.5:cloud --set eval.provider=ollama
       mix arbor.pipeline.run pipeline.dot --logs-root /tmp/run1
       mix arbor.pipeline.run pipeline.dot --workdir ./my_project
+
+  ## Options
+
+    - `--set key=value` — set initial context values (repeatable)
+    - `--logs-root` — directory for pipeline logs
+    - `--workdir` — working directory for shell handlers
   """
 
   use Mix.Task
@@ -18,7 +25,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
   def run(args) do
     {opts, files, _} =
       OptionParser.parse(args,
-        strict: [logs_root: :string, workdir: :string]
+        strict: [logs_root: :string, workdir: :string, set: :keep]
       )
 
     # Start only the orchestrator and its deps — not the full umbrella.
@@ -30,7 +37,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
     file = List.first(files)
 
     unless file do
-      error("Usage: mix arbor.pipeline.run <file.dot> [--logs-root dir] [--workdir dir]")
+      error("Usage: mix arbor.pipeline.run <file.dot> [--set key=value ...] [--logs-root dir] [--workdir dir]")
       System.halt(1)
     end
 
@@ -39,12 +46,30 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
       System.halt(1)
     end
 
+    initial_values = parse_set_opts(opts)
+
     run_opts =
       opts
       |> Keyword.take([:logs_root, :workdir])
       |> Keyword.put(:on_event, &print_event/1)
 
+    run_opts =
+      if initial_values != %{} do
+        Keyword.put(run_opts, :initial_values, initial_values)
+      else
+        run_opts
+      end
+
     info("\nRunning pipeline: #{file}")
+
+    if initial_values != %{} do
+      info("  Initial values:")
+
+      Enum.each(Enum.sort(initial_values), fn {k, v} ->
+        info("    #{k} = #{v}")
+      end)
+    end
+
     info(String.duplicate("-", 40))
 
     case Arbor.Orchestrator.run_file(file, run_opts) do
@@ -57,6 +82,28 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
       {:error, reason} ->
         error("\nPipeline failed: #{inspect(reason)}")
         System.halt(1)
+    end
+  end
+
+  defp parse_set_opts(opts) do
+    opts
+    |> Keyword.get_values(:set)
+    |> Enum.reduce(%{}, fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        [key, value] -> Map.put(acc, key, maybe_parse_value(value))
+        _ ->
+          warn("Ignoring malformed --set: #{pair} (expected key=value)")
+          acc
+      end
+    end)
+  end
+
+  # Try to parse JSON values so --set foo=42 gives an integer, --set bar=true gives a boolean,
+  # and --set list=[1,2,3] gives a list. Plain strings stay as strings.
+  defp maybe_parse_value(value) do
+    case Jason.decode(value) do
+      {:ok, parsed} -> parsed
+      {:error, _} -> value
     end
   end
 
