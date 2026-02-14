@@ -1,7 +1,7 @@
 // Coding Eval Pipeline
 // Evaluates LLM code generation quality using compile, functional, quality, and similarity graders.
 // Dataset: JSONL files with Elixir coding challenges.
-// Subject: LocalLLM (LM Studio/Ollama via UnifiedLLM adapters).
+// Subject: LLM (UnifiedLLM adapters — local, cloud, and CLI providers).
 //
 // Usage:
 //   Engine.run(graph, initial_values: %{
@@ -26,21 +26,21 @@ digraph CodingEval {
 
   run_compile [
     type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
     graders="compile_check",
     data_class="internal"
   ]
 
   run_functional [
     type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
     graders="functional_test",
     data_class="internal"
   ]
 
   run_quality [
     type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
     graders="code_quality",
     data_class="internal"
   ]

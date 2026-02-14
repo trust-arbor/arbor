@@ -23,7 +23,7 @@ digraph EvalChat {
 
   run_eval [
     type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LocalLLM",
+    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
     graders="contains",
     data_class="internal"
   ]
