@@ -53,9 +53,53 @@ defmodule Arbor.AI.SessionBridge do
     enabled?() and orchestrator_available?()
   end
 
+  @session_manager_module Arbor.Agent.SessionManager
+
   # ── Session execution ────────────────────────────────────────────
 
   defp run_session(prompt, opts) do
+    agent_id = Keyword.get(opts, :agent_id, "anonymous")
+    provider = Keyword.get(opts, :provider)
+    model = Keyword.get(opts, :model)
+
+    case find_persistent_session(agent_id) do
+      {:ok, session_pid} ->
+        run_persistent_session(session_pid, prompt, provider, model)
+
+      :no_session ->
+        run_ephemeral_session(prompt, opts)
+    end
+  rescue
+    e ->
+      Logger.warning("[SessionBridge] Unexpected error: #{Exception.message(e)}")
+      {:unavailable, {:exception, Exception.message(e)}}
+  end
+
+  defp find_persistent_session(agent_id) do
+    if Code.ensure_loaded?(@session_manager_module) do
+      case apply(@session_manager_module, :get_session, [agent_id]) do
+        {:ok, pid} -> {:ok, pid}
+        {:error, _} -> :no_session
+      end
+    else
+      :no_session
+    end
+  rescue
+    _ -> :no_session
+  end
+
+  defp run_persistent_session(session_pid, prompt, provider, model) do
+    case send_message(session_pid, prompt) do
+      {:ok, text} ->
+        state = get_state(session_pid)
+        {:ok, build_response(text, state, provider, model)}
+
+      {:error, reason} ->
+        {:unavailable, {:session_error, reason}}
+    end
+  end
+
+  defp run_ephemeral_session(prompt, opts) do
     agent_id = Keyword.get(opts, :agent_id, "anonymous")
     provider = Keyword.get(opts, :provider)
     model = Keyword.get(opts, :model)
@@ -99,10 +143,6 @@ defmodule Arbor.AI.SessionBridge do
       {:error, reason} ->
         {:unavailable, {:session_start_failed, reason}}
     end
-  rescue
-    e ->
-      Logger.warning("[SessionBridge] Unexpected error: #{Exception.message(e)}")
-      {:unavailable, {:exception, Exception.message(e)}}
   end
 
   # ── Response format bridge ───────────────────────────────────────

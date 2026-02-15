@@ -31,6 +31,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     PromptAbTestHandler,
     RetryEscalateHandler,
     RoutingHandler,
+    SessionHandler,
     ShellHandler,
     StartHandler,
     SubgraphHandler,
@@ -102,7 +103,20 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "memory.recall_store" => MemoryRecallHandler,
     "memory.store_file" => MemoryStoreHandler,
     # LLM routing
-    "routing.select" => RoutingHandler
+    "routing.select" => RoutingHandler,
+    # Session-as-DOT node types
+    "session.classify" => SessionHandler,
+    "session.memory_recall" => SessionHandler,
+    "session.mode_select" => SessionHandler,
+    "session.llm_call" => SessionHandler,
+    "session.tool_dispatch" => SessionHandler,
+    "session.format" => SessionHandler,
+    "session.memory_update" => SessionHandler,
+    "session.checkpoint" => SessionHandler,
+    "session.background_checks" => SessionHandler,
+    "session.process_results" => SessionHandler,
+    "session.route_actions" => SessionHandler,
+    "session.update_goals" => SessionHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 

@@ -14,6 +14,7 @@ defmodule Arbor.Agent.Application do
           Arbor.Agent.Registry,
           Arbor.Agent.SummaryCache,
           Arbor.Agent.Fitness,
+          Arbor.Agent.SessionManager,
           Arbor.Agent.Supervisor
         ]
 

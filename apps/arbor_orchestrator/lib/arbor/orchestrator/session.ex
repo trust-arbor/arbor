@@ -69,27 +69,8 @@ defmodule Arbor.Orchestrator.Session do
   require Logger
 
   alias Arbor.Orchestrator.Engine
-  alias Arbor.Orchestrator.Handlers.{Registry, SessionHandler}
 
   @default_heartbeat_interval 30_000
-
-  # All session.* node types that SessionHandler dispatches on.
-  # Nodes with shape=diamond (check_auth, check_response, mode_router)
-  # use ConditionalHandler via the Registry's shape-to-type mapping — correct.
-  @session_node_types ~w(
-    session.classify
-    session.memory_recall
-    session.mode_select
-    session.llm_call
-    session.tool_dispatch
-    session.format
-    session.memory_update
-    session.checkpoint
-    session.background_checks
-    session.process_results
-    session.route_actions
-    session.update_goals
-  )
 
   # ── Contract module availability (runtime bridge) ──────────────────
   # Checked at runtime so the orchestrator works standalone without
@@ -278,7 +259,6 @@ defmodule Arbor.Orchestrator.Session do
 
     with {:ok, turn_graph} <- parse_dot_file(turn_dot_path),
          {:ok, heartbeat_graph} <- parse_dot_file(heartbeat_dot_path) do
-      ensure_session_handler_registered()
 
       # Build contract structs if available (runtime bridge)
       {session_config, session_state, behavior} =
@@ -604,24 +584,6 @@ defmodule Arbor.Orchestrator.Session do
   defp parse_dot_file(path) do
     with {:ok, source} <- File.read(path) do
       Arbor.Orchestrator.parse(source)
-    end
-  end
-
-  defp ensure_session_handler_registered do
-    Enum.each(@session_node_types, fn type ->
-      unless handler_registered?(type) do
-        Registry.register(type, SessionHandler)
-      end
-    end)
-  end
-
-  defp handler_registered?(type) do
-    node = %Arbor.Orchestrator.Graph.Node{id: "_probe", attrs: %{"type" => type}}
-
-    try do
-      Registry.resolve(node) == SessionHandler
-    rescue
-      _ -> false
     end
   end
 

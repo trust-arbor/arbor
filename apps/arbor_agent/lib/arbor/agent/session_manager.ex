@@ -1,0 +1,237 @@
+defmodule Arbor.Agent.SessionManager do
+  @moduledoc """
+  Manages persistent DOT sessions for agents.
+
+  Each agent gets at most one long-lived Session that accumulates state,
+  runs heartbeats via the DOT graph, and handles queries through turn.dot.
+  This replaces the procedural execute_query and seed_heartbeat_cycle paths
+  with graph-based execution.
+
+  ## Architecture
+
+  SessionManager owns an ETS table mapping `agent_id → session_pid`.
+  It monitors each session process and cleans up on crash/stop.
+  Session creation is delegated to `Arbor.Orchestrator.Session` via
+  runtime bridge (no compile-time dependency).
+  """
+
+  use GenServer
+
+  require Logger
+
+  @session_module Arbor.Orchestrator.Session
+  @adapters_module Arbor.Orchestrator.Session.Adapters
+  @table __MODULE__
+
+  # ── Public API ──────────────────────────────────────────────────
+
+  @doc """
+  Ensure a session exists for the given agent. Creates one if needed.
+
+  Returns `{:ok, pid}` on success, `{:error, reason}` on failure.
+  Idempotent — second call returns the existing session pid.
+  """
+  @spec ensure_session(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def ensure_session(agent_id, opts \\ []) do
+    GenServer.call(__MODULE__, {:ensure_session, agent_id, opts})
+  end
+
+  @doc """
+  Get the session pid for an agent.
+
+  Returns `{:ok, pid}` or `{:error, :no_session}`.
+  """
+  @spec get_session(String.t()) :: {:ok, pid()} | {:error, :no_session}
+  def get_session(agent_id) do
+    case :ets.lookup(@table, agent_id) do
+      [{^agent_id, pid}] when is_pid(pid) ->
+        if Process.alive?(pid), do: {:ok, pid}, else: {:error, :no_session}
+
+      _ ->
+        {:error, :no_session}
+    end
+  end
+
+  @doc """
+  Check whether an agent has an active session.
+  """
+  @spec has_session?(String.t()) :: boolean()
+  def has_session?(agent_id) do
+    match?({:ok, _}, get_session(agent_id))
+  end
+
+  @doc """
+  Stop and clean up the session for an agent.
+  """
+  @spec stop_session(String.t()) :: :ok
+  def stop_session(agent_id) do
+    GenServer.call(__MODULE__, {:stop_session, agent_id})
+  end
+
+  # ── GenServer ───────────────────────────────────────────────────
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl true
+  def init(_opts) do
+    table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    {:ok, %{table: table, monitors: %{}}}
+  end
+
+  @impl true
+  def handle_call({:ensure_session, agent_id, opts}, _from, state) do
+    case :ets.lookup(@table, agent_id) do
+      [{^agent_id, pid}] when is_pid(pid) ->
+        if Process.alive?(pid) do
+          {:reply, {:ok, pid}, state}
+        else
+          # Stale entry — clean up and create new
+          cleanup_entry(agent_id, state)
+          create_session(agent_id, opts, state)
+        end
+
+      _ ->
+        create_session(agent_id, opts, state)
+    end
+  end
+
+  def handle_call({:stop_session, agent_id}, _from, state) do
+    state = do_stop_session(agent_id, state)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Enum.find(state.monitors, fn {_id, r} -> r == ref end) do
+      {agent_id, ^ref} ->
+        :ets.delete(@table, agent_id)
+        {:noreply, %{state | monitors: Map.delete(state.monitors, agent_id)}}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  # ── Private ─────────────────────────────────────────────────────
+
+  defp create_session(agent_id, opts, state) do
+    if orchestrator_available?() do
+      session_opts = build_session_opts(agent_id, opts)
+
+      case GenServer.start(@session_module, session_opts) do
+        {:ok, pid} ->
+          ref = Process.monitor(pid)
+          :ets.insert(@table, {agent_id, pid})
+          new_state = %{state | monitors: Map.put(state.monitors, agent_id, ref)}
+          {:reply, {:ok, pid}, new_state}
+
+        {:error, reason} ->
+          {:reply, {:error, {:session_start_failed, reason}}, state}
+      end
+    else
+      {:reply, {:error, :orchestrator_unavailable}, state}
+    end
+  end
+
+  defp build_session_opts(agent_id, opts) do
+    trust_tier = Keyword.get(opts, :trust_tier, :established)
+    adapters = build_adapters(agent_id, trust_tier, opts)
+
+    [
+      session_id: "agent-session-#{agent_id}",
+      agent_id: agent_id,
+      trust_tier: trust_tier,
+      adapters: adapters,
+      turn_dot: turn_dot_path(),
+      heartbeat_dot: heartbeat_dot_path(),
+      start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
+      execution_mode: :session
+    ]
+  end
+
+  defp build_adapters(agent_id, trust_tier, opts) do
+    if Code.ensure_loaded?(@adapters_module) do
+      apply(@adapters_module, :build, [
+        [
+          agent_id: agent_id,
+          trust_tier: trust_tier,
+          llm_provider: Keyword.get(opts, :provider),
+          llm_model: Keyword.get(opts, :model),
+          system_prompt: Keyword.get(opts, :system_prompt),
+          tools: Keyword.get(opts, :tools, [])
+        ]
+      ])
+    else
+      %{}
+    end
+  end
+
+  defp do_stop_session(agent_id, state) do
+    case :ets.lookup(@table, agent_id) do
+      [{^agent_id, pid}] ->
+        # Demonitor before stopping to avoid race
+        case Map.get(state.monitors, agent_id) do
+          nil -> :ok
+          ref -> Process.demonitor(ref, [:flush])
+        end
+
+        if Process.alive?(pid) do
+          try do
+            GenServer.stop(pid, :normal, 5_000)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+
+        :ets.delete(@table, agent_id)
+        %{state | monitors: Map.delete(state.monitors, agent_id)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp cleanup_entry(agent_id, state) do
+    case Map.get(state.monitors, agent_id) do
+      nil -> :ok
+      ref -> Process.demonitor(ref, [:flush])
+    end
+
+    :ets.delete(@table, agent_id)
+  end
+
+  defp orchestrator_available? do
+    Code.ensure_loaded?(@session_module) and
+      Code.ensure_loaded?(@adapters_module)
+  end
+
+  defp turn_dot_path do
+    Application.get_env(:arbor_agent, :session_turn_dot, default_turn_dot())
+  end
+
+  defp heartbeat_dot_path do
+    Application.get_env(:arbor_agent, :session_heartbeat_dot, default_heartbeat_dot())
+  end
+
+  defp default_turn_dot do
+    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "turn.dot"])
+  end
+
+  defp default_heartbeat_dot do
+    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "heartbeat.dot"])
+  end
+
+  defp orchestrator_app_dir do
+    case :code.priv_dir(:arbor_orchestrator) do
+      {:error, _} ->
+        Path.join([File.cwd!(), "apps", "arbor_orchestrator"])
+
+      priv_dir ->
+        Path.dirname(priv_dir)
+    end
+  end
+end
