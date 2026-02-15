@@ -145,11 +145,40 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       provider: to_string(adapter_opts.provider || client.default_provider),
       model: resolve_model(adapter_opts) || "",
       messages: build_messages(messages, adapter_opts.system_prompt),
-      tools: adapter_opts.tools |> List.wrap() |> Enum.map(&Tool.as_definition/1),
+      tools: normalize_tools(adapter_opts.tools),
       temperature: resolve_opt(call_opts, adapter_opts.config, :temperature, "temperature"),
       max_tokens: resolve_opt(call_opts, adapter_opts.config, :max_tokens, "max_tokens")
     }
   end
+
+  # Normalize tools from various formats:
+  # - Tool structs → as_definition
+  # - Action modules (atoms with to_tool/0) → convert then as_definition
+  # - Maps with :name → pass through as_definition
+  defp normalize_tools(tools) do
+    tools
+    |> List.wrap()
+    |> Enum.map(&normalize_one_tool/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_one_tool(%Tool{} = tool), do: Tool.as_definition(tool)
+
+  defp normalize_one_tool(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :to_tool, 0) do
+      spec = module.to_tool()
+      Tool.as_definition(struct(Tool,
+        name: spec[:name] || Map.get(spec, :name, ""),
+        description: spec[:description] || Map.get(spec, :description),
+        input_schema: spec[:parameters_schema] || Map.get(spec, :parameters_schema, %{})
+      ))
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp normalize_one_tool(%{name: _} = map), do: Tool.as_definition(struct(Tool, map))
+  defp normalize_one_tool(_), do: nil
 
   defp resolve_model(adapter_opts) do
     adapter_opts.model ||
