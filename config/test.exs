@@ -82,3 +82,6 @@ config :arbor_persistence,
 
 # Use hash-based test embeddings when no real providers are available
 config :arbor_ai, embedding_test_fallback: true
+
+# Don't probe local LLM servers (LM Studio, Ollama) during tests
+config :arbor_orchestrator, discover_local_providers: false
