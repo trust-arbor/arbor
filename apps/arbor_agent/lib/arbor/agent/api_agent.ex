@@ -364,5 +364,4 @@ defmodule Arbor.Agent.APIAgent do
       tool_calls_count: length(response[:tool_calls] || [])
     })
   end
-
 end

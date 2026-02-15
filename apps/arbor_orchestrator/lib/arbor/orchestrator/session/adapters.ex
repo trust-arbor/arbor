@@ -167,11 +167,14 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   defp normalize_one_tool(module) when is_atom(module) do
     if Code.ensure_loaded?(module) and function_exported?(module, :to_tool, 0) do
       spec = module.to_tool()
-      Tool.as_definition(struct(Tool,
-        name: spec[:name] || Map.get(spec, :name, ""),
-        description: spec[:description] || Map.get(spec, :description),
-        input_schema: spec[:parameters_schema] || Map.get(spec, :parameters_schema, %{})
-      ))
+
+      Tool.as_definition(
+        struct(Tool,
+          name: spec[:name] || Map.get(spec, :name, ""),
+          description: spec[:description] || Map.get(spec, :description),
+          input_schema: spec[:parameters_schema] || Map.get(spec, :parameters_schema, %{})
+        )
+      )
     end
   rescue
     _ -> nil

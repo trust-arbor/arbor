@@ -108,10 +108,10 @@ defmodule Arbor.Dashboard.AgentManager do
           try do
             Arbor.Agent.Lifecycle.start(
               agent_id,
-              Keyword.merge(opts, [
+              Keyword.merge(opts,
                 model: model_config[:id] || model_config["id"],
                 provider: model_config[:provider] || model_config["provider"]
-              ])
+              )
             )
           rescue
             _ -> :ok

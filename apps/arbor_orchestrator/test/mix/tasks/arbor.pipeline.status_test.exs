@@ -81,7 +81,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.StatusTest do
     end
 
     test "scan handles missing manifest gracefully" do
-      base_dir = create_temp_checkpoint_dir("missing_manifest_#{System.unique_integer([:positive])}")
+      base_dir =
+        create_temp_checkpoint_dir("missing_manifest_#{System.unique_integer([:positive])}")
 
       # Create a subdirectory but no manifest.json
       pipeline_dir = Path.join(base_dir, "incomplete-pipeline")
@@ -115,7 +116,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.StatusTest do
     end
 
     test "scan handles corrupted JSON gracefully" do
-      base_dir = create_temp_checkpoint_dir("corrupted_json_#{System.unique_integer([:positive])}")
+      base_dir =
+        create_temp_checkpoint_dir("corrupted_json_#{System.unique_integer([:positive])}")
 
       pipeline_dir = Path.join(base_dir, "corrupted-pipeline")
       File.mkdir_p!(pipeline_dir)
@@ -174,7 +176,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.StatusTest do
     end
 
     test "scan handles multiple pipelines in same directory" do
-      base_dir = create_temp_checkpoint_dir("multi_pipeline_#{System.unique_integer([:positive])}")
+      base_dir =
+        create_temp_checkpoint_dir("multi_pipeline_#{System.unique_integer([:positive])}")
 
       # Create three pipeline directories
       for i <- 1..3 do

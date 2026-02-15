@@ -143,6 +143,7 @@ defmodule Arbor.Agent.SessionManager do
 
     turn = turn_dot_path()
     hb = heartbeat_dot_path()
+
     [
       session_id: "agent-session-#{agent_id}",
       agent_id: agent_id,

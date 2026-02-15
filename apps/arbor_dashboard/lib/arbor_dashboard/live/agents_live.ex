@@ -90,7 +90,11 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
     socket =
       socket
-      |> assign(running_count: length(running), profile_count: length(profiles), running_ids: safe_running_ids())
+      |> assign(
+        running_count: length(running),
+        profile_count: length(profiles),
+        running_ids: safe_running_ids()
+      )
       |> stream(:agents, profiles, reset: true)
 
     {:noreply, socket}
@@ -524,7 +528,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       _ -> "Unknown"
     end
   end
-
 
   defp format_created(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_created(_), do: ""

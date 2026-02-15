@@ -113,7 +113,15 @@ defmodule Arbor.Gateway.MCP.Handler do
               type: "string",
               description:
                 "What to inspect: 'agents', 'memory', 'signals', 'capabilities', 'goals', 'pipelines', 'overview'",
-              enum: ["agents", "memory", "signals", "capabilities", "goals", "pipelines", "overview"]
+              enum: [
+                "agents",
+                "memory",
+                "signals",
+                "capabilities",
+                "goals",
+                "pipelines",
+                "overview"
+              ]
             },
             agent_id: %{
               type: "string",
@@ -594,7 +602,12 @@ defmodule Arbor.Gateway.MCP.Handler do
           Enum.map_join(Enum.take(recent, 10), "\n", fn entry ->
             status = to_string(entry.status || :unknown)
             duration = if entry.duration_ms, do: "#{div(entry.duration_ms, 1000)}s", else: "-"
-            finished = if entry.finished_at, do: Calendar.strftime(entry.finished_at, "%H:%M:%S"), else: "-"
+
+            finished =
+              if entry.finished_at,
+                do: Calendar.strftime(entry.finished_at, "%H:%M:%S"),
+                else: "-"
+
             "| #{entry.graph_id || entry.pipeline_id} | #{status} | #{duration} | #{finished} |"
           end)
 
