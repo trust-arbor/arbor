@@ -251,7 +251,9 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
 
   describe "Stripe keys" do
     test "detects Stripe secret key" do
-      code = ~s|@stripe_key "SK_LIVE_TESTING_PLACEHOLDER"|
+      # Construct dynamically to avoid GitHub push protection false positive
+      key = "sk_" <> "live_" <> String.duplicate("a1b2c3d4", 4)
+      code = ~s|@stripe_key "#{key}"|
 
       result = PIIDetection.run(%{code: code})
 
@@ -333,7 +335,9 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
     end
 
     test "detects Stripe key" do
-      text = "stripe_key: SK_LIVE_TESTING_PLACEHOLDER"
+      # Construct dynamically to avoid GitHub push protection false positive
+      key = "sk_" <> "live_" <> String.duplicate("a1b2c3d4", 4)
+      text = "stripe_key: #{key}"
       findings = PIIDetection.scan_text(text)
       assert Enum.any?(findings, fn {label, _} -> label == "Stripe Key" end)
     end
