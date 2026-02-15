@@ -122,6 +122,125 @@ defmodule Arbor.Web.Helpers do
   end
 
   @doc """
+  Safely calls a zero-arity function, returning nil on any error or exit.
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.safe_call(fn -> 42 end)
+      42
+
+      iex> Arbor.Web.Helpers.safe_call(fn -> raise "boom" end)
+      nil
+  """
+  def safe_call(fun) do
+    fun.()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc """
+  Unwraps `{:ok, list}` tuples, returning the list or `[]` on error/nil.
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.unwrap_list({:ok, [1, 2]})
+      [1, 2]
+
+      iex> Arbor.Web.Helpers.unwrap_list({:error, :not_found})
+      []
+
+      iex> Arbor.Web.Helpers.unwrap_list([3, 4])
+      [3, 4]
+  """
+  def unwrap_list({:ok, val}) when is_list(val), do: val
+  def unwrap_list({:error, _}), do: []
+  def unwrap_list(val) when is_list(val), do: val
+  def unwrap_list(_), do: []
+
+  @doc """
+  Unwraps `{:ok, map}` tuples, returning the map or nil on error/nil.
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.unwrap_map({:ok, %{a: 1}})
+      %{a: 1}
+
+      iex> Arbor.Web.Helpers.unwrap_map({:error, :not_found})
+      nil
+
+      iex> Arbor.Web.Helpers.unwrap_map(%{b: 2})
+      %{b: 2}
+  """
+  def unwrap_map({:ok, val}) when is_map(val), do: val
+  def unwrap_map({:error, _}), do: nil
+  def unwrap_map(nil), do: nil
+  def unwrap_map(val) when is_map(val), do: val
+  def unwrap_map(_), do: nil
+
+  @doc """
+  Checks if a LiveView stream is empty.
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.stream_empty?(%Phoenix.LiveView.LiveStream{inserts: []})
+      true
+  """
+  def stream_empty?(%Phoenix.LiveView.LiveStream{inserts: []}), do: true
+  def stream_empty?(_), do: false
+
+  @doc """
+  Formats a token count as a human-readable string (e.g., "1.2k", "3.4M").
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.format_token_count(500)
+      "500"
+
+      iex> Arbor.Web.Helpers.format_token_count(1500)
+      "1.5k"
+
+      iex> Arbor.Web.Helpers.format_token_count(2_500_000)
+      "2.5M"
+  """
+  def format_token_count(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M"
+  def format_token_count(n) when n >= 1000, do: "#{Float.round(n / 1000, 1)}k"
+  def format_token_count(n), do: to_string(n)
+
+  @doc """
+  Formats a duration in milliseconds as a human-readable string.
+
+  ## Examples
+
+      iex> Arbor.Web.Helpers.format_duration(1500)
+      "1.5s"
+
+      iex> Arbor.Web.Helpers.format_duration(450)
+      "450ms"
+  """
+  def format_duration(ms) when is_number(ms) and ms >= 1000, do: "#{Float.round(ms / 1000, 1)}s"
+  def format_duration(ms) when is_number(ms), do: "#{ms}ms"
+  def format_duration(_), do: ""
+
+  @doc """
+  Checks if a signal's metadata or data contains a matching agent_id.
+  """
+  def signal_matches_agent?(signal, agent_id) do
+    matches_in?(signal.metadata, agent_id) or matches_in?(signal.data, agent_id)
+  end
+
+  @doc """
+  Checks if a map contains an agent_id or id field matching the given value.
+  Handles both atom and string keys.
+  """
+  def matches_in?(%{agent_id: id}, agent_id) when id == agent_id, do: true
+  def matches_in?(%{"agent_id" => id}, agent_id) when id == agent_id, do: true
+  def matches_in?(%{id: id}, agent_id) when id == agent_id, do: true
+  def matches_in?(%{"id" => id}, agent_id) when id == agent_id, do: true
+  def matches_in?(_, _), do: false
+
+  @doc """
   Pluralizes a word based on count.
 
   ## Examples
