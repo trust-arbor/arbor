@@ -125,6 +125,7 @@ defmodule Arbor.Agent.Lifecycle do
         case Executor.start(agent_id, executor_opts) do
           {:ok, pid} ->
             maybe_start_session(agent_id, profile, opts)
+            maybe_start_api_agent(agent_id, profile, opts)
             Arbor.Signals.emit(:agent, :started, %{agent_id: agent_id})
             {:ok, pid}
 
@@ -148,6 +149,16 @@ defmodule Arbor.Agent.Lifecycle do
       :exit, _ -> :ok
     end
 
+    # Stop APIAgent host if running
+    try do
+      case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:host, agent_id}) do
+        [{pid, _}] -> GenServer.stop(pid, :normal, 5_000)
+        [] -> :ok
+      end
+    catch
+      :exit, _ -> :ok
+    end
+
     result = Executor.stop(agent_id)
 
     Arbor.Signals.emit(:agent, :stopped, %{
@@ -156,6 +167,17 @@ defmodule Arbor.Agent.Lifecycle do
     })
 
     result
+  end
+
+  @doc """
+  Get the APIAgent host pid for an agent, if running.
+  """
+  @spec get_host(String.t()) :: {:ok, pid()} | {:error, :no_host}
+  def get_host(agent_id) do
+    case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:host, agent_id}) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, :no_host}
+    end
   end
 
   @doc """
@@ -237,6 +259,29 @@ defmodule Arbor.Agent.Lifecycle do
           Logger.warning(
             "Failed to start session for agent #{agent_id}: #{inspect(reason)}",
             mode: mode
+          )
+      end
+    end
+  end
+
+  defp maybe_start_api_agent(agent_id, profile, opts) do
+    if Keyword.get(opts, :start_host, true) do
+      host_opts = [
+        id: agent_id,
+        name: {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:host, agent_id}}},
+        display_name: profile.display_name || agent_id,
+        model: Keyword.get(opts, :model, "arcee-ai/trinity-large-preview:free"),
+        provider: Keyword.get(opts, :provider, :openrouter),
+        heartbeat_enabled: Keyword.get(opts, :heartbeat_enabled, true)
+      ]
+
+      case Arbor.Agent.APIAgent.start_link(host_opts) do
+        {:ok, _pid} ->
+          Logger.info("APIAgent host started for agent #{agent_id}")
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to start APIAgent host for agent #{agent_id}: #{inspect(reason)}"
           )
       end
     end
