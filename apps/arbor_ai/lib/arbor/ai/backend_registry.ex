@@ -230,8 +230,12 @@ defmodule Arbor.AI.BackendRegistry do
   defp ensure_started do
     case Process.whereis(__MODULE__) do
       nil ->
-        # Start if not running (useful for scripts/tests)
-        {:ok, _} = start_link()
+        # Start if not running (useful for scripts/tests).
+        # Handle race where another process starts it between whereis and start_link.
+        case start_link() do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+        end
 
       _pid ->
         :ok
