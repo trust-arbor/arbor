@@ -95,7 +95,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         proposals: [],
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
-        selected_heartbeat_model: nil
+        selected_heartbeat_model: nil,
+        # Group chat support
+        group_pid: nil,
+        group_id: nil,
+        group_participants: [],
+        group_mode: false
       )
       |> stream(:messages, [])
       |> stream(:signals, [])
@@ -180,26 +185,61 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_event("send-message", _params, socket) do
     input = String.trim(socket.assigns.input)
 
-    if input == "" or socket.assigns.agent == nil do
-      {:noreply, socket}
-    else
-      # Add user message
-      user_msg = %{
-        id: "msg-#{System.unique_integer([:positive])}",
-        role: :user,
-        content: input,
-        timestamp: DateTime.utc_now()
-      }
+    cond do
+      input == "" ->
+        {:noreply, socket}
 
-      socket =
-        socket
-        |> stream_insert(:messages, user_msg)
-        |> assign(input: "", loading: true, error: nil)
+      # Group chat mode
+      socket.assigns.group_mode and socket.assigns.group_pid ->
+        # Add user message to display
+        user_msg = %{
+          id: "msg-#{System.unique_integer([:positive])}",
+          role: :user,
+          content: input,
+          sender_name: "User",
+          sender_type: :human,
+          timestamp: DateTime.utc_now()
+        }
 
-      # Spawn async query — keeps LiveView responsive during LLM calls
-      dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
+        socket =
+          socket
+          |> stream_insert(:messages, user_msg)
+          |> assign(input: "", error: nil)
 
-      {:noreply, socket}
+        # Send to group (triggers agent responses)
+        AgentManager.group_send(
+          socket.assigns.group_pid,
+          "human_primary",
+          "User",
+          :human,
+          input
+        )
+
+        {:noreply, socket}
+
+      # Single-agent mode (existing flow)
+      socket.assigns.agent != nil ->
+        # Add user message
+        user_msg = %{
+          id: "msg-#{System.unique_integer([:positive])}",
+          role: :user,
+          content: input,
+          timestamp: DateTime.utc_now()
+        }
+
+        socket =
+          socket
+          |> stream_insert(:messages, user_msg)
+          |> assign(input: "", loading: true, error: nil)
+
+        # Spawn async query — keeps LiveView responsive during LLM calls
+        dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
+
+        {:noreply, socket}
+
+      # No agent or group
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -285,6 +325,80 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
   end
 
+  def handle_event("create-group", _params, socket) do
+    # Get all running agents
+    case Arbor.Agent.Registry.list() do
+      {:ok, [_ | _] = agents} ->
+        # Build participant specs for all running agents + human user
+        agent_specs =
+          Enum.map(agents, fn entry ->
+            %{
+              id: entry.agent_id,
+              name: entry.metadata[:display_name] || "Agent",
+              type: :agent
+            }
+          end)
+
+        human_spec = %{
+          id: "human_primary",
+          name: "User",
+          type: :human
+        }
+
+        participant_specs = [human_spec | agent_specs]
+
+        # Create the group
+        case AgentManager.create_group("Multi-Agent Chat", participant_specs) do
+          {:ok, group_pid} ->
+            # Extract group_id from the Registry (it's in the via tuple)
+            [{group_id, ^group_pid}] = AgentManager.list_groups()
+
+            # Subscribe to group PubSub topic
+            Phoenix.PubSub.subscribe(Arbor.Web.PubSub, "group_chat:#{group_id}")
+
+            # Build participant list for display
+            participants = build_participant_list(participant_specs)
+
+            socket =
+              socket
+              |> assign(
+                group_pid: group_pid,
+                group_id: group_id,
+                group_participants: participants,
+                group_mode: true
+              )
+              |> stream(:messages, [], reset: true)
+
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:noreply, assign(socket, error: "Failed to create group: #{inspect(reason)}")}
+        end
+
+      _ ->
+        {:noreply, assign(socket, error: "No agents running to create a group")}
+    end
+  end
+
+  def handle_event("leave-group", _params, socket) do
+    # Unsubscribe from group topic if subscribed
+    if socket.assigns.group_id do
+      Phoenix.PubSub.unsubscribe(Arbor.Web.PubSub, "group_chat:#{socket.assigns.group_id}")
+    end
+
+    socket =
+      socket
+      |> assign(
+        group_pid: nil,
+        group_id: nil,
+        group_participants: [],
+        group_mode: false
+      )
+      |> stream(:messages, [], reset: true)
+
+    {:noreply, socket}
+  end
+
   @impl true
   def handle_info({:query_result, :cli, {:ok, response}}, socket) do
     thinking = response.thinking
@@ -332,6 +446,44 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:query_result, _backend, {:error, reason}}, socket) do
     error_msg = format_query_error(reason)
     {:noreply, assign(socket, loading: false, error: error_msg)}
+  end
+
+  def handle_info({:group_message, message}, socket) do
+    # Handle messages from the group chat
+    # Skip if we sent this message (already displayed)
+    if message.sender_id == "human_primary" and message.sender_type == :human do
+      {:noreply, socket}
+    else
+      # Add message to chat display
+      msg_entry = %{
+        id: "msg-#{System.unique_integer([:positive])}",
+        role: if(message.sender_type == :agent, do: :assistant, else: :user),
+        content: message.content,
+        sender_name: message.sender_name,
+        sender_type: message.sender_type,
+        sender_id: message.sender_id,
+        timestamp: message.timestamp,
+        # Assign a consistent color based on sender_id for visual distinction
+        sender_color: sender_color_hue(message.sender_id)
+      }
+
+      socket = stream_insert(socket, :messages, msg_entry)
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:group_participant_joined, participant}, socket) do
+    # Update participant list when someone joins
+    updated_participants = [participant | socket.assigns.group_participants]
+    {:noreply, assign(socket, group_participants: updated_participants)}
+  end
+
+  def handle_info({:group_participant_left, participant_id}, socket) do
+    # Remove participant from list when they leave
+    updated_participants =
+      Enum.reject(socket.assigns.group_participants, &(&1.id == participant_id))
+
+    {:noreply, assign(socket, group_participants: updated_participants)}
   end
 
   def handle_info({:signal_received, signal}, socket) do
@@ -985,6 +1137,41 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               Stop Agent
             </button>
+            <%!-- Group chat controls --%>
+            <button
+              :if={!@group_mode}
+              phx-click="create-group"
+              style="padding: 0.4rem 0.75rem; background: var(--aw-success, #22c55e); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
+              title="Create multi-agent group chat"
+            >
+              👥 Group
+            </button>
+            <button
+              :if={@group_mode}
+              phx-click="leave-group"
+              style="padding: 0.4rem 0.75rem; background: var(--aw-warning, #f59e0b); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
+              title="Leave group chat"
+            >
+              ← Leave Group
+            </button>
+          </div>
+        </div>
+
+        <%!-- Group participants list --%>
+        <div
+          :if={@group_mode && @group_participants != []}
+          style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); background: rgba(74, 158, 255, 0.05);"
+        >
+          <div style="font-size: 0.8em; color: var(--aw-text-muted, #888); margin-bottom: 0.3rem;">
+            👥 Participants ({length(@group_participants)}):
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0.4rem;">
+            <%= for participant <- @group_participants do %>
+              <div style={"padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75em; display: flex; align-items: center; gap: 0.3rem; " <> participant_badge_style(participant)}>
+                <span>{if participant.type == :agent, do: "🤖", else: "👤"}</span>
+                <span>{participant.name}</span>
+              </div>
+            <% end %>
           </div>
         </div>
 
@@ -997,10 +1184,21 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           <div
             :for={{dom_id, msg} <- @streams.messages}
             id={dom_id}
-            style={"margin-bottom: 0.75rem; padding: 0.6rem; border-radius: 6px; " <> message_style(msg.role)}
+            style={"margin-bottom: 0.75rem; padding: 0.6rem; border-radius: 6px; " <> message_style(msg.role, msg[:sender_type], @group_mode)}
           >
             <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
-              <strong style="font-size: 0.9em;">{role_label(msg.role)}</strong>
+              <%!-- Group mode: show sender name with color/icon --%>
+              <div
+                :if={@group_mode && msg[:sender_name]}
+                style="display: flex; align-items: center; gap: 0.4rem;"
+              >
+                <span>{if msg[:sender_type] == :agent, do: "🤖", else: "👤"}</span>
+                <strong style={"font-size: 0.9em; color: " <> sender_color(msg[:sender_color])}>
+                  {msg.sender_name}
+                </strong>
+              </div>
+              <%!-- Single-agent mode: show role label --%>
+              <strong :if={!@group_mode} style="font-size: 0.9em;">{role_label(msg.role)}</strong>
               <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
                 {format_time(msg.timestamp)}
               </span>
@@ -1556,13 +1754,42 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Helpers ──────────────────────────────────────────────────────────
 
-  defp message_style(:user), do: "background: rgba(74, 158, 255, 0.1); margin-left: 2rem;"
-  defp message_style(:assistant), do: "background: rgba(74, 255, 158, 0.1); margin-right: 2rem;"
-  defp message_style(_), do: ""
+  defp message_style(role, sender_type, group_mode)
+
+  # Group mode: neutral background for all messages, no margins
+  defp message_style(_role, _sender_type, true) do
+    "background: rgba(74, 158, 255, 0.05); border-left: 3px solid rgba(74, 158, 255, 0.3);"
+  end
+
+  # Single-agent mode: use role-based styling
+  defp message_style(:user, _sender_type, false),
+    do: "background: rgba(74, 158, 255, 0.1); margin-left: 2rem;"
+
+  defp message_style(:assistant, _sender_type, false),
+    do: "background: rgba(74, 255, 158, 0.1); margin-right: 2rem;"
+
+  defp message_style(_, _, _), do: ""
 
   defp role_label(:user), do: "You"
   defp role_label(:assistant), do: "Claude"
   defp role_label(_), do: "System"
+
+  defp sender_color(hue) when is_integer(hue) do
+    "hsl(#{hue}, 70%, 60%)"
+  end
+
+  defp sender_color(_), do: "#94a3b8"
+
+  defp participant_badge_style(participant) do
+    base =
+      "background: hsl(#{participant.color}, 60%, 20%); border: 1px solid hsl(#{participant.color}, 60%, 40%);"
+
+    if participant.type == :agent do
+      base <> " color: hsl(#{participant.color}, 70%, 70%);"
+    else
+      base <> " color: #94a3b8;"
+    end
+  end
 
   defp format_time(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_time(_), do: ""
@@ -2130,5 +2357,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     else
       socket
     end
+  end
+
+  # Group chat helpers
+
+  defp build_participant_list(participant_specs) do
+    Enum.map(participant_specs, fn spec ->
+      %{
+        id: spec.id,
+        name: spec.name,
+        type: spec.type,
+        color: sender_color_hue(spec.id)
+      }
+    end)
+  end
+
+  defp sender_color_hue(sender_id) do
+    # Generate a consistent hue (0-360) based on sender_id hash
+    # This ensures each sender gets a unique but stable color
+    hash = :erlang.phash2(sender_id, 360)
+    hash
   end
 end
