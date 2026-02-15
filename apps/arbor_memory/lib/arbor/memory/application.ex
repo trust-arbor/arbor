@@ -7,6 +7,7 @@ defmodule Arbor.Memory.Application do
   @working_memory_ets :arbor_working_memory
   @proposals_ets :arbor_memory_proposals
   @chat_history_ets :arbor_chat_history
+  @preferences_ets :arbor_preferences
 
   @impl true
   def start(_type, _args) do
@@ -19,6 +20,7 @@ defmodule Arbor.Memory.Application do
         ensure_ets(@working_memory_ets)
         ensure_ets(@proposals_ets)
         ensure_ets(@chat_history_ets)
+        ensure_ets(@preferences_ets)
 
         [
           {Arbor.Persistence.BufferedStore,

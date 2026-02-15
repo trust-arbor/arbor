@@ -55,10 +55,9 @@ defmodule Arbor.Memory do
     CodeStore,
     Consolidation,
     ContextWindow,
-    DurableStore,
     Embedding,
-    Events,
     GoalStore,
+    GraphOps,
     IdentityConsolidator,
     Index,
     IndexSupervisor,
@@ -68,9 +67,9 @@ defmodule Arbor.Memory do
     Patterns,
     Preconscious,
     Preferences,
+    PreferencesStore,
     Proposal,
     ReflectionProcessor,
-    Relationship,
     RelationshipStore,
     Retrieval,
     SelfKnowledge,
@@ -78,17 +77,11 @@ defmodule Arbor.Memory do
     Summarizer,
     Thinking,
     TokenBudget,
-    WorkingMemory
+    WorkingMemory,
+    WorkingMemoryStore
   }
 
   require Logger
-
-  # State storage for knowledge graphs (agent_id => KnowledgeGraph.t())
-  # In production, this would be backed by a GenServer or persistence
-  @graph_ets :arbor_memory_graphs
-
-  # State storage for working memory (agent_id => WorkingMemory.t())
-  @working_memory_ets :arbor_working_memory
 
   # ============================================================================
   # Agent Lifecycle
@@ -132,7 +125,7 @@ defmodule Arbor.Memory do
     # Initialize knowledge graph if enabled
     if graph_enabled do
       graph = KnowledgeGraph.new(agent_id, opts)
-      :ets.insert(@graph_ets, {agent_id, graph})
+      GraphOps.save_graph(agent_id, graph)
     end
 
     # Emit initialization signal
@@ -161,7 +154,7 @@ defmodule Arbor.Memory do
     IndexSupervisor.stop_index(agent_id)
 
     # Remove knowledge graph
-    :ets.delete(@graph_ets, agent_id)
+    :ets.delete(:arbor_memory_graphs, agent_id)
 
     # Remove working memory (Phase 2)
     delete_working_memory(agent_id)
@@ -178,7 +171,7 @@ defmodule Arbor.Memory do
   """
   @spec initialized?(String.t()) :: boolean()
   def initialized?(agent_id) do
-    IndexSupervisor.has_index?(agent_id) or has_graph?(agent_id)
+    IndexSupervisor.has_index?(agent_id) or GraphOps.has_graph?(agent_id)
   end
 
   # ============================================================================
@@ -298,260 +291,46 @@ defmodule Arbor.Memory do
   # Knowledge Graph Operations
   # ============================================================================
 
-  @doc """
-  Add a knowledge node to the agent's graph.
+  @doc "Add a knowledge node to the agent's graph."
+  defdelegate add_knowledge(agent_id, node_data), to: GraphOps
 
-  ## Node Data
+  @doc "Link two knowledge nodes."
+  defdelegate link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []),
+    to: GraphOps
 
-  - `:type` - Node type (required): :fact, :experience, :skill, :insight, :relationship
-  - `:content` - Node content (required)
-  - `:relevance` - Initial relevance (optional, default: 1.0)
-  - `:metadata` - Additional metadata (optional)
-  - `:pinned` - Whether node is protected from decay (optional)
+  @doc "Recall a knowledge node, reinforcing its relevance."
+  defdelegate reinforce_knowledge(agent_id, node_id), to: GraphOps
 
-  ## Examples
+  @doc "Search knowledge graph by content."
+  defdelegate search_knowledge(agent_id, query, opts \\ []), to: GraphOps
 
-      {:ok, node_id} = Arbor.Memory.add_knowledge("agent_001", %{
-        type: :fact,
-        content: "Paris is the capital of France"
-      })
-  """
-  @spec add_knowledge(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
-  def add_knowledge(agent_id, node_data) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node_id} <- KnowledgeGraph.add_node(graph, node_data) do
-      save_graph(agent_id, new_graph)
+  @doc "Find a knowledge node by name (case-insensitive exact match)."
+  defdelegate find_knowledge_by_name(agent_id, name), to: GraphOps
 
-      # Emit signal
-      Signals.emit_knowledge_added(agent_id, node_id, node_data[:type])
+  @doc "Get all pending proposals (facts and learnings awaiting approval)."
+  defdelegate get_pending_proposals(agent_id), to: GraphOps
 
-      {:ok, node_id}
-    end
-  end
+  @doc "Approve a pending fact or learning."
+  defdelegate approve_pending(agent_id, pending_id), to: GraphOps
 
-  @doc """
-  Link two knowledge nodes.
+  @doc "Reject a pending fact or learning."
+  defdelegate reject_pending(agent_id, pending_id), to: GraphOps
 
-  ## Examples
+  @doc "Get knowledge graph statistics."
+  defdelegate knowledge_stats(agent_id), to: GraphOps
 
-      {:ok, _} = Arbor.Memory.link_knowledge("agent_001", node_a, node_b, :supports)
-  """
-  @spec link_knowledge(String.t(), String.t(), String.t(), atom(), keyword()) ::
-          :ok | {:error, term()}
-  def link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph} <-
-           KnowledgeGraph.add_edge(graph, source_id, target_id, relationship, opts) do
-      save_graph(agent_id, new_graph)
+  @doc "Trigger spreading activation from a node, boosting related nodes."
+  defdelegate cascade_recall(agent_id, node_id, boost_amount, opts \\ []), to: GraphOps
 
-      # Emit signal
-      Signals.emit_knowledge_linked(agent_id, source_id, target_id, relationship)
-
-      :ok
-    end
-  end
-
-  @doc """
-  Recall a knowledge node, reinforcing its relevance.
-  """
-  @spec reinforce_knowledge(String.t(), String.t()) ::
-          {:ok, map()} | {:error, term()}
-  def reinforce_knowledge(agent_id, node_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node} <- KnowledgeGraph.reinforce(graph, node_id) do
-      save_graph(agent_id, new_graph)
-      {:ok, node}
-    end
-  end
-
-  @doc """
-  Search knowledge graph by content.
-  """
-  @spec search_knowledge(String.t(), String.t(), keyword()) ::
-          {:ok, [map()]} | {:error, term()}
-  def search_knowledge(agent_id, query, opts \\ []) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      KnowledgeGraph.recall(graph, query, opts)
-    end
-  end
-
-  @doc """
-  Find a knowledge node by name (case-insensitive exact match).
-
-  Useful for deduplication — check if a node with this name exists
-  before creating a new one.
-
-  ## Examples
-
-      {:ok, node_id} = Arbor.Memory.find_knowledge_by_name("agent_001", "Elixir")
-      {:error, :not_found} = Arbor.Memory.find_knowledge_by_name("agent_001", "nonexistent")
-  """
-  @spec find_knowledge_by_name(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def find_knowledge_by_name(agent_id, name) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      KnowledgeGraph.find_by_name(graph, name)
-    end
-  end
-
-  @doc """
-  Get all pending proposals (facts and learnings awaiting approval).
-  """
-  @spec get_pending_proposals(String.t()) :: {:ok, [map()]} | {:error, term()}
-  def get_pending_proposals(agent_id) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      {:ok, KnowledgeGraph.get_pending(graph)}
-    end
-  end
-
-  @doc """
-  Approve a pending fact or learning.
-  """
-  @spec approve_pending(String.t(), String.t()) ::
-          {:ok, String.t()} | {:error, term()}
-  def approve_pending(agent_id, pending_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node_id} <- KnowledgeGraph.approve_pending(graph, pending_id) do
-      save_graph(agent_id, new_graph)
-
-      # Emit signal
-      Signals.emit_pending_approved(agent_id, pending_id, node_id)
-
-      {:ok, node_id}
-    end
-  end
-
-  @doc """
-  Reject a pending fact or learning.
-  """
-  @spec reject_pending(String.t(), String.t()) :: :ok | {:error, term()}
-  def reject_pending(agent_id, pending_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph} <- KnowledgeGraph.reject_pending(graph, pending_id) do
-      save_graph(agent_id, new_graph)
-
-      # Emit signal
-      Signals.emit_pending_rejected(agent_id, pending_id)
-
-      :ok
-    end
-  end
-
-  @doc """
-  Get knowledge graph statistics.
-  """
-  @spec knowledge_stats(String.t()) :: {:ok, map()} | {:error, term()}
-  def knowledge_stats(agent_id) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      {:ok, KnowledgeGraph.stats(graph)}
-    end
-  end
-
-  @doc """
-  Trigger spreading activation from a node, boosting related nodes.
-
-  Performs a breadth-first traversal from `node_id`, boosting each
-  connected node's relevance with exponential decay per hop.
-
-  ## Options
-
-  - `:max_depth` - Maximum hops from starting node (default: 3)
-  - `:min_boost` - Stop spreading when boost drops below this (default: 0.05)
-  - `:decay_factor` - Multiply boost by this per hop (default: 0.5)
-
-  ## Examples
-
-      {:ok, graph} = Arbor.Memory.cascade_recall("agent_001", node_id, 0.3)
-  """
-  @spec cascade_recall(String.t(), String.t(), float(), keyword()) ::
-          {:ok, map()} | {:error, term()}
-  def cascade_recall(agent_id, node_id, boost_amount, opts \\ []) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      updated_graph = KnowledgeGraph.cascade_recall(graph, node_id, boost_amount, opts)
-      save_graph(agent_id, updated_graph)
-      {:ok, KnowledgeGraph.stats(updated_graph)}
-    end
-  end
-
-  @doc """
-  Get the lowest-relevance nodes approaching decay threshold.
-
-  Useful for inspecting which memories are at risk of being pruned.
-
-  ## Examples
-
-      {:ok, nodes} = Arbor.Memory.near_threshold_nodes("agent_001", 10)
-  """
-  @spec near_threshold_nodes(String.t(), non_neg_integer()) ::
-          {:ok, [map()]} | {:error, term()}
-  def near_threshold_nodes(agent_id, count \\ 10) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      {:ok, KnowledgeGraph.lowest_relevance(graph, count)}
-    end
-  end
+  @doc "Get the lowest-relevance nodes approaching decay threshold."
+  defdelegate near_threshold_nodes(agent_id, count \\ 10), to: GraphOps
 
   # ============================================================================
   # Consolidation (Decay and Pruning)
   # ============================================================================
 
-  @doc """
-  Run consolidation on the agent's knowledge graph.
-
-  Consolidation applies decay to all non-pinned nodes and prunes
-  nodes that fall below the relevance threshold.
-
-  ## Options
-
-  - `:prune_threshold` - Override the default prune threshold
-
-  Returns metrics about what was consolidated.
-  """
-  @spec consolidate(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def consolidate(agent_id, opts \\ []) do
-    start_time = System.monotonic_time(:millisecond)
-
-    # Emit start signal
-    Signals.emit_consolidation_started(agent_id)
-
-    with {:ok, graph} <- get_graph(agent_id) do
-      # Apply decay
-      decayed_graph = KnowledgeGraph.decay(graph)
-      decayed_count = map_size(graph.nodes)
-
-      # Prune
-      threshold = Keyword.get(opts, :prune_threshold, 0.1)
-      {pruned_graph, pruned_count} = KnowledgeGraph.prune(decayed_graph, threshold)
-
-      # Save
-      save_graph(agent_id, pruned_graph)
-
-      # Calculate duration
-      duration_ms = System.monotonic_time(:millisecond) - start_time
-
-      # Get final stats
-      stats = KnowledgeGraph.stats(pruned_graph)
-
-      metrics = %{
-        decayed_count: decayed_count,
-        pruned_count: pruned_count,
-        duration_ms: duration_ms,
-        total_nodes: stats.node_count,
-        average_relevance: stats.average_relevance
-      }
-
-      # Emit signals
-      Signals.emit_consolidation_completed(agent_id, metrics)
-      Signals.emit_knowledge_decayed(agent_id, stats)
-
-      if pruned_count > 0 do
-        Signals.emit_knowledge_pruned(agent_id, pruned_count)
-      end
-
-      # Record permanent event
-      Events.record_consolidation_completed(agent_id, metrics)
-
-      {:ok, metrics}
-    end
-  end
+  @doc "Run consolidation on the agent's knowledge graph."
+  defdelegate consolidate(agent_id, opts \\ []), to: Consolidation, as: :consolidate_basic
 
   # ============================================================================
   # Token Budget Delegation
@@ -669,89 +448,17 @@ defmodule Arbor.Memory do
   # Working Memory (Phase 2)
   # ============================================================================
 
-  @doc """
-  Get working memory for an agent.
+  @doc "Get working memory for an agent."
+  defdelegate get_working_memory(agent_id), to: WorkingMemoryStore
 
-  Returns the current working memory or nil if not set.
+  @doc "Save working memory for an agent."
+  defdelegate save_working_memory(agent_id, working_memory), to: WorkingMemoryStore
 
-  ## Examples
+  @doc "Load working memory for an agent."
+  defdelegate load_working_memory(agent_id, opts \\ []), to: WorkingMemoryStore
 
-      wm = Arbor.Memory.get_working_memory("agent_001")
-  """
-  @spec get_working_memory(String.t()) :: WorkingMemory.t() | nil
-  def get_working_memory(agent_id) do
-    case :ets.lookup(@working_memory_ets, agent_id) do
-      [{^agent_id, wm}] -> wm
-      [] -> nil
-    end
-  end
-
-  @doc """
-  Save working memory for an agent.
-
-  Stores the working memory in ETS (Phase 2) or Postgres (Phase 6+).
-
-  ## Examples
-
-      wm = WorkingMemory.new("agent_001")
-      :ok = Arbor.Memory.save_working_memory("agent_001", wm)
-  """
-  @spec save_working_memory(String.t(), WorkingMemory.t()) :: :ok
-  def save_working_memory(agent_id, working_memory) do
-    :ets.insert(@working_memory_ets, {agent_id, working_memory})
-    DurableStore.persist_async("working_memory", agent_id, WorkingMemory.serialize(working_memory))
-    Signals.emit_working_memory_saved(agent_id, WorkingMemory.stats(working_memory))
-    :ok
-  end
-
-  @doc """
-  Load working memory for an agent.
-
-  Returns existing working memory or creates a new one if none exists.
-  This is the primary entry point for session startup.
-
-  ## Examples
-
-      wm = Arbor.Memory.load_working_memory("agent_001")
-  """
-  @spec load_working_memory(String.t(), keyword()) :: WorkingMemory.t()
-  def load_working_memory(agent_id, opts \\ []) do
-    case get_working_memory(agent_id) do
-      nil ->
-        # Try loading from Postgres before creating fresh
-        case load_working_memory_from_postgres(agent_id) do
-          {:ok, wm} ->
-            :ets.insert(@working_memory_ets, {agent_id, wm})
-            Signals.emit_working_memory_loaded(agent_id, :restored)
-            wm
-
-          :not_found ->
-            wm = WorkingMemory.new(agent_id, opts)
-            save_working_memory(agent_id, wm)
-            Signals.emit_working_memory_loaded(agent_id, :created)
-            wm
-        end
-
-      wm ->
-        # Don't emit signal on reads — only on creation.
-        # Emitting here caused a feedback loop: MemoryLive subscribes to memory.*,
-        # reloads tab data on any signal, which calls load_working_memory, which
-        # emitted another signal → infinite loop at 131K signals/sec.
-        wm
-    end
-  end
-
-  @doc """
-  Delete working memory for an agent.
-
-  Called during cleanup.
-  """
-  @spec delete_working_memory(String.t()) :: :ok
-  def delete_working_memory(agent_id) do
-    :ets.delete(@working_memory_ets, agent_id)
-    DurableStore.delete("working_memory", agent_id)
-    :ok
-  end
+  @doc "Delete working memory for an agent."
+  defdelegate delete_working_memory(agent_id), to: WorkingMemoryStore
 
   # ============================================================================
   # Working Memory Serialization
@@ -927,271 +634,48 @@ defmodule Arbor.Memory do
   # Relationships (Phase 3)
   # ============================================================================
 
-  @doc """
-  Get a relationship by ID.
+  @doc "Get a relationship by ID."
+  defdelegate get_relationship(agent_id, relationship_id),
+    to: RelationshipStore,
+    as: :get_with_tracking
 
-  ## Examples
+  @doc "Get a relationship by name."
+  defdelegate get_relationship_by_name(agent_id, name),
+    to: RelationshipStore,
+    as: :get_by_name_with_tracking
 
-      {:ok, rel} = Arbor.Memory.get_relationship("agent_001", relationship_id)
-  """
-  @spec get_relationship(String.t(), String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
-  def get_relationship(agent_id, relationship_id) do
-    case RelationshipStore.get(agent_id, relationship_id) do
-      {:ok, rel} ->
-        # Touch to update access tracking, emit signal
-        RelationshipStore.touch(agent_id, relationship_id)
-        Signals.emit_relationship_accessed(agent_id, relationship_id)
-        {:ok, rel}
+  @doc "Get the primary relationship (highest salience)."
+  defdelegate get_primary_relationship(agent_id),
+    to: RelationshipStore,
+    as: :get_primary_with_tracking
 
-      error ->
-        error
-    end
-  end
+  @doc "Save a relationship."
+  defdelegate save_relationship(agent_id, relationship), to: RelationshipStore, as: :save
 
-  @doc """
-  Get a relationship by name.
+  @doc "Add a key moment to a relationship."
+  defdelegate add_moment(agent_id, relationship_id, summary, opts \\ []),
+    to: RelationshipStore
 
-  ## Examples
+  @doc "List all relationships for an agent."
+  defdelegate list_relationships(agent_id, opts \\ []), to: RelationshipStore, as: :list
 
-      {:ok, rel} = Arbor.Memory.get_relationship_by_name("agent_001", "Hysun")
-  """
-  @spec get_relationship_by_name(String.t(), String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
-  def get_relationship_by_name(agent_id, name) do
-    case RelationshipStore.get_by_name(agent_id, name) do
-      {:ok, rel} ->
-        # Touch to update access tracking
-        RelationshipStore.touch(agent_id, rel.id)
-        Signals.emit_relationship_accessed(agent_id, rel.id)
-        {:ok, rel}
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
-  Get the primary relationship (highest salience).
-
-  ## Examples
-
-      {:ok, rel} = Arbor.Memory.get_primary_relationship("agent_001")
-  """
-  @spec get_primary_relationship(String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
-  def get_primary_relationship(agent_id) do
-    case RelationshipStore.get_primary(agent_id) do
-      {:ok, rel} ->
-        # Touch to update access tracking
-        RelationshipStore.touch(agent_id, rel.id)
-        Signals.emit_relationship_accessed(agent_id, rel.id)
-        {:ok, rel}
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
-  Save a relationship.
-
-  Creates or updates the relationship in the store.
-
-  ## Examples
-
-      rel = Relationship.new("Hysun", relationship_dynamic: "Collaborative partnership")
-      {:ok, saved_rel} = Arbor.Memory.save_relationship("agent_001", rel)
-  """
-  @spec save_relationship(String.t(), Relationship.t()) ::
-          {:ok, Relationship.t()} | {:error, term()}
-  def save_relationship(agent_id, %Relationship{} = relationship) do
-    # Check if this is a new relationship
-    is_new =
-      case RelationshipStore.get(agent_id, relationship.id) do
-        {:ok, _} -> false
-        {:error, :not_found} -> true
-      end
-
-    case RelationshipStore.put(agent_id, relationship) do
-      {:ok, saved_rel} ->
-        if is_new do
-          Signals.emit_relationship_created(agent_id, saved_rel.id, saved_rel.name)
-          Events.record_relationship_created(agent_id, saved_rel.id, saved_rel.name)
-        else
-          Signals.emit_relationship_updated(agent_id, saved_rel.id, %{action: :saved})
-        end
-
-        {:ok, saved_rel}
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
-  Add a key moment to a relationship.
-
-  ## Options
-
-  - `:emotional_markers` - List of atoms describing emotional tone
-  - `:salience` - Importance of this moment (default: 0.5)
-
-  ## Examples
-
-      {:ok, rel} = Arbor.Memory.add_moment("agent_001", rel_id, "First collaborative blog post",
-        emotional_markers: [:connection, :accomplishment],
-        salience: 0.8
-      )
-  """
-  @spec add_moment(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, Relationship.t()} | {:error, term()}
-  def add_moment(agent_id, relationship_id, summary, opts \\ []) do
-    case RelationshipStore.get(agent_id, relationship_id) do
-      {:ok, rel} ->
-        updated_rel = Relationship.add_moment(rel, summary, opts)
-
-        case RelationshipStore.put(agent_id, updated_rel) do
-          {:ok, saved_rel} ->
-            Signals.emit_moment_added(agent_id, relationship_id, summary)
-
-            Events.record_relationship_moment(agent_id, relationship_id, %{
-              summary: summary,
-              emotional_markers: Keyword.get(opts, :emotional_markers, []),
-              salience: Keyword.get(opts, :salience, 0.5)
-            })
-
-            {:ok, saved_rel}
-
-          error ->
-            error
-        end
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
-  List all relationships for an agent.
-
-  ## Options
-
-  - `:sort_by` - Sort by: `:salience` (default), `:last_interaction`, `:name`, `:access_count`
-  - `:sort_dir` - Sort direction: `:desc` (default), `:asc`
-  - `:limit` - Maximum relationships to return
-
-  ## Examples
-
-      {:ok, relationships} = Arbor.Memory.list_relationships("agent_001")
-      {:ok, recent} = Arbor.Memory.list_relationships("agent_001", sort_by: :last_interaction, limit: 5)
-  """
-  @spec list_relationships(String.t(), keyword()) :: {:ok, [Relationship.t()]}
-  def list_relationships(agent_id, opts \\ []) do
-    RelationshipStore.list(agent_id, opts)
-  end
-
-  @doc """
-  Delete a relationship.
-
-  ## Examples
-
-      :ok = Arbor.Memory.delete_relationship("agent_001", relationship_id)
-  """
-  @spec delete_relationship(String.t(), String.t()) :: :ok | {:error, :not_found}
-  def delete_relationship(agent_id, relationship_id) do
-    RelationshipStore.delete(agent_id, relationship_id)
-  end
+  @doc "Delete a relationship."
+  defdelegate delete_relationship(agent_id, relationship_id), to: RelationshipStore, as: :delete
 
   # ============================================================================
   # Enhanced Consolidation (Phase 3)
   # ============================================================================
 
-  @doc """
-  Run enhanced consolidation on the agent's knowledge graph.
+  @doc "Run enhanced consolidation on the agent's knowledge graph."
+  defdelegate run_consolidation(agent_id, opts \\ []), to: Consolidation, as: :run_enhanced
 
-  This uses the full Consolidation module which includes:
-  - Decay (reduce relevance of non-pinned nodes)
-  - Reinforce (boost recently-accessed nodes)
-  - Archive (save pruned nodes to EventLog before removal)
-  - Prune (remove nodes below threshold)
-  - Quota enforcement (evict if over type limits)
+  @doc "Check if consolidation should run for an agent."
+  defdelegate should_consolidate?(agent_id, opts \\ []), to: Consolidation, as: :should_run?
 
-  ## Options
-
-  - `:prune_threshold` - Relevance below which to prune (default: 0.1)
-  - `:reinforce_window_hours` - How recent is "recently accessed" (default: 24)
-  - `:reinforce_boost` - How much to boost recent nodes (default: 0.1)
-  - `:archive` - Whether to archive pruned nodes (default: true)
-
-  ## Examples
-
-      {:ok, new_graph, metrics} = Arbor.Memory.run_consolidation("agent_001")
-  """
-  @spec run_consolidation(String.t(), keyword()) ::
-          {:ok, KnowledgeGraph.t(), map()} | {:error, term()}
-  def run_consolidation(agent_id, opts \\ []) do
-    # Emit start signal
-    Signals.emit_consolidation_started(agent_id)
-
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, metrics} <- Consolidation.consolidate(agent_id, graph, opts) do
-      # Save updated graph
-      save_graph(agent_id, new_graph)
-
-      # Emit completion signals
-      Signals.emit_consolidation_completed(agent_id, metrics)
-
-      if metrics.pruned_count > 0 do
-        Signals.emit_knowledge_pruned(agent_id, metrics.pruned_count)
-      end
-
-      # Record permanent event
-      Events.record_consolidation_completed(agent_id, metrics)
-
-      {:ok, new_graph, metrics}
-    end
-  end
-
-  @doc """
-  Check if consolidation should run for an agent.
-
-  Based on graph size and time since last consolidation.
-
-  ## Options
-
-  - `:size_threshold` - Consolidate if node count exceeds this (default: 100)
-  - `:min_interval_minutes` - Minimum minutes between consolidations (default: 60)
-  - `:last_consolidation` - DateTime of last consolidation
-
-  ## Examples
-
-      if Arbor.Memory.should_consolidate?("agent_001") do
-        {:ok, _, _} = Arbor.Memory.run_consolidation("agent_001")
-      end
-  """
-  @spec should_consolidate?(String.t(), keyword()) :: boolean()
-  def should_consolidate?(agent_id, opts \\ []) do
-    case get_graph(agent_id) do
-      {:ok, graph} -> Consolidation.should_consolidate?(graph, opts)
-      {:error, _} -> false
-    end
-  end
-
-  @doc """
-  Preview what consolidation would do without actually doing it.
-
-  ## Examples
-
-      preview = Arbor.Memory.preview_consolidation("agent_001")
-  """
-  @spec preview_consolidation(String.t(), keyword()) :: map() | {:error, term()}
-  def preview_consolidation(agent_id, opts \\ []) do
-    case get_graph(agent_id) do
-      {:ok, graph} -> Consolidation.preview(graph, opts)
-      error -> error
-    end
-  end
+  @doc "Preview what consolidation would do without actually doing it."
+  defdelegate preview_consolidation(agent_id, opts \\ []),
+    to: Consolidation,
+    as: :preview_for_agent
 
   # ============================================================================
   # Background Checks (Phase 4)
@@ -1601,193 +1085,35 @@ defmodule Arbor.Memory do
   # Preferences (Phase 5)
   # ============================================================================
 
-  # ETS table for preferences storage
-  @preferences_ets :arbor_preferences
+  @doc "Get preferences for an agent."
+  defdelegate get_preferences(agent_id), to: PreferencesStore
 
-  @doc """
-  Get preferences for an agent.
+  @doc "Adjust a cognitive preference for an agent."
+  defdelegate adjust_preference(agent_id, param, value, opts \\ []), to: PreferencesStore
 
-  Returns the Preferences struct or nil if not set.
+  @doc "Pin a memory to protect it from decay."
+  defdelegate pin_memory(agent_id, memory_id, opts \\ []), to: PreferencesStore
 
-  ## Examples
+  @doc "Unpin a memory, allowing it to decay normally."
+  defdelegate unpin_memory(agent_id, memory_id), to: PreferencesStore
 
-      prefs = Arbor.Memory.get_preferences("agent_001")
-  """
-  @spec get_preferences(String.t()) :: Preferences.t() | nil
-  def get_preferences(agent_id) do
-    ensure_preferences_table()
-
-    case :ets.lookup(@preferences_ets, agent_id) do
-      [{^agent_id, prefs}] -> prefs
-      [] -> nil
-    end
-  end
-
-  @doc """
-  Adjust a cognitive preference for an agent.
-
-  ## Parameters
-
-  - `:decay_rate` - 0.01 to 0.50 (narrower per trust tier)
-  - `:max_pins` - 1 to 200 (narrower per trust tier)
-  - `:retrieval_threshold` - 0.0 to 1.0
-  - `:consolidation_interval` - 60,000ms to 3,600,000ms
-  - `:attention_focus` - String or nil
-  - `:type_quota` - Tuple of {type, quota}
-  - `:context_preference` - Tuple of {key, value}
-
-  ## Options
-
-  - `:trust_tier` - Trust tier for tier-specific validation bounds
-
-  ## Examples
-
-      {:ok, prefs} = Arbor.Memory.adjust_preference("agent_001", :decay_rate, 0.15)
-      {:ok, prefs} = Arbor.Memory.adjust_preference("agent_001", :decay_rate, 0.10, trust_tier: :trusted)
-  """
-  @spec adjust_preference(String.t(), atom(), term(), keyword()) ::
-          {:ok, Preferences.t()} | {:error, term()}
-  def adjust_preference(agent_id, param, value, opts \\ []) do
-    prefs = get_or_create_preferences(agent_id)
-
-    case Preferences.adjust(prefs, param, value, opts) do
-      {:ok, updated_prefs} ->
-        save_preferences(agent_id, updated_prefs)
-
-        Signals.emit_cognitive_adjustment(agent_id, param, %{
-          old_value: Map.get(prefs, param),
-          new_value: value,
-          trust_tier: Keyword.get(opts, :trust_tier)
-        })
-
-        {:ok, updated_prefs}
-
-      error ->
-        error
-    end
-  end
-
-  @doc """
-  Pin a memory to protect it from decay.
-
-  When `trust_tier:` is provided, uses tier-specific pin limits.
-
-  ## Examples
-
-      {:ok, prefs} = Arbor.Memory.pin_memory("agent_001", "memory_123")
-      {:ok, prefs} = Arbor.Memory.pin_memory("agent_001", "memory_123", trust_tier: :trusted)
-  """
-  @spec pin_memory(String.t(), String.t(), keyword()) ::
-          {:ok, Preferences.t()} | {:error, :max_pins_reached}
-  def pin_memory(agent_id, memory_id, opts \\ []) do
-    prefs = get_or_create_preferences(agent_id)
-
-    case Preferences.pin(prefs, memory_id, opts) do
-      {:error, _} = error ->
-        error
-
-      updated_prefs ->
-        save_preferences(agent_id, updated_prefs)
-        Signals.emit_cognitive_adjustment(agent_id, :pin_memory, %{memory_id: memory_id})
-        {:ok, updated_prefs}
-    end
-  end
-
-  @doc """
-  Unpin a memory, allowing it to decay normally.
-
-  ## Examples
-
-      {:ok, prefs} = Arbor.Memory.unpin_memory("agent_001", "memory_123")
-  """
-  @spec unpin_memory(String.t(), String.t()) :: {:ok, Preferences.t()}
-  def unpin_memory(agent_id, memory_id) do
-    prefs = get_or_create_preferences(agent_id)
-    updated_prefs = Preferences.unpin(prefs, memory_id)
-    save_preferences(agent_id, updated_prefs)
-    Signals.emit_cognitive_adjustment(agent_id, :unpin_memory, %{memory_id: memory_id})
-    {:ok, updated_prefs}
-  end
-
-  @doc """
-  Serialize a Preferences struct to a JSON-safe map.
-  """
-  @spec serialize_preferences(Preferences.t()) :: map()
+  @doc "Serialize a Preferences struct to a JSON-safe map."
   defdelegate serialize_preferences(prefs), to: Preferences, as: :serialize
 
-  @doc """
-  Deserialize a map back into a Preferences struct.
-  """
-  @spec deserialize_preferences(map()) :: Preferences.t()
+  @doc "Deserialize a map back into a Preferences struct."
   defdelegate deserialize_preferences(data), to: Preferences, as: :deserialize
 
-  @doc """
-  Get a summary of current preferences and usage.
+  @doc "Get a summary of current preferences and usage."
+  defdelegate inspect_preferences(agent_id), to: PreferencesStore
 
-  ## Examples
+  @doc "Get a trust-aware introspection of current preferences."
+  defdelegate introspect_preferences(agent_id, trust_tier), to: PreferencesStore
 
-      info = Arbor.Memory.inspect_preferences("agent_001")
-  """
-  @spec inspect_preferences(String.t()) :: map()
-  def inspect_preferences(agent_id) do
-    case get_preferences(agent_id) do
-      nil -> %{agent_id: agent_id, status: :not_initialized}
-      prefs -> Preferences.inspect_preferences(prefs)
-    end
-  end
+  @doc "Set a context preference for prompt building."
+  defdelegate set_context_preference(agent_id, key, value), to: PreferencesStore
 
-  @doc """
-  Get a trust-aware introspection of current preferences.
-
-  Includes allowed ranges and capability flags for the given trust tier.
-
-  ## Examples
-
-      report = Arbor.Memory.introspect_preferences("agent_001", :trusted)
-  """
-  @spec introspect_preferences(String.t(), atom()) :: map()
-  def introspect_preferences(agent_id, trust_tier) do
-    case get_preferences(agent_id) do
-      nil -> %{agent_id: agent_id, status: :not_initialized}
-      prefs -> Preferences.introspect(prefs, trust_tier)
-    end
-  end
-
-  @doc """
-  Set a context preference for prompt building.
-
-  ## Examples
-
-      {:ok, prefs} = Arbor.Memory.set_context_preference("agent_001", :include_goals, false)
-  """
-  @spec set_context_preference(String.t(), atom(), term()) :: {:ok, Preferences.t()}
-  def set_context_preference(agent_id, key, value) do
-    prefs = get_or_create_preferences(agent_id)
-    {:ok, updated_prefs} = Preferences.set_context_preference(prefs, key, value)
-    save_preferences(agent_id, updated_prefs)
-
-    Signals.emit_cognitive_adjustment(agent_id, :context_preference, %{
-      key: key,
-      value: value
-    })
-
-    {:ok, updated_prefs}
-  end
-
-  @doc """
-  Get a context preference value.
-
-  ## Examples
-
-      true = Arbor.Memory.get_context_preference("agent_001", :include_goals)
-  """
-  @spec get_context_preference(String.t(), atom(), term()) :: term()
-  def get_context_preference(agent_id, key, default \\ nil) do
-    case get_preferences(agent_id) do
-      nil -> default
-      prefs -> Preferences.get_context_preference(prefs, key, default)
-    end
-  end
+  @doc "Get a context preference value."
+  defdelegate get_context_preference(agent_id, key, default \\ nil), to: PreferencesStore
 
   # ============================================================================
   # Reflection (Phase 5)
@@ -2153,189 +1479,9 @@ defmodule Arbor.Memory do
   # read_self — Live System Introspection
   # ============================================================================
 
-  @doc """
-  Aggregate live stats from the memory system for a given aspect.
-
-  Provides a Seed-style `read_self` that pulls live data from KG, working
-  memory, preferences, proposals, and self-knowledge.
-
-  ## Aspects
-
-  - `:memory_system` — KG stats, working memory stats, proposal stats
-  - `:identity` — self-knowledge traits/values/capabilities, active goal count by type
-  - `:tools` — capability list with proficiency, optional trust_tier bounds
-  - `:cognition` — preferences, working memory engagement/concerns/curiosity
-  - `:all` — aggregates all four
-
-  ## Options
-
-  - `:trust_tier` — trust tier for preference bounds (default: `:trusted`)
-  """
-  @spec read_self(String.t(), atom(), keyword()) :: {:ok, map()}
-  def read_self(agent_id, aspect \\ :all, opts \\ []) do
-    result =
-      case aspect do
-        :memory_system -> read_self_memory_system(agent_id)
-        :identity -> read_self_identity(agent_id, opts)
-        :tools -> read_self_tools(agent_id, opts)
-        :cognition -> read_self_cognition(agent_id)
-        :all ->
-          Map.merge(
-            Map.merge(read_self_memory_system(agent_id), read_self_identity(agent_id, opts)),
-            Map.merge(read_self_tools(agent_id, opts), read_self_cognition(agent_id))
-          )
-        _ -> %{error: "Unknown aspect: #{inspect(aspect)}"}
-      end
-
-    {:ok, result}
-  end
-
-  defp read_self_memory_system(agent_id) do
-    kg = fetch_graph(agent_id)
-    kg_stats = if kg, do: KnowledgeGraph.stats(kg), else: %{node_count: 0, edge_count: 0}
-
-    wm = fetch_working_memory(agent_id)
-    wm_stats = if wm, do: WorkingMemory.stats(wm), else: %{thought_count: 0}
-
-    proposal_stats =
-      try do
-        Proposal.stats(agent_id)
-      rescue
-        _ -> %{pending: 0}
-      end
-
-    %{
-      memory_system: %{
-        knowledge_graph: kg_stats,
-        working_memory: wm_stats,
-        proposals: proposal_stats
-      }
-    }
-  end
-
-  defp read_self_identity(agent_id, _opts) do
-    sk = get_self_knowledge(agent_id)
-    goals = GoalStore.get_active_goals(agent_id)
-
-    goals_by_type =
-      goals
-      |> Enum.group_by(& &1.type)
-      |> Map.new(fn {type, gs} -> {type, length(gs)} end)
-
-    sk_summary =
-      if sk do
-        %{
-          traits: Enum.map(sk.personality_traits, fn {trait, strength, _, _} -> %{trait: trait, strength: strength} end),
-          values: Enum.map(sk.values, fn {value, importance, _, _} -> %{value: value, importance: importance} end),
-          capability_count: length(sk.capabilities),
-          version: sk.version
-        }
-      else
-        %{traits: [], values: [], capability_count: 0, version: 0}
-      end
-
-    %{
-      identity: %{
-        self_knowledge: sk_summary,
-        active_goals: goals_by_type,
-        total_active_goals: length(goals)
-      }
-    }
-  end
-
-  defp read_self_tools(agent_id, opts) do
-    sk = get_self_knowledge(agent_id)
-    trust_tier = Keyword.get(opts, :trust_tier, :trusted)
-
-    capabilities =
-      if sk do
-        Enum.map(sk.capabilities, fn {name, proficiency, evidence, _added_at} ->
-          %{name: name, proficiency: proficiency, evidence: evidence}
-        end)
-      else
-        []
-      end
-
-    bounds =
-      try do
-        Preferences.bounds_for_tier(trust_tier)
-      rescue
-        _ -> %{}
-      end
-
-    %{
-      tools: %{
-        capabilities: capabilities,
-        trust_tier: trust_tier,
-        trust_bounds: bounds
-      }
-    }
-  end
-
-  defp read_self_cognition(agent_id) do
-    prefs = get_preferences(agent_id)
-    wm = fetch_working_memory(agent_id)
-
-    prefs_summary =
-      if prefs do
-        try do
-          Preferences.inspect_preferences(prefs)
-        rescue
-          _ -> %{}
-        end
-      else
-        %{}
-      end
-
-    wm_summary =
-      if wm do
-        %{
-          engagement: Map.get(wm, :engagement_level, 0.5),
-          concerns: Map.get(wm, :concerns, []),
-          curiosity: Map.get(wm, :curiosity, []),
-          thought_count: length(Map.get(wm, :recent_thoughts, []))
-        }
-      else
-        %{engagement: 0.5, concerns: [], curiosity: [], thought_count: 0}
-      end
-
-    thinking_count =
-      try do
-        length(Thinking.recent_thinking(agent_id, limit: 100))
-      rescue
-        _ -> 0
-      end
-
-    %{
-      cognition: %{
-        preferences: prefs_summary,
-        working_memory: wm_summary,
-        recent_thinking_count: thinking_count
-      }
-    }
-  end
-
-  defp fetch_graph(agent_id) do
-    if :ets.whereis(:arbor_memory_graphs) != :undefined do
-      case :ets.lookup(:arbor_memory_graphs, agent_id) do
-        [{^agent_id, graph}] -> graph
-        [] -> nil
-      end
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp fetch_working_memory(agent_id) do
-    if :ets.whereis(:arbor_working_memory) != :undefined do
-      case :ets.lookup(:arbor_working_memory, agent_id) do
-        [{^agent_id, wm}] -> wm
-        [] -> nil
-      end
-    end
-  rescue
-    _ -> nil
-  end
+  @doc "Aggregate live stats from the memory system for a given aspect."
+  defdelegate read_self(agent_id, aspect \\ :all, opts \\ []),
+    to: Arbor.Memory.Introspection
 
   # ============================================================================
   # Thinking (Seed/Host Phase 3)
@@ -2481,37 +1627,7 @@ defmodule Arbor.Memory do
           {:ok, String.t()} | {:error, term()}
   defdelegate subscribe_to_percepts(agent_id, handler), to: Bridge
 
-  # ============================================================================
-  # Private Helpers (Phase 5)
-  # ============================================================================
-
-  defp get_or_create_preferences(agent_id) do
-    case get_preferences(agent_id) do
-      nil ->
-        prefs = Preferences.new(agent_id)
-        save_preferences(agent_id, prefs)
-        prefs
-
-      prefs ->
-        prefs
-    end
-  end
-
-  defp save_preferences(agent_id, prefs) do
-    ensure_preferences_table()
-    :ets.insert(@preferences_ets, {agent_id, prefs})
-    :ok
-  end
-
-  defp ensure_preferences_table do
-    if :ets.whereis(@preferences_ets) == :undefined do
-      try do
-        :ets.new(@preferences_ets, [:named_table, :public, :set])
-      rescue
-        ArgumentError -> :ok
-      end
-    end
-  end
+  # Preferences operations delegated to PreferencesStore
 
   # ============================================================================
   # Private Helpers
@@ -2530,20 +1646,7 @@ defmodule Arbor.Memory do
     Keyword.merge(defaults, opts)
   end
 
-  # Graph ETS table is created eagerly in Application.start/2
-  # to avoid race conditions from lazy initialization.
-
-  defp get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
-    end
-  end
-
-  defp save_graph(agent_id, graph) do
-    :ets.insert(@graph_ets, {agent_id, graph})
-    :ok
-  end
+  # Graph operations delegated to GraphOps
 
   # Convert a string to an atom safely for insight categories.
   # Tries existing atoms first, then downcases and underscores.
@@ -2556,65 +1659,16 @@ defmodule Arbor.Memory do
     |> String.to_atom()
   end
 
-  defp has_graph?(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, _}] -> true
-      [] -> false
-    end
-  end
-
   # ============================================================================
   # Export / Import (for Seed capture & restore)
   # ============================================================================
 
-  @doc """
-  Export the full knowledge graph for an agent as a serializable map.
+  @doc "Export the full knowledge graph for an agent as a serializable map."
+  defdelegate export_knowledge_graph(agent_id), to: GraphOps
 
-  Used by `Arbor.Agent.Seed.capture/2` to snapshot graph state.
-  """
-  @spec export_knowledge_graph(String.t()) :: {:ok, map()} | {:error, :graph_not_initialized}
-  def export_knowledge_graph(agent_id) do
-    case get_graph(agent_id) do
-      {:ok, graph} -> {:ok, KnowledgeGraph.to_map(graph)}
-      {:error, _} = error -> error
-    end
-  end
+  @doc "Import a knowledge graph from a serializable map."
+  defdelegate import_knowledge_graph(agent_id, graph_map), to: GraphOps
 
-  @doc """
-  Import a knowledge graph from a serializable map.
-
-  Used by `Arbor.Agent.Seed.restore/2` to restore graph state.
-  """
-  @spec import_knowledge_graph(String.t(), map()) :: :ok
-  def import_knowledge_graph(agent_id, graph_map) do
-    graph = KnowledgeGraph.from_map(graph_map)
-    save_graph(agent_id, graph)
-  end
-
-  @doc """
-  Save preferences for an agent (public wrapper for Seed restore).
-  """
-  @spec save_preferences_for_agent(String.t(), Preferences.t()) :: :ok
-  def save_preferences_for_agent(agent_id, prefs) do
-    save_preferences(agent_id, prefs)
-  end
-
-  # ============================================================================
-  # Durable Persistence Helpers (Private)
-  # ============================================================================
-
-  defp load_working_memory_from_postgres(agent_id) do
-    case DurableStore.load("working_memory", agent_id) do
-      {:ok, data} when is_map(data) ->
-        wm = WorkingMemory.deserialize(data)
-        {:ok, wm}
-
-      _ ->
-        :not_found
-    end
-  rescue
-    e ->
-      Logger.warning("Failed to load working memory from Postgres for #{agent_id}: #{inspect(e)}")
-      :not_found
-  end
+  @doc "Save preferences for an agent (public wrapper for Seed restore)."
+  defdelegate save_preferences_for_agent(agent_id, prefs), to: PreferencesStore
 end

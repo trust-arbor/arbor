@@ -32,7 +32,7 @@ defmodule Arbor.Memory.Consolidation do
       end
   """
 
-  alias Arbor.Memory.{Events, KnowledgeGraph}
+  alias Arbor.Memory.{Events, GraphOps, KnowledgeGraph, Signals}
 
   require Logger
 
@@ -213,6 +213,114 @@ defmodule Arbor.Memory.Consolidation do
       average_relevance_before: avg_relevance(graph),
       average_relevance_after_decay: avg_relevance(decayed)
     }
+  end
+
+  # ============================================================================
+  # Agent-Level Operations (with graph load/save/signals)
+  # ============================================================================
+
+  @doc """
+  Run basic consolidation on an agent's knowledge graph.
+
+  Loads the graph, applies decay + prune, saves, and emits signals.
+  """
+  @spec consolidate_basic(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def consolidate_basic(agent_id, opts \\ []) do
+    start_time = System.monotonic_time(:millisecond)
+
+    Signals.emit_consolidation_started(agent_id)
+
+    with {:ok, graph} <- GraphOps.get_graph(agent_id) do
+      # Apply decay
+      decayed_graph = KnowledgeGraph.decay(graph)
+      decayed_count = map_size(graph.nodes)
+
+      # Prune
+      threshold = Keyword.get(opts, :prune_threshold, 0.1)
+      {pruned_graph, pruned_count} = KnowledgeGraph.prune(decayed_graph, threshold)
+
+      # Save
+      GraphOps.save_graph(agent_id, pruned_graph)
+
+      # Calculate duration
+      duration_ms = System.monotonic_time(:millisecond) - start_time
+
+      # Get final stats
+      stats = KnowledgeGraph.stats(pruned_graph)
+
+      metrics = %{
+        decayed_count: decayed_count,
+        pruned_count: pruned_count,
+        duration_ms: duration_ms,
+        total_nodes: stats.node_count,
+        average_relevance: stats.average_relevance
+      }
+
+      # Emit signals
+      Signals.emit_consolidation_completed(agent_id, metrics)
+      Signals.emit_knowledge_decayed(agent_id, stats)
+
+      if pruned_count > 0 do
+        Signals.emit_knowledge_pruned(agent_id, pruned_count)
+      end
+
+      # Record permanent event
+      Events.record_consolidation_completed(agent_id, metrics)
+
+      {:ok, metrics}
+    end
+  end
+
+  @doc """
+  Run enhanced consolidation on an agent's knowledge graph.
+
+  Loads the graph, runs full consolidation (decay + reinforce + archive + prune + quota),
+  saves, and emits signals.
+  """
+  @spec run_enhanced(String.t(), keyword()) ::
+          {:ok, KnowledgeGraph.t(), map()} | {:error, term()}
+  def run_enhanced(agent_id, opts \\ []) do
+    Signals.emit_consolidation_started(agent_id)
+
+    with {:ok, graph} <- GraphOps.get_graph(agent_id),
+         {:ok, new_graph, metrics} <- consolidate(agent_id, graph, opts) do
+      # Save updated graph
+      GraphOps.save_graph(agent_id, new_graph)
+
+      # Emit completion signals
+      Signals.emit_consolidation_completed(agent_id, metrics)
+
+      if metrics.pruned_count > 0 do
+        Signals.emit_knowledge_pruned(agent_id, metrics.pruned_count)
+      end
+
+      # Record permanent event
+      Events.record_consolidation_completed(agent_id, metrics)
+
+      {:ok, new_graph, metrics}
+    end
+  end
+
+  @doc """
+  Check if consolidation should run for an agent.
+  """
+  @spec should_run?(String.t(), keyword()) :: boolean()
+  def should_run?(agent_id, opts \\ []) do
+    case GraphOps.get_graph(agent_id) do
+      {:ok, graph} -> should_consolidate?(graph, opts)
+      {:error, _} -> false
+    end
+  end
+
+  @doc """
+  Preview what consolidation would do for an agent without doing it.
+  """
+  @spec preview_for_agent(String.t(), keyword()) :: map() | {:error, term()}
+  def preview_for_agent(agent_id, opts \\ []) do
+    case GraphOps.get_graph(agent_id) do
+      {:ok, graph} -> preview(graph, opts)
+      error -> error
+    end
   end
 
   # ============================================================================

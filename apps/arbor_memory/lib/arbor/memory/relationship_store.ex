@@ -29,7 +29,7 @@ defmodule Arbor.Memory.RelationshipStore do
       :ok = RelationshipStore.delete("agent_001", relationship_id)
   """
 
-  alias Arbor.Memory.Relationship
+  alias Arbor.Memory.{Events, Relationship, Signals}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Relationship, as: RelationshipSchema
 
@@ -77,8 +77,9 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec get(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get(agent_id, relationship_id) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id and r.id == ^relationship_id
+      )
 
     case Repo.one(query) do
       nil -> {:error, :not_found}
@@ -92,8 +93,9 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec get_by_name(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get_by_name(agent_id, name) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id and r.name == ^name
+      )
 
     case Repo.one(query) do
       nil -> {:error, :not_found}
@@ -117,8 +119,9 @@ defmodule Arbor.Memory.RelationshipStore do
     limit = Keyword.get(opts, :limit)
 
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id
+      )
 
     query = apply_sort(query, sort_by, sort_dir)
     query = if limit, do: from(r in query, limit: ^limit), else: query
@@ -135,8 +138,9 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec delete(String.t(), String.t()) :: :ok | {:error, :not_found}
   def delete(agent_id, relationship_id) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id and r.id == ^relationship_id
+      )
 
     case Repo.delete_all(query) do
       {0, _} -> {:error, :not_found}
@@ -152,8 +156,9 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec update(String.t(), String.t(), map()) :: {:ok, Relationship.t()} | {:error, term()}
   def update(agent_id, relationship_id, changes) when is_map(changes) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id and r.id == ^relationship_id
+      )
 
     case Repo.one(query) do
       nil ->
@@ -180,10 +185,11 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec get_primary(String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get_primary(agent_id) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id,
         order_by: [desc: r.salience],
         limit: 1
+      )
 
     case Repo.one(query) do
       nil -> {:error, :not_found}
@@ -201,8 +207,9 @@ defmodule Arbor.Memory.RelationshipStore do
     now = DateTime.utc_now()
 
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id and r.id == ^relationship_id
+      )
 
     case Repo.one(query) do
       nil ->
@@ -231,11 +238,126 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec count(String.t()) :: {:ok, non_neg_integer()}
   def count(agent_id) do
     query =
-      from r in RelationshipSchema,
+      from(r in RelationshipSchema,
         where: r.agent_id == ^agent_id,
         select: count(r.id)
+      )
 
     {:ok, Repo.one(query)}
+  end
+
+  # ============================================================================
+  # Facade-Level Operations (with touch/signals/events)
+  # ============================================================================
+
+  @doc """
+  Get a relationship by ID with access tracking and signal emission.
+  """
+  @spec get_with_tracking(String.t(), String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_with_tracking(agent_id, relationship_id) do
+    case get(agent_id, relationship_id) do
+      {:ok, rel} ->
+        touch(agent_id, relationship_id)
+        Signals.emit_relationship_accessed(agent_id, relationship_id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Get a relationship by name with access tracking and signal emission.
+  """
+  @spec get_by_name_with_tracking(String.t(), String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_by_name_with_tracking(agent_id, name) do
+    case get_by_name(agent_id, name) do
+      {:ok, rel} ->
+        touch(agent_id, rel.id)
+        Signals.emit_relationship_accessed(agent_id, rel.id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Get the primary relationship with access tracking and signal emission.
+  """
+  @spec get_primary_with_tracking(String.t()) ::
+          {:ok, Relationship.t()} | {:error, :not_found}
+  def get_primary_with_tracking(agent_id) do
+    case get_primary(agent_id) do
+      {:ok, rel} ->
+        touch(agent_id, rel.id)
+        Signals.emit_relationship_accessed(agent_id, rel.id)
+        {:ok, rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Save a relationship with signal/event emission for create vs update.
+  """
+  @spec save(String.t(), Relationship.t()) ::
+          {:ok, Relationship.t()} | {:error, term()}
+  def save(agent_id, %Relationship{} = relationship) do
+    is_new =
+      case get(agent_id, relationship.id) do
+        {:ok, _} -> false
+        {:error, :not_found} -> true
+      end
+
+    case put(agent_id, relationship) do
+      {:ok, saved_rel} ->
+        if is_new do
+          Signals.emit_relationship_created(agent_id, saved_rel.id, saved_rel.name)
+          Events.record_relationship_created(agent_id, saved_rel.id, saved_rel.name)
+        else
+          Signals.emit_relationship_updated(agent_id, saved_rel.id, %{action: :saved})
+        end
+
+        {:ok, saved_rel}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Add a key moment to a relationship with signal/event emission.
+  """
+  @spec add_moment(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Relationship.t()} | {:error, term()}
+  def add_moment(agent_id, relationship_id, summary, opts \\ []) do
+    case get(agent_id, relationship_id) do
+      {:ok, rel} ->
+        updated_rel = Relationship.add_moment(rel, summary, opts)
+
+        case put(agent_id, updated_rel) do
+          {:ok, saved_rel} ->
+            Signals.emit_moment_added(agent_id, relationship_id, summary)
+
+            Events.record_relationship_moment(agent_id, relationship_id, %{
+              summary: summary,
+              emotional_markers: Keyword.get(opts, :emotional_markers, []),
+              salience: Keyword.get(opts, :salience, 0.5)
+            })
+
+            {:ok, saved_rel}
+
+          error ->
+            error
+        end
+
+      error ->
+        error
+    end
   end
 
   # ============================================================================
