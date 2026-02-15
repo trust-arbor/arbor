@@ -68,6 +68,9 @@ _rel/
 /sandbox/
 **/sandbox/agents/
 
+# Development-only pipeline specs (may contain example secrets)
+apps/arbor_orchestrator/specs/pipelines/dev/
+
 # Other AI tool artifacts
 .goose/
 .venv/
