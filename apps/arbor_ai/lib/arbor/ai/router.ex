@@ -54,6 +54,7 @@ defmodule Arbor.AI.Router do
     BackendTrust,
     BudgetTracker,
     CliImpl,
+    GraphRouter,
     QuotaTracker,
     RoutingConfig,
     TaskMeta,
@@ -260,8 +261,34 @@ defmodule Arbor.AI.Router do
   # Private Functions - Task Routing
   # ===========================================================================
 
-  # Extracted from route_task/2 for pattern matching convenience
+  # Strangler fig: try graph-based routing first, fall back to imperative
   defp do_route_task(task_meta, opts) do
+    if graph_routing_enabled?() do
+      case GraphRouter.route(task_meta, opts) do
+        {:ok, {backend, model}} = result ->
+          tier = TaskMeta.tier(task_meta)
+          Logger.debug("Router (graph) selected", backend: backend, model: model, tier: tier)
+          emit_routing_decision(tier, backend, model, :graph_tier_match, 0)
+          result
+
+        {:error, reason} ->
+          Logger.debug("Graph routing unavailable, falling back to imperative",
+            reason: inspect(reason)
+          )
+
+          do_route_task_imperative(task_meta, opts)
+      end
+    else
+      do_route_task_imperative(task_meta, opts)
+    end
+  end
+
+  defp graph_routing_enabled? do
+    Application.get_env(:arbor_ai, :enable_graph_routing, false)
+  end
+
+  # Original imperative routing pipeline (fallback)
+  defp do_route_task_imperative(task_meta, opts) do
     tier = TaskMeta.tier(task_meta)
     min_trust = Keyword.get(opts, :min_trust, task_meta.min_trust_level)
     exclude = Keyword.get(opts, :exclude, [])

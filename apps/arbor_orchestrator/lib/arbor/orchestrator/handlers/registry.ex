@@ -30,6 +30,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     ParallelHandler,
     PromptAbTestHandler,
     RetryEscalateHandler,
+    RoutingHandler,
     ShellHandler,
     StartHandler,
     SubgraphHandler,
@@ -99,7 +100,9 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "drift_detect" => DriftDetectHandler,
     "prompt.ab_test" => PromptAbTestHandler,
     "memory.recall_store" => MemoryRecallHandler,
-    "memory.store_file" => MemoryStoreHandler
+    "memory.store_file" => MemoryStoreHandler,
+    # LLM routing
+    "routing.select" => RoutingHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
