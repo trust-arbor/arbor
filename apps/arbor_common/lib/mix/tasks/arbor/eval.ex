@@ -1,11 +1,11 @@
-defmodule Mix.Tasks.Arbor.Eval do
-  @shortdoc "Evaluate an expression on the running Arbor server"
+defmodule Mix.Tasks.Arbor.Rpc do
+  @shortdoc "Evaluate an expression on the running Arbor server via RPC"
   @moduledoc """
   Evaluates an Elixir expression on the running Arbor server via RPC.
 
-      $ mix arbor.eval ":erlang.memory(:total)"
-      $ mix arbor.eval "Arbor.Security.list_capabilities()"
-      $ mix arbor.eval "Application.started_applications()"
+      $ mix arbor.rpc ":erlang.memory(:total)"
+      $ mix arbor.rpc "Arbor.Security.list_capabilities()"
+      $ mix arbor.rpc "Application.started_applications()"
 
   The expression is evaluated in the context of the remote server node.
   The result is inspected and printed to stdout.
@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   @impl Mix.Task
   def run([]) do
-    Mix.shell().error("Usage: mix arbor.eval <expression>")
+    Mix.shell().error("Usage: mix arbor.rpc <expression>")
     exit({:shutdown, 1})
   end
 

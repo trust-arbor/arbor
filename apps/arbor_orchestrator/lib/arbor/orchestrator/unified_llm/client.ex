@@ -741,7 +741,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
         api_adapters
       end
 
-    if Keyword.get(opts, :discover_local, true) do
+    default_discover_local =
+      Application.get_env(:arbor_orchestrator, :discover_local_providers, true)
+
+    if Keyword.get(opts, :discover_local, default_discover_local) do
       adapters
       |> maybe_add_local("lm_studio", LMStudio)
       |> maybe_add_local("ollama", Ollama)

@@ -3,47 +3,46 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
 
   alias Arbor.Orchestrator.Eval.Subjects.LLM
 
-  @moduletag :fast
-
   describe "run/2" do
+    @tag :fast
     test "returns error for unknown provider" do
       result = LLM.run("hello", provider: "nonexistent")
       assert {:error, msg} = result
       assert msg =~ "unknown provider"
     end
 
+    @tag :live_local
     test "returns error when LM Studio is not available" do
-      # Force a connection to a port that's not running
-      # The adapter will fail to connect
       result = LLM.run("hello", provider: "lm_studio", timeout: 1_000)
 
-      # Either error (server down) or ok (server happens to be up)
       case result do
         {:error, _reason} -> :ok
         {:ok, %{text: text}} -> assert is_binary(text)
       end
     end
 
+    @tag :live_local
     test "accepts string input" do
-      # Just verify it doesn't crash on string input
       result = LLM.run("test prompt", provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
+    @tag :live_local
     test "accepts map input with prompt and system keys" do
       input = %{"prompt" => "Hello", "system" => "You are helpful"}
       result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
+    @tag :live_local
     test "accepts atom-keyed map input" do
       input = %{prompt: "Hello", system: "Be helpful"}
       result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
+    @tag :live_local
     test "supports CLI provider names" do
-      # Should not crash — these are valid provider keys even if the backend isn't available
       for provider <- ~w(claude_cli codex_cli gemini_cli opencode_cli qwen_cli) do
         result = LLM.run("hello", provider: provider, timeout: 1_000)
         assert match?({:ok, _}, result) or match?({:error, _}, result)

@@ -210,7 +210,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         "XAI_API_KEY" => nil
       },
       fn ->
-        client = Client.from_env()
+        client = Client.from_env(discover_local: false)
         assert client.default_provider == "test"
       end
     )

@@ -707,7 +707,7 @@ defmodule Arbor.Orchestrator.Session do
          Process.whereis(Arbor.Signals.Bus) != nil do
       agent_id = data[:agent_id]
       meta = if agent_id, do: %{agent_id: agent_id}, else: %{}
-      Arbor.Signals.emit(category, event, data, metadata: meta)
+      apply(Arbor.Signals, :emit, [category, event, data, [metadata: meta]])
     end
   rescue
     _ -> :ok
