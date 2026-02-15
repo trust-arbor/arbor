@@ -413,20 +413,20 @@ defmodule Arbor.Persistence.Checkpoint do
   # Signal Emissions
   # ============================================================================
 
-  defp emit_saved(id), do: safe_emit(:saved, %{checkpoint_id: inspect(id)})
+  defp emit_saved(id), do: safe_emit(:saved, %{checkpoint_id: to_string(id)})
 
   defp emit_save_failed(id, reason) do
-    safe_emit(:save_failed, %{checkpoint_id: inspect(id), reason: inspect(reason, limit: 200)})
+    safe_emit(:save_failed, %{checkpoint_id: to_string(id), reason: inspect(reason, limit: 200)})
   end
 
-  defp emit_loaded(id), do: safe_emit(:loaded, %{checkpoint_id: inspect(id)})
+  defp emit_loaded(id), do: safe_emit(:loaded, %{checkpoint_id: to_string(id)})
 
   defp emit_load_failed(id, reason) do
-    safe_emit(:load_failed, %{checkpoint_id: inspect(id), reason: inspect(reason, limit: 200)})
+    safe_emit(:load_failed, %{checkpoint_id: to_string(id), reason: inspect(reason, limit: 200)})
   end
 
   defp emit_restored(id, module) do
-    safe_emit(:restored, %{checkpoint_id: inspect(id), module: inspect(module)})
+    safe_emit(:restored, %{checkpoint_id: to_string(id), module: inspect(module)})
   end
 
   # Signals may not be started yet (checkpoint starts before signals).
