@@ -26,7 +26,7 @@ defmodule Arbor.Memory.ChatHistory do
 
   use GenServer
 
-  alias Arbor.Memory.DurableStore
+  alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -106,7 +106,7 @@ defmodule Arbor.Memory.ChatHistory do
   def clear(agent_id) when is_binary(agent_id) do
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
     :ets.select_delete(@ets_table, match_spec)
-    DurableStore.delete_by_prefix("chat_history", agent_id)
+    MemoryStore.delete_by_prefix("chat_history", agent_id)
     Logger.debug("Cleared chat history for #{agent_id}")
     :ok
   end
@@ -141,12 +141,12 @@ defmodule Arbor.Memory.ChatHistory do
       msg
       |> Map.update(:timestamp, nil, &maybe_to_iso8601/1)
 
-    DurableStore.persist_async("chat_history", key, msg_map)
+    MemoryStore.persist_async("chat_history", key, msg_map)
   end
 
   defp load_messages_from_postgres(agent_id) do
-    if DurableStore.available?() do
-      case DurableStore.load_by_prefix("chat_history", agent_id) do
+    if MemoryStore.available?() do
+      case MemoryStore.load_by_prefix("chat_history", agent_id) do
         {:ok, pairs} ->
           Enum.each(pairs, fn {key, msg_map} ->
             case String.split(key, ":", parts: 2) do
@@ -177,8 +177,8 @@ defmodule Arbor.Memory.ChatHistory do
   end
 
   defp load_all_messages_from_postgres do
-    if DurableStore.available?() do
-      case DurableStore.load_all("chat_history") do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("chat_history") do
         {:ok, pairs} ->
           Enum.each(pairs, fn {key, msg_map} ->
             case String.split(key, ":", parts: 2) do
@@ -235,7 +235,7 @@ defmodule Arbor.Memory.ChatHistory do
 
       Enum.each(to_remove, fn {{aid, mid}, _msg} ->
         :ets.delete(@ets_table, {aid, mid})
-        DurableStore.delete("chat_history", "#{aid}:#{mid}")
+        MemoryStore.delete("chat_history", "#{aid}:#{mid}")
       end)
 
       Logger.debug(

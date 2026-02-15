@@ -66,7 +66,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
       state = IdentityConsolidator.get_consolidation_state("agent_001")
   """
 
-  alias Arbor.Memory.{DurableStore, Events, InsightDetector, KnowledgeGraph, Patterns, SelfKnowledge, Signals}
+  alias Arbor.Memory.{MemoryStore, Events, InsightDetector, KnowledgeGraph, Patterns, SelfKnowledge, Signals}
 
   @max_changes_per_day 3
   @cooldown_hours 4
@@ -429,7 +429,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
   def save_self_knowledge(agent_id, %SelfKnowledge{} = sk) do
     ensure_ets_exists()
     :ets.insert(@self_knowledge_ets, {agent_id, sk})
-    DurableStore.persist_async("self_knowledge", agent_id, SelfKnowledge.serialize(sk))
+    MemoryStore.persist_async("self_knowledge", agent_id, SelfKnowledge.serialize(sk))
     :ok
   end
 
@@ -438,7 +438,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
   # ============================================================================
 
   defp load_self_knowledge_from_postgres(agent_id) do
-    case DurableStore.load("self_knowledge", agent_id) do
+    case MemoryStore.load("self_knowledge", agent_id) do
       {:ok, data} when is_map(data) ->
         sk = SelfKnowledge.deserialize(data)
         {:ok, sk}

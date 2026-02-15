@@ -1,4 +1,4 @@
-defmodule Arbor.Memory.DurableStore do
+defmodule Arbor.Memory.MemoryStore do
   @moduledoc """
   Write-through persistence helpers for memory stores.
 
@@ -37,7 +37,7 @@ defmodule Arbor.Memory.DurableStore do
   catch
     kind, reason ->
       Logger.warning(
-        "DurableStore.persist failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+        "MemoryStore.persist failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
       )
 
       :ok
@@ -75,7 +75,7 @@ defmodule Arbor.Memory.DurableStore do
   catch
     kind, reason ->
       Logger.warning(
-        "DurableStore.load failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+        "MemoryStore.load failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
       )
 
       {:error, :not_found}
@@ -109,7 +109,7 @@ defmodule Arbor.Memory.DurableStore do
     end
   catch
     kind, reason ->
-      Logger.warning("DurableStore.load_all failed for #{namespace}: #{inspect({kind, reason})}")
+      Logger.warning("MemoryStore.load_all failed for #{namespace}: #{inspect({kind, reason})}")
       {:ok, []}
   end
 
@@ -142,7 +142,7 @@ defmodule Arbor.Memory.DurableStore do
   catch
     kind, reason ->
       Logger.warning(
-        "DurableStore.load_by_prefix failed for #{namespace}/#{prefix}: #{inspect({kind, reason})}"
+        "MemoryStore.load_by_prefix failed for #{namespace}/#{prefix}: #{inspect({kind, reason})}"
       )
 
       {:ok, []}
@@ -162,7 +162,7 @@ defmodule Arbor.Memory.DurableStore do
   catch
     kind, reason ->
       Logger.warning(
-        "DurableStore.delete failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+        "MemoryStore.delete failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
       )
 
       :ok

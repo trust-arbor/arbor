@@ -27,7 +27,7 @@ defmodule Arbor.Memory.IntentStore do
 
   alias Arbor.Contracts.Memory.Intent
   alias Arbor.Contracts.Memory.Percept
-  alias Arbor.Memory.DurableStore
+  alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -303,7 +303,7 @@ defmodule Arbor.Memory.IntentStore do
   @spec clear(String.t()) :: :ok
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
-    DurableStore.delete("intents", agent_id)
+    MemoryStore.delete("intents", agent_id)
     :ok
   end
 
@@ -329,7 +329,7 @@ defmodule Arbor.Memory.IntentStore do
     :ets.insert(@ets_table, {agent_id, updated})
     persist_agent_data_async(agent_id, updated)
 
-    DurableStore.embed_async("intents", agent_id, intent_to_text(intent),
+    MemoryStore.embed_async("intents", agent_id, intent_to_text(intent),
       agent_id: agent_id, type: :intent)
 
     Signals.emit_intent_formed(agent_id, intent)
@@ -538,7 +538,7 @@ defmodule Arbor.Memory.IntentStore do
 
   defp persist_agent_data_async(agent_id, data) do
     serialized = serialize_agent_data(data)
-    DurableStore.persist_async("intents", agent_id, serialized)
+    MemoryStore.persist_async("intents", agent_id, serialized)
   end
 
   defp serialize_agent_data(data) do
@@ -669,8 +669,8 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp load_from_postgres(buffer_size) do
-    if DurableStore.available?() do
-      case DurableStore.load_all("intents") do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("intents") do
         {:ok, pairs} ->
           Enum.each(pairs, fn {agent_id, data} ->
             agent_data = deserialize_agent_data(data)
