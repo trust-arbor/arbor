@@ -51,6 +51,7 @@ defmodule Arbor.Memory.Signals do
   | `:relationship_changed` | Relationship context changed |
   | `:identity` | Full identity snapshot broadcast |
   | `:decision` | Important decision recorded |
+  | `:chat_message_added` | Chat message added to history |
 
   ## Examples
 
@@ -351,6 +352,17 @@ defmodule Arbor.Memory.Signals do
       complexity: summary_info[:complexity],
       model_used: summary_info[:model_used],
       summarized_at: DateTime.utc_now()
+    })
+  end
+
+  @doc """
+  Emit a signal when a chat message is added to history.
+  """
+  @spec emit_chat_message_added(String.t(), String.t()) :: :ok
+  def emit_chat_message_added(agent_id, message_id) do
+    emit_memory_signal(agent_id, :chat_message_added, %{
+      message_id: message_id,
+      added_at: DateTime.utc_now()
     })
   end
 
@@ -1320,7 +1332,9 @@ defmodule Arbor.Memory.Signals do
       # WorkingMemory state
       :engagement_changed, :concern_added, :concern_resolved,
       :curiosity_added, :curiosity_satisfied,
-      :conversation_changed, :relationship_changed
+      :conversation_changed, :relationship_changed,
+      # Chat history
+      :chat_message_added
     ]
   end
 

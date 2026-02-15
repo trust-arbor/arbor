@@ -22,16 +22,20 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
     {running, profiles} = safe_load_agents()
 
+    running_ids = safe_running_ids()
+
     socket =
       socket
       |> assign(
         page_title: "Agents",
         running_count: length(running),
         profile_count: length(profiles),
+        running_ids: running_ids,
         selected_agent: nil,
         agent_detail: nil,
         subscription_id: subscription_id
       )
+      |> stream_configure(:agents, dom_id: &"agent-#{&1.agent_id}")
       |> stream(:agents, profiles)
 
     {:ok, socket}
@@ -58,6 +62,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       socket
       |> assign(:running_count, length(running))
       |> assign(:profile_count, length(profiles))
+      |> assign(:running_ids, safe_running_ids())
       |> stream(:agents, profiles, reset: true)
 
     {:noreply, socket}
@@ -75,6 +80,34 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     {:noreply, assign(socket, selected_agent: nil, agent_detail: nil)}
   end
 
+  def handle_event("chat-agent", %{"id" => agent_id}, socket) do
+    {:noreply, push_navigate(socket, to: "/chat?agent_id=#{agent_id}")}
+  end
+
+  def handle_event("stop-agent", %{"id" => agent_id}, socket) do
+    Arbor.Dashboard.AgentManager.stop_agent(agent_id)
+    {running, profiles} = safe_load_agents()
+
+    socket =
+      socket
+      |> assign(running_count: length(running), profile_count: length(profiles), running_ids: safe_running_ids())
+      |> stream(:agents, profiles, reset: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("delete-agent", %{"id" => agent_id}, socket) do
+    Arbor.Agent.Lifecycle.destroy(agent_id)
+    {running, profiles} = safe_load_agents()
+
+    socket =
+      socket
+      |> assign(running_count: length(running), profile_count: length(profiles))
+      |> stream(:agents, profiles, reset: true)
+
+    {:noreply, socket}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -89,16 +122,173 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       <div
         :for={{dom_id, profile} <- @streams.agents}
         id={dom_id}
-        phx-click="select-agent"
-        phx-value-id={profile.agent_id}
-        style="cursor: pointer;"
+        style="
+          border: 1px solid var(--aw-border, #333);
+          border-radius: 6px;
+          padding: 1rem;
+          margin-bottom: 0.75rem;
+          background: var(--aw-surface, #1a1a1a);
+          transition: border-color 0.2s, box-shadow 0.2s;
+        "
+        onmouseover="this.style.borderColor='var(--aw-primary, #60a5fa)'; this.style.boxShadow='0 2px 8px rgba(96, 165, 250, 0.1)';"
+        onmouseout="this.style.borderColor='var(--aw-border, #333)'; this.style.boxShadow='none';"
       >
-        <.event_card
-          icon="\u{1F916}"
-          title={agent_name(profile)}
-          subtitle={agent_subtitle(profile)}
-          timestamp={format_created(profile.created_at)}
-        />
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <%!-- Left side: Agent info --%>
+          <div style="flex: 1;">
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
+              <h3 style="margin: 0; font-size: 1.1rem; color: var(--aw-text, #fff);">
+                {agent_name(profile)}
+              </h3>
+              <.badge
+                label={to_string(profile.trust_tier)}
+                color={tier_color(profile.trust_tier)}
+              />
+              <span
+                style={"width: 10px; height: 10px; border-radius: 50%; background: #{status_dot_color(@running_ids, profile.agent_id)};"}
+                title={status_title(@running_ids, profile.agent_id)}
+              >
+              </span>
+            </div>
+            <div style="display: flex; gap: 1rem; font-size: 0.9rem; color: var(--aw-text-muted, #888);">
+              <span :if={profile.template}>Template: {profile.template}</span>
+              <span>Created: {format_created(profile.created_at)}</span>
+            </div>
+          </div>
+          <%!-- Right side: Action buttons --%>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <%= if MapSet.member?(@running_ids, profile.agent_id) do %>
+              <%!-- Running agent actions --%>
+              <button
+                phx-click="chat-agent"
+                phx-value-id={profile.agent_id}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-success, #22c55e);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                  transition: opacity 0.2s;
+                "
+                onmouseover="this.style.opacity='0.8';"
+                onmouseout="this.style.opacity='1';"
+              >
+                💬 Chat
+              </button>
+              <a
+                href={"/memory/#{profile.agent_id}"}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: 1px solid var(--aw-border, #333);
+                  border-radius: 4px;
+                  background: transparent;
+                  color: var(--aw-text, #fff);
+                  text-decoration: none;
+                  cursor: pointer;
+                  transition: border-color 0.2s;
+                "
+                onmouseover="this.style.borderColor='var(--aw-primary, #60a5fa)';"
+                onmouseout="this.style.borderColor='var(--aw-border, #333)';"
+              >
+                🧠 Memory
+              </a>
+              <button
+                phx-click="stop-agent"
+                phx-value-id={profile.agent_id}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-error, #ef4444);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                  transition: opacity 0.2s;
+                "
+                onmouseover="this.style.opacity='0.8';"
+                onmouseout="this.style.opacity='1';"
+              >
+                ⏹ Stop
+              </button>
+            <% else %>
+              <%!-- Stopped agent actions --%>
+              <button
+                phx-click="chat-agent"
+                phx-value-id={profile.agent_id}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-primary, #60a5fa);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                  transition: opacity 0.2s;
+                "
+                onmouseover="this.style.opacity='0.8';"
+                onmouseout="this.style.opacity='1';"
+              >
+                ▶ Resume Chat
+              </button>
+              <a
+                href={"/memory/#{profile.agent_id}"}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: 1px solid var(--aw-border, #333);
+                  border-radius: 4px;
+                  background: transparent;
+                  color: var(--aw-text, #fff);
+                  text-decoration: none;
+                  cursor: pointer;
+                  transition: border-color 0.2s;
+                "
+                onmouseover="this.style.borderColor='var(--aw-primary, #60a5fa)';"
+                onmouseout="this.style.borderColor='var(--aw-border, #333)';"
+              >
+                🧠 Memory
+              </a>
+              <button
+                phx-click="delete-agent"
+                phx-value-id={profile.agent_id}
+                data-confirm="Are you sure? This will permanently delete the agent profile."
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-error, #ef4444);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                  transition: opacity 0.2s;
+                "
+                onmouseover="this.style.opacity='0.8';"
+                onmouseout="this.style.opacity='1';"
+              >
+                🗑 Delete
+              </button>
+            <% end %>
+            <button
+              phx-click="select-agent"
+              phx-value-id={profile.agent_id}
+              style="
+                padding: 0.5rem 0.75rem;
+                border: 1px solid var(--aw-border, #333);
+                border-radius: 4px;
+                background: transparent;
+                color: var(--aw-text-muted, #888);
+                cursor: pointer;
+                transition: border-color 0.2s;
+              "
+              onmouseover="this.style.borderColor='var(--aw-primary, #60a5fa)';"
+              onmouseout="this.style.borderColor='var(--aw-border, #333)';"
+              title="View details"
+            >
+              ℹ️
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -119,6 +309,74 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     >
       <div class="aw-agent-detail">
         <div :if={detail = @agent_detail}>
+          <%!-- Action buttons --%>
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--aw-border, #333);">
+            <%= if detail.running do %>
+              <button
+                phx-click="chat-agent"
+                phx-value-id={@selected_agent}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-success, #22c55e);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                "
+              >
+                💬 Chat
+              </button>
+              <button
+                phx-click="stop-agent"
+                phx-value-id={@selected_agent}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-error, #ef4444);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                "
+              >
+                ⏹ Stop
+              </button>
+            <% else %>
+              <button
+                phx-click="chat-agent"
+                phx-value-id={@selected_agent}
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-primary, #60a5fa);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                "
+              >
+                ▶ Resume Chat
+              </button>
+              <button
+                phx-click="delete-agent"
+                phx-value-id={@selected_agent}
+                data-confirm="Are you sure? This will permanently delete the agent profile."
+                style="
+                  padding: 0.5rem 1rem;
+                  border: none;
+                  border-radius: 4px;
+                  background: var(--aw-error, #ef4444);
+                  color: white;
+                  font-weight: 500;
+                  cursor: pointer;
+                "
+              >
+                🗑 Delete
+              </button>
+            <% end %>
+          </div>
+
           <%!-- Profile section --%>
           <div :if={detail.profile} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Profile</h4>
@@ -267,11 +525,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     end
   end
 
-  defp agent_subtitle(profile) do
-    tier = to_string(profile.trust_tier)
-    template = if profile.template, do: " | #{profile.template}", else: ""
-    "#{tier}#{template}"
-  end
 
   defp format_created(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_created(_), do: ""
@@ -300,7 +553,30 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   defp goal_icon(%{type: :achieve}), do: "\u{1F3AF}"
   defp goal_icon(_), do: "\u{2B50}"
 
+  defp status_dot_color(running_ids, agent_id) do
+    if MapSet.member?(running_ids, agent_id) do
+      "var(--aw-success, #22c55e)"
+    else
+      "var(--aw-muted, #666)"
+    end
+  end
+
+  defp status_title(running_ids, agent_id) do
+    if MapSet.member?(running_ids, agent_id), do: "Running", else: "Stopped"
+  end
+
   # ── Safe API wrappers ───────────────────────────────────────────────
+
+  defp safe_running_ids do
+    case Arbor.Agent.Registry.list() do
+      {:ok, agents} -> MapSet.new(agents, & &1.agent_id)
+      _ -> MapSet.new()
+    end
+  rescue
+    _ -> MapSet.new()
+  catch
+    :exit, _ -> MapSet.new()
+  end
 
   defp safe_load_agents do
     running = safe_running()

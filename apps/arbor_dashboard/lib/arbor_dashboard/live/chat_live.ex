@@ -100,7 +100,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         group_pid: nil,
         group_id: nil,
         group_participants: [],
-        group_mode: false
+        group_mode: false,
+        # Group creation modal
+        show_group_modal: false,
+        available_for_group: [],
+        group_selection: %{},
+        group_name_input: "Group Chat"
       )
       |> stream(:messages, [])
       |> stream(:signals, [])
@@ -121,6 +126,43 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     {:ok, socket}
   end
+
+  @impl true
+  def handle_params(%{"agent_id" => agent_id}, _uri, socket) do
+    # Skip if we're already connected to this agent
+    if socket.assigns.agent == agent_id do
+      {:noreply, socket}
+    else
+      case Arbor.Agent.running?(agent_id) do
+        true ->
+          # Agent is already running — just reconnect
+          case Arbor.Agent.Lifecycle.get_host(agent_id) do
+            {:ok, pid} ->
+              metadata = get_agent_metadata(agent_id)
+              {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
+
+            _ ->
+              {:noreply, assign(socket, error: "Agent running but host not found")}
+          end
+
+        false ->
+          # Agent is stopped — try to resume it
+          case Arbor.Dashboard.AgentManager.resume_agent(agent_id) do
+            {:ok, ^agent_id, pid} ->
+              metadata = get_agent_metadata(agent_id)
+              {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
+
+            {:error, reason} ->
+              {:noreply, assign(socket, error: "Failed to resume agent: #{inspect(reason)}")}
+          end
+      end
+    end
+  rescue
+    e ->
+      {:noreply, assign(socket, error: "Error: #{Exception.message(e)}")}
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
   def terminate(_reason, socket) do
@@ -206,6 +248,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           |> stream_insert(:messages, user_msg)
           |> assign(input: "", error: nil)
 
+        # Persist to chat history
+        try do
+          if socket.assigns.group_id do
+            Arbor.Memory.append_chat_message(socket.assigns.group_id, user_msg)
+          end
+        rescue
+          _ -> :ok
+        end
+
         # Send to group (triggers agent responses)
         AgentManager.group_send(
           socket.assigns.group_pid,
@@ -231,6 +282,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           socket
           |> stream_insert(:messages, user_msg)
           |> assign(input: "", loading: true, error: nil)
+
+        # Persist to chat history
+        try do
+          if socket.assigns.agent do
+            Arbor.Memory.append_chat_message(socket.assigns.agent, user_msg)
+          end
+        rescue
+          _ -> :ok
+        end
 
         # Spawn async query — keeps LiveView responsive during LLM calls
         dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
@@ -325,60 +385,99 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
   end
 
-  def handle_event("create-group", _params, socket) do
-    # Get all running agents
-    case Arbor.Agent.Registry.list() do
-      {:ok, [_ | _] = agents} ->
-        # Build participant specs for all running agents + human user
-        agent_specs =
-          Enum.map(agents, fn entry ->
-            %{
-              id: entry.agent_id,
-              name: entry.metadata[:display_name] || "Agent",
-              type: :agent
-            }
-          end)
+  def handle_event("show-group-modal", _params, socket) do
+    # Load all agent profiles to display in the modal
+    available = Arbor.Agent.Lifecycle.list_agents()
 
-        human_spec = %{
-          id: "human_primary",
-          name: "User",
-          type: :human
-        }
+    {:noreply,
+     assign(socket,
+       show_group_modal: true,
+       available_for_group: available,
+       group_selection: %{},
+       group_name_input: "Group Chat"
+     )}
+  end
 
-        participant_specs = [human_spec | agent_specs]
+  def handle_event("toggle-group-agent", %{"agent-id" => agent_id}, socket) do
+    current = socket.assigns.group_selection
 
-        # Create the group
-        case AgentManager.create_group("Multi-Agent Chat", participant_specs) do
-          {:ok, group_pid} ->
-            # Extract group_id from the Registry (it's in the via tuple)
-            [{group_id, ^group_pid}] = AgentManager.list_groups()
+    updated =
+      if Map.has_key?(current, agent_id) do
+        Map.delete(current, agent_id)
+      else
+        Map.put(current, agent_id, true)
+      end
 
-            # Subscribe to group PubSub topic
-            Phoenix.PubSub.subscribe(Arbor.Web.PubSub, "group_chat:#{group_id}")
+    {:noreply, assign(socket, group_selection: updated)}
+  end
 
-            # Build participant list for display
-            participants = build_participant_list(participant_specs)
+  def handle_event("update-group-name", %{"value" => name}, socket) do
+    {:noreply, assign(socket, group_name_input: name)}
+  end
 
-            socket =
-              socket
-              |> assign(
-                group_pid: group_pid,
-                group_id: group_id,
-                group_participants: participants,
-                group_mode: true
-              )
-              |> stream(:messages, [], reset: true)
+  def handle_event("confirm-create-group", _params, socket) do
+    selected_ids = Map.keys(socket.assigns.group_selection)
+    group_name = socket.assigns.group_name_input
 
-            {:noreply, socket}
-
-          {:error, reason} ->
-            {:noreply, assign(socket, error: "Failed to create group: #{inspect(reason)}")}
+    if Enum.empty?(selected_ids) do
+      {:noreply, assign(socket, error: "Please select at least one agent")}
+    else
+      # Resume any stopped agents from the selection
+      Enum.each(selected_ids, fn agent_id ->
+        unless Arbor.Agent.running?(agent_id) do
+          AgentManager.resume_agent(agent_id)
         end
+      end)
 
-      _ ->
-        {:noreply, assign(socket, error: "No agents running to create a group")}
+      # Brief pause to ensure agents have started
+      Process.sleep(100)
+
+      # Build participant specs for selected agents + human user
+      agent_specs =
+        Enum.map(selected_ids, fn agent_id ->
+          name =
+            case Arbor.Agent.Lifecycle.restore(agent_id) do
+              {:ok, profile} -> profile.display_name || "Agent"
+              _ -> "Agent"
+            end
+
+          %{id: agent_id, name: name, type: :agent}
+        end)
+
+      human_spec = %{id: "human_primary", name: "User", type: :human}
+      participant_specs = [human_spec | agent_specs]
+
+      # Create the group
+      case AgentManager.create_group(group_name, participant_specs) do
+        {:ok, group_pid} ->
+          [{group_id, ^group_pid}] = AgentManager.list_groups()
+          Phoenix.PubSub.subscribe(Arbor.Web.PubSub, "group_chat:#{group_id}")
+          participants = build_participant_list(participant_specs)
+
+          socket =
+            socket
+            |> assign(
+              group_pid: group_pid,
+              group_id: group_id,
+              group_participants: participants,
+              group_mode: true,
+              show_group_modal: false
+            )
+            |> stream(:messages, [], reset: true)
+
+          {:noreply, socket}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, error: "Failed to create group: #{inspect(reason)}")}
+      end
     end
   end
+
+  def handle_event("cancel-group-modal", _params, socket) do
+    {:noreply, assign(socket, show_group_modal: false)}
+  end
+
+  def handle_event("noop", _params, socket), do: {:noreply, socket}
 
   def handle_event("leave-group", _params, socket) do
     # Unsubscribe from group topic if subscribed
@@ -466,6 +565,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Assign a consistent color based on sender_id for visual distinction
         sender_color: sender_color_hue(message.sender_id)
       }
+
+      # Persist to chat history
+      try do
+        if socket.assigns.agent || socket.assigns.group_id do
+          agent_key = socket.assigns.agent || socket.assigns.group_id
+          Arbor.Memory.append_chat_message(agent_key, msg_entry)
+        end
+      rescue
+        _ -> :ok
+      end
 
       socket = stream_insert(socket, :messages, msg_entry)
       {:noreply, socket}
@@ -588,6 +697,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp process_query_response(socket, agent, response) do
     assistant_msg = build_assistant_message(response)
+
+    # Persist to chat history
+    try do
+      if agent do
+        Arbor.Memory.append_chat_message(agent, assistant_msg)
+      end
+    rescue
+      _ -> :ok
+    end
 
     socket
     |> stream_insert(:messages, assistant_msg)
@@ -1137,10 +1255,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             >
               Stop Agent
             </button>
-            <%!-- Group chat controls --%>
+          </div>
+          <%!-- Group chat controls (outside agent-specific div) --%>
+          <div style="display: flex; align-items: center; gap: 0.5rem; width: 100%; padding: 0 0.75rem;">
             <button
               :if={!@group_mode}
-              phx-click="create-group"
+              phx-click="show-group-modal"
               style="padding: 0.4rem 0.75rem; background: var(--aw-success, #22c55e); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
               title="Create multi-agent group chat"
             >
@@ -1578,6 +1698,88 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         </div>
       </div>
     </div>
+
+    <%!-- Group Creation Modal --%>
+    <div
+      :if={@show_group_modal}
+      style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000;"
+      phx-click="cancel-group-modal"
+    >
+      <div
+        style="background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); border-radius: 8px; padding: 1.5rem; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto;"
+        phx-click="noop"
+      >
+        <h3 style="margin: 0 0 1rem 0; color: var(--aw-text, #e0e0e0);">
+          👥 Create Group Chat
+        </h3>
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; margin-bottom: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.9em;">
+            Group Name
+          </label>
+          <input
+            type="text"
+            value={@group_name_input}
+            phx-keyup="update-group-name"
+            phx-debounce="300"
+            style="width: 100%; padding: 0.5rem; background: var(--aw-bg-secondary, #222); border: 1px solid var(--aw-border, #333); border-radius: 4px; color: var(--aw-text, #e0e0e0);"
+          />
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <label style="display: block; margin-bottom: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.9em;">
+            Select Agents ({map_size(@group_selection)} selected)
+          </label>
+          <div style="max-height: 300px; overflow-y: auto; border: 1px solid var(--aw-border, #333); border-radius: 4px; padding: 0.5rem;">
+            <%= if @available_for_group == [] do %>
+              <div style="text-align: center; padding: 2rem; color: var(--aw-text-muted, #888);">
+                No agents available. Create an agent first.
+              </div>
+            <% else %>
+              <%= for profile <- @available_for_group do %>
+                <label
+                  style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 4px; cursor: pointer; margin-bottom: 0.25rem;"
+                  onmouseover="this.style.background='rgba(74, 158, 255, 0.1)'"
+                  onmouseout="this.style.background='transparent'"
+                >
+                  <input
+                    type="checkbox"
+                    checked={Map.has_key?(@group_selection, profile.agent_id)}
+                    phx-click="toggle-group-agent"
+                    phx-value-agent-id={profile.agent_id}
+                    style="width: 18px; height: 18px;"
+                  />
+                  <span style="color: var(--aw-text, #e0e0e0);">
+                    {profile.display_name || profile.agent_id}
+                  </span>
+                  <span
+                    :if={!Arbor.Agent.running?(profile.agent_id)}
+                    style="margin-left: auto; font-size: 0.75em; color: var(--aw-text-muted, #888);"
+                  >
+                    (stopped)
+                  </span>
+                </label>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button
+            phx-click="cancel-group-modal"
+            style="padding: 0.5rem 1rem; background: var(--aw-bg-secondary, #222); border: 1px solid var(--aw-border, #333); border-radius: 4px; color: var(--aw-text, #e0e0e0); cursor: pointer;"
+          >
+            Cancel
+          </button>
+          <button
+            phx-click="confirm-create-group"
+            style="padding: 0.5rem 1rem; background: var(--aw-success, #22c55e); border: none; border-radius: 4px; color: white; cursor: pointer;"
+          >
+            Create Group
+          </button>
+        </div>
+      </div>
+    </div>
     """
   end
 
@@ -1622,6 +1824,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       :not_found ->
         assign(socket, error: "Agent reported running but not found")
+    end
+  end
+
+  defp get_agent_metadata(agent_id) do
+    case Arbor.Agent.Registry.lookup(agent_id) do
+      {:ok, entry} -> entry.metadata || %{}
+      _ -> %{}
     end
   end
 
@@ -1676,7 +1885,22 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       proposals: proposals,
       selected_heartbeat_model: nil
     )
-    |> stream(:messages, [], reset: true)
+    |> then(fn socket ->
+      # Load chat history from persistence
+      try do
+        history = Arbor.Memory.load_chat_history(agent_id)
+        # Ensure each message has an :id field for streaming
+        history_with_ids =
+          Enum.map(history, fn msg ->
+            Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
+          end)
+        stream(socket, :messages, history_with_ids, reset: true)
+      rescue
+        _ ->
+          # Fallback to empty if history unavailable
+          stream(socket, :messages, [], reset: true)
+      end
+    end)
     |> stream(:signals, [], reset: true)
     |> stream(:thinking, [], reset: true)
     |> stream(:memories, [], reset: true)

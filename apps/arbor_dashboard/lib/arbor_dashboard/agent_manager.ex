@@ -33,7 +33,20 @@ defmodule Arbor.Dashboard.AgentManager do
     lifecycle_opts = [template: template] ++ Keyword.take(opts, [:capabilities, :initial_goals])
 
     with {:ok, profile} <- Arbor.Agent.Lifecycle.create(display_name, lifecycle_opts) do
-      agent_id = profile.agent_id
+      # Persist model config for resume
+      updated_profile = put_in(profile.metadata[:last_model_config], model_config)
+      profile_path = Path.join([".arbor", "agents", "#{profile.agent_id}.agent.json"])
+
+      try do
+        case Arbor.Agent.Profile.to_json(updated_profile) do
+          {:ok, json} -> File.write(profile_path, json)
+          _ -> :ok
+        end
+      rescue
+        _ -> :ok
+      end
+
+      agent_id = updated_profile.agent_id
       {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
 
       case Arbor.Agent.Supervisor.start_child(
@@ -55,6 +68,68 @@ defmodule Arbor.Dashboard.AgentManager do
           error
       end
     end
+  end
+
+  @doc """
+  Resume a previously created agent from its persisted profile.
+
+  Restores the agent's identity, capabilities, and last model configuration,
+  then starts the agent process under supervision.
+
+  Returns `{:ok, agent_id, pid}` or `{:error, reason}`.
+  """
+  @spec resume_agent(String.t(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
+  def resume_agent(agent_id, opts \\ []) do
+    with {:ok, profile} <- Arbor.Agent.Lifecycle.restore(agent_id) do
+      # Get model config from profile metadata or opts
+      model_config =
+        get_in(profile.metadata, [:last_model_config]) ||
+          get_in(profile.metadata, ["last_model_config"]) ||
+          Keyword.get(opts, :model_config, default_model_config())
+
+      display_name = profile.display_name || profile.character.name || "Agent"
+      {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
+
+      # Start the agent under supervision
+      case Arbor.Agent.Supervisor.start_child(
+             agent_id: agent_id,
+             module: module,
+             start_opts: start_opts,
+             metadata: %{
+               model_config: model_config,
+               backend: model_config[:backend] || Map.get(model_config, "backend", :api),
+               display_name: display_name,
+               started_at: System.system_time(:millisecond),
+               resumed: true
+             }
+           ) do
+        {:ok, pid} ->
+          # Also start the lifecycle (executor, session) if not already running
+          try do
+            Arbor.Agent.Lifecycle.start(
+              agent_id,
+              Keyword.merge(opts, [
+                model: model_config[:id] || model_config["id"],
+                provider: model_config[:provider] || model_config["provider"]
+              ])
+            )
+          rescue
+            _ -> :ok
+          catch
+            :exit, _ -> :ok
+          end
+
+          broadcast({:agent_started, agent_id, pid, model_config})
+          {:ok, agent_id, pid}
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  defp default_model_config do
+    %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli}
   end
 
   @doc """

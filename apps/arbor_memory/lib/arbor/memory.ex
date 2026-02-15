@@ -51,6 +51,7 @@ defmodule Arbor.Memory do
     ActionPatterns,
     BackgroundChecks,
     Bridge,
+    ChatHistory,
     CodeStore,
     Consolidation,
     ContextWindow,
@@ -2134,6 +2135,19 @@ defmodule Arbor.Memory do
   @spec execute_and_wait(String.t(), struct(), keyword()) ::
           {:ok, struct()} | {:error, :timeout}
   defdelegate execute_and_wait(agent_id, intent, opts \\ []), to: Bridge
+
+  # ============================================================================
+  # Chat History (Seed/Host Phase 3)
+  # ============================================================================
+
+  @doc "Append a chat message to an agent's conversation history."
+  defdelegate append_chat_message(agent_id, msg), to: ChatHistory, as: :append
+
+  @doc "Load chat history for an agent, sorted chronologically."
+  defdelegate load_chat_history(agent_id), to: ChatHistory, as: :load
+
+  @doc "Clear all chat history for an agent."
+  defdelegate clear_chat_history(agent_id), to: ChatHistory, as: :clear
 
   # ============================================================================
   # read_self — Live System Introspection
