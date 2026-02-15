@@ -124,6 +124,7 @@ defmodule Arbor.Agent.Lifecycle do
 
         case Executor.start(agent_id, executor_opts) do
           {:ok, pid} ->
+            maybe_start_session(agent_id, profile, opts)
             Arbor.Signals.emit(:agent, :started, %{agent_id: agent_id})
             {:ok, pid}
 
@@ -141,6 +142,7 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec stop(String.t()) :: :ok | {:error, term()}
   def stop(agent_id) do
+    Arbor.Agent.SessionManager.stop_session(agent_id)
     result = Executor.stop(agent_id)
 
     Arbor.Signals.emit(:agent, :stopped, %{
@@ -202,6 +204,29 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # -- Private helpers --
+
+  defp maybe_start_session(agent_id, profile, opts) do
+    mode = Application.get_env(:arbor_agent, :session_execution_mode, :legacy)
+
+    if mode in [:session, :graph] do
+      session_opts =
+        Keyword.merge(opts,
+          trust_tier: profile.trust_tier,
+          start_heartbeat: true
+        )
+
+      case Arbor.Agent.SessionManager.ensure_session(agent_id, session_opts) do
+        {:ok, _pid} ->
+          Logger.info("Session started for agent #{agent_id}", mode: mode)
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to start session for agent #{agent_id}: #{inspect(reason)}",
+            mode: mode
+          )
+      end
+    end
+  end
 
   defp resolve_template(opts) do
     case Keyword.get(opts, :template) do

@@ -170,11 +170,15 @@ defmodule Arbor.Agent.APIAgent do
 
     state = init_seed(host_state, seed_opts)
 
+    # When a persistent DOT session manages heartbeat, disable the agent's loop
+    session_manages_heartbeat = session_execution_mode() in [:session, :graph]
+
     # Initialize heartbeat loop
     heartbeat_opts =
       Keyword.merge(opts,
         heartbeat_enabled:
-          Keyword.get(opts, :heartbeat_enabled, config.heartbeat_enabled) and
+          not session_manages_heartbeat and
+            Keyword.get(opts, :heartbeat_enabled, config.heartbeat_enabled) and
             state.memory_initialized,
         heartbeat_interval_ms:
           Keyword.get(opts, :heartbeat_interval_ms, config.heartbeat_interval_ms),
@@ -354,6 +358,81 @@ defmodule Arbor.Agent.APIAgent do
   # ============================================================================
 
   defp handle_query(prompt, opts, state) do
+    mode = session_execution_mode()
+
+    if mode in [:session, :graph] and session_active?(state.id) do
+      handle_query_via_session(prompt, opts, state, mode)
+    else
+      handle_query_legacy(prompt, opts, state)
+    end
+  end
+
+  defp handle_query_via_session(prompt, opts, state, mode) do
+    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
+    index = Keyword.get(opts, :index_response, true) and state.memory_initialized
+
+    {_enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
+    recalled = if recall, do: recalled, else: []
+
+    case Arbor.Agent.SessionManager.get_session(state.id) do
+      {:ok, session_pid} ->
+        case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
+          {:ok, text} ->
+            new_state =
+              if index do
+                finalize_query(prompt, text, state)
+              else
+                state
+              end
+
+            response = %{
+              text: text,
+              thinking: nil,
+              usage: %{},
+              model: to_string(state.model),
+              provider: to_string(state.provider),
+              tool_calls: [],
+              recalled_memories: recalled,
+              session_id: state.id,
+              type: :session
+            }
+
+            new_state = %{new_state | recalled_memories: recalled, query_count: state.query_count + 1}
+            {:reply, {:ok, response}, new_state}
+
+          {:error, reason} ->
+            if mode == :session do
+              Logger.warning("Session query failed, falling back to legacy: #{inspect(reason)}",
+                agent_id: state.id
+              )
+
+              handle_query_legacy(prompt, opts, state)
+            else
+              {:reply, {:error, {:session_error, reason}}, state}
+            end
+        end
+
+      {:error, _} ->
+        if mode == :session do
+          handle_query_legacy(prompt, opts, state)
+        else
+          {:reply, {:error, :no_session}, state}
+        end
+    end
+  rescue
+    e ->
+      if mode == :session do
+        Logger.warning("Session query crashed, falling back to legacy: #{Exception.message(e)}",
+          agent_id: state.id
+        )
+
+        handle_query_legacy(prompt, opts, state)
+      else
+        {:reply, {:error, {:session_crash, Exception.message(e)}}, state}
+      end
+  end
+
+  defp handle_query_legacy(prompt, opts, state) do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
@@ -368,9 +447,6 @@ defmodule Arbor.Agent.APIAgent do
         tool_calls = response[:tool_calls] || []
 
         if text == "" and tool_calls == [] do
-          # Empty response with no tool calls — likely a rate limit or API error
-          # that was swallowed by the provider. Surface as error rather than
-          # returning an empty message to the user.
           Logger.warning("Empty response from API (no text, no tool calls)",
             agent_id: state.id,
             model: state.model,
@@ -379,7 +455,6 @@ defmodule Arbor.Agent.APIAgent do
 
           {:reply, {:error, :empty_response}, state}
         else
-          # Seed: finalize query (index, update WM, consolidate, context window)
           new_state =
             if index do
               finalize_query(prompt, text, new_state)
@@ -448,5 +523,17 @@ defmodule Arbor.Agent.APIAgent do
       model: model,
       tool_calls_count: length(response[:tool_calls] || [])
     })
+  end
+
+  # ============================================================================
+  # Private: Session execution mode helpers
+  # ============================================================================
+
+  defp session_execution_mode do
+    Application.get_env(:arbor_agent, :session_execution_mode, :legacy)
+  end
+
+  defp session_active?(agent_id) do
+    Arbor.Agent.SessionManager.has_session?(agent_id)
   end
 end
