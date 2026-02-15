@@ -40,6 +40,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         selected_signal: nil,
         active_categories: MapSet.new(subscribed_categories),
         paused: false,
+        buffered_signals: [],
         subscribed_categories: subscribed_categories,
         filter_open: false
       )
@@ -63,9 +64,17 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   end
 
   @impl true
+  @max_buffer 1000
+
   def handle_info({:signal_received, signal}, socket) do
     if socket.assigns.paused do
-      {:noreply, socket}
+      buffer = socket.assigns.buffered_signals
+
+      if length(buffer) < @max_buffer do
+        {:noreply, assign(socket, :buffered_signals, [signal | buffer])}
+      else
+        {:noreply, socket}
+      end
     else
       if MapSet.member?(socket.assigns.active_categories, signal.category) do
         {:noreply, stream_insert(socket, :signals, signal, at: 0)}
@@ -82,6 +91,19 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
 
   @impl true
   def handle_event("toggle-pause", _params, socket) do
+    socket =
+      if socket.assigns.paused do
+        # Unpausing — flush buffer into stream (oldest first so newest ends up on top)
+        socket.assigns.buffered_signals
+        |> Enum.filter(&MapSet.member?(socket.assigns.active_categories, &1.category))
+        |> Enum.reduce(socket, fn signal, sock ->
+          stream_insert(sock, :signals, signal, at: 0)
+        end)
+        |> assign(:buffered_signals, [])
+      else
+        socket
+      end
+
     {:noreply, assign(socket, :paused, !socket.assigns.paused)}
   end
 
@@ -158,15 +180,19 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
           phx-click="toggle-pause"
           class={"aw-btn #{if @paused, do: "aw-btn-success", else: "aw-btn-warning"}"}
         >
-          {if @paused, do: "Resume", else: "Pause"}
+          <%= if @paused do %>
+            Resume ({length(@buffered_signals)})
+          <% else %>
+            Pause
+          <% end %>
         </button>
       </:actions>
     </.dashboard_header>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
       <.stat_card
-        value={@stats.total_stored}
-        label="Signals stored"
+        value={@stats.current_count}
+        label="In Store"
         color={:blue}
       />
       <.stat_card
@@ -349,7 +375,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     stats = Arbor.Signals.stats()
 
     %{
-      total_stored: get_in(stats, [:store, :total_stored]) || 0,
+      current_count: get_in(stats, [:store, :current_count]) || 0,
       active_subscriptions: get_in(stats, [:bus, :active_subscriptions]) || 0,
       healthy: stats[:healthy] || false
     }
@@ -360,6 +386,6 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   end
 
   defp default_stats do
-    %{total_stored: 0, active_subscriptions: 0, healthy: false}
+    %{current_count: 0, active_subscriptions: 0, healthy: false}
   end
 end

@@ -18,7 +18,7 @@ defmodule Arbor.Dashboard.Live.SignalsLiveTest do
     test "shows stat cards", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/signals")
 
-      assert html =~ "Signals stored"
+      assert html =~ "In Store"
       assert html =~ "Subscriptions"
       assert html =~ "System health"
     end
