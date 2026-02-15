@@ -62,24 +62,33 @@ defmodule Arbor.Security.ConstraintTest do
   end
 
   describe "allowed_paths constraint" do
-    test "matching path returns :ok", %{principal: p, resource: r} do
-      constraints = %{allowed_paths: ["project/src"]}
+    test "matching path prefix returns :ok", %{principal: p, resource: r} do
+      # resource is "arbor://fs/read/project/src/main.ex"
+      constraints = %{allowed_paths: ["arbor://fs/read/project/src"]}
       assert :ok = Constraint.enforce(constraints, p, r)
     end
 
     test "non-matching path returns constraint_violated", %{principal: p, resource: r} do
-      constraints = %{allowed_paths: ["project/docs", "project/test"]}
+      constraints = %{allowed_paths: ["arbor://fs/read/project/docs", "arbor://fs/read/project/test"]}
 
       assert {:error, {:constraint_violated, :allowed_paths, context}} =
                Constraint.enforce(constraints, p, r)
 
       assert context.resource_uri == r
-      assert context.allowed_paths == ["project/docs", "project/test"]
     end
 
     test "multiple paths, one matches", %{principal: p, resource: r} do
-      constraints = %{allowed_paths: ["project/docs", "project/src"]}
+      constraints = %{allowed_paths: ["arbor://fs/read/project/docs", "arbor://fs/read/project/src"]}
       assert :ok = Constraint.enforce(constraints, p, r)
+    end
+
+    test "rejects substring-only matches (not prefix)", %{principal: p} do
+      # "/home" should NOT match "/home_config" — that was the old bug
+      constraints = %{allowed_paths: ["/home"]}
+      assert {:error, {:constraint_violated, :allowed_paths, _}} =
+               Constraint.enforce(constraints, p, "/home_config")
+      # But should match "/home/user/file" (proper prefix)
+      assert :ok = Constraint.enforce(constraints, p, "/home/user/file")
     end
   end
 

@@ -576,7 +576,7 @@ defmodule Arbor.SecurityTest do
       assert {:ok, :authorized} = Security.authorize(agent_id, resource)
     end
 
-    test "returns authorized when escalation is disabled", %{agent_id: agent_id} do
+    test "returns error when escalation is disabled but approval required", %{agent_id: agent_id} do
       resource = "arbor://fs/write/disabled_#{:erlang.unique_integer([:positive])}"
 
       Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
@@ -588,7 +588,7 @@ defmodule Arbor.SecurityTest do
           constraints: %{requires_approval: true}
         )
 
-      assert {:ok, :authorized} = Security.authorize(agent_id, resource)
+      assert {:error, :escalation_disabled} = Security.authorize(agent_id, resource)
     end
 
     test "returns authorized when no constraints", %{agent_id: agent_id} do

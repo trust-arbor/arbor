@@ -171,7 +171,7 @@ defmodule Arbor.Contracts.Security.Capability do
   This is the deterministic binary that gets signed by the issuer.
   Excludes `issuer_signature`, `delegation_chain` signatures, and `signature` fields.
 
-  Format: `id <> resource_uri <> principal_id <> issuer_id <> iso8601(granted_at) <> delegation_depth <> sorted_constraints_json`
+  Format: `id <> resource_uri <> principal_id <> issuer_id <> iso8601(granted_at) <> iso8601(expires_at) <> delegation_depth <> sorted_constraints_json`
   """
   @spec signing_payload(t()) :: binary()
   def signing_payload(%__MODULE__{} = cap) do
@@ -185,6 +185,7 @@ defmodule Arbor.Contracts.Security.Capability do
       cap.principal_id <>
       (cap.issuer_id || "") <>
       DateTime.to_iso8601(cap.granted_at) <>
+      (if cap.expires_at, do: DateTime.to_iso8601(cap.expires_at), else: "") <>
       Integer.to_string(cap.delegation_depth) <>
       constraints_json
   end

@@ -71,12 +71,18 @@ defmodule Arbor.Security.Constraint do
   def evaluate_allowed_paths(nil, _resource_uri), do: :ok
 
   def evaluate_allowed_paths(paths, resource_uri) when is_list(paths) do
-    if Enum.any?(paths, &String.contains?(resource_uri, &1)) do
+    if Enum.any?(paths, fn path -> path_matches?(resource_uri, path) end) do
       :ok
     else
       {:error,
        {:constraint_violated, :allowed_paths, %{resource_uri: resource_uri, allowed_paths: paths}}}
     end
+  end
+
+  # Exact match or prefix with "/" separator — prevents "/home" matching "/home_config"
+  defp path_matches?(resource_uri, allowed_path) do
+    resource_uri == allowed_path or
+      String.starts_with?(resource_uri, allowed_path <> "/")
   end
 
   @doc false

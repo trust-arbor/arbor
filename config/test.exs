@@ -17,7 +17,11 @@ config :arbor_security,
   # Tests that bypass Security.grant/1 create unsigned capabilities.
   # Only the grant facade signs via SystemAuthority — direct CapabilityStore.put
   # stores unsigned caps. Require signing in prod, not in tests.
-  capability_signing_required: false
+  capability_signing_required: false,
+  # Disable identity verification by default in tests — most tests don't have
+  # crypto infrastructure. Tests that specifically test identity verification
+  # opt in with verify_identity: true.
+  identity_verification: false
 
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
@@ -47,7 +51,8 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 config :arbor_signals,
   checkpoint_module: nil,
   checkpoint_store: nil,
-  authorizer: Arbor.Signals.Adapters.OpenAuthorizer
+  authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
+  allow_open_authorizer: true
 
 # Postgres tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo
