@@ -214,9 +214,18 @@ defmodule Arbor.Agent.Lifecycle do
     mode = Application.get_env(:arbor_agent, :session_execution_mode, :legacy)
 
     if mode in [:session, :graph] do
+      # Include all available actions as tools unless explicitly provided
+      tools =
+        Keyword.get_lazy(opts, :tools, fn ->
+          if Code.ensure_loaded?(Arbor.Actions),
+            do: apply(Arbor.Actions, :all_actions, []),
+            else: []
+        end)
+
       session_opts =
         Keyword.merge(opts,
           trust_tier: profile.trust_tier,
+          tools: tools,
           start_heartbeat: true
         )
 
