@@ -14,7 +14,8 @@ for child <- [
       {Arbor.Memory.GoalStore, []},
       {Arbor.Memory.IntentStore, []},
       {Arbor.Memory.Thinking, []},
-      {Arbor.Memory.CodeStore, []}
+      {Arbor.Memory.CodeStore, []},
+      {Arbor.Memory.ChatHistory, []}
     ] do
   Supervisor.start_child(Arbor.Memory.Supervisor, child)
 end
