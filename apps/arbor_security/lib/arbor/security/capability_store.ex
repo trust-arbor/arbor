@@ -21,6 +21,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.Capability.Signer
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
 
@@ -197,7 +198,7 @@ defmodule Arbor.Security.CapabilityStore do
       |> Enum.reject(&is_nil/1)
       |> Enum.find(fn cap ->
         not expired?(cap) and authorizes_resource?(cap, resource_uri) and
-          signature_acceptable?(cap)
+          signature_acceptable?(cap) and delegation_chain_valid?(cap)
       end)
       |> case do
         nil -> {:error, :not_found}
@@ -355,6 +356,18 @@ defmodule Arbor.Security.CapabilityStore do
     # "arbor://fs/read/home" matching "arbor://fs/read/home_config"
     cap.resource_uri == resource_uri or
       String.starts_with?(resource_uri, cap.resource_uri <> "/")
+  end
+
+  defp delegation_chain_valid?(%{delegation_chain: nil}), do: true
+  defp delegation_chain_valid?(%{delegation_chain: []}), do: true
+
+  defp delegation_chain_valid?(cap) do
+    key_lookup = &Arbor.Security.lookup_public_key/1
+
+    case Signer.verify_delegation_chain(cap, key_lookup) do
+      :ok -> true
+      {:error, _} -> false
+    end
   end
 
   defp cleanup_expired(state) do
@@ -636,8 +649,24 @@ defmodule Arbor.Security.CapabilityStore do
     Map.new(constraints, fn {k, v} -> {to_string(k), v} end)
   end
 
-  # Constraints come back with string keys — keep as-is (atom keys would need SafeAtom)
-  defp deserialize_constraints(constraints) when is_map(constraints), do: constraints
+  @known_constraint_keys ~w(allowed_paths time_window rate_limit patterns max_size requires_approval allowed_actions scope)a
+
+  # Convert known string keys back to atoms so constraint enforcement works after restore
+  defp deserialize_constraints(constraints) when is_map(constraints) do
+    allowed_strings = Enum.map(@known_constraint_keys, &Atom.to_string/1)
+
+    Map.new(constraints, fn
+      {k, v} when is_binary(k) ->
+        if k in allowed_strings do
+          {String.to_existing_atom(k), v}
+        else
+          {k, v}
+        end
+
+      {k, v} ->
+        {k, v}
+    end)
+  end
 
   # Delegation chain entries may contain binary signatures
   defp serialize_delegation_chain(chain) when is_list(chain) do

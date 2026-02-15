@@ -61,14 +61,18 @@ defmodule Arbor.Security.EscalationTest do
       assert :ok = Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/read/docs")
     end
 
-    test "returns :ok when escalation is disabled", %{capability: cap} do
+    test "returns error when escalation is disabled but approval required", %{capability: cap} do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
-      assert :ok = Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert {:error, :escalation_disabled} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
     end
 
-    test "returns :ok when consensus_module is nil", %{capability: cap} do
+    test "returns error when consensus_module is nil but approval required", %{capability: cap} do
       Application.put_env(:arbor_security, :consensus_module, nil)
-      assert :ok = Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert {:error, :no_consensus_module} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
     end
 
     test "returns pending_approval with proposal_id on successful submission", %{capability: cap} do

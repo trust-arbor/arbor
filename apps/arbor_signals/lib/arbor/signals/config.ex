@@ -14,6 +14,8 @@ defmodule Arbor.Signals.Config do
         channel_rotate_on_leave: true
   """
 
+  require Logger
+
   @default_authorizer Arbor.Signals.Adapters.CapabilityAuthorizer
   @default_restricted_topics [:security, :identity]
   @default_auto_rotate_interval_ms 86_400_000
@@ -27,7 +29,18 @@ defmodule Arbor.Signals.Config do
   """
   @spec authorizer() :: module()
   def authorizer do
-    Application.get_env(:arbor_signals, :authorizer, @default_authorizer)
+    configured = Application.get_env(:arbor_signals, :authorizer, @default_authorizer)
+
+    if configured == Arbor.Signals.Adapters.OpenAuthorizer and
+         not Application.get_env(:arbor_signals, :allow_open_authorizer, false) do
+      Logger.warning(
+        "OpenAuthorizer rejected without allow_open_authorizer flag, using CapabilityAuthorizer"
+      )
+
+      @default_authorizer
+    else
+      configured
+    end
   end
 
   @doc """

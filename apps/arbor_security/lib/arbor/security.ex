@@ -579,8 +579,7 @@ defmodule Arbor.Security do
         :ok
 
       is_nil(signed_request) ->
-        # No signed request provided — allow if verification not forced
-        :ok
+        {:error, :missing_signed_request}
 
       true ->
         case Verifier.verify(signed_request) do

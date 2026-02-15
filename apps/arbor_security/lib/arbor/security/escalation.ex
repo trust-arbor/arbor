@@ -56,20 +56,20 @@ defmodule Arbor.Security.Escalation do
 
       # M2: Log when escalation is bypassed due to disabled config or missing module
       not escalation_enabled? ->
-        Logger.warning("Escalation bypassed: consensus_escalation_enabled is false",
+        Logger.warning("Escalation required but disabled: consensus_escalation_enabled is false",
           principal_id: principal_id,
           resource_uri: resource_uri
         )
 
-        :ok
+        {:error, :escalation_disabled}
 
       is_nil(consensus_module) ->
-        Logger.warning("Escalation bypassed: no consensus_module configured",
+        Logger.warning("Escalation required but no consensus_module configured",
           principal_id: principal_id,
           resource_uri: resource_uri
         )
 
-        :ok
+        {:error, :no_consensus_module}
 
       not consensus_available?(consensus_module) ->
         # Consensus module configured but not available — fail closed
