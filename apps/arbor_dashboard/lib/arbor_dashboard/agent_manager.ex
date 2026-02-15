@@ -171,6 +171,85 @@ defmodule Arbor.Dashboard.AgentManager do
 
   defp handle_query_result({:error, _} = error), do: error
 
+  @doc """
+  Create a group chat with the given participants.
+
+  ## Participant Specs
+
+  Each participant spec is a map with:
+  - `:id` - Unique identifier (agent_id for agents, user_id for humans)
+  - `:name` - Display name
+  - `:type` - `:agent` or `:human`
+
+  For agent participants, automatically looks up the host_pid via `Lifecycle.get_host/1`.
+
+  ## Example
+
+      participant_specs = [
+        %{id: "agent_abc123", name: "Alice", type: :agent},
+        %{id: "agent_def456", name: "Bob", type: :agent},
+        %{id: "hysun", name: "Hysun", type: :human}
+      ]
+      {:ok, group_pid} = AgentManager.create_group("brainstorm", participant_specs)
+  """
+  @spec create_group(String.t(), [map()]) :: {:ok, pid()} | {:error, term()}
+  def create_group(name, participant_specs) do
+    # Build participant structs with host_pid lookup for agents
+    participants =
+      Enum.map(participant_specs, fn spec ->
+        host_pid =
+          if spec.type == :agent do
+            case Arbor.Agent.Lifecycle.get_host(spec.id) do
+              {:ok, pid} -> pid
+              _ -> nil
+            end
+          else
+            nil
+          end
+
+        %{
+          id: spec.id,
+          name: spec.name,
+          type: spec.type,
+          host_pid: host_pid
+        }
+      end)
+
+    Arbor.Agent.GroupChat.create(name, participants: participants)
+  end
+
+  @doc """
+  Send a message to a group chat.
+
+  The group parameter can be a pid or a via tuple.
+  """
+  @spec group_send(GenServer.server(), String.t(), String.t(), :agent | :human, String.t()) ::
+          :ok
+  def group_send(group, sender_id, sender_name, sender_type, content) do
+    Arbor.Agent.GroupChat.send_message(group, sender_id, sender_name, sender_type, content)
+  end
+
+  @doc """
+  List all active group chats.
+
+  Returns a list of `{group_id, pid}` tuples by querying the ExecutorRegistry
+  for all entries with `{:group, group_id}` keys.
+  """
+  @spec list_groups() :: [{String.t(), pid()}]
+  def list_groups do
+    # Query ExecutorRegistry for all {:group, group_id} entries
+    # Match pattern: {{:group, group_id}, pid, _value}
+    Registry.select(Arbor.Agent.ExecutorRegistry, [
+      {
+        {{:group, :"$1"}, :"$2", :_},
+        [],
+        [{{:"$1", :"$2"}}]
+      }
+    ])
+  rescue
+    _ -> []
+  end
+
   # ── Private ─────────────────────────────────────────────────────────
 
   defp build_start_opts(agent_id, display_name, %{backend: :cli} = config) do
