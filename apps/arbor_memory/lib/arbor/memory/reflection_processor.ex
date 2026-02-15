@@ -35,8 +35,6 @@ defmodule Arbor.Memory.ReflectionProcessor do
       {:ok, history} = ReflectionProcessor.history("agent_001")
   """
 
-  alias Arbor.Contracts.Memory.Goal
-
   alias Arbor.Memory.{
     Events,
     GoalStore,
@@ -49,7 +47,19 @@ defmodule Arbor.Memory.ReflectionProcessor do
     WorkingMemory
   }
 
+  alias Arbor.Memory.Reflection.{GoalProcessor, PromptBuilder, ResponseParser}
+
   require Logger
+
+  # Backward-compat delegations for extracted modules (tests call these directly)
+  @doc false
+  defdelegate parse_reflection_response(response), to: ResponseParser
+  @doc false
+  defdelegate build_reflection_prompt(context), to: PromptBuilder
+  @doc false
+  defdelegate process_goal_updates(agent_id, goal_updates), to: GoalProcessor
+  @doc false
+  defdelegate process_new_goals(agent_id, new_goals), to: GoalProcessor
 
   @type reflection :: %{
           id: String.t(),
@@ -214,12 +224,12 @@ defmodule Arbor.Memory.ReflectionProcessor do
     Signals.emit_reflection_started(agent_id, %{type: :deep_reflect})
 
     with {:ok, context} <- build_deep_context(agent_id, opts),
-         {:ok, prompt} <- {:ok, build_reflection_prompt(context)},
+         {:ok, prompt} <- {:ok, PromptBuilder.build_reflection_prompt(context)},
          {:ok, response_text} <- call_llm(prompt, Keyword.put(opts, :agent_id, agent_id)),
-         {:ok, parsed} <- parse_reflection_response(response_text) do
+         {:ok, parsed} <- ResponseParser.parse_reflection_response(response_text) do
       # Integrate results into subsystems
-      process_goal_updates(agent_id, parsed.goal_updates)
-      process_new_goals(agent_id, parsed.new_goals)
+      GoalProcessor.process_goal_updates(agent_id, parsed.goal_updates)
+      GoalProcessor.process_new_goals(agent_id, parsed.new_goals)
       integrate_insights(agent_id, parsed.insights)
       integrate_learnings(agent_id, parsed.learnings)
       integrate_knowledge_graph(agent_id, parsed.knowledge_nodes, parsed.knowledge_edges)
@@ -425,7 +435,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
        self_knowledge: sk,
        self_knowledge_text: format_self_knowledge_or_default(sk),
        goals: goals,
-       goals_text: format_goals_for_prompt(goals),
+       goals_text: PromptBuilder.format_goals_for_prompt(goals),
        knowledge_graph_text: get_knowledge_text(agent_id),
        working_memory_text: get_working_memory_text(agent_id),
        recent_thinking_text: format_recent_thinking(agent_id),
@@ -434,7 +444,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp format_self_knowledge_or_default(nil), do: "(No self-knowledge established yet)"
-  defp format_self_knowledge_or_default(sk), do: format_self_knowledge(sk)
+  defp format_self_knowledge_or_default(sk), do: PromptBuilder.format_self_knowledge(sk)
 
   defp get_knowledge_text(agent_id) do
     case get_knowledge_summary(agent_id) do
@@ -491,107 +501,6 @@ defmodule Arbor.Memory.ReflectionProcessor do
       end
 
     "- [#{event.type}] #{data_text}"
-  end
-
-  # ============================================================================
-  # LLM Prompt Building (ported from arbor_seed)
-  # ============================================================================
-
-  @doc false
-  def build_reflection_prompt(context) do
-    """
-    You are performing a deep reflection on recent experiences. Your PRIMARY PURPOSE is to:
-    1. **EVALUATE PROGRESS ON ACTIVE GOALS** - This is your most important task
-    2. Identify patterns and connections relevant to your goals
-    3. Note relationship dynamics that affect your work
-    4. Consolidate learnings
-    5. Discover knowledge graph relationships
-
-    ## Current Identity Context
-    #{context.self_knowledge_text}
-
-    ## ACTIVE GOALS - EVALUATE EACH ONE
-    #{context.goals_text}
-
-    ## Current Knowledge Graph
-    #{context.knowledge_graph_text}
-
-    ## Working Memory
-    #{context.working_memory_text}
-
-    ## Recent Thinking
-    #{context.recent_thinking_text}
-
-    ## Recent Activity
-    #{context.recent_activity_text}
-
-    ## Instructions
-
-    **GOAL EVALUATION IS YOUR TOP PRIORITY.** For each active goal:
-    - What progress was made? (estimate new percentage)
-    - What blockers or challenges exist?
-    - What's the next concrete step?
-    - Should this goal be marked achieved, failed, or blocked?
-
-    Also reflect on:
-    - Patterns in the ACTUAL WORK being done (not system behavior)
-    - Relationship dynamics (what matters to the human you're working with)
-    - Technical learnings relevant to the project/codebase
-    - New goals that emerged from the work
-    - Entities (people, projects, concepts) and their relationships
-
-    **DO NOT** create learnings or insights about:
-    - How the system/framework works internally
-    - Meta-observations about your own behavior or the heartbeat loop
-    - Obvious facts about conversation flow or goal tracking
-    - System implementation details
-
-    Respond in JSON format:
-    {
-      "thinking": "Your reflection process, especially about goal progress...",
-      "goal_updates": [
-        {
-          "goal_id": "the goal ID from above",
-          "new_progress": 0.45,
-          "status": "active|achieved|failed|blocked|abandoned",
-          "note": "What happened with this goal",
-          "next_step": "The next concrete action to take",
-          "blockers": ["any blockers identified"]
-        }
-      ],
-      "new_goals": [
-        {
-          "description": "A new goal that emerged",
-          "priority": "critical|high|medium|low",
-          "type": "achieve|maintain|explore|learn",
-          "parent_goal_id": "optional - if this is a subgoal"
-        }
-      ],
-      "insights": [
-        {"content": "An insight about patterns or meaning", "importance": 0.7, "related_goal_id": "optional"}
-      ],
-      "learnings": [
-        {"content": "Something meaningful learned", "confidence": 0.8, "category": "technical|relationship|self"}
-      ],
-      "knowledge_nodes": [
-        {"name": "entity name", "type": "person|project|concept|tool|goal", "context": "brief context"}
-      ],
-      "knowledge_edges": [
-        {"from": "entity name", "to": "other entity name", "relationship": "knows|worked_on|uses|advances_goal|blocks_goal|related_to"}
-      ],
-      "self_insight_suggestions": [
-        {
-          "content": "I tend to be curious and ask clarifying questions before acting",
-          "category": "personality|capability|value|preference",
-          "confidence": 0.4,
-          "evidence": ["asked 3 questions before starting"]
-        }
-      ]
-    }
-
-    **Important:** Include goal_updates for EVERY active goal, even if just to note "no progress this cycle".
-    Link insights and knowledge nodes to goals when relevant.
-    """
   end
 
   # ============================================================================
@@ -679,169 +588,6 @@ defmodule Arbor.Memory.ReflectionProcessor do
       {:error, :llm_not_available}
     end
   end
-
-  # ============================================================================
-  # JSON Response Parsing
-  # ============================================================================
-
-  @doc false
-  def parse_reflection_response(response) do
-    json_text = extract_json_text(response)
-
-    case Jason.decode(json_text) do
-      {:ok, parsed} ->
-        {:ok, normalize_parsed_response(parsed)}
-
-      {:error, _} ->
-        Logger.warning("Failed to parse reflection JSON response",
-          response_preview: String.slice(response, 0, 200)
-        )
-
-        {:ok, empty_parsed_response()}
-    end
-  end
-
-  defp extract_json_text(response) do
-    case Regex.run(~r/```(?:json)?\s*(\{[\s\S]*?\})\s*```/, response) do
-      [_, json] -> json
-      nil -> String.trim(response)
-    end
-  end
-
-  defp normalize_parsed_response(parsed) do
-    %{
-      goal_updates: parsed["goal_updates"] || [],
-      new_goals: parsed["new_goals"] || [],
-      insights: parsed["insights"] || [],
-      learnings: parsed["learnings"] || [],
-      knowledge_nodes: parsed["knowledge_nodes"] || [],
-      knowledge_edges: parsed["knowledge_edges"] || [],
-      self_insight_suggestions: parsed["self_insight_suggestions"] || [],
-      relationships: parsed["relationships"] || [],
-      thinking: parsed["thinking"]
-    }
-  end
-
-  defp empty_parsed_response do
-    %{
-      goal_updates: [],
-      new_goals: [],
-      insights: [],
-      learnings: [],
-      knowledge_nodes: [],
-      knowledge_edges: [],
-      self_insight_suggestions: [],
-      relationships: [],
-      thinking: nil
-    }
-  end
-
-  # ============================================================================
-  # Goal Processing
-  # ============================================================================
-
-  @doc false
-  def process_goal_updates(agent_id, goal_updates) do
-    Enum.each(goal_updates, fn update ->
-      goal_id = update["goal_id"]
-
-      if goal_id do
-        process_single_goal_update(agent_id, goal_id, update)
-      end
-    end)
-  end
-
-  defp process_single_goal_update(agent_id, goal_id, update) do
-    # Update progress
-    if update["new_progress"] do
-      progress = min(1.0, max(0.0, update["new_progress"]))
-      GoalStore.update_goal_progress(agent_id, goal_id, progress)
-    end
-
-    # Update status
-    case update["status"] do
-      "achieved" ->
-        GoalStore.achieve_goal(agent_id, goal_id)
-
-      "abandoned" ->
-        GoalStore.abandon_goal(agent_id, goal_id, update["note"])
-
-      "blocked" ->
-        GoalStore.block_goal(agent_id, goal_id, update["blockers"])
-
-      "failed" ->
-        GoalStore.fail_goal(agent_id, goal_id, update["note"])
-
-      _ ->
-        :ok
-    end
-
-    # Store notes in goal metadata if present
-    if update["note"] do
-      accumulate_goal_note(agent_id, goal_id, update["note"])
-    end
-
-    Signals.emit_reflection_goal_update(agent_id, goal_id, update)
-
-    Logger.debug("Goal updated via reflection",
-      agent_id: agent_id,
-      goal_id: goal_id,
-      progress: update["new_progress"],
-      status: update["status"]
-    )
-  rescue
-    ArgumentError ->
-      Logger.debug("Invalid goal update data",
-        agent_id: agent_id,
-        goal_id: goal_id
-      )
-  end
-
-  @doc false
-  def process_new_goals(agent_id, new_goals) do
-    new_goals
-    |> Enum.filter(&valid_goal_description?/1)
-    |> Enum.each(&create_goal_from_data(agent_id, &1))
-  end
-
-  defp valid_goal_description?(goal_data) do
-    desc = goal_data["description"]
-    desc != nil and desc != ""
-  end
-
-  defp create_goal_from_data(agent_id, goal_data) do
-    goal =
-      Goal.new(goal_data["description"],
-        type: atomize_type(goal_data["type"]),
-        priority: atomize_priority_to_int(goal_data["priority"]),
-        success_criteria: goal_data["success_criteria"],
-        notes: if(goal_data["note"], do: [goal_data["note"]], else: [])
-      )
-
-    goal = maybe_set_parent(goal, goal_data["parent_goal_id"])
-
-    case GoalStore.add_goal(agent_id, goal) do
-      {:ok, saved_goal} ->
-        Signals.emit_reflection_goal_created(agent_id, saved_goal.id, goal_data)
-
-        Logger.info("New goal created via reflection",
-          agent_id: agent_id,
-          goal_id: saved_goal.id,
-          description: goal_data["description"]
-        )
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp accumulate_goal_note(agent_id, goal_id, note) do
-    timestamped_note = "#{DateTime.utc_now() |> DateTime.to_iso8601()}: #{note}"
-    GoalStore.add_note(agent_id, goal_id, timestamped_note)
-  end
-
-  defp maybe_set_parent(goal, nil), do: goal
-  defp maybe_set_parent(goal, parent_id), do: %{goal | parent_id: parent_id}
 
   # ============================================================================
   # Insight Integration
@@ -984,7 +730,7 @@ defmodule Arbor.Memory.ReflectionProcessor do
 
       {:error, _} ->
         Arbor.Memory.add_knowledge(agent_id, %{
-          type: safe_node_type(node_data["type"]),
+          type: PromptBuilder.safe_node_type(node_data["type"]),
           content: name,
           metadata: %{context: node_data["context"], source: :reflection}
         })
@@ -1322,212 +1068,6 @@ defmodule Arbor.Memory.ReflectionProcessor do
     }
   end
 
-  defp format_self_knowledge(sk) do
-    parts = []
-
-    parts =
-      if sk.capabilities != [] do
-        caps =
-          Enum.map_join(sk.capabilities, "\n", fn c ->
-            "  - #{c.name}: #{Float.round(c.proficiency * 100, 0)}%"
-          end)
-
-        parts ++ ["## Capabilities\n#{caps}"]
-      else
-        parts
-      end
-
-    parts =
-      if sk.personality_traits != [] do
-        traits =
-          Enum.map_join(sk.personality_traits, "\n", fn t ->
-            "  - #{t.trait}: #{Float.round(t.strength * 100, 0)}%"
-          end)
-
-        parts ++ ["## Personality Traits\n#{traits}"]
-      else
-        parts
-      end
-
-    parts =
-      if sk.values != [] do
-        vals =
-          Enum.map_join(sk.values, "\n", fn v ->
-            "  - #{v.value}: #{Float.round(v.importance * 100, 0)}%"
-          end)
-
-        parts ++ ["## Values\n#{vals}"]
-      else
-        parts
-      end
-
-    if parts == [] do
-      "(Self-knowledge initialized but no entries yet)"
-    else
-      Enum.join(parts, "\n\n")
-    end
-  end
-
-  defp format_goals_for_prompt([]) do
-    "(No active goals)"
-  end
-
-  defp format_goals_for_prompt(goals) do
-    {blocked, active} = Enum.split_with(goals, &(&1.status == :blocked))
-
-    sorted_active =
-      active
-      |> Enum.sort_by(&goal_urgency/1, :desc)
-
-    active_text =
-      if sorted_active == [] do
-        ""
-      else
-        Enum.map_join(sorted_active, "\n\n", &format_single_goal/1)
-      end
-
-    blocked_text =
-      if blocked == [] do
-        ""
-      else
-        header = "\n\n### Blocked Goals\n"
-        items = Enum.map_join(blocked, "\n\n", &format_blocked_goal/1)
-        header <> items
-      end
-
-    (active_text <> blocked_text)
-    |> String.trim()
-    |> case do
-      "" -> "(No active goals)"
-      text -> text
-    end
-  end
-
-  defp format_single_goal(goal) do
-    emoji = priority_emoji(goal.priority)
-    progress_pct = Float.round(goal.progress * 100, 0)
-    bar_filled = round(goal.progress * 20)
-    bar_empty = 20 - bar_filled
-    bar = String.duplicate("█", bar_filled) <> String.duplicate("░", bar_empty)
-    deadline = deadline_text(goal)
-
-    base =
-      "- #{emoji} [#{goal.id}] #{goal.description}#{deadline}\n" <>
-        "  Priority: #{goal.priority} | Type: #{goal.type} | " <>
-        "Progress: #{bar} #{progress_pct}%"
-
-    base
-    |> maybe_append_criteria(goal)
-    |> maybe_append_notes(goal)
-  end
-
-  defp format_blocked_goal(goal) do
-    emoji = priority_emoji(goal.priority)
-    blockers = get_in(goal.metadata || %{}, [:blockers]) || []
-
-    blockers_text =
-      if blockers == [] do
-        ""
-      else
-        "\n  Blocked by: " <> Enum.join(blockers, ", ")
-      end
-
-    "- #{emoji} [BLOCKED] [#{goal.id}] #{goal.description}#{blockers_text}"
-  end
-
-  defp maybe_append_criteria(text, goal) do
-    criteria = goal.success_criteria || get_in(goal.metadata || %{}, [:success_criteria])
-
-    case criteria do
-      nil -> text
-      "" -> text
-      c -> text <> "\n  Success criteria: #{c}"
-    end
-  end
-
-  defp maybe_append_notes(text, goal) do
-    notes =
-      case goal.notes do
-        [] -> get_in(goal.metadata || %{}, [:notes]) || []
-        n when is_list(n) -> n
-        _ -> []
-      end
-
-    case notes do
-      [] -> text
-      ns ->
-        recent = Enum.take(ns, -3)
-        notes_text = Enum.map_join(recent, "\n", &("    - " <> to_string(&1)))
-        text <> "\n  Recent notes:\n#{notes_text}"
-    end
-  end
-
-  defp goal_urgency(goal) do
-    deadline = goal.deadline || get_in(goal.metadata || %{}, [:deadline])
-
-    overdue_factor =
-      case deadline do
-        nil -> 0.0
-        d when is_binary(d) ->
-          case DateTime.from_iso8601(d) do
-            {:ok, dt, _} -> deadline_urgency_factor(dt)
-            _ -> 0.0
-          end
-        %DateTime{} = dt -> deadline_urgency_factor(dt)
-        _ -> 0.0
-      end
-
-    goal.priority * (1.0 + overdue_factor)
-  end
-
-  defp deadline_urgency_factor(deadline) do
-    hours = DateTime.diff(deadline, DateTime.utc_now(), :hour)
-
-    cond do
-      hours < 0 -> 2.0
-      hours < 24 -> 1.0
-      hours < 168 -> 0.5
-      true -> 0.0
-    end
-  end
-
-  defp priority_emoji(priority) when is_integer(priority) do
-    cond do
-      priority >= 80 -> "🔴"
-      priority >= 60 -> "🟠"
-      priority >= 40 -> "🟡"
-      true -> "🟢"
-    end
-  end
-
-  defp priority_emoji(_), do: "🟡"
-
-  defp deadline_text(goal) do
-    deadline = goal.deadline || get_in(goal.metadata || %{}, [:deadline])
-
-    case deadline do
-      nil -> ""
-      d when is_binary(d) ->
-        case DateTime.from_iso8601(d) do
-          {:ok, dt, _} -> format_deadline(dt)
-          _ -> ""
-        end
-      %DateTime{} = dt -> format_deadline(dt)
-      _ -> ""
-    end
-  end
-
-  defp format_deadline(deadline) do
-    hours = DateTime.diff(deadline, DateTime.utc_now(), :hour)
-
-    cond do
-      hours < 0 -> " ⚠️ OVERDUE"
-      hours < 24 -> " ⏰ Due in #{hours}h"
-      hours < 168 -> " Due in #{div(hours, 24)}d"
-      true -> ""
-    end
-  end
-
   defp get_knowledge_summary(agent_id) do
     case Arbor.Memory.knowledge_stats(agent_id) do
       {:ok, stats} ->
@@ -1542,34 +1082,6 @@ defmodule Arbor.Memory.ReflectionProcessor do
         {:error, :no_graph}
     end
   end
-
-  # Priority mapping: arbor_seed uses atoms, trust-arbor uses 0-100 integers
-  defp atomize_priority_to_int(nil), do: 50
-  defp atomize_priority_to_int("critical"), do: 90
-  defp atomize_priority_to_int("high"), do: 70
-  defp atomize_priority_to_int("medium"), do: 50
-  defp atomize_priority_to_int("low"), do: 30
-  defp atomize_priority_to_int(_), do: 50
-
-  # Goal type mapping to trust-arbor atoms
-  defp atomize_type(nil), do: :achieve
-  defp atomize_type("achieve"), do: :achieve
-  defp atomize_type("achievement"), do: :achieve
-  defp atomize_type("maintain"), do: :maintain
-  defp atomize_type("maintenance"), do: :maintain
-  defp atomize_type("explore"), do: :explore
-  defp atomize_type("exploration"), do: :explore
-  defp atomize_type("learn"), do: :learn
-  defp atomize_type(_), do: :achieve
-
-  # Safe node type conversion
-  defp safe_node_type(nil), do: :concept
-  defp safe_node_type("person"), do: :relationship
-  defp safe_node_type("project"), do: :experience
-  defp safe_node_type("concept"), do: :fact
-  defp safe_node_type("tool"), do: :skill
-  defp safe_node_type("goal"), do: :insight
-  defp safe_node_type(_), do: :fact
 
   # String truncation for signal data
   defp truncate(str, max_len) when is_binary(str) and byte_size(str) > max_len do

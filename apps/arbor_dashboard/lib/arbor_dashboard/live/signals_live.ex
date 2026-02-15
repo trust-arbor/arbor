@@ -9,6 +9,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   use Phoenix.LiveView
 
   import Arbor.Web.Components
+  import Arbor.Web.Helpers
 
   alias Arbor.Web.{Helpers, Icons}
 
@@ -326,10 +327,6 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     </.modal>
     """
   end
-
-  # Check if a stream is empty by peeking at its items
-  # LiveView streams don't have a built-in empty? check, so we track with CSS
-  defp stream_empty?(_stream), do: false
 
   defp reload_signals(active_categories) do
     if MapSet.size(active_categories) == 0 do

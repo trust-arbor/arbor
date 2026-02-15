@@ -9,6 +9,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   use Phoenix.LiveView
 
   import Arbor.Web.Components
+  import Arbor.Web.Helpers
 
   alias Arbor.Dashboard.ChatState
   alias Arbor.Web.Helpers
@@ -1074,27 +1075,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp caps(nil), do: []
   defp caps(sk), do: Map.get(sk, :capabilities, [])
-
-  defp safe_call(fun) do
-    fun.()
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
-  # Unwrap {:ok, value} tuples and handle {:error, _} — return map or nil
-  defp unwrap_map({:ok, val}) when is_map(val), do: val
-  defp unwrap_map({:error, _}), do: nil
-  defp unwrap_map(nil), do: nil
-  defp unwrap_map(val) when is_map(val), do: val
-  defp unwrap_map(_), do: nil
-
-  # Unwrap {:ok, value} tuples and handle {:error, _} — return list or []
-  defp unwrap_list({:ok, val}) when is_list(val), do: val
-  defp unwrap_list({:error, _}), do: []
-  defp unwrap_list(val) when is_list(val), do: val
-  defp unwrap_list(_), do: []
 
   defp discover_agents do
     # Combine agents from ETS tables and ChatState recent list

@@ -11,8 +11,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   require Logger
 
   import Arbor.Web.Components
+  import Arbor.Web.Helpers
 
   alias Arbor.Agent.{APIAgent, Claude, Manager}
+  alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
   alias Arbor.Dashboard.ChatState
   alias Arbor.Web.Helpers
 
@@ -94,18 +96,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         proposals: [],
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
-        selected_heartbeat_model: nil,
-        # Group chat support
-        group_pid: nil,
-        group_id: nil,
-        group_participants: [],
-        group_mode: false,
-        # Group creation modal
-        show_group_modal: false,
-        available_for_group: [],
-        group_selection: %{},
-        group_name_input: "Group Chat"
+        selected_heartbeat_model: nil
       )
+      |> assign(GroupChat.init_assigns())
       |> stream(:messages, [])
       |> stream(:signals, [])
       |> stream(:thinking, [])
@@ -325,7 +318,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_event("toggle-completed-goals", _params, socket) do
     agent_id = socket.assigns.agent_id
     show_completed = !socket.assigns.show_completed_goals
-    goals = if agent_id, do: fetch_goals(agent_id, show_completed), else: []
+    goals = if agent_id, do: SignalTracker.fetch_goals(agent_id, show_completed), else: []
 
     {:noreply, assign(socket, show_completed_goals: show_completed, agent_goals: goals)}
   end
@@ -384,133 +377,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
   end
 
-  def handle_event("show-group-modal", _params, socket) do
-    # Load all agent profiles to display in the modal
-    available = Arbor.Agent.Lifecycle.list_agents()
-
-    {:noreply,
-     assign(socket,
-       show_group_modal: true,
-       available_for_group: available,
-       group_selection: %{},
-       group_name_input: "Group Chat"
-     )}
-  end
-
-  def handle_event("toggle-group-agent", %{"agent-id" => agent_id}, socket) do
-    current = socket.assigns.group_selection
-
-    updated =
-      if Map.has_key?(current, agent_id) do
-        Map.delete(current, agent_id)
-      else
-        Map.put(current, agent_id, true)
-      end
-
-    {:noreply, assign(socket, group_selection: updated)}
-  end
-
-  def handle_event("update-group-name", %{"value" => name}, socket) do
-    {:noreply, assign(socket, group_name_input: name)}
-  end
-
-  def handle_event("confirm-create-group", _params, socket) do
-    selected_ids = Map.keys(socket.assigns.group_selection)
-    group_name = socket.assigns.group_name_input
-
-    if Enum.empty?(selected_ids) do
-      {:noreply, assign(socket, error: "Please select at least one agent")}
-    else
-      # Resume any stopped agents from the selection
-      Enum.each(selected_ids, fn agent_id ->
-        unless Arbor.Agent.running?(agent_id) do
-          Manager.resume_agent(agent_id)
-        end
-      end)
-
-      # Brief pause to ensure agents have started
-      Process.sleep(100)
-
-      # Build participant specs for selected agents + human user
-      agent_specs =
-        Enum.map(selected_ids, fn agent_id ->
-          name =
-            case Arbor.Agent.Lifecycle.restore(agent_id) do
-              {:ok, profile} -> profile.display_name || "Agent"
-              _ -> "Agent"
-            end
-
-          %{id: agent_id, name: name, type: :agent}
-        end)
-
-      human_spec = %{id: "human_primary", name: "User", type: :human}
-      participant_specs = [human_spec | agent_specs]
-
-      # Create the group
-      case Manager.create_group(group_name, participant_specs) do
-        {:ok, group_pid} ->
-          {group_id, _} =
-            Manager.list_groups()
-            |> Enum.find(fn {_id, pid} -> pid == group_pid end)
-
-          try do
-            Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "group_chat:#{group_id}")
-          rescue
-            _ -> :ok
-          end
-
-          participants = build_participant_list(participant_specs)
-
-          socket =
-            socket
-            |> assign(
-              group_pid: group_pid,
-              group_id: group_id,
-              group_participants: participants,
-              group_mode: true,
-              show_group_modal: false
-            )
-            |> stream(:messages, [], reset: true)
-
-          {:noreply, socket}
-
-        {:error, reason} ->
-          {:noreply, assign(socket, error: "Failed to create group: #{inspect(reason)}")}
-      end
-    end
-  end
-
-  def handle_event("cancel-group-modal", _params, socket) do
-    {:noreply, assign(socket, show_group_modal: false)}
-  end
+  def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("confirm-create-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("cancel-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("leave-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
 
   def handle_event("noop", _params, socket), do: {:noreply, socket}
-
-  def handle_event("leave-group", _params, socket) do
-    # Unsubscribe from group topic if subscribed
-    if socket.assigns.group_id do
-      try do
-        Phoenix.PubSub.unsubscribe(
-          Arbor.Dashboard.PubSub,
-          "group_chat:#{socket.assigns.group_id}"
-        )
-      rescue
-        _ -> :ok
-      end
-    end
-
-    socket =
-      socket
-      |> assign(
-        group_pid: nil,
-        group_id: nil,
-        group_participants: [],
-        group_mode: false
-      )
-      |> stream(:messages, [], reset: true)
-
-    {:noreply, socket}
-  end
 
   @impl true
   def handle_info({:query_result, :cli, {:ok, response}}, socket) do
@@ -561,53 +435,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, loading: false, error: error_msg)}
   end
 
-  def handle_info({:group_message, message}, socket) do
-    # Handle messages from the group chat
-    # Skip if we sent this message (already displayed)
-    if message.sender_id == "human_primary" and message.sender_type == :human do
-      {:noreply, socket}
-    else
-      # Add message to chat display
-      msg_entry = %{
-        id: "msg-#{System.unique_integer([:positive])}",
-        role: if(message.sender_type == :agent, do: :assistant, else: :user),
-        content: message.content,
-        sender_name: message.sender_name,
-        sender_type: message.sender_type,
-        sender_id: message.sender_id,
-        timestamp: message.timestamp,
-        # Assign a consistent color based on sender_id for visual distinction
-        sender_color: sender_color_hue(message.sender_id)
-      }
+  def handle_info({:group_message, _} = msg, socket), do: GroupChat.handle_info(msg, socket)
 
-      # Persist to chat history
-      try do
-        if socket.assigns.agent || socket.assigns.group_id do
-          agent_key = socket.assigns.agent || socket.assigns.group_id
-          Arbor.Memory.append_chat_message(agent_key, msg_entry)
-        end
-      rescue
-        _ -> :ok
-      end
+  def handle_info({:group_participant_joined, _} = msg, socket),
+    do: GroupChat.handle_info(msg, socket)
 
-      socket = stream_insert(socket, :messages, msg_entry)
-      {:noreply, socket}
-    end
-  end
-
-  def handle_info({:group_participant_joined, participant}, socket) do
-    # Update participant list when someone joins
-    updated_participants = [participant | socket.assigns.group_participants]
-    {:noreply, assign(socket, group_participants: updated_participants)}
-  end
-
-  def handle_info({:group_participant_left, participant_id}, socket) do
-    # Remove participant from list when they leave
-    updated_participants =
-      Enum.reject(socket.assigns.group_participants, &(&1.id == participant_id))
-
-    {:noreply, assign(socket, group_participants: updated_participants)}
-  end
+  def handle_info({:group_participant_left, _} = msg, socket),
+    do: GroupChat.handle_info(msg, socket)
 
   # Signal: agent lifecycle events (started, stopped, chat_message)
   def handle_info({:signal_received, %{category: :agent} = signal}, socket) do
@@ -616,7 +450,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Signal: all other signals (agent activity, heartbeat, etc.)
   def handle_info({:signal_received, signal}, socket) do
-    # Only show signals related to our agent
     agent_id = socket.assigns.agent_id
 
     if agent_id && signal_matches_agent?(signal, agent_id) do
@@ -628,24 +461,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         metadata: signal.metadata
       }
 
-      socket = stream_insert(socket, :signals, signal_entry)
-
-      # Process action signals
-      socket = maybe_add_action(socket, signal)
-
-      # Track heartbeat LLM data
-      socket = maybe_track_heartbeat(socket, signal)
-
-      # Track goal changes
-      socket = maybe_refresh_goals(socket, signal)
-
-      # Track memory note signals
-      socket = maybe_track_memory_note(socket, signal)
-
-      # Track identity, cognitive, code signals
-      socket = maybe_track_identity(socket, signal)
-      socket = maybe_track_cognitive(socket, signal)
-      socket = maybe_track_code(socket, signal)
+      socket =
+        socket
+        |> stream_insert(:signals, signal_entry)
+        |> SignalTracker.process_signal(signal)
 
       {:noreply, socket}
     else
@@ -1891,7 +1710,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> assign(
       query_count: 0,
       working_thoughts: [],
-      agent_goals: fetch_goals(agent_id, socket.assigns[:show_completed_goals] || false),
+      agent_goals:
+        SignalTracker.fetch_goals(agent_id, socket.assigns[:show_completed_goals] || false),
       llm_call_count: tokens.count,
       last_llm_mode: nil,
       last_llm_thinking: nil,
@@ -2060,19 +1880,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     "Query failed: #{inspect(reason)}"
   end
 
-  defp signal_matches_agent?(signal, agent_id) do
-    matches_in?(signal.metadata, agent_id) or matches_in?(signal.data, agent_id)
-  end
-
-  defp matches_in?(%{agent_id: id}, agent_id) when id == agent_id, do: true
-  defp matches_in?(%{"agent_id" => id}, agent_id) when id == agent_id, do: true
-  defp matches_in?(%{id: id}, agent_id) when id == agent_id, do: true
-  defp matches_in?(%{"id" => id}, agent_id) when id == agent_id, do: true
-  defp matches_in?(_, _), do: false
-
-  defp stream_empty?(%Phoenix.LiveView.LiveStream{inserts: []}), do: true
-  defp stream_empty?(_), do: false
-
   defp action_input_summary(%{input: input}) when is_map(input) and map_size(input) > 0 do
     cond do
       Map.has_key?(input, "command") -> String.slice(to_string(input["command"]), 0, 60)
@@ -2112,22 +1919,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     _ -> nil
   catch
     :exit, _ -> nil
-  end
-
-  defp safe_call(fun) do
-    fun.()
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
-  defp unwrap_list(result) do
-    case result do
-      {:ok, list} when is_list(list) -> list
-      list when is_list(list) -> list
-      _ -> []
-    end
   end
 
   # ── Tool Display Helpers ────────────────────────────────────────────
@@ -2206,113 +1997,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     )
   end
 
-  defp format_token_count(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M"
-  defp format_token_count(n) when n >= 1000, do: "#{Float.round(n / 1000, 1)}k"
-  defp format_token_count(n), do: to_string(n)
-
-  defp format_duration(ms) when is_number(ms) and ms >= 1000, do: "#{Float.round(ms / 1000, 1)}s"
-  defp format_duration(ms) when is_number(ms), do: "#{ms}ms"
-  defp format_duration(_), do: ""
-
-  # ── Signal Tracking: Identity, Cognitive, Code ─────────────────────
-
-  defp maybe_track_identity(socket, signal) do
-    case to_string(signal.type) do
-      "memory_self_insight_created" -> track_self_insight(socket, signal)
-      "memory_identity_change" -> track_identity_change(socket, signal)
-      "memory_consolidation_completed" -> track_consolidation(socket, signal)
-      _ -> socket
-    end
-  end
-
-  defp track_self_insight(socket, signal) do
-    insight = %{
-      content: signal_field(signal, :content) || "",
-      category: signal_field(signal, :category),
-      confidence: signal_field(signal, :confidence),
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.add_insight(agent_id, insight)
-    assign(socket, self_insights: ChatState.get_identity_state(agent_id).insights)
-  end
-
-  defp track_identity_change(socket, signal) do
-    change = %{
-      field: signal_field(signal, :field),
-      change_type: signal_field(signal, :change_type),
-      reason: signal_field(signal, :reason),
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.add_identity_change(agent_id, change)
-    assign(socket, identity_changes: ChatState.get_identity_state(agent_id).identity_changes)
-  end
-
-  defp track_consolidation(socket, signal) do
-    data = signal.data || signal.metadata || %{}
-
-    consolidation = %{
-      promoted: data[:promoted] || data["promoted"] || 0,
-      deferred: data[:deferred] || data["deferred"] || 0,
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.set_consolidation(agent_id, consolidation)
-    assign(socket, last_consolidation: consolidation)
-  end
-
-  # Extract a field from signal data, falling back to metadata
-  defp signal_field(signal, key) do
-    get_in(signal.data, [key]) || get_in(signal.metadata, [key])
-  end
-
-  defp maybe_track_cognitive(socket, signal) do
-    event = to_string(signal.type)
-    agent_id = socket.assigns.agent_id
-
-    if event == "memory_cognitive_adjustment" do
-      data = signal.data || signal.metadata || %{}
-
-      adjustment = %{
-        field: data[:field] || data["field"],
-        old_value: data[:old_value] || data["old_value"],
-        new_value: data[:new_value] || data["new_value"],
-        timestamp: signal.timestamp
-      }
-
-      ChatState.add_cognitive_adjustment(agent_id, adjustment)
-      assign(socket, cognitive_adjustments: ChatState.get_cognitive_state(agent_id).adjustments)
-    else
-      socket
-    end
-  end
-
-  defp maybe_track_code(socket, signal) do
-    if to_string(signal.type) in ["code_created", "memory_code_loaded"] do
-      module_info = build_code_module_info(signal)
-      agent_id = socket.assigns.agent_id
-      ChatState.add_code_module(agent_id, module_info)
-      assign(socket, code_modules: ChatState.get_code_modules(agent_id))
-    else
-      socket
-    end
-  end
-
-  defp build_code_module_info(signal) do
-    data = signal.data || signal.metadata || %{}
-
-    %{
-      name: flex_get(data, :name) || flex_get(data, :module) || "unnamed",
-      purpose: flex_get(data, :purpose) || "",
-      sandbox_level: flex_get(data, :sandbox_level),
-      created_at: signal.timestamp
-    }
-  end
-
   defp get_working_thoughts(agent) do
     case Claude.get_working_memory(agent) do
       {:ok, nil} -> []
@@ -2352,114 +2036,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     %{content: to_string(t), timestamp: DateTime.utc_now()}
   end
 
-  defp maybe_add_action(socket, signal) do
-    # Check if signal contains action data
-    event = to_string(signal.type)
-
-    if String.contains?(event, "action") or String.contains?(event, "tool") do
-      action_entry = %{
-        id: "act-#{System.unique_integer([:positive])}",
-        name: get_action_name(signal),
-        outcome: get_action_outcome(signal),
-        timestamp: signal.timestamp,
-        details: signal.metadata
-      }
-
-      stream_insert(socket, :actions, action_entry)
-    else
-      socket
-    end
-  end
-
-  defp get_action_name(signal) do
-    case signal.metadata do
-      %{action: name} -> to_string(name)
-      %{"action" => name} -> to_string(name)
-      %{tool: name} -> to_string(name)
-      %{"tool" => name} -> to_string(name)
-      %{name: name} -> to_string(name)
-      %{"name" => name} -> to_string(name)
-      _ -> to_string(signal.type)
-    end
-  end
-
-  defp get_action_outcome(signal) do
-    extract_outcome(signal.metadata)
-  end
-
-  defp extract_outcome(meta) do
-    get_explicit_outcome(meta) ||
-      get_success_outcome(meta) ||
-      get_error_outcome(meta) ||
-      :unknown
-  end
-
-  defp get_explicit_outcome(meta) do
-    meta[:outcome] || meta["outcome"] || meta[:status] || meta["status"]
-  end
-
-  defp get_success_outcome(meta) do
-    case {meta[:success], meta["success"]} do
-      {true, _} -> :success
-      {_, true} -> :success
-      {false, _} -> :failure
-      {_, false} -> :failure
-      _ -> nil
-    end
-  end
-
-  defp get_error_outcome(meta) do
-    if Map.has_key?(meta, :error) or Map.has_key?(meta, "error"), do: :failure
-  end
-
-  # ── Goals ──────────────────────────────────────────────────────────
-
-  defp fetch_goals(agent_id, show_completed) do
-    unless Code.ensure_loaded?(Arbor.Memory), do: throw(:no_memory)
-
-    if show_completed do
-      fetch_all_goals(agent_id)
-    else
-      fetch_active_goals(agent_id)
-    end
-  rescue
-    _ -> []
-  catch
-    :exit, _ -> []
-    :no_memory -> []
-  end
-
-  defp fetch_all_goals(agent_id) do
-    cond do
-      function_exported?(Arbor.Memory, :get_all_goals, 1) ->
-        agent_id |> Arbor.Memory.get_all_goals() |> sort_goals()
-
-      function_exported?(Arbor.Memory, :get_active_goals, 1) ->
-        Arbor.Memory.get_active_goals(agent_id)
-
-      true ->
-        []
-    end
-  end
-
-  defp fetch_active_goals(agent_id) do
-    if function_exported?(Arbor.Memory, :get_active_goals, 1) do
-      Arbor.Memory.get_active_goals(agent_id)
-    else
-      []
-    end
-  end
-
-  # Sort: active goals by priority (desc), completed by achieved_at (desc)
-  defp sort_goals(goals) do
-    Enum.sort_by(goals, fn goal ->
-      case goal.status do
-        :active -> {0, -goal.priority}
-        _ -> {1, goal.achieved_at || goal.created_at}
-      end
-    end)
-  end
-
   defp goal_status_color(:active), do: :green
   defp goal_status_color(:achieved), do: :blue
   defp goal_status_color(:abandoned), do: :red
@@ -2478,109 +2054,4 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp goal_text_style(:active), do: ""
   defp goal_text_style(_), do: "opacity: 0.8;"
-
-  # ── Heartbeat / LLM Tracking ───────────────────────────────────────
-
-  defp maybe_track_heartbeat(socket, signal) do
-    if to_string(signal.type) == "heartbeat_complete" do
-      heartbeat = parse_heartbeat_data(signal)
-
-      socket
-      |> apply_heartbeat_assigns(heartbeat)
-      |> maybe_stream_llm_interaction(heartbeat, signal.timestamp)
-    else
-      socket
-    end
-  end
-
-  defp parse_heartbeat_data(signal) do
-    data = signal.data || %{}
-    usage = flex_get(data, :usage) || %{}
-
-    %{
-      mode: flex_get(data, :cognitive_mode),
-      thinking: flex_get(data, :agent_thinking),
-      llm_actions: flex_get(data, :llm_actions) || 0,
-      notes_count: flex_get(data, :memory_notes_count) || 0,
-      hb_in: flex_get(usage, :input_tokens) || 0,
-      hb_out: flex_get(usage, :output_tokens) || 0,
-      hb_cached: flex_get(usage, :cache_read_input_tokens) || 0
-    }
-  end
-
-  defp apply_heartbeat_assigns(socket, hb) do
-    assign(socket,
-      heartbeat_count: socket.assigns.heartbeat_count + 1,
-      last_llm_mode: hb.mode,
-      last_llm_thinking: hb.thinking,
-      memory_notes_total: socket.assigns.memory_notes_total + hb.notes_count,
-      hb_input_tokens: socket.assigns.hb_input_tokens + hb.hb_in,
-      hb_output_tokens: socket.assigns.hb_output_tokens + hb.hb_out,
-      hb_cached_tokens: socket.assigns.hb_cached_tokens + hb.hb_cached
-    )
-  end
-
-  defp maybe_stream_llm_interaction(socket, hb, timestamp) do
-    if hb.thinking && hb.thinking != "" do
-      interaction = %{
-        id: "llm-#{System.unique_integer([:positive])}",
-        mode: hb.mode || :unknown,
-        thinking: hb.thinking,
-        actions: hb.llm_actions,
-        notes: hb.notes_count,
-        timestamp: timestamp
-      }
-
-      stream_insert(socket, :llm_interactions, interaction)
-    else
-      socket
-    end
-  end
-
-  # Lookup a key by atom first, then string fallback (for mixed-key maps)
-  defp flex_get(map, atom_key) when is_atom(atom_key) do
-    map[atom_key] || map[Atom.to_string(atom_key)]
-  end
-
-  defp maybe_refresh_goals(socket, signal) do
-    event = to_string(signal.type)
-
-    if String.contains?(event, "goal") do
-      agent_id = socket.assigns.agent_id
-      show_completed = socket.assigns.show_completed_goals
-      assign(socket, agent_goals: fetch_goals(agent_id, show_completed))
-    else
-      socket
-    end
-  end
-
-  defp maybe_track_memory_note(socket, signal) do
-    event = to_string(signal.type)
-
-    if event == "agent_memory_note" do
-      assign(socket, memory_notes_total: socket.assigns.memory_notes_total + 1)
-    else
-      socket
-    end
-  end
-
-  # Group chat helpers
-
-  defp build_participant_list(participant_specs) do
-    Enum.map(participant_specs, fn spec ->
-      %{
-        id: spec.id,
-        name: spec.name,
-        type: spec.type,
-        color: sender_color_hue(spec.id)
-      }
-    end)
-  end
-
-  defp sender_color_hue(sender_id) do
-    # Generate a consistent hue (0-360) based on sender_id hash
-    # This ensures each sender gets a unique but stable color
-    hash = :erlang.phash2(sender_id, 360)
-    hash
-  end
 end
