@@ -50,13 +50,25 @@ defmodule Arbor.Consensus.LLMBridge do
   - `:max_tokens` — max response tokens (default: 4096)
   - `:temperature` — sampling temperature (default: 0.7)
   - `:timeout` — call timeout in ms (not used directly, caller manages)
+  - `:backend` — `:cli` to force CLI backend (agents can read source code),
+    `:api` to force UnifiedLLM API path. Default: auto-detect.
   """
   @spec complete(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
-    if available?() do
-      complete_via_unified(system_prompt, user_prompt, opts)
-    else
-      complete_via_fallback(system_prompt, user_prompt, opts)
+    backend = Keyword.get(opts, :backend)
+
+    cond do
+      backend == :cli ->
+        complete_via_fallback(system_prompt, user_prompt, opts)
+
+      backend == :api and available?() ->
+        complete_via_unified(system_prompt, user_prompt, opts)
+
+      available?() ->
+        complete_via_unified(system_prompt, user_prompt, opts)
+
+      true ->
+        complete_via_fallback(system_prompt, user_prompt, opts)
     end
   catch
     :exit, reason ->
@@ -107,6 +119,9 @@ defmodule Arbor.Consensus.LLMBridge do
   # Fallback Path (Arbor.AI)
   # ============================================================================
 
+  # CLI backends available: :anthropic (claude), :openai (codex), :gemini, :lmstudio
+  @cli_providers ~w(anthropic openai gemini lmstudio qwen opencode)a
+
   defp complete_via_fallback(system_prompt, user_prompt, opts) do
     if Code.ensure_loaded?(@ai_mod) do
       # Combine prompts since CLI backends silently drop system_prompt opt
@@ -119,12 +134,17 @@ defmodule Arbor.Consensus.LLMBridge do
         #{user_prompt}
         """
 
+      cli_provider = resolve_cli_provider(Keyword.get(opts, :provider))
+
       ai_opts = [
         max_tokens: Keyword.get(opts, :max_tokens, 4096),
         temperature: Keyword.get(opts, :temperature, 0.7),
-        backend: :cli,
-        provider: fallback_provider(Keyword.get(opts, :provider))
+        backend: :cli
       ]
+
+      # Only pass provider if it maps to a real CLI backend;
+      # otherwise let CliImpl use its fallback chain
+      ai_opts = if cli_provider, do: Keyword.put(ai_opts, :provider, cli_provider), else: ai_opts
 
       case apply(@ai_mod, :generate_text, [combined, ai_opts]) do
         {:ok, response} ->
@@ -138,17 +158,26 @@ defmodule Arbor.Consensus.LLMBridge do
     end
   end
 
-  # Convert provider string to atom for Arbor.AI compatibility
-  defp fallback_provider(nil), do: :anthropic
-  defp fallback_provider(provider) when is_atom(provider), do: provider
+  # Map API provider strings to CLI backend atoms.
+  # Returns nil for providers without CLI backends (uses fallback chain).
+  defp resolve_cli_provider(nil), do: nil
 
-  defp fallback_provider(provider) when is_binary(provider) do
-    # Extract just the provider name (before the colon if provider:model format)
-    provider
-    |> String.split(":")
-    |> hd()
-    |> String.to_existing_atom()
-  rescue
-    ArgumentError -> :anthropic
+  defp resolve_cli_provider(provider) when is_atom(provider) do
+    if provider in @cli_providers, do: provider, else: nil
+  end
+
+  defp resolve_cli_provider(provider) when is_binary(provider) do
+    # Extract provider name (before colon in "provider:model" format)
+    name =
+      provider
+      |> String.split(":")
+      |> hd()
+
+    try do
+      atom = String.to_existing_atom(name)
+      if atom in @cli_providers, do: atom, else: nil
+    rescue
+      ArgumentError -> nil
+    end
   end
 end

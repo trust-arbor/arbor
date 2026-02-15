@@ -19,7 +19,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
   require Logger
 
   @default_timeout 600_000
-  @default_model "gpt5"
 
   @session_vars_to_clear ~w(
     CLAUDE_CODE_ENTRYPOINT CLAUDE_SESSION_ID CLAUDE_CONFIG_DIR
@@ -241,9 +240,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
 
   defp extract_text(_), do: ""
 
-  defp resolve_model(nil), do: @default_model
-  defp resolve_model("gpt5"), do: nil
-  defp resolve_model("gpt-5" <> _), do: nil
+  # Let codex pick its own default model — account-dependent
+  defp resolve_model(nil), do: nil
+  defp resolve_model("default"), do: nil
   defp resolve_model(model) when is_binary(model), do: model
   defp resolve_model(model) when is_atom(model), do: Atom.to_string(model)
 

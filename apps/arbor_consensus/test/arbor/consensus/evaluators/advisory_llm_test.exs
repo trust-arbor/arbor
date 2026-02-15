@@ -274,14 +274,20 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
-      # Verify specific assignments
-      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
-      assert map[:privacy] == "openai:gpt-4.1"
-      assert map[:emergence] == "openrouter:qwen/qwen3-coder"
-      assert map[:user_experience] == "gemini:gemini-2.5-flash"
-      assert map[:vision] == "anthropic:claude-sonnet-4-5-20250929"
-      assert map[:brainstorming] == "openrouter:deepseek/deepseek-r1"
-      assert map[:general] == "anthropic:claude-sonnet-4-5-20250929"
+      # Verify specific assignments — distributed across 4 CLI agents
+      assert map[:security] == "anthropic:claude"
+      assert map[:vision] == "anthropic:claude"
+      assert map[:general] == "anthropic:claude"
+      assert map[:consistency] == "openai:codex"
+      assert map[:performance] == "openai:codex"
+      assert map[:privacy] == "openai:codex"
+      assert map[:brainstorming] == "opencode:opencode"
+      assert map[:emergence] == "opencode:opencode"
+      assert map[:capability] == "opencode:opencode"
+      assert map[:stability] == "gemini:gemini"
+      assert map[:resource_usage] == "gemini:gemini"
+      assert map[:user_experience] == "gemini:gemini"
+      assert map[:generalization] == "gemini:gemini"
     end
 
     test "caller can override provider_model via opts" do
@@ -314,10 +320,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+      assert {"anthropic", "claude"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
-      assert {"openai", "gpt-4.1"} = AdvisoryLLM.resolve_provider_model(:privacy)
+      assert {"openai", "codex"} = AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
     test "per-call override via provider_model opt" do
@@ -327,24 +333,40 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                )
     end
 
-    test "handles provider-only string with default model" do
-      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+    test "handles provider-only string" do
+      # When override has no colon, provider and model are the same string
+      assert {"anthropic", "anthropic"} =
                AdvisoryLLM.resolve_provider_model(:security, provider_model: "anthropic")
     end
 
-    test "handles openrouter paths with slashes" do
+    test "handles openrouter paths with slashes via override" do
       assert {"openrouter", "deepseek/deepseek-r1"} =
-               AdvisoryLLM.resolve_provider_model(:brainstorming)
+               AdvisoryLLM.resolve_provider_model(:brainstorming,
+                 provider_model: "openrouter:deepseek/deepseek-r1"
+               )
     end
 
-    test "handles model names with colons (ollama tags)" do
+    test "handles model names with colons (ollama tags) via override" do
       assert {"ollama", "deepseek-v3.2:cloud"} =
-               AdvisoryLLM.resolve_provider_model(:generalization)
+               AdvisoryLLM.resolve_provider_model(:generalization,
+                 provider_model: "ollama:deepseek-v3.2:cloud"
+               )
     end
 
     test "general perspective has a default" do
-      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+      assert {"anthropic", "claude"} =
                AdvisoryLLM.resolve_provider_model(:general)
+    end
+
+    test "CLI agent defaults resolve correctly" do
+      assert {"opencode", "opencode"} =
+               AdvisoryLLM.resolve_provider_model(:brainstorming)
+
+      assert {"gemini", "gemini"} =
+               AdvisoryLLM.resolve_provider_model(:generalization)
+
+      assert {"gemini", "gemini"} =
+               AdvisoryLLM.resolve_provider_model(:stability)
     end
   end
 

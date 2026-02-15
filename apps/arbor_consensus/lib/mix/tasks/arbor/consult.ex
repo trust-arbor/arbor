@@ -78,7 +78,8 @@ defmodule Mix.Tasks.Arbor.Consult do
     context: :string,
     provider: :string,
     skill: :string,
-    timeout: :integer
+    timeout: :integer,
+    backend: :string
   ]
 
   @aliases [
@@ -89,7 +90,8 @@ defmodule Mix.Tasks.Arbor.Consult do
     s: :save,
     d: :docs,
     c: :context,
-    k: :skill
+    k: :skill,
+    b: :backend
   ]
 
   @impl Mix.Task
@@ -108,6 +110,7 @@ defmodule Mix.Tasks.Arbor.Consult do
       -k, --skill NAME         Use a skill from the library as system prompt
           --provider P:M       Override provider:model (e.g. anthropic:claude-sonnet-4-5-20250929)
           --timeout SECONDS    Timeout per perspective (default: 180)
+      -b, --backend cli|api   Force CLI agents (read source code) or API providers
 
     Perspectives: #{Enum.join(@perspectives, ", ")}
     """)
@@ -329,7 +332,15 @@ defmodule Mix.Tasks.Arbor.Consult do
     File.mkdir_p!(dir)
 
     write_question_file(dir, question, results, opts, provider_model_display, mode)
-    write_perspectives_file(dir, question, results, provider_model_display, mode)
+
+    # When running individual perspectives (e.g., batch script with -p),
+    # save each to its own file to avoid parallel overwrites.
+    # When running --all, save combined perspectives.md.
+    if opts[:all] or opts[:multi_model] do
+      write_perspectives_file(dir, question, results, provider_model_display, mode)
+    else
+      write_individual_perspective_files(dir, results, provider_model_display)
+    end
 
     Mix.shell().info("\nSaved to #{dir}/")
   end
@@ -367,7 +378,13 @@ defmodule Mix.Tasks.Arbor.Consult do
     #{format_docs_section(doc_paths)}#{format_context_section(opts[:context])}
     """
 
-    File.write!(Path.join(dir, "question.md"), String.trim(content) <> "\n")
+    path = Path.join(dir, "question.md")
+
+    # Only write question.md if it doesn't exist yet — avoids
+    # parallel overwrites when batch script runs multiple perspectives
+    unless File.exists?(path) do
+      File.write!(path, String.trim(content) <> "\n")
+    end
   end
 
   defp write_perspectives_file(dir, question, results, provider_model_display, mode) do
@@ -414,6 +431,33 @@ defmodule Mix.Tasks.Arbor.Consult do
       Path.join(dir, "perspectives.md"),
       String.trim(header) <> "\n\n" <> String.trim(body) <> "\n"
     )
+  end
+
+  # Write each perspective to its own file — safe for parallel batch runs
+  defp write_individual_perspective_files(dir, results, provider_model_display) do
+    for {perspective, eval} <- results do
+      pm =
+        provider_model_display ||
+          AdvisoryLLM.provider_map()[perspective] ||
+          "unknown"
+
+      content = """
+      ---
+      date: #{Date.utc_today()}
+      perspective: #{perspective}
+      provider: #{pm}
+      ---
+
+      ## #{perspective} (#{pm})
+
+      #{eval.reasoning}
+      """
+
+      File.write!(
+        Path.join(dir, "#{perspective}.md"),
+        String.trim(content) <> "\n"
+      )
+    end
   end
 
   defp format_consulted(results, opts, :multi_model) do
@@ -549,9 +593,20 @@ defmodule Mix.Tasks.Arbor.Consult do
           end
       end
 
-    case opts[:timeout] do
+    eval_opts =
+      case opts[:timeout] do
+        nil -> eval_opts
+        t -> Keyword.put(eval_opts, :timeout, t * 1_000)
+      end
+
+    # --backend cli|api forces CLI agents (can read source code) or API providers
+    case opts[:backend] do
       nil -> eval_opts
-      t -> Keyword.put(eval_opts, :timeout, t * 1_000)
+      "cli" -> Keyword.put(eval_opts, :backend, :cli)
+      "api" -> Keyword.put(eval_opts, :backend, :api)
+      other ->
+        Mix.shell().error("Unknown backend '#{other}'. Use 'cli' or 'api'.")
+        exit({:shutdown, 1})
     end
   end
 
