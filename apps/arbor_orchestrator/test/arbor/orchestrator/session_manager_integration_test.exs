@@ -37,7 +37,11 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
       agent_id = "int-test-agent-#{:erlang.unique_integer([:positive])}"
 
       on_exit(fn ->
-        @session_manager.stop_session(agent_id)
+        try do
+          @session_manager.stop_session(agent_id)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       %{agent_id: agent_id}

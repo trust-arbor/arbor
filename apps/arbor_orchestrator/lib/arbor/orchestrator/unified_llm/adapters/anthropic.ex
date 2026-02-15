@@ -44,12 +44,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
     {system_text, non_system_messages} = split_system_messages(request.messages)
     provider_options = provider_options(request)
 
-    base_body = %{
-      "model" => request.model,
-      "system" => system_text,
-      "messages" => Enum.map(non_system_messages, &message_to_input/1),
-      "max_tokens" => request.max_tokens || 1024
-    }
+    base_body =
+      %{
+        "model" => request.model,
+        "system" => system_text,
+        "messages" => Enum.map(non_system_messages, &message_to_input/1),
+        "max_tokens" => request.max_tokens || 1024
+      }
+      |> maybe_put_tools(request.tools)
 
     %{
       method: :post,
@@ -536,6 +538,26 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
 
   defp int_or_nil(value) when is_integer(value), do: value
   defp int_or_nil(_), do: nil
+
+  defp maybe_put_tools(body, nil), do: body
+  defp maybe_put_tools(body, []), do: body
+
+  defp maybe_put_tools(body, tools) when is_list(tools) do
+    anthropic_tools =
+      Enum.map(tools, fn tool ->
+        name = Map.get(tool, :name) || Map.get(tool, "name") || ""
+        description = Map.get(tool, :description) || Map.get(tool, "description")
+
+        schema =
+          Map.get(tool, :input_schema) || Map.get(tool, :parameters) ||
+            Map.get(tool, "input_schema") || Map.get(tool, "parameters") || %{}
+
+        base = %{"name" => to_string(name), "input_schema" => schema}
+        if description, do: Map.put(base, "description", to_string(description)), else: base
+      end)
+
+    Map.put(body, "tools", anthropic_tools)
+  end
 
   defp provider_options(%Request{provider_options: options}) when is_map(options) do
     case Map.get(options, "anthropic") || Map.get(options, :anthropic) || %{} do
