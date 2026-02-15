@@ -173,8 +173,10 @@ defmodule Arbor.Trust.Manager do
     store_pid =
       case Process.whereis(Store) do
         nil ->
-          {:ok, pid} = Store.start_link(opts)
-          pid
+          case Store.start_link(opts) do
+            {:ok, pid} -> pid
+            {:error, {:already_started, pid}} -> pid
+          end
 
         pid ->
           pid

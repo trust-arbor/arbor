@@ -285,8 +285,14 @@ defmodule Arbor.AI.SessionRegistry do
 
   defp ensure_started do
     case Process.whereis(__MODULE__) do
-      nil -> {:ok, _} = start_link()
-      _pid -> :ok
+      nil ->
+        case start_link() do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+        end
+
+      _pid ->
+        :ok
     end
   end
 

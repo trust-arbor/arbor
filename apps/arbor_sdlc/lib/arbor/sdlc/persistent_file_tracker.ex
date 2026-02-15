@@ -286,7 +286,10 @@ defmodule Arbor.SDLC.PersistentFileTracker do
     if backend == Arbor.Persistence.Store.ETS do
       case GenServer.whereis(store_name) do
         nil ->
-          {:ok, _} = backend.start_link(name: store_name)
+          case backend.start_link(name: store_name) do
+            {:ok, _} -> :ok
+            {:error, {:already_started, _}} -> :ok
+          end
 
         _pid ->
           :ok
