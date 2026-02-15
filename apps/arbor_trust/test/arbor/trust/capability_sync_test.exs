@@ -586,6 +586,8 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
   describe "sync_capabilities with full services" do
     setup do
+      # Start Security services (required for grant/list_capabilities)
+      ensure_security_started()
       # Start Store, EventStore, Manager, and CapabilitySync so sync calls work
       ensure_store_started()
       ensure_event_store_started()
@@ -721,6 +723,21 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     case Process.whereis(CapabilitySync) do
       nil -> start_supervised!({CapabilitySync, enabled: false})
       _pid -> :ok
+    end
+  end
+
+  defp ensure_security_started do
+    for {mod, opts} <- [
+          {Arbor.Security.Identity.Registry, []},
+          {Arbor.Security.SystemAuthority, []},
+          {Arbor.Security.CapabilityStore, []},
+          {Arbor.Security.Reflex.Registry, []},
+          {Arbor.Security.Constraint.RateLimiter, []}
+        ] do
+      case Process.whereis(mod) do
+        nil -> start_supervised!({mod, opts})
+        _pid -> :ok
+      end
     end
   end
 end
