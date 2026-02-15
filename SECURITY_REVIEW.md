@@ -1,225 +1,220 @@
 # Security Review: trust-arbor/arbor
 
-**Date:** 2026-02-07
-**Scope:** `/Users/azmaveth/code/trust-arbor/arbor/` (25-app Elixir/OTP umbrella)
-**Method:** 4-agent parallel review (Auth, Code Exec, Sandbox/BEAM, Config/Fail-open)
+**Date:** 2026-02-15  
+**Scope:** `/Users/azmaveth/code/trust-arbor/arbor/` (current `main` working tree)  
+**Method:** Manual code audit of ingress/authn/authz, action execution, taint/sandbox enforcement, identity verification, and runtime configuration.
 
 ---
 
-## Summary
+## Executive Summary
+
+This review supersedes the 2026-02-07 report. Several previously-remediated controls are still in place, but a new/remaining **critical execution path bypass** exists:
+
+- `POST /mcp` is unauthenticated (`apps/arbor_gateway/lib/arbor/gateway/router.ex:22`, `apps/arbor_gateway/lib/arbor/gateway/router.ex:61`, `apps/arbor_gateway/lib/arbor/gateway/router.ex:63`)
+- MCP `arbor_run` allows `agent_id` to be omitted (`apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:95`, `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:98`)
+- Omitted `agent_id` routes to unchecked action execution (`apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:263`, `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:264`)
+- Unchecked action path bypasses authorization and taint checks (`apps/arbor_actions/lib/arbor_actions.ex:139`, `apps/arbor_actions/lib/arbor_actions.ex:146`)
+
+Removing `/api/bridge` and `/api/signals` reduces attack surface, but **does not close this hole**.
+
+---
+
+## Severity Summary
 
 | Severity | Count |
-|----------|-------|
-| CRITICAL | 5 |
-| HIGH | 15 |
-| MEDIUM | 20 |
-| LOW | 10 |
-| **Total** | **50** |
+|---|---:|
+| CRITICAL | 2 |
+| HIGH | 6 |
+| MEDIUM | 5 |
+| LOW | 1 |
+| **Total** | **14** |
 
 ---
 
-## Remediation Status
+## Findings
 
-- [x] **Phase 1** — Critical (C1-C5) — All 5 remediated
-- [x] **Phase 2** — High (H1-H15) — 12/15 remediated, 2 deferred (H1/H2), 1 documented (H15)
-- [x] **Phase 3** — Medium (M1-M20) — 12 remediated, 2 documented (M5, M13, M19), 6 document-only
-- [x] **Phase 4** — Low (L1-L10) — 8 remediated, 2 document-only
+### CRITICAL
 
----
+#### C1. Unauthenticated MCP endpoint can execute actions without authorization
 
-## CRITICAL (5)
+**Impact:** Any local process (and potentially browser-origin traffic due CORS) can invoke tools on a running Arbor node without an API key, capability checks, or taint enforcement.
 
-### C1: No Authentication on Gateway HTTP API
-- **File:** `apps/arbor_gateway/lib/arbor/gateway/router.ex`
-- **Issue:** Zero auth plugs on any endpoint. Any localhost process can: authorize tools (`/api/bridge`), read/write any agent's memory (`/api/memory`), inject signals (`/api/signals`), execute code (`/api/dev/eval`).
-- **Remediation:** Add authentication plug (API key or bearer token) to Gateway router.
-- **Status:** [x] Remediated — `Arbor.Gateway.Auth` plug (API key via env/config)
+**Evidence**
+- `/mcp` bypasses gateway auth: `apps/arbor_gateway/lib/arbor/gateway/router.ex:22`, `apps/arbor_gateway/lib/arbor/gateway/router.ex:61`, `apps/arbor_gateway/lib/arbor/gateway/router.ex:63`
+- MCP endpoint enables CORS: `apps/arbor_gateway/lib/arbor/gateway/router.ex:40`
+- `arbor_run` documents optional `agent_id`: `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:95`, `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:98`
+- Missing `agent_id` triggers unchecked execution: `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:261`, `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:264`
+- Unchecked execution path exists by design: `apps/arbor_actions/lib/arbor_actions.ex:139`, `apps/arbor_actions/lib/arbor_actions.ex:146`
 
-### C2: Shell Metacharacter Sandbox Bypass
-- **Files:** `apps/arbor_shell/lib/arbor/shell/sandbox.ex:137-143`, `apps/arbor_shell/lib/arbor/shell/executor.ex:43`, `apps/arbor_shell/lib/arbor/shell/port_session.ex:162`
-- **Issue:** Sandbox only checks first word of command. `;`, `&&`, `||`, `|`, `` ` ``, `$()` all bypass. `Port.open({:spawn, command})` passes through `/bin/sh -c`.
-- **Remediation:** Use `{:spawn_executable, path}` with args list; add metacharacter detection to sandbox.
-- **Status:** [x] Remediated — metacharacter detection + spawn_executable in executor/port_session
+**Recommended fix**
+1. Require authentication on `/mcp` (same API-key gate as other endpoints).
+2. Require `agent_id` for `arbor_run`.
+3. Remove unchecked execution path from MCP (`execute_action/3` call path).
+4. Disable broad MCP CORS unless explicitly required and origin-allowlisted.
 
-### C3: Reflex Safety System Fails Open on Any Exception
-- **File:** `apps/arbor_security/lib/arbor/security.ex:608-612`
-- **Issue:** `rescue _ -> :ok` catches all exceptions. If Reflex.Registry crashes, ALL reflex protections (rm -rf, sudo, SSH, SSRF blocks) permanently disabled.
-- **Remediation:** Change to `rescue _ -> {:error, :reflex_check_failed}` (fail-closed).
-- **Status:** [x] Remediated — fail-closed with Logger.error
+#### C2. MCP unchecked execution can reach dangerous actions (code load + filesystem)
 
-### C4: HotLoad Compiles Arbitrary Code Without Sandbox Validation
-- **File:** `apps/arbor_actions/lib/arbor/actions/code.ex:407`
-- **Issue:** `Code.compile_string(source_code)` runs without passing through `Arbor.Sandbox.Code.validate/2` despite that module existing. Module immediately loaded into VM.
-- **Remediation:** Route source through `Arbor.Sandbox.Code.validate/2` before compilation.
-- **Status:** [x] Remediated — `validate_source_safety/1` added before `compile_source/1`
+**Impact:** The C1 path can execute privileged actions without capability or taint checks, including runtime code loading and unconstrained filesystem operations.
 
-### C5: Hardcoded Erlang Cookie + Unrestricted RPC
-- **Files:** `apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex:11`, `apps/arbor_common/lib/mix/tasks/arbor/eval.ex:34`
-- **Issue:** Cookie `:arbor_dev` in source. `:rpc.call(node, Code, :eval_string, [expr])` enables full RCE if distribution port reachable.
-- **Remediation:** Generate random cookie at runtime, don't commit to source.
-- **Status:** [x] Remediated — cookie from `ARBOR_COOKIE` env var, no fallback
+**Evidence**
+- Hot code load compiles runtime source: `apps/arbor_actions/lib/arbor/actions/code.ex:450`
+- File path validation is skipped without `:workspace` context: `apps/arbor_actions/lib/arbor/actions/file.ex:38`, `apps/arbor_actions/lib/arbor/actions/file.ex:40`
+- MCP unchecked path passes empty context `%{}`: `apps/arbor_gateway/lib/arbor/gateway/mcp/handler.ex:264`
 
----
+**Recommended fix**
+1. Enforce authorized execution only (`authorize_and_execute/4`) for all remotely-triggerable actions.
+2. For file actions, require an explicit workspace/root context on all external execution paths.
+3. Treat `code_hot_load` as non-default/admin-only and block from remote endpoints unless strongly authenticated.
 
-## HIGH (15)
+### HIGH
 
-### H1: Identity Verification Bypass (no signed_request)
-- **File:** `apps/arbor_security/lib/arbor/security.ex:556-561`
-- **Issue:** When `signed_request` is nil (omitted), returns `:ok` even with verification enabled.
-- **Status:** [ ] Deferred — requires identity infrastructure (19 callers pass no signed_request)
+#### H1. Identity verification does not bind verified signer to authorized principal
 
-### H2: Unregistered Identities Pass Authorization
-- **File:** `apps/arbor_security/lib/arbor/security.ex:545-547`
-- **Issue:** `{:error, :not_found} -> :ok` — any arbitrary principal_id works without registration.
-- **Status:** [ ] Deferred — requires identity infrastructure (most callers use unregistered IDs)
+**Impact:** A valid signed request from agent A can satisfy verification while authorizing principal B if caller-controlled IDs diverge.
 
-### H3: `can?/3` Skips All Security Checks
-- **File:** `apps/arbor_security/lib/arbor/security.ex:332-338`
-- **Issue:** Only checks capability existence. Bypasses identity, constraints, rate limits, escalation, reflexes.
-- **Status:** [x] Remediated — Logger.warning on every call + deprecation comment
+**Evidence**
+- Verification result agent ID is ignored: `apps/arbor_security/lib/arbor/security.ex:585`, `apps/arbor_security/lib/arbor/security.ex:586`
 
-### H4: Dev Eval Endpoint
-- **File:** `apps/arbor_gateway/lib/arbor/gateway/dev/router.ex:142`
-- **Issue:** `Code.eval_string(code)` on HTTP POST body. Route mounted unconditionally; guard is config-based.
-- **Status:** [x] Remediated — compile-time guard: only mounted in dev/test
+**Recommended fix**
+- In `authorize/4`, enforce `verified_agent_id == principal_id` when verification is enabled.
 
-### H5: Unauthenticated Dashboard
-- **File:** `apps/arbor_dashboard/lib/arbor_dashboard/router.ex`
-- **Issue:** Zero auth on `/eval`, `/agents`, `/consensus`, `/signals`, `/monitor`.
-- **Status:** [x] Remediated — HTTP Basic Auth plug (`Arbor.Dashboard.Auth`), required in prod
+#### H2. Unknown identities are treated as acceptable during authorization
 
-### H6: Consensus force_approve Accepts Any Caller
-- **File:** `apps/arbor_consensus/lib/arbor/consensus/coordinator.ex:469-496`
-- **Issue:** `force_approve/3` accepts any `approver_id` without authority verification.
-- **Status:** [x] Remediated — `can?/3` check for `arbor://consensus/admin` capability
+**Impact:** Unregistered principal IDs are not rejected early, weakening identity gate semantics.
 
-### H7: Audit Event Persistence Fails Silently
-- **File:** `apps/arbor_security/lib/arbor/security/events.ex:332-337`
-- **Issue:** `rescue _ -> :ok` drops all audit events if EventLog backend is down.
-- **Status:** [x] Remediated — Logger.error + error return instead of silent swallow
+**Evidence**
+- Not-found identity returns `:ok`: `apps/arbor_security/lib/arbor/security.ex:566`, `apps/arbor_security/lib/arbor/security.ex:569`
 
-### H8: Filesystem Sandbox Symlink Escape
-- **File:** `apps/arbor_sandbox/lib/arbor/sandbox/filesystem.ex:67-74`
-- **Issue:** `Path.expand` doesn't resolve symlinks. SafePath module exists but not used.
-- **Status:** [x] Remediated — `SafePath.resolve_within/2` integrated into `resolve_path/2`
+**Recommended fix**
+- Fail closed on unknown identities in production/security mode.
 
-### H9: Code Sandbox Dynamic Dispatch Bypass
-- **File:** `apps/arbor_sandbox/lib/arbor/sandbox/code.ex:260-261`
-- **Issue:** AST walker only catches `apply` with literal atom module. Variable modules bypass.
-- **Status:** [x] Remediated — block apply/3 and spawn with variable modules at pure/strict/limited
+#### H3. Executor still uses shadow-mode authorization and lacks sender auth on intents
 
-### H10: Unsigned Capabilities Accepted by Default
-- **File:** `apps/arbor_security/lib/arbor/security/config.ex:53`
-- **Issue:** `capability_signing_required` defaults to `false`.
-- **Status:** [x] Remediated — default changed to `true`
+**Impact:** Effective decision path still depends on `can?/3` capability-existence checks instead of full `authorize/4` pipeline; cast sender/source remains unauthenticated.
 
-### H11: CompileAndTest Shell Injection
-- **File:** `apps/arbor_actions/lib/arbor/actions/code.ex:176`
-- **Issue:** `test_files` joined into shell command unsanitized with `sandbox: :none`.
-- **Status:** [x] Remediated — validate_test_files/1 (must end _test.exs, no metacharacters, no ..)
+**Evidence**
+- Shadow mode enabled: `apps/arbor_agent/lib/arbor/agent/executor.ex:33`
+- Missing sender/source auth TODO: `apps/arbor_agent/lib/arbor/agent/executor.ex:172`, `apps/arbor_agent/lib/arbor/agent/executor.ex:175`
+- Decision uses `can?/3` when shadow mode enabled: `apps/arbor_agent/lib/arbor/agent/executor.ex:614`, `apps/arbor_agent/lib/arbor/agent/executor.ex:618`
 
-### H12: :os.cmd Insufficient Shell Escaping
-- **File:** `apps/arbor_ai/lib/arbor/ai/agent_sdk/transport.ex:189`
-- **Issue:** `shell_escape/1` only escapes double quotes. `$()`, backticks, pipes pass through.
-- **Status:** [x] Remediated — replaced with System.cmd (no shell interpretation)
+**Recommended fix**
+1. Cut over to `authorize/4` as authoritative path.
+2. Authorize intent source (`intent.source_agent`) before processing.
 
-### H13: No HTTP-Level Rate Limiting on Gateway
-- **File:** `apps/arbor_gateway/lib/arbor/gateway/router.ex`
-- **Issue:** Unlimited requests to all API endpoints.
-- **Status:** [x] Remediated — ETS-based rate limiter plug (100 req/min default, configurable)
+#### H4. Signals subscription auth uses `can?/3` (capability-only)
 
-### H14: No Production secret_key_base
-- **Files:** `config/dev.exs:26`, no `prod.exs`/`runtime.exs` override
-- **Issue:** Deterministic dev key, no production override exists.
-- **Status:** [x] Remediated — SECRET_KEY_BASE required from env var in prod
+**Impact:** Subscription authorization omits identity verification, constraints, reflex checks, and escalation.
 
-### H15: Macro-Generated Code After Sandbox Check
-- **File:** `apps/arbor_sandbox/lib/arbor/sandbox/code.ex`
-- **Issue:** AST validated pre-expansion. Macros expand after check.
-- **Status:** [ ] Document only — inherent limitation of pre-compilation validation
+**Evidence**
+- Capability-only adapter explicitly uses `can?/3`: `apps/arbor_signals/lib/arbor/signals/adapters/capability_authorizer.ex:6`, `apps/arbor_signals/lib/arbor/signals/adapters/capability_authorizer.ex:53`
+- This adapter is default authorizer: `apps/arbor_signals/lib/arbor/signals/config.ex:19`, `apps/arbor_signals/lib/arbor/signals/config.ex:32`
 
----
+**Recommended fix**
+- Move restricted topics to full `authorize/4` path or equivalent hardened adapter.
 
-## MEDIUM (20)
+#### H5. Executor computes sandbox level but does not enforce it on action execution
 
-| # | Finding | File | Status |
-|---|---------|------|--------|
-| M1 | `requires_approval` constraint is no-op | `constraint.ex:100-102` | [x] Remediated — returns constraint violation when approval=true |
-| M2 | Escalation bypassed when config disabled | `escalation.ex:46-67` | [x] Remediated — Logger.warning on bypass |
-| M3 | Trust points only boost tier, never lower | `trust/store.ex:255-268` | [ ] Document only — by design for trust accumulation model |
-| M4 | Prefix-based URI matching over-grants access | `capability_store.ex:327-334` | [x] Remediated — require exact match or prefix + "/" separator |
-| M5 | Signal bus uses OpenAuthorizer | `config.exs:85` | [x] Documented — TODO comment to switch to SecurityAuthorizer |
-| M6 | Missing dangerous `:erlang` functions in code sandbox | `sandbox/code.ex` | [x] Remediated — 10 functions added to @never_allowed_functions |
-| M7 | `Agent`/`Task` in `@always_allowed` at `:pure` level | `sandbox/code.ex:65-66` | [x] Remediated — moved to @limited_allowed |
-| M8 | Dangerous commands in `:strict` allowlist | `sandbox.ex:36-50` | [x] Remediated — removed runtimes (mix, elixir, node, python, etc.) |
-| M9 | PATH manipulation bypass at `:basic` level | `sandbox.ex` | [ ] Document only — requires resolve_executable integration |
-| M10 | Public ETS tables (21+) including reflex registry | `reflex/registry.ex:151` + others | [ ] Document only — requires systematic :protected audit |
-| M11 | TOCTOU race in filesystem sandbox | `sandbox/filesystem.ex` | [ ] Document only — inherent in userspace file checks |
-| M12 | `String.to_atom` atom exhaustion in Executor | `executor.ex:523,537` | [x] Remediated — String.to_existing_atom + rescue |
-| M13 | Memory API has no agent-level authorization | `memory/router.ex` | [x] Documented — TODO for agent_id == caller_id enforcement |
-| M14 | `check_origin: false` in dev, no prod override | `dev.exs:29` | [x] Remediated — check_origin enforced in prod via runtime.exs |
-| M15 | Git dependency without commit pinning | `mix.exs:29` | [x] Remediated — pinned to commit 4ebedfbb |
-| M16 | 7 path dependencies with `override: true` | `mix.exs:20-26` | [ ] Document only — required for local development |
-| M17 | No CSP, HSTS, or TLS configuration | Gateway + Dashboard | [ ] Document only — deployment-level concern |
-| M18 | Path normalization inconsistency in bridge | `claude_session.ex:283-289` | [x] Remediated — use System.user_home() instead of fragile regex |
-| M19 | Executor accepts unauthenticated GenServer casts | `executor.ex:167-189` | [x] Documented — TODO for source_agent authorization |
-| M20 | Lua eval via JidoSandbox (external trust) | `sandbox/virtual.ex:95-101` | [ ] Document only — external dependency trust boundary |
+**Impact:** Trust-tier sandbox selection is currently informational for many act paths; actions are dispatched directly.
 
----
+**Evidence**
+- Sandbox level computed: `apps/arbor_agent/lib/arbor/agent/executor.ex:236`
+- Action path ignores sandbox level and dispatches directly: `apps/arbor_agent/lib/arbor/agent/executor.ex:294`, `apps/arbor_agent/lib/arbor/agent/executor.ex:296`
 
-## LOW (10)
+**Recommended fix**
+- Enforce sandbox/trust policy per action type before dispatch.
 
-| # | Finding | File | Status |
-|---|---------|------|--------|
-| L1 | Default sandbox path in `/tmp` (world-writable) | `filesystem.ex:9` | [x] Remediated — changed to `~/.arbor/sandbox/agents` |
-| L2 | EPMD on localhost | `arbor_helpers.ex:10,52` | [ ] Document only — required for Erlang distribution |
-| L3 | Process enumeration at `:limited` level | Multiple | [ ] Document only — by design for agent introspection |
-| L4 | `String.to_atom` fallback in self_knowledge | `self_knowledge.ex:764` | [x] Remediated — falls back to string instead of creating atom |
-| L5 | `term_to_binary` nil-key acceptance | `topic_registry.ex:488-489` | [x] Remediated — reject unverifiable signed checkpoints |
-| L6 | Runtime .env loading from CWD | `runtime.exs:4-22` | [x] Documented — warning comment about CWD .env risk |
-| L7 | Old identity entries default to `:active` | `identity/registry.ex:397-398` | [x] Remediated — defaults to `:unknown` instead of `:active` |
-| L8 | Bridge signal emission swallows errors | `bridge/router.ex:100-102` | [x] Remediated — Logger.debug on emission failure |
-| L9 | tmux send-keys injection (local CLI) | `hands/send.ex:59` | [x] Remediated — strip control characters from message |
-| L10 | Hands.Spawn script interpolation | `hands/spawn.ex:165-179` | [x] Remediated — shell_escape all interpolated paths |
+#### H6. Shell authorization path does not pass command/url context into reflex pipeline
+
+**Impact:** Reflex checks that depend on command/URL context are weakened for shell facade calls.
+
+**Evidence**
+- Shell auth call omits opts/context: `apps/arbor_shell/lib/arbor/shell.ex:90`, `apps/arbor_shell/lib/arbor/shell.ex:115`, `apps/arbor_shell/lib/arbor/shell.ex:280`
+- Reflex context builder expects `:command`/`:url` in opts: `apps/arbor_security/lib/arbor/security.ex:639`, `apps/arbor_security/lib/arbor/security.ex:655`
+
+**Recommended fix**
+- Pass command/url/path context into `Arbor.Security.authorize/4` opts for shell/web actions.
+
+### MEDIUM
+
+#### M1. Development eval endpoint remains compiled in dev/test and executes arbitrary code
+
+**Evidence**
+- Route mounted in dev/test builds: `apps/arbor_gateway/lib/arbor/gateway/router.ex:48`, `apps/arbor_gateway/lib/arbor/gateway/router.ex:49`
+- Endpoint evaluates request body with `Code.eval_string/1`: `apps/arbor_gateway/lib/arbor/gateway/dev/router.ex:32`, `apps/arbor_gateway/lib/arbor/gateway/dev/router.ex:142`
+
+**Recommendation**
+- Keep disabled by default and require explicit dev flag + local binding (current local check exists).
+
+#### M2. Runtime `.env` loading trusts current working directory
+
+**Evidence**
+- Loads `.env` from `File.cwd!/0`: `config/runtime.exs:4`, `config/runtime.exs:6`
+
+**Recommendation**
+- Use fixed trusted path (for example `~/.arbor/.env`) in production/runtime contexts.
+
+#### M3. Atom exhaustion risk in memory insight conversion
+
+**Evidence**
+- Dynamic `String.to_atom/1` in `safe_insight_atom/1`: `apps/arbor_memory/lib/arbor/memory.ex:2538`, `apps/arbor_memory/lib/arbor/memory.ex:2542`
+
+**Recommendation**
+- Replace with allowlist mapping or `String.to_existing_atom/1` + fallback string.
+
+#### M4. Memory API still trusts caller-provided `agent_id` (cross-agent scope risk)
+
+**Evidence**
+- Explicit TODO notes body `agent_id` trust and missing caller binding: `apps/arbor_gateway/lib/arbor/gateway/memory/router.ex:126`, `apps/arbor_gateway/lib/arbor/gateway/memory/router.ex:128`
+
+**Recommendation**
+- Bind memory operations to authenticated principal/session identity.
+
+#### M5. Consensus force admin check uses `can?/3` instead of full authorization
+
+**Evidence**
+- Force authorization path uses `can?/3`: `apps/arbor_consensus/lib/arbor/consensus/coordinator.ex:686`, `apps/arbor_consensus/lib/arbor/consensus/coordinator.ex:689`
+
+**Recommendation**
+- Use `authorize/4` for force operations.
+
+### LOW
+
+#### L1. MCP tests currently normalize no-`agent_id` execution behavior
+
+**Evidence**
+- `arbor_run` tests execute without `agent_id`: `apps/arbor_gateway/test/arbor/gateway/mcp/handler_test.exs:163`, `apps/arbor_gateway/test/arbor/gateway/mcp/handler_test.exs:165`
+
+**Recommendation**
+- Update tests to require authenticated principal + `agent_id` to avoid reintroducing C1/C2.
 
 ---
 
-## Positive Security Findings
+## Security Controls Confirmed Present
 
-- `SafeAtom` — proper atom safety with allowlists and `to_existing` only
-- `SafePath` — symlink detection, path traversal prevention (now integrated with filesystem sandbox via H8)
-- Custom Credo checks for `unsafe_atom_conversion` and `unsafe_binary_to_term`
-- All `binary_to_term` calls use `[:safe]` flag
-- No `keys: :atoms` in JSON decoding
-- No NIF usage
-- Trust store ETS tables use `:protected` access
-- Bridge authorization fails closed (returns "deny" on error)
-- Delegation tokens properly signed
-- Rate limiter uses GenServer serialization (no TOCTOU)
-- `SECURITY.md` with responsible disclosure guidance
+- Gateway API key auth plug exists for non-bypassed endpoints (`apps/arbor_gateway/lib/arbor/gateway/auth.ex:1`).
+- Gateway default bind IP is loopback (`apps/arbor_gateway/lib/arbor/gateway/application.ex:20`).
+- Shell execution uses `spawn_executable` + arg list (`apps/arbor_shell/lib/arbor/shell/executor.ex:50`, `apps/arbor_shell/lib/arbor/shell/executor.ex:93`).
+- Shell sandbox blocks metacharacters at basic/strict (`apps/arbor_shell/lib/arbor/shell/sandbox.ex:24`, `apps/arbor_shell/lib/arbor/shell/sandbox.ex:68`, `apps/arbor_shell/lib/arbor/shell/sandbox.ex:85`).
+- Code hot-load now validates AST before compile (`apps/arbor_actions/lib/arbor/actions/code.ex:432`, `apps/arbor_actions/lib/arbor/actions/code.ex:435`).
 
 ---
 
-## Remediation Roadmap
+## Prioritized Remediation Plan
 
-### Phase 1 — Immediate (C1-C5)
-1. Add authentication to Gateway HTTP API (C1)
-2. Fix shell sandbox metacharacter bypass (C2)
-3. Change reflex rescue to fail-closed (C3)
-4. Route HotLoad through sandbox validation (C4)
-5. Generate random Erlang cookie (C5)
+1. **Close C1/C2 immediately**
+   - Authenticate `/mcp`, require `agent_id`, remove unchecked execution path.
+2. **Finalize identity enforcement**
+   - Bind signed request identity to principal; fail unknown identity in security mode.
+3. **Cut over runtime authorization paths**
+   - Executor + consensus force + restricted signal subscriptions to full `authorize/4`.
+4. **Enforce trust-tier sandboxing at execution time**
+   - Ensure computed sandbox level actually gates action dispatch.
+5. **Clean residual medium issues**
+   - CWD `.env`, `String.to_atom`, memory agent scoping, dev eval operational hardening.
 
-### Phase 2 — Short-term (H1-H15)
-6. Fix identity verification to require signed_request (H1)
-7. Fail-closed on unregistered identities (H2)
-8. Audit `can?/3` callers (H3)
-9. Add auth to dashboard (H5)
-10. Add authorization to force_approve/force_reject (H6)
-11. Make audit persistence non-optional (H7)
-12. Integrate SafePath into filesystem sandbox (H8)
-13. Set capability_signing_required: true (H10)
-14. Fix code sandbox dynamic dispatch (H9, H15)
-15. Add HTTP rate limiting (H13)
+---
 
-### Phase 3 — Medium-term (M1-M20)
-### Phase 4 — Long-term (L1-L10)
+## Notes For Current Cleanup Work
+
+- Removing `/api/bridge` and `/api/signals` is still worthwhile and lowers risk.
+- After removing those routes, the highest-risk remaining surface is still `/mcp` until C1/C2 are fixed.
