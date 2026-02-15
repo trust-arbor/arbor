@@ -142,7 +142,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp build_request(client, messages, call_opts, adapter_opts) do
     %Request{
-      provider: adapter_opts.provider || client.default_provider,
+      provider: to_string(adapter_opts.provider || client.default_provider),
       model: resolve_model(adapter_opts) || "",
       messages: build_messages(messages, adapter_opts.system_prompt),
       tools: adapter_opts.tools |> List.wrap() |> Enum.map(&Tool.as_definition/1),
