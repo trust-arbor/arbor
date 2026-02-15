@@ -15,11 +15,6 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_id =
-      if connected?(socket) do
-        safe_subscribe()
-      end
-
     stages = safe_stages()
     items_by_stage = safe_load_items(stages)
     status = safe_status()
@@ -33,43 +28,39 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
         items_by_stage: items_by_stage,
         selected_item: nil,
         pipeline_status: status,
-        total_items: total,
-        subscription_id: subscription_id
+        total_items: total
       )
+
+    socket =
+      if connected?(socket) do
+        Arbor.Web.SignalLive.subscribe(socket, "sdlc.*", &reload_roadmap/1)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
-  def handle_info({:signal_received, _signal}, socket) do
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp reload_roadmap(socket) do
     stages = socket.assigns.stages
     items_by_stage = safe_load_items(stages)
     status = safe_status()
     total = items_by_stage |> Map.values() |> List.flatten() |> length()
 
-    socket =
-      socket
-      |> assign(:items_by_stage, items_by_stage)
-      |> assign(:pipeline_status, status)
-      |> assign(:total_items, total)
-
-    {:noreply, socket}
+    assign(socket,
+      items_by_stage: items_by_stage,
+      pipeline_status: status,
+      total_items: total
+    )
   end
-
-  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("select-item", %{"path" => path}, socket) do
@@ -334,21 +325,5 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
     _ -> %{healthy: false}
   catch
     :exit, _ -> %{healthy: false}
-  end
-
-  defp safe_subscribe do
-    pid = self()
-
-    case Arbor.Signals.subscribe("sdlc.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
   end
 end

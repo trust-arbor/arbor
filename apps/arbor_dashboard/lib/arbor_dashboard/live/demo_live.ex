@@ -57,14 +57,6 @@ defmodule Arbor.Dashboard.Live.DemoLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_ids =
-      if connected?(socket) do
-        :timer.send_interval(@refresh_interval_ms, :refresh)
-        subscribe_to_signals()
-      else
-        []
-      end
-
     socket =
       assign(socket,
         page_title: "Self-Healing Demo",
@@ -72,7 +64,6 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         active_faults: safe_active_faults(),
         available_faults: safe_available_faults(),
         feed: [],
-        subscription_ids: subscription_ids,
         monitor_status: safe_monitor_status(),
         # Consensus tracking
         current_proposal: nil,
@@ -97,14 +88,26 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         timer_ref: nil
       )
 
+    socket =
+      if connected?(socket) do
+        :timer.send_interval(@refresh_interval_ms, :refresh)
+
+        socket
+        |> Arbor.Web.SignalLive.subscribe_raw("demo.*")
+        |> Arbor.Web.SignalLive.subscribe_raw("monitor.*")
+        |> Arbor.Web.SignalLive.subscribe_raw("consensus.*")
+        |> Arbor.Web.SignalLive.subscribe_raw("code.*")
+        |> Arbor.Web.SignalLive.subscribe_raw("debug_agent.*")
+      else
+        socket
+      end
+
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    for sub_id <- socket.assigns[:subscription_ids] || [] do
-      safe_unsubscribe(sub_id)
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
@@ -1078,41 +1081,6 @@ defmodule Arbor.Dashboard.Live.DemoLive do
     _ -> %{process_count: 0, memory_mb: 0, anomaly_count: 0}
   catch
     :exit, _ -> %{process_count: 0, memory_mb: 0, anomaly_count: 0}
-  end
-
-  defp subscribe_to_signals do
-    pid = self()
-    patterns = ["demo.*", "monitor.*", "consensus.*", "code.*", "debug_agent.*"]
-
-    patterns
-    |> Enum.map(&subscribe_pattern(&1, pid))
-    |> Enum.reject(&is_nil/1)
-  rescue
-    _ -> []
-  catch
-    :exit, _ -> []
-  end
-
-  defp subscribe_pattern(pattern, pid) do
-    callback = fn signal ->
-      send(pid, {:signal_received, signal})
-      :ok
-    end
-
-    case Arbor.Signals.subscribe(pattern, callback) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  end
-
-  defp safe_unsubscribe(nil), do: :ok
-
-  defp safe_unsubscribe(sub_id) do
-    Arbor.Signals.unsubscribe(sub_id)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   # ── Phase 4: Thinking state updates ───────────────────────────────

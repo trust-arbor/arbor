@@ -15,11 +15,6 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_id =
-      if connected?(socket) do
-        safe_subscribe()
-      end
-
     {proposals, decisions, stats, topics} = safe_load_all()
 
     socket =
@@ -32,51 +27,37 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         selected_decision: nil,
         selected_events: [],
         status_filter: :all,
-        tab: :proposals,
-        subscription_id: subscription_id
+        tab: :proposals
       )
       |> stream(:proposals, proposals)
       |> stream(:decisions, decisions)
+
+    socket =
+      if connected?(socket) do
+        Arbor.Web.SignalLive.subscribe(socket, "consensus.*", &reload_consensus/1)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
-  def handle_info({:signal_received, signal}, socket) do
-    case signal.type do
-      type when type in ~w(evaluation_completed decision_rendered advice_rendered)a ->
-        {proposals, decisions, stats, _topics} = safe_load_all()
-
-        socket =
-          socket
-          |> assign(:stats, stats)
-          |> stream(:proposals, proposals, reset: true)
-          |> stream(:decisions, decisions, reset: true)
-
-        {:noreply, socket}
-
-      type when type in ~w(topic_registered topic_removed)a ->
-        {:noreply, assign(socket, :topics, safe_topics())}
-
-      _ ->
-        {:noreply, socket}
-    end
-  end
-
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp reload_consensus(socket) do
+    {proposals, decisions, stats, topics} = safe_load_all()
+
+    socket
+    |> assign(stats: stats, topics: topics)
+    |> stream(:proposals, proposals, reset: true)
+    |> stream(:decisions, decisions, reset: true)
+  end
 
   @impl true
   def handle_event("select-tab", %{"tab" => tab}, socket) do
@@ -444,21 +425,5 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     _ -> []
   catch
     :exit, _ -> []
-  end
-
-  defp safe_subscribe do
-    pid = self()
-
-    case Arbor.Signals.subscribe("consensus.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
   end
 end

@@ -16,14 +16,13 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {signals, stats, subscription_id} =
+    {signals, stats} =
       if connected?(socket) do
-        {sub_id, recent} = safe_subscribe_and_load()
         stats = safe_stats()
         Process.send_after(self(), :refresh_stats, @stats_refresh_interval)
-        {recent, stats, sub_id}
+        {safe_recent(limit: 50), stats}
       else
-        {[], default_stats(), nil}
+        {[], default_stats()}
       end
 
     socket =
@@ -34,25 +33,23 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         selected_signal: nil,
         category_filter: :all,
         paused: false,
-        subscription_id: subscription_id,
         categories: Map.keys(Icons.category_icons())
       )
       |> stream(:signals, signals)
+
+    socket =
+      if connected?(socket) do
+        Arbor.Web.SignalLive.subscribe_raw(socket, "*")
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
@@ -262,39 +259,6 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
       {:ok, json} -> json
       _ -> inspect(data, pretty: true)
     end
-  end
-
-  defp safe_subscribe_and_load do
-    pid = self()
-
-    sub_id =
-      try do
-        case Arbor.Signals.subscribe("*", fn signal ->
-               send(pid, {:signal_received, signal})
-               :ok
-             end) do
-          {:ok, id} -> id
-          _ -> nil
-        end
-      rescue
-        _ -> nil
-      catch
-        :exit, _ -> nil
-      end
-
-    recent =
-      try do
-        case Arbor.Signals.recent(limit: 50) do
-          {:ok, signals} -> signals
-          _ -> []
-        end
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    {sub_id, recent}
   end
 
   defp safe_recent(opts) do
