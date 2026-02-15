@@ -83,8 +83,8 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
   end
 
   describe "trust_tier/0" do
-    test "returns :probationary" do
-      assert Diagnostician.trust_tier() == :probationary
+    test "returns :established" do
+      assert Diagnostician.trust_tier() == :established
     end
   end
 

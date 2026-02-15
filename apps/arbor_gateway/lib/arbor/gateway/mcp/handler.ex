@@ -378,7 +378,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
       _ ->
         # Try AgentManager
-        case bridge_call(Arbor.Dashboard.AgentManager, :list_agents, []) do
+        case bridge_call(Arbor.Agent.Manager, :list_agents, []) do
           {:ok, agents} when is_list(agents) ->
             if agents == [] do
               "No agents running."
@@ -670,7 +670,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
       _ ->
         # Try dashboard AgentManager
-        case bridge_call(Arbor.Dashboard.AgentManager, :list_agents, []) do
+        case bridge_call(Arbor.Agent.Manager, :list_agents, []) do
           {:ok, [{id, _pid} | _]} -> id
           _ -> nil
         end

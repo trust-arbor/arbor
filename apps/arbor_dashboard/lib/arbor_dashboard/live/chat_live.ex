@@ -12,20 +12,20 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.Agent.{APIAgent, Claude}
-  alias Arbor.Dashboard.{AgentManager, ChatState}
+  alias Arbor.Agent.{APIAgent, Claude, Manager}
+  alias Arbor.Dashboard.ChatState
   alias Arbor.Web.Helpers
 
   @impl true
   def mount(_params, _session, socket) do
     ChatState.init()
 
-    existing_agent =
+    {existing_agent, socket} =
       if connected?(socket) do
-        AgentManager.subscribe()
-        AgentManager.find_first_agent()
+        socket = Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")
+        {Manager.find_first_agent(), socket}
       else
-        :not_found
+        {:not_found, socket}
       end
 
     available_models =
@@ -156,7 +156,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
         false ->
           # Agent is stopped — try to resume it
-          case Arbor.Dashboard.AgentManager.resume_agent(agent_id) do
+          case Manager.resume_agent(agent_id) do
             {:ok, ^agent_id, pid} ->
               metadata = get_agent_metadata(agent_id)
               {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
@@ -189,7 +189,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
 
       config ->
-        case AgentManager.start_agent(config) do
+        case Manager.start_agent(config) do
           {:ok, agent_id, pid} ->
             metadata = %{model_config: config, backend: config.backend}
             socket = reconnect_to_agent(socket, agent_id, pid, metadata)
@@ -209,7 +209,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_event("stop-agent", _params, socket) do
     if socket.assigns[:agent_id] do
-      AgentManager.stop_agent(socket.assigns.agent_id)
+      Manager.stop_agent(socket.assigns.agent_id)
     end
 
     {:noreply, clear_agent_assigns(socket)}
@@ -257,7 +257,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         end
 
         # Send to group (triggers agent responses)
-        AgentManager.group_send(
+        Manager.group_send(
           socket.assigns.group_pid,
           "human_primary",
           "User",
@@ -424,7 +424,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       # Resume any stopped agents from the selection
       Enum.each(selected_ids, fn agent_id ->
         unless Arbor.Agent.running?(agent_id) do
-          AgentManager.resume_agent(agent_id)
+          Manager.resume_agent(agent_id)
         end
       end)
 
@@ -447,10 +447,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       participant_specs = [human_spec | agent_specs]
 
       # Create the group
-      case AgentManager.create_group(group_name, participant_specs) do
+      case Manager.create_group(group_name, participant_specs) do
         {:ok, group_pid} ->
           {group_id, _} =
-            AgentManager.list_groups()
+            Manager.list_groups()
             |> Enum.find(fn {_id, pid} -> pid == group_pid end)
 
           try do
@@ -609,6 +609,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, group_participants: updated_participants)}
   end
 
+  # Signal: agent lifecycle events (started, stopped, chat_message)
+  def handle_info({:signal_received, %{category: :agent} = signal}, socket) do
+    handle_agent_signal(signal, socket)
+  end
+
+  # Signal: all other signals (agent activity, heartbeat, etc.)
   def handle_info({:signal_received, signal}, socket) do
     # Only show signals related to our agent
     agent_id = socket.assigns.agent_id
@@ -647,25 +653,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  # PubSub: another tab started an agent — reconnect if we have none
-  def handle_info({:agent_started, agent_id, pid, model_config}, socket) do
-    if socket.assigns[:agent] == nil do
-      metadata = %{
-        model_config: model_config,
-        backend: model_config[:backend] || model_config.backend
-      }
-
-      {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  # PubSub: agent was stopped (by another tab or programmatically)
-  def handle_info({:agent_stopped, _agent_id}, socket) do
-    {:noreply, clear_agent_assigns(socket)}
-  end
-
   # Process monitor: agent crashed or was killed
   def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
     if pid == socket.assigns[:agent] do
@@ -675,9 +662,40 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  # PubSub: external chat message (e.g., from Claude Code via AgentManager.chat/3)
-  def handle_info({:chat_message, %{role: role, content: content} = payload}, socket) do
-    sender = Map.get(payload, :sender, "External")
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # ── Agent Lifecycle Signal Handlers ────────────────────────────────────
+
+  # Another tab started an agent — reconnect if we have none
+  defp handle_agent_signal(%{type: :started} = signal, socket) do
+    if socket.assigns[:agent] == nil do
+      %{agent_id: agent_id, model_config: model_config} = signal.data
+      pid = Map.get(signal.data, :pid)
+
+      metadata = %{
+        model_config: model_config,
+        backend: model_config[:backend] || Map.get(model_config, :backend)
+      }
+
+      if pid && Process.alive?(pid) do
+        {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
+      else
+        {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Agent was stopped (by another tab or programmatically)
+  defp handle_agent_signal(%{type: :stopped}, socket) do
+    {:noreply, clear_agent_assigns(socket)}
+  end
+
+  # External chat message (e.g., from Claude Code via Manager.chat/3)
+  defp handle_agent_signal(%{type: :chat_message} = signal, socket) do
+    %{role: role, content: content} = signal.data
+    sender = Map.get(signal.data, :sender, "External")
 
     msg = %{
       id: "msg-#{System.unique_integer([:positive])}",
@@ -705,7 +723,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, socket}
   end
 
-  def handle_info(_msg, socket), do: {:noreply, socket}
+  # Unknown agent signal — ignore
+  defp handle_agent_signal(_signal, socket), do: {:noreply, socket}
 
   # ── Query Response Helpers ────────────────────────────────────────────
 
@@ -1235,8 +1254,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
           >
             <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
-              <%= if @current_model do %>
-                Chat with {@current_model.label} ({@current_model.provider})
+              <%= if @current_model && @current_model[:label] do %>
+                Chat with {@current_model.label} ({@current_model[:provider]})
               <% else %>
                 Chat with Claude
               <% end %>
@@ -1828,7 +1847,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Agent already exists — just reconnect to the running instance
   defp reconnect_existing_agent(socket) do
-    case AgentManager.find_first_agent() do
+    case Manager.find_first_agent() do
       {:ok, agent_id, pid, metadata} ->
         reconnect_to_agent(socket, agent_id, pid, metadata)
 

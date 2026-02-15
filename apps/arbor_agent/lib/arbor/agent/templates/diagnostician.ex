@@ -6,8 +6,8 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   and proposing fixes via governance. Works with Arbor.Monitor for detection
   and the consensus council for fix approval.
 
-  Trust tier is `:probationary` — can analyze and propose, but cannot
-  hot-reload code without council approval.
+  Trust tier is `:established` — a trusted system agent that can analyze
+  and propose, but still requires council approval for remediation actions.
   """
 
   @behaviour Arbor.Agent.Template
@@ -59,7 +59,7 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   end
 
   @impl true
-  def trust_tier, do: :probationary
+  def trust_tier, do: :established
 
   @impl true
   def initial_goals do

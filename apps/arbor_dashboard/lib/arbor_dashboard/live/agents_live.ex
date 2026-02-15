@@ -77,7 +77,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   end
 
   def handle_event("stop-agent", %{"id" => agent_id}, socket) do
-    Arbor.Dashboard.AgentManager.stop_agent(agent_id)
+    Arbor.Agent.Manager.stop_agent(agent_id)
     {running, profiles} = safe_load_agents()
 
     socket =
@@ -399,6 +399,37 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
             </div>
           </div>
 
+          <%!-- Model config --%>
+          <div :if={detail.model_config} style="margin-bottom: 1.5rem;">
+            <h4 style="margin-bottom: 0.75rem;">Model Configuration</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+              <div :if={model_field(detail.model_config, :provider)}>
+                <strong>Provider:</strong>
+                <span>{model_field(detail.model_config, :provider)}</span>
+              </div>
+              <div :if={
+                model_field(detail.model_config, :id) || model_field(detail.model_config, :model)
+              }>
+                <strong>Model:</strong>
+                <code style="font-size: 0.85em;">
+                  {model_field(detail.model_config, :id) || model_field(detail.model_config, :model)}
+                </code>
+              </div>
+              <div :if={model_field(detail.model_config, :backend)}>
+                <strong>Backend:</strong>
+                <.badge label={to_string(model_field(detail.model_config, :backend))} color={:blue} />
+              </div>
+              <div :if={model_field(detail.model_config, :temperature)}>
+                <strong>Temperature:</strong>
+                <span>{model_field(detail.model_config, :temperature)}</span>
+              </div>
+              <div :if={model_field(detail.model_config, :max_tokens)}>
+                <strong>Max tokens:</strong>
+                <span>{model_field(detail.model_config, :max_tokens)}</span>
+              </div>
+            </div>
+          </div>
+
           <%!-- Running status --%>
           <div :if={detail.running} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Running Instance</h4>
@@ -473,7 +504,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
               <div style="display: flex; align-items: center; gap: 0.5rem;">
                 <span>{goal_icon(goal)}</span>
                 <strong>{goal.description || goal.type}</strong>
-                <.badge :if={goal[:priority]} label={to_string(goal.priority)} color={:gray} />
+                <.badge :if={goal.priority} label={to_string(goal.priority)} color={:gray} />
               </div>
             </div>
           </div>
@@ -513,6 +544,13 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   # ── Helpers ──────────────────────────────────────────────────────────
 
+  # Model config may have atom or string keys depending on source
+  defp model_field(nil, _key), do: nil
+
+  defp model_field(config, key) when is_map(config) do
+    Map.get(config, key) || Map.get(config, to_string(key))
+  end
+
   defp agent_name(profile) do
     case profile do
       %{character: %{name: name}} when is_binary(name) and name != "" -> name
@@ -527,7 +565,9 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   defp format_thinking_time(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_thinking_time(_), do: ""
 
+  defp tier_color(:full_partner), do: :green
   defp tier_color(:trusted), do: :green
+  defp tier_color(:established), do: :blue
   defp tier_color(:verified), do: :blue
   defp tier_color(:probationary), do: :purple
   defp tier_color(:untrusted), do: :gray
@@ -605,6 +645,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     reasoning = safe_reasoning_status(agent_id)
     goals = safe_goals(agent_id)
     thinking = safe_thinking(agent_id)
+    model_config = safe_model_config(agent_id, profile, running)
 
     %{
       profile: profile,
@@ -612,8 +653,52 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       executor: executor,
       reasoning: reasoning,
       goals: goals,
-      thinking: thinking
+      thinking: thinking,
+      model_config: model_config
     }
+  end
+
+  defp safe_model_config(agent_id, profile, running) do
+    # Try multiple sources for model config:
+    # 1. Profile metadata (persisted from AgentManager)
+    # 2. Registry metadata (runtime, from AgentManager or Supervisor)
+    # 3. DebugAgent state (for system agents)
+    config =
+      get_in(profile || %{}, [Access.key(:metadata, %{}), :last_model_config]) ||
+        get_in(running || %{}, [Access.key(:metadata, %{}), :model_config]) ||
+        safe_debug_agent_config(agent_id)
+
+    config
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp safe_debug_agent_config(agent_id) do
+    # For DebugAgent, check the orchestrator session config
+    case Arbor.Agent.Lifecycle.get_host(agent_id) do
+      {:ok, host_pid} ->
+        state = :sys.get_state(host_pid)
+
+        cond do
+          is_map(state) and Map.has_key?(state, :model_config) ->
+            state.model_config
+
+          is_map(state) and Map.has_key?(state, :provider) ->
+            %{provider: state.provider, model: state.model}
+
+          true ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_find_profile(agent_id) do

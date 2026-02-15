@@ -109,8 +109,10 @@ defmodule Arbor.Agent.DebugAgentTest do
   describe "module structure" do
     test "exports expected functions" do
       Code.ensure_loaded!(DebugAgent)
-      assert function_exported?(DebugAgent, :start, 0)
-      assert function_exported?(DebugAgent, :start, 1)
+      assert function_exported?(DebugAgent, :start_managed, 0)
+      assert function_exported?(DebugAgent, :start_managed, 1)
+      assert function_exported?(DebugAgent, :start_link, 0)
+      assert function_exported?(DebugAgent, :start_link, 1)
       assert function_exported?(DebugAgent, :stop, 1)
       assert function_exported?(DebugAgent, :run_bounded, 2)
       assert function_exported?(DebugAgent, :get_state, 1)
@@ -123,7 +125,7 @@ defmodule Arbor.Agent.DebugAgentTest do
       assert specs != []
 
       spec_names = Enum.map(specs, fn {{name, _arity}, _} -> name end)
-      assert :start in spec_names
+      assert :start_managed in spec_names
       assert :stop in spec_names
       assert :run_bounded in spec_names
     end

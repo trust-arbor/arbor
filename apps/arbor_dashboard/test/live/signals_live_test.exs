@@ -23,11 +23,11 @@ defmodule Arbor.Dashboard.Live.SignalsLiveTest do
       assert html =~ "System health"
     end
 
-    test "shows filter bar with All button", %{conn: conn} do
+    test "shows category filter dropdown", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/signals")
 
-      assert html =~ "aw-filter-bar"
-      assert html =~ "All"
+      assert html =~ "toggle-filter-dropdown"
+      assert html =~ "Categories"
     end
 
     test "shows stream container", %{conn: conn} do
