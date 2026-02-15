@@ -28,7 +28,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Anthropic,
-    Arborcli,
     ClaudeCli,
     CodexCli,
     Gemini,
@@ -51,22 +50,10 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     "zai" => Zai,
     "xai" => Xai,
     "gemini" => Gemini,
-    # CLI backends — direct adapters with env cleanup and proper Port execution
+    # CLI backends — direct adapters calling the binary via Port
     "claude_cli" => ClaudeCli,
     "codex_cli" => CodexCli,
-    "gemini_cli" => GeminiCli,
-    # Fallback through Arborcli bridge for others
-    "opencode_cli" => Arborcli,
-    "qwen_cli" => Arborcli
-  }
-
-  # Map CLI provider names to the atoms Arborcli expects
-  @cli_provider_map %{
-    "claude_cli" => :anthropic,
-    "codex_cli" => :openai,
-    "gemini_cli" => :gemini,
-    "opencode_cli" => :opencode,
-    "qwen_cli" => :qwen
+    "gemini_cli" => GeminiCli
   }
 
   @impl true
@@ -181,13 +168,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   defp parse_input(%{prompt: prompt} = input), do: {prompt, input[:system]}
   defp parse_input(prompt) when is_binary(prompt), do: {prompt, nil}
 
-  # For CLI providers, pass the resolved backend atom so Arborcli routes correctly
-  defp build_provider_options(provider) do
-    case Map.get(@cli_provider_map, provider) do
-      nil -> %{}
-      cli_atom -> %{"cli_provider" => cli_atom}
-    end
-  end
+  # CLI providers don't need special options — they route directly via their adapter
+  defp build_provider_options(_provider), do: %{}
 
   # API providers
   defp default_model("lm_studio"), do: "qwen/qwen3-coder-next"
@@ -202,8 +184,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   defp default_model("claude_cli"), do: "sonnet"
   defp default_model("codex_cli"), do: "gpt5"
   defp default_model("gemini_cli"), do: "auto"
-  defp default_model("opencode_cli"), do: "opencode/big-pickle"
-  defp default_model("qwen_cli"), do: "qwen_code"
   defp default_model(_), do: ""
 
   defp extract_text(%{text: text}), do: text

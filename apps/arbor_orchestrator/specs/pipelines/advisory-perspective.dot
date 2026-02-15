@@ -1,0 +1,49 @@
+// Advisory Council — Single Perspective via CLI Agent
+//
+// Runs one advisory perspective through a CLI coding agent (claude, codex, gemini).
+// The CLI agent has built-in tools (file reading, search, shell) so it can
+// research the codebase during its reasoning. No ToolLoop needed — the agent
+// IS the tool loop.
+//
+// Usage (from iex or mix task):
+//   {:ok, graph} = Arbor.Orchestrator.parse(File.read!("apps/arbor_orchestrator/specs/pipelines/advisory-perspective.dot"))
+//   # Override graph attrs for the specific run:
+//   graph = %{graph | attrs: Map.merge(graph.attrs, %{
+//     "perspective" => "security",
+//     "provider" => "codex_cli",
+//     "question" => "Should we restructure into minimal core + plugins?",
+//     "briefing_path" => ".arbor/council/2026-02-15-arbor-v2-minimal-core/briefing.md",
+//     "skill_path" => ".arbor/skills/advisory/security/SKILL.md"
+//   })}
+//   {:ok, result} = Arbor.Orchestrator.Engine.run(graph)
+
+digraph advisory_perspective {
+  // Graph-level attrs — overridden at runtime
+  goal="Advisory council perspective evaluation"
+  perspective="security"
+  provider="codex_cli"
+  question="Evaluate the proposal from your perspective."
+  briefing_path=".arbor/council/2026-02-15-arbor-v2-minimal-core/briefing.md"
+  skill_path=".arbor/skills/advisory/security/SKILL.md"
+
+  start [type="start"]
+
+  // The CLI agent researches the codebase and produces structured analysis.
+  // system_prompt loaded from skill file at runtime via prompt template.
+  // The agent can read files, search code, etc. with its built-in tools.
+  // llm_provider and system_prompt injected at runtime from graph attrs.
+  // prompt is the full question + briefing content.
+  evaluate [
+    type="codergen"
+    simulate="false"
+    label="Run advisory evaluation"
+    max_tokens="16384"
+    temperature="0.7"
+    timeout="600000"
+  ]
+
+  done [type="exit"]
+
+  start -> evaluate
+  evaluate -> done
+}

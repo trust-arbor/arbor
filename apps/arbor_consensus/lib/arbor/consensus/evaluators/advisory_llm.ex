@@ -85,23 +85,28 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — distributes across different
-  # providers and models for genuine viewpoint diversity.
+  # Default provider:model per perspective — distributes across 4 CLI agents
+  # for viewpoint diversity. Each CLI agent can read source code during reasoning.
   # Override per-call via opts[:provider_model].
+  #
+  # claude (anthropic): security, vision, general — complex/critical analysis
+  # codex (openai): consistency, performance, privacy — technical/analytical
+  # opencode: brainstorming, emergence, capability — creative/exploratory
+  # gemini: stability, resource_usage, user_experience, generalization — practical
   @perspective_models %{
-    brainstorming: "openrouter:deepseek/deepseek-r1",
-    user_experience: "gemini:gemini-2.5-flash",
-    security: "anthropic:claude-sonnet-4-5-20250929",
-    privacy: "openai:gpt-4.1",
-    stability: "xai:grok-4.1-fast",
-    capability: "zai:glm-5",
-    emergence: "openrouter:qwen/qwen3-coder",
-    vision: "anthropic:claude-sonnet-4-5-20250929",
-    performance: "lm_studio:qwen3-coder-8b",
-    generalization: "ollama:deepseek-v3.2:cloud",
-    resource_usage: "openrouter:arcee-ai/trinity-large-preview:free",
-    consistency: "openai:gpt-4.1-mini",
-    general: "anthropic:claude-sonnet-4-5-20250929"
+    security: "anthropic:claude",
+    vision: "anthropic:claude",
+    general: "anthropic:claude",
+    consistency: "openai:codex",
+    performance: "openai:codex",
+    privacy: "openai:codex",
+    brainstorming: "opencode:opencode",
+    emergence: "opencode:opencode",
+    capability: "opencode:opencode",
+    stability: "gemini:gemini",
+    resource_usage: "gemini:gemini",
+    user_experience: "gemini:gemini",
+    generalization: "gemini:gemini"
   }
 
   # ============================================================================
@@ -156,15 +161,22 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     )
 
     # Support :llm_fn override for testing (same pattern as orchestrator handlers)
+    backend = Keyword.get(opts, :backend)
+
     llm_fn =
       Keyword.get_lazy(opts, :llm_fn, fn ->
         fn sys, usr ->
-          LLMBridge.complete(sys, usr,
+          bridge_opts = [
             provider: provider,
             model: model,
             max_tokens: Keyword.get(opts, :max_tokens, 4096),
             temperature: Keyword.get(opts, :temperature, 0.7)
-          )
+          ]
+
+          bridge_opts =
+            if backend, do: Keyword.put(bridge_opts, :backend, backend), else: bridge_opts
+
+          LLMBridge.complete(sys, usr, bridge_opts)
         end
       end)
 
@@ -198,7 +210,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   def resolve_provider_model(perspective, opts \\ []) do
     provider_model =
       Keyword.get(opts, :provider_model) ||
-        Map.get(@perspective_models, perspective, "anthropic:claude-sonnet-4-5-20250929")
+        Map.get(@perspective_models, perspective, "anthropic:claude")
 
     parse_provider_model(provider_model)
   end
@@ -206,7 +218,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp parse_provider_model(provider_model) when is_binary(provider_model) do
     case String.split(provider_model, ":", parts: 2) do
       [provider, model] -> {provider, model}
-      [provider] -> {provider, "claude-sonnet-4-5-20250929"}
+      [provider] -> {provider, provider}
     end
   end
 
