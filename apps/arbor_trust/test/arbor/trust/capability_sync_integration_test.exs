@@ -21,6 +21,13 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   @moduletag :integration
 
   setup do
+    # Start Security services (required for grant/list_capabilities/authorize)
+    start_supervised!({Arbor.Security.Identity.Registry, []})
+    start_supervised!({Arbor.Security.SystemAuthority, []})
+    start_supervised!({Arbor.Security.CapabilityStore, []})
+    start_supervised!({Arbor.Security.Reflex.Registry, []})
+    start_supervised!({Arbor.Security.Constraint.RateLimiter, []})
+
     # Start Trust services
     start_supervised!({EventStore, []})
     start_supervised!({Store, []})
