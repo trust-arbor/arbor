@@ -2,17 +2,15 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
   @moduledoc """
   Behavioral test: agent heartbeat cycle.
 
-  Verifies the full heartbeat loop:
-  1. Agent starts with identity and capabilities
-  2. Heartbeat fires (seed_heartbeat_cycle)
-  3. Cognitive mode selected based on state
-  4. HeartbeatLLM called with appropriate prompt
-  5. Response parsed (JSON with thoughts, observations, goals, etc.)
-  6. Memory updated (working memory, goals via ETS)
-  7. Signals emitted for observability
+  Verifies heartbeat subsystems that are used by the DOT Session:
+  1. HeartbeatPrompt builds valid prompts with cognitive modes
+  2. CognitivePrompts returns mode-specific instructions
+  3. Heartbeat responses parse correctly
+  4. Working memory persists via ETS
+  5. Goal store lifecycle works per-agent
 
-  This is the core agent autonomy loop — if it breaks during migration,
-  agents go silent.
+  The actual heartbeat loop is managed by the DOT Session graph.
+  These tests verify the building blocks it uses.
   """
   use Arbor.Test.BehavioralCase
 
