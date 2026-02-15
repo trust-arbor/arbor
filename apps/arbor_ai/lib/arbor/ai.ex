@@ -190,6 +190,22 @@ defmodule Arbor.AI do
     # SECURITY: Snapshot config if called directly (not via generate_text/2)
     opts = snapshot_config(opts)
 
+    # Strangler fig: try unified Client first, fall back to ReqLLM
+    case Arbor.AI.UnifiedBridge.generate_text(prompt, opts) do
+      {:ok, response} ->
+        {:ok, response}
+
+      :unavailable ->
+        # Fallback to legacy ReqLLM path
+        generate_text_via_reqllm(prompt, opts)
+
+      {:error, reason} ->
+        Logger.warning("Unified LLM failed, falling back to ReqLLM: #{inspect(reason)}")
+        generate_text_via_reqllm(prompt, opts)
+    end
+  end
+
+  defp generate_text_via_reqllm(prompt, opts) do
     provider = Keyword.fetch!(opts, :provider)
     model = Keyword.fetch!(opts, :model)
     system_prompt = Keyword.get(opts, :system_prompt)
@@ -211,7 +227,7 @@ defmodule Arbor.AI do
       |> maybe_add_thinking(thinking_enabled, thinking_budget)
 
     Logger.debug(
-      "Arbor.AI API generating with #{provider}:#{model}, thinking: #{thinking_enabled}"
+      "Arbor.AI API generating with #{provider}:#{model} via ReqLLM (fallback), thinking: #{thinking_enabled}"
     )
 
     case ReqLLM.generate_text(model_spec, messages, req_opts) do
