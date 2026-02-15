@@ -188,6 +188,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
       Map.get(tool, :input_schema) || Map.get(tool, :parameters) ||
         Map.get(tool, "input_schema") || Map.get(tool, "parameters") || %{}
 
+    # Ensure parameters has "type": "object" — required by OpenAI Chat Completions spec.
+    # Actions with no params (schema: []) produce %{} which strict providers reject.
+    parameters =
+      if parameters == %{} or not Map.has_key?(parameters, "type") do
+        Map.merge(%{"type" => "object", "properties" => %{}}, parameters)
+      else
+        parameters
+      end
+
     function =
       %{"name" => to_string(name), "parameters" => parameters}
       |> maybe_put("description", if(description, do: to_string(description)))
