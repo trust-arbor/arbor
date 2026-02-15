@@ -1,0 +1,84 @@
+// LLM Request Router
+//
+// Tier-based routing graph executed by Engine.run at runtime.
+// Classification and filter pre-computation happen in GraphRouter
+// before engine invocation — this graph does pure decision-making.
+//
+// Context inputs (initial_values from GraphRouter):
+//   tier, min_trust, exclude, budget_status
+//   avail_<backend>, trust_<backend>, quota_<backend>, free_<backend>
+//
+// Context outputs:
+//   selected_backend, selected_model, routing_reason
+
+digraph llm_routing {
+  label="LLM Request Router"
+  rankdir=TB
+
+  start [shape=Mdiamond, label="Start"]
+  done  [shape=Msquare, label="Done"]
+  failed [shape=Msquare, label="Failed"]
+
+  // ============================================================
+  // Tier dispatch — conditional edges branch on pre-computed tier
+  // ============================================================
+  route_tier [shape=diamond, label="Route by Tier"]
+
+  // ============================================================
+  // Per-tier selection nodes
+  // Candidates are JSON arrays: [["backend","model"], ...]
+  // The routing.select handler filters by pre-computed context flags
+  // ============================================================
+  select_critical [type="routing.select", label="Select Critical",
+    candidates="[[\"anthropic\",\"opus\"],[\"anthropic\",\"sonnet\"]]"]
+
+  select_complex [type="routing.select", label="Select Complex",
+    candidates="[[\"anthropic\",\"sonnet\"],[\"openai\",\"gpt5\"],[\"gemini\",\"auto\"]]"]
+
+  select_moderate [type="routing.select", label="Select Moderate",
+    candidates="[[\"gemini\",\"auto\"],[\"anthropic\",\"sonnet\"],[\"openai\",\"gpt5\"]]"]
+
+  select_simple [type="routing.select", label="Select Simple",
+    candidates="[[\"opencode\",\"grok\"],[\"qwen\",\"qwen_code\"],[\"gemini\",\"auto\"]]"]
+
+  select_trivial [type="routing.select", label="Select Trivial",
+    candidates="[[\"opencode\",\"grok\"],[\"qwen\",\"qwen_code\"]]"]
+
+  // ============================================================
+  // Fallback — tried when tier-specific selection fails
+  // ============================================================
+  select_fallback [type="routing.select", label="Select Fallback",
+    candidates="[[\"lmstudio\",\"auto\"],[\"ollama\",\"auto\"],[\"anthropic\",\"sonnet\"],[\"openai\",\"gpt4\"],[\"gemini\",\"auto\"]]"]
+
+  // ============================================================
+  // Edges
+  // ============================================================
+
+  // Entry
+  start -> route_tier
+
+  // Tier branching
+  route_tier -> select_critical  [condition="context.tier=critical"]
+  route_tier -> select_complex   [condition="context.tier=complex"]
+  route_tier -> select_moderate  [condition="context.tier=moderate"]
+  route_tier -> select_simple    [condition="context.tier=simple"]
+  route_tier -> select_trivial   [condition="context.tier=trivial"]
+
+  // Success paths
+  select_critical -> done  [condition="outcome=success"]
+  select_complex  -> done  [condition="outcome=success"]
+  select_moderate -> done  [condition="outcome=success"]
+  select_simple   -> done  [condition="outcome=success"]
+  select_trivial  -> done  [condition="outcome=success"]
+
+  // Failure paths — all go to fallback
+  select_critical -> select_fallback  [condition="outcome=fail"]
+  select_complex  -> select_fallback  [condition="outcome=fail"]
+  select_moderate -> select_fallback  [condition="outcome=fail"]
+  select_simple   -> select_fallback  [condition="outcome=fail"]
+  select_trivial  -> select_fallback  [condition="outcome=fail"]
+
+  // Fallback outcomes
+  select_fallback -> done    [condition="outcome=success"]
+  select_fallback -> failed  [condition="outcome=fail"]
+}
