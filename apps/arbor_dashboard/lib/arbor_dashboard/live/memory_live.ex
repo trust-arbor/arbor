@@ -21,12 +21,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   def mount(%{"agent_id" => agent_id}, _session, socket) do
     ChatState.init()
 
-    subscription_id =
-      if connected?(socket) do
-        Process.send_after(self(), :refresh, @refresh_interval)
-        safe_subscribe()
-      end
-
     socket =
       socket
       |> assign(
@@ -34,12 +28,25 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         agent_id: agent_id,
         active_tab: "overview",
         expanded_section: nil,
-        subscription_id: subscription_id,
         tab_data: %{},
-        error: nil,
-        signal_reload_pending: false
+        error: nil
       )
       |> load_tab_data("overview", agent_id)
+
+    socket =
+      if connected?(socket) do
+        Process.send_after(self(), :refresh, @refresh_interval)
+
+        Arbor.Web.SignalLive.subscribe(socket, "memory.*", fn s ->
+          if aid = s.assigns.agent_id do
+            load_tab_data(s, s.assigns.active_tab, aid)
+          else
+            s
+          end
+        end)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
@@ -53,7 +60,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         agent_id: nil,
         active_tab: nil,
         expanded_section: nil,
-        subscription_id: nil,
         tab_data: %{},
         error: nil,
         available_agents: discover_agents()
@@ -64,15 +70,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   # ── Events ────────────────────────────────────────────────────────
@@ -142,27 +140,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   @impl true
   def handle_info(:refresh, socket) do
     Process.send_after(self(), :refresh, @refresh_interval)
-
-    if agent_id = socket.assigns.agent_id do
-      {:noreply, load_tab_data(socket, socket.assigns.active_tab, agent_id)}
-    else
-      {:noreply, socket}
-    end
-  end
-
-  def handle_info({:signal_received, _signal}, socket) do
-    # Debounce signal-triggered reloads to prevent feedback loops.
-    # Multiple signals within 500ms only trigger one reload.
-    if socket.assigns[:signal_reload_pending] do
-      {:noreply, socket}
-    else
-      Process.send_after(self(), :signal_reload, 500)
-      {:noreply, assign(socket, signal_reload_pending: true)}
-    end
-  end
-
-  def handle_info(:signal_reload, socket) do
-    socket = assign(socket, signal_reload_pending: false)
 
     if agent_id = socket.assigns.agent_id do
       {:noreply, load_tab_data(socket, socket.assigns.active_tab, agent_id)}
@@ -1097,31 +1074,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp caps(nil), do: []
   defp caps(sk), do: Map.get(sk, :capabilities, [])
-
-  defp safe_subscribe do
-    pid = self()
-
-    case Arbor.Signals.subscribe("memory.*", &maybe_forward_signal(&1, pid)) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
-  defp maybe_forward_signal(signal, pid) do
-    case Process.info(pid, :message_queue_len) do
-      {:message_queue_len, len} when len < 500 ->
-        send(pid, {:signal_received, signal})
-
-      _ ->
-        :ok
-    end
-
-    :ok
-  end
 
   defp safe_call(fun) do
     fun.()

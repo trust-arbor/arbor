@@ -15,11 +15,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_id =
-      if connected?(socket) do
-        safe_subscribe()
-      end
-
     {running, profiles} = safe_load_agents()
 
     running_ids = safe_running_ids()
@@ -32,43 +27,40 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
         profile_count: length(profiles),
         running_ids: running_ids,
         selected_agent: nil,
-        agent_detail: nil,
-        subscription_id: subscription_id
+        agent_detail: nil
       )
       |> stream_configure(:agents, dom_id: &"agent-#{&1.agent_id}")
       |> stream(:agents, profiles)
+
+    socket =
+      if connected?(socket) do
+        Arbor.Web.SignalLive.subscribe(socket, "agent.*", &reload_agents/1)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
-  def handle_info({:signal_received, _signal}, socket) do
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp reload_agents(socket) do
     {running, profiles} = safe_load_agents()
 
-    socket =
-      socket
-      |> assign(:running_count, length(running))
-      |> assign(:profile_count, length(profiles))
-      |> assign(:running_ids, safe_running_ids())
-      |> stream(:agents, profiles, reset: true)
-
-    {:noreply, socket}
+    socket
+    |> assign(
+      running_count: length(running),
+      profile_count: length(profiles),
+      running_ids: safe_running_ids()
+    )
+    |> stream(:agents, profiles, reset: true)
   end
-
-  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("select-agent", %{"id" => agent_id}, socket) do
@@ -680,21 +672,5 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     _ -> []
   catch
     :exit, _ -> []
-  end
-
-  defp safe_subscribe do
-    pid = self()
-
-    case Arbor.Signals.subscribe("agent.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
   end
 end

@@ -20,12 +20,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def mount(_params, _session, socket) do
     ChatState.init()
 
-    {subscription_ids, existing_agent} =
+    existing_agent =
       if connected?(socket) do
         AgentManager.subscribe()
-        {safe_subscribe(), AgentManager.find_first_agent()}
+        AgentManager.find_first_agent()
       else
-        {nil, :not_found}
+        :not_found
       end
 
     available_models =
@@ -42,7 +42,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         input: "",
         loading: false,
         error: nil,
-        subscription_ids: subscription_ids,
         available_models: available_models,
         current_model: nil,
         chat_backend: nil,
@@ -114,6 +113,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       |> stream(:actions, [])
       |> stream(:llm_interactions, [])
 
+    # Subscribe to signals with backpressure (raw mode — we use individual signals)
+    socket =
+      if connected?(socket) do
+        socket
+        |> Arbor.Web.SignalLive.subscribe_raw("agent.*")
+        |> Arbor.Web.SignalLive.subscribe_raw("memory.*")
+      else
+        socket
+      end
+
     # Reconnect to existing agent if one is running
     socket =
       case existing_agent do
@@ -168,17 +177,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def terminate(_reason, socket) do
     # Agent survives navigation — managed by Supervisor, not LiveView.
     # Only unsubscribe from signals.
-    case socket.assigns[:subscription_ids] do
-      {agent_sub, memory_sub} ->
-        safe_unsubscribe(agent_sub)
-        safe_unsubscribe(memory_sub)
-
-      sub_id when is_binary(sub_id) ->
-        safe_unsubscribe(sub_id)
-
-      _ ->
-        :ok
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
@@ -2094,55 +2093,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     _ -> nil
   catch
     :exit, _ -> nil
-  end
-
-  # Max messages we allow in the LiveView mailbox before dropping signals.
-  # Prevents signal storms from making the UI unresponsive.
-  @max_signal_queue 500
-
-  defp safe_subscribe do
-    pid = self()
-
-    handler = fn signal ->
-      # Check queue pressure before sending — drop signals when overwhelmed
-      case Process.info(pid, :message_queue_len) do
-        {:message_queue_len, len} when len < @max_signal_queue ->
-          send(pid, {:signal_received, signal})
-
-        _ ->
-          :ok
-      end
-
-      :ok
-    end
-
-    agent_sub =
-      case Arbor.Signals.subscribe("agent.*", handler) do
-        {:ok, id} -> id
-        _ -> nil
-      end
-
-    memory_sub =
-      case Arbor.Signals.subscribe("memory.*", handler) do
-        {:ok, id} -> id
-        _ -> nil
-      end
-
-    {agent_sub, memory_sub}
-  rescue
-    _ -> {nil, nil}
-  catch
-    :exit, _ -> {nil, nil}
-  end
-
-  defp safe_unsubscribe(nil), do: :ok
-
-  defp safe_unsubscribe(sub_id) do
-    Arbor.Signals.unsubscribe(sub_id)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   defp safe_call(fun) do

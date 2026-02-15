@@ -15,11 +15,11 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {activity, subscription_id} =
+    activity =
       if connected?(socket) do
-        {safe_recent(limit: 100), safe_subscribe()}
+        safe_recent(limit: 100)
       else
-        {[], nil}
+        []
       end
 
     stats = compute_stats(activity)
@@ -34,25 +34,23 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
         agent_filter: nil,
         paused: false,
         selected_event: nil,
-        subscription_id: subscription_id,
         categories: Map.keys(Icons.category_icons())
       )
       |> stream(:activity, activity)
+
+    socket =
+      if connected?(socket) do
+        Arbor.Web.SignalLive.subscribe_raw(socket, "*")
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      try do
-        Arbor.Signals.unsubscribe(sub_id)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
@@ -425,30 +423,5 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
     _ -> []
   catch
     :exit, _ -> []
-  end
-
-  defp safe_subscribe do
-    pid = self()
-
-    case Arbor.Signals.subscribe("*", &maybe_forward_signal(&1, pid)) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
-  defp maybe_forward_signal(signal, pid) do
-    case Process.info(pid, :message_queue_len) do
-      {:message_queue_len, len} when len < 500 ->
-        send(pid, {:signal_received, signal})
-
-      _ ->
-        :ok
-    end
-
-    :ok
   end
 end

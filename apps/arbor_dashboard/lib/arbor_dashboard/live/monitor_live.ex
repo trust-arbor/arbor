@@ -21,14 +21,6 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    subscription_id =
-      if connected?(socket) do
-        :timer.send_interval(@refresh_interval, :refresh)
-        subscribe_to_signals()
-      else
-        nil
-      end
-
     socket =
       socket
       |> assign(:page_title, "Monitor")
@@ -37,16 +29,24 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
       |> assign(:status, safe_fetch_status())
       |> assign(:selected_skill, nil)
       |> assign(:history, %{})
-      |> assign(:subscription_id, subscription_id)
+
+    socket =
+      if connected?(socket) do
+        :timer.send_interval(@refresh_interval, :refresh)
+
+        Arbor.Web.SignalLive.subscribe(socket, "monitor.*", fn s ->
+          assign(s, anomalies: safe_fetch_anomalies())
+        end)
+      else
+        socket
+      end
 
     {:ok, socket}
   end
 
   @impl true
   def terminate(_reason, socket) do
-    if sub_id = socket.assigns[:subscription_id] do
-      safe_unsubscribe(sub_id)
-    end
+    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
@@ -61,11 +61,6 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
       |> update_history(metrics)
 
     {:noreply, socket}
-  end
-
-  def handle_info({:signal_received, _signal}, socket) do
-    # Refresh on any monitor signal
-    {:noreply, assign(socket, anomalies: safe_fetch_anomalies())}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -265,36 +260,6 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
   # ============================================================================
   # Helpers
   # ============================================================================
-
-  defp subscribe_to_signals do
-    pid = self()
-
-    case safe_subscribe("monitor.*", fn signal ->
-           send(pid, {:signal_received, signal})
-           :ok
-         end) do
-      {:ok, id} -> id
-      _ -> nil
-    end
-  end
-
-  defp safe_subscribe(pattern, callback) do
-    Arbor.Signals.subscribe(pattern, callback)
-  rescue
-    _ -> {:error, :unavailable}
-  catch
-    :exit, _ -> {:error, :unavailable}
-  end
-
-  defp safe_unsubscribe(nil), do: :ok
-
-  defp safe_unsubscribe(id) do
-    Arbor.Signals.unsubscribe(id)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
 
   defp safe_fetch_metrics do
     Arbor.Monitor.metrics()
