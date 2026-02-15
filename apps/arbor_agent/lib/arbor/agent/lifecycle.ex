@@ -233,7 +233,7 @@ defmodule Arbor.Agent.Lifecycle do
   # -- Private helpers --
 
   defp maybe_start_session(agent_id, profile, opts) do
-    mode = Application.get_env(:arbor_agent, :session_execution_mode, :legacy)
+    mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
 
     if mode in [:session, :graph] do
       # Include all available actions as tools unless explicitly provided
@@ -271,8 +271,7 @@ defmodule Arbor.Agent.Lifecycle do
         name: {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:host, agent_id}}},
         display_name: profile.display_name || agent_id,
         model: Keyword.get(opts, :model, "arcee-ai/trinity-large-preview:free"),
-        provider: Keyword.get(opts, :provider, :openrouter),
-        heartbeat_enabled: Keyword.get(opts, :heartbeat_enabled, true)
+        provider: Keyword.get(opts, :provider, :openrouter)
       ]
 
       case Arbor.Agent.APIAgent.start_link(host_opts) do

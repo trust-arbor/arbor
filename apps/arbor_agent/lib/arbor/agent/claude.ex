@@ -3,13 +3,12 @@ defmodule Arbor.Agent.Claude do
   Claude Code Host — the execution environment for a Claude agent in Arbor.
 
   This is a Host in the Seed/Host architecture. Portable identity (memory,
-  signals, executor, heartbeat logic) lives in `Arbor.Agent.AgentSeed`.
-  This module provides only Claude-specific functionality:
+  signals, executor) lives in `Arbor.Agent.AgentSeed`. Heartbeat is managed
+  by the DOT Session. This module provides only Claude-specific functionality:
 
   - Query execution via `Arbor.AI.AgentSDK`
   - Thinking extraction from session files
   - Checkpoint persistence
-  - LLM think cycle delegation to `HeartbeatLLM`
 
   ## Usage
 
@@ -18,17 +17,11 @@ defmodule Arbor.Agent.Claude do
   """
 
   use GenServer
-  use Arbor.Agent.HeartbeatLoop
   use Arbor.Agent.AgentSeed
 
   require Logger
 
-  alias Arbor.Agent.{
-    CheckpointManager,
-    HeartbeatLLM,
-    HeartbeatResponse,
-    TimingContext
-  }
+  alias Arbor.Agent.CheckpointManager
 
   alias Arbor.AI.AgentSDK
   alias Arbor.AI.SessionReader
@@ -57,8 +50,6 @@ defmodule Arbor.Agent.Claude do
   - `:model` - Default model to use (default: :sonnet)
   - `:capture_thinking` - Enable thinking capture (default: true)
   - `:memory_enabled` - Enable memory system (default: true)
-  - `:heartbeat_enabled` - Enable heartbeat loop (default: true)
-  - `:heartbeat_interval_ms` - Heartbeat interval in ms (default: 10_000)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -157,15 +148,6 @@ defmodule Arbor.Agent.Claude do
   end
 
   # ============================================================================
-  # AgentSeed Callback
-  # ============================================================================
-
-  @impl Arbor.Agent.AgentSeed
-  def seed_think(state, mode) do
-    run_llm_think_cycle(state, mode)
-  end
-
-  # ============================================================================
   # GenServer Callbacks
   # ============================================================================
 
@@ -188,7 +170,6 @@ defmodule Arbor.Agent.Claude do
     # Initialize seed (memory, executor, signals, working memory, capabilities)
     seed_opts =
       opts
-      |> Keyword.put(:seed_module, __MODULE__)
       |> Keyword.put_new(:id, id)
 
     state = init_seed(host_state, seed_opts)
@@ -207,16 +188,6 @@ defmodule Arbor.Agent.Claude do
         state
       end
 
-    # Initialize heartbeat loop
-    heartbeat_opts =
-      Keyword.merge(opts,
-        heartbeat_enabled:
-          Keyword.get(opts, :heartbeat_enabled, true) and state.memory_initialized,
-        context_window: state.context_window
-      )
-
-    state = init_heartbeat(state, heartbeat_opts)
-
     # Schedule auto-checkpoint
     state =
       if checkpoint_enabled?() do
@@ -231,7 +202,6 @@ defmodule Arbor.Agent.Claude do
       model: state.default_model,
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
-      heartbeat_enabled: state.heartbeat_enabled,
       executor: state.executor_pid != nil,
       checkpoint_restored: state.query_count > 0
     )
@@ -240,7 +210,6 @@ defmodule Arbor.Agent.Claude do
       id: id,
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
-      heartbeat_enabled: state.heartbeat_enabled,
       executor_started: state.executor_pid != nil
     })
 
@@ -294,31 +263,17 @@ defmodule Arbor.Agent.Claude do
 
   @impl true
   def handle_info(msg, state) do
-    # Chain: heartbeat → seed → host
-    case handle_heartbeat_info(msg, state) do
+    case seed_handle_info(msg, state) do
       {:noreply, new_state} ->
         {:noreply, new_state}
 
-      {:heartbeat_triggered, new_state} ->
-        seed_heartbeat_async(new_state)
-        {:noreply, new_state}
-
       :not_handled ->
-        case seed_handle_info(msg, state) do
-          {:noreply, new_state} ->
-            {:noreply, new_state}
-
-          :not_handled ->
-            handle_host_info(msg, state)
-        end
+        handle_host_info(msg, state)
     end
   end
 
   @impl true
   def terminate(reason, state) do
-    # Cancel heartbeat timer
-    cancel_heartbeat(state)
-
     # Cancel checkpoint timer
     if state[:checkpoint_timer_ref] do
       Process.cancel_timer(state.checkpoint_timer_ref)
@@ -331,15 +286,6 @@ defmodule Arbor.Agent.Claude do
 
     # Seed cleanup (save WM, context, stop executor)
     seed_terminate(reason, state)
-  end
-
-  # ============================================================================
-  # HeartbeatLoop Callback
-  # ============================================================================
-
-  @impl Arbor.Agent.HeartbeatLoop
-  def run_heartbeat_cycle(state, body) do
-    seed_heartbeat_cycle(state, body)
   end
 
   # ============================================================================
@@ -359,44 +305,6 @@ defmodule Arbor.Agent.Claude do
 
   defp handle_host_info(_msg, state) do
     {:noreply, state}
-  end
-
-  # ============================================================================
-  # Private: LLM Think Cycle (Host-specific)
-  # ============================================================================
-
-  defp run_llm_think_cycle(state, mode) do
-    case select_think_result(state, mode) do
-      {:ok, parsed} ->
-        {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
-         Map.get(parsed, :goal_updates, [])}
-
-      {:error, _reason} ->
-        {HeartbeatResponse.empty_response(), "", [], []}
-    end
-  end
-
-  defp select_think_result(state, mode) do
-    if user_waiting?(state) do
-      {:ok, HeartbeatResponse.empty_response()}
-    else
-      execute_think_mode(state, mode)
-    end
-  end
-
-  defp execute_think_mode(_state, :conversation),
-    do: {:ok, HeartbeatResponse.empty_response()}
-
-  defp execute_think_mode(state, mode)
-       when mode in [:introspection, :reflection, :pattern_analysis, :insight_detection],
-       do: HeartbeatLLM.idle_think(state)
-
-  defp execute_think_mode(state, _mode),
-    do: HeartbeatLLM.think(state)
-
-  defp user_waiting?(state) do
-    timing = TimingContext.compute(state)
-    timing.user_waiting
   end
 
   # ============================================================================

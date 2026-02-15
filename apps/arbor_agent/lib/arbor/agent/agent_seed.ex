@@ -4,33 +4,18 @@ defmodule Arbor.Agent.AgentSeed do
 
   Provides all portable Seed functions that any agent Host can use:
   memory integration, identity consolidation, signal subscriptions,
-  executor wiring, action execution, and heartbeat seed logic.
-
-  The Host provides only one callback: `seed_think/2`, which delegates
-  to the Host-specific LLM provider.
+  executor wiring, and action execution. Heartbeat is managed by the
+  DOT Session (see `Arbor.Agent.SessionManager`).
 
   ## Usage
 
       defmodule MyAgent do
         use GenServer
-        use Arbor.Agent.HeartbeatLoop
         use Arbor.Agent.AgentSeed
-
-        @impl Arbor.Agent.AgentSeed
-        def seed_think(state, mode) do
-          # Host-specific LLM call
-          MyLLM.think(state, mode)
-        end
 
         def init(opts) do
           state = init_seed(%{my_field: "host-specific"}, opts)
-          state = init_heartbeat(state, opts)
           {:ok, state}
-        end
-
-        @impl Arbor.Agent.HeartbeatLoop
-        def run_heartbeat_cycle(state, body) do
-          seed_heartbeat_cycle(state, body)
         end
       end
 
@@ -67,34 +52,9 @@ defmodule Arbor.Agent.AgentSeed do
   @default_id "agent"
   @default_recall_limit 5
   @consolidation_check_interval 10
-  @identity_consolidation_interval 30
-  @reflection_interval 60
-
-  @doc """
-  Called by the Host to perform an LLM think cycle during heartbeat.
-
-  The Host should delegate to its LLM provider. Returns the same
-  tuple format as `HeartbeatLLM.think/1`.
-
-  ## Parameters
-
-  - `state` — Current agent state map
-  - `mode` — Cognitive mode atom (`:consolidation`, `:introspection`, etc.)
-
-  ## Returns
-
-  `{parsed_response, thinking_string, memory_notes_list, goal_updates_list}`
-  """
-  @callback seed_think(state :: map(), mode :: atom()) ::
-              {parsed :: map(), thinking :: String.t(), notes :: [String.t()], goals :: [map()]}
 
   defmacro __using__(_opts) do
     quote do
-      @behaviour Arbor.Agent.AgentSeed
-
-      # Store the host module so seed_heartbeat_cycle can call back to seed_think/2
-      @seed_host_module __MODULE__
-
       import Arbor.Agent.AgentSeed,
         only: [
           init_seed: 2,
@@ -103,8 +63,6 @@ defmodule Arbor.Agent.AgentSeed do
           prepare_query: 2,
           prepare_query: 3,
           finalize_query: 3,
-          seed_heartbeat_cycle: 2,
-          seed_heartbeat_async: 1,
           seed_emit_signal: 2,
           execute_seed_action: 4,
           seed_memory_stats: 1,
@@ -117,9 +75,6 @@ defmodule Arbor.Agent.AgentSeed do
           actions_available?: 0,
           safe_memory_call: 1
         ]
-
-      @doc false
-      def __seed_host_module__, do: @seed_host_module
     end
   end
 
@@ -142,8 +97,6 @@ defmodule Arbor.Agent.AgentSeed do
   def init_seed(state, opts) do
     id = Keyword.get(opts, :id, @default_id)
     memory_enabled = Keyword.get(opts, :memory_enabled, true)
-    # The host module is passed via opts so seed_heartbeat_cycle can call seed_think/2
-    seed_module = Keyword.get(opts, :seed_module)
 
     # Initialize memory system
     memory_initialized =
@@ -171,7 +124,6 @@ defmodule Arbor.Agent.AgentSeed do
 
     seed_state = %{
       id: id,
-      seed_module: seed_module,
       memory_enabled: memory_enabled,
       memory_initialized: memory_initialized,
       working_memory: working_memory,
@@ -310,143 +262,6 @@ defmodule Arbor.Agent.AgentSeed do
     add_to_context_window(state, prompt, response_text)
   end
 
-  @doc """
-  Run a full heartbeat cycle with seed logic.
-
-  Orchestrates: background checks → LLM think (via `seed_think/2` callback) →
-  action routing → goal updates → memory notes → context compression →
-  identity consolidation → periodic reflection.
-
-  Returns the standard `HeartbeatLoop` result tuple.
-  """
-  @spec seed_heartbeat_cycle(map(), map()) ::
-          {:ok, list(), map(), map() | nil, nil, map()} | {:error, term()}
-  def seed_heartbeat_cycle(state, _body) do
-    # Increment heartbeat counter
-    heartbeat_count = (state[:heartbeat_count] || 0) + 1
-    state = Map.put(state, :heartbeat_count, heartbeat_count)
-
-    # Determine cognitive mode
-    mode = determine_cognitive_mode(state)
-    state = Map.put(state, :cognitive_mode, mode)
-
-    # 1. Background checks
-    background_result = run_background_checks(state)
-
-    bg_actions =
-      if is_map(background_result) do
-        Map.get(background_result, :actions, [])
-      else
-        []
-      end
-
-    # 2. LLM think cycle via Host callback
-    {llm_result, thinking, memory_notes, goal_updates} =
-      state.seed_module.seed_think(state, mode)
-
-    # 3. Route LLM-generated actions through Executor
-    llm_actions = Map.get(llm_result, :actions, [])
-
-    if llm_actions != [] and state[:executor_pid] do
-      ExecutorIntegration.route_actions(state.id, llm_actions)
-    end
-
-    # 3.5. Route pending intentions from IntentStore to Executor (BDI pull-based)
-    if state[:executor_pid] do
-      ExecutorIntegration.route_pending_intentions(state.id)
-    end
-
-    # 4. Process goal updates
-    process_goal_updates(state.id, goal_updates)
-
-    # 4.5. Create new goals suggested by the LLM
-    new_goals = Map.get(llm_result, :new_goals, [])
-    create_suggested_goals(state.id, new_goals)
-
-    # 4.75. Process decompositions (goal -> intentions)
-    decompositions = Map.get(llm_result, :decompositions, [])
-    process_decompositions(state.id, decompositions)
-
-    # 5. Index memory notes
-    index_memory_notes(state.id, memory_notes)
-
-    # 6. Process proposal decisions from LLM
-    proposal_decisions = Map.get(llm_result, :proposal_decisions, [])
-    process_proposal_decisions(state.id, proposal_decisions)
-
-    # 7. Context compression
-    maybe_compress_context(state)
-
-    # 7. Periodic identity consolidation
-    maybe_consolidate_identity(state.id, heartbeat_count)
-
-    # 8. Periodic reflection
-    maybe_periodic_reflection(state.id, heartbeat_count)
-
-    # Combine actions
-    all_actions = bg_actions ++ llm_actions
-
-    llm_usage = Map.get(llm_result, :usage, %{})
-
-    llm_output = Map.get(llm_result, :output, "")
-
-    bg_suggestions =
-      if is_map(background_result),
-        do: Map.get(background_result, :suggestions, []),
-        else: []
-
-    metadata = %{
-      cognitive_mode: mode,
-      background_actions: length(bg_actions),
-      llm_actions: length(llm_actions),
-      thinking: thinking,
-      memory_notes_count: length(memory_notes),
-      goal_updates_count: length(goal_updates),
-      heartbeat_count: heartbeat_count,
-      usage: llm_usage,
-      output: llm_output,
-      background_suggestions: bg_suggestions
-    }
-
-    # Only pass context window back if there's meaningful user-facing output
-    context_window_to_sync =
-      if is_binary(llm_output) and String.trim(llm_output) != "" do
-        state[:context_window]
-      else
-        nil
-      end
-
-    {:ok, all_actions, %{}, context_window_to_sync, nil, metadata}
-  end
-
-  @doc """
-  Run heartbeat cycle asynchronously in a Task.
-
-  Sends `{:heartbeat_complete, result}` back to the calling process.
-  """
-  @spec seed_heartbeat_async(map()) :: {:ok, pid()}
-  def seed_heartbeat_async(state) do
-    host_pid = self()
-    body = Map.get(state, :body, %{})
-
-    Task.start(fn ->
-      result =
-        try do
-          seed_heartbeat_cycle(state, body)
-        rescue
-          e ->
-            Logger.warning("Heartbeat cycle error: #{Exception.message(e)}")
-            {:error, {:heartbeat_exception, Exception.message(e)}}
-        catch
-          :exit, reason ->
-            Logger.warning("Heartbeat cycle exit: #{inspect(reason)}")
-            {:error, {:heartbeat_exit, reason}}
-        end
-
-      send(host_pid, {:heartbeat_complete, result})
-    end)
-  end
-
   # ============================================================================
   # Signal Emission
   # ============================================================================
@@ -564,6 +379,95 @@ defmodule Arbor.Agent.AgentSeed do
     :exit, reason ->
       Logger.debug("Memory call caught exit: #{inspect(reason)}")
       nil
+  end
+
+  # ============================================================================
+  # Private: Percept/Intent Status Tracking
+  # ============================================================================
+
+  defp handle_percept_intent_status(_agent_id, %{intent_id: nil}), do: :ok
+  defp handle_percept_intent_status(_agent_id, %{intent_id: ""}), do: :ok
+
+  defp handle_percept_intent_status(agent_id, percept) do
+    intent_id = percept.intent_id
+
+    case percept.outcome do
+      :success ->
+        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
+
+      outcome when outcome in [:failure, :error] ->
+        handle_intent_failure(agent_id, intent_id, percept)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp handle_intent_failure(agent_id, intent_id, percept) do
+    reason = inspect(percept.error || percept.outcome)
+
+    case safe_memory_call(fn -> Arbor.Memory.fail_intent(agent_id, intent_id, reason) end) do
+      {:ok, retry_count} when retry_count >= @max_intent_retries ->
+        # Abandon this intent — too many retries
+        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
+
+        # Look up the goal_id for signaling
+        goal_id = get_intent_goal_id(agent_id, intent_id)
+
+        seed_emit_signal(:agent_intent_abandoned, %{
+          agent_id: agent_id,
+          intent_id: intent_id,
+          goal_id: goal_id,
+          retry_count: retry_count,
+          reason: reason
+        })
+
+        Logger.warning("Intent #{intent_id} abandoned after #{retry_count} retries",
+          agent_id: agent_id,
+          goal_id: goal_id
+        )
+
+        # Dead-letter check: if all intents for this goal are terminal, flag it
+        maybe_flag_dead_letter_goal(agent_id, goal_id)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_flag_dead_letter_goal(_agent_id, nil), do: :ok
+
+  defp maybe_flag_dead_letter_goal(agent_id, goal_id) do
+    pending =
+      safe_memory_call(fn ->
+        Arbor.Memory.pending_intents_for_goal(agent_id, goal_id)
+      end)
+
+    # If no pending intents remain, all were completed or abandoned — goal is a dead letter
+    if (is_list(pending) and pending == []) or pending == nil do
+      safe_memory_call(fn ->
+        Arbor.Memory.update_goal_metadata(agent_id, goal_id, %{decomposition_failed: true})
+      end)
+
+      seed_emit_signal(:goal_dead_letter, %{
+        agent_id: agent_id,
+        goal_id: goal_id,
+        reason: "all_intents_abandoned"
+      })
+
+      Logger.warning("Goal #{goal_id} flagged as dead letter — all intents abandoned",
+        agent_id: agent_id
+      )
+    end
+  end
+
+  defp get_intent_goal_id(agent_id, intent_id) do
+    case safe_memory_call(fn -> Arbor.Memory.get_intent(agent_id, intent_id) end) do
+      {:ok, intent, _status} -> intent.goal_id
+      _ -> nil
+    end
   end
 
   # ============================================================================
@@ -791,26 +695,6 @@ defmodule Arbor.Agent.AgentSeed do
     _ -> state
   end
 
-  defp maybe_compress_context(state) do
-    if state[:context_window] && ContextManager.should_compress?(state.context_window) do
-      case ContextManager.maybe_compress(state.context_window) do
-        {:ok, compressed} ->
-          Logger.debug("Context compressed", agent_id: state.id)
-          seed_emit_signal(:context_compressed, %{id: state.id})
-          compressed
-
-        {:error, _} ->
-          state.context_window
-      end
-    else
-      state[:context_window]
-    end
-  end
-
-  # ============================================================================
-  # Private: Security
-  # ============================================================================
-
   # ============================================================================
   # Private: Executor & Actions
   # ============================================================================
@@ -971,588 +855,6 @@ defmodule Arbor.Agent.AgentSeed do
 
   defp handle_memory_signal(_type, _payload, state) do
     {:noreply, state}
-  end
-
-  # ============================================================================
-  # Private: Heartbeat Helpers
-  # ============================================================================
-
-  defp determine_cognitive_mode(state) do
-    heartbeat_count = state[:heartbeat_count] || 0
-
-    cond do
-      # User waiting — always conversation mode
-      user_waiting?(state) ->
-        :conversation
-
-      # Maintenance floor: every 5th cycle, consolidate regardless (council: stability)
-      rem(heartbeat_count, 5) == 0 and heartbeat_count > 0 ->
-        :consolidation
-
-      # Plan execution: goals exist but have no pending intentions — need decomposition
-      has_undecomposed_goals?(state) ->
-        :plan_execution
-
-      # Goal pursuit when active goals exist (council: adaptive goal-first)
-      has_active_goals?(state) ->
-        :goal_pursuit
-
-      # No goals — idle mode
-      true ->
-        idle_mode()
-    end
-  end
-
-  defp has_active_goals?(state) do
-    agent_id = state[:id] || state[:agent_id]
-
-    goals =
-      try do
-        Arbor.Memory.get_active_goals(agent_id)
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    is_list(goals) and goals != []
-  end
-
-  defp has_undecomposed_goals?(state) do
-    agent_id = state[:id] || state[:agent_id]
-
-    goals =
-      try do
-        Arbor.Memory.get_active_goals(agent_id)
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    if is_list(goals) and goals != [] do
-      # Check if any goal has no pending intentions (needs decomposition)
-      # Skip goals flagged as decomposition_failed
-      Enum.any?(goals, fn goal ->
-        not decomposition_failed?(goal) and not has_pending_intents?(agent_id, goal.id)
-      end)
-    else
-      false
-    end
-  end
-
-  defp decomposition_failed?(goal) do
-    meta = goal.metadata || %{}
-    meta[:decomposition_failed] == true or meta["decomposition_failed"] == true
-  end
-
-  defp has_pending_intents?(agent_id, goal_id) do
-    pending =
-      try do
-        Arbor.Memory.pending_intents_for_goal(agent_id, goal_id)
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-
-    is_list(pending) and pending != []
-  end
-
-  defp user_waiting?(state) do
-    timing = TimingContext.compute(state)
-    timing.user_waiting
-  end
-
-  defp idle_mode do
-    if idle_reflection_enabled?() and :rand.uniform() < idle_reflection_chance() do
-      Enum.random([:introspection, :reflection, :pattern_analysis, :insight_detection])
-    else
-      :consolidation
-    end
-  end
-
-  defp idle_reflection_enabled? do
-    Application.get_env(:arbor_agent, :idle_reflection_enabled, true)
-  end
-
-  defp idle_reflection_chance do
-    Application.get_env(:arbor_agent, :idle_reflection_chance, 0.3)
-  end
-
-  defp process_proposal_decisions(_agent_id, []), do: :ok
-
-  defp process_proposal_decisions(agent_id, decisions) do
-    Enum.each(decisions, &apply_proposal_decision(agent_id, &1))
-  end
-
-  defp apply_proposal_decision(_agent_id, decision) when not is_map(decision), do: :ok
-
-  defp apply_proposal_decision(agent_id, decision) do
-    proposal_id = decision[:proposal_id]
-    action = decision[:decision]
-
-    if proposal_id && action do
-      safe_memory_call(fn ->
-        execute_proposal_action(agent_id, proposal_id, action, decision[:reason])
-      end)
-    end
-  end
-
-  defp execute_proposal_action(agent_id, proposal_id, :accept, _reason) do
-    # Get the proposal first to check its type and metadata
-    case Memory.get_proposal(agent_id, proposal_id) do
-      {:ok, proposal} ->
-        # Accept the proposal (marks it in ETS)
-        Memory.accept_proposal(agent_id, proposal_id)
-
-        # Type-specific post-acceptance handling
-        apply_accepted_proposal(agent_id, proposal)
-
-      _ ->
-        Memory.accept_proposal(agent_id, proposal_id)
-    end
-  end
-
-  defp execute_proposal_action(agent_id, proposal_id, :reject, reason) do
-    opts = if reason, do: [reason: reason], else: []
-    Memory.reject_proposal(agent_id, proposal_id, opts)
-  end
-
-  defp execute_proposal_action(agent_id, proposal_id, :defer, _reason),
-    do: Memory.defer_proposal(agent_id, proposal_id)
-
-  defp execute_proposal_action(_agent_id, _proposal_id, _action, _reason), do: :ok
-
-  defp apply_accepted_proposal(agent_id, %{type: :identity, metadata: metadata})
-       when is_map(metadata) do
-    safe_memory_call(fn ->
-      Memory.apply_accepted_change(agent_id, metadata)
-    end)
-  end
-
-  defp apply_accepted_proposal(_agent_id, _proposal), do: :ok
-
-  defp process_goal_updates(_agent_id, []), do: :ok
-
-  defp process_goal_updates(agent_id, updates) do
-    Enum.each(updates, &apply_goal_update(agent_id, &1))
-  end
-
-  defp apply_goal_update(agent_id, update) do
-    goal_id = update[:goal_id]
-    progress = update[:progress]
-
-    if goal_id && progress do
-      safe_memory_call(fn -> Arbor.Memory.update_goal_progress(agent_id, goal_id, progress) end)
-
-      # Goal milestone: when progress reaches 1.0, achieve and checkpoint
-      if progress >= 1.0 do
-        achieve_and_checkpoint_goal(agent_id, goal_id)
-      end
-    end
-  end
-
-  defp achieve_and_checkpoint_goal(agent_id, goal_id) do
-    safe_memory_call(fn -> Arbor.Memory.achieve_goal(agent_id, goal_id) end)
-
-    seed_emit_signal(:goal_milestone, %{
-      agent_id: agent_id,
-      goal_id: goal_id,
-      milestone: :achieved,
-      timestamp: DateTime.utc_now()
-    })
-
-    Logger.info("Goal achieved: #{goal_id}", agent_id: agent_id)
-  end
-
-  defp create_suggested_goals(_agent_id, []), do: :ok
-
-  defp create_suggested_goals(agent_id, goals) do
-    alias Arbor.Contracts.Memory.Goal
-
-    # Cap at 3 new goals per heartbeat cycle
-    goals
-    |> Enum.take(3)
-    |> Enum.each(fn goal ->
-      desc = goal[:description]
-      priority = goal[:priority] || :medium
-
-      if desc do
-        goal_struct =
-          Goal.new(desc,
-            priority: priority,
-            success_criteria: goal[:success_criteria]
-          )
-
-        safe_memory_call(fn ->
-          Arbor.Memory.add_goal(agent_id, goal_struct)
-        end)
-
-        seed_emit_signal(:goal_suggested, %{
-          agent_id: agent_id,
-          description: String.slice(desc, 0..100),
-          priority: priority
-        })
-      end
-    end)
-  end
-
-  defp handle_percept_intent_status(_agent_id, %{intent_id: nil}), do: :ok
-  defp handle_percept_intent_status(_agent_id, %{intent_id: ""}), do: :ok
-
-  defp handle_percept_intent_status(agent_id, percept) do
-    intent_id = percept.intent_id
-
-    case percept.outcome do
-      :success ->
-        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
-
-      outcome when outcome in [:failure, :error] ->
-        handle_intent_failure(agent_id, intent_id, percept)
-
-      _ ->
-        :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp handle_intent_failure(agent_id, intent_id, percept) do
-    reason = inspect(percept.error || percept.outcome)
-
-    case safe_memory_call(fn -> Arbor.Memory.fail_intent(agent_id, intent_id, reason) end) do
-      {:ok, retry_count} when retry_count >= @max_intent_retries ->
-        # Abandon this intent — too many retries
-        safe_memory_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
-
-        # Look up the goal_id for signaling
-        goal_id = get_intent_goal_id(agent_id, intent_id)
-
-        seed_emit_signal(:agent_intent_abandoned, %{
-          agent_id: agent_id,
-          intent_id: intent_id,
-          goal_id: goal_id,
-          retry_count: retry_count,
-          reason: reason
-        })
-
-        Logger.warning("Intent #{intent_id} abandoned after #{retry_count} retries",
-          agent_id: agent_id,
-          goal_id: goal_id
-        )
-
-        # Dead-letter check: if all intents for this goal are terminal, flag it
-        maybe_flag_dead_letter_goal(agent_id, goal_id)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp maybe_flag_dead_letter_goal(_agent_id, nil), do: :ok
-
-  defp maybe_flag_dead_letter_goal(agent_id, goal_id) do
-    pending =
-      safe_memory_call(fn ->
-        Arbor.Memory.pending_intents_for_goal(agent_id, goal_id)
-      end)
-
-    # If no pending intents remain, all were completed or abandoned — goal is a dead letter
-    if (is_list(pending) and pending == []) or pending == nil do
-      safe_memory_call(fn ->
-        Arbor.Memory.update_goal_metadata(agent_id, goal_id, %{decomposition_failed: true})
-      end)
-
-      seed_emit_signal(:goal_dead_letter, %{
-        agent_id: agent_id,
-        goal_id: goal_id,
-        reason: "all_intents_abandoned"
-      })
-
-      Logger.warning("Goal #{goal_id} flagged as dead letter — all intents abandoned",
-        agent_id: agent_id
-      )
-    end
-  end
-
-  defp get_intent_goal_id(agent_id, intent_id) do
-    case safe_memory_call(fn -> Arbor.Memory.get_intent(agent_id, intent_id) end) do
-      {:ok, intent, _status} -> intent.goal_id
-      _ -> nil
-    end
-  end
-
-  defp process_decompositions(_agent_id, []), do: :ok
-
-  defp process_decompositions(agent_id, decompositions) do
-    Enum.each(decompositions, fn decomp ->
-      goal_id = decomp[:goal_id]
-      intentions = decomp[:intentions] || []
-
-      if goal_id do
-        Enum.each(intentions, &record_decomposed_intent(agent_id, goal_id, &1))
-      end
-    end)
-  end
-
-  defp record_decomposed_intent(agent_id, goal_id, intention) do
-    alias Arbor.Contracts.Memory.Intent
-    action = intention[:action]
-
-    if action do
-      intent =
-        Intent.action(action, intention[:params] || %{},
-          goal_id: goal_id,
-          reasoning: intention[:reasoning],
-          metadata: %{
-            preconditions: intention[:preconditions],
-            success_criteria: intention[:success_criteria],
-            status: :pending
-          }
-        )
-
-      safe_memory_call(fn -> Arbor.Memory.record_intent(agent_id, intent) end)
-
-      seed_emit_signal(:intent_decomposed, %{
-        agent_id: agent_id,
-        intent_id: intent.id,
-        goal_id: goal_id,
-        action: action
-      })
-
-      Logger.debug("Decomposed intention for goal #{goal_id}: #{action}",
-        agent_id: agent_id
-      )
-    end
-  end
-
-  defp index_memory_notes(_agent_id, []), do: :ok
-
-  defp index_memory_notes(agent_id, notes) do
-    Enum.each(notes, fn note ->
-      safe_memory_call(fn ->
-        Arbor.Memory.index(agent_id, note, %{
-          type: :heartbeat_observation,
-          timestamp: DateTime.utc_now()
-        })
-      end)
-
-      seed_emit_signal(:agent_memory_note, %{
-        id: agent_id,
-        note: String.slice(note, 0..100)
-      })
-    end)
-
-    # Also add heartbeat notes to working memory so they're visible in the dashboard.
-    # This runs in a Task (not the GenServer), so we read/update/save ETS directly.
-    safe_memory_call(fn ->
-      wm = Arbor.Memory.load_working_memory(agent_id)
-
-      updated_wm =
-        Enum.reduce(notes, wm, fn note, acc ->
-          Arbor.Memory.WorkingMemory.add_thought(
-            acc,
-            "[hb] #{String.slice(note, 0..120)}",
-            priority: :low
-          )
-        end)
-
-      Arbor.Memory.save_working_memory(agent_id, updated_wm)
-    end)
-  end
-
-  defp run_background_checks(state) do
-    if background_checks_available?() do
-      action_history = gather_action_history(state)
-      result = Memory.run_background_checks(state.id, action_history: action_history)
-
-      Enum.each(result.warnings, fn warning ->
-        Logger.info("Background check warning: #{warning.message}",
-          agent_id: state.id,
-          type: warning.type,
-          severity: warning.severity
-        )
-      end)
-
-      Enum.each(result.actions, &dispatch_background_action(&1, state.id))
-
-      # Surface suggestions
-      surface_background_suggestions(state.id, result.suggestions, state)
-
-      seed_emit_signal(:heartbeat_complete, %{
-        id: state.id,
-        action_count: length(result.actions),
-        warning_count: length(result.warnings),
-        suggestion_count: length(result.suggestions)
-      })
-
-      result
-    else
-      %{actions: [], warnings: [], suggestions: []}
-    end
-  rescue
-    e ->
-      Logger.warning("Background checks failed: #{Exception.message(e)}")
-      %{actions: [], warnings: [], suggestions: []}
-  catch
-    :exit, reason ->
-      Logger.warning("Background checks timeout: #{inspect(reason)}")
-      %{actions: [], warnings: [], suggestions: []}
-  end
-
-  defp gather_action_history(state) do
-    agent_id = state.id
-
-    percepts = safe_memory_call(fn -> Arbor.Memory.recent_percepts(agent_id, limit: 50) end)
-    percepts = if is_list(percepts), do: percepts, else: []
-
-    Enum.map(percepts, fn p ->
-      tool = get_tool_from_percept(p, agent_id)
-      status = if p.outcome == :success, do: :success, else: :error
-
-      %{tool: tool, status: status, timestamp: p.created_at}
-    end)
-  end
-
-  defp get_tool_from_percept(percept, agent_id) do
-    cond do
-      is_map(percept.data) && Map.has_key?(percept.data, :tool) ->
-        to_string(percept.data.tool)
-
-      is_map(percept.data) && Map.has_key?(percept.data, "tool") ->
-        percept.data["tool"]
-
-      percept.intent_id ->
-        case safe_memory_call(fn -> Arbor.Memory.get_intent(agent_id, percept.intent_id) end) do
-          {:ok, intent, _status} when not is_nil(intent) -> to_string(intent.action || "unknown")
-          {:ok, intent} when not is_nil(intent) -> to_string(Map.get(intent, :action, "unknown"))
-          _ -> "unknown"
-        end
-
-      true ->
-        "unknown"
-    end
-  end
-
-  defp dispatch_background_action(%{type: :run_consolidation}, agent_id) do
-    spawn(fn -> Arbor.Memory.run_consolidation(agent_id) end)
-  end
-
-  defp dispatch_background_action(%{type: other}, agent_id) do
-    Logger.debug("Background check action: #{other}", agent_id: agent_id)
-  end
-
-  defp surface_background_suggestions(_agent_id, [], _state), do: :ok
-
-  defp surface_background_suggestions(agent_id, suggestions, state) do
-    Enum.each(suggestions, fn suggestion ->
-      maybe_create_suggestion_proposal(agent_id, suggestion)
-      maybe_add_suggestion_curiosity(agent_id, suggestion, state)
-    end)
-  end
-
-  defp maybe_create_suggestion_proposal(agent_id, suggestion) do
-    if (suggestion[:confidence] || 0) >= 0.5 do
-      safe_memory_call(fn ->
-        Arbor.Memory.create_proposal(
-          agent_id,
-          suggestion[:type] || :background_insight,
-          suggestion[:content] || inspect(suggestion)
-        )
-      end)
-    end
-  end
-
-  defp maybe_add_suggestion_curiosity(agent_id, suggestion, state) do
-    if state[:working_memory] && (suggestion[:confidence] || 0) >= 0.6 do
-      content = suggestion[:content] || inspect(suggestion)
-      summary = String.slice(content, 0..120)
-
-      safe_memory_call(fn ->
-        wm =
-          state.working_memory
-          |> Arbor.Memory.WorkingMemory.add_curiosity(
-            "[hb] [#{suggestion[:type]}] #{summary}",
-            max_curiosity: 5
-          )
-
-        Arbor.Memory.save_working_memory(agent_id, wm)
-      end)
-    end
-  end
-
-  defp maybe_consolidate_identity(agent_id, heartbeat_count) do
-    if rem(heartbeat_count, @identity_consolidation_interval) == 0 do
-      spawn(fn -> run_identity_consolidation(agent_id, heartbeat_count) end)
-    end
-  end
-
-  defp run_identity_consolidation(agent_id, heartbeat_count) do
-    if identity_consolidator_available?(:consolidate, 2) do
-      safe_memory_call(fn ->
-        handle_consolidation_result(
-          Memory.consolidate_identity(agent_id),
-          agent_id,
-          heartbeat_count
-        )
-      end)
-    end
-  end
-
-  defp handle_consolidation_result({:ok, :no_changes}, _agent_id, _heartbeat_count), do: :ok
-
-  defp handle_consolidation_result({:ok, _sk}, agent_id, heartbeat_count) do
-    Logger.info("Identity consolidated", agent_id: agent_id)
-
-    seed_emit_signal(:identity_consolidated, %{
-      id: agent_id,
-      heartbeat: heartbeat_count
-    })
-  end
-
-  defp handle_consolidation_result({:error, reason}, _agent_id, _heartbeat_count) do
-    Logger.debug("Identity consolidation skipped: #{inspect(reason)}")
-  end
-
-  defp maybe_periodic_reflection(agent_id, heartbeat_count) do
-    if rem(heartbeat_count, @reflection_interval) == 0 do
-      spawn(fn -> run_periodic_reflection(agent_id, heartbeat_count) end)
-    end
-  end
-
-  defp run_periodic_reflection(agent_id, heartbeat_count) do
-    if reflection_processor_available?() do
-      safe_memory_call(fn ->
-        handle_reflection_result(
-          Memory.periodic_reflection(agent_id),
-          agent_id,
-          heartbeat_count
-        )
-      end)
-    end
-  end
-
-  defp reflection_processor_available? do
-    Code.ensure_loaded?(Arbor.Memory.ReflectionProcessor) and
-      function_exported?(Arbor.Memory.ReflectionProcessor, :periodic_reflection, 1)
-  end
-
-  defp handle_reflection_result({:ok, reflection}, agent_id, heartbeat_count) do
-    Logger.info("Periodic reflection completed",
-      agent_id: agent_id,
-      insights: length(reflection[:insights] || [])
-    )
-
-    seed_emit_signal(:reflection_completed, %{
-      id: agent_id,
-      insights_count: length(reflection[:insights] || []),
-      heartbeat: heartbeat_count
-    })
-  end
-
-  defp handle_reflection_result({:error, reason}, _agent_id, _heartbeat_count) do
-    Logger.debug("Periodic reflection failed: #{inspect(reason)}")
   end
 
   defp get_memory_stats(agent_id) do

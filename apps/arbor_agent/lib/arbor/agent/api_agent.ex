@@ -4,14 +4,13 @@ defmodule Arbor.Agent.APIAgent do
 
   This is a Host in the Seed/Host architecture, mirroring `Arbor.Agent.Claude`
   but using `Arbor.AI.generate_text_with_tools/2` for queries instead of
-  the Claude CLI. Portable identity (memory, signals, executor, heartbeat logic)
-  lives in `Arbor.Agent.AgentSeed`.
+  the Claude CLI. Portable identity (memory, signals, executor) lives in
+  `Arbor.Agent.AgentSeed`. Heartbeat is managed by the DOT Session.
 
   This module provides API-specific functionality:
-  - Query execution via `Arbor.AI.generate_text_with_tools/2` (jido_ai agentic loop)
+  - Query execution via Session (DOT) or direct `Arbor.AI.generate_text_with_tools/2`
   - Rich system prompt building from memory subsystems
   - Configurable model/provider via tiered config
-  - Separate heartbeat model configuration
 
   ## Usage
 
@@ -24,17 +23,11 @@ defmodule Arbor.Agent.APIAgent do
   """
 
   use GenServer
-  use Arbor.Agent.HeartbeatLoop
   use Arbor.Agent.AgentSeed
 
   require Logger
 
-  alias Arbor.Agent.{
-    APIConfig,
-    HeartbeatLLM,
-    HeartbeatResponse,
-    TimingContext
-  }
+  alias Arbor.Agent.APIConfig
 
   @type option ::
           {:id, String.t()}
@@ -61,10 +54,6 @@ defmodule Arbor.Agent.APIAgent do
   - `:provider` - Provider atom (e.g., :openrouter, :zai_coding_plan)
   - `:model_id` - Model ID for tiered config lookup (usually same as :model)
   - `:memory_enabled` - Enable memory system (default: true)
-  - `:heartbeat_enabled` - Enable heartbeat loop (default: true)
-  - `:heartbeat_interval_ms` - Heartbeat interval in ms (default: 10_000)
-  - `:heartbeat_model` - Model for heartbeat LLM calls (default: same as query model)
-  - `:heartbeat_provider` - Provider for heartbeat LLM calls (default: same as query provider)
   - `:max_tokens` - Max tokens for generation (default: 16_384)
   - `:temperature` - Sampling temperature (default: 0.7)
   - `:max_turns` - Max tool-call turns per query (default: 10)
@@ -110,31 +99,12 @@ defmodule Arbor.Agent.APIAgent do
   def get_recalled_memories(agent), do: GenServer.call(agent, :get_recalled_memories)
 
   @doc """
-  Update the heartbeat model at runtime.
-
-  Allows changing which model handles heartbeat LLM calls without restarting.
-  """
-  @spec set_heartbeat_model(t(), map()) :: :ok
-  def set_heartbeat_model(agent, config) when is_map(config) do
-    GenServer.cast(agent, {:set_heartbeat_model, config})
-  end
-
-  @doc """
   Execute an Arbor action through the capability-based authorization system.
   """
   @spec execute_action(t(), module(), map(), keyword()) ::
           {:ok, any()} | {:ok, :pending_approval, String.t()} | {:error, term()}
   def execute_action(agent, action_module, params, opts \\ []) do
     GenServer.call(agent, {:execute_action, action_module, params, opts}, 60_000)
-  end
-
-  # ============================================================================
-  # AgentSeed Callback
-  # ============================================================================
-
-  @impl Arbor.Agent.AgentSeed
-  def seed_think(state, mode) do
-    run_llm_think_cycle(state, mode)
   end
 
   # ============================================================================
@@ -155,37 +125,15 @@ defmodule Arbor.Agent.APIAgent do
       provider: Keyword.get(opts, :provider, :openrouter),
       max_tokens: config.max_tokens,
       temperature: config.temperature,
-      max_turns: config.max_turns,
-      # Heartbeat model (separate from query model — defaults to trinity for JSON compliance)
-      heartbeat_model: Keyword.get(opts, :heartbeat_model),
-      heartbeat_provider:
-        Keyword.get(opts, :heartbeat_provider, Keyword.get(opts, :provider, :openrouter))
+      max_turns: config.max_turns
     }
 
     # Initialize seed (memory, executor, signals, working memory, capabilities)
     seed_opts =
       opts
-      |> Keyword.put(:seed_module, __MODULE__)
       |> Keyword.put_new(:id, id)
 
     state = init_seed(host_state, seed_opts)
-
-    # When a persistent DOT session manages heartbeat, disable the agent's loop
-    session_manages_heartbeat = session_execution_mode() in [:session, :graph]
-
-    # Initialize heartbeat loop
-    heartbeat_opts =
-      Keyword.merge(opts,
-        heartbeat_enabled:
-          not session_manages_heartbeat and
-            Keyword.get(opts, :heartbeat_enabled, config.heartbeat_enabled) and
-            state.memory_initialized,
-        heartbeat_interval_ms:
-          Keyword.get(opts, :heartbeat_interval_ms, config.heartbeat_interval_ms),
-        context_window: state.context_window
-      )
-
-    state = init_heartbeat(state, heartbeat_opts)
 
     Logger.info("API agent started",
       id: id,
@@ -194,7 +142,6 @@ defmodule Arbor.Agent.APIAgent do
       max_tokens: state.max_tokens,
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
-      heartbeat_enabled: state.heartbeat_enabled,
       executor: state.executor_pid != nil
     )
 
@@ -205,7 +152,6 @@ defmodule Arbor.Agent.APIAgent do
       provider: state.provider,
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
-      heartbeat_enabled: state.heartbeat_enabled,
       executor_started: state.executor_pid != nil
     })
 
@@ -214,7 +160,15 @@ defmodule Arbor.Agent.APIAgent do
 
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
-    handle_query(prompt, opts, state)
+    # Route through persistent Session
+    case Arbor.Agent.SessionManager.get_session(state.id) do
+      {:ok, session_pid} ->
+        handle_session_query(prompt, opts, state, session_pid)
+
+      {:error, _} ->
+        # No session available — use direct API query
+        handle_direct_query(prompt, opts, state)
+    end
   end
 
   def handle_call(:agent_id, _from, state) do
@@ -246,60 +200,19 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   @impl true
-  def handle_cast({:set_heartbeat_model, config}, state) do
-    new_state = %{
-      state
-      | heartbeat_model: config[:id] || config[:model] || state.heartbeat_model,
-        heartbeat_provider: config[:provider] || state.heartbeat_provider
-    }
-
-    Logger.info("Heartbeat model updated",
-      agent_id: state.id,
-      model: new_state.heartbeat_model,
-      provider: new_state.heartbeat_provider
-    )
-
-    {:noreply, new_state}
-  end
-
-  @impl true
   def handle_info(msg, state) do
-    # Chain: heartbeat → seed → host
-    case handle_heartbeat_info(msg, state) do
+    case seed_handle_info(msg, state) do
       {:noreply, new_state} ->
         {:noreply, new_state}
 
-      {:heartbeat_triggered, new_state} ->
-        seed_heartbeat_async(new_state)
-        {:noreply, new_state}
-
       :not_handled ->
-        case seed_handle_info(msg, state) do
-          {:noreply, new_state} ->
-            {:noreply, new_state}
-
-          :not_handled ->
-            handle_host_info(msg, state)
-        end
+        handle_host_info(msg, state)
     end
   end
 
   @impl true
   def terminate(reason, state) do
-    # Cancel heartbeat timer
-    cancel_heartbeat(state)
-
-    # Seed cleanup (save WM, context, stop executor)
     seed_terminate(reason, state)
-  end
-
-  # ============================================================================
-  # HeartbeatLoop Callback
-  # ============================================================================
-
-  @impl Arbor.Agent.HeartbeatLoop
-  def run_heartbeat_cycle(state, body) do
-    seed_heartbeat_cycle(state, body)
   end
 
   # ============================================================================
@@ -311,134 +224,61 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   # ============================================================================
-  # Private: LLM Think Cycle (Host-specific — uses HeartbeatLLM)
+  # Private: Query Handling
   # ============================================================================
 
-  defp run_llm_think_cycle(state, mode) do
-    hb_opts = [
-      model: state[:heartbeat_model],
-      provider: state[:heartbeat_provider]
-    ]
-
-    case select_think_result(state, mode, hb_opts) do
-      {:ok, parsed} ->
-        {parsed, Map.get(parsed, :thinking, ""), Map.get(parsed, :memory_notes, []),
-         Map.get(parsed, :goal_updates, [])}
-
-      {:error, _reason} ->
-        {HeartbeatResponse.empty_response(), "", [], []}
-    end
-  end
-
-  defp select_think_result(state, mode, hb_opts) do
-    if user_waiting?(state) do
-      {:ok, HeartbeatResponse.empty_response()}
-    else
-      execute_think_mode(state, mode, hb_opts)
-    end
-  end
-
-  defp execute_think_mode(_state, :conversation, _hb_opts),
-    do: {:ok, HeartbeatResponse.empty_response()}
-
-  defp execute_think_mode(state, mode, hb_opts)
-       when mode in [:introspection, :reflection, :pattern_analysis, :insight_detection],
-       do: HeartbeatLLM.idle_think(state, hb_opts)
-
-  defp execute_think_mode(state, _mode, hb_opts),
-    do: HeartbeatLLM.think(state, hb_opts)
-
-  defp user_waiting?(state) do
-    timing = TimingContext.compute(state)
-    timing.user_waiting
-  end
-
-  # ============================================================================
-  # Private: Query Handling (Host-specific — uses generate_text_with_tools)
-  # ============================================================================
-
-  defp handle_query(prompt, opts, state) do
-    mode = session_execution_mode()
-
-    if mode in [:session, :graph] and session_active?(state.id) do
-      handle_query_via_session(prompt, opts, state, mode)
-    else
-      handle_query_legacy(prompt, opts, state)
-    end
-  end
-
-  defp handle_query_via_session(prompt, opts, state, mode) do
+  defp handle_session_query(prompt, opts, state, session_pid) do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
     {_enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
     recalled = if recall, do: recalled, else: []
 
-    case Arbor.Agent.SessionManager.get_session(state.id) do
-      {:ok, session_pid} ->
-        case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
-          {:ok, text} ->
-            new_state =
-              if index do
-                finalize_query(prompt, text, state)
-              else
-                state
-              end
+    case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
+      {:ok, text} ->
+        new_state =
+          if index do
+            finalize_query(prompt, text, state)
+          else
+            state
+          end
 
-            response = %{
-              text: text,
-              thinking: nil,
-              usage: %{},
-              model: to_string(state.model),
-              provider: to_string(state.provider),
-              tool_calls: [],
-              recalled_memories: recalled,
-              session_id: state.id,
-              type: :session
-            }
+        response = %{
+          text: text,
+          thinking: nil,
+          usage: %{},
+          model: to_string(state.model),
+          provider: to_string(state.provider),
+          tool_calls: [],
+          recalled_memories: recalled,
+          session_id: state.id,
+          type: :session
+        }
 
-            new_state = %{new_state | recalled_memories: recalled, query_count: state.query_count + 1}
-            {:reply, {:ok, response}, new_state}
+        new_state = %{new_state | recalled_memories: recalled, query_count: state.query_count + 1}
+        {:reply, {:ok, response}, new_state}
 
-          {:error, reason} ->
-            if mode == :session do
-              Logger.warning("Session query failed, falling back to legacy: #{inspect(reason)}",
-                agent_id: state.id
-              )
-
-              handle_query_legacy(prompt, opts, state)
-            else
-              {:reply, {:error, {:session_error, reason}}, state}
-            end
-        end
-
-      {:error, _} ->
-        if mode == :session do
-          handle_query_legacy(prompt, opts, state)
-        else
-          {:reply, {:error, :no_session}, state}
-        end
-    end
-  rescue
-    e ->
-      if mode == :session do
-        Logger.warning("Session query crashed, falling back to legacy: #{Exception.message(e)}",
+      {:error, reason} ->
+        Logger.warning("Session query failed, falling back to direct: #{inspect(reason)}",
           agent_id: state.id
         )
 
-        handle_query_legacy(prompt, opts, state)
-      else
-        {:reply, {:error, {:session_crash, Exception.message(e)}}, state}
-      end
+        handle_direct_query(prompt, opts, state)
+    end
+  rescue
+    e ->
+      Logger.warning("Session query crashed, falling back to direct: #{Exception.message(e)}",
+        agent_id: state.id
+      )
+
+      handle_direct_query(prompt, opts, state)
   end
 
-  defp handle_query_legacy(prompt, opts, state) do
+  defp handle_direct_query(prompt, opts, state) do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    # Seed: prepare query (recall memories, skip timing/self-knowledge — handled by split prompt)
     {enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
-
     recalled = if recall, do: recalled, else: []
 
     case execute_query(enhanced_prompt, state, opts) do
@@ -525,15 +365,4 @@ defmodule Arbor.Agent.APIAgent do
     })
   end
 
-  # ============================================================================
-  # Private: Session execution mode helpers
-  # ============================================================================
-
-  defp session_execution_mode do
-    Application.get_env(:arbor_agent, :session_execution_mode, :legacy)
-  end
-
-  defp session_active?(agent_id) do
-    Arbor.Agent.SessionManager.has_session?(agent_id)
-  end
 end

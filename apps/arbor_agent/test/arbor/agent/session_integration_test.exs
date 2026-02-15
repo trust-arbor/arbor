@@ -14,9 +14,9 @@ defmodule Arbor.Agent.SessionIntegrationTest do
   end
 
   describe "session_execution_mode config" do
-    test "default mode is :legacy" do
+    test "default mode is :session" do
       Application.delete_env(:arbor_agent, :session_execution_mode)
-      assert Application.get_env(:arbor_agent, :session_execution_mode, :legacy) == :legacy
+      assert Application.get_env(:arbor_agent, :session_execution_mode, :session) == :session
     end
 
     test ":session mode can be set at runtime" do

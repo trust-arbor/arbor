@@ -277,12 +277,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("set-heartbeat-model", %{"heartbeat_model" => model_id}, socket) do
+    # Heartbeat model is now managed by the DOT Session — this UI event
+    # only updates the local assign for display purposes.
     hb_config =
       Enum.find(socket.assigns.heartbeat_models, &(&1[:id] == model_id))
-
-    if hb_config && is_pid(socket.assigns[:agent]) do
-      APIAgent.set_heartbeat_model(socket.assigns.agent, hb_config)
-    end
 
     {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
   end
