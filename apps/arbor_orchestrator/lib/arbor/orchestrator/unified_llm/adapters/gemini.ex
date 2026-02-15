@@ -47,6 +47,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
         "contents" => Enum.map(non_system_messages, &message_to_input/1),
         "systemInstruction" => system_instruction
       }
+      |> maybe_put_tools(request.tools)
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
 
@@ -473,6 +474,26 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
 
   defp int_or_nil(value) when is_integer(value), do: value
   defp int_or_nil(_), do: nil
+
+  defp maybe_put_tools(body, nil), do: body
+  defp maybe_put_tools(body, []), do: body
+
+  defp maybe_put_tools(body, tools) when is_list(tools) do
+    declarations =
+      Enum.map(tools, fn tool ->
+        name = Map.get(tool, :name) || Map.get(tool, "name") || ""
+        description = Map.get(tool, :description) || Map.get(tool, "description")
+
+        parameters =
+          Map.get(tool, :input_schema) || Map.get(tool, :parameters) ||
+            Map.get(tool, "input_schema") || Map.get(tool, "parameters") || %{}
+
+        base = %{"name" => to_string(name), "parameters" => parameters}
+        if description, do: Map.put(base, "description", to_string(description)), else: base
+      end)
+
+    Map.put(body, "tools", [%{"functionDeclarations" => declarations}])
+  end
 
   defp provider_options(%Request{provider_options: options}) when is_map(options) do
     case Map.get(options, "gemini") || Map.get(options, :gemini) || %{} do

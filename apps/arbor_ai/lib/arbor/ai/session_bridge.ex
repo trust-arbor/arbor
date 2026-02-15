@@ -266,17 +266,29 @@ defmodule Arbor.AI.SessionBridge do
 
   defp orchestrator_app_dir do
     # In an umbrella, specs/ lives in the source tree (not _build).
-    # Always resolve from the project root to find them.
-    source_path = Path.join([File.cwd!(), "apps", "arbor_orchestrator"])
+    # Try multiple resolution strategies since CWD varies:
+    # - From umbrella root: CWD = /umbrella/
+    # - From app tests: CWD = /umbrella/apps/arbor_ai/
+    # - In release mode: specs must be in priv/
+    cwd = File.cwd!()
 
-    if File.dir?(source_path) do
-      source_path
-    else
-      # Fallback for release mode — specs would need to be in priv/
-      case :code.priv_dir(:arbor_orchestrator) do
-        {:error, _} -> source_path
-        priv_dir -> Path.dirname(priv_dir)
-      end
+    candidates = [
+      Path.join([cwd, "apps", "arbor_orchestrator"]),
+      Path.join([cwd, "..", "arbor_orchestrator"]) |> Path.expand(),
+      cwd
+    ]
+
+    case Enum.find(candidates, fn path ->
+           File.dir?(path) and File.exists?(Path.join(path, "specs"))
+         end) do
+      nil ->
+        case :code.priv_dir(:arbor_orchestrator) do
+          {:error, _} -> List.first(candidates)
+          priv_dir -> Path.dirname(to_string(priv_dir))
+        end
+
+      path ->
+        path
     end
   end
 end

@@ -141,13 +141,15 @@ defmodule Arbor.Agent.SessionManager do
     trust_tier = Keyword.get(opts, :trust_tier, :established)
     adapters = build_adapters(agent_id, trust_tier, opts)
 
+    turn = turn_dot_path()
+    hb = heartbeat_dot_path()
     [
       session_id: "agent-session-#{agent_id}",
       agent_id: agent_id,
       trust_tier: trust_tier,
       adapters: adapters,
-      turn_dot: turn_dot_path(),
-      heartbeat_dot: heartbeat_dot_path(),
+      turn_dot: turn,
+      heartbeat_dot: hb,
       start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
       execution_mode: :session
     ]
@@ -226,12 +228,34 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp orchestrator_app_dir do
-    case :code.priv_dir(:arbor_orchestrator) do
-      {:error, _} ->
-        Path.join([File.cwd!(), "apps", "arbor_orchestrator"])
+    # In an umbrella, specs/ lives in the source tree (not _build).
+    # Try multiple resolution strategies since CWD varies:
+    # - From umbrella root: CWD = /umbrella/
+    # - From app tests: CWD = /umbrella/apps/arbor_orchestrator/
+    # - In release mode: specs must be in priv/
+    cwd = File.cwd!()
 
-      priv_dir ->
-        Path.dirname(priv_dir)
+    candidates = [
+      # Direct: CWD is umbrella root
+      Path.join([cwd, "apps", "arbor_orchestrator"]),
+      # Sibling: CWD is an app dir (e.g., apps/arbor_orchestrator or apps/arbor_agent)
+      Path.join([cwd, "..", "arbor_orchestrator"]) |> Path.expand(),
+      # Self: CWD IS the orchestrator dir
+      cwd
+    ]
+
+    case Enum.find(candidates, fn path ->
+           File.dir?(path) and File.exists?(Path.join(path, "specs"))
+         end) do
+      nil ->
+        # Fallback for release mode
+        case :code.priv_dir(:arbor_orchestrator) do
+          {:error, _} -> List.first(candidates)
+          priv_dir -> Path.dirname(to_string(priv_dir))
+        end
+
+      path ->
+        path
     end
   end
 end

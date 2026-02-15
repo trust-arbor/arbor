@@ -173,7 +173,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
 
   defp build_tools([]), do: nil
   defp build_tools(nil), do: nil
-  defp build_tools(tools), do: tools
+
+  defp build_tools(tools) do
+    Enum.map(tools, &tool_to_chat_format/1)
+  end
+
+  defp tool_to_chat_format(%{"type" => "function"} = tool), do: tool
+
+  defp tool_to_chat_format(tool) when is_map(tool) do
+    name = Map.get(tool, :name) || Map.get(tool, "name") || ""
+    description = Map.get(tool, :description) || Map.get(tool, "description")
+
+    parameters =
+      Map.get(tool, :input_schema) || Map.get(tool, :parameters) ||
+        Map.get(tool, "input_schema") || Map.get(tool, "parameters") || %{}
+
+    function =
+      %{"name" => to_string(name), "parameters" => parameters}
+      |> maybe_put("description", if(description, do: to_string(description)))
+
+    %{"type" => "function", "function" => function}
+  end
 
   # --- Response Parsing ---
 

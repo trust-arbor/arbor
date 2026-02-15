@@ -196,7 +196,6 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   end
 
   defp format_llm_response(response) do
-    # Check for tool calls in the raw response
     tool_calls = extract_tool_calls(response)
 
     if tool_calls != [] do
@@ -206,12 +205,39 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     end
   end
 
-  defp extract_tool_calls(%{raw: raw}) when is_map(raw) do
-    calls = Map.get(raw, "tool_calls") || Map.get(raw, :tool_calls) || []
-    if is_list(calls), do: calls, else: []
-  end
+  defp extract_tool_calls(response) do
+    # First try parsed content_parts (reliable — each adapter already parses tool calls)
+    from_parts =
+      case Map.get(response, :content_parts) do
+        parts when is_list(parts) ->
+          parts
+          |> Enum.filter(&(Map.get(&1, :kind) == :tool_call))
+          |> Enum.map(fn part ->
+            %{
+              "id" => Map.get(part, :id, "call"),
+              "name" => Map.get(part, :name, "unknown"),
+              "arguments" => Map.get(part, :arguments, %{})
+            }
+          end)
 
-  defp extract_tool_calls(_), do: []
+        _ ->
+          []
+      end
+
+    if from_parts != [] do
+      from_parts
+    else
+      # Fallback: check raw response (for mock responses or non-standard providers)
+      case Map.get(response, :raw) do
+        raw when is_map(raw) ->
+          calls = Map.get(raw, "tool_calls") || Map.get(raw, :tool_calls) || []
+          if is_list(calls), do: calls, else: []
+
+        _ ->
+          []
+      end
+    end
+  end
 
   # ── Tool Dispatch ───────────────────────────────────────────────────
   #
