@@ -259,7 +259,6 @@ defmodule Arbor.Orchestrator.Session do
 
     with {:ok, turn_graph} <- parse_dot_file(turn_dot_path),
          {:ok, heartbeat_graph} <- parse_dot_file(heartbeat_dot_path) do
-
       # Build contract structs if available (runtime bridge)
       {session_config, session_state, behavior} =
         build_contract_structs(

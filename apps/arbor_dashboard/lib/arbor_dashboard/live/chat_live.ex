@@ -491,7 +491,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # Unsubscribe from group topic if subscribed
     if socket.assigns.group_id do
       try do
-        Phoenix.PubSub.unsubscribe(Arbor.Dashboard.PubSub, "group_chat:#{socket.assigns.group_id}")
+        Phoenix.PubSub.unsubscribe(
+          Arbor.Dashboard.PubSub,
+          "group_chat:#{socket.assigns.group_id}"
+        )
       rescue
         _ -> :ok
       end
@@ -1902,6 +1905,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           Enum.map(history, fn msg ->
             Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
           end)
+
         stream(socket, :messages, history_with_ids, reset: true)
       rescue
         _ ->

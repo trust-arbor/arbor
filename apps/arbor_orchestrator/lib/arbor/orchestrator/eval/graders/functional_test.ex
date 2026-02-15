@@ -146,9 +146,14 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, result} -> result
-      {:exit, reason} -> %{passed: false, call: call, detail: "timeout (exit: #{inspect(reason)})"}
-      nil -> %{passed: false, call: call, detail: "timeout after #{timeout}ms"}
+      {:ok, result} ->
+        result
+
+      {:exit, reason} ->
+        %{passed: false, call: call, detail: "timeout (exit: #{inspect(reason)})"}
+
+      nil ->
+        %{passed: false, call: call, detail: "timeout after #{timeout}ms"}
     end
   end
 

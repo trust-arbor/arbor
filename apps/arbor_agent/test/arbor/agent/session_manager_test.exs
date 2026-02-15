@@ -55,7 +55,8 @@ defmodule Arbor.Agent.SessionManagerTest do
 
   describe "stop_session/1" do
     test "no-op for unknown agent" do
-      assert :ok = SessionManager.stop_session("nonexistent-#{:erlang.unique_integer([:positive])}")
+      assert :ok =
+               SessionManager.stop_session("nonexistent-#{:erlang.unique_integer([:positive])}")
     end
   end
 end

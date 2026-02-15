@@ -123,10 +123,22 @@ defmodule Arbor.AI.GraphRouter do
       registry_name = Map.get(@backend_registry_names, backend, String.to_existing_atom(backend))
 
       acc
-      |> Map.put("avail_#{backend}", bool(BackendRegistry.available?(registry_name) == :available))
-      |> Map.put("trust_#{backend}", bool(BackendTrust.meets_minimum?(String.to_existing_atom(backend), min_trust)))
-      |> Map.put("quota_#{backend}", bool(QuotaTracker.available?(String.to_existing_atom(backend))))
-      |> Map.put("free_#{backend}", bool(BudgetTracker.free_backend?(String.to_existing_atom(backend))))
+      |> Map.put(
+        "avail_#{backend}",
+        bool(BackendRegistry.available?(registry_name) == :available)
+      )
+      |> Map.put(
+        "trust_#{backend}",
+        bool(BackendTrust.meets_minimum?(String.to_existing_atom(backend), min_trust))
+      )
+      |> Map.put(
+        "quota_#{backend}",
+        bool(QuotaTracker.available?(String.to_existing_atom(backend)))
+      )
+      |> Map.put(
+        "free_#{backend}",
+        bool(BudgetTracker.free_backend?(String.to_existing_atom(backend)))
+      )
     end)
   end
 

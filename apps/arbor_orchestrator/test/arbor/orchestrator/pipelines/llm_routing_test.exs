@@ -16,7 +16,8 @@ defmodule Arbor.Orchestrator.Pipelines.LlmRoutingTest do
     Engine.run(graph,
       initial_values: initial_values,
       max_steps: 20,
-      logs_root: Path.join(System.tmp_dir!(), "arbor_routing_test_#{:erlang.unique_integer([:positive])}")
+      logs_root:
+        Path.join(System.tmp_dir!(), "arbor_routing_test_#{:erlang.unique_integer([:positive])}")
     )
   end
 

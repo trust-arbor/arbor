@@ -111,7 +111,9 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   def handle_info({:pipeline_event, %{type: :stage_started, node_id: node_id} = event}, state) do
     case find_entry_key(event) do
-      nil -> :ok
+      nil ->
+        :ok
+
       pipeline_id ->
         update_entry(pipeline_id, fn entry ->
           %{entry | current_node: node_id}
@@ -123,15 +125,18 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   def handle_info({:pipeline_event, %{type: :stage_completed} = event}, state) do
     case find_entry_key(event) do
-      nil -> :ok
+      nil ->
+        :ok
+
       pipeline_id ->
         node_id = Map.get(event, :node_id)
         duration_ms = Map.get(event, :duration_ms, 0)
 
         update_entry(pipeline_id, fn entry ->
-          %{entry |
-            completed_count: entry.completed_count + 1,
-            node_durations: Map.put(entry.node_durations, node_id, duration_ms)
+          %{
+            entry
+            | completed_count: entry.completed_count + 1,
+              node_durations: Map.put(entry.node_durations, node_id, duration_ms)
           }
         end)
     end
@@ -141,16 +146,14 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   def handle_info({:pipeline_event, %{type: :pipeline_completed} = event}, state) do
     case find_entry_key(event) do
-      nil -> :ok
+      nil ->
+        :ok
+
       pipeline_id ->
         duration_ms = Map.get(event, :duration_ms)
 
         update_entry(pipeline_id, fn entry ->
-          %{entry |
-            status: :completed,
-            finished_at: DateTime.utc_now(),
-            duration_ms: duration_ms
-          }
+          %{entry | status: :completed, finished_at: DateTime.utc_now(), duration_ms: duration_ms}
         end)
 
         cleanup_history()
@@ -161,17 +164,20 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   def handle_info({:pipeline_event, %{type: :pipeline_failed} = event}, state) do
     case find_entry_key(event) do
-      nil -> :ok
+      nil ->
+        :ok
+
       pipeline_id ->
         duration_ms = Map.get(event, :duration_ms)
         failure_reason = Map.get(event, :reason)
 
         update_entry(pipeline_id, fn entry ->
-          %{entry |
-            status: :failed,
-            finished_at: DateTime.utc_now(),
-            duration_ms: duration_ms,
-            failure_reason: failure_reason
+          %{
+            entry
+            | status: :failed,
+              finished_at: DateTime.utc_now(),
+              duration_ms: duration_ms,
+              failure_reason: failure_reason
           }
         end)
 
@@ -221,6 +227,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
   end
 
   defp find_by_graph_id(nil), do: nil
+
   defp find_by_graph_id(graph_id) do
     @table_name
     |> :ets.tab2list()
@@ -277,7 +284,10 @@ defmodule Arbor.Orchestrator.JobRegistry do
           all_entries
           |> Enum.map(fn {_id, entry} -> entry end)
           |> Enum.filter(fn %Entry{status: status} -> status in [:completed, :failed] end)
-          |> Enum.sort_by(fn %Entry{finished_at: finished_at} -> finished_at end, {:desc, DateTime})
+          |> Enum.sort_by(
+            fn %Entry{finished_at: finished_at} -> finished_at end,
+            {:desc, DateTime}
+          )
 
         if length(finished_entries) > @max_history do
           to_delete = Enum.drop(finished_entries, @max_history)

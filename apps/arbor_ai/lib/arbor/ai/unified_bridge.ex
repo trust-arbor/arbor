@@ -166,7 +166,7 @@ defmodule Arbor.AI.UnifiedBridge do
       cache_read_input_tokens: Map.get(usage, :cache_read_input_tokens, 0),
       total_tokens:
         Map.get(usage, :total_tokens) ||
-          (Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0))
+          Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
     }
   end
 
