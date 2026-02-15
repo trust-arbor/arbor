@@ -331,6 +331,7 @@ defmodule Arbor.Orchestrator.Session do
             |> apply_turn_result(message, result)
 
           response = Map.get(result.context, "session.response", "")
+          emit_turn_signal(new_state, result)
           {:reply, {:ok, response}, new_state}
 
         {:error, reason} ->
@@ -375,15 +376,22 @@ defmodule Arbor.Orchestrator.Session do
       |> Map.put(:heartbeat_in_flight, false)
       |> apply_heartbeat_result(result)
 
+    emit_heartbeat_signal(new_state, result)
     {:noreply, new_state}
   end
 
-  def handle_info({:heartbeat_result, {:error, _reason}}, state) do
+  def handle_info({:heartbeat_result, {:error, reason}}, state) do
     # Heartbeat failures are non-fatal — continue with current state
     new_state =
       state
       |> Map.put(:heartbeat_in_flight, false)
       |> maybe_increment_errors()
+
+    emit_signal(:agent, :heartbeat_failed, %{
+      agent_id: state.agent_id,
+      session_id: state.session_id,
+      reason: inspect(reason)
+    })
 
     {:noreply, new_state}
   end
@@ -646,6 +654,63 @@ defmodule Arbor.Orchestrator.Session do
         # :trust_tier_resolver in adapters.
         declared_tier
     end
+  end
+
+  # ── Signal emission (runtime bridge) ──────────────────────────────
+  #
+  # Orchestrator is standalone — emit signals via runtime bridge to
+  # Arbor.Signals when available. Matches the signal format the
+  # dashboard expects from the legacy path (HeartbeatLoop, APIAgent).
+
+  defp emit_turn_signal(state, %{context: result_ctx}) do
+    tool_calls = Map.get(result_ctx, "session.tool_calls", [])
+    response = Map.get(result_ctx, "session.response", "")
+
+    emit_signal(:agent, :query_completed, %{
+      id: state.agent_id,
+      agent_id: state.agent_id,
+      session_id: state.session_id,
+      type: :session,
+      model: Map.get(result_ctx, "llm.model", "unknown"),
+      tool_calls_count: length(List.wrap(tool_calls)),
+      response_length: String.length(response),
+      turn_count: get_turn_count(state)
+    })
+  end
+
+  defp emit_turn_signal(_state, _result), do: :ok
+
+  defp emit_heartbeat_signal(state, %{context: result_ctx}) do
+    actions = Map.get(result_ctx, "session.actions", [])
+    goal_updates = Map.get(result_ctx, "session.goal_updates", [])
+    new_goals = Map.get(result_ctx, "session.new_goals", [])
+    memory_notes = Map.get(result_ctx, "session.memory_notes", [])
+    cognitive_mode = Map.get(result_ctx, "session.cognitive_mode", "reflection")
+
+    emit_signal(:agent, :heartbeat_complete, %{
+      agent_id: state.agent_id,
+      session_id: state.session_id,
+      cognitive_mode: cognitive_mode,
+      actions_taken: length(List.wrap(actions)),
+      goal_updates_count: length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
+      memory_notes_count: length(List.wrap(memory_notes)),
+      agent_output: Map.get(result_ctx, "llm.content"),
+      completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
+    })
+  end
+
+  defp emit_heartbeat_signal(_state, _result), do: :ok
+
+  defp emit_signal(category, event, data) do
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :emit, 4) and
+         Process.whereis(Arbor.Signals.Bus) != nil do
+      agent_id = data[:agent_id]
+      meta = if agent_id, do: %{agent_id: agent_id}, else: %{}
+      Arbor.Signals.emit(category, event, data, metadata: meta)
+    end
+  rescue
+    _ -> :ok
   end
 
   defp apply_goal_changes(existing_goals, updates, new_goals) do
