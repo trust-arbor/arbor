@@ -450,8 +450,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       # Create the group
       case AgentManager.create_group(group_name, participant_specs) do
         {:ok, group_pid} ->
-          [{group_id, ^group_pid}] = AgentManager.list_groups()
-          Phoenix.PubSub.subscribe(Arbor.Web.PubSub, "group_chat:#{group_id}")
+          {group_id, _} =
+            AgentManager.list_groups()
+            |> Enum.find(fn {_id, pid} -> pid == group_pid end)
+
+          try do
+            Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "group_chat:#{group_id}")
+          rescue
+            _ -> :ok
+          end
+
           participants = build_participant_list(participant_specs)
 
           socket =
@@ -482,7 +490,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_event("leave-group", _params, socket) do
     # Unsubscribe from group topic if subscribed
     if socket.assigns.group_id do
-      Phoenix.PubSub.unsubscribe(Arbor.Web.PubSub, "group_chat:#{socket.assigns.group_id}")
+      try do
+        Phoenix.PubSub.unsubscribe(Arbor.Dashboard.PubSub, "group_chat:#{socket.assigns.group_id}")
+      rescue
+        _ -> :ok
+      end
     end
 
     socket =
@@ -1737,18 +1749,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               </div>
             <% else %>
               <%= for profile <- @available_for_group do %>
-                <label
-                  style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 4px; cursor: pointer; margin-bottom: 0.25rem;"
-                  onmouseover="this.style.background='rgba(74, 158, 255, 0.1)'"
-                  onmouseout="this.style.background='transparent'"
+                <div
+                  phx-click="toggle-group-agent"
+                  phx-value-agent-id={profile.agent_id}
+                  style={"display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 4px; cursor: pointer; margin-bottom: 0.25rem; background: #{if Map.has_key?(@group_selection, profile.agent_id), do: "rgba(74, 158, 255, 0.15)", else: "transparent"};"}
                 >
-                  <input
-                    type="checkbox"
-                    checked={Map.has_key?(@group_selection, profile.agent_id)}
-                    phx-click="toggle-group-agent"
-                    phx-value-agent-id={profile.agent_id}
-                    style="width: 18px; height: 18px;"
-                  />
+                  <span style={"display: inline-block; width: 18px; height: 18px; border: 2px solid #{if Map.has_key?(@group_selection, profile.agent_id), do: "var(--aw-primary, #60a5fa)", else: "var(--aw-border, #555)"}; border-radius: 3px; text-align: center; line-height: 14px; font-size: 12px; color: var(--aw-primary, #60a5fa);"}>
+                    {if Map.has_key?(@group_selection, profile.agent_id), do: "✓", else: ""}
+                  </span>
                   <span style="color: var(--aw-text, #e0e0e0);">
                     {profile.display_name || profile.agent_id}
                   </span>
@@ -1758,7 +1766,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                   >
                     (stopped)
                   </span>
-                </label>
+                </div>
               <% end %>
             <% end %>
           </div>

@@ -341,10 +341,10 @@ defmodule Arbor.Agent.GroupChat do
   end
 
   defp get_pubsub_module do
-    if Code.ensure_loaded?(Arbor.Web.PubSub) do
-      Arbor.Web.PubSub
-    else
-      Phoenix.PubSub
+    cond do
+      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
+      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
+      true -> Phoenix.PubSub
     end
   end
 
