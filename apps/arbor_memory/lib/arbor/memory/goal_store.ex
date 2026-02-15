@@ -23,7 +23,7 @@ defmodule Arbor.Memory.GoalStore do
   use GenServer
 
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.DurableStore
+  alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -288,7 +288,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec delete_goal(String.t(), String.t()) :: :ok
   def delete_goal(agent_id, goal_id) do
     :ets.delete(@ets_table, {agent_id, goal_id})
-    DurableStore.delete("goals", "#{agent_id}:#{goal_id}")
+    MemoryStore.delete("goals", "#{agent_id}:#{goal_id}")
     :ok
   end
 
@@ -299,7 +299,7 @@ defmodule Arbor.Memory.GoalStore do
   def clear_goals(agent_id) do
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
     :ets.select_delete(@ets_table, match_spec)
-    DurableStore.delete_by_prefix("goals", agent_id)
+    MemoryStore.delete_by_prefix("goals", agent_id)
     :ok
   end
 
@@ -422,13 +422,13 @@ defmodule Arbor.Memory.GoalStore do
       |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
       |> Map.update(:deadline, nil, &maybe_to_iso8601/1)
 
-    DurableStore.persist_async("goals", key, goal_map)
-    DurableStore.embed_async("goals", key, goal.description, agent_id: agent_id, type: :goal)
+    MemoryStore.persist_async("goals", key, goal_map)
+    MemoryStore.embed_async("goals", key, goal.description, agent_id: agent_id, type: :goal)
   end
 
   defp load_goals_from_postgres do
-    if DurableStore.available?() do
-      case DurableStore.load_all("goals") do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("goals") do
         {:ok, pairs} ->
           Enum.each(pairs, fn {key, goal_map} ->
             case String.split(key, ":", parts: 2) do

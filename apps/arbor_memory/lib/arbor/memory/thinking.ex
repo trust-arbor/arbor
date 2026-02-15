@@ -24,7 +24,7 @@ defmodule Arbor.Memory.Thinking do
 
   use GenServer
 
-  alias Arbor.Memory.DurableStore
+  alias Arbor.Memory.MemoryStore
   alias Arbor.Memory.Signals
 
   require Logger
@@ -128,7 +128,7 @@ defmodule Arbor.Memory.Thinking do
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
     :ets.delete(@ets_table, {:stream, agent_id})
-    DurableStore.delete("thinking", agent_id)
+    MemoryStore.delete("thinking", agent_id)
     :ok
   end
 
@@ -153,7 +153,7 @@ defmodule Arbor.Memory.Thinking do
     :ets.insert(@ets_table, {agent_id, entries})
     persist_entries_async(agent_id, entries)
 
-    DurableStore.embed_async("thinking", "#{agent_id}:#{entry.id}", text,
+    MemoryStore.embed_async("thinking", "#{agent_id}:#{entry.id}", text,
       agent_id: agent_id, type: :thought)
 
     Signals.emit_thinking_recorded(agent_id, text)
@@ -187,7 +187,7 @@ defmodule Arbor.Memory.Thinking do
         :ets.insert(@ets_table, {agent_id, entries})
         persist_entries_async(agent_id, entries)
 
-        DurableStore.embed_async("thinking", "#{agent_id}:#{entry.id}", full_text,
+        MemoryStore.embed_async("thinking", "#{agent_id}:#{entry.id}", full_text,
           agent_id: agent_id, type: :thought)
 
         Signals.emit_thinking_recorded(agent_id, full_text)
@@ -253,7 +253,7 @@ defmodule Arbor.Memory.Thinking do
 
   defp persist_entries_async(agent_id, entries) do
     serialized = %{"entries" => Enum.map(entries, &serialize_entry/1)}
-    DurableStore.persist_async("thinking", agent_id, serialized)
+    MemoryStore.persist_async("thinking", agent_id, serialized)
   end
 
   defp serialize_entry(entry) do
@@ -288,8 +288,8 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp load_from_postgres(buffer_size) do
-    if DurableStore.available?() do
-      case DurableStore.load_all("thinking") do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("thinking") do
         {:ok, pairs} ->
           Enum.each(pairs, fn {agent_id, data} ->
             entries =

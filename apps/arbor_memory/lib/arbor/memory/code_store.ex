@@ -27,7 +27,7 @@ defmodule Arbor.Memory.CodeStore do
 
   use GenServer
 
-  alias Arbor.Memory.DurableStore
+  alias Arbor.Memory.MemoryStore
 
   require Logger
 
@@ -97,7 +97,7 @@ defmodule Arbor.Memory.CodeStore do
     :ets.insert(@ets_table, {agent_id, [entry | entries]})
 
     persist_entry_async(agent_id, entry)
-    DurableStore.embed_async("code_patterns", "#{agent_id}:#{entry.id}",
+    MemoryStore.embed_async("code_patterns", "#{agent_id}:#{entry.id}",
       "#{purpose} (#{language}): #{String.slice(code, 0, 200)}",
       agent_id: agent_id, type: :code_pattern)
 
@@ -181,7 +181,7 @@ defmodule Arbor.Memory.CodeStore do
       |> Enum.reject(&(&1.id == entry_id))
 
     :ets.insert(@ets_table, {agent_id, entries})
-    DurableStore.delete("code_patterns", "#{agent_id}:#{entry_id}")
+    MemoryStore.delete("code_patterns", "#{agent_id}:#{entry_id}")
     :ok
   end
 
@@ -191,7 +191,7 @@ defmodule Arbor.Memory.CodeStore do
   @spec clear(String.t()) :: :ok
   def clear(agent_id) do
     :ets.delete(@ets_table, agent_id)
-    DurableStore.delete_by_prefix("code_patterns", agent_id)
+    MemoryStore.delete_by_prefix("code_patterns", agent_id)
     :ok
   end
 
@@ -244,7 +244,7 @@ defmodule Arbor.Memory.CodeStore do
       "metadata" => entry.metadata
     }
 
-    DurableStore.persist_async("code_patterns", "#{agent_id}:#{entry.id}", serialized)
+    MemoryStore.persist_async("code_patterns", "#{agent_id}:#{entry.id}", serialized)
   end
 
   defp deserialize_entry(map) do
@@ -269,8 +269,8 @@ defmodule Arbor.Memory.CodeStore do
   end
 
   defp load_from_postgres do
-    if DurableStore.available?() do
-      case DurableStore.load_all("code_patterns") do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("code_patterns") do
         {:ok, pairs} ->
           # Group by agent_id (keys are "agent_id:entry_id")
           grouped =
