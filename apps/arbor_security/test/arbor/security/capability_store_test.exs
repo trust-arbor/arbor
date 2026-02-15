@@ -117,6 +117,48 @@ defmodule Arbor.Security.CapabilityStoreTest do
       assert {:error, :not_found} =
                CapabilityStore.find_authorizing(agent_id, "arbor://fs/write/specific")
     end
+
+    test "matches glob wildcard /** patterns", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://actions/execute/**")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      # Should match any subpath
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://actions/execute/memory_recall")
+
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://actions/execute/shell_execute")
+
+      # Should NOT match different root
+      assert {:error, :not_found} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://actions/delete/something")
+    end
+
+    test "glob /** does not match partial path segments", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      # Should match subpaths under arbor://fs/read/
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home/file.txt")
+
+      # Should NOT match arbor://fs/readonly (different segment)
+      assert {:error, :not_found} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/readonly/file.txt")
+    end
+
+    test "prefix matching does not cross segment boundaries", %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/home")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      # Should match subpath
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home/file.txt")
+
+      # Should NOT match home_config (boundary-aware)
+      assert {:error, :not_found} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home_config/file.txt")
+    end
   end
 
   describe "revoke/1" do

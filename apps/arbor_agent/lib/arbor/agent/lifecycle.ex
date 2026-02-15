@@ -142,7 +142,12 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec stop(String.t()) :: :ok | {:error, term()}
   def stop(agent_id) do
-    Arbor.Agent.SessionManager.stop_session(agent_id)
+    try do
+      Arbor.Agent.SessionManager.stop_session(agent_id)
+    catch
+      :exit, _ -> :ok
+    end
+
     result = Executor.stop(agent_id)
 
     Arbor.Signals.emit(:agent, :stopped, %{

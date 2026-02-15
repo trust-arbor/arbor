@@ -348,14 +348,27 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp authorizes_resource?(cap, resource_uri) do
-    # Check if capability's resource pattern matches the requested resource
+    # Check if capability's resource pattern matches the requested resource.
     # The action is encoded in the URI: arbor://{type}/{action}/{path}
-    # Matching is done via prefix: capability for "arbor://fs/read/project"
-    # authorizes access to "arbor://fs/read/project/src/file.ex"
-    # M4: Require exact match OR prefix + separator to prevent
-    # "arbor://fs/read/home" matching "arbor://fs/read/home_config"
-    cap.resource_uri == resource_uri or
-      String.starts_with?(resource_uri, cap.resource_uri <> "/")
+    #
+    # Glob support: "arbor://fs/read/**" matches anything under arbor://fs/read/
+    # Boundary-aware: "arbor://fs/read/home" does NOT match "arbor://fs/read/home_config"
+    pattern = cap.resource_uri
+
+    cond do
+      # Exact match
+      pattern == resource_uri ->
+        true
+
+      # Glob wildcard: "arbor://foo/**" matches "arbor://foo/bar" and "arbor://foo/bar/baz"
+      String.ends_with?(pattern, "/**") ->
+        prefix = String.trim_trailing(pattern, "**")
+        String.starts_with?(resource_uri, prefix)
+
+      # Prefix + boundary separator
+      true ->
+        String.starts_with?(resource_uri, pattern <> "/")
+    end
   end
 
   defp delegation_chain_valid?(%{delegation_chain: nil}), do: true

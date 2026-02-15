@@ -265,13 +265,18 @@ defmodule Arbor.AI.SessionBridge do
   end
 
   defp orchestrator_app_dir do
-    case :code.priv_dir(:arbor_orchestrator) do
-      {:error, _} ->
-        # Dev mode — find relative to project root
-        Path.join([File.cwd!(), "apps", "arbor_orchestrator"])
+    # In an umbrella, specs/ lives in the source tree (not _build).
+    # Always resolve from the project root to find them.
+    source_path = Path.join([File.cwd!(), "apps", "arbor_orchestrator"])
 
-      priv_dir ->
-        Path.dirname(priv_dir)
+    if File.dir?(source_path) do
+      source_path
+    else
+      # Fallback for release mode — specs would need to be in priv/
+      case :code.priv_dir(:arbor_orchestrator) do
+        {:error, _} -> source_path
+        priv_dir -> Path.dirname(priv_dir)
+      end
     end
   end
 end
