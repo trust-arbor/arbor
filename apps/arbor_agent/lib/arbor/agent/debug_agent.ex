@@ -39,17 +39,25 @@ defmodule Arbor.Agent.DebugAgent do
   alias Arbor.Agent.CircuitBreaker
   alias Arbor.Agent.Investigation
   alias Arbor.Agent.Lifecycle
+  alias Arbor.Agent.Manager
   alias Arbor.Agent.Templates.Diagnostician
   alias Arbor.Agent.Verification
   alias Arbor.Monitor.AnomalyQueue
 
   require Logger
 
-  @default_agent_id "debug-agent"
+  @default_display_name "debug-agent"
   @poll_interval_ms 1_000
   @decision_poll_interval_ms 500
   @max_decision_polls 60
   @verification_delay_ms 500
+
+  @default_model_config %{
+    id: "haiku",
+    label: "Haiku (fast)",
+    provider: :anthropic,
+    backend: :api
+  }
 
   # ============================================================================
   # Public API
@@ -58,49 +66,67 @@ defmodule Arbor.Agent.DebugAgent do
   @doc """
   Start a debug agent as a GenServer.
 
+  When started through the Manager (recommended), `agent_id` is provided in opts.
+  When started standalone, a display name is used with `via_name` registration.
+
   ## Options
 
-    * `:agent_id` — Unique agent ID (default: "debug-agent")
+    * `:agent_id` — Crypto agent ID (set by Manager when supervised)
+    * `:display_name` — Display name (default: "debug-agent")
+    * `:model_config` — Model configuration map
     * `:poll_interval` — How often to check for work in ms (default: 1000)
     * `:on_proposal` — Callback when a proposal is created
     * `:on_decision` — Callback when a decision is received
   """
   def start_link(opts \\ []) do
-    agent_id = Keyword.get(opts, :agent_id, @default_agent_id)
-    name = Keyword.get(opts, :name, via_name(agent_id))
+    display_name = Keyword.get(opts, :display_name, @default_display_name)
+    name = Keyword.get(opts, :name, via_name(display_name))
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @doc """
-  Start a debug agent (convenience wrapper around start_link).
+  Start a debug agent through the Manager with stable identity.
 
-  Returns `{:ok, agent_id}` on success.
+  This is the recommended way to start the DebugAgent. It:
+  - Restores an existing identity if one exists for this display name
+  - Creates a new crypto identity if this is the first boot
+  - Starts the agent under the Arbor.Agent.Supervisor
+  - Registers in the Agent Registry with proper metadata
+  - Emits an `agent.started` signal
+
+  Returns `{:ok, agent_id, pid}` or `{:error, reason}`.
   """
-  @spec start() :: {:ok, String.t()} | {:error, term()}
-  def start, do: start([])
+  @spec start_managed(keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
+  def start_managed(opts \\ []) do
+    display_name = Keyword.get(opts, :display_name, @default_display_name)
+    model_config = Keyword.get(opts, :model_config, @default_model_config)
 
-  @spec start(keyword()) :: {:ok, String.t()} | {:error, term()}
-  def start(opts) do
-    agent_id = Keyword.get(opts, :agent_id, @default_agent_id)
-
-    case start_link(opts) do
-      {:ok, _pid} -> {:ok, agent_id}
-      {:error, {:already_started, _pid}} -> {:ok, agent_id}
-      {:error, reason} -> {:error, reason}
-    end
+    Manager.start_or_resume(__MODULE__, display_name,
+      template: Diagnostician,
+      model_config: model_config
+    )
   end
 
   @doc """
   Stop a debug agent.
 
+  When managed, use `Manager.stop_agent(agent_id)` instead.
   Returns `:ok` whether or not the agent was running (idempotent).
   """
   @spec stop(String.t()) :: :ok
   def stop(agent_id) do
-    GenServer.stop(via_name(agent_id))
-    :ok
+    Manager.stop_agent(agent_id)
+  rescue
+    _ ->
+      # Fallback: try direct GenServer stop
+      try do
+        GenServer.stop(via_name(agent_id))
+      catch
+        :exit, _ -> :ok
+      end
+
+      :ok
   catch
-    :exit, {:noproc, _} -> :ok
     :exit, _ -> :ok
   end
 
@@ -145,65 +171,63 @@ defmodule Arbor.Agent.DebugAgent do
 
   @impl true
   def init(opts) do
-    agent_id = Keyword.get(opts, :agent_id, @default_agent_id)
+    # agent_id is provided by Manager/Supervisor when started via start_managed
+    # Falls back to display_name for standalone/test usage
+    agent_id =
+      Keyword.get(opts, :agent_id) ||
+        Keyword.get(opts, :id) ||
+        Keyword.get(opts, :display_name, @default_display_name)
+
+    display_name = Keyword.get(opts, :display_name, @default_display_name)
     poll_interval = Keyword.get(opts, :poll_interval, @poll_interval_ms)
+    model_config = Keyword.get(opts, :model_config, @default_model_config)
 
-    # Create agent from Diagnostician template
-    # Lifecycle.create takes display_name as first arg, returns crypto agent_id in profile
-    case Lifecycle.create(agent_id, template: Diagnostician) do
-      {:ok, profile} ->
-        # Use the crypto-derived agent_id from the profile
-        crypto_agent_id = profile.agent_id
+    # Start executor and session for AI-enhanced diagnosis
+    lifecycle_opts = [
+      model: model_config[:id] || model_config[:model],
+      provider: model_config[:provider]
+    ]
 
-        # Start executor
-        case Lifecycle.start(crypto_agent_id) do
-          {:ok, _pid} ->
-            # Start circuit breaker for this agent
-            circuit_breaker = start_circuit_breaker(agent_id)
+    safe_lifecycle_start(agent_id, lifecycle_opts)
 
-            state = %{
-              agent_id: crypto_agent_id,
-              poll_interval: poll_interval,
-              phase: :idle,
-              current_lease: nil,
-              current_anomaly: nil,
-              current_proposal: nil,
-              current_proposal_id: nil,
-              current_investigation: nil,
-              decision_polls: 0,
-              circuit_breaker: circuit_breaker,
-              callbacks: %{
-                on_proposal: Keyword.get(opts, :on_proposal),
-                on_decision: Keyword.get(opts, :on_decision),
-                on_investigation: Keyword.get(opts, :on_investigation),
-                on_verification: Keyword.get(opts, :on_verification)
-              },
-              stats: %{
-                anomalies_claimed: 0,
-                proposals_submitted: 0,
-                proposals_approved: 0,
-                proposals_rejected: 0,
-                investigations_completed: 0,
-                verifications_passed: 0,
-                verifications_failed: 0,
-                circuit_breaker_blocked: 0,
-                started_at: DateTime.utc_now()
-              }
-            }
+    # Start circuit breaker for this agent
+    circuit_breaker = start_circuit_breaker(display_name)
 
-            # Schedule first work check
-            schedule_work_check(poll_interval)
-            safe_emit(:debug_agent, :started, %{agent_id: agent_id})
+    state = %{
+      agent_id: agent_id,
+      poll_interval: poll_interval,
+      phase: :idle,
+      current_lease: nil,
+      current_anomaly: nil,
+      current_proposal: nil,
+      current_proposal_id: nil,
+      current_investigation: nil,
+      decision_polls: 0,
+      circuit_breaker: circuit_breaker,
+      callbacks: %{
+        on_proposal: Keyword.get(opts, :on_proposal),
+        on_decision: Keyword.get(opts, :on_decision),
+        on_investigation: Keyword.get(opts, :on_investigation),
+        on_verification: Keyword.get(opts, :on_verification)
+      },
+      stats: %{
+        anomalies_claimed: 0,
+        proposals_submitted: 0,
+        proposals_approved: 0,
+        proposals_rejected: 0,
+        investigations_completed: 0,
+        verifications_passed: 0,
+        verifications_failed: 0,
+        circuit_breaker_blocked: 0,
+        started_at: DateTime.utc_now()
+      }
+    }
 
-            {:ok, state}
+    # Schedule first work check
+    schedule_work_check(poll_interval)
+    safe_emit(:debug_agent, :started, %{agent_id: agent_id})
 
-          {:error, reason} ->
-            {:stop, {:executor_start_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:stop, {:create_failed, reason}}
-    end
+    {:ok, state}
   end
 
   @impl true
@@ -213,7 +237,14 @@ defmodule Arbor.Agent.DebugAgent do
       safe_release_lease(state.current_lease)
     end
 
-    # Lifecycle cleanup (stops executor if running)
+    # Unregister from the agent registry
+    try do
+      Arbor.Agent.Registry.unregister(state.agent_id)
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Lifecycle cleanup (stops session, executor, host)
     Lifecycle.stop(state.agent_id)
     safe_emit(:debug_agent, :stopped, %{agent_id: state.agent_id})
     :ok
@@ -767,6 +798,17 @@ defmodule Arbor.Agent.DebugAgent do
   end
 
   # ============================================================================
+  # Lifecycle Helpers
+  # ============================================================================
+
+  defp safe_lifecycle_start(agent_id, opts) do
+    Lifecycle.start(agent_id, opts)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   # Circuit Breaker Helpers
   # ============================================================================
 

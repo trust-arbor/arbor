@@ -15,6 +15,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   alias Arbor.AI.Response
 
   describe "scenario: basic text generation" do
+    @tag :integration
     test "generate_text/2 returns {:ok, %Response{}} with non-empty text" do
       # This is the fundamental contract that all callers depend on
       result = AI.generate_text("What is 2+2?", backend: :api)
@@ -36,6 +37,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
       end
     end
 
+    @tag :integration
     test "generate_text/2 with system_prompt passes it through" do
       result =
         AI.generate_text("Hello",
@@ -54,6 +56,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
     end
 
     @tag :known_bug
+    @tag :integration
     test "generate_text/2 with invalid provider returns error tuple, not crash" do
       # NOTE: This test documents a known bug — invalid provider causes
       # FunctionClauseError in System.get_env/2 because the env var name
@@ -157,6 +160,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   end
 
   describe "scenario: routing behavior" do
+    @tag :integration
     test "backend: :auto uses Router to select backend without crashing" do
       # The Router should make a deterministic choice based on config
       # In test env, CLI backends may not be available, which is fine
@@ -188,6 +192,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
       end
     end
 
+    @tag :integration
     test "backend: :api routes to API implementation" do
       # API backend should always be available (it uses HTTP, not CLI)
       result = AI.generate_text("Hello, this is an API routing test", backend: :api)
@@ -204,6 +209,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   end
 
   describe "scenario: error handling consistency" do
+    @tag :integration
     test "API backend handles valid prompts without crashing" do
       # The facade should handle normal input gracefully
       result =
@@ -225,6 +231,7 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
       end
     end
 
+    @tag :integration
     test "API backend handles empty string gracefully" do
       # Empty string should return an error, not crash
       result =

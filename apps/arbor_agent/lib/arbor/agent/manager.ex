@@ -1,20 +1,28 @@
-defmodule Arbor.Dashboard.AgentManager do
+defmodule Arbor.Agent.Manager do
   @moduledoc """
-  Stateless coordination for agent lifecycle in the dashboard.
+  Stateless coordination for agent lifecycle.
 
   Wraps `Arbor.Agent.Supervisor` and `Arbor.Agent.Registry` with
-  PubSub broadcasts so multiple LiveView instances stay in sync.
+  signal emissions so all consumers (dashboard, CLI, gateway) stay in sync.
 
   No GenServer — just function calls. Nothing to crash.
+
+  ## Signal Events
+
+  All lifecycle events are emitted on the `:agent` signal category:
+
+  - `{:agent, :started}` — agent started with `%{agent_id, model_config}`
+  - `{:agent, :stopped}` — agent stopped with `%{agent_id}`
+  - `{:agent, :chat_message}` — external chat message with `%{role, content, sender}`
+
+  Consumers subscribe via `Arbor.Signals.subscribe("agent.*", handler)` or
+  `Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")`.
   """
 
   alias Arbor.Agent.APIAgent
   alias Arbor.Agent.Claude
 
   require Logger
-
-  @pubsub Arbor.Dashboard.PubSub
-  @topic "dashboard:agent"
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -61,7 +69,7 @@ defmodule Arbor.Dashboard.AgentManager do
              }
            ) do
         {:ok, pid} ->
-          broadcast({:agent_started, agent_id, pid, model_config})
+          safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
         {:error, _} = error ->
@@ -119,7 +127,7 @@ defmodule Arbor.Dashboard.AgentManager do
             :exit, _ -> :ok
           end
 
-          broadcast({:agent_started, agent_id, pid, model_config})
+          safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
         {:error, _} = error ->
@@ -128,25 +136,73 @@ defmodule Arbor.Dashboard.AgentManager do
     end
   end
 
-  defp default_model_config do
-    %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli}
+  @doc """
+  Start or resume a system agent with stable identity.
+
+  Searches for an existing profile matching `display_name` and `template`.
+  If found, resumes that agent. If not found, creates a new identity and starts fresh.
+
+  This is the preferred way to start system agents (like DebugAgent) that need
+  stable identity across restarts.
+
+  The `model_config` map must include a `:module` key specifying the GenServer module.
+
+  ## Options
+
+  - `:template` — agent template module (required for identity matching)
+  - `:display_name` — display name for the agent (default: from model_config)
+  - All other options from `start_agent/2` and `resume_agent/2`
+
+  ## Examples
+
+      Manager.start_or_resume(DebugAgent, "debug-agent",
+        template: Diagnostician,
+        model_config: %{id: "haiku", provider: :anthropic, backend: :api}
+      )
+  """
+  @spec start_or_resume(module(), String.t(), keyword()) ::
+          {:ok, String.t(), pid()} | {:error, term()}
+  def start_or_resume(module, display_name, opts \\ []) do
+    template = Keyword.get(opts, :template)
+    model_config = Keyword.get(opts, :model_config, default_model_config())
+    model_config = Map.put(model_config, :module, module)
+
+    case find_existing_profile(display_name, template) do
+      {:ok, agent_id} ->
+        Logger.info("[Manager] Resuming #{display_name} with identity #{agent_id}")
+        resume_agent(agent_id, Keyword.put(opts, :model_config, model_config))
+
+      :not_found ->
+        Logger.info("[Manager] Creating new identity for #{display_name}")
+
+        start_agent(
+          model_config,
+          Keyword.merge(opts, display_name: display_name)
+        )
+    end
   end
 
   @doc """
   Stop a running agent by ID.
 
-  Uses `Supervisor.stop_agent_by_id/1` and broadcasts the event.
+  Stops the lifecycle (session, executor, host) first, then the supervised process.
   """
   @spec stop_agent(String.t()) :: :ok | {:error, :not_found}
   def stop_agent(agent_id) do
-    result = Arbor.Agent.Supervisor.stop_agent_by_id(agent_id)
-
-    case result do
-      :ok -> broadcast({:agent_stopped, agent_id})
+    # Stop lifecycle components (session, executor, host) first
+    try do
+      Arbor.Agent.Lifecycle.stop(agent_id)
+    rescue
       _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
 
-    result
+    # Then stop the supervised agent process
+    Arbor.Agent.Supervisor.stop_agent_by_id(agent_id)
+
+    safe_emit(:stopped, %{agent_id: agent_id})
+    :ok
   end
 
   @doc """
@@ -177,22 +233,10 @@ defmodule Arbor.Dashboard.AgentManager do
   end
 
   @doc """
-  Subscribe the calling process to agent lifecycle PubSub events.
-
-  Events:
-  - `{:agent_started, agent_id, pid, model_config}`
-  - `{:agent_stopped, agent_id}`
-  """
-  @spec subscribe() :: :ok | {:error, term()}
-  def subscribe do
-    Phoenix.PubSub.subscribe(@pubsub, @topic)
-  end
-
-  @doc """
-  Send a message to the agent and broadcast the conversation to the chat UI.
+  Send a message to the agent and emit the conversation as signals.
 
   This allows external callers (e.g., Claude Code via Tidewave) to have
-  conversations with the agent that are visible in the ChatLive UI.
+  conversations with the agent that are visible to any signal subscriber.
 
   The `sender` label identifies who sent the message (e.g., "Opus", "Hysun").
   If no `:agent_id` is provided, uses the first running agent.
@@ -213,38 +257,13 @@ defmodule Arbor.Dashboard.AgentManager do
 
     case agent_result do
       {:ok, _agent_id, pid, metadata} ->
-        broadcast({:chat_message, %{role: :user, content: input, sender: sender}})
+        safe_emit(:chat_message, %{role: :user, content: input, sender: sender})
         dispatch_query(pid, metadata, input, opts)
 
       :not_found ->
         {:error, :agent_not_found}
     end
   end
-
-  defp dispatch_query(pid, metadata, input, opts) do
-    backend = metadata[:backend] || metadata[:model_config][:backend]
-
-    result = query_backend(backend, pid, input, opts)
-    handle_query_result(result)
-  end
-
-  defp query_backend(:cli, pid, input, opts) do
-    Claude.query(pid, input,
-      timeout: Keyword.get(opts, :timeout, :infinity),
-      permission_mode: :bypass
-    )
-  end
-
-  defp query_backend(:api, pid, input, _opts), do: APIAgent.query(pid, input)
-  defp query_backend(_, _pid, _input, _opts), do: {:error, :unknown_backend}
-
-  defp handle_query_result({:ok, response}) do
-    text = response[:text] || response.text || ""
-    broadcast({:chat_message, %{role: :assistant, content: text, sender: "Agent"}})
-    {:ok, text}
-  end
-
-  defp handle_query_result({:error, _} = error), do: error
 
   @doc """
   Create a group chat with the given participants.
@@ -257,15 +276,6 @@ defmodule Arbor.Dashboard.AgentManager do
   - `:type` - `:agent` or `:human`
 
   For agent participants, automatically looks up the host_pid via `Lifecycle.get_host/1`.
-
-  ## Example
-
-      participant_specs = [
-        %{id: "agent_abc123", name: "Alice", type: :agent},
-        %{id: "agent_def456", name: "Bob", type: :agent},
-        %{id: "hysun", name: "Hysun", type: :human}
-      ]
-      {:ok, group_pid} = AgentManager.create_group("brainstorm", participant_specs)
   """
   @spec create_group(String.t(), [map()]) :: {:ok, pid()} | {:error, term()}
   def create_group(name, participant_specs) do
@@ -312,8 +322,6 @@ defmodule Arbor.Dashboard.AgentManager do
   """
   @spec list_groups() :: [{String.t(), pid()}]
   def list_groups do
-    # Query ExecutorRegistry for all {:group, group_id} entries
-    # Match pattern: {{:group, group_id}, pid, _value}
     Registry.select(Arbor.Agent.ExecutorRegistry, [
       {
         {{:group, :"$1"}, :"$2", :_},
@@ -326,6 +334,20 @@ defmodule Arbor.Dashboard.AgentManager do
   end
 
   # ── Private ─────────────────────────────────────────────────────────
+
+  defp default_model_config do
+    %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli}
+  end
+
+  defp build_start_opts(agent_id, display_name, %{module: module} = config) do
+    extra_opts = Map.get(config, :start_opts, [])
+
+    {module,
+     Keyword.merge(
+       [id: agent_id, agent_id: agent_id, display_name: display_name, model_config: config],
+       extra_opts
+     )}
+  end
 
   defp build_start_opts(agent_id, display_name, %{backend: :cli} = config) do
     model_atom =
@@ -357,7 +379,56 @@ defmodule Arbor.Dashboard.AgentManager do
   defp resolve_template(%{backend: :cli}), do: Arbor.Agent.Templates.ClaudeCode
   defp resolve_template(_), do: Arbor.Agent.Templates.ClaudeCode
 
-  defp broadcast(message) do
-    Phoenix.PubSub.broadcast(@pubsub, @topic, message)
+  defp find_existing_profile(display_name, template) do
+    case Arbor.Agent.Lifecycle.list_agents() do
+      profiles when is_list(profiles) ->
+        match =
+          Enum.find(profiles, fn p ->
+            name_matches? =
+              p.display_name == display_name or
+                (p.character && p.character.name == display_name)
+
+            template_matches? = template == nil or p.template == template
+            name_matches? and template_matches?
+          end)
+
+        if match, do: {:ok, match.agent_id}, else: :not_found
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp dispatch_query(pid, metadata, input, opts) do
+    backend = metadata[:backend] || metadata[:model_config][:backend]
+
+    result = query_backend(backend, pid, input, opts)
+    handle_query_result(result)
+  end
+
+  defp query_backend(:cli, pid, input, opts) do
+    Claude.query(pid, input,
+      timeout: Keyword.get(opts, :timeout, :infinity),
+      permission_mode: :bypass
+    )
+  end
+
+  defp query_backend(:api, pid, input, _opts), do: APIAgent.query(pid, input)
+  defp query_backend(_, _pid, _input, _opts), do: {:error, :unknown_backend}
+
+  defp handle_query_result({:ok, response}) do
+    text = response[:text] || response.text || ""
+    safe_emit(:chat_message, %{role: :assistant, content: text, sender: "Agent"})
+    {:ok, text}
+  end
+
+  defp handle_query_result({:error, _} = error), do: error
+
+  defp safe_emit(type, data) do
+    Arbor.Signals.emit(:agent, type, data)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
