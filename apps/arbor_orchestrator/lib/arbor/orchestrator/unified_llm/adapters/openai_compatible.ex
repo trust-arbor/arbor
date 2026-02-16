@@ -567,6 +567,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         int_or_nil(get_in(usage, ["completion_tokens_details", "reasoning_tokens"])),
       cache_read_tokens: int_or_nil(get_in(usage, ["prompt_tokens_details", "cached_tokens"])),
       cache_write_tokens: nil,
+      # OpenRouter returns cost inside the usage object
+      cost: float_or_nil(Map.get(usage, "cost")),
       raw: usage
     }
   end
@@ -647,6 +649,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
 
   defp int_or_nil(value) when is_integer(value), do: value
   defp int_or_nil(_), do: nil
+
+  defp float_or_nil(value) when is_float(value), do: value
+  defp float_or_nil(value) when is_integer(value), do: value / 1
+  defp float_or_nil(_), do: nil
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map

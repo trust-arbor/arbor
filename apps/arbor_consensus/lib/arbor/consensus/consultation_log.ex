@@ -311,6 +311,8 @@ defmodule Arbor.Consensus.ConsultationLog do
   end
 
   defp build_result(run_id, _question, perspective, eval, llm_meta) do
+    usage = Map.get(llm_meta, :usage, %{})
+
     %{
       id: generate_id(),
       run_id: run_id,
@@ -331,7 +333,11 @@ defmodule Arbor.Consensus.ConsultationLog do
         "perspective" => to_string(perspective),
         "system_prompt_hash" => hash_prompt(Map.get(llm_meta, :system_prompt, "")),
         "concerns" => Map.get(eval, :concerns, []),
-        "recommendations" => Map.get(eval, :recommendations, [])
+        "recommendations" => Map.get(eval, :recommendations, []),
+        "cost" => Map.get(llm_meta, :cost),
+        "input_tokens" => Map.get(usage, :input_tokens),
+        "output_tokens" => Map.get(usage, :output_tokens),
+        "total_tokens" => Map.get(usage, :total_tokens)
       }
     }
   end

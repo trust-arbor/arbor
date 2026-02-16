@@ -54,7 +54,7 @@ defmodule Arbor.Consensus.LLMBridge do
     `:api` to force UnifiedLLM API path. Default: auto-detect.
   """
   @spec complete(String.t(), String.t(), keyword()) ::
-          {:ok, %{text: String.t(), duration_ms: non_neg_integer()}} | {:error, term()}
+          {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}} | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
     backend = Keyword.get(opts, :backend)
     start = System.monotonic_time(:millisecond)
@@ -77,7 +77,8 @@ defmodule Arbor.Consensus.LLMBridge do
     duration_ms = System.monotonic_time(:millisecond) - start
 
     case result do
-      {:ok, text} -> {:ok, %{text: text, duration_ms: duration_ms}}
+      {:ok, text, usage} -> {:ok, %{text: text, duration_ms: duration_ms, usage: usage}}
+      {:ok, text} -> {:ok, %{text: text, duration_ms: duration_ms, usage: %{}}}
       error -> error
     end
   catch
@@ -118,7 +119,7 @@ defmodule Arbor.Consensus.LLMBridge do
 
     case apply(@client_mod, :complete, [client, request]) do
       {:ok, response} ->
-        {:ok, response.text}
+        {:ok, response.text, response.usage}
 
       {:error, _reason} = error ->
         error

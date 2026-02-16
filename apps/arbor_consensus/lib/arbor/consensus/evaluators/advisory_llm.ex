@@ -243,9 +243,15 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     llm_meta = %{provider: provider, model: model, system_prompt: system_prompt, user_prompt: user_prompt}
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:ok, %{text: response_text, duration_ms: duration_ms}}} ->
+      {:ok, {:ok, %{text: response_text, duration_ms: duration_ms} = response}} ->
         result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
-        llm_meta = Map.merge(llm_meta, %{duration_ms: duration_ms, raw_response: response_text})
+        usage = Map.get(response, :usage, %{})
+        llm_meta = Map.merge(llm_meta, %{
+          duration_ms: duration_ms,
+          raw_response: response_text,
+          usage: usage,
+          cost: Map.get(usage, :cost)
+        })
         with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
         result
 
@@ -257,10 +263,16 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         result
 
       {:ok, {:error, reason}} ->
-        error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
+        result = error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
+        error_meta = Map.merge(llm_meta, %{duration_ms: 0, raw_response: "", error: inspect(reason)})
+        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+        result
 
       nil ->
-        error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
+        result = error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
+        error_meta = Map.merge(llm_meta, %{duration_ms: timeout, raw_response: "", error: "timeout"})
+        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+        result
     end
   end
 
