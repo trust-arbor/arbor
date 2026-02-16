@@ -109,12 +109,12 @@ defmodule Arbor.Consensus.Config do
   @doc """
   Timeout for LLM evaluator calls in milliseconds.
 
-  Default: 60_000 (60 seconds). LLM calls can be slow; this should be
-  long enough for complex analysis but not indefinite.
+  Default: 300_000 (5 minutes). Kimi K2.5 (default advisory model) can take
+  50-125s per perspective, with occasional spikes to 180s+ under load.
   """
   @spec llm_evaluator_timeout() :: pos_integer()
   def llm_evaluator_timeout do
-    Application.get_env(@app, :llm_evaluator_timeout, 180_000)
+    Application.get_env(@app, :llm_evaluator_timeout, 300_000)
   end
 
   @doc """
