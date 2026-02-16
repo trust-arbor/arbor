@@ -224,8 +224,8 @@ defmodule Mix.Tasks.Arbor.Sdlc do
   defp cmd_backend(backend) when backend in @valid_backends do
     ensure_running!()
     node = Helpers.full_node_name()
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    atom = String.to_atom(backend)
+
+    {:ok, atom} = Arbor.Common.SafeAtom.to_allowed(backend, [:cli, :api])
 
     case :rpc.call(node, Application, :put_env, [:arbor_sdlc, :ai_backend, atom]) do
       :ok ->

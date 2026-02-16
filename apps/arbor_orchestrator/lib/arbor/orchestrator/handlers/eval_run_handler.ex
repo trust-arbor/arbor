@@ -98,10 +98,16 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
 
   defp get_from_map_item(context, key) do
     case Context.get(context, "map.current_item") do
-      item when is_map(item) -> Map.get(item, key) || Map.get(item, String.to_atom(key))
+      item when is_map(item) -> Map.get(item, key) || Map.get(item, safe_to_existing_atom(key))
       item when is_binary(item) -> try_parse_json_item(item, key)
       _ -> nil
     end
+  end
+
+  defp safe_to_existing_atom(str) when is_binary(str) do
+    String.to_existing_atom(str)
+  rescue
+    ArgumentError -> str
   end
 
   defp try_parse_json_item(str, key) do

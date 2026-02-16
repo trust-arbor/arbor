@@ -165,17 +165,17 @@ defmodule Arbor.Sandbox do
       virtual: nil
     }
 
-    # Initialize filesystem sandbox
-    sandbox =
-      case Filesystem.create(agent_id, level, opts) do
-        {:ok, fs} -> %{sandbox | filesystem: fs}
-        {:error, _} -> sandbox
-      end
+    # Initialize filesystem sandbox — fail if filesystem cannot be created
+    case Filesystem.create(agent_id, level, opts) do
+      {:ok, fs} ->
+        sandbox = %{sandbox | filesystem: fs}
+        :ok = Registry.register(sandbox)
+        emit_sandbox_created(sandbox)
+        {:ok, sandbox}
 
-    :ok = Registry.register(sandbox)
-    emit_sandbox_created(sandbox)
-
-    {:ok, sandbox}
+      {:error, reason} ->
+        {:error, {:filesystem_init_failed, reason}}
+    end
   end
 
   @doc """

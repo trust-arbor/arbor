@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Judge.PromptBuilder do
   Builds LLM prompts for the judge and parses JSON responses into Verdicts.
   """
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Judge.{Rubric, Verdict}
 
   @doc """
@@ -209,9 +210,10 @@ defmodule Arbor.Actions.Judge.PromptBuilder do
   defp parse_list(_), do: []
 
   defp safe_to_atom(str) when is_binary(str) do
-    String.to_existing_atom(str)
-  rescue
-    ArgumentError -> String.to_atom(str)
+    case SafeAtom.to_existing(str) do
+      {:ok, atom} -> atom
+      {:error, _} -> str
+    end
   end
 
   defp compute_dimension_scores(overall, rubric) do
