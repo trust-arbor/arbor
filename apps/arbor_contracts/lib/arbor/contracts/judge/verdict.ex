@@ -67,26 +67,46 @@ defmodule Arbor.Contracts.Judge.Verdict do
 
   defp validate_score(attrs) do
     case Map.get(attrs, :overall_score) do
-      s when is_number(s) and s >= 0.0 and s <= 1.0 -> :ok
-      nil -> {:error, {:missing_required_field, :overall_score}}
-      s when is_number(s) -> {:error, {:invalid_field, :overall_score, "must be between 0.0 and 1.0"}}
-      _ -> {:error, {:invalid_field, :overall_score, "must be a number"}}
+      s when is_number(s) and s >= 0.0 and s <= 1.0 ->
+        :ok
+
+      nil ->
+        {:error, {:missing_required_field, :overall_score}}
+
+      s when is_number(s) ->
+        {:error, {:invalid_field, :overall_score, "must be between 0.0 and 1.0"}}
+
+      _ ->
+        {:error, {:invalid_field, :overall_score, "must be a number"}}
     end
   end
 
   defp validate_recommendation(attrs) do
     case Map.get(attrs, :recommendation) do
-      r when r in @valid_recommendations -> :ok
-      nil -> {:error, {:missing_required_field, :recommendation}}
-      r -> {:error, {:invalid_field, :recommendation, "must be one of #{inspect(@valid_recommendations)}, got #{inspect(r)}"}}
+      r when r in @valid_recommendations ->
+        :ok
+
+      nil ->
+        {:error, {:missing_required_field, :recommendation}}
+
+      r ->
+        {:error,
+         {:invalid_field, :recommendation,
+          "must be one of #{inspect(@valid_recommendations)}, got #{inspect(r)}"}}
     end
   end
 
   defp validate_mode(attrs) do
     case Map.get(attrs, :mode) do
-      m when m in @valid_modes -> :ok
-      nil -> {:error, {:missing_required_field, :mode}}
-      m -> {:error, {:invalid_field, :mode, "must be one of #{inspect(@valid_modes)}, got #{inspect(m)}"}}
+      m when m in @valid_modes ->
+        :ok
+
+      nil ->
+        {:error, {:missing_required_field, :mode}}
+
+      m ->
+        {:error,
+         {:invalid_field, :mode, "must be one of #{inspect(@valid_modes)}, got #{inspect(m)}"}}
     end
   end
 end

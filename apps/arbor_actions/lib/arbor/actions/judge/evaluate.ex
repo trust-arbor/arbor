@@ -231,7 +231,9 @@ defmodule Arbor.Actions.Judge.Evaluate do
 
   defp evaluate(subject, rubric, evidence, :critique, llm_fn, params) do
     evidence_summary = EvidenceRunner.summarize(evidence)
-    {system_prompt, user_prompt} = PromptBuilder.build(subject, rubric, evidence_summary, :critique, intent: params[:intent])
+
+    {system_prompt, user_prompt} =
+      PromptBuilder.build(subject, rubric, evidence_summary, :critique, intent: params[:intent])
 
     case call_llm(system_prompt, user_prompt, llm_fn) do
       {:ok, response, llm_meta} ->
@@ -302,7 +304,10 @@ defmodule Arbor.Actions.Judge.Evaluate do
   defp find_gaps(evidence, rubric) do
     evidence_types = MapSet.new(evidence, & &1.type)
     dimension_names = MapSet.new(rubric.dimensions, & &1[:name])
-    MapSet.difference(dimension_names, evidence_types) |> MapSet.to_list() |> Enum.map(&to_string/1)
+
+    MapSet.difference(dimension_names, evidence_types)
+    |> MapSet.to_list()
+    |> Enum.map(&to_string/1)
   end
 
   defp safe_to_atom(nil), do: nil

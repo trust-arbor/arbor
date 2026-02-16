@@ -21,7 +21,9 @@ defmodule Arbor.Contracts.Judge.VerdictTest do
 
     test "defaults for optional fields" do
       attrs = %{overall_score: 0.5, recommendation: :revise, mode: :verification}
-      assert {:ok, %Verdict{dimension_scores: %{}, strengths: [], weaknesses: []}} = Verdict.new(attrs)
+
+      assert {:ok, %Verdict{dimension_scores: %{}, strengths: [], weaknesses: []}} =
+               Verdict.new(attrs)
     end
 
     test "rejects missing overall_score" do

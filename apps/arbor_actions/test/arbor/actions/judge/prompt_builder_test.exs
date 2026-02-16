@@ -37,7 +37,11 @@ defmodule Arbor.Actions.Judge.PromptBuilderTest do
 
     test "includes intent in user prompt when provided" do
       subject = %{content: "test"}
-      {_system, user} = PromptBuilder.build(subject, @rubric, @evidence_summary, :critique, intent: "Review security")
+
+      {_system, user} =
+        PromptBuilder.build(subject, @rubric, @evidence_summary, :critique,
+          intent: "Review security"
+        )
 
       assert String.contains?(user, "Review security")
     end
@@ -54,14 +58,15 @@ defmodule Arbor.Actions.Judge.PromptBuilderTest do
 
   describe "parse_response/3" do
     test "parses valid JSON response" do
-      response = Jason.encode!(%{
-        overall_score: 0.75,
-        dimension_scores: %{depth: 0.8, actionability: 0.7},
-        strengths: ["Good analysis"],
-        weaknesses: ["Needs more detail"],
-        recommendation: "keep",
-        confidence: 0.85
-      })
+      response =
+        Jason.encode!(%{
+          overall_score: 0.75,
+          dimension_scores: %{depth: 0.8, actionability: 0.7},
+          strengths: ["Good analysis"],
+          weaknesses: ["Needs more detail"],
+          recommendation: "keep",
+          confidence: 0.85
+        })
 
       assert {:ok, verdict} = PromptBuilder.parse_response(response, @rubric, :critique)
       assert verdict.overall_score == 0.75
@@ -83,18 +88,20 @@ defmodule Arbor.Actions.Judge.PromptBuilderTest do
     end
 
     test "rejects invalid JSON" do
-      assert {:error, {:invalid_json, _}} = PromptBuilder.parse_response("not json", @rubric, :critique)
+      assert {:error, {:invalid_json, _}} =
+               PromptBuilder.parse_response("not json", @rubric, :critique)
     end
 
     test "clamps scores to 0-1 range" do
-      response = Jason.encode!(%{
-        overall_score: 1.5,
-        recommendation: "keep",
-        confidence: 0.5,
-        strengths: [],
-        weaknesses: [],
-        dimension_scores: %{}
-      })
+      response =
+        Jason.encode!(%{
+          overall_score: 1.5,
+          recommendation: "keep",
+          confidence: 0.5,
+          strengths: [],
+          weaknesses: [],
+          dimension_scores: %{}
+        })
 
       assert {:ok, verdict} = PromptBuilder.parse_response(response, @rubric, :critique)
       assert verdict.overall_score == 1.0

@@ -103,7 +103,8 @@ defmodule Arbor.Contracts.Judge.Rubric do
               {:halt, {:error, {:invalid_dimension, "dimension name must be an atom"}}}
 
             not is_number(dim[:weight]) or dim[:weight] < 0 ->
-              {:halt, {:error, {:invalid_dimension, "dimension weight must be a non-negative number"}}}
+              {:halt,
+               {:error, {:invalid_dimension, "dimension weight must be a non-negative number"}}}
 
             true ->
               {:cont, :ok}

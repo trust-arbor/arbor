@@ -22,10 +22,26 @@ defmodule Arbor.Actions.Judge.Rubrics do
       version: 1,
       dimensions: [
         %{name: :depth, weight: 0.20, description: "Analytical depth and rigor"},
-        %{name: :perspective_relevance, weight: 0.20, description: "Stays on assigned perspective topic"},
-        %{name: :actionability, weight: 0.20, description: "Concrete, implementable recommendations"},
-        %{name: :accuracy, weight: 0.15, description: "Technical claims correct and well-grounded"},
-        %{name: :originality, weight: 0.15, description: "Unique insights beyond obvious observations"},
+        %{
+          name: :perspective_relevance,
+          weight: 0.20,
+          description: "Stays on assigned perspective topic"
+        },
+        %{
+          name: :actionability,
+          weight: 0.20,
+          description: "Concrete, implementable recommendations"
+        },
+        %{
+          name: :accuracy,
+          weight: 0.15,
+          description: "Technical claims correct and well-grounded"
+        },
+        %{
+          name: :originality,
+          weight: 0.15,
+          description: "Unique insights beyond obvious observations"
+        },
         %{name: :calibration, weight: 0.10, description: "Confidence matches actual certainty"}
       ]
     }
@@ -43,12 +59,32 @@ defmodule Arbor.Actions.Judge.Rubrics do
       domain: "code",
       version: 1,
       dimensions: [
-        %{name: :correctness, weight: 0.30, description: "Code produces correct output and handles edge cases"},
-        %{name: :style, weight: 0.15, description: "Follows language idioms and project conventions"},
-        %{name: :completeness, weight: 0.20, description: "All requirements addressed, no missing pieces"},
+        %{
+          name: :correctness,
+          weight: 0.30,
+          description: "Code produces correct output and handles edge cases"
+        },
+        %{
+          name: :style,
+          weight: 0.15,
+          description: "Follows language idioms and project conventions"
+        },
+        %{
+          name: :completeness,
+          weight: 0.20,
+          description: "All requirements addressed, no missing pieces"
+        },
         %{name: :efficiency, weight: 0.10, description: "Reasonable time/space complexity"},
-        %{name: :safety, weight: 0.15, description: "No security vulnerabilities or unsafe patterns"},
-        %{name: :documentation, weight: 0.10, description: "Clear comments and docstrings where needed"}
+        %{
+          name: :safety,
+          weight: 0.15,
+          description: "No security vulnerabilities or unsafe patterns"
+        },
+        %{
+          name: :documentation,
+          weight: 0.10,
+          description: "Clear comments and docstrings where needed"
+        }
       ]
     }
   end

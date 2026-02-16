@@ -6,13 +6,13 @@ defmodule Arbor.Actions.Judge.QuickTest do
   alias Arbor.Actions.Judge.Quick
 
   @mock_llm_response Jason.encode!(%{
-    overall_score: 0.7,
-    dimension_scores: %{},
-    strengths: ["Reasonable"],
-    weaknesses: [],
-    recommendation: "keep",
-    confidence: 0.6
-  })
+                       overall_score: 0.7,
+                       dimension_scores: %{},
+                       strengths: ["Reasonable"],
+                       weaknesses: [],
+                       recommendation: "keep",
+                       confidence: 0.6
+                     })
 
   defp mock_llm_fn(_system, _user) do
     {:ok, @mock_llm_response, %{model: "test-model", provider: "test"}}
@@ -21,7 +21,8 @@ defmodule Arbor.Actions.Judge.QuickTest do
   describe "domain inference" do
     test "infers advisory for analysis-style content" do
       params = %{
-        content: "We recommend implementing security checks. Consider the stability implications. This analysis suggests...",
+        content:
+          "We recommend implementing security checks. Consider the stability implications. This analysis suggests...",
         llm_fn: &mock_llm_fn/2
       }
 
@@ -31,7 +32,8 @@ defmodule Arbor.Actions.Judge.QuickTest do
 
     test "infers code for code-style content" do
       params = %{
-        content: "defmodule MyApp.Router do\n  use Phoenix.Router\n  import Plug.Conn\n  def index(conn, _params), do: send_resp(conn, 200, \"ok\")\nend",
+        content:
+          "defmodule MyApp.Router do\n  use Phoenix.Router\n  import Plug.Conn\n  def index(conn, _params), do: send_resp(conn, 200, \"ok\")\nend",
         mode: :verification
       }
 
