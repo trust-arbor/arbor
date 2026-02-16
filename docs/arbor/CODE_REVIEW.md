@@ -134,8 +134,8 @@
 ### R8. `arbor_memory/identity_consolidator.ex` — 1,272 lines
 - [ ] Split consolidation phases into separate modules
 
-### R9. `arbor_memory/reflection_processor.ex` — 1,215 lines
-- [ ] Separate LLM interaction from processing logic
+### R9. `arbor_memory/reflection_processor.ex` — 1,215 lines → 887 lines
+- [x] Extract `ReflectionProcessor.Integrations` (~366 lines) — insight/learning/knowledge-graph/relationship integration, insight detection, goals-in-KG, post-reflection decay, safe_atom helper
 
 ### R10. `arbor_ai/ai.ex` — 1,068 lines → 879 lines
 - [x] Extract `Arbor.AI.ToolAuthorization` (~100 lines) — confused deputy prevention bridge to arbor_security
@@ -147,8 +147,8 @@
 ### R12. `arbor_orchestrator/session.ex` — 919 lines
 - [ ] Split into `SessionState`, `SessionTurn`, `Session`
 
-### R13. `arbor_actions/background_checks.ex` — 892 lines
-- [ ] Split by check type
+### R13. `arbor_actions/background_checks.ex` — 892 lines → 169 lines
+- [x] Extract `BackgroundChecks.Run.Checks` (~761 lines) — all 6 check functions, result/warning/suggestion helpers, time/date helpers, formatting, threshold module attributes
 
 ### R14. `arbor_agent/executor.ex` — 777 lines → 495 lines
 - [x] Extract `Executor.ActionDispatch` (~308 lines) — all action dispatch clauses, AI analysis, proposal/hot-load helpers, module discovery
