@@ -260,34 +260,30 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         assert is_binary(Map.get(map, p)), "provider:model for #{p} should be a string"
       end
 
-      # Multiple providers are represented (not all the same)
-      providers =
-        map
-        |> Map.values()
-        |> Enum.map(&(String.split(&1, ":", parts: 2) |> hd()))
-        |> Enum.uniq()
+      # Multiple distinct models are represented for viewpoint diversity
+      unique_models = map |> Map.values() |> Enum.uniq()
 
-      assert length(providers) >= 3,
-             "expected at least 3 different providers, got: #{inspect(providers)}"
+      assert length(unique_models) >= 3,
+             "expected at least 3 different models, got: #{inspect(unique_models)}"
     end
 
     test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
-      # Verify specific assignments — distributed across 4 CLI agents
-      assert map[:security] == "anthropic:claude"
-      assert map[:vision] == "anthropic:claude"
-      assert map[:general] == "anthropic:claude"
-      assert map[:consistency] == "openai:codex"
-      assert map[:performance] == "openai:codex"
-      assert map[:privacy] == "openai:codex"
-      assert map[:brainstorming] == "opencode:opencode"
-      assert map[:emergence] == "opencode:opencode"
-      assert map[:capability] == "opencode:opencode"
-      assert map[:stability] == "gemini:gemini"
-      assert map[:resource_usage] == "gemini:gemini"
-      assert map[:user_experience] == "gemini:gemini"
-      assert map[:generalization] == "gemini:gemini"
+      # Verify specific assignments — distributed across 5 models
+      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
+      assert map[:vision] == "anthropic:claude-sonnet-4-5-20250929"
+      assert map[:consistency] == "openrouter:openai/gpt-5-nano"
+      assert map[:performance] == "openrouter:openai/gpt-5-nano"
+      assert map[:privacy] == "openrouter:openai/gpt-5-nano"
+      assert map[:brainstorming] == "openrouter:moonshotai/kimi-k2.5"
+      assert map[:emergence] == "openrouter:moonshotai/kimi-k2.5"
+      assert map[:capability] == "openrouter:moonshotai/kimi-k2.5"
+      assert map[:stability] == "openrouter:x-ai/grok-4.1-fast"
+      assert map[:resource_usage] == "openrouter:x-ai/grok-4.1-fast"
+      assert map[:user_experience] == "openrouter:minimax/minimax-m2.5"
+      assert map[:generalization] == "openrouter:minimax/minimax-m2.5"
+      assert map[:general] == "openrouter:minimax/minimax-m2.5"
     end
 
     test "caller can override provider_model via opts" do
@@ -320,10 +316,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"anthropic", "claude"} =
+      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
-      assert {"openai", "codex"} = AdvisoryLLM.resolve_provider_model(:privacy)
+      assert {"openrouter", "openai/gpt-5-nano"} = AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
     test "per-call override via provider_model opt" do
@@ -354,19 +350,76 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     end
 
     test "general perspective has a default" do
-      assert {"anthropic", "claude"} =
+      assert {"openrouter", "minimax/minimax-m2.5"} =
                AdvisoryLLM.resolve_provider_model(:general)
     end
 
-    test "CLI agent defaults resolve correctly" do
-      assert {"opencode", "opencode"} =
+    test "OpenRouter model defaults resolve correctly" do
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:brainstorming)
 
-      assert {"gemini", "gemini"} =
+      assert {"openrouter", "minimax/minimax-m2.5"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
 
-      assert {"gemini", "gemini"} =
+      assert {"openrouter", "x-ai/grok-4.1-fast"} =
                AdvisoryLLM.resolve_provider_model(:stability)
+    end
+  end
+
+  describe "runtime configuration" do
+    setup do
+      # Reset to defaults after each test
+      on_exit(fn -> AdvisoryLLM.reset_perspective_models() end)
+    end
+
+    test "configure_perspective/2 overrides a single perspective" do
+      AdvisoryLLM.configure_perspective(:security, "ollama:llama3.2:latest")
+
+      assert {"ollama", "llama3.2:latest"} =
+               AdvisoryLLM.resolve_provider_model(:security)
+
+      # Other perspectives unchanged
+      assert {"openrouter", "openai/gpt-5-nano"} =
+               AdvisoryLLM.resolve_provider_model(:privacy)
+    end
+
+    test "configure_perspectives/1 overrides multiple perspectives" do
+      AdvisoryLLM.configure_perspectives(%{
+        security: "xai:grok-3",
+        brainstorming: "openrouter:deepseek/deepseek-r1"
+      })
+
+      assert {"xai", "grok-3"} = AdvisoryLLM.resolve_provider_model(:security)
+      assert {"openrouter", "deepseek/deepseek-r1"} = AdvisoryLLM.resolve_provider_model(:brainstorming)
+
+      # Other perspectives unchanged
+      assert {"openrouter", "x-ai/grok-4.1-fast"} =
+               AdvisoryLLM.resolve_provider_model(:stability)
+    end
+
+    test "reset_perspective_models/0 restores defaults" do
+      AdvisoryLLM.configure_perspective(:security, "ollama:test")
+      assert {"ollama", "test"} = AdvisoryLLM.resolve_provider_model(:security)
+
+      AdvisoryLLM.reset_perspective_models()
+      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+               AdvisoryLLM.resolve_provider_model(:security)
+    end
+
+    test "provider_map/0 reflects runtime configuration" do
+      AdvisoryLLM.configure_perspective(:general, "lm_studio:qwen3-coder")
+      map = AdvisoryLLM.provider_map()
+      assert map[:general] == "lm_studio:qwen3-coder"
+      # Defaults still present for unconfigured perspectives
+      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
+    end
+
+    test "per-call provider_model opt still takes precedence over config" do
+      AdvisoryLLM.configure_perspective(:security, "ollama:test")
+
+      # Per-call override should win
+      assert {"gemini", "gemini-2.5-flash"} =
+               AdvisoryLLM.resolve_provider_model(:security, provider_model: "gemini:gemini-2.5-flash")
     end
   end
 
