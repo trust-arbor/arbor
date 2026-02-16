@@ -12,9 +12,11 @@ defmodule Arbor.Actions.Judge.Producers.PerspectiveRelevance do
 
   # Perspective-specific keywords for when context doesn't provide them
   @perspective_keywords %{
-    security: ~w(security vulnerability attack threat authentication authorization access control encryption trust),
+    security:
+      ~w(security vulnerability attack threat authentication authorization access control encryption trust),
     stability: ~w(stability reliability crash error recovery fault resilience restart supervisor),
-    performance: ~w(performance latency throughput benchmark optimization bottleneck cache memory cpu),
+    performance:
+      ~w(performance latency throughput benchmark optimization bottleneck cache memory cpu),
     privacy: ~w(privacy data personal sensitive consent gdpr pii encryption),
     brainstorming: ~w(idea creative alternative approach option possibility novel),
     user_experience: ~w(user experience interface usability feedback interaction design),

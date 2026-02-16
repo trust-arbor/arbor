@@ -7,7 +7,8 @@ defmodule Arbor.Actions.Judge.EvidenceRunnerTest do
   alias Arbor.Contracts.Judge.Evidence
 
   @subject %{
-    content: "This is a security analysis. We recommend implementing authentication checks because they prevent unauthorized access.",
+    content:
+      "This is a security analysis. We recommend implementing authentication checks because they prevent unauthorized access.",
     perspective: :security
   }
 

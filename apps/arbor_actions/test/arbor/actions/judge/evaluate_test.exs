@@ -14,20 +14,20 @@ defmodule Arbor.Actions.Judge.EvaluateTest do
   """
 
   @mock_llm_response Jason.encode!(%{
-    overall_score: 0.78,
-    dimension_scores: %{
-      depth: 0.85,
-      perspective_relevance: 0.9,
-      actionability: 0.75,
-      accuracy: 0.7,
-      originality: 0.6,
-      calibration: 0.8
-    },
-    strengths: ["Strong security focus", "Concrete recommendations"],
-    weaknesses: ["Could explore more alternatives"],
-    recommendation: "keep",
-    confidence: 0.82
-  })
+                       overall_score: 0.78,
+                       dimension_scores: %{
+                         depth: 0.85,
+                         perspective_relevance: 0.9,
+                         actionability: 0.75,
+                         accuracy: 0.7,
+                         originality: 0.6,
+                         calibration: 0.8
+                       },
+                       strengths: ["Strong security focus", "Concrete recommendations"],
+                       weaknesses: ["Could explore more alternatives"],
+                       recommendation: "keep",
+                       confidence: 0.82
+                     })
 
   defp mock_llm_fn(_system, _user) do
     {:ok, @mock_llm_response, %{model: "test-model", provider: "test"}}
@@ -110,7 +110,12 @@ defmodule Arbor.Actions.Judge.EvaluateTest do
     end
 
     test "accepts code domain" do
-      params = %{content: "defmodule Foo do\n  def bar, do: :ok\nend", mode: :verification, domain: "code"}
+      params = %{
+        content: "defmodule Foo do\n  def bar, do: :ok\nend",
+        mode: :verification,
+        domain: "code"
+      }
+
       assert {:ok, result} = Evaluate.run(params, %{})
       assert result.rubric.domain == "code"
     end

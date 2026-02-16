@@ -98,7 +98,9 @@ defmodule Arbor.Actions.Judge.ResultStore do
       end
 
     content = Map.get(subject, :content, "")
-    truncated = if byte_size(content) > 10_000, do: String.slice(content, 0, 10_000), else: content
+
+    truncated =
+      if byte_size(content) > 10_000, do: String.slice(content, 0, 10_000), else: content
 
     dimension_scores =
       Map.get(verdict, :dimension_scores, %{})

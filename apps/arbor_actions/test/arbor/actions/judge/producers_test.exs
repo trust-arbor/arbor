@@ -88,7 +88,9 @@ defmodule Arbor.Actions.Judge.ProducersTest do
     end
 
     test "high relevance for security content with security perspective" do
-      content = "The security vulnerability in the authentication system allows unauthorized access through the trust boundary."
+      content =
+        "The security vulnerability in the authentication system allows unauthorized access through the trust boundary."
+
       subject = %{content: content, perspective: :security}
 
       assert {:ok, %Evidence{score: score, passed: true}} =

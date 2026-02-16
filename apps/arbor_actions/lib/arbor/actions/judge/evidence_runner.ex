@@ -39,9 +39,7 @@ defmodule Arbor.Actions.Judge.EvidenceRunner do
         {:error, reason} ->
           require Logger
 
-          Logger.debug(
-            "EvidenceRunner: producer #{inspect(producer)} failed: #{inspect(reason)}"
-          )
+          Logger.debug("EvidenceRunner: producer #{inspect(producer)} failed: #{inspect(reason)}")
 
           []
       end

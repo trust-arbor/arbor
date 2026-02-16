@@ -88,8 +88,10 @@ defmodule Arbor.Actions.Judge.Producers.FormatCompliance do
     checks = [
       {String.length(text) >= 50, "sufficient length"},
       {String.contains?(text, "\n"), "has paragraph structure"},
-      {Regex.match?(~r/\b(recommend|suggest|consider|should)\b/i, text), "contains recommendations"},
-      {Regex.match?(~r/\b(because|since|therefore|however)\b/i, text), "contains reasoning connectors"}
+      {Regex.match?(~r/\b(recommend|suggest|consider|should)\b/i, text),
+       "contains recommendations"},
+      {Regex.match?(~r/\b(because|since|therefore|however)\b/i, text),
+       "contains reasoning connectors"}
     ]
 
     passed = Enum.count(checks, fn {pass, _} -> pass end)
