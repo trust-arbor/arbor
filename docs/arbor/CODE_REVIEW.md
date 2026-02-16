@@ -131,8 +131,9 @@
 ### R7. `arbor_orchestrator/engine.ex` — 1,311 lines
 - [ ] Split into `EngineValidator`, `EngineExecutor`, `Engine`
 
-### R8. `arbor_memory/identity_consolidator.ex` — 1,272 lines
-- [ ] Split consolidation phases into separate modules
+### R8. `arbor_memory/identity_consolidator.ex` — 1,272 lines → 769 lines
+- [x] Extract `IdentityConsolidator.InsightIntegration` (~233 lines) — integrate_insight/2, personality/capability/value insight integration, contradicts?/2, trait/capability/value extraction
+- [x] Extract `IdentityConsolidator.Promotion` (~405 lines) — find_promotion_candidates/2, block/unblock insight, categorize_insights, emit signals, promote_single_node, pattern analysis, graph helpers
 
 ### R9. `arbor_memory/reflection_processor.ex` — 1,215 lines → 887 lines
 - [x] Extract `ReflectionProcessor.Integrations` (~366 lines) — insight/learning/knowledge-graph/relationship integration, insight detection, goals-in-KG, post-reflection decay, safe_atom helper
@@ -141,11 +142,11 @@
 - [x] Extract `Arbor.AI.ToolAuthorization` (~100 lines) — confused deputy prevention bridge to arbor_security
 - [x] Extract `Arbor.AI.ToolSignals` (~92 lines) — signal emission + budget/stats recording for tool-calling requests
 
-### R11. `arbor_sdlc/processors/in_progress.ex` — 958 lines
-- [ ] Extract common handler pattern
+### R11. `arbor_sdlc/processors/in_progress.ex` — 958 lines → 499 lines
+- [x] Extract `InProgress.CompletionProcessing` (~483 lines) — check_and_process_completion/3, hand/session completion, test/quality checks, move_to_completed, failure/error/blocked/interrupted handlers, comms routing, resume_session, serialize_item
 
-### R12. `arbor_orchestrator/session.ex` — 919 lines
-- [ ] Split into `SessionState`, `SessionTurn`, `Session`
+### R12. `arbor_orchestrator/session.ex` — 919 lines → 530 lines
+- [x] Extract `Session.Builders` (~428 lines) — build_turn_values/2, build_heartbeat_values/1, session_base_values, build_engine_opts, apply_turn/heartbeat_result, apply_goal_changes, emit signals, checkpoint/restore, verify_trust_tier, contracts_available?, normalize_message, safe_to_atom
 
 ### R13. `arbor_actions/background_checks.ex` — 892 lines → 169 lines
 - [x] Extract `BackgroundChecks.Run.Checks` (~761 lines) — all 6 check functions, result/warning/suggestion helpers, time/date helpers, formatting, threshold module attributes
