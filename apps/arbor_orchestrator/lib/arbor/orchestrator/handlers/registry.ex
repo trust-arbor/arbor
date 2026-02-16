@@ -75,6 +75,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "consensus.ask" => ConsensusHandler,
     "consensus.await" => ConsensusHandler,
     "consensus.check" => ConsensusHandler,
+    "consensus.decide" => ConsensusHandler,
     # Memory
     "memory.recall" => MemoryHandler,
     "memory.consolidate" => MemoryHandler,

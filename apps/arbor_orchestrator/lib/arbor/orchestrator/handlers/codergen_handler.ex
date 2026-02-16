@@ -103,10 +103,15 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       {:ok, response_text} ->
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
+        updates =
+          base_updates
+          |> Map.put("last_response", response_text)
+          |> maybe_put_perspective_key(node.attrs, response_text)
+
         %Outcome{
           status: :success,
           notes: response_text,
-          context_updates: Map.put(base_updates, "last_response", response_text)
+          context_updates: updates
         }
 
       {:error, reason} ->
@@ -134,6 +139,9 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         nil -> "You are a coding agent working on the following goal: #{goal}"
         sys -> sys
       end
+
+    # In decision mode with a perspective, prepend vote format instructions
+    system_content = maybe_prepend_vote_format(system_content, node.attrs, graph.attrs)
 
     user_content = prompt <> previous_outcome
 
@@ -275,6 +283,32 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   end
 
   defp parse_float(_, default), do: default
+
+  @vote_format_prefix """
+  You MUST respond with a JSON object in this exact format:
+  {"vote": "approve" or "reject" or "abstain", "reasoning": "your detailed reasoning", "confidence": 0.0-1.0, "concerns": ["list", "of", "concerns"], "risk_score": 0.0-1.0}
+
+  Respond ONLY with the JSON object, no other text.
+
+  """
+
+  defp maybe_prepend_vote_format(system_content, node_attrs, graph_attrs) do
+    perspective = Map.get(node_attrs, "perspective")
+    mode = Map.get(graph_attrs, "mode")
+
+    if perspective && mode == "decision" do
+      @vote_format_prefix <> system_content
+    else
+      system_content
+    end
+  end
+
+  defp maybe_put_perspective_key(updates, node_attrs, response_text) do
+    case Map.get(node_attrs, "perspective") do
+      nil -> updates
+      perspective -> Map.put(updates, "vote.#{perspective}", response_text)
+    end
+  end
 
   defp parse_score(nil), do: nil
   defp parse_score(value) when is_integer(value), do: value / 1
