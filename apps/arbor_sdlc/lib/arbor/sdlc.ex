@@ -620,6 +620,8 @@ defmodule Arbor.SDLC do
   end
 
   defp write_and_move_item(item, old_path, to_stage) do
+    alias Arbor.Common.SafePath
+
     # Derive roadmap root from the item's actual source path rather than
     # Config.new() which may not reflect runtime-configured roadmap root.
     # Path structure: <roadmap_root>/<stage_dir>/<filename.md>
@@ -629,10 +631,11 @@ defmodule Arbor.SDLC do
     # Serialize the item back to markdown
     content = ItemParser.serialize(Map.from_struct(item))
 
-    # Write to the new location
-    filename = Path.basename(old_path)
+    # Write to the new location — validate paths stay within roadmap root
+    filename = SafePath.sanitize_filename(Path.basename(old_path))
     dest_dir = Pipeline.stage_path(to_stage, roadmap_root)
-    dest_path = Path.join(dest_dir, filename)
+
+    {:ok, dest_path} = SafePath.safe_join(dest_dir, filename)
 
     File.mkdir_p!(dest_dir)
     File.write!(dest_path, content)

@@ -314,8 +314,9 @@ defmodule Arbor.Actions.Judge.Evaluate do
   defp safe_to_atom(s) when is_atom(s), do: s
 
   defp safe_to_atom(s) when is_binary(s) do
-    String.to_existing_atom(s)
-  rescue
-    ArgumentError -> String.to_atom(s)
+    case Arbor.Common.SafeAtom.to_existing(s) do
+      {:ok, atom} -> atom
+      {:error, _} -> s
+    end
   end
 end

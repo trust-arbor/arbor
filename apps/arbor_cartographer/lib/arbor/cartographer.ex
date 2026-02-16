@@ -430,10 +430,15 @@ defmodule Arbor.Cartographer do
             |> String.split(":")
             |> List.first()
 
-          # Safe: model names come from local `ollama list` command output, not user input.
-          # Each unique model name is bounded by installed models on the local system.
-          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-          {:ollama, String.to_atom(name)}
+          # Model names from local `ollama list` — use existing atom or keep as string
+          model_id =
+            try do
+              String.to_existing_atom(name)
+            rescue
+              ArgumentError -> name
+            end
+
+          {:ollama, model_id}
         end)
 
       _ ->

@@ -259,11 +259,15 @@ defmodule Arbor.Contracts.Error do
   end
 
   defp exception_to_code(%{__struct__: module}) do
-    module
-    |> Module.split()
-    |> List.last()
-    |> Macro.underscore()
-    |> String.to_atom()
+    code_str =
+      module
+      |> Module.split()
+      |> List.last()
+      |> Macro.underscore()
+
+    String.to_existing_atom(code_str)
+  rescue
+    ArgumentError -> :wrapped_error
   end
 
   defp maybe_put(error, _key, nil), do: error

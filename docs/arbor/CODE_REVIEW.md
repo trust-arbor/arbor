@@ -9,37 +9,29 @@
 ## Phase 1: Security (Fix Immediately)
 
 ### S1. Unsafe `String.to_atom/1` — LLM JSON keys (CRITICAL)
-- [ ] `apps/arbor_actions/lib/arbor/actions/judge/prompt_builder.ex:211` — `safe_to_atom/1` falls back to `String.to_atom/1` on untrusted LLM JSON dimension names
-- [ ] `apps/arbor_actions/lib/arbor/actions/judge/evaluate.ex:314` — identical unsafe fallback pattern
-- **Fix:** Replace with `Arbor.Common.SafeAtom.to_allowed/2` using rubric dimension names as allowlist
+- [x] `apps/arbor_actions/lib/arbor/actions/judge/prompt_builder.ex:211` — replaced with `SafeAtom.to_existing/1`, fallback keeps string key
+- [x] `apps/arbor_actions/lib/arbor/actions/judge/evaluate.ex:314` — replaced with `SafeAtom.to_existing/1`, fallback keeps string
 
 ### S2. Unsafe `String.to_atom/1` — orchestrator map context (CRITICAL)
-- [ ] `apps/arbor_orchestrator/lib/arbor/orchestrator/handlers/eval_run_handler.ex:101` — `Map.get(item, String.to_atom(key))` converts untrusted context keys
-- **Fix:** Use `Arbor.Common.SafeAtom.to_existing/1` or only allow string keys
+- [x] `apps/arbor_orchestrator/lib/arbor/orchestrator/handlers/eval_run_handler.ex:101` — replaced with inline `String.to_existing_atom` + rescue (no arbor_common dep)
 
 ### S3. Unsafe `String.to_atom/1` — contracts error module (HIGH)
-- [ ] `apps/arbor_contracts/lib/arbor/contracts/error.ex:266` — `exception_to_code/1` converts module name via `String.to_atom/1`
-- **Fix:** Use `String.to_existing_atom/1` with rescue fallback to `:wrapped_error`
+- [x] `apps/arbor_contracts/lib/arbor/contracts/error.ex:266` — replaced with `String.to_existing_atom` + rescue to `:wrapped_error` (Level 0, no arbor_common dep)
 
 ### S4. Unsafe `String.to_atom/1` — cartographer ollama detection (MEDIUM)
-- [ ] `apps/arbor_cartographer/lib/arbor/cartographer.ex:436` — converts ollama model names to atoms
-- **Fix:** Use `SafeAtom.to_existing/1` or maintain bounded allowlist
+- [x] `apps/arbor_cartographer/lib/arbor/cartographer.ex:436` — replaced with `String.to_existing_atom` + rescue keeps string (no arbor_common dep)
 
 ### S5. Unsafe `String.to_atom/1` — common mix helpers (LOW)
-- [ ] `apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex:35`
-- **Fix:** Use `SafeAtom.to_existing/1`
+- [x] `apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex:35` — acceptable: ARBOR_COOKIE is operator-controlled env var, required as atom for Erlang distribution. Clarified comment.
 
 ### S6. Unsafe `String.to_atom/1` — SDLC mix task (LOW)
-- [ ] `apps/arbor_sdlc/lib/mix/tasks/arbor/sdlc.ex:228` — credo-disabled, backend from `@valid_backends`
-- **Fix:** Use `SafeAtom.to_allowed/2` with `@valid_backends`
+- [x] `apps/arbor_sdlc/lib/mix/tasks/arbor/sdlc.ex:228` — replaced with `SafeAtom.to_allowed/2` using `[:cli, :api]` allowlist
 
 ### S7. File I/O without SafePath validation (HIGH)
-- [ ] `apps/arbor_sdlc/lib/arbor/sdlc.ex:622-669` — `write_and_move_item/3` uses `File.mkdir_p!`, `File.write!`, `File.rm` without `SafePath.resolve_within/2`
-- **Fix:** Validate all paths with `Arbor.Common.SafePath.resolve_within/2` before file operations
+- [x] `apps/arbor_sdlc/lib/arbor/sdlc.ex:622-669` — added `SafePath.sanitize_filename` + `SafePath.safe_join` for dest path validation
 
 ### S8. Sandbox silently continues without filesystem on init failure (HIGH)
-- [ ] `apps/arbor_sandbox/lib/arbor/sandbox.ex:169-173` — filesystem init failure is swallowed, sandbox created without isolation
-- **Fix:** Fail hard with `{:error, {:filesystem_init_failed, reason}}`
+- [x] `apps/arbor_sandbox/lib/arbor/sandbox.ex:169-173` — now returns `{:error, {:filesystem_init_failed, reason}}` instead of silently continuing
 
 ---
 

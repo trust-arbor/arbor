@@ -68,7 +68,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
     unless Node.alive?() do
       ensure_epmd()
       suffix = :rand.uniform(99_999)
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      # Safe: suffix is bounded integer from :rand, creates finite atom space
       name = :"arbor_mix_#{suffix}@localhost"
       {:ok, _} = Node.start(name, :shortnames)
       Node.set_cookie(cookie())
