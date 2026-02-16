@@ -86,21 +86,7 @@ defmodule Arbor.Shell do
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
-    command_name = extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
-
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
-
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} ->
-        execute(command, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, _reason} ->
-        {:error, :unauthorized}
-    end
+    authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
   end
 
   @doc """
@@ -114,21 +100,7 @@ defmodule Arbor.Shell do
           | {:error, :unauthorized | term()}
   # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
-    command_name = extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
-
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
-
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} ->
-        execute_async(command, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, _reason} ->
-        {:error, :unauthorized}
-    end
+    authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
   end
 
   # ===========================================================================
@@ -282,21 +254,7 @@ defmodule Arbor.Shell do
           | {:error, :unauthorized | term()}
   # H6: Pass command context into authorize/4 opts for streaming execution too.
   def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
-    command_name = extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
-
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
-
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} ->
-        execute_streaming(command, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, _reason} ->
-        {:error, :unauthorized}
-    end
+    authorize_and_dispatch(agent_id, command, opts, fn -> execute_streaming(command, opts) end)
   end
 
   # ===========================================================================
@@ -576,6 +534,26 @@ defmodule Arbor.Shell do
       String.slice(command, 0, 197) <> "..."
     else
       command
+    end
+  end
+
+  # Shared authorization dispatch — all authorize_and_execute_* variants
+  # use the same auth check pattern, only the execution function differs.
+  defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
+    command_name = extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+      {:ok, :authorized} ->
+        execute_fn.()
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, _reason} ->
+        {:error, :unauthorized}
     end
   end
 

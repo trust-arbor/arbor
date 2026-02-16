@@ -52,52 +52,43 @@
 ### D4. `safe_to_atom/1` with unsafe fallback duplicated in judge modules
 - [x] Fixed in Phase 1 (S1) — both copies now use `SafeAtom.to_existing/1` internally. Functions retained as local wrappers with safe implementation.
 
-### D5. `safe_call/2` rescue wrapper duplicated in demo, monitor
-- [ ] Extract to `Arbor.Common.SafeCall`
-- [ ] Replace copies in arbor_demo, arbor_monitor
+### D5. `safe_call/2` rescue wrapper duplicated across apps
+- [x] Reviewed: 10+ variants across arbor_agent, arbor_demo, arbor_web, arbor_orchestrator. Different signatures (nil vs default, with/without logging). Monitor has none. Variants are intentionally different — not worth unifying.
 
 ### D6. `via/1` registry tuple duplicated in arbor_agent modules
-- [ ] Extract to `Arbor.Agent.Helpers.via/1`
-- [ ] Replace copies in executor.ex, reasoning_loop.ex
+- [x] Reviewed: Two copies use different registries (ExecutorRegistry vs ReasoningLoopRegistry). One-liner functions that are intentionally separate per GenServer.
 
 ### D7. SafeAtom allowlist boilerplate — 5 x 40 lines in safe_atom.ex
 - [ ] Create `define_enum/2` macro for identity_statuses, taint_levels, taint_roles, taint_policies, signal_categories
 - [ ] Replace ~200 lines of repetitive code
 
 ### D8. Shell authorization pattern repeated 3 times identically
-- [ ] Extract `authorize_shell_operation/4` in `apps/arbor_shell/lib/arbor/shell.ex`
-- [ ] Replace lines 88-104, 116-132, 284-300
+- [x] Extracted `authorize_and_dispatch/4` in `apps/arbor_shell/lib/arbor/shell.ex`. Three `authorize_and_execute*` functions now delegate to shared dispatch.
 
 ### D9. Shell sandbox+registration setup repeated 3 times
-- [ ] Extract `prepare_execution/2` in `apps/arbor_shell/lib/arbor/shell.ex`
-- [ ] Replace lines 308-312, 334-338, 410-418
+- [x] Reviewed: Sync and async share 3-line preamble (sandbox check + register). Streaming version is quite different (PortSession). Minimal duplication — not worth extracting.
 
 ### D10. Signal subscription boilerplate repeated in 7+ LiveViews
 - [ ] Extract `SignalSubscription` helper/component in arbor_dashboard
 - [ ] Replace mount/terminate/handle_info patterns across all LiveViews
 
 ### D11. Validation pattern (optional type check) repeated 4 times
-- [ ] Extract `validate_optional/3` in `apps/arbor_contracts/lib/arbor/contracts/error.ex`
-- [ ] Replace lines 290-320
+- [x] Extracted `validate_optional/3` in `apps/arbor_contracts/lib/arbor/contracts/error.ex`. Four `validate_optional_*` functions now delegate to generic function with type check callback.
 
 ### D12. Advisory LLM system prompts — 13 perspectives with repetitive preamble
-- [ ] Template the `@arbor_context` + `@response_format` preamble in `apps/arbor_consensus/lib/arbor/consensus/evaluators/advisory_llm.ex:364-620`
-- [ ] Use dynamic prompt generation function
+- [x] Reviewed: Preamble already templated via `@arbor_context` and `@response_format` module attributes. Each perspective has unique focus areas. Already well-structured.
 
 ### D13. Historian membership event handling — 6 identical clauses
-- [ ] Refactor `apply_membership_event` in `apps/arbor_historian/lib/arbor/historian.ex:560-630`
-- [ ] Single clause with case dispatch on event type
+- [x] Extracted `extract_event_data/1` in `apps/arbor_historian/lib/arbor/historian.ex`. Removed duplicated `data = event[:data] || event["data"] || %{}` and `agent_id` extraction from 5 clauses.
 
 ### D14. Persistence filter application — 5 filters with identical pattern
-- [ ] Extract generic filter applier in `apps/arbor_persistence/lib/arbor/persistence.ex:288-315`
+- [x] Consolidated 4 `where` filter clauses into single generic clause using `field(r, ^field)` dynamic field access with `@eval_where_filters` allowlist.
 
 ### D15. Flow item_parser enum parsing — 3 identical functions
-- [ ] Extract `parse_enum/2` in `apps/arbor_flow/lib/arbor/flow/item_parser.ex`
-- [ ] Replace `parse_priority/1` (220-230), `parse_category/1` (234-244), `parse_effort/1` (248-258)
+- [x] Extracted `parse_enum/2` in `apps/arbor_flow/lib/arbor/flow/item_parser.ex`. `parse_priority/1`, `parse_category/1`, `parse_effort/1` now delegate to shared function.
 
 ### D16. SDLC new vs changed file handlers nearly identical
-- [ ] Extract `process_file_event/4` in `apps/arbor_sdlc/lib/arbor/sdlc.ex:265-378`
-- [ ] Parameterize by `:new` | `:changed`
+- [x] Reviewed: Handlers share structure but have meaningful behavioral differences — different events (item_detected vs item_changed), different tracker logic, different async patterns. Not worth unifying.
 
 ### D17. Two separate SessionReader modules
 - [ ] `apps/arbor_ai/lib/arbor/ai/session_reader.ex` and `apps/arbor_common/lib/arbor/common/sessions/reader.ex`
