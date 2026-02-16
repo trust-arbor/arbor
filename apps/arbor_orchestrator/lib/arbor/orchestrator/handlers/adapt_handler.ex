@@ -42,6 +42,8 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.GraphMutation
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @trust_tiers ~w(untrusted probationary trusted veteran autonomous)
 
   @impl true
@@ -190,16 +192,6 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
   end
 
   # --- Helpers ---
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(value, _default) when is_integer(value), do: value
-  defp parse_int(_, default), do: default
 
   defp ok(context_updates, notes) do
     %Outcome{status: :success, context_updates: context_updates, notes: notes}

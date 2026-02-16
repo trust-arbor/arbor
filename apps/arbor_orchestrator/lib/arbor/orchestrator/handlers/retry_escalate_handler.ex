@@ -23,6 +23,8 @@ defmodule Arbor.Orchestrator.Handlers.RetryEscalateHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @default_models "haiku,sonnet,opus"
   @default_escalate_on "fail,timeout"
   @default_timeout 30_000
@@ -232,24 +234,6 @@ defmodule Arbor.Orchestrator.Handlers.RetryEscalateHandler do
     Context.get(context, source_key) ||
       Map.get(node.attrs, "prompt")
   end
-
-  defp parse_csv(str) when is_binary(str) do
-    str |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-  end
-
-  defp parse_csv(_), do: []
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {int, _} -> int
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 
   defp parse_float(nil, default), do: default
 

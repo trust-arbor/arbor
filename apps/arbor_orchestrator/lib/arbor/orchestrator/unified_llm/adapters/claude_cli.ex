@@ -20,6 +20,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
 
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
+  import Arbor.Orchestrator.Handlers.Helpers, only: [maybe_add: 3]
+
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.CliTransport
   alias Arbor.Orchestrator.UnifiedLLM.{Request, Response}
 
@@ -107,8 +109,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
     end
   end
 
-  defp maybe_add(opts, _key, nil), do: opts
-  defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
 
   # Simple Agent-based transport storage. The Agent is started lazily
   # on first access and stores a single transport pid.

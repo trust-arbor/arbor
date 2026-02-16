@@ -5,6 +5,8 @@ defmodule Arbor.Orchestrator.Handlers.ManagerLoopHandler do
 
   alias Arbor.Orchestrator.Engine.{Condition, Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, graph, opts) do
     poll_interval_ms = parse_duration_ms(Map.get(node.attrs, "manager.poll_interval", "45s"))
@@ -190,17 +192,6 @@ defmodule Arbor.Orchestrator.Handlers.ManagerLoopHandler do
   end
 
   defp parse_duration_ms(_), do: 45_000
-
-  defp parse_int(value, _default) when is_integer(value), do: value
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> default
-    end
-  end
-
-  defp parse_int(_, default), do: default
 
   defp truthy?(true), do: true
   defp truthy?("true"), do: true

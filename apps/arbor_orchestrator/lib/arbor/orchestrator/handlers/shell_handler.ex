@@ -17,6 +17,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @default_timeout 120_000
 
   @impl true
@@ -183,18 +185,6 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   end
 
   # --- Utilities ---
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {int, _} -> int
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 
   defp truncate(str, max) when is_binary(str) and byte_size(str) > max do
     String.slice(str, -max, max)

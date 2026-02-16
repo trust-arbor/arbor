@@ -25,6 +25,8 @@ defmodule Arbor.Orchestrator.Handlers.MemoryHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @read_only ~w(memory.recall memory.working_load memory.stats)
   @memory_mod Arbor.Memory
 
@@ -185,18 +187,6 @@ defmodule Arbor.Orchestrator.Handlers.MemoryHandler do
     Map.get(node.attrs, "agent_id") ||
       Context.get(context, "session.agent_id", "orchestrator")
   end
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 
   defp parse_metadata(node, context) do
     case Map.get(node.attrs, "metadata") do

@@ -17,6 +17,8 @@ defmodule Arbor.Orchestrator.Handlers.OutputValidateHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  import Arbor.Orchestrator.Handlers.Helpers, only: [parse_csv: 1]
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @impl true
@@ -335,12 +337,6 @@ defmodule Arbor.Orchestrator.Handlers.OutputValidateHandler do
 
   # --- Utilities ---
 
-  defp parse_csv(str) do
-    str
-    |> String.split(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
 
   defp parse_integer(nil), do: :none
 

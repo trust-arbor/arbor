@@ -7,6 +7,8 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, graph, opts) do
     branches = Graph.outgoing_edges(graph, node.id)
@@ -325,17 +327,6 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
     |> Context.get("score", Context.get(context, "branch.score", 0.0))
     |> parse_float(0.0)
   end
-
-  defp parse_int(value, _default) when is_integer(value), do: value
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> default
-    end
-  end
-
-  defp parse_int(_, default), do: default
 
   defp parse_float(value, _default) when is_float(value), do: value
   defp parse_float(value, _default) when is_integer(value), do: value / 1

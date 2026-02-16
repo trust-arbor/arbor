@@ -14,6 +14,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     ToolLoop
   }
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, graph, opts) do
     goal = Map.get(graph.attrs, "goal", "")
@@ -274,18 +276,6 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         end
     end
   end
-
-  defp parse_int(nil, default), do: default
-  defp parse_int(value, _default) when is_integer(value), do: value
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> default
-    end
-  end
-
-  defp parse_int(_, default), do: default
 
   defp parse_float(nil, default), do: default
   defp parse_float(value, _default) when is_float(value), do: value
