@@ -1,0 +1,52 @@
+digraph research_parallel {
+  goal="Parallel codebase investigation"
+
+  start [type="start"]
+
+  fork [type="parallel" join_policy="wait_all" error_policy="continue" max_parallel="4"]
+
+  branch_a [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    system_prompt="Research branch A: [injected at runtime]"
+    llm_provider="openrouter"
+    llm_model="google/gemini-3-flash-preview"
+    temperature="0.2"
+    max_tokens="4096"
+    max_turns="10"
+  ]
+
+  branch_b [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    system_prompt="Research branch B: [injected at runtime]"
+    llm_provider="openrouter"
+    llm_model="google/gemini-3-flash-preview"
+    temperature="0.2"
+    max_tokens="4096"
+    max_turns="10"
+  ]
+
+  collect [type="parallel.fan_in"]
+
+  synthesize [
+    type="codergen"
+    simulate="false"
+    system_prompt="Synthesize the research findings from all branches into a coherent report. Highlight key findings, conflicts, and gaps."
+    llm_provider="openrouter"
+    llm_model="google/gemini-3-flash-preview"
+    temperature="0.3"
+    max_tokens="8192"
+  ]
+
+  done [type="exit"]
+
+  start -> fork
+  fork -> branch_a -> collect
+  fork -> branch_b -> collect
+  collect -> synthesize -> done
+}

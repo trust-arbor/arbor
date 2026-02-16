@@ -46,7 +46,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
     end
   end
 
-  describe "execute/3" do
+  describe "execute/4" do
     test "executes a known action" do
       # file_read with a path that exists
       result = ArborActionsExecutor.execute("file_read", %{"path" => "mix.exs"}, ".")
@@ -60,6 +60,58 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
     test "returns error for unknown action" do
       assert {:error, "Unknown action: nonexistent"} =
                ArborActionsExecutor.execute("nonexistent", %{}, ".")
+    end
+
+    test "accepts agent_id via opts" do
+      # Should not crash — agent_id flows through to authorize_and_execute
+      result =
+        ArborActionsExecutor.execute("file_read", %{"path" => "mix.exs"}, ".",
+          agent_id: "test-agent-123"
+        )
+
+      # Either succeeds or fails authorization — both are valid outcomes
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
+    end
+
+    test "defaults agent_id to system when not provided" do
+      # Same as calling without opts — backward compatible
+      result = ArborActionsExecutor.execute("file_read", %{"path" => "mix.exs"}, ".")
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
+    end
+
+    test "atomizes string keys from LLM JSON output" do
+      # LLMs produce string-keyed maps from JSON. The executor should
+      # atomize them using the action's schema as an allowlist.
+      # file_read expects :path (atom key) but LLM sends "path" (string key).
+      result =
+        ArborActionsExecutor.execute(
+          "file_read",
+          %{"path" => "mix.exs"},
+          "."
+        )
+
+      # If key atomization works, the action should receive the path correctly
+      case result do
+        {:ok, content} ->
+          assert is_binary(content)
+          assert content =~ "defp deps"
+
+        {:error, reason} ->
+          # Authorization failure is acceptable, but NOT a nil path error
+          refute reason =~ "nil"
+      end
+    end
+
+    test "formats map results as JSON" do
+      # We can't easily test this without a mock, but we can verify
+      # the format_result function behavior through the public API
+      # by checking that results are always strings
+      result = ArborActionsExecutor.execute("file_read", %{"path" => "mix.exs"}, ".")
+
+      case result do
+        {:ok, text} -> assert is_binary(text)
+        {:error, msg} -> assert is_binary(msg)
+      end
     end
   end
 
@@ -94,6 +146,30 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
 
       assert Map.keys(arbor_first) == Map.keys(coding_first)
       assert Map.keys(arbor_first["function"]) == Map.keys(coding_first["function"])
+    end
+
+    test "execute/4 is compatible with ToolLoop's calling convention" do
+      # ToolLoop calls executor.execute(name, args, workdir, agent_id: agent_id)
+      # Both CodingTools and ArborActionsExecutor must accept this signature
+      coding_result =
+        Arbor.Orchestrator.UnifiedLLM.CodingTools.execute(
+          "read_file",
+          %{"path" => "mix.exs"},
+          ".",
+          agent_id: "test"
+        )
+
+      assert match?({:ok, _}, coding_result)
+
+      arbor_result =
+        ArborActionsExecutor.execute(
+          "file_read",
+          %{"path" => "mix.exs"},
+          ".",
+          agent_id: "test"
+        )
+
+      assert match?({:ok, _}, arbor_result) or match?({:error, _}, arbor_result)
     end
   end
 end

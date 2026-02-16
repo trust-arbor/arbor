@@ -1,9 +1,9 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   @moduledoc """
-  Bridges ToolLoop's `execute/3` interface to Arbor.Actions.
+  Bridges ToolLoop's tool execution interface to Arbor.Actions.
 
   Converts Arbor Action schemas (Jido format) to OpenAI tool-calling format
-  for the LLM, and routes `execute/3` calls to Arbor's action system.
+  for the LLM, and routes execute calls to Arbor's action system.
 
   ## Usage in DOT nodes
 
@@ -63,14 +63,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   end
 
   @doc """
-  Execute an action by name, matching ToolLoop's `execute/3` interface.
+  Execute an action by name with optional agent identity for authorization.
 
-  Maps tool names to Arbor Actions and executes via the action system.
-  Uses a system agent ID for authorization since codergen runs in a
-  trusted orchestrator context.
+  Accepts a 4th `opts` keyword list with:
+    * `:agent_id` - The agent identity for authorization (default: `"system"`)
+
+  Maps tool names to Arbor Actions, atomizes string-keyed args using the
+  action's schema as an allowlist, and executes via the action system.
   """
-  @spec execute(String.t(), map(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(name, args, workdir) do
+  @spec execute(String.t(), map(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def execute(name, args, workdir, opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id, "system")
+
     with_actions_module(fn ->
       action_map = build_action_map()
 
@@ -79,19 +84,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
           {:error, "Unknown action: #{name}"}
 
         action_module ->
-          # Inject workdir into args for file/shell actions
-          params = maybe_inject_workdir(args, workdir)
+          params =
+            args
+            |> atomize_known_keys(action_module)
+            |> maybe_inject_workdir(workdir)
 
           case apply(@actions_mod, :authorize_and_execute, [
-                 "orchestrator",
+                 agent_id,
                  action_module,
                  params
                ]) do
-            {:ok, result} when is_binary(result) ->
-              {:ok, result}
-
             {:ok, result} ->
-              {:ok, inspect(result)}
+              {:ok, format_result(result)}
 
             {:error, reason} ->
               {:error, "Action #{name} failed: #{inspect(reason)}"}
@@ -126,12 +130,97 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
     |> Map.new()
   end
 
-  # Inject workdir for actions that need directory context
+  # Atomize string keys using the action's schema as an allowlist.
+  # This prevents arbitrary atom creation (SafeAtom pattern) while
+  # fixing the string-key/atom-key mismatch between LLM JSON output
+  # and Arbor Action param access.
+  defp atomize_known_keys(args, action_module) do
+    schema = action_module.to_tool().parameters_schema
+    known_atoms = extract_schema_keys(schema)
+
+    Map.new(args, fn {k, v} ->
+      case atomize_if_known(k, known_atoms) do
+        {:ok, atom_key} -> {atom_key, v}
+        :unknown -> {k, v}
+      end
+    end)
+  end
+
+  defp extract_schema_keys(nil), do: MapSet.new()
+
+  defp extract_schema_keys(schema) do
+    props = Map.get(schema, "properties") || Map.get(schema, :properties) || %{}
+
+    props
+    |> Map.keys()
+    |> Enum.flat_map(fn key ->
+      atom_key =
+        if is_atom(key) do
+          key
+        else
+          try do
+            String.to_existing_atom(key)
+          rescue
+            ArgumentError -> nil
+          end
+        end
+
+      if atom_key, do: [atom_key], else: []
+    end)
+    |> MapSet.new()
+  end
+
+  defp atomize_if_known(key, _known_atoms) when is_atom(key), do: {:ok, key}
+
+  defp atomize_if_known(key, known_atoms) when is_binary(key) do
+    try do
+      atom = String.to_existing_atom(key)
+
+      if MapSet.member?(known_atoms, atom) do
+        {:ok, atom}
+      else
+        :unknown
+      end
+    rescue
+      ArgumentError -> :unknown
+    end
+  end
+
+  # Inject workdir for actions that need directory context.
+  # Injects both atom and string keys for compatibility.
   defp maybe_inject_workdir(args, workdir) do
     args
-    |> Map.put_new("workdir", workdir)
-    |> Map.put_new("cwd", workdir)
+    |> put_new_either(:workdir, "workdir", workdir)
+    |> put_new_either(:cwd, "cwd", workdir)
   end
+
+  defp put_new_either(map, atom_key, string_key, value) do
+    if Map.has_key?(map, atom_key) || Map.has_key?(map, string_key) do
+      map
+    else
+      Map.put(map, atom_key, value)
+    end
+  end
+
+  # Format action results for LLM consumption.
+  # JSON for structured data, plain text for strings.
+  defp format_result(result) when is_binary(result), do: result
+
+  defp format_result(result) when is_map(result) do
+    case Jason.encode(result, pretty: true) do
+      {:ok, json} -> json
+      {:error, _} -> inspect(result, pretty: true)
+    end
+  end
+
+  defp format_result(result) when is_list(result) do
+    case Jason.encode(result, pretty: true) do
+      {:ok, json} -> json
+      {:error, _} -> inspect(result, pretty: true)
+    end
+  end
+
+  defp format_result(result), do: inspect(result, pretty: true)
 
   # Runtime bridge — don't crash if arbor_actions isn't loaded
   defp with_actions_module(fun) do
