@@ -469,8 +469,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     #{@arbor_context}
 
     Your role is VISION: evaluate whether a design aligns with Arbor's north star.
-    You will be given reference file paths to read, including Arbor's VISION.md.
-    Use it as your primary reference for what Arbor should become.
+    Reference documents (including Arbor's VISION.md) will be provided inline below.
+    Use them as your primary reference for what Arbor should become.
 
     Focus on:
     - Does this design move toward or away from the vision?
@@ -635,15 +635,25 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp format_doc_paths([]), do: ""
 
   defp format_doc_paths(doc_paths) do
-    paths_section = Enum.map_join(doc_paths, "\n", &"- #{&1}")
+    # Read and inline file contents so API models (which can't read files) get the context.
+    # CLI models also benefit from having content pre-loaded.
+    docs =
+      Enum.flat_map(doc_paths, fn path ->
+        case File.read(path) do
+          {:ok, content} ->
+            filename = Path.basename(path)
+            ["#### #{filename}\n```\n#{String.trim(content)}\n```\n"]
 
-    """
-    ### Reference Documents
+          {:error, _} ->
+            Logger.debug("AdvisoryLLM: could not read reference doc: #{path}")
+            []
+        end
+      end)
 
-    Read the following files for additional context before responding:
-    #{paths_section}
-
-    """
+    case docs do
+      [] -> ""
+      _ -> "### Reference Documents\n\n" <> Enum.join(docs, "\n") <> "\n"
+    end
   end
 
   defp format_context(context) when map_size(context) == 0, do: ""
