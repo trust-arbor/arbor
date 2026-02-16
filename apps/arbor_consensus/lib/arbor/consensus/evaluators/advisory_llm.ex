@@ -93,7 +93,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # openrouter:openai/gpt-5-nano: security, consistency, performance, privacy
   # openrouter:moonshotai/kimi-k2.5: vision, brainstorming, emergence, capability
   # openrouter:x-ai/grok-4.1-fast: stability, resource_usage
-  # openrouter:minimax/minimax-m2.5: user_experience, generalization, general
+  # openrouter:deepseek/deepseek-v3.2: user_experience, generalization, general
   #
   # Configure via:
   #   Application.put_env(:arbor_consensus, :perspective_models, %{
@@ -115,9 +115,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     capability: "openrouter:moonshotai/kimi-k2.5",
     stability: "openrouter:x-ai/grok-4.1-fast",
     resource_usage: "openrouter:x-ai/grok-4.1-fast",
-    user_experience: "openrouter:minimax/minimax-m2.5",
-    generalization: "openrouter:minimax/minimax-m2.5",
-    general: "openrouter:minimax/minimax-m2.5"
+    user_experience: "openrouter:deepseek/deepseek-v3.2",
+    generalization: "openrouter:deepseek/deepseek-v3.2",
+    general: "openrouter:deepseek/deepseek-v3.2"
   }
 
   # ============================================================================

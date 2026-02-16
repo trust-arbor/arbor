@@ -281,9 +281,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert map[:capability] == "openrouter:moonshotai/kimi-k2.5"
       assert map[:stability] == "openrouter:x-ai/grok-4.1-fast"
       assert map[:resource_usage] == "openrouter:x-ai/grok-4.1-fast"
-      assert map[:user_experience] == "openrouter:minimax/minimax-m2.5"
-      assert map[:generalization] == "openrouter:minimax/minimax-m2.5"
-      assert map[:general] == "openrouter:minimax/minimax-m2.5"
+      assert map[:user_experience] == "openrouter:deepseek/deepseek-v3.2"
+      assert map[:generalization] == "openrouter:deepseek/deepseek-v3.2"
+      assert map[:general] == "openrouter:deepseek/deepseek-v3.2"
     end
 
     test "caller can override provider_model via opts" do
@@ -351,7 +351,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
     test "general perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "minimax/minimax-m2.5"} =
+      assert {"openrouter", "deepseek/deepseek-v3.2"} =
                AdvisoryLLM.resolve_provider_model(:general)
     end
 
@@ -359,7 +359,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:brainstorming)
 
-      assert {"openrouter", "minimax/minimax-m2.5"} =
+      assert {"openrouter", "deepseek/deepseek-v3.2"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
 
       assert {"openrouter", "x-ai/grok-4.1-fast"} =
