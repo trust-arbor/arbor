@@ -255,8 +255,8 @@
 - [x] `apps/arbor_memory/lib/arbor/memory.ex` — `safe_insight_atom/1` now uses `SafeAtom.to_existing/1` after normalization
 
 ### A5. Redundant message envelope structs across contracts
-- [ ] Review: `Contracts.Comms.Message`, `Contracts.Comms.ResponseEnvelope`, `Contracts.Session.Message`, `Contracts.Session.Turn`
-- [ ] Consider shared `Envelope` base or at least shared validation
+- [x] Reviewed: four structs model two distinct domains (comms = external channels, session = LLM conversation). Fields, semantics, and lifecycles differ fundamentally. Shared `Envelope` base would create artificial coupling.
+- [x] Shared validation patterns (`validate_optional_string`, `validate_optional_map`) already addressed by D11 in error.ex.
 
 ### A6. Trust facade verbose 3-level delegation
 - [x] `apps/arbor_trust/lib/arbor/trust.ex` — short functions now use `defdelegate` directly to Manager. Verbose contract impls also use `defdelegate` with `:as` option. Eliminated ~40 lines of passthrough.
