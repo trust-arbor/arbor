@@ -34,7 +34,7 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
     timestamps()
   end
 
-  @valid_domains ~w(coding chat heartbeat embedding)
+  @valid_domains ~w(coding chat heartbeat embedding advisory_consultation)
   @valid_statuses ~w(running completed failed)
 
   @required_fields [:id, :domain, :model, :provider, :dataset]
