@@ -62,6 +62,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
   alias Arbor.Consensus.Config
+  alias Arbor.Consensus.ConsultationLog
   alias Arbor.Consensus.LLMBridge
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
@@ -239,9 +240,21 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
     task = Task.async(fn -> llm_fn.(system_prompt, user_prompt) end)
 
+    llm_meta = %{provider: provider, model: model, system_prompt: system_prompt, user_prompt: user_prompt}
+
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:ok, response_text}} ->
-        build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
+      {:ok, {:ok, %{text: response_text, duration_ms: duration_ms}}} ->
+        result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
+        llm_meta = Map.merge(llm_meta, %{duration_ms: duration_ms, raw_response: response_text})
+        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+        result
+
+      {:ok, {:ok, response_text}} when is_binary(response_text) ->
+        # Backward compat for test llm_fn overrides that return plain text
+        result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
+        llm_meta = Map.merge(llm_meta, %{duration_ms: 0, raw_response: response_text})
+        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+        result
 
       {:ok, {:error, reason}} ->
         error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
@@ -249,6 +262,15 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
       nil ->
         error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
     end
+  end
+
+  defp log_consultation_result(proposal, perspective, eval, llm_meta, opts) do
+    run_id = Keyword.get(opts, :consultation_id)
+    ConsultationLog.log_single(proposal.description, perspective, eval, llm_meta, run_id: run_id)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # ============================================================================

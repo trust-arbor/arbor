@@ -26,6 +26,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       )
   """
 
+  alias Arbor.Consensus.ConsultationLog
   alias Arbor.Contracts.Consensus.Proposal
 
   @default_timeout 180_000
@@ -54,7 +55,10 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
     with {:ok, proposal} <- build_advisory_proposal(description, context) do
       perspectives = evaluator_module.perspectives()
-      eval_opts = Keyword.drop(opts, [:context])
+
+      # Create a shared consultation run so all perspectives log under one EvalRun
+      consultation_id = ConsultationLog.create_run(description, perspectives, opts)
+      eval_opts = opts |> Keyword.drop([:context]) |> Keyword.put(:consultation_id, consultation_id)
 
       tasks =
         Enum.map(perspectives, fn perspective ->
@@ -74,6 +78,9 @@ defmodule Arbor.Consensus.Evaluators.Consult do
           end
         end)
         |> Enum.sort_by(fn {perspective, _} -> perspective end)
+
+      # Update the run with final sample count
+      ConsultationLog.complete_run(consultation_id, results)
 
       {:ok, results}
     end

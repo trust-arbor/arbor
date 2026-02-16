@@ -41,7 +41,7 @@ defmodule Arbor.Consensus.LLMBridge do
   @doc """
   Complete an LLM request with system and user prompt separation.
 
-  Returns `{:ok, response_text}` or `{:error, reason}`.
+  Returns `{:ok, %{text: text, duration_ms: ms}}` or `{:error, reason}`.
 
   ## Options
 
@@ -53,22 +53,32 @@ defmodule Arbor.Consensus.LLMBridge do
   - `:backend` — `:cli` to force CLI backend (agents can read source code),
     `:api` to force UnifiedLLM API path. Default: auto-detect.
   """
-  @spec complete(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec complete(String.t(), String.t(), keyword()) ::
+          {:ok, %{text: String.t(), duration_ms: non_neg_integer()}} | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
     backend = Keyword.get(opts, :backend)
+    start = System.monotonic_time(:millisecond)
 
-    cond do
-      backend == :cli ->
-        complete_via_fallback(system_prompt, user_prompt, opts)
+    result =
+      cond do
+        backend == :cli ->
+          complete_via_fallback(system_prompt, user_prompt, opts)
 
-      backend == :api and available?() ->
-        complete_via_unified(system_prompt, user_prompt, opts)
+        backend == :api and available?() ->
+          complete_via_unified(system_prompt, user_prompt, opts)
 
-      available?() ->
-        complete_via_unified(system_prompt, user_prompt, opts)
+        available?() ->
+          complete_via_unified(system_prompt, user_prompt, opts)
 
-      true ->
-        complete_via_fallback(system_prompt, user_prompt, opts)
+        true ->
+          complete_via_fallback(system_prompt, user_prompt, opts)
+      end
+
+    duration_ms = System.monotonic_time(:millisecond) - start
+
+    case result do
+      {:ok, text} -> {:ok, %{text: text, duration_ms: duration_ms}}
+      error -> error
     end
   catch
     :exit, reason ->
