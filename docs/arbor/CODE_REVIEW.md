@@ -272,7 +272,7 @@
 - [ ] Split into service modules (covered by R1)
 
 ### O3. Taint policy checking spread across 5 functions
-- [ ] Extract to `Arbor.Actions.TaintPolicies` module from `apps/arbor_actions/lib/arbor_actions.ex:376-506`
+- [x] Extracted to `Arbor.Actions.TaintEnforcement` module (~130 lines). Facade calls `TaintEnforcement.check/3` and `TaintEnforcement.maybe_emit_propagated/3`.
 
 ### O4. `generate_text_with_tools` — 97 lines
 - [ ] Split into pipeline (covered by R10)
