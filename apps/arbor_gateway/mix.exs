@@ -32,7 +32,7 @@ defmodule ArborGateway.MixProject do
       {:plug, "~> 1.14"},
       {:plug_cowboy, "~> 2.6"},
       {:jason, "~> 1.4"},
-      {:ex_mcp, path: "../../../../ex_mcp"},
+      {:ex_mcp, "~> 0.7"},
       {:zoi, "~> 0.17"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

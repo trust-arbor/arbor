@@ -27,10 +27,10 @@ defmodule Arbor.Agent.Executor do
 
   require Logger
 
-  # Shadow mode: when true, both can?/3 and authorize/4 are called but only
-  # can?/3 result drives the decision (safe fallback). Divergences are logged.
-  # Set to false for hard cutover to authorize/4 as the sole authority.
-  @shadow_mode true
+  # H3: Shadow mode disabled — authorize/4 is now the sole authority for
+  # capability decisions. can?/3 is still called for divergence logging
+  # during the transition period but no longer drives the decision.
+  @shadow_mode false
 
   @type state :: %{
           agent_id: String.t(),
@@ -169,10 +169,8 @@ defmodule Arbor.Agent.Executor do
     {:reply, {:ok, info}, state}
   end
 
-  # M19: Intent handler accepts any cast without verifying the sender's identity.
-  # The intent's source_agent should be validated against a capability like
-  # arbor://agent/intent/{agent_id}. Currently relies on signal bus authorization.
-  # TODO: Add Arbor.Security.authorize(intent.source_agent, resource, :send) check
+  # H3: Authorize intent source before processing. The intent's source_agent
+  # must hold a capability for arbor://agent/intent/{target_agent_id}.
   @impl true
   def handle_cast({:intent, %Intent{} = intent}, state) do
     state = update_in(state, [:stats, :intents_received], &(&1 + 1))
@@ -183,16 +181,29 @@ defmodule Arbor.Agent.Executor do
       action: intent.action
     })
 
-    case state.status do
-      :running ->
-        state = process_intent(intent, state)
-        {:noreply, state}
+    # Authorize the intent sender (if source_agent is available)
+    case authorize_intent_sender(intent, state) do
+      :ok ->
+        case state.status do
+          :running ->
+            state = process_intent(intent, state)
+            {:noreply, state}
 
-      :paused ->
-        pending = :queue.in(intent, state.pending_intents)
-        {:noreply, %{state | pending_intents: pending}}
+          :paused ->
+            pending = :queue.in(intent, state.pending_intents)
+            {:noreply, %{state | pending_intents: pending}}
 
-      :stopped ->
+          :stopped ->
+            {:noreply, state}
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Executor] Intent sender unauthorized: #{inspect(reason)} " <>
+            "for intent #{intent.id} targeting #{state.agent_id}"
+        )
+
+        handle_blocked(intent, {:sender_unauthorized, reason}, state)
         {:noreply, state}
     end
   end
@@ -207,6 +218,32 @@ defmodule Arbor.Agent.Executor do
   end
 
   # -- Private --
+
+  # H3: Authorize the source of an intent. If the intent has a source_agent,
+  # verify it holds a capability for sending intents to this agent.
+  # Intents without source_agent (self-generated) are allowed.
+  defp authorize_intent_sender(%Intent{} = intent, state) do
+    source = Map.get(intent, :source_agent, nil)
+
+    cond do
+      is_nil(source) ->
+        # Self-generated intents (from the agent's own Mind) — always allowed
+        :ok
+
+      source == state.agent_id ->
+        # Agent sending intents to itself — always allowed
+        :ok
+
+      true ->
+        resource = "arbor://agent/intent/#{state.agent_id}"
+
+        case safe_call(fn -> Arbor.Security.authorize(source, resource, :send) end) do
+          {:ok, :authorized} -> :ok
+          {:error, reason} -> {:error, reason}
+          _ -> {:error, :security_unavailable}
+        end
+    end
+  end
 
   defp process_intent(%Intent{} = intent, state) do
     start_time = System.monotonic_time(:millisecond)
@@ -291,9 +328,14 @@ defmodule Arbor.Agent.Executor do
     {:ok, %{thought: intent.reasoning}}
   end
 
-  defp do_execute(%Intent{type: :act, action: action, params: params}, _sandbox_level) do
-    Logger.info("Executor: dispatching action=#{inspect(action)}")
-    dispatch_action(action, params)
+  # H5: Enforce sandbox level on action execution. The sandbox_level computed
+  # from the agent's trust tier is passed into the action dispatch context.
+  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level) do
+    Logger.info("Executor: dispatching action=#{inspect(action)} sandbox=#{sandbox_level}")
+
+    # Inject sandbox level into params so actions can respect it
+    params_with_sandbox = Map.put(params || %{}, :sandbox, sandbox_level)
+    dispatch_action(action, params_with_sandbox)
   end
 
   defp do_execute(%Intent{type: :wait}, _sandbox_level) do
