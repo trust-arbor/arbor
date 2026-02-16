@@ -587,7 +587,7 @@ defmodule Arbor.Historian do
   end
 
   defp apply_membership_event(:channel_created, event, acc) do
-    {data, agent_id} = extract_event_data(event)
+    {_data, agent_id} = extract_event_data(event)
     timestamp = event[:timestamp] || event["timestamp"]
 
     %{
