@@ -138,7 +138,7 @@
 - [ ] Separate LLM interaction from processing logic
 
 ### R10. `arbor_ai/ai.ex` — 1,068 lines
-- [ ] Extract `ToolAuthorizationBridge` (~76 lines, lines 787-863)
+- [x] Extract `Arbor.AI.ToolAuthorization` (~100 lines) — confused deputy prevention bridge to arbor_security
 - [ ] Split `generate_text_with_tools` (97 lines) into build/execute/emit/record pipeline
 
 ### R11. `arbor_sdlc/processors/in_progress.ex` — 958 lines
