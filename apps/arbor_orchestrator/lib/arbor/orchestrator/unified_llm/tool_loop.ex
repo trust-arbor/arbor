@@ -36,6 +36,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     workdir = Keyword.get(opts, :workdir, ".")
     on_tool_call = Keyword.get(opts, :on_tool_call)
     tool_executor = Keyword.get(opts, :tool_executor, CodingTools)
+    agent_id = Keyword.get(opts, :agent_id, "system")
 
     tools = Keyword.get(opts, :tools, CodingTools.definitions())
     request = %{request | tools: tools}
@@ -45,6 +46,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       workdir: workdir,
       on_tool_call: on_tool_call,
       tool_executor: tool_executor,
+      agent_id: agent_id,
       turn: 0,
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
     })
@@ -101,7 +103,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     results =
       Enum.map(tool_calls, fn tc ->
         args = normalize_args(tc.arguments)
-        result = state.tool_executor.execute(tc.name, args, state.workdir)
+        result = state.tool_executor.execute(tc.name, args, state.workdir, agent_id: state.agent_id)
 
         if state.on_tool_call do
           state.on_tool_call.(tc.name, args, result)

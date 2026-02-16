@@ -16,7 +16,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   # --- Mock tool executor ---
 
   defmodule MockTools do
-    def execute("read_file", %{"path" => path}, workdir) do
+    def execute(name, args, workdir, _opts \\ [])
+
+    def execute("read_file", %{"path" => path}, workdir, _opts) do
       full = Path.join(workdir, path)
 
       case File.read(full) do
@@ -25,19 +27,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
       end
     end
 
-    def execute("write_file", %{"path" => path, "content" => content}, workdir) do
+    def execute("write_file", %{"path" => path, "content" => content}, workdir, _opts) do
       full = Path.join(workdir, path)
       File.mkdir_p!(Path.dirname(full))
       File.write!(full, content)
       {:ok, "Wrote #{byte_size(content)} bytes"}
     end
 
-    def execute("shell_exec", %{"command" => cmd}, workdir) do
+    def execute("shell_exec", %{"command" => cmd}, workdir, _opts) do
       {output, _} = System.cmd("sh", ["-c", cmd], cd: workdir, stderr_to_stdout: true)
       {:ok, output}
     end
 
-    def execute(name, _args, _workdir), do: {:error, "Unknown: #{name}"}
+    def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
   end
 
   # --- Mock adapter ---

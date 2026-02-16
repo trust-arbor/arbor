@@ -1,0 +1,22 @@
+digraph research_codebase {
+  goal="Research a codebase topic"
+
+  start [type="start"]
+
+  investigate [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_search,file_glob,file_list"
+    system_prompt="You are a code researcher. Investigate the topic thoroughly using the available tools. Read relevant files, search for patterns, and report your findings in a structured format with file:line references."
+    llm_provider="openrouter"
+    llm_model="google/gemini-3-flash-preview"
+    temperature="0.2"
+    max_tokens="8192"
+    max_turns="15"
+  ]
+
+  done [type="exit"]
+
+  start -> investigate -> done
+}

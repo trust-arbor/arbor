@@ -102,8 +102,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   @impl true
   def idempotency, do: :idempotent_with_key
 
-  defp call_llm_and_respond(prompt, node, _context, graph, base_updates, opts) do
-    case call_llm(prompt, node, graph, opts) do
+  defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
+    case call_llm(prompt, node, context, graph, opts) do
       {:ok, response_text} ->
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
@@ -127,7 +127,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     end
   end
 
-  defp call_llm(prompt, node, graph, opts) do
+  defp call_llm(prompt, node, context, graph, opts) do
     client = Keyword.get(opts, :llm_client) || Client.default_client()
 
     previous_outcome =
@@ -185,12 +185,17 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
       {tool_defs, executor} = resolve_tools(node, opts)
 
+      agent_id =
+        Map.get(node.attrs, "agent_id") ||
+          Arbor.Orchestrator.Engine.Context.get(context, "session.agent_id", "system")
+
       tool_loop_opts =
         [
           workdir: workdir,
           max_turns: max_turns,
           tools: tool_defs,
           tool_executor: executor,
+          agent_id: agent_id,
           on_tool_call: build_tool_callback(opts, node.id)
         ]
         |> maybe_add_stream_callback(on_stream)

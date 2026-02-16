@@ -214,6 +214,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.CodingTools do
     {:error, "Unknown tool: #{name}"}
   end
 
+  # Accept 4th arg for compatibility with ToolLoop's agent_id threading
+  def execute(name, args, workdir, _opts), do: execute(name, args, workdir)
+
   # --- Private ---
 
   defp resolve_path(nil, workdir), do: workdir
