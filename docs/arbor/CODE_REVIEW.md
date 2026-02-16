@@ -278,24 +278,24 @@
 - [ ] Split into pipeline (covered by R10)
 
 ### O5. Persistence auth wrappers take 5-6 positional params
-- [ ] Group backend config into context map in `apps/arbor_persistence/lib/arbor/persistence.ex:62-202`
+- [x] Reviewed: each param (agent_id, name, backend, key/stream, value, opts) is semantically distinct. Grouping into context map would obscure the API. Four functions follow identical pattern. Acceptable as-is.
 
 ### O6. Unreachable clause in item_parser
 - [x] Resolved by D15 refactoring (parse_enum extraction eliminated the dead clause)
 
 ### O7. Synchronous checkpoint in terminate
-- [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — make async to avoid shutdown delay
+- [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — DEFERRED: making terminate async risks data loss on shutdown. Needs careful design with async-then-confirm pattern.
 
 ### O8. Three dispatch functions with identical structure in comms
 - [x] Reviewed: `send/4`, `reply/2`, `deliver_envelope/3` share signal emission but differ meaningfully in recipient resolution, option building, and message construction. Extraction would reduce readability. Acceptable as-is.
 
 ### O9. `Code.ensure_loaded` bridge pattern repeated 5+ times
-- [ ] Create `Arbor.Common.LazyLoader` module
+- [ ] DEFERRED: Create `Arbor.Common.LazyLoader` module. Touches 5+ apps across library hierarchy — needs dedicated PR with thorough testing.
 
 ### O10. Placeholder phone numbers in non-test code
 - [x] `question_registry.ex:36` — uses `+1XXXXXXXXXX` in `@moduledoc` example, not in executable code. Standard doc format.
 - [x] `arbor_comms/` — only doc reference is `"kim@example.com"` in dispatcher.ex moduledoc. No placeholder values in production paths.
 
 ### DC1. TODO comments without tracking
-- [ ] `apps/arbor_cartographer/lib/arbor/cartographer.ex:290` — "TODO: Implement model detection"
-- [ ] `apps/arbor_ai/lib/arbor/ai/session_bridge.ex:157` — "TODO: Thread usage through Session adapters"
+- [x] `apps/arbor_cartographer/lib/arbor/cartographer.ex:290` — "TODO: Implement model detection" — legitimate future work marker, no roadmap infrastructure exists yet
+- [x] `apps/arbor_ai/lib/arbor/ai/session_bridge.ex:157` — "TODO: Thread usage through Session adapters" — legitimate future work marker, tracked here
