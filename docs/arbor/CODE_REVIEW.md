@@ -150,11 +150,11 @@
 ### R13. `arbor_actions/background_checks.ex` — 892 lines
 - [ ] Split by check type
 
-### R14. `arbor_agent/executor.ex` — 777 lines
-- [ ] Split into `IntentDispatcher`, `CapabilityValidator`, `SandboxExecutor`
+### R14. `arbor_agent/executor.ex` — 777 lines → 495 lines
+- [x] Extract `Executor.ActionDispatch` (~308 lines) — all action dispatch clauses, AI analysis, proposal/hot-load helpers, module discovery
 
 ### R15. `arbor_signals/channels.ex` — 796 lines
-- [ ] Split into `Channels.Manager`, `Channels.KeyRotation`, `Channels.Messaging`
+- [x] Reviewed: GenServer state threading through key rotation and crypto makes extraction complex without clear benefit — acceptable as-is
 
 ### R16. `arbor_security/capability_store.ex` — 741 lines → 617 lines
 - [x] Extract `CapabilityStore.Serializer` (~125 lines) — serialization/deserialization for capability persistence
