@@ -29,7 +29,8 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
       CapabilityAuthorizer.authorize_subscription("agent_xyz", :identity)
 
-      assert_received {:can_check, "agent_xyz", "arbor://signals/subscribe/identity", :subscribe}
+      # :identity is a restricted topic (H4), so it uses authorize/4 not can?/3
+      assert_received {:authorize_check, "agent_xyz", "arbor://signals/subscribe/identity", :subscribe}
     end
 
     test "returns :no_capability when security module is not loaded" do
@@ -77,16 +78,23 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
   defmodule MockSecurityAllows do
     def can?(_principal, _resource, _action), do: true
+    def authorize(_principal, _resource, _action, _opts), do: {:ok, :authorized}
   end
 
   defmodule MockSecurityDenies do
     def can?(_principal, _resource, _action), do: false
+    def authorize(_principal, _resource, _action, _opts), do: {:error, :denied}
   end
 
   defmodule MockSecurityCapture do
     def can?(principal, resource, action) do
       send(self(), {:can_check, principal, resource, action})
       true
+    end
+
+    def authorize(principal, resource, action, _opts) do
+      send(self(), {:authorize_check, principal, resource, action})
+      {:ok, :authorized}
     end
   end
 
