@@ -34,11 +34,6 @@ defmodule Arbor.Web do
   def live_view do
     quote do
       use Phoenix.LiveView
-
-      import Arbor.Web.Components
-      import Arbor.Web.Helpers
-      import Arbor.Web.Icons
-
       unquote(html_helpers())
     end
   end
@@ -47,11 +42,6 @@ defmodule Arbor.Web do
   def live_component do
     quote do
       use Phoenix.LiveComponent
-
-      import Arbor.Web.Components
-      import Arbor.Web.Helpers
-      import Arbor.Web.Icons
-
       unquote(html_helpers())
     end
   end
@@ -60,11 +50,6 @@ defmodule Arbor.Web do
   def component do
     quote do
       use Phoenix.Component
-
-      import Arbor.Web.Components
-      import Arbor.Web.Helpers
-      import Arbor.Web.Icons
-
       unquote(html_helpers())
     end
   end
@@ -83,12 +68,6 @@ defmodule Arbor.Web do
   @doc false
   def html do
     quote do
-      import Phoenix.HTML
-
-      import Arbor.Web.Components
-      import Arbor.Web.Helpers
-      import Arbor.Web.Icons
-
       unquote(html_helpers())
     end
   end
@@ -98,6 +77,10 @@ defmodule Arbor.Web do
       import Phoenix.HTML
       # Import Phoenix.Component for sigil_H and core functionality
       import Phoenix.Component, except: [flash: 1]
+
+      import Arbor.Web.Components
+      import Arbor.Web.Helpers
+      import Arbor.Web.Icons
 
       # Routes and verified routes if available
       alias Phoenix.LiveView.JS

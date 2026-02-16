@@ -93,13 +93,9 @@ defmodule Arbor.Demo do
   Sets fast polling (500ms), low thresholds (100 messages), and enables signals.
   Call this before injecting faults for reliable demo detection.
   """
-  @spec configure_demo_mode() :: :ok
-  def configure_demo_mode do
-    # Fast polling for demo
-    Application.put_env(:arbor_monitor, :polling_interval_ms, 500)
-
-    # Low thresholds for quick detection
-    Application.put_env(:arbor_monitor, :anomaly_config, %{
+  @demo_monitor_config [
+    polling_interval_ms: 500,
+    anomaly_config: %{
       scheduler_utilization: %{threshold: 0.90},
       process_count_ratio: %{threshold: 0.50},
       message_queue_len: %{threshold: 100},
@@ -107,23 +103,13 @@ defmodule Arbor.Demo do
       ets_table_count: %{threshold: 500},
       ewma_alpha: 0.3,
       ewma_stddev_threshold: 2.0
-    })
+    },
+    signal_emission_enabled: true
+  ]
 
-    # Enable signal emission
-    Application.put_env(:arbor_monitor, :signal_emission_enabled, true)
-
-    Logger.info("[Demo] Demo mode configured (fast polling, low thresholds)")
-    :ok
-  end
-
-  @doc """
-  Reset to normal production configuration.
-  """
-  @spec configure_production_mode() :: :ok
-  def configure_production_mode do
-    Application.put_env(:arbor_monitor, :polling_interval_ms, 5_000)
-
-    Application.put_env(:arbor_monitor, :anomaly_config, %{
+  @production_monitor_config [
+    polling_interval_ms: 5_000,
+    anomaly_config: %{
       scheduler_utilization: %{threshold: 0.90},
       process_count_ratio: %{threshold: 0.80},
       message_queue_len: %{threshold: 10_000},
@@ -131,9 +117,28 @@ defmodule Arbor.Demo do
       ets_table_count: %{threshold: 500},
       ewma_alpha: 0.3,
       ewma_stddev_threshold: 3.0
-    })
+    }
+  ]
 
-    Logger.info("[Demo] Production mode configured")
+  @spec configure_demo_mode() :: :ok
+  def configure_demo_mode do
+    apply_monitor_config(@demo_monitor_config, "Demo mode configured (fast polling, low thresholds)")
+  end
+
+  @doc """
+  Reset to normal production configuration.
+  """
+  @spec configure_production_mode() :: :ok
+  def configure_production_mode do
+    apply_monitor_config(@production_monitor_config, "Production mode configured")
+  end
+
+  defp apply_monitor_config(config, label) do
+    Enum.each(config, fn {key, value} ->
+      Application.put_env(:arbor_monitor, key, value)
+    end)
+
+    Logger.info("[Demo] #{label}")
     :ok
   end
 

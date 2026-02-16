@@ -91,19 +91,16 @@
 - [x] Reviewed: Handlers share structure but have meaningful behavioral differences — different events (item_detected vs item_changed), different tracker logic, different async patterns. Not worth unifying.
 
 ### D17. Two separate SessionReader modules
-- [ ] `apps/arbor_ai/lib/arbor/ai/session_reader.ex` and `apps/arbor_common/lib/arbor/common/sessions/reader.ex`
-- [ ] Consolidate to one location
+- [x] Reviewed: `AI.SessionReader` (domain-specific, reads Claude Code thinking blocks) and `Common.Sessions.Reader` (generic streaming JSONL with SafePath). Different abstraction levels — proper layering, not duplication.
 
 ### D18. `__using__/1` import pattern repeated 4 times in arbor_web
-- [ ] Extract `common_imports/0` in `apps/arbor_web/lib/arbor_web.ex`
-- [ ] Replace lines 38-42, 51-55, 64-68, 88-92
+- [x] Moved shared `Arbor.Web.{Components,Helpers,Icons}` imports into `html_helpers/0`. Four definitions (live_view, live_component, component, html) simplified.
 
 ### D19. Demo/production config — same keys, different values
-- [ ] Data-driven config map in `apps/arbor_demo/lib/arbor/demo.ex:97-138`
+- [x] Extracted `@demo_monitor_config` and `@production_monitor_config` module attributes with `apply_monitor_config/2` shared function.
 
 ### D20. Monitor skill boilerplate — 9 modules with 40-60 lines each
-- [ ] Create `Arbor.Monitor.Skill` macro/behaviour
-- [ ] Apply to beam.ex, ets.ex, memory.ex, network.ex, ports.ex, processes.ex, scheduler.ex, system.ex, supervisor.ex
+- [x] Reviewed: Skills already implement `@behaviour Arbor.Monitor.Skill` with unique `collect/0` and `check/1`. Each skill has domain-specific logic. Behaviour IS the right abstraction — macro would save minimal code.
 
 ---
 
