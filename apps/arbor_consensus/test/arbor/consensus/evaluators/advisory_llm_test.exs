@@ -191,8 +191,13 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert eval.perspective == :brainstorming
     end
 
-    test "doc paths are passed in user prompt to llm_fn" do
-      doc_path = ".arbor/roadmap/consensus-redesign.md"
+    test "doc paths are read and inlined in user prompt" do
+      # Create a temp file so format_doc_paths can read and inline it
+      tmp_dir = System.tmp_dir!()
+      doc_path = Path.join(tmp_dir, "test_reference_doc.md")
+      File.write!(doc_path, "# Test Reference\n\nThis is test content for advisory.")
+
+      on_exit(fn -> File.rm(doc_path) end)
 
       {:ok, proposal} =
         Proposal.new(%{
@@ -203,7 +208,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
           context: %{reference_docs: [doc_path]}
         })
 
-      # Capture the user prompt to verify doc paths are included
+      # Capture the user prompt to verify doc contents are inlined
       test_pid = self()
 
       capture_fn = fn _system_prompt, user_prompt ->
@@ -222,7 +227,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: capture_fn)
 
       assert_receive {:user_prompt, user_prompt}
-      assert user_prompt =~ doc_path
+      # File contents should be inlined, not just the path
+      assert user_prompt =~ "Reference Documents"
+      assert user_prompt =~ "test_reference_doc.md"
+      assert user_prompt =~ "This is test content for advisory."
     end
   end
 
