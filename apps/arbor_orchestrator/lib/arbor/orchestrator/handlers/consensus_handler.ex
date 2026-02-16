@@ -257,12 +257,15 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
   @council_decision_mod Arbor.Contracts.Consensus.CouncilDecision
 
   defp parse_vote_result(result, _question, index) do
-    # Branch results have context_updates with last_response from CodergenHandler
-    response_text =
-      get_in(result, ["context_updates", "last_response"]) ||
-        Map.get(result, "notes", "")
-
     branch_id = Map.get(result, "id", "perspective_#{index}")
+    ctx_updates = Map.get(result, "context_updates", %{})
+
+    # Branch results have context_updates with last_response from CodergenHandler.
+    # Also check vote.<perspective> key as fallback (unique per perspective, survives merges).
+    response_text =
+      Map.get(ctx_updates, "last_response") ||
+        Map.get(ctx_updates, "vote.#{branch_id}") ||
+        Map.get(result, "notes", "")
 
     if is_binary(response_text) and response_text != "" do
       {vote, reasoning, confidence, concerns, risk_score} = parse_vote_data(response_text)
