@@ -80,6 +80,28 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   @doc """
+  Ensure an agent's identity and capabilities are registered without starting
+  any processes. Reads the profile from disk, re-registers the identity in the
+  security subsystem, and re-grants capabilities from the template.
+
+  Use this when you need an agent's authorization to be active (e.g., for
+  orchestrator pipeline execution) without running a full agent process.
+
+  Returns `{:ok, agent_id}` or `{:error, reason}`.
+  """
+  @spec ensure_identity(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def ensure_identity(agent_id) do
+    case restore(agent_id) do
+      {:ok, profile} ->
+        ensure_identity_and_capabilities(profile)
+        {:ok, agent_id}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   Restore an agent from a persisted profile.
   """
   @spec restore(String.t()) :: {:ok, Profile.t()} | {:error, :not_found | term()}
@@ -116,6 +138,9 @@ defmodule Arbor.Agent.Lifecycle do
   def start(agent_id, opts \\ []) do
     case restore(agent_id) do
       {:ok, profile} ->
+        # Re-register identity and capabilities (ETS-only, lost on restart)
+        ensure_identity_and_capabilities(profile)
+
         executor_opts =
           Keyword.merge(opts,
             agent_id: agent_id,
@@ -391,6 +416,74 @@ defmodule Arbor.Agent.Lifecycle do
       created_at: DateTime.utc_now(),
       version: 1
     }
+  end
+
+  # Re-register identity and capabilities on resume.
+  # ETS-based stores lose state on restart, so we re-grant from the profile.
+  defp ensure_identity_and_capabilities(%Profile{} = profile) do
+    agent_id = profile.agent_id
+
+    # Re-register identity from stored public key
+    case profile.identity do
+      %{public_key: pub_hex} when is_binary(pub_hex) ->
+        case Base.decode16(pub_hex, case: :mixed) do
+          {:ok, pub_key} ->
+            identity = %Arbor.Contracts.Security.Identity{
+              agent_id: agent_id,
+              public_key: pub_key,
+              name: profile.display_name,
+              status: :active,
+              created_at: profile.created_at || DateTime.utc_now()
+            }
+
+            case Arbor.Security.register_identity(identity) do
+              :ok -> :ok
+              {:error, :already_registered} -> :ok
+              {:error, reason} ->
+                Logger.warning("Failed to re-register identity: #{inspect(reason)}",
+                  agent_id: agent_id
+                )
+            end
+
+          :error ->
+            Logger.warning("Invalid public key hex in profile", agent_id: agent_id)
+        end
+
+      _ ->
+        :ok
+    end
+
+    # Re-grant capabilities from template or stored list
+    capabilities = resolve_capabilities_for_regrant(profile)
+    grant_capabilities(agent_id, capabilities)
+  end
+
+  defp resolve_capabilities_for_regrant(%Profile{} = profile) do
+    # Prefer template's current capabilities (may have been updated)
+    case profile.template do
+      nil ->
+        profile.initial_capabilities || []
+
+      template_mod when is_atom(template_mod) ->
+        if Code.ensure_loaded?(template_mod) and function_exported?(template_mod, :required_capabilities, 0) do
+          template_mod.required_capabilities()
+        else
+          profile.initial_capabilities || []
+        end
+
+      template_str when is_binary(template_str) ->
+        try do
+          mod = String.to_existing_atom("Elixir." <> template_str)
+
+          if function_exported?(mod, :required_capabilities, 0) do
+            mod.required_capabilities()
+          else
+            profile.initial_capabilities || []
+          end
+        rescue
+          ArgumentError -> profile.initial_capabilities || []
+        end
+    end
   end
 
   defp persist_profile(%Profile{} = profile) do
