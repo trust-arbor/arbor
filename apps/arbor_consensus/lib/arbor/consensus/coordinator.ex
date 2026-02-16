@@ -682,15 +682,21 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # H6: Check force_approve/force_reject authorization via capability system.
-  # Uses can?/3 (capability existence) for now. Upgrade to authorize/4
-  # (full identity verification) once identity infrastructure is wired in (H1/H2).
+  # M5: Check force_approve/force_reject authorization via full authorize/4 pipeline.
+  # Uses authorize/4 (identity verification, constraints, reflexes, escalation)
+  # instead of the weaker can?/3 (capability-only check).
   defp check_force_authorization(actor_id) do
-    if Arbor.Security.can?(actor_id, "arbor://consensus/admin", :force) do
-      :ok
-    else
-      Logger.warning("Unauthorized force operation attempted by #{actor_id}")
-      {:error, {:unauthorized, :consensus_admin_required}}
+    case Arbor.Security.authorize(actor_id, "arbor://consensus/admin", :force) do
+      {:ok, :authorized} ->
+        :ok
+
+      {:ok, :pending_approval, _proposal_id} ->
+        Logger.warning("Force operation by #{actor_id} requires approval")
+        {:error, {:unauthorized, :pending_approval}}
+
+      {:error, reason} ->
+        Logger.warning("Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}")
+        {:error, {:unauthorized, :consensus_admin_required}}
     end
   rescue
     _ ->

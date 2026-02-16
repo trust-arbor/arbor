@@ -115,13 +115,16 @@ defmodule Arbor.Gateway.Dev.Router do
 
   # Private helpers
 
+  # M1: Require explicit :dev_endpoints flag AND dev environment check.
+  # The flag defaults to false — dev endpoints are opt-in even in dev/test builds.
+  # Set `config :arbor_gateway, dev_endpoints: true` to enable.
   defp check_dev_environment do
-    allowed = Application.get_env(:arbor_gateway, :dev_endpoints, Mix.env() == :dev)
+    explicitly_enabled = Application.get_env(:arbor_gateway, :dev_endpoints, false)
 
-    if allowed do
+    if explicitly_enabled do
       :ok
     else
-      {:error, "Dev endpoints are only available in development"}
+      {:error, "Dev endpoints require explicit opt-in via config :arbor_gateway, dev_endpoints: true"}
     end
   end
 

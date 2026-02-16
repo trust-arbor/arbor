@@ -1648,15 +1648,22 @@ defmodule Arbor.Memory do
 
   # Graph operations delegated to GraphOps
 
-  # Convert a string to an atom safely for insight categories.
-  # Tries existing atoms first, then downcases and underscores.
+  # M3: Convert a string to an atom safely for insight categories.
+  # Uses String.to_existing_atom to prevent atom table exhaustion from untrusted input.
+  # Falls back to keeping the value as a string if the atom doesn't already exist.
   defp safe_insight_atom(name) when is_atom(name), do: name
 
   defp safe_insight_atom(name) when is_binary(name) do
-    name
-    |> String.downcase()
-    |> String.replace(~r/\s+/, "_")
-    |> String.to_atom()
+    normalized =
+      name
+      |> String.downcase()
+      |> String.replace(~r/\s+/, "_")
+
+    try do
+      String.to_existing_atom(normalized)
+    rescue
+      ArgumentError -> normalized
+    end
   end
 
   # ============================================================================

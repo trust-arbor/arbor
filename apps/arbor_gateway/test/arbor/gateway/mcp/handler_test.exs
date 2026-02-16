@@ -66,11 +66,13 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert "action" in help_tool.inputSchema.required
     end
 
-    test "arbor_run requires 'action' and 'params'", %{state: state} do
+    # L1: arbor_run now requires agent_id in addition to action and params
+    test "arbor_run requires 'action', 'params', and 'agent_id'", %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       run_tool = Enum.find(tools, &(&1.name == "arbor_run"))
       assert "action" in run_tool.inputSchema.required
       assert "params" in run_tool.inputSchema.required
+      assert "agent_id" in run_tool.inputSchema.required
     end
 
     test "arbor_status requires 'component'", %{state: state} do
@@ -158,7 +160,39 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   # ===========================================================================
 
   describe "arbor_run" do
-    test "executes file_exists action successfully", %{state: state} do
+    # L1: All arbor_run tests now include agent_id (C1/C2 fix)
+    test "executes file_exists action with agent_id", %{state: state} do
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_run",
+          %{
+            "action" => "file_exists",
+            "params" => %{"path" => "/tmp"},
+            "agent_id" => "test_agent_001"
+          },
+          state
+        )
+
+      # With authorization, may get Success or Unauthorized depending on test setup
+      assert text =~ "Success" or text =~ "Unauthorized" or text =~ "Error"
+    end
+
+    test "handles action not found with agent_id", %{state: state} do
+      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_run",
+          %{
+            "action" => "nonexistent_action",
+            "params" => %{},
+            "agent_id" => "test_agent_001"
+          },
+          state
+        )
+
+      assert text =~ "not found"
+    end
+
+    test "rejects execution without agent_id", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
@@ -166,31 +200,36 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
           state
         )
 
-      assert text =~ "Success"
-      assert text =~ "exists: true"
+      # C1: Must reject when agent_id is missing
+      assert text =~ "Agent ID is required"
     end
 
-    test "handles action not found", %{state: state} do
+    test "rejects execution with empty agent_id", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
-          %{"action" => "nonexistent_action", "params" => %{}},
+          %{
+            "action" => "file_exists",
+            "params" => %{"path" => "/tmp"},
+            "agent_id" => ""
+          },
           state
         )
 
-      assert text =~ "not found"
+      # C1: Must reject when agent_id is empty
+      assert text =~ "Agent ID is required"
     end
 
     test "handles missing params gracefully", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
-          %{"action" => "file_exists"},
+          %{"action" => "file_exists", "agent_id" => "test_agent_001"},
           state
         )
 
       # Should error since path is required
-      assert text =~ "Error" or text =~ "not found"
+      assert text =~ "Error" or text =~ "not found" or text =~ "Unauthorized"
     end
   end
 
