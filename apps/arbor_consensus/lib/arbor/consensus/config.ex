@@ -109,8 +109,9 @@ defmodule Arbor.Consensus.Config do
   @doc """
   Timeout for LLM evaluator calls in milliseconds.
 
-  Default: 300_000 (5 minutes). Kimi K2.5 (default advisory model) can take
-  50-125s per perspective, with occasional spikes to 180s+ under load.
+  Default: 300_000 (5 minutes). Gemini 3 Flash Preview (default) responds in
+  ~5-9s per perspective. Kept at 300s to accommodate slower models like Kimi K2.5
+  (50-125s) when configured as runtime overrides.
   """
   @spec llm_evaluator_timeout() :: pos_integer()
   def llm_evaluator_timeout do
