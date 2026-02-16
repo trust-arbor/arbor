@@ -117,7 +117,33 @@ defmodule Arbor.Monitor do
     |> Enum.map(& &1.name())
   end
 
+  @doc """
+  Get healing pipeline status.
+
+  Returns a map with queue, cascade, verification, and rejection stats.
+  Each component returns its stats or an empty map if unavailable.
+  """
+  @spec healing_status() :: map()
+  def healing_status do
+    alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, RejectionTracker, Verification}
+
+    %{
+      queue: safe_call(fn -> AnomalyQueue.stats() end),
+      cascade: safe_call(fn -> CascadeDetector.status() end),
+      verification: safe_call(fn -> Verification.stats() end),
+      rejections: safe_call(fn -> RejectionTracker.stats() end)
+    }
+  end
+
   defp find_skill(name) do
     Enum.find(Config.enabled_skills(), fn mod -> mod.name() == name end)
+  end
+
+  defp safe_call(fun) do
+    fun.()
+  rescue
+    _ -> %{}
+  catch
+    :exit, _ -> %{}
   end
 end
