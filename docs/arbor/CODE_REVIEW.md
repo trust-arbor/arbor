@@ -252,16 +252,14 @@
 - [ ] Refactor `apply/3` calls where possible
 
 ### A4. Memory reimplements SafeAtom
-- [ ] `apps/arbor_memory/lib/arbor/memory.ex:1654-1667` — `safe_insight_atom/1` duplicates SafeAtom
-- [ ] Replace with `Arbor.Common.SafeAtom.to_existing/1`
+- [x] `apps/arbor_memory/lib/arbor/memory.ex` — `safe_insight_atom/1` now uses `SafeAtom.to_existing/1` after normalization
 
 ### A5. Redundant message envelope structs across contracts
 - [ ] Review: `Contracts.Comms.Message`, `Contracts.Comms.ResponseEnvelope`, `Contracts.Session.Message`, `Contracts.Session.Turn`
 - [ ] Consider shared `Envelope` base or at least shared validation
 
 ### A6. Trust facade verbose 3-level delegation
-- [ ] `apps/arbor_trust/lib/arbor/trust.ex:103-217` — short -> long -> Manager (unnecessary hop)
-- [ ] Simplify with `defdelegate` directly to Manager
+- [x] `apps/arbor_trust/lib/arbor/trust.ex` — short functions now use `defdelegate` directly to Manager. Verbose contract impls also use `defdelegate` with `:as` option. Eliminated ~40 lines of passthrough.
 
 ---
 
@@ -283,7 +281,7 @@
 - [ ] Group backend config into context map in `apps/arbor_persistence/lib/arbor/persistence.ex:62-202`
 
 ### O6. Unreachable clause in item_parser
-- [ ] Remove dead binary clause at `apps/arbor_flow/lib/arbor/flow/item_parser.ex:387`
+- [x] Resolved by D15 refactoring (parse_enum extraction eliminated the dead clause)
 
 ### O7. Synchronous checkpoint in terminate
 - [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — make async to avoid shutdown delay
