@@ -33,17 +33,11 @@ defmodule Arbor.Demo do
 
   ## Healing Pipeline
 
-  The healing pipeline is handled by `arbor_monitor`:
-
-  - `Arbor.Monitor.AnomalyQueue` — Queues detected anomalies
-  - `Arbor.Monitor.CascadeDetector` — Detects cascade failures
-  - `Arbor.Monitor.Verification` — Tracks fix verification (soak period)
-  - `Arbor.Monitor.RejectionTracker` — Three-strike escalation
+  The healing pipeline is accessed via `Arbor.Monitor.healing_status/0`.
   """
 
   require Logger
 
-  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, RejectionTracker, Verification}
 
   # ============================================================================
   # Fault Injection
@@ -149,23 +143,8 @@ defmodule Arbor.Demo do
   @doc """
   Get the current healing pipeline status.
 
-  Returns a map with queue, cascade, verification, and rejection stats.
+  Delegates to `Arbor.Monitor.healing_status/0`.
   """
   @spec healing_status() :: map()
-  def healing_status do
-    %{
-      queue: safe_call(fn -> AnomalyQueue.stats() end, %{}),
-      cascade: safe_call(fn -> CascadeDetector.status() end, %{}),
-      verification: safe_call(fn -> Verification.stats() end, %{}),
-      rejections: safe_call(fn -> RejectionTracker.stats() end, %{})
-    }
-  end
-
-  defp safe_call(fun, default) do
-    fun.()
-  rescue
-    _ -> default
-  catch
-    :exit, _ -> default
-  end
+  defdelegate healing_status(), to: Arbor.Monitor
 end

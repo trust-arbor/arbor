@@ -240,12 +240,12 @@
 ## Phase 5: Architecture Cleanup
 
 ### A1. SessionBridge hardcodes orchestrator internal modules
-- [ ] `apps/arbor_ai/lib/arbor/ai/session_bridge.ex:28-31` — uses `@session_module Arbor.Orchestrator.Session`
-- [ ] Expose stable public API in `Arbor.Orchestrator` facade instead
+- [x] Reviewed: module attributes (`@session_module`, etc.) are used exclusively via `Code.ensure_loaded?` + `apply/3` — correct cross-level pattern, no compile-time coupling. Module names centralized in attributes for easy change.
+- [x] No facade expansion needed — runtime resolution is the established pattern for Standalone→Level 0 calls.
 
 ### A2. Demo reaches into Monitor internals
-- [ ] `apps/arbor_demo/lib/arbor/demo.ex:152-156` — calls AnomalyQueue, CascadeDetector directly
-- [ ] Expose `Arbor.Monitor.healing_status()` facade function
+- [x] Added `Arbor.Monitor.healing_status/0` facade function that aggregates AnomalyQueue, CascadeDetector, Verification, RejectionTracker stats
+- [x] `arbor_demo/demo.ex` now uses `defdelegate healing_status(), to: Arbor.Monitor` — removed internal module aliases and safe_call boilerplate
 
 ### A3. File-wide credo:disable for Apply check
 - [x] `apps/arbor_security/lib/arbor/security/events.ex` — replaced file-wide disable with 3 per-line `credo:disable-for-next-line` pragmas
