@@ -62,6 +62,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.Keychain
   alias Arbor.Security.Reflex
+  alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
 
   # ===========================================================================
@@ -549,6 +550,51 @@ defmodule Arbor.Security do
   defdelegate new_keychain(agent_id), to: Keychain, as: :new
 
   # ===========================================================================
+  # Signing Key Storage
+  # ===========================================================================
+
+  @doc """
+  Store an agent's signing private key (encrypted at rest).
+
+  Called during agent creation to persist the Ed25519 private key.
+  The key is encrypted with AES-256-GCM using a master key.
+  """
+  defdelegate store_signing_key(agent_id, private_key), to: SigningKeyStore, as: :put
+
+  @doc """
+  Load an agent's signing private key.
+
+  Returns `{:ok, private_key}` or `{:error, :no_signing_key}`.
+  """
+  defdelegate load_signing_key(agent_id), to: SigningKeyStore, as: :get
+
+  @doc """
+  Delete an agent's signing key.
+
+  Called during agent destruction.
+  """
+  defdelegate delete_signing_key(agent_id), to: SigningKeyStore, as: :delete
+
+  @doc """
+  Create a signer function for an agent.
+
+  Returns a function that closes over the agent_id and private_key,
+  producing a fresh SignedRequest for any given payload. The orchestrator
+  receives this function — never the raw private key.
+
+  ## Example
+
+      {:ok, signer} = Arbor.Security.make_signer(agent_id, private_key)
+      {:ok, signed} = signer.("arbor://actions/execute/file_read")
+  """
+  @spec make_signer(String.t(), binary()) ::
+          (binary() -> {:ok, SignedRequest.t()} | {:error, term()})
+  def make_signer(agent_id, private_key)
+      when is_binary(agent_id) and is_binary(private_key) do
+    fn payload -> SignedRequest.sign(payload, agent_id, private_key) end
+  end
+
+  # ===========================================================================
   # Private functions
   # ===========================================================================
 
@@ -579,6 +625,8 @@ defmodule Arbor.Security do
   # H1: When identity verification is enabled, verify the signed request AND
   # bind the verified agent_id to the principal_id being authorized.
   # A valid signature from agent A must not authorize principal B.
+  # H3: When expected_resource is provided, verify the signed payload matches
+  # the resource being authorized (prevents cross-resource replay).
   defp maybe_verify_identity(principal_id, opts) do
     verify? = Keyword.get(opts, :verify_identity, Config.identity_verification_enabled?())
     signed_request = Keyword.get(opts, :signed_request)
@@ -591,16 +639,35 @@ defmodule Arbor.Security do
         {:error, :missing_signed_request}
 
       true ->
-        case Verifier.verify(signed_request) do
-          {:ok, verified_agent_id} ->
-            if verified_agent_id == principal_id do
-              :ok
-            else
-              {:error, {:identity_mismatch, verified_agent_id, principal_id}}
-            end
+        with {:ok, verified_agent_id} <- Verifier.verify(signed_request),
+             :ok <- check_identity_binding(verified_agent_id, principal_id),
+             :ok <- check_resource_binding(signed_request, opts) do
+          :ok
+        end
+    end
+  end
 
-          {:error, _} = error ->
-            error
+  # The verified agent_id must match the principal_id being authorized
+  defp check_identity_binding(verified_agent_id, principal_id) do
+    if verified_agent_id == principal_id do
+      :ok
+    else
+      {:error, {:identity_mismatch, verified_agent_id, principal_id}}
+    end
+  end
+
+  # If expected_resource is provided, the signed payload must match it.
+  # This prevents a signed request for resource A from authorizing resource B.
+  defp check_resource_binding(signed_request, opts) do
+    case Keyword.get(opts, :expected_resource) do
+      nil ->
+        :ok
+
+      expected ->
+        if signed_request.payload == expected do
+          :ok
+        else
+          {:error, {:resource_mismatch, signed_request.payload, expected}}
         end
     end
   end

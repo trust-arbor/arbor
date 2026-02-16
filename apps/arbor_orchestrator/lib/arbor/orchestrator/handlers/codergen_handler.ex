@@ -189,6 +189,12 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         Map.get(node.attrs, "agent_id") ||
           Arbor.Orchestrator.Engine.Context.get(context, "session.agent_id", "system")
 
+      # Extract signer from context — allows cryptographic identity verification
+      # for every tool call executed within the pipeline
+      signer =
+        Keyword.get(opts, :signer) ||
+          Arbor.Orchestrator.Engine.Context.get(context, "session.signer")
+
       tool_loop_opts =
         [
           workdir: workdir,
@@ -196,6 +202,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
           tools: tool_defs,
           tool_executor: executor,
           agent_id: agent_id,
+          signer: signer,
           on_tool_call: build_tool_callback(opts, node.id)
         ]
         |> maybe_add_stream_callback(on_stream)

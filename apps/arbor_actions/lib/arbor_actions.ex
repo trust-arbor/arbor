@@ -111,20 +111,33 @@ defmodule Arbor.Actions do
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | {:taint_blocked, atom(), atom(), atom()} | term()}
   def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
+    # Extract signing data from context (if present) before passing to action
+    {signed_request, clean_context} = Map.pop(context, :signed_request)
+
     action_name = action_module_to_name(action_module)
     resource = "arbor://actions/execute/#{action_name}"
 
-    case Arbor.Security.authorize(agent_id, resource, :execute) do
+    # Build auth opts — when a signed_request is present, enable identity
+    # verification and resource binding. When absent, fall back to config
+    # defaults (disabled in dev/test, enabled in production).
+    auth_opts =
+      if signed_request do
+        [signed_request: signed_request, verify_identity: true, expected_resource: resource]
+      else
+        []
+      end
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
         # Check taint before executing
-        case check_taint(action_module, params, context) do
+        case check_taint(action_module, params, clean_context) do
           :ok ->
-            result = execute_action(action_module, params, context)
-            maybe_emit_taint_propagated(action_module, context, result)
+            result = execute_action(action_module, params, clean_context)
+            maybe_emit_taint_propagated(action_module, clean_context, result)
             result
 
           {:error, {:taint_blocked, param, level, role}} = taint_error ->
-            TaintEvents.emit_taint_blocked(action_module, param, level, role, context)
+            TaintEvents.emit_taint_blocked(action_module, param, level, role, clean_context)
             taint_error
         end
 
