@@ -103,7 +103,7 @@ defmodule Arbor.Trust do
   """
   @spec create_trust_profile(String.t()) ::
           {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, term()}
-  def create_trust_profile(agent_id), do: create_trust_profile_for_principal(agent_id)
+  defdelegate create_trust_profile(agent_id), to: Manager
 
   @doc """
   Get the trust profile for an agent.
@@ -114,7 +114,7 @@ defmodule Arbor.Trust do
   """
   @spec get_trust_profile(String.t()) ::
           {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, :not_found | term()}
-  def get_trust_profile(agent_id), do: get_trust_profile_for_principal(agent_id)
+  defdelegate get_trust_profile(agent_id), to: Manager
 
   @doc """
   Get the current trust tier for an agent.
@@ -124,7 +124,12 @@ defmodule Arbor.Trust do
       {:ok, :trusted} = Arbor.Trust.get_trust_tier("agent_001")
   """
   @spec get_trust_tier(String.t()) :: {:ok, atom()} | {:error, :not_found | term()}
-  def get_trust_tier(agent_id), do: get_current_trust_tier_for_principal(agent_id)
+  def get_trust_tier(agent_id) do
+    case Manager.get_trust_profile(agent_id) do
+      {:ok, profile} -> {:ok, profile.tier}
+      {:error, _} = error -> error
+    end
+  end
 
   @doc """
   Calculate the current trust score for an agent.
@@ -135,7 +140,7 @@ defmodule Arbor.Trust do
   """
   @spec calculate_trust_score(String.t()) ::
           {:ok, Arbor.Trust.Behaviour.trust_score()} | {:error, term()}
-  def calculate_trust_score(agent_id), do: calculate_trust_score_for_principal(agent_id)
+  defdelegate calculate_trust_score(agent_id), to: Manager
 
   @doc """
   Record a trust-affecting event.
@@ -146,16 +151,15 @@ defmodule Arbor.Trust do
   """
   @spec record_trust_event(String.t(), atom(), map()) :: :ok
   def record_trust_event(agent_id, event_type, metadata \\ %{}),
-    do: record_trust_event_for_principal_with_metadata(agent_id, event_type, metadata)
+    do: Manager.record_trust_event(agent_id, event_type, metadata)
 
   @doc "Freeze an agent's trust progression."
   @spec freeze_trust(String.t(), atom()) :: :ok | {:error, term()}
-  def freeze_trust(agent_id, reason),
-    do: freeze_trust_progression_for_principal_with_reason(agent_id, reason)
+  defdelegate freeze_trust(agent_id, reason), to: Manager
 
   @doc "Unfreeze an agent's trust progression."
   @spec unfreeze_trust(String.t()) :: :ok | {:error, term()}
-  def unfreeze_trust(agent_id), do: unfreeze_trust_progression_for_principal(agent_id)
+  defdelegate unfreeze_trust(agent_id), to: Manager
 
   @doc """
   Check if an agent has sufficient trust for an operation.
@@ -166,55 +170,38 @@ defmodule Arbor.Trust do
   """
   @spec check_trust_authorization(String.t(), atom()) ::
           {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
-  def check_trust_authorization(agent_id, required_tier),
-    do: check_if_principal_meets_required_trust_tier(agent_id, required_tier)
+  defdelegate check_trust_authorization(agent_id, required_tier), to: Manager
 
   # ===========================================================================
-  # Contract implementations — verbose, AI-readable names
+  # Contract implementations — verbose names delegated to Manager
   # ===========================================================================
 
   @impl true
-  def create_trust_profile_for_principal(agent_id) do
-    Manager.create_trust_profile(agent_id)
-  end
+  defdelegate create_trust_profile_for_principal(agent_id), to: Manager, as: :create_trust_profile
 
   @impl true
-  def get_trust_profile_for_principal(agent_id) do
-    Manager.get_trust_profile(agent_id)
-  end
+  defdelegate get_trust_profile_for_principal(agent_id), to: Manager, as: :get_trust_profile
 
   @impl true
-  def get_current_trust_tier_for_principal(agent_id) do
-    case Manager.get_trust_profile(agent_id) do
-      {:ok, profile} -> {:ok, profile.tier}
-      {:error, _} = error -> error
-    end
-  end
+  def get_current_trust_tier_for_principal(agent_id), do: get_trust_tier(agent_id)
 
   @impl true
-  def calculate_trust_score_for_principal(agent_id) do
-    Manager.calculate_trust_score(agent_id)
-  end
+  defdelegate calculate_trust_score_for_principal(agent_id), to: Manager, as: :calculate_trust_score
 
   @impl true
-  def record_trust_event_for_principal_with_metadata(agent_id, event_type, metadata) do
-    Manager.record_trust_event(agent_id, event_type, metadata)
-  end
+  def record_trust_event_for_principal_with_metadata(agent_id, event_type, metadata),
+    do: Manager.record_trust_event(agent_id, event_type, metadata)
 
   @impl true
-  def freeze_trust_progression_for_principal_with_reason(agent_id, reason) do
-    Manager.freeze_trust(agent_id, reason)
-  end
+  defdelegate freeze_trust_progression_for_principal_with_reason(agent_id, reason),
+    to: Manager, as: :freeze_trust
 
   @impl true
-  def unfreeze_trust_progression_for_principal(agent_id) do
-    Manager.unfreeze_trust(agent_id)
-  end
+  defdelegate unfreeze_trust_progression_for_principal(agent_id), to: Manager, as: :unfreeze_trust
 
   @impl true
-  def check_if_principal_meets_required_trust_tier(agent_id, required_tier) do
-    Manager.check_trust_authorization(agent_id, required_tier)
-  end
+  defdelegate check_if_principal_meets_required_trust_tier(agent_id, required_tier),
+    to: Manager, as: :check_trust_authorization
 
   # ===========================================================================
   # Administration

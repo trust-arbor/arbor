@@ -1649,8 +1649,8 @@ defmodule Arbor.Memory do
   # Graph operations delegated to GraphOps
 
   # M3: Convert a string to an atom safely for insight categories.
-  # Uses String.to_existing_atom to prevent atom table exhaustion from untrusted input.
-  # Falls back to keeping the value as a string if the atom doesn't already exist.
+  # Normalizes (downcase + underscores), then uses SafeAtom to prevent
+  # atom table exhaustion from untrusted input.
   defp safe_insight_atom(name) when is_atom(name), do: name
 
   defp safe_insight_atom(name) when is_binary(name) do
@@ -1659,10 +1659,9 @@ defmodule Arbor.Memory do
       |> String.downcase()
       |> String.replace(~r/\s+/, "_")
 
-    try do
-      String.to_existing_atom(normalized)
-    rescue
-      ArgumentError -> normalized
+    case Arbor.Common.SafeAtom.to_existing(normalized) do
+      {:ok, atom} -> atom
+      {:error, _} -> normalized
     end
   end
 
