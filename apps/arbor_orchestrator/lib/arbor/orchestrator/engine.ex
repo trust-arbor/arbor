@@ -22,6 +22,8 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @type event :: map()
 
   @type run_result :: %{
@@ -645,7 +647,7 @@ defmodule Arbor.Orchestrator.Engine do
   defp execute_with_retry(node, context, graph, retries, opts) do
     handler = Registry.resolve(node)
     max_attempts = parse_max_attempts(node, graph)
-    current_retry_count = parse_int(Map.get(retries, node.id, 0))
+    current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
 
     do_execute_with_retry(
       handler,
@@ -1070,7 +1072,7 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp best_by_weight_then_lexical(edges) do
-    Enum.sort_by(edges, fn edge -> {-parse_int(Map.get(edge.attrs, "weight", 0)), edge.to} end)
+    Enum.sort_by(edges, fn edge -> {-parse_int(Map.get(edge.attrs, "weight", 0), 0), edge.to} end)
     |> List.first()
   end
 
@@ -1090,38 +1092,15 @@ defmodule Arbor.Orchestrator.Engine do
   defp parse_max_attempts(node, graph) do
     cond do
       Map.has_key?(node.attrs, "max_retries") ->
-        parse_int(Map.get(node.attrs, "max_retries")) + 1
+        parse_int(Map.get(node.attrs, "max_retries"), 0) + 1
 
       Map.has_key?(graph.attrs, "default_max_retry") ->
-        parse_int(Map.get(graph.attrs, "default_max_retry")) + 1
+        parse_int(Map.get(graph.attrs, "default_max_retry"), 0) + 1
 
       true ->
         retry_profile(node, graph).max_attempts
     end
   end
-
-  defp parse_int(value) when is_integer(value), do: value
-
-  defp parse_int(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> 0
-    end
-  end
-
-  defp parse_int(_), do: 0
-
-  defp parse_int(nil, default), do: default
-  defp parse_int(value, _default) when is_integer(value), do: value
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> default
-    end
-  end
-
-  defp parse_int(_, default), do: default
 
   defp parse_float(nil, default), do: default
   defp parse_float(value, _default) when is_float(value), do: value

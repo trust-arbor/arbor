@@ -35,6 +35,8 @@ defmodule Arbor.Orchestrator.Handlers.MemoryStoreHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  import Arbor.Orchestrator.Handlers.Helpers, only: [parse_csv: 1]
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @impl true
@@ -146,14 +148,6 @@ defmodule Arbor.Orchestrator.Handlers.MemoryStoreHandler do
     |> Enum.join("-")
   end
 
-  defp parse_csv(str) when is_binary(str) do
-    str
-    |> String.split(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp parse_csv(_), do: []
 
   defp parse_int_or_nil(nil), do: nil
   defp parse_int_or_nil(""), do: nil

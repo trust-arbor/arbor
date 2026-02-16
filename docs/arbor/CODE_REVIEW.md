@@ -38,19 +38,19 @@
 ## Phase 2: Extract Shared Utilities (Duplication)
 
 ### D1. `parse_int/2` duplicated 15+ times across orchestrator handlers
-- [ ] Create `Arbor.Orchestrator.Handlers.Helpers.parse_int/2`
-- [ ] Replace all 15+ handler-local copies
+- [x] Create `Arbor.Orchestrator.Handlers.Helpers.parse_int/2`
+- [x] Replace all handler-local copies (13 handlers + engine.ex). Remaining: `ir/compiler.ex` has different semantics (returns nil), left as-is.
 
 ### D2. `maybe_add/3` duplicated 30+ times across orchestrator, ai, comms, demo
-- [ ] Add to `Arbor.Orchestrator.Handlers.Helpers` (or `Arbor.Common.Helpers`)
-- [ ] Replace all 30+ copies
+- [x] Add to `Arbor.Orchestrator.Handlers.Helpers`
+- [x] Replace orchestrator-internal copies (10 handlers + engine.ex + claude_cli.ex). Cross-app copies (arbor_ai, arbor_comms) left as-is — 2-line function doesn't warrant cross-library import.
 
 ### D3. `parse_csv/1` duplicated 5+ times across orchestrator handlers
-- [ ] Add to `Arbor.Orchestrator.Handlers.Helpers`
-- [ ] Replace all copies
+- [x] Add to `Arbor.Orchestrator.Handlers.Helpers`
+- [x] Replace 6 handler copies. `eval_aggregate_handler.ex` skipped — has different default return value.
 
 ### D4. `safe_to_atom/1` with unsafe fallback duplicated in judge modules
-- [ ] Remove after S1 fix (replace with SafeAtom)
+- [x] Fixed in Phase 1 (S1) — both copies now use `SafeAtom.to_existing/1` internally. Functions retained as local wrappers with safe implementation.
 
 ### D5. `safe_call/2` rescue wrapper duplicated in demo, monitor
 - [ ] Extract to `Arbor.Common.SafeCall`

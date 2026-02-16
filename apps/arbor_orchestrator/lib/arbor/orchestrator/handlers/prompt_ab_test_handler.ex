@@ -35,6 +35,8 @@ defmodule Arbor.Orchestrator.Handlers.PromptAbTestHandler do
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, graph, opts) do
     try do
@@ -320,16 +322,6 @@ defmodule Arbor.Orchestrator.Handlers.PromptAbTestHandler do
   defp normal_cdf(z) do
     0.5 * (1.0 + :math.erf(z / :math.sqrt(2)))
   end
-
-  defp parse_int(value, default) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(value, _default) when is_integer(value), do: value
-  defp parse_int(_value, default), do: default
 
   defp parse_float(value, default) when is_binary(value) do
     case Float.parse(value) do

@@ -13,6 +13,8 @@ defmodule Arbor.Orchestrator.Handlers.EvalDatasetHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, _graph, opts) do
     try do
@@ -34,12 +36,12 @@ defmodule Arbor.Orchestrator.Handlers.EvalDatasetHandler do
 
       load_opts =
         if Map.get(node.attrs, "seed"),
-          do: [{:seed, parse_int(Map.get(node.attrs, "seed"))} | load_opts],
+          do: [{:seed, parse_int(Map.get(node.attrs, "seed"), 0)} | load_opts],
           else: load_opts
 
       load_opts =
         if Map.get(node.attrs, "limit"),
-          do: [{:limit, parse_int(Map.get(node.attrs, "limit"))} | load_opts],
+          do: [{:limit, parse_int(Map.get(node.attrs, "limit"), 0)} | load_opts],
           else: load_opts
 
       case Arbor.Orchestrator.Eval.load_dataset(resolved, load_opts) do
@@ -76,7 +78,4 @@ defmodule Arbor.Orchestrator.Handlers.EvalDatasetHandler do
     if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
   end
 
-  defp parse_int(val) when is_integer(val), do: val
-  defp parse_int(val) when is_binary(val), do: String.to_integer(val)
-  defp parse_int(_), do: 0
 end

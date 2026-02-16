@@ -34,6 +34,8 @@ defmodule Arbor.Orchestrator.Handlers.MemoryRecallHandler do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph.Node
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(%Node{attrs: attrs, id: node_id}, context, _graph, opts) do
     try do
@@ -223,22 +225,4 @@ defmodule Arbor.Orchestrator.Handlers.MemoryRecallHandler do
     end)
   end
 
-  defp parse_csv(str) when is_binary(str) do
-    str
-    |> String.split(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp parse_csv(_), do: []
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 end

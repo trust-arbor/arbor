@@ -41,6 +41,8 @@ defmodule Arbor.Orchestrator.Handlers.DriftDetectHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  import Arbor.Orchestrator.Handlers.Helpers, only: [parse_csv: 1]
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @all_dimensions ["length", "keywords", "structure", "format"]
@@ -270,12 +272,6 @@ defmodule Arbor.Orchestrator.Handlers.DriftDetectHandler do
     if max_val == 0, do: 1.0, else: 1.0 - abs(a - b) / max_val
   end
 
-  defp parse_csv(str) do
-    str
-    |> String.split(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
 
   defp parse_float(val, default) when is_binary(val) do
     case Float.parse(val) do

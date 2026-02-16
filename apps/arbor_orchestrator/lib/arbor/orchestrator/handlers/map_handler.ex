@@ -20,6 +20,8 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph.Node
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @impl true
   def execute(node, context, graph, opts) do
     try do
@@ -246,17 +248,4 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
     }
   end
 
-  # --- Helpers ---
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {int, _} -> int
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 end

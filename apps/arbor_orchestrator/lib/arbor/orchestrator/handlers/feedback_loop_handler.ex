@@ -25,6 +25,8 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
+  import Arbor.Orchestrator.Handlers.Helpers
+
   @default_max_iterations 3
   @default_threshold 0.8
   @default_plateau_window 3
@@ -266,18 +268,6 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandler do
   end
 
   # --- Helpers ---
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(val, default) when is_binary(val) do
-    case Integer.parse(val) do
-      {int, _} -> int
-      :error -> default
-    end
-  end
-
-  defp parse_int(val, _default) when is_integer(val), do: val
-  defp parse_int(_, default), do: default
 
   defp parse_float(nil, default), do: default
 

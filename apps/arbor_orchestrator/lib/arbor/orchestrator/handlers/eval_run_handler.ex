@@ -16,6 +16,8 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  import Arbor.Orchestrator.Handlers.Helpers, only: [parse_csv: 1, maybe_add: 3]
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Eval
 
@@ -117,8 +119,6 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
     end
   end
 
-  defp maybe_add(opts, _key, nil), do: opts
-  defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
 
   # --- Subject resolution ---
 
@@ -155,10 +155,4 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
     _ -> Arbor.Orchestrator.Eval.Subjects.Passthrough
   end
 
-  defp parse_csv(nil), do: []
-  defp parse_csv(""), do: []
-
-  defp parse_csv(str) do
-    str |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
-  end
 end
