@@ -95,10 +95,10 @@ defmodule Arbor.Gateway.MCP.Handler do
             agent_id: %{
               type: "string",
               description:
-                "Optional: agent ID for authorization. If omitted, executes without auth check."
+                "Agent ID for authorization. Required — all actions are authorization-checked."
             }
           },
-          required: ["action", "params"]
+          required: ["action", "params", "agent_id"]
         }
       },
       %{
@@ -259,18 +259,17 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
-  defp run_action(action_name, params, agent_id) do
+  # C1/C2: All MCP action execution MUST go through authorize_and_execute.
+  # agent_id is required — the unchecked execute_action path is removed.
+  defp run_action(action_name, params, agent_id) when is_binary(agent_id) and agent_id != "" do
     case find_action_module(action_name) do
       {:ok, mod} ->
         # Atomize known param keys for the action
         atom_params = atomize_params(params)
 
-        result =
-          if agent_id do
-            call_actions(:authorize_and_execute, [agent_id, mod, atom_params, %{}])
-          else
-            call_actions(:execute_action, [mod, atom_params, %{}])
-          end
+        # C2: Always use authorized execution with workspace context for file safety
+        context = %{workspace: default_workspace()}
+        result = call_actions(:authorize_and_execute, [agent_id, mod, atom_params, context])
 
         case result do
           {:ok, {:ok, value}} ->
@@ -278,6 +277,9 @@ defmodule Arbor.Gateway.MCP.Handler do
 
           {:ok, {:error, :unauthorized}} ->
             "## Unauthorized\n\nAgent '#{agent_id}' lacks permission for #{action_name}."
+
+          {:ok, {:error, {:taint_blocked, param, level, role}}} ->
+            "## Taint Blocked\n\nParameter '#{param}' blocked: taint=#{level}, role=#{role}."
 
           {:ok, {:error, reason}} ->
             "## Error\n\n#{inspect(reason)}"
@@ -292,6 +294,17 @@ defmodule Arbor.Gateway.MCP.Handler do
       {:error, :not_found} ->
         "Action '#{action_name}' not found. Use arbor_actions to list available actions."
     end
+  end
+
+  # C1: Reject calls without agent_id
+  defp run_action(action_name, _params, _agent_id) do
+    "## Error\n\nAgent ID is required to execute '#{action_name}'. " <>
+      "Provide a valid agent_id parameter."
+  end
+
+  # C2: Default workspace for file path validation on MCP-originated requests
+  defp default_workspace do
+    Application.get_env(:arbor_gateway, :mcp_workspace, nil)
   end
 
   defp get_status("overview", _agent_id) do

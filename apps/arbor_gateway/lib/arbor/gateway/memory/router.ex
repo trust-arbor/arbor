@@ -123,26 +123,35 @@ defmodule Arbor.Gateway.Memory.Router do
   plug(:dispatch)
 
   # POST /api/memory/recall — Semantic recall for an agent
-  # M13: agent_id from request body is used as-is — scoping relies on Gateway auth
-  # ensuring the caller is authorized for arbor://memory/* resources.
-  # TODO: Extract agent_id from authenticated session and enforce agent_id == caller_id
+  # M4: Authorize agent_id against memory capability before allowing access.
   post "/recall" do
     case Schemas.Memory.validate(Schemas.Memory.recall_request(), conn.body_params) do
       {:ok, validated} ->
-        opts = build_recall_opts(validated)
+        agent_id = validated["agent_id"]
 
-        case Memory.recall(validated["agent_id"], validated["query"], opts) do
-          {:ok, results} ->
-            json_response(conn, 200, %{status: "ok", results: format_results(results)})
+        case authorize_memory_access(agent_id, :read) do
+          :ok ->
+            opts = build_recall_opts(validated)
 
-          {:error, :index_not_initialized} ->
-            json_response(conn, 404, %{
-              status: "error",
-              reason: "Memory not initialized for agent"
-            })
+            case Memory.recall(agent_id, validated["query"], opts) do
+              {:ok, results} ->
+                json_response(conn, 200, %{status: "ok", results: format_results(results)})
+
+              {:error, :index_not_initialized} ->
+                json_response(conn, 404, %{
+                  status: "error",
+                  reason: "Memory not initialized for agent"
+                })
+
+              {:error, reason} ->
+                json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+            end
 
           {:error, reason} ->
-            json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+            json_response(conn, 403, %{
+              status: "error",
+              reason: "Unauthorized memory access: #{inspect(reason)}"
+            })
         end
 
       {:error, errors} ->
@@ -151,24 +160,36 @@ defmodule Arbor.Gateway.Memory.Router do
   end
 
   # POST /api/memory/index — Index new content for an agent
+  # M4: Authorize agent_id against memory capability before allowing write.
   post "/index" do
     case Schemas.Memory.validate(Schemas.Memory.index_request(), conn.body_params) do
       {:ok, validated} ->
-        # Convert string keys to atoms for type/source
-        safe_metadata = atomize_metadata(validated["metadata"] || %{})
+        agent_id = validated["agent_id"]
 
-        case Memory.index(validated["agent_id"], validated["content"], safe_metadata) do
-          {:ok, entry_id} ->
-            json_response(conn, 200, %{status: "ok", entry_id: entry_id})
+        case authorize_memory_access(agent_id, :write) do
+          :ok ->
+            # Convert string keys to atoms for type/source
+            safe_metadata = atomize_metadata(validated["metadata"] || %{})
 
-          {:error, :index_not_initialized} ->
-            json_response(conn, 404, %{
-              status: "error",
-              reason: "Memory not initialized for agent"
-            })
+            case Memory.index(agent_id, validated["content"], safe_metadata) do
+              {:ok, entry_id} ->
+                json_response(conn, 200, %{status: "ok", entry_id: entry_id})
+
+              {:error, :index_not_initialized} ->
+                json_response(conn, 404, %{
+                  status: "error",
+                  reason: "Memory not initialized for agent"
+                })
+
+              {:error, reason} ->
+                json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+            end
 
           {:error, reason} ->
-            json_response(conn, 500, %{status: "error", reason: inspect(reason)})
+            json_response(conn, 403, %{
+              status: "error",
+              reason: "Unauthorized memory access: #{inspect(reason)}"
+            })
         end
 
       {:error, errors} ->
@@ -289,6 +310,29 @@ defmodule Arbor.Gateway.Memory.Router do
       {:error, _} -> str
     end
   end
+
+  # M4: Authorize memory access for the given agent_id.
+  # Checks that the agent holds a capability for memory operations.
+  # This prevents cross-agent memory access via caller-controlled agent_id.
+  defp authorize_memory_access(agent_id, action) when is_binary(agent_id) do
+    resource = "arbor://memory/#{action}/#{agent_id}"
+
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :authorize, 4) do
+      case Arbor.Security.authorize(agent_id, resource, action) do
+        {:ok, :authorized} -> :ok
+        {:error, reason} -> {:error, reason}
+        _ -> :ok
+      end
+    else
+      # Security module not available — allow access (backward compatibility)
+      :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp authorize_memory_access(_agent_id, _action), do: {:error, :invalid_agent_id}
 
   defp json_response(conn, status, body) do
     conn

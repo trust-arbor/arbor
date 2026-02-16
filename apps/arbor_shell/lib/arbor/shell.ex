@@ -83,11 +83,15 @@ defmodule Arbor.Shell do
           {:ok, map()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | :timeout | term()}
+  # H6: Pass command context into authorize/4 opts so the reflex pipeline
+  # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
     command_name = extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
 
-    case Arbor.Security.authorize(agent_id, resource, :execute) do
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
         execute(command, opts)
 
@@ -108,11 +112,14 @@ defmodule Arbor.Shell do
           {:ok, String.t()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | term()}
+  # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
     command_name = extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
 
-    case Arbor.Security.authorize(agent_id, resource, :execute) do
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
         execute_async(command, opts)
 
@@ -273,11 +280,14 @@ defmodule Arbor.Shell do
           {:ok, String.t()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | term()}
+  # H6: Pass command context into authorize/4 opts for streaming execution too.
   def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
     command_name = extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
 
-    case Arbor.Security.authorize(agent_id, resource, :execute) do
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
         execute_streaming(command, opts)
 

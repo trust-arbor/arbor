@@ -43,24 +43,14 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
     security_module = security_module()
     resource_uri = "arbor://signals/subscribe/#{topic}"
 
-    if Code.ensure_loaded?(security_module) and
-         function_exported?(security_module, :can?, 3) do
-      # can?/3 is a fast ETS-only capability check — no GenServer calls,
-      # no identity verification, no constraint enforcement. Ideal for
-      # subscribe-time gating where delivery-time checks provide the second layer.
+    # H4: Use full authorize/4 pipeline for restricted topics (identity verification,
+    # constraints, reflexes, escalation). Use fast can?/3 for non-restricted topics.
+    restricted_topics = restricted_topics()
 
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(security_module, :can?, [principal_id, resource_uri, :subscribe]) do
-        true -> {:ok, :authorized}
-        false -> {:error, :no_capability}
-      end
+    if topic_is_restricted?(topic, restricted_topics) do
+      authorize_full(security_module, principal_id, resource_uri)
     else
-      Logger.warning(
-        "CapabilityAuthorizer: security module #{inspect(security_module)} not loaded, " <>
-          "denying subscription for #{inspect(principal_id)} to #{inspect(topic)}"
-      )
-
-      {:error, :no_capability}
+      authorize_fast(security_module, principal_id, resource_uri)
     end
   rescue
     error ->
@@ -70,6 +60,63 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
       )
 
       {:error, :no_capability}
+  end
+
+  # Full authorize/4 pipeline for restricted topics
+  defp authorize_full(security_module, principal_id, resource_uri) do
+    if Code.ensure_loaded?(security_module) and
+         function_exported?(security_module, :authorize, 4) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, []]) do
+        {:ok, :authorized} -> {:ok, :authorized}
+        {:ok, :pending_approval, _} -> {:error, :pending_approval}
+        {:error, _reason} -> {:error, :no_capability}
+      end
+    else
+      Logger.warning(
+        "CapabilityAuthorizer: security module #{inspect(security_module)} not loaded for restricted topic"
+      )
+
+      {:error, :no_capability}
+    end
+  end
+
+  # Fast ETS-only check for non-restricted topics
+  defp authorize_fast(security_module, principal_id, resource_uri) do
+    if Code.ensure_loaded?(security_module) and
+         function_exported?(security_module, :can?, 3) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(security_module, :can?, [principal_id, resource_uri, :subscribe]) do
+        true -> {:ok, :authorized}
+        false -> {:error, :no_capability}
+      end
+    else
+      Logger.warning(
+        "CapabilityAuthorizer: security module #{inspect(security_module)} not loaded, " <>
+          "denying subscription for #{inspect(principal_id)} to #{inspect(resource_uri)}"
+      )
+
+      {:error, :no_capability}
+    end
+  end
+
+  defp topic_is_restricted?(topic, restricted_topics) do
+    topic_atom =
+      if is_atom(topic) do
+        topic
+      else
+        try do
+          String.to_existing_atom(to_string(topic))
+        rescue
+          _ -> nil
+        end
+      end
+
+    topic_atom in restricted_topics
+  end
+
+  defp restricted_topics do
+    Application.get_env(:arbor_signals, :restricted_topics, [:security, :identity])
   end
 
   @doc false

@@ -179,4 +179,18 @@ defmodule Arbor.Security.Config do
   def quota_enforcement_enabled? do
     Application.get_env(@app, :quota_enforcement_enabled, true)
   end
+
+  @doc """
+  Whether strict identity mode is enabled.
+
+  When `true`, unknown (unregistered) identities are rejected during
+  authorization. When `false` (default), unknown identities proceed to
+  capability check — the capability lookup handles unknown principals.
+
+  Enable in production for fail-closed identity enforcement (H2).
+  """
+  @spec strict_identity_mode?() :: boolean()
+  def strict_identity_mode? do
+    Application.get_env(@app, :strict_identity_mode, false)
+  end
 end
