@@ -305,7 +305,7 @@ defmodule Arbor.Security do
     # Check reflexes FIRST (instant block before expensive checks)
     with :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
          :ok <- check_identity_status(principal_id),
-         :ok <- maybe_verify_identity(opts),
+         :ok <- maybe_verify_identity(principal_id, opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
          escalation_result <- Escalation.maybe_escalate(cap, principal_id, resource_uri) do
@@ -552,6 +552,9 @@ defmodule Arbor.Security do
   # Private functions
   # ===========================================================================
 
+  # H2: Fail closed on unknown identities when strict identity mode is enabled.
+  # In permissive mode (default for dev/test), unknown identities proceed to
+  # capability check. In strict mode (production), unknown identities are rejected.
   defp check_identity_status(principal_id) do
     case Registry.get_status(principal_id) do
       {:ok, :active} ->
@@ -564,13 +567,19 @@ defmodule Arbor.Security do
         {:error, {:unauthorized, :identity_revoked}}
 
       {:error, :not_found} ->
-        # Identity not registered — allow authorization to proceed
-        # (the capability check will handle unknown principals)
-        :ok
+        if Config.strict_identity_mode?() do
+          {:error, {:unauthorized, :unknown_identity}}
+        else
+          # Permissive mode: allow through to capability check
+          :ok
+        end
     end
   end
 
-  defp maybe_verify_identity(opts) do
+  # H1: When identity verification is enabled, verify the signed request AND
+  # bind the verified agent_id to the principal_id being authorized.
+  # A valid signature from agent A must not authorize principal B.
+  defp maybe_verify_identity(principal_id, opts) do
     verify? = Keyword.get(opts, :verify_identity, Config.identity_verification_enabled?())
     signed_request = Keyword.get(opts, :signed_request)
 
@@ -583,8 +592,15 @@ defmodule Arbor.Security do
 
       true ->
         case Verifier.verify(signed_request) do
-          {:ok, _agent_id} -> :ok
-          {:error, _} = error -> error
+          {:ok, verified_agent_id} ->
+            if verified_agent_id == principal_id do
+              :ok
+            else
+              {:error, {:identity_mismatch, verified_agent_id, principal_id}}
+            end
+
+          {:error, _} = error ->
+            error
         end
     end
   end

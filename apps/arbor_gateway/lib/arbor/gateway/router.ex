@@ -9,7 +9,7 @@ defmodule Arbor.Gateway.Router do
   - `/api/memory/*` — memory operations for bridged agents
   - `/api/dev/*` — development tools (eval, recompile, info)
   - `/api/signals/*` — signal ingestion from external sources (hooks, etc.)
-  - `/mcp` — MCP server for progressive-disclosure Arbor tools
+  - `/mcp` — MCP server for progressive-disclosure Arbor tools (authenticated)
   """
 
   use Plug.Router
@@ -19,7 +19,7 @@ defmodule Arbor.Gateway.Router do
   plug(Plug.Logger)
   plug(:match)
   plug(:conditional_parsers)
-  plug(:require_auth_unless_health_or_mcp)
+  plug(:require_auth_unless_health)
   # H13: Rate limiting on all authenticated endpoints
   plug(Arbor.Gateway.RateLimiter)
   plug(:dispatch)
@@ -31,13 +31,14 @@ defmodule Arbor.Gateway.Router do
   end
 
   # MCP endpoint — ExMCP handles its own body parsing
+  # C1: CORS disabled — MCP is authenticated and should not accept browser-origin requests
   forward("/mcp",
     to: ExMCP.HttpPlug,
     init_opts: [
       handler: Arbor.Gateway.MCP.Handler,
       server_info: %{name: "arbor", version: "0.1.0"},
       sse_enabled: true,
-      cors_enabled: true
+      cors_enabled: false
     ]
   )
 
@@ -58,8 +59,8 @@ defmodule Arbor.Gateway.Router do
   defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
   defp conditional_parsers(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
 
-  # Skip auth for health check and MCP (MCP has its own auth if needed)
-  defp require_auth_unless_health_or_mcp(%{request_path: "/health"} = conn, _opts), do: conn
-  defp require_auth_unless_health_or_mcp(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
-  defp require_auth_unless_health_or_mcp(conn, _opts), do: Auth.call(conn, [])
+  # Skip auth for health check only — all other endpoints require API key auth
+  # C1: MCP no longer bypasses auth (was unauthenticated, enabling action execution without authorization)
+  defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+  defp require_auth_unless_health(conn, _opts), do: Auth.call(conn, [])
 end
