@@ -12,9 +12,42 @@ defmodule Arbor.Gateway.Memory.RouterTest do
 
   @opts Router.init([])
 
+  # Start security infrastructure needed for M4 authorization checks
+  setup_all do
+    for child <- [
+          {Arbor.Security.Identity.Registry, []},
+          {Arbor.Security.Identity.NonceCache, []},
+          {Arbor.Security.SystemAuthority, []},
+          {Arbor.Security.Constraint.RateLimiter, []},
+          {Arbor.Security.CapabilityStore, []},
+          {Arbor.Security.Reflex.Registry, []}
+        ] do
+      Supervisor.start_child(Arbor.Security.Supervisor, child)
+    end
+
+    :ok
+  end
+
   setup do
     # Use unique agent IDs to avoid test interference
     agent_id = "gateway_memory_test_#{System.unique_integer([:positive])}"
+
+    # Grant memory capabilities for the test agent (M4 authorization)
+    # capability_signing_required: false in test config, so direct put works
+    now = DateTime.utc_now()
+
+    for action <- [:read, :write] do
+      cap = %Arbor.Contracts.Security.Capability{
+        id: "cap_mem_#{action}_#{agent_id}",
+        principal_id: agent_id,
+        resource_uri: "arbor://memory/#{action}/#{agent_id}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      }
+
+      Arbor.Security.CapabilityStore.put(cap)
+    end
+
     on_exit(fn -> Memory.cleanup_for_agent(agent_id) end)
     {:ok, agent_id: agent_id}
   end
