@@ -1,0 +1,323 @@
+# Arbor Code Review — Remediation Tracker
+
+> **Date:** 2026-02-16
+> **Scope:** All 26 umbrella apps | 800+ source files | 189,453 LOC
+> **Branch:** `refactor/code-review-remediation`
+
+---
+
+## Phase 1: Security (Fix Immediately)
+
+### S1. Unsafe `String.to_atom/1` — LLM JSON keys (CRITICAL)
+- [ ] `apps/arbor_actions/lib/arbor/actions/judge/prompt_builder.ex:211` — `safe_to_atom/1` falls back to `String.to_atom/1` on untrusted LLM JSON dimension names
+- [ ] `apps/arbor_actions/lib/arbor/actions/judge/evaluate.ex:314` — identical unsafe fallback pattern
+- **Fix:** Replace with `Arbor.Common.SafeAtom.to_allowed/2` using rubric dimension names as allowlist
+
+### S2. Unsafe `String.to_atom/1` — orchestrator map context (CRITICAL)
+- [ ] `apps/arbor_orchestrator/lib/arbor/orchestrator/handlers/eval_run_handler.ex:101` — `Map.get(item, String.to_atom(key))` converts untrusted context keys
+- **Fix:** Use `Arbor.Common.SafeAtom.to_existing/1` or only allow string keys
+
+### S3. Unsafe `String.to_atom/1` — contracts error module (HIGH)
+- [ ] `apps/arbor_contracts/lib/arbor/contracts/error.ex:266` — `exception_to_code/1` converts module name via `String.to_atom/1`
+- **Fix:** Use `String.to_existing_atom/1` with rescue fallback to `:wrapped_error`
+
+### S4. Unsafe `String.to_atom/1` — cartographer ollama detection (MEDIUM)
+- [ ] `apps/arbor_cartographer/lib/arbor/cartographer.ex:436` — converts ollama model names to atoms
+- **Fix:** Use `SafeAtom.to_existing/1` or maintain bounded allowlist
+
+### S5. Unsafe `String.to_atom/1` — common mix helpers (LOW)
+- [ ] `apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex:35`
+- **Fix:** Use `SafeAtom.to_existing/1`
+
+### S6. Unsafe `String.to_atom/1` — SDLC mix task (LOW)
+- [ ] `apps/arbor_sdlc/lib/mix/tasks/arbor/sdlc.ex:228` — credo-disabled, backend from `@valid_backends`
+- **Fix:** Use `SafeAtom.to_allowed/2` with `@valid_backends`
+
+### S7. File I/O without SafePath validation (HIGH)
+- [ ] `apps/arbor_sdlc/lib/arbor/sdlc.ex:622-669` — `write_and_move_item/3` uses `File.mkdir_p!`, `File.write!`, `File.rm` without `SafePath.resolve_within/2`
+- **Fix:** Validate all paths with `Arbor.Common.SafePath.resolve_within/2` before file operations
+
+### S8. Sandbox silently continues without filesystem on init failure (HIGH)
+- [ ] `apps/arbor_sandbox/lib/arbor/sandbox.ex:169-173` — filesystem init failure is swallowed, sandbox created without isolation
+- **Fix:** Fail hard with `{:error, {:filesystem_init_failed, reason}}`
+
+---
+
+## Phase 2: Extract Shared Utilities (Duplication)
+
+### D1. `parse_int/2` duplicated 15+ times across orchestrator handlers
+- [ ] Create `Arbor.Orchestrator.Handlers.Helpers.parse_int/2`
+- [ ] Replace all 15+ handler-local copies
+
+### D2. `maybe_add/3` duplicated 30+ times across orchestrator, ai, comms, demo
+- [ ] Add to `Arbor.Orchestrator.Handlers.Helpers` (or `Arbor.Common.Helpers`)
+- [ ] Replace all 30+ copies
+
+### D3. `parse_csv/1` duplicated 5+ times across orchestrator handlers
+- [ ] Add to `Arbor.Orchestrator.Handlers.Helpers`
+- [ ] Replace all copies
+
+### D4. `safe_to_atom/1` with unsafe fallback duplicated in judge modules
+- [ ] Remove after S1 fix (replace with SafeAtom)
+
+### D5. `safe_call/2` rescue wrapper duplicated in demo, monitor
+- [ ] Extract to `Arbor.Common.SafeCall`
+- [ ] Replace copies in arbor_demo, arbor_monitor
+
+### D6. `via/1` registry tuple duplicated in arbor_agent modules
+- [ ] Extract to `Arbor.Agent.Helpers.via/1`
+- [ ] Replace copies in executor.ex, reasoning_loop.ex
+
+### D7. SafeAtom allowlist boilerplate — 5 x 40 lines in safe_atom.ex
+- [ ] Create `define_enum/2` macro for identity_statuses, taint_levels, taint_roles, taint_policies, signal_categories
+- [ ] Replace ~200 lines of repetitive code
+
+### D8. Shell authorization pattern repeated 3 times identically
+- [ ] Extract `authorize_shell_operation/4` in `apps/arbor_shell/lib/arbor/shell.ex`
+- [ ] Replace lines 88-104, 116-132, 284-300
+
+### D9. Shell sandbox+registration setup repeated 3 times
+- [ ] Extract `prepare_execution/2` in `apps/arbor_shell/lib/arbor/shell.ex`
+- [ ] Replace lines 308-312, 334-338, 410-418
+
+### D10. Signal subscription boilerplate repeated in 7+ LiveViews
+- [ ] Extract `SignalSubscription` helper/component in arbor_dashboard
+- [ ] Replace mount/terminate/handle_info patterns across all LiveViews
+
+### D11. Validation pattern (optional type check) repeated 4 times
+- [ ] Extract `validate_optional/3` in `apps/arbor_contracts/lib/arbor/contracts/error.ex`
+- [ ] Replace lines 290-320
+
+### D12. Advisory LLM system prompts — 13 perspectives with repetitive preamble
+- [ ] Template the `@arbor_context` + `@response_format` preamble in `apps/arbor_consensus/lib/arbor/consensus/evaluators/advisory_llm.ex:364-620`
+- [ ] Use dynamic prompt generation function
+
+### D13. Historian membership event handling — 6 identical clauses
+- [ ] Refactor `apply_membership_event` in `apps/arbor_historian/lib/arbor/historian.ex:560-630`
+- [ ] Single clause with case dispatch on event type
+
+### D14. Persistence filter application — 5 filters with identical pattern
+- [ ] Extract generic filter applier in `apps/arbor_persistence/lib/arbor/persistence.ex:288-315`
+
+### D15. Flow item_parser enum parsing — 3 identical functions
+- [ ] Extract `parse_enum/2` in `apps/arbor_flow/lib/arbor/flow/item_parser.ex`
+- [ ] Replace `parse_priority/1` (220-230), `parse_category/1` (234-244), `parse_effort/1` (248-258)
+
+### D16. SDLC new vs changed file handlers nearly identical
+- [ ] Extract `process_file_event/4` in `apps/arbor_sdlc/lib/arbor/sdlc.ex:265-378`
+- [ ] Parameterize by `:new` | `:changed`
+
+### D17. Two separate SessionReader modules
+- [ ] `apps/arbor_ai/lib/arbor/ai/session_reader.ex` and `apps/arbor_common/lib/arbor/common/sessions/reader.ex`
+- [ ] Consolidate to one location
+
+### D18. `__using__/1` import pattern repeated 4 times in arbor_web
+- [ ] Extract `common_imports/0` in `apps/arbor_web/lib/arbor_web.ex`
+- [ ] Replace lines 38-42, 51-55, 64-68, 88-92
+
+### D19. Demo/production config — same keys, different values
+- [ ] Data-driven config map in `apps/arbor_demo/lib/arbor/demo.ex:97-138`
+
+### D20. Monitor skill boilerplate — 9 modules with 40-60 lines each
+- [ ] Create `Arbor.Monitor.Skill` macro/behaviour
+- [ ] Apply to beam.ex, ets.ex, memory.ex, network.ex, ports.ex, processes.ex, scheduler.ex, system.ex, supervisor.ex
+
+---
+
+## Phase 3: Split Large Modules (Refactoring)
+
+### R1. `arbor_dashboard/live/chat_live.ex` — 2,057 lines
+- [ ] Extract state into structs (AgentState, UIState, ChatState, TokenState, MemoryState, LLMState, CognitiveState)
+- [ ] Extract `ChatLive.AgentManager` — start/stop agent events
+- [ ] Extract `ChatLive.MessageHandler` — send-message logic (78 lines!)
+- [ ] Extract `ChatLive.UIController` — 16 toggle event clauses
+- [ ] Extract `ChatLive.ProposalHandler` — proposal events
+
+### R2. `arbor_memory/context_window.ex` — 1,939 lines
+- [ ] Split into `ContextWindowLegacy` and `ContextWindowMultiLayer` with router
+
+### R3. `arbor_consensus/coordinator.ex` — 1,923 lines
+- [ ] Split by concern: coordination, voting, lifecycle
+
+### R4. `arbor_memory/knowledge_graph.ex` — 1,814 lines
+- [ ] Split into `GraphStructure`, `DecayEngine`, `GraphSearch`
+
+### R5. `arbor_memory/memory.ex` — 1,681 lines (150+ functions)
+- [ ] Create sub-facades: `Memory.IndexOps`, `Memory.GraphOps`
+
+### R6. `arbor_memory/signals.ex` — 1,382 lines
+- [ ] Group by signal domain
+
+### R7. `arbor_orchestrator/engine.ex` — 1,311 lines
+- [ ] Split into `EngineValidator`, `EngineExecutor`, `Engine`
+
+### R8. `arbor_memory/identity_consolidator.ex` — 1,272 lines
+- [ ] Split consolidation phases into separate modules
+
+### R9. `arbor_memory/reflection_processor.ex` — 1,215 lines
+- [ ] Separate LLM interaction from processing logic
+
+### R10. `arbor_ai/ai.ex` — 1,068 lines
+- [ ] Extract `ToolAuthorizationBridge` (~76 lines, lines 787-863)
+- [ ] Split `generate_text_with_tools` (97 lines) into build/execute/emit/record pipeline
+
+### R11. `arbor_sdlc/processors/in_progress.ex` — 958 lines
+- [ ] Extract common handler pattern
+
+### R12. `arbor_orchestrator/session.ex` — 919 lines
+- [ ] Split into `SessionState`, `SessionTurn`, `Session`
+
+### R13. `arbor_actions/background_checks.ex` — 892 lines
+- [ ] Split by check type
+
+### R14. `arbor_agent/executor.ex` — 777 lines
+- [ ] Split into `IntentDispatcher`, `CapabilityValidator`, `SandboxExecutor`
+
+### R15. `arbor_signals/channels.ex` — 796 lines
+- [ ] Split into `Channels.Manager`, `Channels.KeyRotation`, `Channels.Messaging`
+
+### R16. `arbor_security/capability_store.ex` — 741 lines
+- [ ] Split into `CapabilityStore.Index`, `CapabilityStore.Validator`
+
+### R17. `arbor_security/security.ex` — 730 lines (47+ public functions)
+- [ ] Split into `Security.Capabilities`, `Security.Identities`, `Security.Reflexes`
+
+---
+
+## Phase 4: Testing Gaps
+
+### T1. `arbor_contracts` — 72 modules, 16 tests (22% ratio)
+- [ ] Add tests for `error.ex` `wrap/1` edge cases (lines 202-242)
+- [ ] Add tests for consensus modules (6 modules, 400+ lines)
+- [ ] Add tests for judge modules (4 modules)
+- [ ] Add tests for comms contracts (question_registry, message, response_envelope)
+- [ ] Add tests for memory types, persistence contracts
+- [ ] **Target: 80% module coverage**
+
+### T2. `arbor_dashboard` — 27 modules, 10 tests (37% ratio)
+- [ ] Add ChatLive event handler tests (start-agent, send-message, toggles)
+- [ ] Add AgentsLive tests
+- [ ] Add MonitorLive tests
+- [ ] Add SignalsLive tests
+- [ ] Add MemoryLive tests
+- [ ] Add EvalLive tests
+- [ ] **Target: 80% module coverage**
+
+### T3. `arbor_common` — 43 modules, 15 tests (35% ratio)
+- [ ] Add tests for `sessions/` parsers (message_parser, turn_parser, adapter)
+- [ ] Add tests for `skill_library.ex` (475 lines, 0 tests)
+- [ ] **Target: 80% module coverage**
+
+### T4. `arbor_orchestrator` — 167 modules, 105 tests (63% ratio)
+- [ ] Add integration tests for full graph execution (start -> compute -> end)
+- [ ] Add handler edge case tests (error conditions, type mismatches)
+- [ ] Add context threading tests across multiple handlers
+- [ ] **Target: 80% module coverage**
+
+### T5. `arbor_ai` — 42 modules, 27 tests (64% ratio)
+- [ ] Add tests for `ResponseNormalizer` (5 public functions, 0 tests)
+- [ ] Add tests for `RoutingConfig` (7 public functions, 0 tests)
+- [ ] Add tests for `BackendRegistry` (ETS caching, TTL)
+- [ ] Add tests for `route_task/2` tier-based routing
+- [ ] **Target: 80% module coverage**
+
+### T6. `arbor_web` — 12 modules, 8 tests (67% ratio)
+- [ ] Add tests for hooks.ex
+- [ ] Add tests for signal_live.ex
+- [ ] Add tests for telemetry.ex
+- [ ] **Target: 80% module coverage**
+
+### T7. `arbor_monitor` — 20 modules, 14 tests (70% ratio)
+- [ ] Add CascadeDetector state machine tests
+- [ ] Add HealingSupervisor integration tests
+- [ ] Add RejectionTracker three-strike logic tests
+- [ ] **Target: 80% module coverage**
+
+### T8. `arbor_gateway` — 14 modules, 6 tests (43% ratio)
+- [ ] Add ClaudeSession authorization tests
+- [ ] Add tool authorization denial tests
+- [ ] **Target: 80% module coverage**
+
+### T9. `arbor_flow` — 5 modules, 4 tests (80% ratio)
+- [ ] Add `watcher.ex` tests (436 lines, 0 tests) — file lifecycle, crash recovery, callbacks
+
+### T10. `arbor_agent` — 46 modules, 38 tests (83% ratio)
+- [ ] Add concurrent agent creation tests (identity collision)
+- [ ] Add checkpoint race condition tests
+- [ ] Add partial failure recovery tests in lifecycle
+
+### T11. `arbor_persistence` — 32 modules, 24 tests (75% ratio)
+- [ ] Add eval operation tests (insert_eval_run, update_eval_run)
+- [ ] Add authorization rejection path tests
+
+### T12. Property-based and stress tests
+- [ ] Add property-based tests for `arbor_security/double_ratchet.ex` (511 lines)
+- [ ] Add concurrent identity registration stress tests for `arbor_security/identity/registry.ex` (573 lines)
+- [ ] Add key rotation under concurrent sends tests for `arbor_signals`
+
+---
+
+## Phase 5: Architecture Cleanup
+
+### A1. SessionBridge hardcodes orchestrator internal modules
+- [ ] `apps/arbor_ai/lib/arbor/ai/session_bridge.ex:28-31` — uses `@session_module Arbor.Orchestrator.Session`
+- [ ] Expose stable public API in `Arbor.Orchestrator` facade instead
+
+### A2. Demo reaches into Monitor internals
+- [ ] `apps/arbor_demo/lib/arbor/demo.ex:152-156` — calls AnomalyQueue, CascadeDetector directly
+- [ ] Expose `Arbor.Monitor.healing_status()` facade function
+
+### A3. File-wide credo:disable for Apply check
+- [ ] `apps/arbor_security/lib/arbor/security/events.ex` — reduce scope to per-line pragmas
+- [ ] Refactor `apply/3` calls where possible
+
+### A4. Memory reimplements SafeAtom
+- [ ] `apps/arbor_memory/lib/arbor/memory.ex:1654-1667` — `safe_insight_atom/1` duplicates SafeAtom
+- [ ] Replace with `Arbor.Common.SafeAtom.to_existing/1`
+
+### A5. Redundant message envelope structs across contracts
+- [ ] Review: `Contracts.Comms.Message`, `Contracts.Comms.ResponseEnvelope`, `Contracts.Session.Message`, `Contracts.Session.Turn`
+- [ ] Consider shared `Envelope` base or at least shared validation
+
+### A6. Trust facade verbose 3-level delegation
+- [ ] `apps/arbor_trust/lib/arbor/trust.ex:103-217` — short -> long -> Manager (unnecessary hop)
+- [ ] Simplify with `defdelegate` directly to Manager
+
+---
+
+## Phase 6: Simplification & Dead Code
+
+### O1. ChatLive 50+ socket assigns
+- [ ] Group into 7 state structs (covered by R1)
+
+### O2. 38 handle_event clauses in one module
+- [ ] Split into service modules (covered by R1)
+
+### O3. Taint policy checking spread across 5 functions
+- [ ] Extract to `Arbor.Actions.TaintPolicies` module from `apps/arbor_actions/lib/arbor_actions.ex:376-506`
+
+### O4. `generate_text_with_tools` — 97 lines
+- [ ] Split into pipeline (covered by R10)
+
+### O5. Persistence auth wrappers take 5-6 positional params
+- [ ] Group backend config into context map in `apps/arbor_persistence/lib/arbor/persistence.ex:62-202`
+
+### O6. Unreachable clause in item_parser
+- [ ] Remove dead binary clause at `apps/arbor_flow/lib/arbor/flow/item_parser.ex:387`
+
+### O7. Synchronous checkpoint in terminate
+- [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — make async to avoid shutdown delay
+
+### O8. Three dispatch functions with identical structure in comms
+- [ ] Extract `dispatch_with_logging/5` in `apps/arbor_comms/lib/arbor/comms/dispatcher.ex`
+
+### O9. `Code.ensure_loaded` bridge pattern repeated 5+ times
+- [ ] Create `Arbor.Common.LazyLoader` module
+
+### O10. Placeholder phone numbers in non-test code
+- [ ] Clean up `apps/arbor_contracts/lib/arbor/contracts/comms/question_registry.ex:36`
+- [ ] Clean up similar placeholders in `apps/arbor_comms/`
+
+### DC1. TODO comments without tracking
+- [ ] `apps/arbor_cartographer/lib/arbor/cartographer.ex:290` — "TODO: Implement model detection"
+- [ ] `apps/arbor_ai/lib/arbor/ai/session_bridge.ex:157` — "TODO: Thread usage through Session adapters"
