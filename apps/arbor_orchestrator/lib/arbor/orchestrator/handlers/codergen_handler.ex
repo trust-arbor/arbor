@@ -23,6 +23,10 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       |> Map.get("prompt", Map.get(node.attrs, "label", node.id))
       |> String.replace("$goal", to_string(goal))
 
+    # In decision mode, perspective nodes should evaluate the council question,
+    # not their own node ID
+    prompt = maybe_use_council_question(prompt, node.attrs, graph.attrs, context)
+
     base_updates = %{
       "last_stage" => node.id,
       "last_prompt" => prompt,
@@ -300,6 +304,25 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       @vote_format_prefix <> system_content
     else
       system_content
+    end
+  end
+
+  defp maybe_use_council_question(prompt, node_attrs, graph_attrs, context) do
+    perspective = Map.get(node_attrs, "perspective")
+    mode = Map.get(graph_attrs, "mode")
+    has_explicit_prompt = Map.has_key?(node_attrs, "prompt")
+
+    if perspective && mode == "decision" && !has_explicit_prompt do
+      # Use the council question as the prompt for decision-mode perspective nodes
+      question = Arbor.Orchestrator.Engine.Context.get(context, "council.question", "")
+
+      if question != "" do
+        "Evaluate the following proposal and cast your vote:\n\n#{question}"
+      else
+        prompt
+      end
+    else
+      prompt
     end
   end
 
