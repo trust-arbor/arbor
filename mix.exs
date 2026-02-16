@@ -21,7 +21,8 @@ defmodule Arbor.MixProject do
       {:jido_action, "~> 2.0.0-rc.4", override: true},
       {:jido_signal, "~> 2.0.0-rc.4", override: true},
       {:jido_ai, git: "https://github.com/agentjido/jido_ai.git", branch: "main", override: true},
-      {:jido_sandbox, git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
+      {:jido_sandbox,
+       git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
 
       # jido_behaviortree and jido_character are unused — removed
 

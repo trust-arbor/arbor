@@ -124,7 +124,8 @@ defmodule Arbor.Gateway.Dev.Router do
     if explicitly_enabled do
       :ok
     else
-      {:error, "Dev endpoints require explicit opt-in via config :arbor_gateway, dev_endpoints: true"}
+      {:error,
+       "Dev endpoints require explicit opt-in via config :arbor_gateway, dev_endpoints: true"}
     end
   end
 
