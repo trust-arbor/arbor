@@ -1,6 +1,6 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 # Create ETS tables first (same as Application.start/2 does)
-for table <- [:arbor_memory_graphs, :arbor_working_memory, :arbor_memory_proposals] do
+for table <- [:arbor_memory_graphs, :arbor_working_memory, :arbor_memory_proposals, :arbor_chat_history, :arbor_preferences] do
   if :ets.whereis(table) == :undefined do
     :ets.new(table, [:named_table, :public, :set])
   end

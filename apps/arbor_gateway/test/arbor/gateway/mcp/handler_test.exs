@@ -5,7 +5,13 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   setup do
     # Ensure ETS tables exist for memory/security lookups
-    for table <- [:arbor_memory_graphs, :arbor_working_memory, :arbor_memory_proposals] do
+    for table <- [
+          :arbor_memory_graphs,
+          :arbor_working_memory,
+          :arbor_memory_proposals,
+          :arbor_chat_history,
+          :arbor_preferences
+        ] do
       if :ets.whereis(table) == :undefined do
         :ets.new(table, [:named_table, :public, :set])
       end

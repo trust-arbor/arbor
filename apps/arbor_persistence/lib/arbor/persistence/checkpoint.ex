@@ -413,21 +413,27 @@ defmodule Arbor.Persistence.Checkpoint do
   # Signal Emissions
   # ============================================================================
 
-  defp emit_saved(id), do: safe_emit(:saved, %{checkpoint_id: to_string(id)})
+  defp emit_saved(id), do: safe_emit(:saved, %{checkpoint_id: stringify_id(id)})
 
   defp emit_save_failed(id, reason) do
-    safe_emit(:save_failed, %{checkpoint_id: to_string(id), reason: inspect(reason, limit: 200)})
+    safe_emit(:save_failed, %{checkpoint_id: stringify_id(id), reason: inspect(reason, limit: 200)})
   end
 
-  defp emit_loaded(id), do: safe_emit(:loaded, %{checkpoint_id: to_string(id)})
+  defp emit_loaded(id), do: safe_emit(:loaded, %{checkpoint_id: stringify_id(id)})
 
   defp emit_load_failed(id, reason) do
-    safe_emit(:load_failed, %{checkpoint_id: to_string(id), reason: inspect(reason, limit: 200)})
+    safe_emit(:load_failed, %{checkpoint_id: stringify_id(id), reason: inspect(reason, limit: 200)})
   end
 
   defp emit_restored(id, module) do
-    safe_emit(:restored, %{checkpoint_id: to_string(id), module: inspect(module)})
+    safe_emit(:restored, %{checkpoint_id: stringify_id(id), module: inspect(module)})
   end
+
+  # Checkpoint IDs can be strings, atoms, or tuples like {:agent, "user_123"}.
+  # to_string/1 only works for types implementing String.Chars — use inspect for others.
+  defp stringify_id(id) when is_binary(id), do: id
+  defp stringify_id(id) when is_atom(id), do: to_string(id)
+  defp stringify_id(id), do: inspect(id)
 
   # Signals may not be started yet (checkpoint starts before signals).
   # Emit best-effort without crashing.
