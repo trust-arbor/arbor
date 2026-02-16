@@ -22,7 +22,7 @@ defmodule Arbor.Agent.TemplateTest do
       assert length(char.traits) == 3
       assert "thoroughness" in char.values
       assert char.tone == "analytical"
-      assert length(char.knowledge) == 2
+      assert length(char.knowledge) == 4
       assert length(char.instructions) == 3
     end
 
@@ -32,7 +32,7 @@ defmodule Arbor.Agent.TemplateTest do
 
     test "initial_goals are well-formed" do
       goals = Researcher.initial_goals()
-      assert length(goals) == 2
+      assert length(goals) == 3
       assert Enum.all?(goals, &is_map/1)
       assert Enum.all?(goals, &Map.has_key?(&1, :type))
       assert Enum.all?(goals, &Map.has_key?(&1, :description))
@@ -40,7 +40,7 @@ defmodule Arbor.Agent.TemplateTest do
 
     test "required_capabilities include read access and memory" do
       caps = Researcher.required_capabilities()
-      assert length(caps) == 3
+      assert length(caps) == 5
       resources = Enum.map(caps, & &1.resource)
       assert "arbor://fs/read/**" in resources
       assert "arbor://memory/**" in resources

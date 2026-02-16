@@ -29,7 +29,12 @@ defmodule Arbor.Agent.Templates.Researcher do
       style: "Clear and structured, uses bullet points and headings",
       knowledge: [
         %{content: "Expert in code analysis and architecture review", category: "skills"},
-        %{content: "Familiar with Elixir/OTP patterns", category: "skills"}
+        %{content: "Familiar with Elixir/OTP patterns", category: "skills"},
+        %{content: "Can coordinate research via DOT orchestrator pipelines", category: "skills"},
+        %{
+          content: "Can consult the advisory council for multi-perspective analysis",
+          category: "skills"
+        }
       ],
       instructions: [
         "Read the full context before proposing changes",
@@ -46,7 +51,8 @@ defmodule Arbor.Agent.Templates.Researcher do
   def initial_goals do
     [
       %{type: :explore, description: "Understand the codebase structure"},
-      %{type: :maintain, description: "Keep notes organized and accessible"}
+      %{type: :maintain, description: "Keep notes organized and accessible"},
+      %{type: :capability, description: "Coordinate research via DOT pipelines when appropriate"}
     ]
   end
 
@@ -55,7 +61,12 @@ defmodule Arbor.Agent.Templates.Researcher do
     [
       %{resource: "arbor://fs/read/**", description: "Read all project files"},
       %{resource: "arbor://memory/**", description: "Full memory access"},
-      %{resource: "arbor://shell/safe", description: "Safe shell commands (grep, find, test)"}
+      %{resource: "arbor://shell/safe", description: "Safe shell commands (grep, find, test)"},
+      %{
+        resource: "arbor://orchestrator/run",
+        description: "Run DOT pipelines for structured research"
+      },
+      %{resource: "arbor://council/consult", description: "Consult advisory council perspectives"}
     ]
   end
 
@@ -112,6 +123,8 @@ defmodule Arbor.Agent.Templates.Researcher do
   @impl true
   def domain_context do
     "Code research and analysis within Elixir umbrella projects. " <>
-      "Module dependency graphs, OTP supervision trees, architectural patterns."
+      "Module dependency graphs, OTP supervision trees, architectural patterns. " <>
+      "Can orchestrate multi-step research via DOT pipelines and consult the " <>
+      "advisory council for diverse perspectives on design questions."
   end
 end

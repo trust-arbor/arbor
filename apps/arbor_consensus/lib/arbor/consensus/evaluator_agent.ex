@@ -67,6 +67,7 @@ defmodule Arbor.Consensus.EvaluatorAgent do
     :current_envelope,
     :processing_task,
     :memory_adapter,
+    :perspective_filter,
     evaluations_processed: 0,
     started_at: nil
   ]
@@ -136,6 +137,8 @@ defmodule Arbor.Consensus.EvaluatorAgent do
   - `:mailbox_size` — max mailbox size (default: 100)
   - `:reserved_high_priority` — reserved high priority slots (default: 10)
   - `:memory_adapter` — module implementing `MemoryAdapter` behaviour (optional)
+  - `:perspective_filter` — restrict this agent to a subset of perspectives (optional)
+  - `:agent_name` — override the name used for Registry and identity (optional)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -192,9 +195,10 @@ defmodule Arbor.Consensus.EvaluatorAgent do
     mailbox_size = Keyword.get(opts, :mailbox_size, 100)
     reserved = Keyword.get(opts, :reserved_high_priority, 10)
     memory_adapter = Keyword.get(opts, :memory_adapter)
+    perspective_filter = Keyword.get(opts, :perspective_filter)
 
-    # Get the evaluator's name (used for logging and identity)
-    name = evaluator.name()
+    # Allow overriding the name for per-perspective agents
+    name = Keyword.get(opts, :agent_name, evaluator.name())
 
     # Create the mailbox
     {:ok, mailbox} = AgentMailbox.new(max_size: mailbox_size, reserved_high_priority: reserved)
@@ -204,6 +208,7 @@ defmodule Arbor.Consensus.EvaluatorAgent do
       name: name,
       mailbox: mailbox,
       memory_adapter: memory_adapter,
+      perspective_filter: perspective_filter,
       started_at: DateTime.utc_now()
     }
 
@@ -232,7 +237,8 @@ defmodule Arbor.Consensus.EvaluatorAgent do
     status = %{
       name: state.name,
       evaluator: state.evaluator,
-      perspectives: state.evaluator.perspectives(),
+      perspectives: effective_perspectives(state),
+      perspective_filter: state.perspective_filter,
       processing: state.current_envelope != nil,
       evaluations_processed: state.evaluations_processed,
       started_at: state.started_at,
@@ -251,7 +257,7 @@ defmodule Arbor.Consensus.EvaluatorAgent do
 
   @impl true
   def handle_call(:perspectives, _from, state) do
-    {:reply, state.evaluator.perspectives(), state}
+    {:reply, effective_perspectives(state), state}
   end
 
   @impl true
@@ -507,5 +513,14 @@ defmodule Arbor.Consensus.EvaluatorAgent do
 
   defp deadline_passed?(deadline) do
     DateTime.compare(DateTime.utc_now(), deadline) == :gt
+  end
+
+  defp effective_perspectives(%{perspective_filter: nil} = state) do
+    state.evaluator.perspectives()
+  end
+
+  defp effective_perspectives(%{perspective_filter: filter} = state) do
+    all = state.evaluator.perspectives()
+    Enum.filter(all, &(&1 in filter))
   end
 end

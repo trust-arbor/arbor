@@ -4,7 +4,15 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.Outcome
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request, ToolLoop}
+
+  alias Arbor.Orchestrator.UnifiedLLM.{
+    ArborActionsExecutor,
+    Client,
+    CodingTools,
+    Message,
+    Request,
+    ToolLoop
+  }
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -163,10 +171,14 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
       max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
 
+      {tool_defs, executor} = resolve_tools(node, opts)
+
       tool_loop_opts =
         [
           workdir: workdir,
           max_turns: max_turns,
+          tools: tool_defs,
+          tool_executor: executor,
           on_tool_call: build_tool_callback(opts, node.id)
         ]
         |> maybe_add_stream_callback(on_stream)
@@ -186,6 +198,23 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         {:ok, response} -> {:ok, response.text}
         {:error, _} = error -> error
       end
+    end
+  end
+
+  # Resolve which tools and executor to use based on node attributes.
+  # If `tools` attr is set, use ArborActionsExecutor with those specific actions.
+  # Otherwise, fall back to CodingTools (5 built-in tools).
+  # The `tool_executor` opt allows test injection.
+  defp resolve_tools(node, opts) do
+    case Map.get(node.attrs, "tools") do
+      nil ->
+        executor = Keyword.get(opts, :tool_executor, CodingTools)
+        {CodingTools.definitions(), executor}
+
+      tools_str when is_binary(tools_str) ->
+        action_names = String.split(tools_str, ",", trim: true)
+        executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
+        {ArborActionsExecutor.definitions(action_names), executor}
     end
   end
 

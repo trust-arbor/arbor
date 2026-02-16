@@ -62,7 +62,8 @@ defmodule Arbor.Consensus.EvaluatorAgent.Supervisor do
   @spec start_agent(Supervisor.supervisor(), module(), keyword()) ::
           {:ok, pid()} | {:error, :already_started | term()}
   def start_agent(supervisor, evaluator, opts) do
-    name = evaluator.name()
+    # Support agent_name override for per-perspective agents
+    name = Keyword.get(opts, :agent_name, evaluator.name())
 
     # Check if already running
     case lookup_agent(name) do
@@ -187,7 +188,8 @@ defmodule Arbor.Consensus.EvaluatorAgent.Supervisor do
   # =============================================================================
 
   defp do_start_agent(supervisor, evaluator, opts) do
-    name = evaluator.name()
+    # Support agent_name override for per-perspective agents
+    name = Keyword.get(opts, :agent_name, evaluator.name())
 
     # Use Registry for name registration if available
     registered_name =
@@ -200,6 +202,7 @@ defmodule Arbor.Consensus.EvaluatorAgent.Supervisor do
     agent_opts =
       opts
       |> Keyword.put(:evaluator, evaluator)
+      |> Keyword.put(:agent_name, name)
       |> Keyword.put(:name, registered_name)
 
     child_spec = %{
