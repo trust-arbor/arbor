@@ -261,6 +261,10 @@ defmodule Arbor.Actions do
       ],
       background_checks: [
         Arbor.Actions.BackgroundChecks.Run
+      ],
+      judge: [
+        Arbor.Actions.Judge.Evaluate,
+        Arbor.Actions.Judge.Quick
       ]
     }
   end
