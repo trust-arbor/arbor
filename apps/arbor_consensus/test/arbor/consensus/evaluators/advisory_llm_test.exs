@@ -268,7 +268,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         assert is_binary(Map.get(map, p)), "provider:model for #{p} should be a string"
       end
 
-      # All perspectives use the same high-quality model (Kimi K2.5)
+      # All perspectives use the same high-quality model (Gemini 3 Flash Preview)
       unique_models = map |> Map.values() |> Enum.uniq()
 
       assert length(unique_models) >= 1,
@@ -278,9 +278,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
-      # All perspectives use Kimi K2.5 — best intelligence/cost ratio
+      # All perspectives use Gemini 3 Flash Preview — best intelligence/cost ratio
       for p <- @all_perspectives do
-        assert map[p] == "openrouter:moonshotai/kimi-k2.5",
+        assert map[p] == "openrouter:google/gemini-3-flash-preview",
                "expected kimi-k2.5 for #{p}, got: #{map[p]}"
       end
     end
@@ -315,10 +315,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
-      assert {"openrouter", "moonshotai/kimi-k2.5"} = AdvisoryLLM.resolve_provider_model(:privacy)
+      assert {"openrouter", "google/gemini-3-flash-preview"} = AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
     test "per-call override via provider_model opt" do
@@ -350,18 +350,18 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
     test "general perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:general)
     end
 
     test "OpenRouter model defaults resolve correctly" do
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:brainstorming)
 
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
 
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
   end
@@ -379,7 +379,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                AdvisoryLLM.resolve_provider_model(:security)
 
       # Other perspectives unchanged
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
@@ -393,7 +393,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"openrouter", "deepseek/deepseek-r1"} = AdvisoryLLM.resolve_provider_model(:brainstorming)
 
       # Other perspectives unchanged
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
 
@@ -402,7 +402,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"ollama", "test"} = AdvisoryLLM.resolve_provider_model(:security)
 
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "moonshotai/kimi-k2.5"} =
+      assert {"openrouter", "google/gemini-3-flash-preview"} =
                AdvisoryLLM.resolve_provider_model(:security)
     end
 
@@ -411,7 +411,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       map = AdvisoryLLM.provider_map()
       assert map[:general] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
-      assert map[:security] == "openrouter:moonshotai/kimi-k2.5"
+      assert map[:security] == "openrouter:google/gemini-3-flash-preview"
     end
 
     test "per-call provider_model opt still takes precedence over config" do

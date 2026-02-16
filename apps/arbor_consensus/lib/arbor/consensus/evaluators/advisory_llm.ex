@@ -23,8 +23,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   ## Model Selection
 
-  All perspectives default to Kimi K2.5 via OpenRouter — best intelligence/cost
-  ratio tested ($0.45/M input, $0.44/M output, ~$0.066 per 13-perspective run).
+  All perspectives default to Gemini 3 Flash Preview via OpenRouter — best
+  speed/quality/cost ratio tested (~$0.059 per 13-perspective run in ~9 seconds).
+  Kimi K2.5 available as override for deep analysis when needed.
   Sessions persist per perspective via `session_context`, so a security
   evaluator remembers what it reviewed last time.
 
@@ -86,21 +87,22 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — Kimi K2.5 for all perspectives.
-  # Best intelligence/cost ratio tested (2026-02-16 controlled experiment):
-  # $0.45/M input, $0.44/M output. Won or tied every perspective vs
-  # GPT-5-nano, DeepSeek v3.2, and Grok 4.1-fast. Full 13-perspective
-  # consultation costs ~$0.066.
+  # Default provider:model per perspective — Gemini 3 Flash Preview.
+  # Best speed/quality/cost ratio tested (2026-02-16):
+  # - 13 perspectives in ~9 seconds ($0.059 total)
+  # - Comparable quality to Kimi K2.5 with 17x faster response
+  # - Enables real-time council consultations for live decision-making
   #
-  # Latency: 50-125s per perspective (use 300s timeout).
+  # Kimi K2.5 ("openrouter:moonshotai/kimi-k2.5") available for deep analysis
+  # when model diversity or maximum depth is needed (~$0.066, 50-125s/perspective).
   #
   # Configure via:
   #   Application.put_env(:arbor_consensus, :perspective_models, %{
-  #     security: "anthropic:claude-sonnet-4-5-20250929",
-  #     brainstorming: "openrouter:moonshotai/kimi-k2.5",
+  #     security: "openrouter:moonshotai/kimi-k2.5",
+  #     brainstorming: "openrouter:google/gemini-3-flash-preview",
   #     ...
   #   })
-  @default_model "openrouter:moonshotai/kimi-k2.5"
+  @default_model "openrouter:google/gemini-3-flash-preview"
   @default_perspective_models %{
     # Override per-perspective at runtime via configure_perspective/2 or
     # Application config :arbor_consensus, :perspective_models.
