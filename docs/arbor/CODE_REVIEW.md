@@ -106,15 +106,14 @@
 
 ## Phase 3: Split Large Modules (Refactoring)
 
-### R1. `arbor_dashboard/live/chat_live.ex` — 2,057 lines
-- [ ] Extract state into structs (AgentState, UIState, ChatState, TokenState, MemoryState, LLMState, CognitiveState)
-- [ ] Extract `ChatLive.AgentManager` — start/stop agent events
-- [ ] Extract `ChatLive.MessageHandler` — send-message logic (78 lines!)
-- [ ] Extract `ChatLive.UIController` — 16 toggle event clauses
-- [ ] Extract `ChatLive.ProposalHandler` — proposal events
+### R1. `arbor_dashboard/live/chat_live.ex` — 2,057 lines → 981 lines
+- [x] Extract `ChatLive.Components` (~1,088 lines) — render function components (chat interface, sidebars, panels)
+- [x] Extract `ChatLive.Helpers` (~162 lines) — data transformation helpers
 
-### R2. `arbor_memory/context_window.ex` — 1,939 lines
-- [ ] Split into `ContextWindowLegacy` and `ContextWindowMultiLayer` with router
+### R2. `arbor_memory/context_window.ex` — 1,939 lines → 969 lines
+- [x] Extract `ContextWindow.Formatting` (~307 lines) — to_prompt_text, build_context, format helpers
+- [x] Extract `ContextWindow.Serialization` (~207 lines) — serialize, deserialize, JSON conversion
+- [x] Extract `ContextWindow.Compression` (~558 lines) — compression, similarity checks, deduplication
 
 ### R3. `arbor_consensus/coordinator.ex` — 1,923 lines → 1,159 lines
 - [x] Extract `Coordinator.Voting` (~587 lines) — council spawning, evaluation processing, decision rendering, execution, agent evaluation collection
@@ -124,8 +123,12 @@
 - [x] Extract `KnowledgeGraph.DecayEngine` (~201 lines) — decay application, time-based decay, cleanup of decayed nodes
 - [x] Extract `KnowledgeGraph.GraphSearch` (~590 lines) — BFS/DFS traversal, path finding, related nodes, subgraph extraction, pattern matching, clustering
 
-### R5. `arbor_memory/memory.ex` — 1,681 lines (150+ functions)
-- [ ] Create sub-facades: `Memory.IndexOps`, `Memory.GraphOps`
+### R5. `arbor_memory/memory.ex` — 1,680 lines → 333 lines
+- [x] Extract `Memory.IndexOps` (~210 lines) — index add/search/query/reindex operations
+- [x] Extract `Memory.KnowledgeOps` (~86 lines) — knowledge graph node/edge operations
+- [x] Extract `Memory.IdentityOps` (~351 lines) — identity consolidation, personality, capability ops
+- [x] Extract `Memory.SessionOps` (~650 lines) — session, working memory, context window operations
+- [x] Extract `Memory.GoalIntentOps` (~289 lines) — goal tracking, intent, proposal operations
 
 ### R6. `arbor_memory/signals.ex` — 1,382 lines → 748 lines
 - [x] Extract `Signals.Reflection` (~125 lines) — reflection-related signal emission
