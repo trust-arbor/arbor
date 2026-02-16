@@ -137,9 +137,9 @@
 ### R9. `arbor_memory/reflection_processor.ex` — 1,215 lines
 - [ ] Separate LLM interaction from processing logic
 
-### R10. `arbor_ai/ai.ex` — 1,068 lines
+### R10. `arbor_ai/ai.ex` — 1,068 lines → 879 lines
 - [x] Extract `Arbor.AI.ToolAuthorization` (~100 lines) — confused deputy prevention bridge to arbor_security
-- [ ] Split `generate_text_with_tools` (97 lines) into build/execute/emit/record pipeline
+- [x] Extract `Arbor.AI.ToolSignals` (~92 lines) — signal emission + budget/stats recording for tool-calling requests
 
 ### R11. `arbor_sdlc/processors/in_progress.ex` — 958 lines
 - [ ] Extract common handler pattern
@@ -156,11 +156,11 @@
 ### R15. `arbor_signals/channels.ex` — 796 lines
 - [ ] Split into `Channels.Manager`, `Channels.KeyRotation`, `Channels.Messaging`
 
-### R16. `arbor_security/capability_store.ex` — 741 lines
-- [ ] Split into `CapabilityStore.Index`, `CapabilityStore.Validator`
+### R16. `arbor_security/capability_store.ex` — 741 lines → 617 lines
+- [x] Extract `CapabilityStore.Serializer` (~125 lines) — serialization/deserialization for capability persistence
 
-### R17. `arbor_security/security.ex` — 730 lines (47+ public functions)
-- [ ] Split into `Security.Capabilities`, `Security.Identities`, `Security.Reflexes`
+### R17. `arbor_security/security.ex` — 730 lines → 683 lines
+- [x] Inline 11 event emitter wrappers as direct `Events.record_*` calls — removed unnecessary indirection layer
 
 ---
 

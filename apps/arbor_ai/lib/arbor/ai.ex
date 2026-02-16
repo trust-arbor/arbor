@@ -72,6 +72,7 @@ defmodule Arbor.AI do
     SessionReader,
     SystemPromptBuilder,
     TaskMeta,
+    ToolSignals,
     UsageStats
   }
 
@@ -271,7 +272,7 @@ defmodule Arbor.AI do
     model = Keyword.fetch!(opts, :model)
 
     # Arbor layer: signal + timing
-    emit_tool_request_started(provider, model, String.length(prompt))
+    ToolSignals.emit_started(provider, model, String.length(prompt))
     start_time = System.monotonic_time(:millisecond)
 
     # Build model struct (bypasses LLMDB lookup, avoids base_url bug)
@@ -333,9 +334,9 @@ defmodule Arbor.AI do
       {:ok, response} ->
         # Session path succeeded — response is already in the right format
         duration_ms = System.monotonic_time(:millisecond) - start_time
-        emit_tool_request_completed(provider, model, duration_ms, response)
-        record_tool_budget_usage(provider, opts, response)
-        record_tool_usage_stats_success(provider, opts, response, duration_ms)
+        ToolSignals.emit_completed(provider, model, duration_ms, response)
+        ToolSignals.record_budget_usage(provider, opts, response)
+        ToolSignals.record_usage_success(provider, opts, response, duration_ms)
         {:ok, response}
 
       {:unavailable, _reason} ->
@@ -346,15 +347,15 @@ defmodule Arbor.AI do
         case result do
           {:ok, raw_result} ->
             response = format_tools_response(raw_result, provider, model)
-            emit_tool_request_completed(provider, model, duration_ms, response)
-            record_tool_budget_usage(provider, opts, response)
-            record_tool_usage_stats_success(provider, opts, response, duration_ms)
+            ToolSignals.emit_completed(provider, model, duration_ms, response)
+            ToolSignals.record_budget_usage(provider, opts, response)
+            ToolSignals.record_usage_success(provider, opts, response, duration_ms)
             {:ok, response}
 
           {:error, reason} ->
             duration_ms_err = System.monotonic_time(:millisecond) - start_time
-            emit_tool_request_failed(provider, model, reason)
-            record_tool_usage_stats_failure(provider, opts, reason, duration_ms_err)
+            ToolSignals.emit_failed(provider, model, reason)
+            ToolSignals.record_usage_failure(provider, opts, reason, duration_ms_err)
             Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
             {:error, reason}
         end
@@ -792,88 +793,6 @@ defmodule Arbor.AI do
   # We no longer pre-populate Application env from System env (was a TOCTOU race).
   # For generate_text_via_api, the key flows via maybe_add_api_key/2 → opts[:api_key].
   # For generate_text_with_tools, ReqLLM resolves from System.get_env directly.
-
-  # ── Signal emission for tool requests ──
-
-  defp emit_tool_request_started(provider, model, prompt_length) do
-    Arbor.Signals.emit(:ai, :tool_request_started, %{
-      provider: provider,
-      model: model,
-      prompt_length: prompt_length,
-      backend: :api_with_tools
-    })
-  rescue
-    _ -> :ok
-  end
-
-  defp emit_tool_request_completed(provider, model, duration_ms, response) do
-    Arbor.Signals.emit(:ai, :tool_request_completed, %{
-      provider: provider,
-      model: model,
-      duration_ms: duration_ms,
-      turns: response[:turns],
-      tool_calls_count: length(response[:tool_calls] || []),
-      backend: :api_with_tools
-    })
-  rescue
-    _ -> :ok
-  end
-
-  defp emit_tool_request_failed(provider, model, reason) do
-    Arbor.Signals.emit(:ai, :tool_request_failed, %{
-      provider: provider,
-      model: model,
-      error: inspect(reason),
-      backend: :api_with_tools
-    })
-  rescue
-    _ -> :ok
-  end
-
-  # ── Budget/stats for tool requests ──
-
-  defp record_tool_budget_usage(provider, opts, response) do
-    if BudgetTracker.started?() do
-      usage = response[:usage] || %{}
-
-      BudgetTracker.record_usage(provider, %{
-        input_tokens: usage[:input_tokens] || 0,
-        output_tokens: usage[:output_tokens] || 0,
-        model: Keyword.get(opts, :model, "unknown")
-      })
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp record_tool_usage_stats_success(provider, opts, response, latency_ms) do
-    if UsageStats.started?() do
-      usage = response[:usage] || %{}
-
-      UsageStats.record_success(provider, %{
-        model: Keyword.get(opts, :model, "unknown"),
-        input_tokens: usage[:input_tokens] || 0,
-        output_tokens: usage[:output_tokens] || 0,
-        latency_ms: latency_ms,
-        backend: :api_with_tools
-      })
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp record_tool_usage_stats_failure(provider, opts, error, latency_ms) do
-    if UsageStats.started?() do
-      UsageStats.record_failure(provider, %{
-        model: Keyword.get(opts, :model, "unknown"),
-        error: inspect(error),
-        latency_ms: latency_ms,
-        backend: :api_with_tools
-      })
-    end
-  rescue
-    _ -> :ok
-  end
 
   defp build_model_spec(provider, model) do
     # Build raw LLMDB.Model struct to bypass LLMDB lookup.
