@@ -9,7 +9,13 @@ defmodule Arbor.Actions.MemoryTest do
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
 
     # Ensure ETS tables exist (test env uses start_children: false)
-    for table <- [:arbor_memory_graphs, :arbor_working_memory, :arbor_memory_proposals] do
+    for table <- [
+          :arbor_memory_graphs,
+          :arbor_working_memory,
+          :arbor_memory_proposals,
+          :arbor_chat_history,
+          :arbor_preferences
+        ] do
       if :ets.whereis(table) == :undefined do
         :ets.new(table, [:named_table, :public, :set])
       end

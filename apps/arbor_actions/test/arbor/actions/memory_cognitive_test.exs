@@ -8,7 +8,13 @@ defmodule Arbor.Actions.MemoryCognitiveTest do
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
 
-    for table <- [:arbor_memory_graphs, :arbor_working_memory, :arbor_memory_proposals] do
+    for table <- [
+          :arbor_memory_graphs,
+          :arbor_working_memory,
+          :arbor_memory_proposals,
+          :arbor_chat_history,
+          :arbor_preferences
+        ] do
       if :ets.whereis(table) == :undefined do
         :ets.new(table, [:named_table, :public, :set])
       end
