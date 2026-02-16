@@ -270,9 +270,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
-      # Verify specific assignments — distributed across 5 models
-      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
-      assert map[:vision] == "anthropic:claude-sonnet-4-5-20250929"
+      # Verify specific assignments — distributed across 4 OpenRouter models
+      assert map[:security] == "openrouter:openai/gpt-5-nano"
+      assert map[:vision] == "openrouter:moonshotai/kimi-k2.5"
       assert map[:consistency] == "openrouter:openai/gpt-5-nano"
       assert map[:performance] == "openrouter:openai/gpt-5-nano"
       assert map[:privacy] == "openrouter:openai/gpt-5-nano"
@@ -316,7 +316,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+      assert {"openrouter", "openai/gpt-5-nano"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
       assert {"openrouter", "openai/gpt-5-nano"} = AdvisoryLLM.resolve_provider_model(:privacy)
@@ -350,6 +350,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     end
 
     test "general perspective has a default" do
+      AdvisoryLLM.reset_perspective_models()
       assert {"openrouter", "minimax/minimax-m2.5"} =
                AdvisoryLLM.resolve_provider_model(:general)
     end
@@ -402,7 +403,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"ollama", "test"} = AdvisoryLLM.resolve_provider_model(:security)
 
       AdvisoryLLM.reset_perspective_models()
-      assert {"anthropic", "claude-sonnet-4-5-20250929"} =
+      assert {"openrouter", "openai/gpt-5-nano"} =
                AdvisoryLLM.resolve_provider_model(:security)
     end
 
@@ -411,7 +412,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       map = AdvisoryLLM.provider_map()
       assert map[:general] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
-      assert map[:security] == "anthropic:claude-sonnet-4-5-20250929"
+      assert map[:security] == "openrouter:openai/gpt-5-nano"
     end
 
     test "per-call provider_model opt still takes precedence over config" do

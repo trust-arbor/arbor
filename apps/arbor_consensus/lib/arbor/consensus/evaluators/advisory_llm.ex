@@ -85,15 +85,15 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — distributes across 5 different
-  # models for genuine viewpoint diversity. Each perspective can be individually
-  # configured at runtime via Application config or `configure_perspective/2`.
+  # Default provider:model per perspective — distributes across 4 different
+  # models via OpenRouter for genuine viewpoint diversity. Each perspective
+  # can be individually configured at runtime via Application config or
+  # `configure_perspective/2`.
   #
-  # anthropic (direct API): security, vision — critical analysis
-  # openrouter:openai/gpt-5-nano: consistency, performance, privacy — technical
-  # openrouter:moonshotai/kimi-k2.5: brainstorming, emergence, capability — creative
-  # openrouter:x-ai/grok-4.1-fast: stability, resource_usage — practical
-  # openrouter:minimax/minimax-m2.5: user_experience, generalization, general — broad
+  # openrouter:openai/gpt-5-nano: security, consistency, performance, privacy
+  # openrouter:moonshotai/kimi-k2.5: vision, brainstorming, emergence, capability
+  # openrouter:x-ai/grok-4.1-fast: stability, resource_usage
+  # openrouter:minimax/minimax-m2.5: user_experience, generalization, general
   #
   # Configure via:
   #   Application.put_env(:arbor_consensus, :perspective_models, %{
@@ -102,10 +102,11 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   #     ...
   #   })
   @default_perspective_models %{
-    # anthropic — critical/complex analysis (direct API)
-    security: "anthropic:claude-sonnet-4-5-20250929",
-    vision: "anthropic:claude-sonnet-4-5-20250929",
-    # openrouter — diverse inexpensive models for genuine viewpoint diversity
+    # All routed through OpenRouter for diverse, inexpensive viewpoint diversity.
+    # Override per-perspective at runtime via configure_perspective/2 or
+    # Application config :arbor_consensus, :perspective_models.
+    security: "openrouter:openai/gpt-5-nano",
+    vision: "openrouter:moonshotai/kimi-k2.5",
     consistency: "openrouter:openai/gpt-5-nano",
     performance: "openrouter:openai/gpt-5-nano",
     privacy: "openrouter:openai/gpt-5-nano",
