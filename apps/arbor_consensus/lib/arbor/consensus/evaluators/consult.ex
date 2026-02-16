@@ -29,7 +29,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   alias Arbor.Consensus.ConsultationLog
   alias Arbor.Contracts.Consensus.Proposal
 
-  @default_timeout 180_000
+  @default_timeout 300_000
 
   @doc """
   Ask an evaluator all its perspectives about a question.

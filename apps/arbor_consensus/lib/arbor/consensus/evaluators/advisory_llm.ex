@@ -21,10 +21,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   - `:consistency` — alignment with existing patterns and conventions
   - `:general` — broad analysis without a specific lens
 
-  ## Model Diversity
+  ## Model Selection
 
-  Each perspective has a default provider:model assignment, distributing
-  evaluations across different models for genuine viewpoint diversity.
+  All perspectives default to Kimi K2.5 via OpenRouter — best intelligence/cost
+  ratio tested ($0.45/M input, $0.44/M output, ~$0.066 per 13-perspective run).
   Sessions persist per perspective via `session_context`, so a security
   evaluator remembers what it reviewed last time.
 
@@ -86,15 +86,13 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — distributes across 4 different
-  # models via OpenRouter for genuine viewpoint diversity. Each perspective
-  # can be individually configured at runtime via Application config or
-  # `configure_perspective/2`.
+  # Default provider:model per perspective — Kimi K2.5 for all perspectives.
+  # Best intelligence/cost ratio tested (2026-02-16 controlled experiment):
+  # $0.45/M input, $0.44/M output. Won or tied every perspective vs
+  # GPT-5-nano, DeepSeek v3.2, and Grok 4.1-fast. Full 13-perspective
+  # consultation costs ~$0.066.
   #
-  # openrouter:openai/gpt-5-nano: security, consistency, performance, privacy
-  # openrouter:moonshotai/kimi-k2.5: vision, brainstorming, emergence, capability
-  # openrouter:x-ai/grok-4.1-fast: stability, resource_usage
-  # openrouter:deepseek/deepseek-v3.2: user_experience, generalization, general
+  # Latency: 50-125s per perspective (use 300s timeout).
   #
   # Configure via:
   #   Application.put_env(:arbor_consensus, :perspective_models, %{
@@ -102,23 +100,23 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   #     brainstorming: "openrouter:moonshotai/kimi-k2.5",
   #     ...
   #   })
+  @default_model "openrouter:moonshotai/kimi-k2.5"
   @default_perspective_models %{
-    # All routed through OpenRouter for diverse, inexpensive viewpoint diversity.
     # Override per-perspective at runtime via configure_perspective/2 or
     # Application config :arbor_consensus, :perspective_models.
-    security: "openrouter:openai/gpt-5-nano",
-    vision: "openrouter:moonshotai/kimi-k2.5",
-    consistency: "openrouter:openai/gpt-5-nano",
-    performance: "openrouter:openai/gpt-5-nano",
-    privacy: "openrouter:openai/gpt-5-nano",
-    brainstorming: "openrouter:moonshotai/kimi-k2.5",
-    emergence: "openrouter:moonshotai/kimi-k2.5",
-    capability: "openrouter:moonshotai/kimi-k2.5",
-    stability: "openrouter:x-ai/grok-4.1-fast",
-    resource_usage: "openrouter:x-ai/grok-4.1-fast",
-    user_experience: "openrouter:deepseek/deepseek-v3.2",
-    generalization: "openrouter:deepseek/deepseek-v3.2",
-    general: "openrouter:deepseek/deepseek-v3.2"
+    security: @default_model,
+    vision: @default_model,
+    consistency: @default_model,
+    performance: @default_model,
+    privacy: @default_model,
+    brainstorming: @default_model,
+    emergence: @default_model,
+    capability: @default_model,
+    stability: @default_model,
+    resource_usage: @default_model,
+    user_experience: @default_model,
+    generalization: @default_model,
+    general: @default_model
   }
 
   # ============================================================================

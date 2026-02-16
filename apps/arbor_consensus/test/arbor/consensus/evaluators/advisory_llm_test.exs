@@ -268,30 +268,21 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         assert is_binary(Map.get(map, p)), "provider:model for #{p} should be a string"
       end
 
-      # Multiple distinct models are represented for viewpoint diversity
+      # All perspectives use the same high-quality model (Kimi K2.5)
       unique_models = map |> Map.values() |> Enum.uniq()
 
-      assert length(unique_models) >= 3,
-             "expected at least 3 different models, got: #{inspect(unique_models)}"
+      assert length(unique_models) >= 1,
+             "expected at least 1 model, got: #{inspect(unique_models)}"
     end
 
     test "each perspective has a default provider:model assignment" do
       map = AdvisoryLLM.provider_map()
 
-      # Verify specific assignments — distributed across 4 OpenRouter models
-      assert map[:security] == "openrouter:openai/gpt-5-nano"
-      assert map[:vision] == "openrouter:moonshotai/kimi-k2.5"
-      assert map[:consistency] == "openrouter:openai/gpt-5-nano"
-      assert map[:performance] == "openrouter:openai/gpt-5-nano"
-      assert map[:privacy] == "openrouter:openai/gpt-5-nano"
-      assert map[:brainstorming] == "openrouter:moonshotai/kimi-k2.5"
-      assert map[:emergence] == "openrouter:moonshotai/kimi-k2.5"
-      assert map[:capability] == "openrouter:moonshotai/kimi-k2.5"
-      assert map[:stability] == "openrouter:x-ai/grok-4.1-fast"
-      assert map[:resource_usage] == "openrouter:x-ai/grok-4.1-fast"
-      assert map[:user_experience] == "openrouter:deepseek/deepseek-v3.2"
-      assert map[:generalization] == "openrouter:deepseek/deepseek-v3.2"
-      assert map[:general] == "openrouter:deepseek/deepseek-v3.2"
+      # All perspectives use Kimi K2.5 — best intelligence/cost ratio
+      for p <- @all_perspectives do
+        assert map[p] == "openrouter:moonshotai/kimi-k2.5",
+               "expected kimi-k2.5 for #{p}, got: #{map[p]}"
+      end
     end
 
     test "caller can override provider_model via opts" do
@@ -324,10 +315,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"openrouter", "openai/gpt-5-nano"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
-      assert {"openrouter", "openai/gpt-5-nano"} = AdvisoryLLM.resolve_provider_model(:privacy)
+      assert {"openrouter", "moonshotai/kimi-k2.5"} = AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
     test "per-call override via provider_model opt" do
@@ -359,7 +350,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
     test "general perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "deepseek/deepseek-v3.2"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:general)
     end
 
@@ -367,10 +358,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:brainstorming)
 
-      assert {"openrouter", "deepseek/deepseek-v3.2"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
 
-      assert {"openrouter", "x-ai/grok-4.1-fast"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
   end
@@ -388,7 +379,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                AdvisoryLLM.resolve_provider_model(:security)
 
       # Other perspectives unchanged
-      assert {"openrouter", "openai/gpt-5-nano"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
@@ -402,7 +393,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"openrouter", "deepseek/deepseek-r1"} = AdvisoryLLM.resolve_provider_model(:brainstorming)
 
       # Other perspectives unchanged
-      assert {"openrouter", "x-ai/grok-4.1-fast"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
 
@@ -411,7 +402,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"ollama", "test"} = AdvisoryLLM.resolve_provider_model(:security)
 
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "openai/gpt-5-nano"} =
+      assert {"openrouter", "moonshotai/kimi-k2.5"} =
                AdvisoryLLM.resolve_provider_model(:security)
     end
 
@@ -420,7 +411,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       map = AdvisoryLLM.provider_map()
       assert map[:general] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
-      assert map[:security] == "openrouter:openai/gpt-5-nano"
+      assert map[:security] == "openrouter:moonshotai/kimi-k2.5"
     end
 
     test "per-call provider_model opt still takes precedence over config" do
