@@ -62,6 +62,7 @@ defmodule Arbor.Agent.Lifecycle do
          {:ok, endorsement} <- endorse_identity(identity),
          keychain <- create_keychain(identity),
          agent_id = identity.agent_id,
+         :ok <- persist_signing_key(agent_id, identity),
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []) do
@@ -95,6 +96,30 @@ defmodule Arbor.Agent.Lifecycle do
       {:ok, profile} ->
         ensure_identity_and_capabilities(profile)
         {:ok, agent_id}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Build a signer function for an agent.
+
+  Loads the agent's signing private key from encrypted storage and returns
+  a function that can produce fresh SignedRequests. The orchestrator receives
+  this function — never the raw private key.
+
+  ## Example
+
+      {:ok, signer} = Lifecycle.build_signer(agent_id)
+      {:ok, signed} = signer.("arbor://actions/execute/file_read")
+  """
+  @spec build_signer(String.t()) ::
+          {:ok, (binary() -> {:ok, term()} | {:error, term()})} | {:error, term()}
+  def build_signer(agent_id) do
+    case Arbor.Security.load_signing_key(agent_id) do
+      {:ok, private_key} ->
+        {:ok, Arbor.Security.make_signer(agent_id, private_key)}
 
       {:error, _} = error ->
         error
@@ -239,6 +264,9 @@ defmodule Arbor.Agent.Lifecycle do
     # Clean up memory
     Arbor.Memory.cleanup_for_agent(agent_id)
 
+    # Clean up signing key
+    Arbor.Security.delete_signing_key(agent_id)
+
     # Remove profile
     path = profile_path(agent_id)
 
@@ -351,6 +379,30 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Security.new_keychain(identity.agent_id)
   end
 
+  # Persist the signing private key for later use in signing ceremonies.
+  # Gracefully degrades if the signing key store is not available.
+  defp persist_signing_key(agent_id, identity) do
+    case identity.private_key do
+      nil ->
+        Logger.warning("No private key to persist for agent #{agent_id}")
+        :ok
+
+      private_key ->
+        case Arbor.Security.store_signing_key(agent_id, private_key) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to persist signing key: #{inspect(reason)}",
+              agent_id: agent_id
+            )
+
+            # Don't fail agent creation over signing key persistence
+            :ok
+        end
+    end
+  end
+
   defp grant_capabilities(_agent_id, []), do: :ok
 
   defp grant_capabilities(agent_id, capabilities) do
@@ -437,8 +489,12 @@ defmodule Arbor.Agent.Lifecycle do
             }
 
             case Arbor.Security.register_identity(identity) do
-              :ok -> :ok
-              {:error, :already_registered} -> :ok
+              :ok ->
+                :ok
+
+              {:error, :already_registered} ->
+                :ok
+
               {:error, reason} ->
                 Logger.warning("Failed to re-register identity: #{inspect(reason)}",
                   agent_id: agent_id
@@ -465,7 +521,8 @@ defmodule Arbor.Agent.Lifecycle do
         profile.initial_capabilities || []
 
       template_mod when is_atom(template_mod) ->
-        if Code.ensure_loaded?(template_mod) and function_exported?(template_mod, :required_capabilities, 0) do
+        if Code.ensure_loaded?(template_mod) and
+             function_exported?(template_mod, :required_capabilities, 0) do
           template_mod.required_capabilities()
         else
           profile.initial_capabilities || []

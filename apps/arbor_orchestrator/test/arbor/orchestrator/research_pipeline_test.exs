@@ -113,12 +113,13 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
   describe "CodergenHandler tool resolution" do
     test "codergen with tools attr uses ArborActionsExecutor" do
       # Simulate what CodergenHandler does with a tools attr
-      node = make_node("research", %{
-        "type" => "codergen",
-        "simulate" => "true",
-        "use_tools" => "true",
-        "tools" => "file_read,file_search"
-      })
+      node =
+        make_node("research", %{
+          "type" => "codergen",
+          "simulate" => "true",
+          "use_tools" => "true",
+          "tools" => "file_read,file_search"
+        })
 
       graph = make_graph([node])
       context = Context.new()
@@ -130,11 +131,12 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
     end
 
     test "codergen without tools attr falls back to CodingTools" do
-      node = make_node("code", %{
-        "type" => "codergen",
-        "simulate" => "true",
-        "use_tools" => "true"
-      })
+      node =
+        make_node("code", %{
+          "type" => "codergen",
+          "simulate" => "true",
+          "use_tools" => "true"
+        })
 
       graph = make_graph([node])
       context = Context.new()
@@ -145,11 +147,12 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
 
     test "agent_id flows from context to tool opts" do
       # When a node has agent_id attr, it should flow through
-      node = make_node("research", %{
-        "type" => "codergen",
-        "simulate" => "true",
-        "agent_id" => "agent_abc123"
-      })
+      node =
+        make_node("research", %{
+          "type" => "codergen",
+          "simulate" => "true",
+          "agent_id" => "agent_abc123"
+        })
 
       graph = make_graph([node])
       context = Context.new()

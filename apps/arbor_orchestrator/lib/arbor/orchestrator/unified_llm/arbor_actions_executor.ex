@@ -75,6 +75,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
           {:ok, String.t()} | {:error, String.t()}
   def execute(name, args, workdir, opts \\ []) do
     agent_id = Keyword.get(opts, :agent_id, "system")
+    signed_request = Keyword.get(opts, :signed_request)
 
     with_actions_module(fn ->
       action_map = build_action_map()
@@ -89,10 +90,20 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
             |> atomize_known_keys(action_module)
             |> maybe_inject_workdir(workdir)
 
+          # Pass signed_request in context for identity verification.
+          # authorize_and_execute extracts it and passes to Security.authorize.
+          context =
+            if signed_request do
+              %{signed_request: signed_request}
+            else
+              %{}
+            end
+
           case apply(@actions_mod, :authorize_and_execute, [
                  agent_id,
                  action_module,
-                 params
+                 params,
+                 context
                ]) do
             {:ok, result} ->
               {:ok, format_result(result)}

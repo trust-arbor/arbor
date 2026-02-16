@@ -38,6 +38,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     tool_executor = Keyword.get(opts, :tool_executor, CodingTools)
     agent_id = Keyword.get(opts, :agent_id, "system")
 
+    signer = Keyword.get(opts, :signer)
     tools = Keyword.get(opts, :tools, CodingTools.definitions())
     request = %{request | tools: tools}
 
@@ -47,6 +48,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       on_tool_call: on_tool_call,
       tool_executor: tool_executor,
       agent_id: agent_id,
+      signer: signer,
       turn: 0,
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
     })
@@ -103,7 +105,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     results =
       Enum.map(tool_calls, fn tc ->
         args = normalize_args(tc.arguments)
-        result = state.tool_executor.execute(tc.name, args, state.workdir, agent_id: state.agent_id)
+
+        # Sign the tool call if a signer function is available.
+        # Each tool call gets a fresh SignedRequest (unique nonce + timestamp).
+        signed_request = sign_tool_call(state.signer, tc.name)
+
+        exec_opts =
+          [agent_id: state.agent_id]
+          |> maybe_add_signed_request(signed_request)
+
+        result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
 
         if state.on_tool_call do
           state.on_tool_call.(tc.name, args, result)
@@ -114,6 +125,24 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
     {results, state}
   end
+
+  # Sign a tool call with the resource URI as the payload.
+  # Returns {:ok, signed_request} or nil if no signer is available.
+  defp sign_tool_call(nil, _tool_name), do: nil
+
+  defp sign_tool_call(signer, tool_name) when is_function(signer, 1) do
+    resource = "arbor://actions/execute/#{tool_name}"
+
+    case signer.(resource) do
+      {:ok, signed_request} -> signed_request
+      {:error, _} -> nil
+    end
+  end
+
+  defp maybe_add_signed_request(opts, nil), do: opts
+
+  defp maybe_add_signed_request(opts, signed_request),
+    do: [{:signed_request, signed_request} | opts]
 
   defp build_assistant_message(response) do
     # Reconstruct the assistant message including tool calls
