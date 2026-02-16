@@ -10,19 +10,16 @@ defmodule Arbor.Orchestrator.Engine do
   """
 
   alias Arbor.Orchestrator.Engine.{
-    Authorization,
     Checkpoint,
-    Condition,
     Context,
+    Executor,
     Fidelity,
-    Outcome
+    Outcome,
+    Router
   }
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
-  alias Arbor.Orchestrator.Handlers.Registry
-
-  import Arbor.Orchestrator.Handlers.Helpers
 
   @type event :: map()
 
@@ -32,6 +29,9 @@ defmodule Arbor.Orchestrator.Engine do
           context: map(),
           node_durations: %{String.t() => non_neg_integer()}
         }
+
+  # Public API delegations for backward compatibility
+  defdelegate should_retry_exception?(exception), to: Executor
 
   @spec run(Graph.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(%Graph{} = graph, opts \\ []) do
@@ -162,8 +162,8 @@ defmodule Arbor.Orchestrator.Engine do
         node = Map.fetch!(graph.nodes, current_node_id)
         last_outcome = Map.get(outcomes, current_node_id, infer_outcome_from_context(context))
 
-        if terminal?(node) do
-          case resolve_goal_gate_retry_target(graph, outcomes) do
+        if Router.terminal?(node) do
+          case Router.resolve_goal_gate_retry_target(graph, outcomes) do
             {:ok, nil} ->
               {:ok,
                %{
@@ -188,7 +188,7 @@ defmodule Arbor.Orchestrator.Engine do
               {:error, reason}
           end
         else
-          case select_next_step(node, last_outcome, context, graph) do
+          case Router.select_next_step(node, last_outcome, context, graph) do
             nil ->
               {:ok,
                %{
@@ -303,7 +303,7 @@ defmodule Arbor.Orchestrator.Engine do
       |> Keyword.put_new(:logs_root, logs_root)
       |> Keyword.put(:stage_started_at, stage_started_at)
 
-    {outcome, retries} = execute_with_retry(node, context, graph, retries, handler_opts)
+    {outcome, retries} = Executor.execute_with_retry(node, context, graph, retries, handler_opts)
 
     completed = [node.id | completed]
     outcomes = Map.put(outcomes, node.id, outcome)
@@ -333,11 +333,11 @@ defmodule Arbor.Orchestrator.Engine do
     })
 
     cond do
-      terminal?(node) ->
-        case resolve_goal_gate_retry_target(graph, outcomes) do
+      Router.terminal?(node) ->
+        case Router.resolve_goal_gate_retry_target(graph, outcomes) do
           {:ok, nil} ->
             # Before completing, check if there are pending fan-out branches
-            case find_next_ready(pending, graph, completed) do
+            case Router.find_next_ready(pending, graph, completed) do
               {next_id, next_edge, remaining} ->
                 emit(opts, %{
                   type: :fan_out_branch_resuming,
@@ -424,7 +424,7 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  # Fan-in aware advancement: uses existing select_next_step for routing,
+  # Fan-in aware advancement: uses Router for routing,
   # but also detects implicit fan-out (multiple unconditional edges) and
   # queues sibling branches in pending. Before executing any node, checks
   # that all predecessors are complete (fan-in gate).
@@ -444,7 +444,7 @@ defmodule Arbor.Orchestrator.Engine do
          node_durations
        ) do
     # Use existing routing logic to pick the preferred next target
-    preferred = select_next_step(node, outcome, context, graph)
+    preferred = Router.select_next_step(node, outcome, context, graph)
 
     preferred_id =
       case preferred do
@@ -454,14 +454,14 @@ defmodule Arbor.Orchestrator.Engine do
       end
 
     # Detect fan-out: collect sibling unconditional edges (excluding preferred)
-    fan_out_edges = collect_fan_out_siblings(node, outcome, context, graph)
+    fan_out_edges = Router.collect_fan_out_siblings(node, outcome, context, graph)
 
     extra_targets =
       fan_out_edges
       |> Enum.map(fn e -> {e.to, e} end)
       |> Enum.reject(fn {id, _} -> id == preferred_id or id in completed end)
 
-    new_pending = merge_pending(extra_targets, pending)
+    new_pending = Router.merge_pending(extra_targets, pending)
 
     if extra_targets != [] do
       emit(opts, %{
@@ -511,8 +511,8 @@ defmodule Arbor.Orchestrator.Engine do
         )
 
       nil ->
-        # No preferred target — check pending for ready nodes
-        case find_next_ready(new_pending, graph, completed) do
+        # No preferred target -- check pending for ready nodes
+        case Router.find_next_ready(new_pending, graph, completed) do
           {next_id, next_edge, remaining} ->
             loop(
               graph,
@@ -572,7 +572,7 @@ defmodule Arbor.Orchestrator.Engine do
          node_durations
        ) do
     fan_in_ready =
-      pending == [] or all_predecessors_complete?(graph, target_id, completed)
+      pending == [] or Router.all_predecessors_complete?(graph, target_id, completed)
 
     if fan_in_ready do
       loop(
@@ -591,7 +591,7 @@ defmodule Arbor.Orchestrator.Engine do
         node_durations
       )
     else
-      # Target not ready — add to pending and find next ready node
+      # Target not ready -- add to pending and find next ready node
       emit(opts, %{
         type: :fan_in_deferred,
         node_id: target_id,
@@ -604,7 +604,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       all_pending = [{target_id, edge} | pending]
 
-      case find_next_ready(all_pending, graph, completed) do
+      case Router.find_next_ready(all_pending, graph, completed) do
         {next_id, next_edge, remaining} ->
           loop(
             graph,
@@ -623,7 +623,7 @@ defmodule Arbor.Orchestrator.Engine do
           )
 
         nil ->
-          # Nothing ready — pipeline complete or deadlock
+          # Nothing ready -- pipeline complete or deadlock
           ordered = Enum.reverse(completed)
           duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
@@ -644,438 +644,6 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp execute_with_retry(node, context, graph, retries, opts) do
-    handler = Registry.resolve(node)
-    max_attempts = parse_max_attempts(node, graph)
-    current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
-
-    do_execute_with_retry(
-      handler,
-      node,
-      context,
-      graph,
-      retries,
-      opts,
-      current_retry_count + 1,
-      max_attempts
-    )
-  end
-
-  defp do_execute_with_retry(handler, node, context, graph, retries, opts, attempt, max_attempts) do
-    try do
-      outcome = Authorization.authorize_and_execute(handler, node, context, graph, opts)
-
-      case outcome.status do
-        status when status in [:success, :partial_success] ->
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-          emit(opts, %{
-            type: :stage_completed,
-            node_id: node.id,
-            status: status,
-            duration_ms: duration_ms
-          })
-
-          {outcome, Map.delete(retries, node.id)}
-
-        status when status in [:retry, :fail] ->
-          if attempt < max_attempts do
-            delay = retry_delay_ms(node, graph, attempt, opts)
-
-            if status == :fail do
-              emit(opts, %{
-                type: :stage_failed,
-                node_id: node.id,
-                error: outcome.failure_reason || "stage failed",
-                will_retry: true
-              })
-            end
-
-            emit(opts, %{
-              type: :stage_retrying,
-              node_id: node.id,
-              attempt: attempt,
-              delay_ms: delay
-            })
-
-            sleep(opts, delay)
-
-            retries = Map.put(retries, node.id, attempt)
-
-            do_execute_with_retry(
-              handler,
-              node,
-              context,
-              graph,
-              retries,
-              opts,
-              attempt + 1,
-              max_attempts
-            )
-          else
-            terminal_outcome =
-              case status do
-                :retry ->
-                  if truthy?(Map.get(node.attrs, "allow_partial", false)) do
-                    %Outcome{
-                      status: :partial_success,
-                      notes: "retries exhausted, partial accepted"
-                    }
-                  else
-                    %Outcome{status: :fail, failure_reason: "max retries exceeded"}
-                  end
-
-                :fail ->
-                  outcome
-              end
-
-            emit_stage_terminal(opts, node.id, terminal_outcome)
-            {terminal_outcome, retries}
-          end
-
-        :skipped ->
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-          emit(opts, %{
-            type: :stage_completed,
-            node_id: node.id,
-            status: :skipped,
-            duration_ms: duration_ms
-          })
-
-          {outcome, retries}
-      end
-    rescue
-      exception ->
-        if should_retry_exception?(exception) and attempt < max_attempts do
-          delay = retry_delay_ms(node, graph, attempt, opts)
-
-          emit(opts, %{
-            type: :stage_failed,
-            node_id: node.id,
-            error: Exception.message(exception),
-            will_retry: true
-          })
-
-          emit(opts, %{type: :stage_retrying, node_id: node.id, attempt: attempt, delay_ms: delay})
-
-          sleep(opts, delay)
-
-          retries = Map.put(retries, node.id, attempt)
-
-          do_execute_with_retry(
-            handler,
-            node,
-            context,
-            graph,
-            retries,
-            opts,
-            attempt + 1,
-            max_attempts
-          )
-        else
-          outcome = %Outcome{status: :fail, failure_reason: Exception.message(exception)}
-
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-          emit(opts, %{
-            type: :stage_failed,
-            node_id: node.id,
-            error: Exception.message(exception),
-            will_retry: false,
-            duration_ms: duration_ms
-          })
-
-          {outcome, retries}
-        end
-    end
-  end
-
-  defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
-    duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-    emit(opts, %{
-      type: :stage_failed,
-      node_id: node_id,
-      error: reason,
-      will_retry: false,
-      duration_ms: duration_ms
-    })
-  end
-
-  defp emit_stage_terminal(opts, node_id, %Outcome{status: status}) do
-    duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-    emit(opts, %{
-      type: :stage_completed,
-      node_id: node_id,
-      status: status,
-      duration_ms: duration_ms
-    })
-  end
-
-  @doc false
-  def should_retry_exception?(exception) do
-    message =
-      exception
-      |> Exception.message()
-      |> String.downcase()
-
-    cond do
-      String.contains?(message, "timeout") -> true
-      String.contains?(message, "timed out") -> true
-      String.contains?(message, "network") -> true
-      String.contains?(message, "connection") -> true
-      String.contains?(message, "rate limit") -> true
-      String.contains?(message, "429") -> true
-      String.contains?(message, "5xx") -> true
-      String.contains?(message, "server error") -> true
-      String.contains?(message, "401") -> false
-      String.contains?(message, "403") -> false
-      String.contains?(message, "400") -> false
-      String.contains?(message, "validation") -> false
-      true -> false
-    end
-  end
-
-  # --- Fan-in/fan-out helpers ---
-
-  # Returns sibling fan-out edges (unconditional parallel branches) from a node.
-  # Fan-out is ON by default for unconditional edges — multiple outgoing edges
-  # without conditions are treated as parallel branches automatically.
-  # Set fan_out="false" to force single-path selection (decision nodes).
-  defp collect_fan_out_siblings(node, outcome, _context, graph) do
-    fan_out_disabled = Map.get(node.attrs, "fan_out") == "false"
-
-    if fan_out_disabled or outcome.status == :fail do
-      []
-    else
-      edges = Graph.outgoing_edges(graph, node.id)
-      Enum.filter(edges, &(Map.get(&1.attrs, "condition", "") in ["", nil]))
-    end
-  end
-
-  # Check if all predecessor nodes (incoming edges) are in the completed list.
-  defp all_predecessors_complete?(graph, node_id, completed) do
-    graph
-    |> Graph.incoming_edges(node_id)
-    |> Enum.all?(fn edge -> edge.from in completed end)
-  end
-
-  # Find the first ready node from candidates where all predecessors are complete.
-  # Returns {node_id, edge, remaining_candidates} or nil.
-  defp find_next_ready(candidates, graph, completed) do
-    {ready, not_ready} =
-      Enum.split_with(candidates, fn {id, _edge} ->
-        id not in completed and all_predecessors_complete?(graph, id, completed)
-      end)
-
-    case ready do
-      [{next_id, next_edge} | rest] ->
-        {next_id, next_edge, rest ++ not_ready}
-
-      [] ->
-        nil
-    end
-  end
-
-  # Merge new targets into pending, avoiding duplicates by node_id.
-  defp merge_pending(new_targets, existing_pending) do
-    existing_ids = MapSet.new(existing_pending, fn {id, _} -> id end)
-
-    new_unique =
-      Enum.reject(new_targets, fn {id, _} -> MapSet.member?(existing_ids, id) end)
-
-    existing_pending ++ new_unique
-  end
-
-  defp select_next_step(node, outcome, context, graph) do
-    if outcome.status == :fail do
-      select_fail_step(node, outcome, context, graph)
-    else
-      case select_handler_suggested_target(node, outcome, graph) do
-        {:node_id, _target} = routed ->
-          routed
-
-        nil ->
-          case select_next_edge(node, outcome, context, graph) do
-            nil -> nil
-            edge -> {:edge, edge}
-          end
-      end
-    end
-  end
-
-  # Some virtual handlers (for example parallel fan-out) need to jump to an
-  # inferred target that is not a direct outgoing edge from the current node.
-  # Keep this path separate so ordinary edge routing still follows spec section 3.3.
-  defp select_handler_suggested_target(node, %Outcome{suggested_next_ids: ids}, graph) do
-    outgoing_target_ids =
-      graph
-      |> Graph.outgoing_edges(node.id)
-      |> Enum.map(& &1.to)
-      |> MapSet.new()
-
-    ids
-    |> Enum.find(fn target ->
-      valid_target?(graph, target) and not MapSet.member?(outgoing_target_ids, target)
-    end)
-    |> case do
-      nil -> nil
-      target -> {:node_id, target}
-    end
-  end
-
-  # Failure routing order (spec 3.7):
-  # 1) fail edge condition outcome=fail
-  # 2) node retry_target
-  # 3) node fallback_retry_target
-  # 4) terminate
-  defp select_fail_step(node, outcome, context, graph) do
-    edges = Graph.outgoing_edges(graph, node.id)
-
-    fail_edges =
-      Enum.filter(edges, fn edge ->
-        case Map.get(edge.attrs, "condition", "") do
-          cond when is_binary(cond) and cond != "" -> Condition.eval(cond, outcome, context)
-          _ -> false
-        end
-      end)
-
-    cond do
-      fail_edges != [] ->
-        {:edge, best_by_weight_then_lexical(fail_edges)}
-
-      valid_target?(graph, Map.get(node.attrs, "retry_target")) ->
-        {:node_id, Map.get(node.attrs, "retry_target")}
-
-      valid_target?(graph, Map.get(node.attrs, "fallback_retry_target")) ->
-        {:node_id, Map.get(node.attrs, "fallback_retry_target")}
-
-      true ->
-        nil
-    end
-  end
-
-  defp select_next_edge(node, outcome, context, graph) do
-    edges = Graph.outgoing_edges(graph, node.id)
-
-    cond do
-      edges == [] ->
-        nil
-
-      true ->
-        condition_matched = Enum.filter(edges, &edge_condition_matches?(&1, outcome, context))
-        unconditional = Enum.filter(edges, &(Map.get(&1.attrs, "condition", "") in ["", nil]))
-
-        cond do
-          condition_matched != [] ->
-            best_by_weight_then_lexical(condition_matched)
-
-          outcome.preferred_label not in [nil, ""] ->
-            Enum.find(unconditional, fn edge ->
-              normalize_label(Map.get(edge.attrs, "label", "")) ==
-                normalize_label(outcome.preferred_label || "")
-            end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
-
-          outcome.suggested_next_ids != [] ->
-            Enum.find_value(outcome.suggested_next_ids, fn suggested_id ->
-              Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
-            end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
-
-          true ->
-            best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
-        end
-    end
-  end
-
-  defp unconditional_or_all([], edges), do: edges
-  defp unconditional_or_all(unconditional, _edges), do: unconditional
-
-  defp edge_condition_matches?(edge, outcome, context) do
-    condition = Map.get(edge.attrs, "condition", "")
-
-    if condition in [nil, ""] do
-      false
-    else
-      Condition.eval(condition, outcome, context)
-    end
-  end
-
-  defp resolve_goal_gate_retry_target(graph, outcomes) do
-    failed_gate =
-      outcomes
-      |> Enum.find_value(fn {node_id, outcome} ->
-        node = Map.get(graph.nodes, node_id)
-
-        if node != nil and truthy?(Map.get(node.attrs, "goal_gate", false)) and
-             outcome.status not in [:success, :partial_success] do
-          node
-        else
-          nil
-        end
-      end)
-
-    if failed_gate == nil do
-      {:ok, nil}
-    else
-      targets = [
-        Map.get(failed_gate.attrs, "retry_target"),
-        Map.get(failed_gate.attrs, "fallback_retry_target"),
-        Map.get(graph.attrs, "retry_target"),
-        Map.get(graph.attrs, "fallback_retry_target")
-      ]
-
-      case Enum.find(targets, &valid_target?(graph, &1)) do
-        nil -> {:error, :goal_gate_unsatisfied_no_retry_target}
-        target -> {:ok, target}
-      end
-    end
-  end
-
-  defp retry_delay_ms(node, graph, attempt, opts) do
-    profile = retry_profile(node, graph)
-
-    initial_delay =
-      parse_int(Map.get(node.attrs, "retry_initial_delay_ms"), profile.initial_delay_ms)
-
-    factor = parse_float(Map.get(node.attrs, "retry_backoff_factor"), profile.backoff_factor)
-    max_delay = parse_int(Map.get(node.attrs, "retry_max_delay_ms"), profile.max_delay_ms)
-    jitter? = parse_bool(Map.get(node.attrs, "retry_jitter"), profile.jitter)
-
-    delay = trunc(initial_delay * :math.pow(factor, attempt - 1))
-    delay = min(delay, max_delay)
-    maybe_apply_jitter(delay, jitter?, opts)
-  end
-
-  defp maybe_apply_jitter(delay, false, _opts), do: delay
-  defp maybe_apply_jitter(delay, _jitter, _opts) when delay <= 0, do: delay
-
-  defp maybe_apply_jitter(delay, true, opts) do
-    rand_fn = Keyword.get(opts, :rand_fn, &:rand.uniform/0)
-
-    rand =
-      rand_fn.()
-      |> case do
-        v when is_float(v) -> v
-        v when is_integer(v) -> v / 1
-        _ -> 0.5
-      end
-      |> min(1.0)
-      |> max(0.0)
-
-    jitter_factor = 0.5 + rand
-    trunc(delay * jitter_factor)
-  end
-
-  defp best_by_weight_then_lexical(edges) do
-    Enum.sort_by(edges, fn edge -> {-parse_int(Map.get(edge.attrs, "weight", 0), 0), edge.to} end)
-    |> List.first()
-  end
-
   defp maybe_set_preferred_label(context, %Outcome{preferred_label: label})
        when is_binary(label) do
     Context.set(context, "preferred_label", label)
@@ -1089,100 +657,17 @@ defmodule Arbor.Orchestrator.Engine do
     Context.set(context, "internal.fidelity.thread_id", thread_id)
   end
 
-  defp parse_max_attempts(node, graph) do
-    cond do
-      Map.has_key?(node.attrs, "max_retries") ->
-        parse_int(Map.get(node.attrs, "max_retries"), 0) + 1
+  # --- Graph adaptation (self-modifying pipelines) ---
 
-      Map.has_key?(graph.attrs, "default_max_retry") ->
-        parse_int(Map.get(graph.attrs, "default_max_retry"), 0) + 1
-
-      true ->
-        retry_profile(node, graph).max_attempts
-    end
-  end
-
-  defp parse_float(nil, default), do: default
-  defp parse_float(value, _default) when is_float(value), do: value
-  defp parse_float(value, _default) when is_integer(value), do: value / 1
-
-  defp parse_float(value, default) when is_binary(value) do
-    case Float.parse(value) do
-      {parsed, _} -> parsed
-      :error -> default
-    end
-  end
-
-  defp parse_float(_, default), do: default
-
-  defp parse_bool(nil, default), do: default
-  defp parse_bool(value, _default) when is_boolean(value), do: value
-  defp parse_bool("true", _default), do: true
-  defp parse_bool("false", _default), do: false
-  defp parse_bool(1, _default), do: true
-  defp parse_bool(0, _default), do: false
-  defp parse_bool(_, default), do: default
-
-  defp retry_profile(node, graph) do
-    preset_name =
-      Map.get(node.attrs, "retry_policy", Map.get(graph.attrs, "retry_policy", "none"))
-      |> to_string()
-      |> String.downcase()
-
-    case preset_name do
-      "standard" ->
-        %{
-          max_attempts: 5,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "aggressive" ->
-        %{
-          max_attempts: 5,
-          initial_delay_ms: 500,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "linear" ->
-        %{
-          max_attempts: 3,
-          initial_delay_ms: 500,
-          backoff_factor: 1.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "patient" ->
-        %{
-          max_attempts: 3,
-          initial_delay_ms: 2_000,
-          backoff_factor: 3.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "none" ->
-        %{
-          max_attempts: 1,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: false
-        }
+  defp check_graph_adaptation(graph, context) do
+    case Context.get(context, "__adapted_graph__") do
+      %Graph{} = new_graph ->
+        # Clear the adaptation key so it doesn't re-trigger on next iteration
+        context = Context.set(context, "__adapted_graph__", nil)
+        {new_graph, context}
 
       _ ->
-        %{
-          max_attempts: 1,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
+        {graph, context}
     end
   end
 
@@ -1200,51 +685,9 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp terminal?(node) do
-    Map.get(node.attrs, "shape") == "Msquare" or String.downcase(node.id) in ["exit", "end"]
-  end
-
-  # --- Graph adaptation (self-modifying pipelines) ---
-
-  defp check_graph_adaptation(graph, context) do
-    case Context.get(context, "__adapted_graph__") do
-      %Graph{} = new_graph ->
-        # Clear the adaptation key so it doesn't re-trigger on next iteration
-        context = Context.set(context, "__adapted_graph__", nil)
-        {new_graph, context}
-
-      _ ->
-        {graph, context}
-    end
-  end
-
-  defp normalize_label(label) do
-    label
-    |> to_string()
-    |> String.downcase()
-    |> String.trim()
-    |> String.replace(~r/^\[[a-z0-9]\]\s*/i, "")
-    |> String.replace(~r/^[a-z0-9]\)\s*/i, "")
-    |> String.replace(~r/^[a-z0-9]\s*-\s*/i, "")
-  end
-
-  defp truthy?(true), do: true
-  defp truthy?("true"), do: true
-  defp truthy?(1), do: true
-  defp truthy?(_), do: false
-
-  defp valid_target?(_graph, target) when target in [nil, ""], do: false
-  defp valid_target?(graph, target) when is_binary(target), do: Map.has_key?(graph.nodes, target)
-  defp valid_target?(_graph, _target), do: false
-
   defp emit(opts, event) do
     pipeline_id = Keyword.get(opts, :pipeline_id, :all)
     Arbor.Orchestrator.EventEmitter.emit(pipeline_id, event, opts)
-  end
-
-  defp sleep(opts, delay_ms) do
-    sleep_fn = Keyword.get(opts, :sleep_fn, fn ms -> Process.sleep(ms) end)
-    sleep_fn.(delay_ms)
   end
 
   defp write_manifest(graph, logs_root) do

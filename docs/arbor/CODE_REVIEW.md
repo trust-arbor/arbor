@@ -116,20 +116,27 @@
 ### R2. `arbor_memory/context_window.ex` — 1,939 lines
 - [ ] Split into `ContextWindowLegacy` and `ContextWindowMultiLayer` with router
 
-### R3. `arbor_consensus/coordinator.ex` — 1,923 lines
-- [ ] Split by concern: coordination, voting, lifecycle
+### R3. `arbor_consensus/coordinator.ex` — 1,923 lines → 1,159 lines
+- [x] Extract `Coordinator.Voting` (~587 lines) — council spawning, evaluation processing, decision rendering, execution, agent evaluation collection
+- [x] Extract `Coordinator.TopicRouting` (~332 lines) — topic matching/routing, council config resolution, organic topic creation
 
-### R4. `arbor_memory/knowledge_graph.ex` — 1,814 lines
-- [ ] Split into `GraphStructure`, `DecayEngine`, `GraphSearch`
+### R4. `arbor_memory/knowledge_graph.ex` — 1,814 lines → 1,150 lines
+- [x] Extract `KnowledgeGraph.DecayEngine` (~201 lines) — decay application, time-based decay, cleanup of decayed nodes
+- [x] Extract `KnowledgeGraph.GraphSearch` (~590 lines) — BFS/DFS traversal, path finding, related nodes, subgraph extraction, pattern matching, clustering
 
 ### R5. `arbor_memory/memory.ex` — 1,681 lines (150+ functions)
 - [ ] Create sub-facades: `Memory.IndexOps`, `Memory.GraphOps`
 
-### R6. `arbor_memory/signals.ex` — 1,382 lines
-- [ ] Group by signal domain
+### R6. `arbor_memory/signals.ex` — 1,382 lines → 748 lines
+- [x] Extract `Signals.Reflection` (~125 lines) — reflection-related signal emission
+- [x] Extract `Signals.Proposals` (~140 lines) — proposal/consensus signal emission
+- [x] Extract `Signals.Identity` (~154 lines) — identity/consolidation signal emission
+- [x] Extract `Signals.WorkingMemory` (~98 lines) — working memory signal emission
+- [x] Extract `Signals.Lifecycle` (~232 lines) — lifecycle/session signal emission
 
-### R7. `arbor_orchestrator/engine.ex` — 1,311 lines
-- [ ] Split into `EngineValidator`, `EngineExecutor`, `Engine`
+### R7. `arbor_orchestrator/engine.ex` — 1,290 lines → 733 lines
+- [x] Extract `Engine.Executor` (~362 lines) — step execution, action handlers, error recovery, retry logic
+- [x] Extract `Engine.Router` (~252 lines) — step routing, condition evaluation, transition logic
 
 ### R8. `arbor_memory/identity_consolidator.ex` — 1,272 lines → 769 lines
 - [x] Extract `IdentityConsolidator.InsightIntegration` (~233 lines) — integrate_insight/2, personality/capability/value insight integration, contradicts?/2, trait/capability/value extraction

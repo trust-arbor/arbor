@@ -8,19 +8,24 @@ defmodule Arbor.Consensus.Coordinator do
 
   ## Lifecycle
 
-      submit → validate → authorize → spawn council → collect evaluations
-           → render decision → (optional) execute → record events
+      submit -> validate -> authorize -> spawn council -> collect evaluations
+           -> render decision -> (optional) execute -> record events
 
   ## State
 
   Tracks active proposals, decisions, council tasks, and duplicate
   fingerprints for deduplication.
+
+  ## Sub-modules
+
+  * `Coordinator.Voting` - Evaluation processing, decision rendering, council spawning
+  * `Coordinator.TopicRouting` - Topic matching, routing, organic topic creation
   """
 
   use GenServer
 
-  alias Arbor.Consensus.{Config, Council, EvaluatorAgent, EventEmitter, EventStore, StateRecovery}
-  alias Arbor.Consensus.{TopicMatcher, TopicRegistry, TopicRule}
+  alias Arbor.Consensus.{Config, EventEmitter, StateRecovery}
+  alias Arbor.Consensus.Coordinator.{TopicRouting, Voting}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
 
@@ -290,7 +295,7 @@ defmodule Arbor.Consensus.Coordinator do
   @impl true
   def handle_call({:submit, proposal_or_attrs, opts}, _from, state) do
     with {:ok, proposal} <- resolve_proposal(proposal_or_attrs),
-         {:ok, proposal} <- maybe_route_via_topic_matcher(proposal),
+         {:ok, proposal} <- TopicRouting.maybe_route_via_topic_matcher(proposal),
          :ok <- check_capacity(state),
          :ok <- check_duplicate_unless_advisory(state, proposal),
          :ok <- check_invariants(proposal),
@@ -301,7 +306,7 @@ defmodule Arbor.Consensus.Coordinator do
       fingerprint = compute_fingerprint(proposal)
 
       # Phase 5: Track routing stats for organic topic creation
-      state = track_routing_stats(state, proposal)
+      state = TopicRouting.track_routing_stats(state, proposal)
 
       state = %{
         state
@@ -324,7 +329,7 @@ defmodule Arbor.Consensus.Coordinator do
       })
 
       # Get council configuration from TopicRegistry
-      {resolved_evaluators, resolved_quorum} = resolve_council_config(proposal, state.config)
+      {resolved_evaluators, resolved_quorum} = TopicRouting.resolve_council_config(proposal, state.config)
 
       # Allow override via opts (for testing), otherwise use resolved evaluators
       # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
@@ -342,7 +347,7 @@ defmodule Arbor.Consensus.Coordinator do
         end
 
       # Extract perspectives from evaluators
-      perspectives = resolve_perspectives_from_evaluators(evaluators)
+      perspectives = Voting.resolve_perspectives_from_evaluators(evaluators)
 
       # Recalculate quorum based on actual perspectives available
       # This prevents mismatches where resolved quorum exceeds available perspectives
@@ -364,7 +369,7 @@ defmodule Arbor.Consensus.Coordinator do
         quorum
       )
 
-      state = spawn_council(state, proposal, evaluators, quorum)
+      state = Voting.spawn_council(state, proposal, evaluators, quorum)
 
       {:reply, {:ok, proposal.id}, state}
     else
@@ -487,7 +492,7 @@ defmodule Arbor.Consensus.Coordinator do
       })
 
       # Execute if configured
-      state = maybe_execute(state, proposal, nil)
+      state = Voting.maybe_execute(state, proposal, nil)
 
       {:reply, :ok, state}
     else
@@ -590,8 +595,8 @@ defmodule Arbor.Consensus.Coordinator do
     case result do
       {:ok, evaluations} ->
         # Recalculate quorum from topic for this proposal
-        quorum = get_proposal_quorum(state, proposal_id)
-        state = process_evaluations(state, proposal_id, evaluations, quorum)
+        quorum = TopicRouting.get_proposal_quorum(state, proposal_id)
+        state = Voting.process_evaluations(state, proposal_id, evaluations, quorum)
         {:noreply, state}
 
       {:error, reason} ->
@@ -617,7 +622,7 @@ defmodule Arbor.Consensus.Coordinator do
   # Handle evaluation completion from persistent agents
   @impl true
   def handle_info({:evaluation_complete, proposal_id, evaluation}, state) do
-    state = collect_agent_evaluation(state, proposal_id, evaluation)
+    state = Voting.collect_agent_evaluation(state, proposal_id, evaluation)
     {:noreply, state}
   end
 
@@ -629,7 +634,7 @@ defmodule Arbor.Consensus.Coordinator do
     )
 
     # Remove evaluator from pending list (treat as abstention)
-    state = remove_pending_evaluator(state, proposal_id, evaluator_name)
+    state = Voting.remove_pending_evaluator(state, proposal_id, evaluator_name)
     {:noreply, state}
   end
 
@@ -642,7 +647,7 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   # ============================================================================
-  # Private Functions
+  # Private Functions - Validation & Proposal Management
   # ============================================================================
 
   defp resolve_proposal(%Proposal{} = proposal), do: {:ok, proposal}
@@ -683,8 +688,6 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   # M5: Check force_approve/force_reject authorization via full authorize/4 pipeline.
-  # Uses authorize/4 (identity verification, constraints, reflexes, escalation)
-  # instead of the weaker can?/3 (capability-only check).
   defp check_force_authorization(actor_id) do
     case Arbor.Security.authorize(actor_id, "arbor://consensus/admin", :force) do
       {:ok, :authorized} ->
@@ -711,7 +714,6 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp compute_fingerprint(proposal) do
-    # Use topic (was change_type) and context fields for fingerprinting
     data =
       :erlang.term_to_binary({
         proposal.topic,
@@ -723,375 +725,14 @@ defmodule Arbor.Consensus.Coordinator do
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
   end
 
-  # Try agent delivery first, fall back to direct council spawning
-  # evaluators is a list of evaluator modules, each declaring its perspectives via perspectives/0
-  defp spawn_council(state, proposal, evaluators, quorum) do
-    perspectives = resolve_perspectives_from_evaluators(evaluators)
+  # Advisory mode skips duplicate check
+  defp check_duplicate_unless_advisory(_state, %{mode: :advisory}), do: :ok
+  defp check_duplicate_unless_advisory(state, proposal), do: check_duplicate(state, proposal)
 
-    case resolve_evaluator_agents(perspectives) do
-      {:ok, agent_mapping} when map_size(agent_mapping) > 0 ->
-        deliver_to_agents(state, proposal, agent_mapping, evaluators, quorum)
+  # Advisory mode skips agent quota check
+  defp check_agent_quota_unless_advisory(_state, %{mode: :advisory}), do: :ok
+  defp check_agent_quota_unless_advisory(state, proposal), do: check_agent_quota(state, proposal)
 
-      _ ->
-        # Direct path: spawn temporary council tasks
-        spawn_council_direct(state, proposal, evaluators, quorum)
-    end
-  end
-
-  # Direct council spawning: temporary tasks for each perspective
-  # Council.evaluate accepts a list of evaluators and builds the perspective->evaluator map
-  defp spawn_council_direct(state, proposal, evaluators, quorum) do
-    config = state.config
-
-    task =
-      Task.async(fn ->
-        result =
-          Council.evaluate(proposal, evaluators,
-            timeout: config.evaluation_timeout_ms,
-            quorum: quorum
-          )
-
-        {:council_result, proposal.id, result}
-      end)
-
-    %{state | active_councils: Map.put(state.active_councils, proposal.id, task)}
-  end
-
-  # Deliver proposal to persistent evaluator agents
-  defp deliver_to_agents(state, proposal, agent_mapping, evaluators, quorum) do
-    config = state.config
-    deadline = DateTime.add(DateTime.utc_now(), config.evaluation_timeout_ms, :millisecond)
-
-    # Determine priority based on topic (governance gets high priority)
-    priority = if proposal.topic == :topic_governance, do: :high, else: :normal
-
-    # Deliver to each agent's mailbox
-    delivered =
-      Enum.reduce_while(agent_mapping, [], fn {evaluator_name, {pid, perspectives}}, acc ->
-        envelope = %{
-          proposal: proposal,
-          perspectives: perspectives,
-          reply_to: self(),
-          deadline: deadline,
-          priority: priority
-        }
-
-        case EvaluatorAgent.deliver(pid, envelope, priority) do
-          :ok ->
-            {:cont, [evaluator_name | acc]}
-
-          {:error, :mailbox_full} ->
-            Logger.warning(
-              "EvaluatorAgent #{evaluator_name} mailbox full for proposal #{proposal.id}"
-            )
-
-            # Continue with other agents
-            {:cont, acc}
-        end
-      end)
-
-    if delivered == [] do
-      # No agents accepted the delivery, fall back to direct council
-      Logger.warning("No agents accepted proposal #{proposal.id}, falling back to direct council")
-
-      spawn_council_direct(state, proposal, evaluators, quorum)
-    else
-      # Track pending evaluations
-      pending_entry = %{
-        quorum: quorum,
-        mode: proposal.mode,
-        collected: [],
-        pending_evaluators: delivered,
-        started_at: DateTime.utc_now()
-      }
-
-      %{
-        state
-        | pending_evaluations: Map.put(state.pending_evaluations, proposal.id, pending_entry)
-      }
-    end
-  end
-
-  # Resolve which evaluator agents are available for the given perspectives
-  defp resolve_evaluator_agents(perspectives) do
-    alias Arbor.Consensus.EvaluatorAgent.Supervisor, as: AgentSupervisor
-
-    try do
-      agents = AgentSupervisor.list_agents()
-
-      # Build a mapping: evaluator_name => {pid, [perspectives it can handle]}
-      agent_mapping =
-        agents
-        |> Enum.reduce(%{}, fn {name, pid, status}, acc ->
-          agent_perspectives = status.perspectives
-          # Find which requested perspectives this agent can handle
-          matching = Enum.filter(perspectives, &(&1 in agent_perspectives))
-
-          if matching != [] do
-            Map.put(acc, name, {pid, matching})
-          else
-            acc
-          end
-        end)
-
-      {:ok, agent_mapping}
-    rescue
-      _ -> {:error, :no_agents}
-    end
-  end
-
-  # Collect an evaluation from a persistent agent
-  defp collect_agent_evaluation(state, proposal_id, evaluation) do
-    case Map.get(state.pending_evaluations, proposal_id) do
-      nil ->
-        # Not tracking this proposal via agents (might be direct path)
-        Logger.debug("Received agent evaluation for untracked proposal #{proposal_id}")
-        state
-
-      pending ->
-        # Add to collected evaluations
-        new_collected = [evaluation | pending.collected]
-        new_pending = %{pending | collected: new_collected}
-
-        state = %{
-          state
-          | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)
-        }
-
-        # Emit evaluation event
-        EventEmitter.evaluation_completed(evaluation)
-
-        record_event(state, :evaluation_submitted, %{
-          proposal_id: proposal_id,
-          evaluator_id: evaluation.evaluator_id,
-          vote: evaluation.vote,
-          perspective: evaluation.perspective,
-          confidence: evaluation.confidence
-        })
-
-        # Check if we should finalize (quorum reached or all evaluators done)
-        check_agent_evaluation_completion(state, proposal_id, new_pending)
-    end
-  end
-
-  # Remove a failed evaluator from pending list
-  defp remove_pending_evaluator(state, proposal_id, evaluator_name) do
-    case Map.get(state.pending_evaluations, proposal_id) do
-      nil ->
-        state
-
-      pending ->
-        new_pending_evaluators = List.delete(pending.pending_evaluators, evaluator_name)
-        new_pending = %{pending | pending_evaluators: new_pending_evaluators}
-
-        state = %{
-          state
-          | pending_evaluations: Map.put(state.pending_evaluations, proposal_id, new_pending)
-        }
-
-        # Check if we should finalize (all remaining evaluators done)
-        check_agent_evaluation_completion(state, proposal_id, new_pending)
-    end
-  end
-
-  # Check if agent evaluations are complete
-  defp check_agent_evaluation_completion(state, proposal_id, pending) do
-    quorum = pending.quorum
-
-    # For advisory mode (quorum is nil), wait for all evaluators
-    # For decision mode, we can terminate early once quorum is reached
-    should_finalize =
-      cond do
-        # All evaluators have responded (or failed)
-        pending.pending_evaluators == [] ->
-          true
-
-        # Decision mode: check if quorum is reached
-        quorum != nil ->
-          approve_count = Enum.count(pending.collected, &(&1.vote == :approve))
-          reject_count = Enum.count(pending.collected, &(&1.vote == :reject))
-          remaining = length(pending.pending_evaluators)
-
-          # Quorum reached for approval or rejection
-          # Can't reach quorum even with all remaining approvals
-          approve_count >= quorum or
-            reject_count >= quorum or
-            (approve_count + remaining < quorum and reject_count + remaining < quorum)
-
-        # Advisory mode: wait for all
-        true ->
-          false
-      end
-
-    if should_finalize do
-      finalize_agent_evaluations(state, proposal_id, pending)
-    else
-      state
-    end
-  end
-
-  # Finalize agent evaluations and render decision
-  defp finalize_agent_evaluations(state, proposal_id, pending) do
-    evaluations = Enum.reverse(pending.collected)
-
-    record_event(state, :council_complete, %{
-      proposal_id: proposal_id,
-      data: %{evaluation_count: length(evaluations)}
-    })
-
-    # Clean up pending tracking
-    state = %{state | pending_evaluations: Map.delete(state.pending_evaluations, proposal_id)}
-
-    # Process evaluations with topic-specific quorum
-    process_evaluations(state, proposal_id, evaluations, pending.quorum)
-  end
-
-  defp process_evaluations(state, proposal_id, evaluations, quorum) do
-    case Map.get(state.proposals, proposal_id) do
-      nil ->
-        Logger.warning("Received evaluations for unknown proposal #{proposal_id}")
-        state
-
-      proposal ->
-        record_evaluation_events(state, proposal_id, evaluations)
-        render_and_apply_decision(state, proposal_id, proposal, evaluations, quorum)
-    end
-  end
-
-  defp record_evaluation_events(state, proposal_id, evaluations) do
-    Enum.each(evaluations, fn eval ->
-      # Emit to durable event log
-      EventEmitter.evaluation_completed(eval)
-
-      # Record to in-memory event store
-      record_event(state, :evaluation_submitted, %{
-        proposal_id: proposal_id,
-        evaluator_id: eval.evaluator_id,
-        vote: eval.vote,
-        perspective: eval.perspective,
-        confidence: eval.confidence
-      })
-    end)
-
-    record_event(state, :council_complete, %{
-      proposal_id: proposal_id,
-      data: %{evaluation_count: length(evaluations)}
-    })
-  end
-
-  defp render_and_apply_decision(state, proposal_id, proposal, evaluations, quorum) do
-    opts = if quorum, do: [quorum: quorum], else: []
-
-    case CouncilDecision.from_evaluations(proposal, evaluations, opts) do
-      {:ok, decision} ->
-        apply_decision(state, proposal_id, proposal, decision)
-
-      {:error, reason} ->
-        Logger.error("Failed to render decision for #{proposal_id}: #{inspect(reason)}")
-        update_proposal_status(state, proposal_id, :deadlock)
-    end
-  end
-
-  defp apply_decision(state, proposal_id, proposal, decision) do
-    proposal = Proposal.update_status(proposal, decision.decision)
-
-    state = %{
-      state
-      | proposals: Map.put(state.proposals, proposal_id, proposal),
-        decisions: Map.put(state.decisions, proposal_id, decision),
-        proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
-    }
-
-    # Emit to durable event log - differentiate between advisory and decision mode
-    if proposal.mode == :advisory do
-      EventEmitter.advice_rendered(decision, proposal)
-    else
-      EventEmitter.decision_rendered(decision)
-    end
-
-    # Record to in-memory event store
-    event_type = if proposal.mode == :advisory, do: :advice_rendered, else: :decision_reached
-
-    record_event(state, event_type, %{
-      proposal_id: proposal_id,
-      decision_id: decision.id,
-      decision: decision.decision,
-      approve_count: decision.approve_count,
-      reject_count: decision.reject_count,
-      abstain_count: decision.abstain_count,
-      data: %{
-        mode: proposal.mode,
-        quorum_met: decision.quorum_met,
-        average_confidence: decision.average_confidence
-      }
-    })
-
-    # Notify any waiters (Phase 2: Tier 1 notification)
-    state = notify_waiters(state, proposal_id, decision)
-
-    maybe_execute(state, proposal, decision)
-  end
-
-  defp maybe_execute(state, %{status: :approved} = proposal, decision) do
-    if state.config.auto_execute_approved && state.executor do
-      case maybe_authorize_execution(state.authorizer, proposal, decision) do
-        :ok ->
-          execute_proposal(state, proposal, decision)
-
-        {:error, reason} ->
-          Logger.warning("Execution authorization denied for #{proposal.id}: #{inspect(reason)}")
-          state
-      end
-    else
-      state
-    end
-  end
-
-  defp maybe_execute(state, _proposal, _decision), do: state
-
-  defp maybe_authorize_execution(nil, _proposal, _decision), do: :ok
-
-  defp maybe_authorize_execution(_authorizer, _proposal, nil), do: :ok
-
-  defp maybe_authorize_execution(authorizer, proposal, decision) do
-    authorizer.authorize_execution(proposal, decision)
-  end
-
-  defp execute_proposal(state, proposal, decision) do
-    record_event(state, :execution_started, %{
-      proposal_id: proposal.id
-    })
-
-    case state.executor.execute(proposal, decision) do
-      {:ok, result} ->
-        # Emit to durable event log
-        EventEmitter.proposal_executed(proposal.id, :success, result)
-
-        record_event(state, :execution_succeeded, %{
-          proposal_id: proposal.id
-        })
-
-        state
-
-      {:error, reason} ->
-        Logger.error("Execution failed for #{proposal.id}: #{inspect(reason)}")
-
-        # Emit to durable event log
-        EventEmitter.proposal_executed(proposal.id, :failed, inspect(reason))
-
-        # Emit signal for real-time observability
-        emit_coordinator_error(proposal.id, reason)
-
-        record_event(state, :execution_failed, %{
-          proposal_id: proposal.id,
-          data: %{error: inspect(reason)}
-        })
-
-        state
-    end
-  end
-
-  @spec update_proposal_status(t(), String.t(), Proposal.status()) :: t()
   defp update_proposal_status(state, proposal_id, status) do
     case Map.get(state.proposals, proposal_id) do
       nil ->
@@ -1126,43 +767,11 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  defp record_event(state, event_type, attrs) do
-    event_attrs =
-      Map.merge(attrs, %{event_type: event_type})
-
-    case ConsensusEvent.new(event_attrs) do
-      {:ok, event} ->
-        store_event(event)
-        maybe_forward_to_sink(state.event_sink, event)
-
-      {:error, reason} ->
-        Logger.warning("Failed to create consensus event: #{inspect(reason)}")
-    end
-  end
-
-  defp store_event(event) do
-    # Conditionally store based on persistence strategy
-    if Config.event_store_enabled?() do
-      EventStore.append(event)
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp maybe_forward_to_sink(nil, _event), do: :ok
-
-  defp maybe_forward_to_sink(event_sink, event) do
-    Task.start(fn ->
-      event_sink.record(event)
-    end)
-  end
-
-  # ===========================================================================
+  # ============================================================================
   # Quota Enforcement (Phase 7)
-  # ===========================================================================
+  # ============================================================================
 
   defp check_agent_quota(state, proposal) do
-    # Use per-coordinator config if set, otherwise fall back to Application env
     quota_enabled =
       case state.config.proposal_quota_enabled do
         nil -> Config.proposal_quota_enabled?()
@@ -1211,182 +820,9 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # ===========================================================================
-  # Phase 3: Topic-Driven Routing
-  # ===========================================================================
-
-  # Route proposals via TopicMatcher when topic is :general or not explicitly set.
-  # If the proposal already has a specific topic AND TopicRegistry has a rule for it,
-  # use that topic directly. Otherwise, run TopicMatcher to find best fit.
-  defp maybe_route_via_topic_matcher(proposal) do
-    # If topic is explicitly set (not :general) and exists in registry, use it
-    if proposal.topic != :general and topic_exists_in_registry?(proposal.topic) do
-      {:ok, proposal}
-    else
-      # Run TopicMatcher to find best-fit topic
-      {matched_topic, confidence} = match_topic(proposal)
-
-      # Update proposal with matched topic and store routing metadata
-      updated_proposal = %{
-        proposal
-        | topic: matched_topic,
-          metadata:
-            Map.merge(proposal.metadata, %{
-              routing_confidence: confidence,
-              original_topic: proposal.topic,
-              routed_by: :topic_matcher
-            })
-      }
-
-      {:ok, updated_proposal}
-    end
-  end
-
-  # Check if topic exists in TopicRegistry
-  defp topic_exists_in_registry?(topic) do
-    case TopicRegistry.get(topic) do
-      {:ok, _rule} -> true
-      {:error, :not_found} -> false
-    end
-  rescue
-    # TopicRegistry may not be running
-    _ -> false
-  end
-
-  # Match proposal to topic via TopicMatcher
-  defp match_topic(proposal) do
-    topics = get_all_topic_rules()
-
-    if topics == [] do
-      # No registry available, keep existing topic
-      {proposal.topic, 0.0}
-    else
-      TopicMatcher.match(
-        proposal.description,
-        proposal.context,
-        topics
-      )
-    end
-  end
-
-  # Get all topic rules from registry
-  defp get_all_topic_rules do
-    TopicRegistry.list()
-  rescue
-    # TopicRegistry may not be running
-    _ -> []
-  end
-
-  # Resolve council configuration from TopicRegistry.
-  # Advisory mode proposals get quorum of nil (collect all perspectives).
-  # Returns {evaluators, quorum} where evaluators is a list of modules.
-  # Council.evaluate will extract perspectives from each evaluator's perspectives/0 callback.
-  defp resolve_council_config(proposal, _config) do
-    topic = proposal.topic
-
-    case TopicRegistry.get(topic) do
-      {:ok, rule} ->
-        resolve_from_topic_rule(proposal, rule)
-
-      {:error, :not_found} ->
-        # Topic not in registry — use default evaluator (RuleBased)
-        Logger.warning("Topic #{inspect(topic)} not found in TopicRegistry, using defaults")
-        default_evaluators_and_quorum(proposal)
-    end
-  rescue
-    # TopicRegistry not running — fall back to defaults
-    _ ->
-      default_evaluators_and_quorum(proposal)
-  end
-
-  defp default_evaluators_and_quorum(proposal) do
-    # Use RuleBased as the default evaluator (preserves existing behavior)
-    evaluators = [Arbor.Consensus.Evaluator.RuleBased]
-
-    quorum =
-      if proposal.mode == :advisory,
-        do: nil,
-        else: Arbor.Contracts.Consensus.Protocol.standard_quorum()
-
-    {evaluators, quorum}
-  end
-
-  # Resolve council config from TopicRule
-  defp resolve_from_topic_rule(proposal, rule) do
-    # Get evaluators from the rule, or fall back to RuleBased
-    evaluators =
-      case rule.required_evaluators do
-        [] ->
-          # No evaluators specified in rule, use default
-          [Arbor.Consensus.Evaluator.RuleBased]
-
-        required ->
-          required
-      end
-
-    # Calculate quorum based on the total perspectives from all evaluators
-    perspectives = resolve_perspectives_from_evaluators(evaluators)
-
-    quorum =
-      if proposal.mode == :advisory do
-        nil
-      else
-        council_size = length(perspectives)
-        TopicRule.quorum_to_number(rule.min_quorum, council_size)
-      end
-
-    {evaluators, quorum}
-  end
-
-  # Get quorum for a proposal by recalculating from its topic
-  defp get_proposal_quorum(state, proposal_id) do
-    case Map.get(state.proposals, proposal_id) do
-      nil ->
-        nil
-
-      proposal ->
-        {_evaluators, quorum} = resolve_council_config(proposal, state.config)
-        quorum
-    end
-  end
-
-  # Resolve perspectives from evaluator modules.
-  # Calls evaluator.perspectives() for each module and flattens the results.
-  # Falls back to Protocol defaults if no valid perspectives are returned.
-  defp resolve_perspectives_from_evaluators(evaluators) do
-    perspectives =
-      evaluators
-      |> Enum.flat_map(fn evaluator ->
-        try do
-          if function_exported?(evaluator, :perspectives, 0) do
-            evaluator.perspectives()
-          else
-            []
-          end
-        rescue
-          _ -> []
-        end
-      end)
-      |> Enum.uniq()
-
-    if perspectives == [] do
-      Arbor.Contracts.Consensus.Protocol.perspectives() -- [:human]
-    else
-      perspectives
-    end
-  end
-
-  # Advisory mode skips duplicate check
-  defp check_duplicate_unless_advisory(_state, %{mode: :advisory}), do: :ok
-  defp check_duplicate_unless_advisory(state, proposal), do: check_duplicate(state, proposal)
-
-  # Advisory mode skips agent quota check
-  defp check_agent_quota_unless_advisory(_state, %{mode: :advisory}), do: :ok
-  defp check_agent_quota_unless_advisory(state, proposal), do: check_agent_quota(state, proposal)
-
-  # ===========================================================================
+  # ============================================================================
   # Waiter Support (Phase 2: Tier 1 Notification)
-  # ===========================================================================
+  # ============================================================================
 
   defp register_waiter(state, proposal_id, pid) do
     ref = Process.monitor(pid)
@@ -1419,25 +855,7 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  defp notify_waiters(state, proposal_id, decision) do
-    case Map.get(state.waiters, proposal_id) do
-      nil ->
-        state
-
-      waiters ->
-        # Send result to all waiters and demonitor them
-        Enum.each(waiters, fn {pid, ref} ->
-          Process.demonitor(ref, [:flush])
-          send(pid, {:consensus_result, proposal_id, decision})
-        end)
-
-        # Remove all waiters for this proposal
-        %{state | waiters: Map.delete(state.waiters, proposal_id)}
-    end
-  end
-
   defp cleanup_waiter_by_ref(state, ref, pid) do
-    # Find which proposal this waiter was for and remove them
     case find_waiter_proposal(state.waiters, ref, pid) do
       nil ->
         state
@@ -1448,7 +866,6 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
-  # Find which proposal a waiter belongs to by ref and pid
   defp find_waiter_proposal(all_waiters, ref, pid) do
     Enum.find_value(all_waiters, fn {proposal_id, waiters} ->
       if waiter_in_list?(waiters, ref, pid), do: {proposal_id, waiters}
@@ -1459,7 +876,6 @@ defmodule Arbor.Consensus.Coordinator do
     Enum.any?(waiters, fn {p, r} -> p == pid and r == ref end)
   end
 
-  # Update waiters map for a proposal, removing entry if empty
   defp update_waiters_for_proposal(state, proposal_id, []) do
     %{state | waiters: Map.delete(state.waiters, proposal_id)}
   end
@@ -1468,9 +884,43 @@ defmodule Arbor.Consensus.Coordinator do
     %{state | waiters: Map.put(state.waiters, proposal_id, new_waiters)}
   end
 
-  # ===========================================================================
+  # ============================================================================
+  # Event Recording & Signals
+  # ============================================================================
+
+  defp record_event(state, event_type, attrs) do
+    event_attrs =
+      Map.merge(attrs, %{event_type: event_type})
+
+    case ConsensusEvent.new(event_attrs) do
+      {:ok, event} ->
+        store_event(event)
+        maybe_forward_to_sink(state.event_sink, event)
+
+      {:error, reason} ->
+        Logger.warning("Failed to create consensus event: #{inspect(reason)}")
+    end
+  end
+
+  defp store_event(event) do
+    if Config.event_store_enabled?() do
+      Arbor.Consensus.EventStore.append(event)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp maybe_forward_to_sink(nil, _event), do: :ok
+
+  defp maybe_forward_to_sink(event_sink, event) do
+    Task.start(fn ->
+      event_sink.record(event)
+    end)
+  end
+
+  # ============================================================================
   # Event Sourcing & Recovery
-  # ===========================================================================
+  # ============================================================================
 
   defp generate_coordinator_id do
     "coord_#{System.unique_integer([:positive, :monotonic])}_#{System.os_time(:millisecond)}"
@@ -1599,7 +1049,6 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   defp handle_single_interrupted(state, info, :deadlock) do
-    # Mark as deadlocked - safest option
     Logger.info("Coordinator: marking proposal #{info.proposal_id} as deadlocked (interrupted)")
 
     state = update_proposal_status(state, info.proposal_id, :deadlock)
@@ -1610,14 +1059,12 @@ defmodule Arbor.Consensus.Coordinator do
       "Evaluation interrupted by crash. Missing perspectives: #{inspect(info.missing_perspectives)}"
     )
 
-    # Emit signal for real-time observability
     emit_proposal_timeout(info.proposal_id, :interrupted)
 
     state
   end
 
   defp handle_single_interrupted(state, info, :resume) do
-    # Re-spawn only missing evaluations
     case Map.get(state.proposals, info.proposal_id) do
       nil ->
         state
@@ -1628,67 +1075,25 @@ defmodule Arbor.Consensus.Coordinator do
             "#{length(info.missing_perspectives)} perspectives remaining"
         )
 
-        # Spawn council for only the missing perspectives
-        spawn_council_for_perspectives(state, proposal, info.missing_perspectives)
+        Voting.spawn_council_for_perspectives(state, proposal, info.missing_perspectives)
     end
   end
 
   defp handle_single_interrupted(state, info, :restart) do
-    # Re-spawn entire council
     case Map.get(state.proposals, info.proposal_id) do
       nil ->
         state
 
       proposal ->
         Logger.info("Coordinator: restarting full evaluation for #{info.proposal_id}")
-        {evaluators, quorum} = resolve_council_config(proposal, state.config)
-        spawn_council(state, proposal, evaluators, quorum)
+        {evaluators, quorum} = TopicRouting.resolve_council_config(proposal, state.config)
+        Voting.spawn_council(state, proposal, evaluators, quorum)
     end
   end
 
-  defp spawn_council_for_perspectives(state, proposal, missing_perspectives) do
-    # Similar to spawn_council but with specific perspectives (used for recovery)
-    # Get evaluators from TopicRegistry and filter to only the missing perspectives
-    config = state.config
-
-    # Resolve evaluators and quorum from TopicRegistry
-    {evaluators, _full_quorum} = resolve_council_config(proposal, state.config)
-
-    # Build evaluator map and filter to only missing perspectives
-    evaluator_map = Council.build_evaluator_map(evaluators)
-
-    filtered_evaluator_map =
-      evaluator_map
-      |> Enum.filter(fn {perspective, _} -> perspective in missing_perspectives end)
-      |> Map.new()
-
-    # Calculate quorum for the missing perspectives
-    quorum =
-      if proposal.mode == :advisory do
-        nil
-      else
-        case TopicRegistry.get(proposal.topic) do
-          {:ok, rule} ->
-            TopicRule.quorum_to_number(rule.min_quorum, length(missing_perspectives))
-
-          _ ->
-            Arbor.Contracts.Consensus.Protocol.standard_quorum()
-        end
-      end
-
-    task =
-      Task.async(fn ->
-        result =
-          Council.evaluate(proposal, filtered_evaluator_map,
-            timeout: config.evaluation_timeout_ms,
-            quorum: quorum
-          )
-
-        {:council_result, proposal.id, result}
-      end)
-
-    %{state | active_councils: Map.put(state.active_councils, proposal.id, task)}
-  end
+  # ============================================================================
+  # Signal Emission Helpers
+  # ============================================================================
 
   defp emit_coordinator_started(state) do
     config_map = %{
@@ -1724,8 +1129,6 @@ defmodule Arbor.Consensus.Coordinator do
     EventEmitter.recovery_completed(state.coordinator_id, stats)
   end
 
-  # Signal emission helpers for real-time observability
-
   defp emit_coordinator_error(proposal_id, reason) do
     Signals.emit(:consensus, :coordinator_error, %{
       proposal_id: proposal_id,
@@ -1753,171 +1156,4 @@ defmodule Arbor.Consensus.Coordinator do
   # Helper to conditionally add to map
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  # ===========================================================================
-  # Phase 5: Organic Topic Creation
-  # ===========================================================================
-
-  @organic_topic_threshold 5
-  @organic_check_interval 10
-  @max_tracked_patterns 100
-  @stats_max_age_days 30
-  @max_descriptions_per_pattern 10
-
-  # Track when proposals route to :general
-  defp track_routing_stats(state, proposal) do
-    if proposal.topic == :general do
-      keywords = extract_keywords(proposal.description)
-      now = DateTime.utc_now()
-
-      routing_stats =
-        Enum.reduce(keywords, state.routing_stats, fn keyword, stats ->
-          Map.update(
-            stats,
-            keyword,
-            %{count: 1, last_seen: now, descriptions: [proposal.description]},
-            &update_routing_stat_entry(&1, now, proposal.description)
-          )
-        end)
-
-      # Prune old and excess entries
-      routing_stats = prune_routing_stats(routing_stats, now)
-
-      new_count = state.general_route_count + 1
-
-      state = %{state | routing_stats: routing_stats, general_route_count: new_count}
-
-      # Check for organic topic patterns periodically
-      if rem(new_count, @organic_check_interval) == 0 do
-        check_organic_topics(state)
-      else
-        state
-      end
-    else
-      state
-    end
-  end
-
-  defp update_routing_stat_entry(entry, now, description) do
-    descriptions =
-      Enum.take(
-        [description | entry.descriptions],
-        @max_descriptions_per_pattern
-      )
-
-    %{entry | count: entry.count + 1, last_seen: now, descriptions: descriptions}
-  end
-
-  # Extract significant keywords from a description
-  defp extract_keywords(description) do
-    stop_words = ~w(the a an is are was were be been being have has had do does did
-                     will would shall should may might can could of in to for on with
-                     at by from this that it and or but not as if then than)
-
-    description
-    |> String.downcase()
-    |> String.replace(~r/[^\w\s]/, " ")
-    |> String.split(~r/\s+/, trim: true)
-    |> Enum.reject(&(&1 in stop_words or String.length(&1) < 3))
-    |> Enum.uniq()
-  end
-
-  # Prune routing stats: remove old entries and cap size
-  defp prune_routing_stats(stats, now) do
-    cutoff = DateTime.add(now, -@stats_max_age_days, :day)
-
-    stats
-    |> Enum.reject(fn {_keyword, entry} ->
-      DateTime.compare(entry.last_seen, cutoff) == :lt
-    end)
-    |> Enum.sort_by(fn {_keyword, entry} -> entry.count end, :desc)
-    |> Enum.take(@max_tracked_patterns)
-    |> Map.new()
-  end
-
-  # Analyze routing stats for potential new topics
-  defp check_organic_topics(state) do
-    # Find keywords that appear frequently in :general-routed proposals
-    candidates =
-      state.routing_stats
-      |> Enum.filter(fn {_keyword, entry} -> entry.count >= @organic_topic_threshold end)
-      |> Enum.sort_by(fn {_keyword, entry} -> entry.count end, :desc)
-
-    case candidates do
-      [] ->
-        state
-
-      candidates ->
-        # Group related keywords (those appearing in the same descriptions)
-        topic_candidate = build_topic_candidate(candidates)
-        propose_organic_topic(state, topic_candidate)
-    end
-  end
-
-  # Build a topic candidate from frequently co-occurring keywords
-  defp build_topic_candidate(candidates) do
-    # Take top keywords as match patterns
-    keywords = Enum.map(candidates, fn {keyword, _entry} -> keyword end)
-    top_keywords = Enum.take(keywords, 5)
-
-    # Build a suggested topic name as a string — actual atom creation happens
-    # if/when governance approves the topic via TopicRegistry
-    {primary_keyword, _entry} = hd(candidates)
-    topic_name = "organic_#{primary_keyword}"
-
-    %{
-      topic: topic_name,
-      match_patterns: top_keywords,
-      keyword_counts: Enum.map(Enum.take(candidates, 5), fn {k, e} -> {k, e.count} end)
-    }
-  end
-
-  # Submit topic creation proposal to :topic_governance
-  defp propose_organic_topic(state, candidate) do
-    description =
-      "Organic topic creation: #{candidate.topic}. " <>
-        "Keywords #{inspect(candidate.match_patterns)} appeared frequently in " <>
-        ":general-routed proposals (counts: #{inspect(candidate.keyword_counts)}). " <>
-        "Suggesting dedicated topic for better routing."
-
-    proposal_attrs = %{
-      proposer: "coordinator:#{state.coordinator_id}",
-      topic: :topic_governance,
-      mode: :advisory,
-      description: description,
-      context: %{
-        organic_topic: true,
-        suggested_topic: candidate.topic,
-        match_patterns: candidate.match_patterns,
-        keyword_counts: candidate.keyword_counts
-      },
-      metadata: %{source: :organic_topic_detection}
-    }
-
-    # Submit internally via a Task to avoid blocking.
-    # Capture the coordinator pid before spawning the Task.
-    coordinator_pid = self()
-
-    Task.start(fn ->
-      case Proposal.new(proposal_attrs) do
-        {:ok, proposal} ->
-          try do
-            GenServer.call(coordinator_pid, {:submit, proposal, []})
-          catch
-            :exit, _ ->
-              Logger.debug("Organic topic proposal submission failed (coordinator busy)")
-          end
-
-        {:error, reason} ->
-          Logger.warning("Failed to create organic topic proposal: #{inspect(reason)}")
-      end
-    end)
-
-    # Reset the general route count to avoid re-proposing
-    %{state | general_route_count: 0}
-  rescue
-    e ->
-      Logger.warning("Organic topic creation error: #{inspect(e)}")
-      state
-  end
 end
