@@ -39,6 +39,9 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_consensus, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
 
+      # Level 1
+      {:arbor_persistence, in_umbrella: true},
+
       # Level 2
       {:arbor_agent, in_umbrella: true},
       {:arbor_sdlc, in_umbrella: true},
@@ -48,6 +51,7 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_eval, in_umbrella: true},
       {:arbor_demo, in_umbrella: true},
       {:arbor_monitor, in_umbrella: true},
+      {:arbor_orchestrator, in_umbrella: true},
 
       # Phoenix stack (via arbor_web, but needed for endpoint)
       {:phoenix, "~> 1.7"},
