@@ -312,20 +312,20 @@ defmodule Arbor.Security do
          escalation_result <- Escalation.maybe_escalate(cap, principal_id, resource_uri) do
       case escalation_result do
         :ok ->
-          emit_authorization_granted(principal_id, resource_uri, opts)
+          Events.record_authorization_granted(principal_id, resource_uri, opts)
           {:ok, :authorized}
 
         {:ok, :pending_approval, proposal_id} ->
-          emit_authorization_pending(principal_id, resource_uri, proposal_id, opts)
+          Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
           {:ok, :pending_approval, proposal_id}
 
         {:error, reason} ->
-          emit_authorization_denied(principal_id, resource_uri, reason, opts)
+          Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
           {:error, reason}
       end
     else
       {:error, reason} = error ->
-        emit_authorization_denied(principal_id, resource_uri, reason, opts)
+        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
         error
     end
   end
@@ -368,7 +368,7 @@ defmodule Arbor.Security do
 
         case CapabilityStore.put(signed_cap) do
           {:ok, :stored} ->
-            emit_capability_granted(signed_cap)
+            Events.record_capability_granted(signed_cap)
             {:ok, signed_cap}
 
           {:error, _} = error ->
@@ -384,7 +384,7 @@ defmodule Arbor.Security do
   def revoke_capability_by_id(capability_id, _opts) do
     case CapabilityStore.revoke(capability_id) do
       :ok ->
-        emit_capability_revoked(capability_id)
+        Events.record_capability_revoked(capability_id)
         :ok
 
       error ->
@@ -421,8 +421,8 @@ defmodule Arbor.Security do
          {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain),
          # Store with quota enforcement
          {:ok, :stored} <- CapabilityStore.put(signed_cap) do
-      emit_capability_granted(signed_cap)
-      emit_delegation_created(parent_cap.principal_id, new_principal_id, signed_cap.id)
+      Events.record_capability_granted(signed_cap)
+      Events.record_delegation_created(parent_cap.principal_id, new_principal_id, signed_cap.id)
       {:ok, signed_cap}
     end
   end
@@ -440,7 +440,7 @@ defmodule Arbor.Security do
   def register_agent_identity_with_public_key(%Identity{} = identity) do
     case Registry.register(Identity.public_only(identity)) do
       :ok ->
-        emit_identity_registered(identity.agent_id)
+        Events.record_identity_registered(identity.agent_id)
         :ok
 
       {:error, _} = error ->
@@ -457,11 +457,11 @@ defmodule Arbor.Security do
   def verify_signed_request_authenticity(%SignedRequest{} = request) do
     case Verifier.verify(request) do
       {:ok, agent_id} ->
-        emit_identity_verification_succeeded(agent_id)
+        Events.record_identity_verification_succeeded(agent_id)
         {:ok, agent_id}
 
       {:error, reason} = error ->
-        emit_identity_verification_failed(request.agent_id, reason)
+        Events.record_identity_verification_failed(request.agent_id, reason)
         error
     end
   end
@@ -695,13 +695,13 @@ defmodule Arbor.Security do
           :ok
 
         {:blocked, reflex, message} ->
-          emit_reflex_triggered(principal_id, reflex, resource_uri, action, :blocked)
+          Events.record_reflex_triggered(principal_id, reflex, resource_uri, action, :blocked)
           {:error, {:reflex_blocked, reflex.id, message}}
 
         {:warned, warnings} ->
           # Log warnings but allow the request to proceed
           for {reflex, message} <- warnings do
-            emit_reflex_warning(principal_id, reflex.id, message)
+            Events.record_reflex_warning(principal_id, reflex.id, message)
           end
 
           :ok
@@ -747,51 +747,4 @@ defmodule Arbor.Security do
   defp extract_path_from_uri("arbor://fs/" <> rest), do: "/" <> rest
   defp extract_path_from_uri(_), do: nil
 
-  defp emit_reflex_triggered(principal_id, reflex, resource_uri, action, response) do
-    Events.record_reflex_triggered(principal_id, reflex, resource_uri, action, response)
-  end
-
-  defp emit_reflex_warning(principal_id, reflex_id, message) do
-    Events.record_reflex_warning(principal_id, reflex_id, message)
-  end
-
-  # Event recording (dual-emit: EventLog + signal bus)
-  # Delegates to Security.Events which persists to EventLog first,
-  # then emits on the signal bus for real-time notification.
-
-  defp emit_authorization_granted(principal_id, resource_uri, opts) do
-    Events.record_authorization_granted(principal_id, resource_uri, opts)
-  end
-
-  defp emit_authorization_pending(principal_id, resource_uri, proposal_id, opts) do
-    Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
-  end
-
-  defp emit_authorization_denied(principal_id, resource_uri, reason, opts) do
-    Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
-  end
-
-  defp emit_capability_granted(cap) do
-    Events.record_capability_granted(cap)
-  end
-
-  defp emit_capability_revoked(capability_id) do
-    Events.record_capability_revoked(capability_id)
-  end
-
-  defp emit_identity_registered(agent_id) do
-    Events.record_identity_registered(agent_id)
-  end
-
-  defp emit_identity_verification_succeeded(agent_id) do
-    Events.record_identity_verification_succeeded(agent_id)
-  end
-
-  defp emit_identity_verification_failed(agent_id, reason) do
-    Events.record_identity_verification_failed(agent_id, reason)
-  end
-
-  defp emit_delegation_created(delegator_id, recipient_id, capability_id) do
-    Events.record_delegation_created(delegator_id, recipient_id, capability_id)
-  end
 end
