@@ -1,0 +1,211 @@
+// Council Decision — Multi-Perspective Voting via DOT Graph
+//
+// Runs all 13 advisory perspectives in parallel, collects votes,
+// and renders a CouncilDecision with quorum enforcement.
+//
+// Runtime-configurable: add/remove perspectives by editing this file.
+// Change models, quorum, prompts — no recompilation needed.
+//
+// Usage:
+//   {:ok, graph} = Arbor.Orchestrator.parse(File.read!("apps/arbor_orchestrator/specs/pipelines/council-decision.dot"))
+//   graph = %{graph | attrs: Map.merge(graph.attrs, %{
+//     "question" => "Should Arbor add a Redis dependency?",
+//     "mode" => "decision"
+//   })}
+//   {:ok, result} = Arbor.Orchestrator.Engine.run(graph)
+//   # result.context has "council.decision", "council.approve_count", etc.
+//
+// Or via convenience API:
+//   Consult.decide(AdvisoryLLM, "Should Arbor add a Redis dependency?")
+
+digraph council_decision {
+  // Graph-level config — overridden at runtime via Consult.decide/3
+  goal="Council decision on proposal"
+  mode="decision"
+  question="Evaluate the proposal and vote."
+
+  start [type="start"]
+
+  // Fan out to all perspectives in parallel
+  evaluate [
+    type="parallel"
+    join_policy="wait_all"
+    error_policy="continue"
+    max_parallel="13"
+  ]
+
+  // --- Perspective nodes ---
+  // Each calls an LLM via CodergenHandler with perspective-specific system prompt.
+  // The vote JSON format is prepended automatically when mode="decision".
+  // Default model: Kimi K2.5 via OpenRouter (best cost/intelligence ratio).
+
+  brainstorming [
+    type="codergen"
+    simulate="false"
+    perspective="brainstorming"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is BRAINSTORMING: explore possibilities, suggest alternatives, push thinking beyond the obvious. Focus on: other approaches, patterns from other domains, simplest possible version, most powerful version, unquestioned assumptions."
+  ]
+
+  user_experience [
+    type="codergen"
+    simulate="false"
+    perspective="user_experience"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is USER EXPERIENCE: evaluate how a design feels to use. Users are developers and AI agents. Focus on: API intuitiveness, sensible defaults, clear error messages, composability, learning curve, usability under pressure."
+  ]
+
+  security [
+    type="codergen"
+    simulate="false"
+    perspective="security"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is SECURITY: evaluate through a defensive security lens. Arbor uses capability-based security kernel, FileGuard, SafeAtom/SafePath, trust layers. Focus on: attack surface, trust boundaries, least privilege, adversarial agents, injection/confused deputy/TOCTOU."
+  ]
+
+  privacy [
+    type="codergen"
+    simulate="false"
+    perspective="privacy"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is PRIVACY: evaluate information flow and data exposure. Focus on: data flows, unintended leaks (logs/signals/errors), agent isolation, encryption at rest/transit, data retention, signal bus exposure."
+  ]
+
+  stability [
+    type="codergen"
+    simulate="false"
+    perspective="stability"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is STABILITY: evaluate graceful failure and recovery. Arbor uses OTP supervision with let-it-crash philosophy. Focus on: crash recovery, cascade failures, state persistence after restart, race conditions, backpressure, failure visibility."
+  ]
+
+  capability [
+    type="codergen"
+    simulate="false"
+    perspective="capability"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is CAPABILITY: evaluate what a design enables. Focus on: new possibilities, enhanced/limited existing capabilities, composable building blocks, power-to-complexity ratio, capabilities for both humans and AI agents."
+  ]
+
+  emergence [
+    type="codergen"
+    simulate="false"
+    perspective="emergence"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is EMERGENCE: evaluate evolutionary potential. Focus on: natural growth direction, emergent behaviors at scale, positive/negative feedback loops, interaction with other evolving parts, 10x/100x scaling, seed vs fixed structure."
+  ]
+
+  vision [
+    type="codergen"
+    simulate="false"
+    perspective="vision"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is VISION: evaluate alignment with Arbor's north star — human and AI flourishing through trust-based development. Focus on: vision alignment, AI agent autonomy, trust vs control, mutual flourishing, long-term implications."
+  ]
+
+  performance [
+    type="codergen"
+    simulate="false"
+    perspective="performance"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is PERFORMANCE: evaluate efficiency on the BEAM VM. Focus on: algorithmic complexity, serialization bottlenecks, BEAM concurrency leverage, memory/GC pressure, latency profile, lazy/incremental/streaming opportunities."
+  ]
+
+  generalization [
+    type="codergen"
+    simulate="false"
+    perspective="generalization"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is GENERALIZATION: evaluate abstraction vs specificity balance. Focus on: solving one problem vs a class, unnecessary abstractions, missed abstractions, composability, consistency with similar components, second use-case readiness."
+  ]
+
+  resource_usage [
+    type="codergen"
+    simulate="false"
+    perspective="resource_usage"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is RESOURCE USAGE: evaluate costs. Focus on: ongoing resource costs (API calls, processes, storage), cheaper alternatives, scaling curve, batching/caching, idle vs active cost, value-to-cost ratio."
+  ]
+
+  consistency [
+    type="codergen"
+    simulate="false"
+    perspective="consistency"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is CONSISTENCY: evaluate alignment with existing patterns. Arbor uses contract-first design, facade pattern, capability-based security, SafeAtom/SafePath, signal bus, OTP supervision. Focus on: pattern adherence, justified novelty, naming conventions, hierarchy fit, discoverability."
+  ]
+
+  general [
+    type="codergen"
+    simulate="false"
+    perspective="general"
+    llm_provider="openrouter"
+    llm_model="moonshotai/kimi-k2.5"
+    temperature="0.3"
+    max_tokens="4096"
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is GENERAL ADVISORY: broad analysis across all dimensions. Focus on: most important considerations, trade-offs, what you'd want to know before approving, risks/opportunities a focused perspective might miss, simplest thing that works."
+  ]
+
+  // Collect all perspective results
+  collect [type="parallel.fan_in"]
+
+  // Tally votes, apply quorum, render CouncilDecision
+  decide [type="consensus.decide", quorum="majority", mode="decision"]
+
+  done [type="exit"]
+
+  // Flow: start -> parallel fan-out -> perspectives -> fan-in -> decide -> done
+  start -> evaluate
+
+  evaluate -> brainstorming -> collect
+  evaluate -> user_experience -> collect
+  evaluate -> security -> collect
+  evaluate -> privacy -> collect
+  evaluate -> stability -> collect
+  evaluate -> capability -> collect
+  evaluate -> emergence -> collect
+  evaluate -> vision -> collect
+  evaluate -> performance -> collect
+  evaluate -> generalization -> collect
+  evaluate -> resource_usage -> collect
+  evaluate -> consistency -> collect
+  evaluate -> general -> collect
+
+  collect -> decide -> done
+}

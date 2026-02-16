@@ -216,6 +216,30 @@ defmodule Arbor.Consensus do
   @spec await(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   defdelegate await(proposal_id, opts \\ []), to: Coordinator
 
+  @doc """
+  Run a binding council decision via the DOT engine pipeline.
+
+  Loads `council-decision.dot`, fans out to all perspectives in parallel,
+  tallies votes, and returns a CouncilDecision with quorum enforcement.
+
+  Unlike `ask/2` (advisory, non-binding), this produces real approve/reject/deadlock
+  decisions. Perspectives, models, quorum — all configurable via the DOT file
+  without recompilation.
+
+  ## Options
+
+    * `:graph` — path to custom council DOT file
+    * `:quorum` — "majority" | "supermajority" | "unanimous"
+    * `:mode` — "decision" | "advisory"
+    * `:timeout` — engine timeout in ms (default: 600_000)
+    * `:context` — additional context map
+  """
+  @spec decide(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def decide(description, opts \\ []) do
+    evaluator = Keyword.get(opts, :evaluator, Arbor.Consensus.Evaluators.AdvisoryLLM)
+    Arbor.Consensus.Evaluators.Consult.decide(evaluator, description, opts)
+  end
+
   # ============================================================================
   # Event Store
   # ============================================================================

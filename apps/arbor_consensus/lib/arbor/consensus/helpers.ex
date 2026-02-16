@@ -103,4 +103,28 @@ defmodule Arbor.Consensus.Helpers do
         error
     end
   end
+
+  @doc """
+  Run a binding council decision and return the result synchronously.
+
+  Convenience wrapper around `Arbor.Consensus.decide/2`. Since the DOT engine
+  pipeline runs synchronously (blocking until all perspectives complete and
+  votes are tallied), no separate await step is needed.
+
+  ## Options
+
+    * `:graph` — path to custom council DOT file
+    * `:quorum` — "majority" | "supermajority" | "unanimous"
+    * `:mode` — "decision" | "advisory"
+    * `:timeout` — engine timeout in ms (default: 600_000)
+
+  ## Examples
+
+      {:ok, decision} = Helpers.decide("Should Arbor add a Redis dependency?")
+      decision.decision  # => "approved" | "rejected" | "deadlock"
+  """
+  @spec decide(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def decide(description, opts \\ []) do
+    Arbor.Consensus.decide(description, opts)
+  end
 end

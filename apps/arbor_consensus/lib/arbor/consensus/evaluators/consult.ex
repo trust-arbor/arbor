@@ -155,6 +155,71 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end
   end
 
+  @doc """
+  Run a council decision via the DOT engine pipeline.
+
+  Loads the `council-decision.dot` graph, injects the question and context,
+  fans out to all 13 perspectives in parallel, tallies votes, and returns
+  a CouncilDecision with quorum enforcement.
+
+  This is the binding-decision counterpart to `ask/3` (which is advisory-only).
+
+  ## Options
+
+  - `:graph` — path to a custom council DOT file (default: `council-decision.dot`)
+  - `:quorum` — override quorum type: "majority" | "supermajority" | "unanimous" (default from DOT file)
+  - `:mode` — "decision" | "advisory" (default from DOT file)
+  - `:timeout` — engine timeout in ms (default: 600_000)
+  - `:context` — map of additional context
+
+  Returns `{:ok, decision_map}` with keys like `"council.decision"`,
+  `"council.approve_count"`, etc., or `{:error, reason}`.
+  """
+  @spec decide(module(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def decide(_evaluator_module, description, opts \\ []) do
+    graph_path = Keyword.get(opts, :graph, default_council_graph_path())
+
+    with {:ok, dot_content} <- read_graph_file(graph_path),
+         {:ok, graph} <- parse_graph(dot_content) do
+      # Inject question and optional overrides into graph attrs
+      overrides = %{"council.question" => description}
+
+      overrides =
+        case Keyword.get(opts, :quorum) do
+          nil -> overrides
+          q -> Map.put(overrides, "quorum", q)
+        end
+
+      overrides =
+        case Keyword.get(opts, :mode) do
+          nil -> overrides
+          m -> Map.put(overrides, "mode", to_string(m))
+        end
+
+      # Merge overrides into graph attrs
+      graph = %{graph | attrs: Map.merge(graph.attrs, overrides)}
+
+      # Set initial context values for the engine
+      engine_opts = [
+        initial_values: %{"council.question" => description}
+      ]
+
+      engine_opts =
+        case Keyword.get(opts, :timeout) do
+          nil -> engine_opts
+          t -> Keyword.put(engine_opts, :timeout, t)
+        end
+
+      case run_engine(graph, engine_opts) do
+        {:ok, result} ->
+          extract_decision_from_result(result)
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
   # ============================================================================
   # Private
   # ============================================================================
@@ -180,5 +245,90 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       target_layer: 4,
       context: context
     })
+  end
+
+  # --- DOT engine helpers (runtime bridge to standalone orchestrator) ---
+
+  @orchestrator_mod Arbor.Orchestrator
+  @engine_mod Arbor.Orchestrator.Engine
+
+  defp default_council_graph_path do
+    # Try multiple candidate paths (umbrella CWD variance)
+    candidates = [
+      Path.join(File.cwd!(), "apps/arbor_orchestrator/specs/pipelines/council-decision.dot"),
+      Path.join(File.cwd!(), "../arbor_orchestrator/specs/pipelines/council-decision.dot"),
+      Path.join(File.cwd!(), "specs/pipelines/council-decision.dot")
+    ]
+
+    Enum.find(candidates, List.first(candidates), &File.exists?/1)
+  end
+
+  defp read_graph_file(path) do
+    case File.read(path) do
+      {:ok, _} = ok -> ok
+      {:error, reason} -> {:error, {:graph_file_not_found, path, reason}}
+    end
+  end
+
+  defp parse_graph(dot_content) do
+    if Code.ensure_loaded?(@orchestrator_mod) do
+      apply(@orchestrator_mod, :parse, [dot_content])
+    else
+      {:error, :orchestrator_not_available}
+    end
+  end
+
+  defp run_engine(graph, opts) do
+    if Code.ensure_loaded?(@engine_mod) do
+      apply(@engine_mod, :run, [graph, opts])
+    else
+      {:error, :engine_not_available}
+    end
+  end
+
+  defp extract_decision_from_result(result) do
+    # Engine returns a result struct with context
+    ctx =
+      cond do
+        is_map(result) and Map.has_key?(result, :context) ->
+          result.context
+
+        is_map(result) and Map.has_key?(result, "context") ->
+          result["context"]
+
+        true ->
+          result
+      end
+
+    decision = get_context_val(ctx, "council.decision")
+
+    if decision do
+      {:ok,
+       %{
+         decision: decision,
+         approve_count: get_context_val(ctx, "council.approve_count", 0),
+         reject_count: get_context_val(ctx, "council.reject_count", 0),
+         abstain_count: get_context_val(ctx, "council.abstain_count", 0),
+         quorum_met: get_context_val(ctx, "council.quorum_met", false),
+         average_confidence: get_context_val(ctx, "council.average_confidence", 0.0),
+         primary_concerns: get_context_val(ctx, "council.primary_concerns", "[]"),
+         status: get_context_val(ctx, "consensus.status", "unknown")
+       }}
+    else
+      {:error, :no_decision_in_result}
+    end
+  end
+
+  defp get_context_val(ctx, key, default \\ nil) do
+    cond do
+      is_struct(ctx) and function_exported?(ctx.__struct__, :get, 3) ->
+        apply(ctx.__struct__, :get, [ctx, key, default])
+
+      is_map(ctx) ->
+        Map.get(ctx, key, default)
+
+      true ->
+        default
+    end
   end
 end
