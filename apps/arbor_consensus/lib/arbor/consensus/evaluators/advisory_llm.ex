@@ -85,28 +85,38 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — distributes across 4 CLI agents
-  # for viewpoint diversity. Each CLI agent can read source code during reasoning.
-  # Override per-call via opts[:provider_model].
+  # Default provider:model per perspective — distributes across 5 different
+  # models for genuine viewpoint diversity. Each perspective can be individually
+  # configured at runtime via Application config or `configure_perspective/2`.
   #
-  # claude (anthropic): security, vision, general — complex/critical analysis
-  # codex (openai): consistency, performance, privacy — technical/analytical
-  # opencode: brainstorming, emergence, capability — creative/exploratory
-  # gemini: stability, resource_usage, user_experience, generalization — practical
-  @perspective_models %{
-    security: "anthropic:claude",
-    vision: "anthropic:claude",
-    general: "anthropic:claude",
-    consistency: "openai:codex",
-    performance: "openai:codex",
-    privacy: "openai:codex",
-    brainstorming: "opencode:opencode",
-    emergence: "opencode:opencode",
-    capability: "opencode:opencode",
-    stability: "gemini:gemini",
-    resource_usage: "gemini:gemini",
-    user_experience: "gemini:gemini",
-    generalization: "gemini:gemini"
+  # anthropic (direct API): security, vision — critical analysis
+  # openrouter:openai/gpt-5-nano: consistency, performance, privacy — technical
+  # openrouter:moonshotai/kimi-k2.5: brainstorming, emergence, capability — creative
+  # openrouter:x-ai/grok-4.1-fast: stability, resource_usage — practical
+  # openrouter:minimax/minimax-m2.5: user_experience, generalization, general — broad
+  #
+  # Configure via:
+  #   Application.put_env(:arbor_consensus, :perspective_models, %{
+  #     security: "anthropic:claude-sonnet-4-5-20250929",
+  #     brainstorming: "openrouter:moonshotai/kimi-k2.5",
+  #     ...
+  #   })
+  @default_perspective_models %{
+    # anthropic — critical/complex analysis (direct API)
+    security: "anthropic:claude-sonnet-4-5-20250929",
+    vision: "anthropic:claude-sonnet-4-5-20250929",
+    # openrouter — diverse inexpensive models for genuine viewpoint diversity
+    consistency: "openrouter:openai/gpt-5-nano",
+    performance: "openrouter:openai/gpt-5-nano",
+    privacy: "openrouter:openai/gpt-5-nano",
+    brainstorming: "openrouter:moonshotai/kimi-k2.5",
+    emergence: "openrouter:moonshotai/kimi-k2.5",
+    capability: "openrouter:moonshotai/kimi-k2.5",
+    stability: "openrouter:x-ai/grok-4.1-fast",
+    resource_usage: "openrouter:x-ai/grok-4.1-fast",
+    user_experience: "openrouter:minimax/minimax-m2.5",
+    generalization: "openrouter:minimax/minimax-m2.5",
+    general: "openrouter:minimax/minimax-m2.5"
   }
 
   # ============================================================================
@@ -123,13 +133,59 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   def strategy, do: :llm
 
   @doc """
-  Returns the default provider:model mapping for each perspective.
+  Returns the current provider:model mapping for each perspective.
 
-  Perspectives are distributed across providers and models for diversity.
-  Override per-call via `provider_model:` opt.
+  Reads from application config (`:arbor_consensus, :perspective_models`),
+  falling back to compiled defaults. Each perspective can be individually
+  overridden at runtime via `configure_perspective/2`.
   """
   @spec provider_map() :: %{atom() => String.t()}
-  def provider_map, do: @perspective_models
+  def provider_map do
+    configured = Application.get_env(:arbor_consensus, :perspective_models, %{})
+    Map.merge(@default_perspective_models, configured)
+  end
+
+  @doc """
+  Configure the provider:model for a specific perspective at runtime.
+
+  ## Examples
+
+      AdvisoryLLM.configure_perspective(:security, "anthropic:claude-sonnet-4-5-20250929")
+      AdvisoryLLM.configure_perspective(:brainstorming, "gemini:gemini-2.5-pro")
+      AdvisoryLLM.configure_perspective(:performance, "ollama:qwen3-coder:latest")
+  """
+  @spec configure_perspective(atom(), String.t()) :: :ok
+  def configure_perspective(perspective, provider_model)
+      when perspective in @perspectives and is_binary(provider_model) do
+    current = Application.get_env(:arbor_consensus, :perspective_models, %{})
+    Application.put_env(:arbor_consensus, :perspective_models, Map.put(current, perspective, provider_model))
+  end
+
+  @doc """
+  Configure provider:model for multiple perspectives at once.
+
+  ## Examples
+
+      AdvisoryLLM.configure_perspectives(%{
+        security: "anthropic:claude-sonnet-4-5-20250929",
+        brainstorming: "gemini:gemini-2.5-pro",
+        stability: "ollama:llama3.2:latest"
+      })
+  """
+  @spec configure_perspectives(%{atom() => String.t()}) :: :ok
+  def configure_perspectives(perspective_models) when is_map(perspective_models) do
+    current = Application.get_env(:arbor_consensus, :perspective_models, %{})
+    merged = Map.merge(current, perspective_models)
+    Application.put_env(:arbor_consensus, :perspective_models, merged)
+  end
+
+  @doc """
+  Reset all perspective models to compiled defaults.
+  """
+  @spec reset_perspective_models() :: :ok
+  def reset_perspective_models do
+    Application.delete_env(:arbor_consensus, :perspective_models)
+  end
 
   @impl true
   @spec evaluate(Proposal.t(), atom(), keyword()) :: {:ok, Evaluation.t()} | {:error, term()}
@@ -210,7 +266,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   def resolve_provider_model(perspective, opts \\ []) do
     provider_model =
       Keyword.get(opts, :provider_model) ||
-        Map.get(@perspective_models, perspective, "anthropic:claude")
+        Map.get(provider_map(), perspective, "anthropic:claude-sonnet-4-5-20250929")
 
     parse_provider_model(provider_model)
   end
