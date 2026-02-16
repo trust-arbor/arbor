@@ -285,26 +285,13 @@ defmodule Arbor.Persistence do
     {:ok, Arbor.Persistence.Repo.all(query)}
   end
 
+  @eval_where_filters [:domain, :model, :provider, :status]
+
   defp eval_apply_filters(query, []), do: query
 
-  defp eval_apply_filters(query, [{:domain, domain} | rest]) do
+  defp eval_apply_filters(query, [{field, value} | rest]) when field in @eval_where_filters do
     import Ecto.Query
-    eval_apply_filters(from(r in query, where: r.domain == ^domain), rest)
-  end
-
-  defp eval_apply_filters(query, [{:model, model} | rest]) do
-    import Ecto.Query
-    eval_apply_filters(from(r in query, where: r.model == ^model), rest)
-  end
-
-  defp eval_apply_filters(query, [{:provider, provider} | rest]) do
-    import Ecto.Query
-    eval_apply_filters(from(r in query, where: r.provider == ^provider), rest)
-  end
-
-  defp eval_apply_filters(query, [{:status, status} | rest]) do
-    import Ecto.Query
-    eval_apply_filters(from(r in query, where: r.status == ^status), rest)
+    eval_apply_filters(from(r in query, where: field(r, ^field) == ^value), rest)
   end
 
   defp eval_apply_filters(query, [{:limit, n} | rest]) do

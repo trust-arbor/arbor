@@ -587,8 +587,7 @@ defmodule Arbor.Historian do
   end
 
   defp apply_membership_event(:channel_created, event, acc) do
-    data = event[:data] || event["data"] || %{}
-    agent_id = data[:agent_id] || data["agent_id"]
+    {data, agent_id} = extract_event_data(event)
     timestamp = event[:timestamp] || event["timestamp"]
 
     %{
@@ -600,25 +599,22 @@ defmodule Arbor.Historian do
   end
 
   defp apply_membership_event(:channel_member_joined, event, acc) do
-    data = event[:data] || event["data"] || %{}
-    agent_id = data[:agent_id] || data["agent_id"]
+    {_data, agent_id} = extract_event_data(event)
     %{acc | members: MapSet.put(acc.members, agent_id)}
   end
 
   defp apply_membership_event(:channel_member_left, event, acc) do
-    data = event[:data] || event["data"] || %{}
-    agent_id = data[:agent_id] || data["agent_id"]
+    {_data, agent_id} = extract_event_data(event)
     %{acc | members: MapSet.delete(acc.members, agent_id)}
   end
 
   defp apply_membership_event(:channel_member_revoked, event, acc) do
-    data = event[:data] || event["data"] || %{}
-    agent_id = data[:agent_id] || data["agent_id"]
+    {_data, agent_id} = extract_event_data(event)
     %{acc | members: MapSet.delete(acc.members, agent_id)}
   end
 
   defp apply_membership_event(:channel_key_rotated, event, acc) do
-    data = event[:data] || event["data"] || %{}
+    {data, _agent_id} = extract_event_data(event)
     new_version = data[:new_version] || data["new_version"] || acc.key_version + 1
     %{acc | key_version: new_version}
   end
@@ -628,6 +624,12 @@ defmodule Arbor.Historian do
   end
 
   defp apply_membership_event(_type, _event, acc), do: acc
+
+  defp extract_event_data(event) do
+    data = event[:data] || event["data"] || %{}
+    agent_id = data[:agent_id] || data["agent_id"]
+    {data, agent_id}
+  end
 
   defp get_event_type(event) do
     type = event[:type] || event["type"]

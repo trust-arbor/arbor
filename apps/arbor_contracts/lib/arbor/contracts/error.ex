@@ -291,35 +291,15 @@ defmodule Arbor.Contracts.Error do
   defp validate_message(msg) when is_binary(msg) and byte_size(msg) > 0, do: :ok
   defp validate_message(msg), do: {:error, {:invalid_message, msg}}
 
-  defp validate_optional_atom(attrs, key) do
-    case get_attr(attrs, key) do
-      nil -> :ok
-      val when is_atom(val) -> :ok
-      val -> {:error, {:"invalid_#{key}", val}}
-    end
-  end
+  defp validate_optional_atom(attrs, key), do: validate_optional(attrs, key, &is_atom/1)
+  defp validate_optional_string(attrs, key), do: validate_optional(attrs, key, &is_binary/1)
+  defp validate_optional_map(attrs, key), do: validate_optional(attrs, key, &is_map/1)
+  defp validate_optional_boolean(attrs, key), do: validate_optional(attrs, key, &is_boolean/1)
 
-  defp validate_optional_string(attrs, key) do
+  defp validate_optional(attrs, key, type_check) do
     case get_attr(attrs, key) do
       nil -> :ok
-      val when is_binary(val) -> :ok
-      val -> {:error, {:"invalid_#{key}", val}}
-    end
-  end
-
-  defp validate_optional_map(attrs, key) do
-    case get_attr(attrs, key) do
-      nil -> :ok
-      val when is_map(val) -> :ok
-      val -> {:error, {:"invalid_#{key}", val}}
-    end
-  end
-
-  defp validate_optional_boolean(attrs, key) do
-    case get_attr(attrs, key) do
-      nil -> :ok
-      val when is_boolean(val) -> :ok
-      val -> {:error, {:"invalid_#{key}", val}}
+      val -> if type_check.(val), do: :ok, else: {:error, {:"invalid_#{key}", val}}
     end
   end
 

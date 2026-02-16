@@ -215,41 +215,17 @@ defmodule Arbor.Flow.ItemParser do
     end
   end
 
-  defp parse_priority(nil), do: nil
+  defp parse_priority(val), do: parse_enum(val, @valid_priorities)
+  defp parse_category(val), do: parse_enum(val, @valid_categories)
+  defp parse_effort(val), do: parse_enum(val, @valid_efforts)
 
-  defp parse_priority(priority_str) do
-    priority = String.downcase(String.trim(priority_str))
+  defp parse_enum(nil, _valid), do: nil
 
-    if priority in @valid_priorities do
-      String.to_existing_atom(priority)
-    else
-      nil
-    end
-  rescue
-    ArgumentError -> nil
-  end
+  defp parse_enum(str, valid) do
+    normalized = String.downcase(String.trim(str))
 
-  defp parse_category(nil), do: nil
-
-  defp parse_category(category_str) do
-    category = String.downcase(String.trim(category_str))
-
-    if category in @valid_categories do
-      String.to_existing_atom(category)
-    else
-      nil
-    end
-  rescue
-    ArgumentError -> nil
-  end
-
-  defp parse_effort(nil), do: nil
-
-  defp parse_effort(effort_str) do
-    effort = String.downcase(String.trim(effort_str))
-
-    if effort in @valid_efforts do
-      String.to_existing_atom(effort)
+    if normalized in valid do
+      String.to_existing_atom(normalized)
     else
       nil
     end
