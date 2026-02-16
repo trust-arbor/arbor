@@ -248,8 +248,8 @@
 - [ ] Expose `Arbor.Monitor.healing_status()` facade function
 
 ### A3. File-wide credo:disable for Apply check
-- [ ] `apps/arbor_security/lib/arbor/security/events.ex` — reduce scope to per-line pragmas
-- [ ] Refactor `apply/3` calls where possible
+- [x] `apps/arbor_security/lib/arbor/security/events.ex` — replaced file-wide disable with 3 per-line `credo:disable-for-next-line` pragmas
+- [x] `apply/3` calls are intentional (cycle prevention) — documented, per-line suppressed
 
 ### A4. Memory reimplements SafeAtom
 - [x] `apps/arbor_memory/lib/arbor/memory.ex` — `safe_insight_atom/1` now uses `SafeAtom.to_existing/1` after normalization
@@ -287,14 +287,14 @@
 - [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — make async to avoid shutdown delay
 
 ### O8. Three dispatch functions with identical structure in comms
-- [ ] Extract `dispatch_with_logging/5` in `apps/arbor_comms/lib/arbor/comms/dispatcher.ex`
+- [x] Reviewed: `send/4`, `reply/2`, `deliver_envelope/3` share signal emission but differ meaningfully in recipient resolution, option building, and message construction. Extraction would reduce readability. Acceptable as-is.
 
 ### O9. `Code.ensure_loaded` bridge pattern repeated 5+ times
 - [ ] Create `Arbor.Common.LazyLoader` module
 
 ### O10. Placeholder phone numbers in non-test code
-- [ ] Clean up `apps/arbor_contracts/lib/arbor/contracts/comms/question_registry.ex:36`
-- [ ] Clean up similar placeholders in `apps/arbor_comms/`
+- [x] `question_registry.ex:36` — uses `+1XXXXXXXXXX` in `@moduledoc` example, not in executable code. Standard doc format.
+- [x] `arbor_comms/` — only doc reference is `"kim@example.com"` in dispatcher.ex moduledoc. No placeholder values in production paths.
 
 ### DC1. TODO comments without tracking
 - [ ] `apps/arbor_cartographer/lib/arbor/cartographer.ex:290` — "TODO: Implement model detection"
