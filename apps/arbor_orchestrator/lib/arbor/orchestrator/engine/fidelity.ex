@@ -7,17 +7,18 @@ defmodule Arbor.Orchestrator.Engine.Fidelity do
 
   @spec resolve(map(), map() | nil, map(), Context.t()) :: %{
           mode: String.t(),
-          thread_id: String.t() | nil
+          thread_id: String.t() | nil,
+          explicit?: boolean()
         }
   def resolve(node, incoming_edge, graph, context) do
-    mode =
+    explicit_mode =
       first_present([
         get_attr(incoming_edge, "fidelity"),
         get_attr(node, "fidelity"),
-        Map.get(graph.attrs, "default_fidelity"),
-        "compact"
+        Map.get(graph.attrs, "default_fidelity")
       ])
-      |> normalize_mode()
+
+    mode = normalize_mode(explicit_mode || "compact")
 
     thread_id =
       if mode == "full" do
@@ -32,7 +33,7 @@ defmodule Arbor.Orchestrator.Engine.Fidelity do
         nil
       end
 
-    %{mode: mode, thread_id: thread_id}
+    %{mode: mode, thread_id: thread_id, explicit?: explicit_mode != nil}
   end
 
   defp normalize_mode(mode) when mode in @valid_modes, do: mode

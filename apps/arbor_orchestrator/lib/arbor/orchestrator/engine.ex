@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.Engine do
     Context,
     Executor,
     Fidelity,
+    FidelityTransformer,
     Outcome,
     Router
   }
@@ -385,8 +386,16 @@ defmodule Arbor.Orchestrator.Engine do
         |> Keyword.put_new(:logs_root, logs_root)
         |> Keyword.put(:stage_started_at, stage_started_at)
 
+      # Apply fidelity transform only when explicitly set on node/edge/graph
+      handler_context =
+        if fidelity.explicit? do
+          FidelityTransformer.transform(context, fidelity.mode, handler_opts)
+        else
+          context
+        end
+
       {outcome, retries} =
-        Executor.execute_with_retry(node, context, graph, retries, handler_opts)
+        Executor.execute_with_retry(node, handler_context, graph, retries, handler_opts)
 
       completed = [node.id | completed]
       outcomes = Map.put(outcomes, node.id, outcome)
@@ -414,6 +423,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       :ok = Checkpoint.write(checkpoint, logs_root)
       :ok = write_node_status(node.id, outcome, logs_root)
+      maybe_store_artifact(opts, node.id, outcome)
 
       emit(opts, %{
         type: :checkpoint_saved,
@@ -796,6 +806,28 @@ defmodule Arbor.Orchestrator.Engine do
          :ok <- File.mkdir_p(Path.join(logs_root, "artifacts")),
          {:ok, encoded} <- Jason.encode(payload, pretty: true) do
       File.write(Path.join(logs_root, "manifest.json"), encoded)
+    end
+  end
+
+  alias Arbor.Orchestrator.Engine.ArtifactStore
+
+  defp maybe_store_artifact(opts, node_id, %Outcome{} = outcome) do
+    case Keyword.get(opts, :artifact_store) do
+      nil ->
+        :ok
+
+      store ->
+        # Store last_response as the primary artifact if present
+        if response = Map.get(outcome.context_updates || %{}, "last_response") do
+          ArtifactStore.store(store, node_id, "response.txt", to_string(response))
+        end
+
+        # Store notes if present
+        if outcome.notes do
+          ArtifactStore.store(store, node_id, "notes.txt", outcome.notes)
+        end
+
+        :ok
     end
   end
 
