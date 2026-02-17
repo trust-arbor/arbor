@@ -62,7 +62,7 @@ defmodule Arbor.Actions.CliAgent.Adapters do
   @spec available_agents() :: [String.t()]
   def available_agents do
     Enum.filter(@adapters, fn {_name, adapter} ->
-      Code.ensure_loaded?(adapter) and function_exported?(adapter, :available?, 0) and
+      Arbor.Common.LazyLoader.exported?(adapter, :available?, 0) and
         adapter.available?()
     end)
     |> Enum.map(fn {name, _adapter} -> name end)

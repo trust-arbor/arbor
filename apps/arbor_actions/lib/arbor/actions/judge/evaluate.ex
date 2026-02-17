@@ -265,7 +265,7 @@ defmodule Arbor.Actions.Judge.Evaluate do
 
   defp call_llm(system_prompt, user_prompt, nil) do
     # Runtime bridge to Arbor.AI
-    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       case apply(Arbor.AI, :generate_text, [
              user_prompt,
              [system_prompt: system_prompt, temperature: 0.15]

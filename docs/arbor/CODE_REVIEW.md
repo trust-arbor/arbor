@@ -291,7 +291,7 @@
 - [x] Reviewed: `send/4`, `reply/2`, `deliver_envelope/3` share signal emission but differ meaningfully in recipient resolution, option building, and message construction. Extraction would reduce readability. Acceptable as-is.
 
 ### O9. `Code.ensure_loaded` bridge pattern repeated 5+ times
-- [ ] DEFERRED: Create `Arbor.Common.LazyLoader` module. Touches 5+ apps across library hierarchy — needs dedicated PR with thorough testing.
+- [x] Created `Arbor.Common.LazyLoader` with `exported?/3` helper. Replaced 14 `Code.ensure_loaded? + function_exported?` call sites across arbor_memory (7), arbor_ai (3), arbor_actions (2), arbor_consensus (1), arbor_common adapters (1). 4 call sites in arbor_signals, arbor_orchestrator, arbor_agent kept inline (no arbor_common dependency — hierarchy compliance).
 
 ### O10. Placeholder phone numbers in non-test code
 - [x] `question_registry.ex:36` — uses `+1XXXXXXXXXX` in `@moduledoc` example, not in executable code. Standard doc format.

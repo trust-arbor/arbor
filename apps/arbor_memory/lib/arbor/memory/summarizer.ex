@@ -200,7 +200,7 @@ defmodule Arbor.Memory.Summarizer do
   end
 
   defp call_llm_summarize(prompt, system_prompt, model, complexity) do
-    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
 
       case Arbor.AI.generate_text(prompt, llm_opts) do

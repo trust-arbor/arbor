@@ -353,7 +353,7 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   end
 
   defp call_summarization_llm(prompt, algorithm, llm_opts) do
-    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       system_prompt =
         case algorithm do
           :incremental_bullets -> @incremental_bullet_system_prompt
@@ -539,7 +539,7 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   defp compute_embedding(_), do: nil
 
   defp embedding_service_available? do
-    Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :embed, 2)
+    Arbor.Common.LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp cosine_similarity(emb1, emb2) when is_list(emb1) and is_list(emb2) do

@@ -183,7 +183,7 @@ defmodule Arbor.AI.SessionBridge do
   defp convert_action_modules(_), do: []
 
   defp convert_one_action(action_module) when is_atom(action_module) do
-    if Code.ensure_loaded?(action_module) and function_exported?(action_module, :to_tool, 0) do
+    if Arbor.Common.LazyLoader.exported?(action_module, :to_tool, 0) do
       spec = action_module.to_tool()
 
       struct(@tool_module,

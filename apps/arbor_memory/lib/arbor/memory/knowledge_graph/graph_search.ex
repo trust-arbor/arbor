@@ -525,7 +525,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
 
   # Embedding service helpers
   defp embedding_service_available? do
-    Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :embed, 2)
+    Arbor.Common.LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp compute_node_embedding(text) when is_binary(text) do
