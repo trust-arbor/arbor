@@ -1,0 +1,24 @@
+digraph eval_content {
+  goal="Evaluate content quality without code access"
+
+  // Runtime-injected attributes:
+  //   eval_skill_path  — path to eval SKILL.md (e.g. .arbor/skills/eval/output_quality/SKILL.md)
+  //   artifact         — the content to evaluate
+  //   criteria         — acceptance criteria or task description
+  //   eval_model       — LLM model to use for judging
+
+  start [type="start"]
+
+  judge [
+    type="codergen"
+    simulate="false"
+    label="Evaluate artifact quality"
+    max_tokens="4096"
+    temperature="0.3"
+    timeout="120000"
+  ]
+
+  exit [type="exit"]
+
+  start -> judge -> exit
+}

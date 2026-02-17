@@ -1,0 +1,78 @@
+digraph eval_code {
+  goal="Evaluate code quality with codebase research"
+
+  // Runtime-injected attributes:
+  //   eval_skill_path  — path to eval SKILL.md
+  //   artifact         — the code to evaluate
+  //   criteria         — acceptance criteria or task description
+  //   target_files     — comma-separated file paths to investigate
+  //   eval_model       — LLM model to use
+
+  start [type="start"]
+
+  fork [
+    type="parallel"
+    fan_out="true"
+    join_policy="wait_all"
+    max_parallel="3"
+    error_policy="continue"
+  ]
+
+  gather_context [
+    type="codergen"
+    simulate="false"
+    label="Gather surrounding code context"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    max_turns="8"
+    max_tokens="8192"
+    temperature="0.2"
+    timeout="180000"
+    system_prompt="You are a code researcher. Read the target files and their surrounding context (imports, callers, tests). Summarize the relevant code structure, dependencies, and patterns. Focus on what a quality evaluator would need to know."
+  ]
+
+  gather_tests [
+    type="codergen"
+    simulate="false"
+    label="Find and analyze related tests"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    max_turns="6"
+    max_tokens="4096"
+    temperature="0.2"
+    timeout="120000"
+    system_prompt="You are a test analyst. Find tests related to the target code. Summarize what is tested, what coverage gaps exist, and whether tests follow project conventions. Report test file paths and key assertions."
+  ]
+
+  gather_patterns [
+    type="codergen"
+    simulate="false"
+    label="Check consistency with project patterns"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    max_turns="6"
+    max_tokens="4096"
+    temperature="0.2"
+    timeout="120000"
+    system_prompt="You are a pattern analyst. Check whether the target code follows the project's established patterns: facade pattern, contract-first design, SafeAtom/SafePath usage, signal emission, taint roles. Report consistency and deviations."
+  ]
+
+  join [type="parallel"]
+
+  judge [
+    type="codergen"
+    simulate="false"
+    label="Synthesize research and evaluate code quality"
+    max_tokens="4096"
+    temperature="0.3"
+    timeout="120000"
+  ]
+
+  exit [type="exit"]
+
+  start -> fork
+  fork -> gather_context -> join
+  fork -> gather_tests -> join
+  fork -> gather_patterns -> join
+  join -> judge -> exit
+}
