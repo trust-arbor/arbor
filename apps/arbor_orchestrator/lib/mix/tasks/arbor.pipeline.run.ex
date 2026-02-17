@@ -15,6 +15,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
     - `--set key=value` — set initial context values (repeatable)
     - `--logs-root` — directory for pipeline logs
     - `--workdir` — working directory for shell handlers
+    - `--resume` — resume from last checkpoint (uses content-hash skip for unchanged nodes)
+    - `--resume-from` — resume from a specific checkpoint file path
   """
 
   use Mix.Task
@@ -25,7 +27,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
   def run(args) do
     {opts, files, _} =
       OptionParser.parse(args,
-        strict: [logs_root: :string, workdir: :string, set: :keep]
+        strict: [
+          logs_root: :string,
+          workdir: :string,
+          set: :keep,
+          resume: :boolean,
+          resume_from: :string
+        ]
       )
 
     # Start only the orchestrator and its deps — not the full umbrella.
@@ -56,6 +64,19 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
       |> Keyword.take([:logs_root, :workdir])
       |> Keyword.put(:on_event, &print_event/1)
       |> Keyword.put(:on_stream, &print_stream_event/1)
+
+    # Resume support
+    run_opts =
+      cond do
+        Keyword.get(opts, :resume_from) ->
+          Keyword.put(run_opts, :resume_from, opts[:resume_from])
+
+        Keyword.get(opts, :resume) ->
+          Keyword.put(run_opts, :resume, true)
+
+        true ->
+          run_opts
+      end
 
     run_opts =
       if initial_values != %{} do
@@ -111,6 +132,14 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
       {:ok, parsed} -> parsed
       {:error, _} -> value
     end
+  end
+
+  defp print_event(%{type: :pipeline_resumed, current_node: node}) do
+    info("  ↩ Resuming from: #{node}")
+  end
+
+  defp print_event(%{type: :stage_skipped, node_id: id, reason: :content_hash_match}) do
+    Mix.shell().info([:cyan, "  ⊘ #{id} (skipped — unchanged)"])
   end
 
   defp print_event(%{type: :stage_started, node_id: id}) do
