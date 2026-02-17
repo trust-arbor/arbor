@@ -29,8 +29,11 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
           Logger.debug("EvalPersistence: created run #{attrs[:id]} in Postgres")
           ok
 
-        {:error, reason} = err ->
-          Logger.warning("EvalPersistence: DB insert failed: #{inspect(reason)}, falling back to JSON")
+        {:error, reason} ->
+          Logger.warning(
+            "EvalPersistence: DB insert failed: #{inspect(reason)}, falling back to JSON"
+          )
+
           slug = run_slug(attrs)
           @fallback.save_run(slug, attrs)
           {:ok, attrs}

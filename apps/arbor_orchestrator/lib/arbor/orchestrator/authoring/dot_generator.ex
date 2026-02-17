@@ -76,7 +76,8 @@ defmodule Arbor.Orchestrator.Authoring.DotGenerator do
   """
   @spec validate_and_fix(String.t(), Conversation.t(), backend()) ::
           {:ok, String.t(), Arbor.Orchestrator.Graph.t()} | {:error, term()}
-  def validate_and_fix(dot_string, %Conversation{} = conv, backend) when is_function(backend, 1) do
+  def validate_and_fix(dot_string, %Conversation{} = conv, backend)
+      when is_function(backend, 1) do
     do_validate_and_fix(dot_string, conv, backend, 0)
   end
 
@@ -103,7 +104,8 @@ defmodule Arbor.Orchestrator.Authoring.DotGenerator do
 
   # ── Private ──
 
-  defp do_validate_and_fix(_dot_string, _conv, _backend, attempt) when attempt >= @max_fix_attempts do
+  defp do_validate_and_fix(_dot_string, _conv, _backend, attempt)
+       when attempt >= @max_fix_attempts do
     {:error, "Failed to generate valid pipeline after #{@max_fix_attempts} attempts"}
   end
 
@@ -151,7 +153,8 @@ defmodule Arbor.Orchestrator.Authoring.DotGenerator do
             do_validate_and_fix(new_dot, new_conv, backend, attempt + 1)
 
           {:question, _text, _conv} ->
-            {:error, "LLM asked a question instead of fixing parse error (attempt #{attempt + 1})"}
+            {:error,
+             "LLM asked a question instead of fixing parse error (attempt #{attempt + 1})"}
 
           {:error, reason} ->
             {:error, reason}
