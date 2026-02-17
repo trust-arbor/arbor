@@ -39,7 +39,12 @@ defmodule Arbor.Agent.Investigation do
     :evidence_chain,
     :suggested_action,
     :confidence,
-    :thinking_log
+    :thinking_log,
+    :similar_events,
+    :error_classification,
+    :fix_strategy,
+    :safety_validation,
+    :codebase_context
   ]
 
   @type symptom :: %{
@@ -77,7 +82,12 @@ defmodule Arbor.Agent.Investigation do
           evidence_chain: [evidence()],
           suggested_action: atom(),
           confidence: float(),
-          thinking_log: [String.t()]
+          thinking_log: [String.t()],
+          similar_events: [map()],
+          error_classification: map() | nil,
+          fix_strategy: atom() | nil,
+          safety_validation: map() | nil,
+          codebase_context: map() | nil
         }
 
   @doc """
@@ -95,7 +105,12 @@ defmodule Arbor.Agent.Investigation do
       evidence_chain: [],
       suggested_action: :none,
       confidence: 0.0,
-      thinking_log: ["Investigation started for #{anomaly.skill} anomaly"]
+      thinking_log: ["Investigation started for #{anomaly.skill} anomaly"],
+      similar_events: [],
+      error_classification: nil,
+      fix_strategy: nil,
+      safety_validation: nil,
+      codebase_context: nil
     }
   end
 
@@ -259,12 +274,182 @@ defmodule Arbor.Agent.Investigation do
   end
 
   @doc """
+  Search for similar past events in Historian to inform hypotheses.
+
+  Queries the last 30 minutes of events and filters for those matching
+  the anomaly's skill or sharing keywords with the error context.
+  """
+  @spec find_similar_events(t()) :: t()
+  def find_similar_events(%__MODULE__{anomaly: anomaly} = investigation) do
+    log = ["Searching for similar events..."]
+
+    similar =
+      if historian_available?() do
+        span =
+          Span.new(from: DateTime.add(DateTime.utc_now(), -30, :minute), to: DateTime.utc_now())
+
+        case safe_call(fn -> Historian.reconstruct(span, max_results: 50) end, {:ok, []}) do
+          {:ok, events} ->
+            events
+            |> Enum.filter(fn e -> similar_to_anomaly?(e, anomaly) end)
+            |> Enum.map(fn e ->
+              %{
+                type: e.type,
+                category: e.category,
+                timestamp: e.timestamp,
+                similarity: compute_similarity(e, anomaly)
+              }
+            end)
+            |> Enum.sort_by(& &1.similarity, :desc)
+            |> Enum.take(10)
+
+          _ ->
+            []
+        end
+      else
+        []
+      end
+
+    # Add as symptom if we found related events
+    symptoms =
+      if similar != [] do
+        [
+          %{
+            type: :similar_event,
+            source: :historian,
+            description: "#{length(similar)} similar events in last 30 minutes",
+            value: similar,
+            severity: if(length(similar) > 5, do: :high, else: :medium),
+            timestamp: DateTime.utc_now()
+          }
+        ]
+      else
+        []
+      end
+
+    # Also gather codebase context from anomaly details
+    codebase_ctx = gather_codebase_context(anomaly)
+
+    log =
+      log ++
+        [
+          "Found #{length(similar)} similar events",
+          "Extracted #{map_size(codebase_ctx)} codebase context categories"
+        ]
+
+    %{
+      investigation
+      | similar_events: similar,
+        symptoms: investigation.symptoms ++ symptoms,
+        codebase_context: codebase_ctx,
+        thinking_log: investigation.thinking_log ++ log
+    }
+  end
+
+  @doc """
+  Classify error details when the anomaly has error context.
+
+  Determines error type, severity, category, and subsystem from
+  error messages and stacktrace information.
+  """
+  @spec categorize_error(t()) :: t()
+  def categorize_error(%__MODULE__{anomaly: anomaly} = investigation) do
+    details = anomaly[:details] || anomaly.details || %{}
+    error_text = extract_error_text(details)
+
+    if error_text != "" do
+      classification = %{
+        error_type: classify_error_type(error_text),
+        severity: classify_error_severity(error_text),
+        category: classify_error_category(error_text),
+        subsystem: infer_subsystem(error_text, investigation.codebase_context)
+      }
+
+      evidence = %{
+        type: :error_classification,
+        description:
+          "Error classified as #{classification.error_type} " <>
+            "(#{classification.severity}, #{classification.category})",
+        data: classification,
+        timestamp: DateTime.utc_now()
+      }
+
+      log = [
+        "Error categorized: type=#{classification.error_type}, " <>
+          "severity=#{classification.severity}, category=#{classification.category}"
+      ]
+
+      %{
+        investigation
+        | error_classification: classification,
+          evidence_chain: investigation.evidence_chain ++ [evidence],
+          thinking_log: investigation.thinking_log ++ log
+      }
+    else
+      log = ["No error context found — skipping error categorization"]
+      %{investigation | thinking_log: investigation.thinking_log ++ log}
+    end
+  end
+
+  @doc """
+  Validate safety of the proposed fix before submission.
+
+  Scans fix_code and AI suggestions for dangerous patterns.
+  Produces a safety score (0-100, higher = safer).
+  """
+  @spec validate_safety(t()) :: t()
+  def validate_safety(%__MODULE__{} = investigation) do
+    # Collect all text that might contain dangerous patterns
+    texts_to_scan = collect_scannable_text(investigation)
+    issues = scan_for_dangerous_patterns(texts_to_scan)
+
+    # Runtime actions (kill/gc/stop/suppress/reset) get simpler validation
+    runtime_issues = validate_runtime_action(investigation.suggested_action)
+    all_issues = issues ++ runtime_issues
+
+    safety_score = max(0, 100 - length(all_issues) * 20)
+    requires_approval = all_issues != [] || safety_score < 60
+
+    validation = %{
+      safety_score: safety_score,
+      issues: all_issues,
+      requires_approval: requires_approval,
+      scanned_at: DateTime.utc_now()
+    }
+
+    evidence = %{
+      type: :safety_validation,
+      description: "Safety score: #{safety_score}/100 (#{length(all_issues)} issues)",
+      data: validation,
+      timestamp: DateTime.utc_now()
+    }
+
+    log = [
+      "Safety validation: score=#{safety_score}, issues=#{length(all_issues)}, " <>
+        "requires_approval=#{requires_approval}"
+    ]
+
+    %{
+      investigation
+      | safety_validation: validation,
+        evidence_chain: investigation.evidence_chain ++ [evidence],
+        thinking_log: investigation.thinking_log ++ log
+    }
+  end
+
+  @doc """
   Convert investigation to a proposal for the consensus council.
   """
   @spec to_proposal(t()) :: map()
   def to_proposal(%__MODULE__{} = investigation) do
     hyp = investigation.selected_hypothesis || %{}
     anomaly = investigation.anomaly
+
+    # Classify fix strategy from root cause analysis
+    fix_strategy = classify_fix_strategy(investigation)
+
+    # Build impact assessment
+    impact = build_impact_assessment(investigation, fix_strategy)
 
     %{
       topic: :runtime_fix,
@@ -288,7 +473,13 @@ defmodule Arbor.Agent.Investigation do
         evidence_chain: investigation.evidence_chain,
         thinking_log: investigation.thinking_log,
         investigation_id: investigation.id,
-        anomaly: anomaly
+        anomaly: anomaly,
+        fix_strategy: fix_strategy,
+        safety_validation: investigation.safety_validation,
+        impact_assessment: impact,
+        similar_events_count: length(investigation.similar_events),
+        error_categorization: investigation.error_classification,
+        codebase_context: investigation.codebase_context
       }
     }
   end
@@ -315,6 +506,292 @@ defmodule Arbor.Agent.Investigation do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # --- Similar Events Helpers ---
+
+  defp historian_available? do
+    Code.ensure_loaded?(Historian) and Process.whereis(Arbor.Historian.Store) != nil
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp similar_to_anomaly?(event, anomaly) do
+    # Match by skill/category
+    skill_match = to_string(event.category) == to_string(anomaly.skill)
+
+    # Match by keyword overlap in details
+    event_text = stringify_map(Map.get(event, :data, %{}))
+    anomaly_text = stringify_map(Map.get(anomaly, :details, %{}))
+    keyword_match = has_common_keywords?(event_text, anomaly_text)
+
+    skill_match || keyword_match
+  end
+
+  defp has_common_keywords?(text_a, text_b) do
+    words_a = extract_keywords(text_a)
+    words_b = extract_keywords(text_b)
+    common = MapSet.intersection(words_a, words_b)
+    MapSet.size(common) >= 2
+  end
+
+  defp extract_keywords(text) do
+    text
+    |> String.downcase()
+    |> String.split(~r/[^a-z0-9_]+/)
+    |> Enum.filter(&(String.length(&1) > 3))
+    |> MapSet.new()
+  end
+
+  defp compute_similarity(event, anomaly) do
+    score = 0.0
+    score = if to_string(event.category) == to_string(anomaly.skill), do: score + 0.5, else: score
+
+    event_text = stringify_map(Map.get(event, :data, %{}))
+    anomaly_text = stringify_map(Map.get(anomaly, :details, %{}))
+    event_words = extract_keywords(event_text)
+    anomaly_words = extract_keywords(anomaly_text)
+
+    if MapSet.size(anomaly_words) > 0 do
+      overlap = MapSet.intersection(event_words, anomaly_words) |> MapSet.size()
+      score + 0.5 * (overlap / max(MapSet.size(anomaly_words), 1))
+    else
+      score
+    end
+  end
+
+  defp stringify_map(map) when is_map(map) do
+    map
+    |> Enum.map(fn {k, v} -> "#{k} #{inspect(v)}" end)
+    |> Enum.join(" ")
+  end
+
+  defp stringify_map(other), do: inspect(other)
+
+  # --- Codebase Context Extraction ---
+
+  defp gather_codebase_context(anomaly) do
+    text = stringify_map(Map.get(anomaly, :details, %{}))
+
+    files = Regex.scan(~r/\b[\w\/]+\.ex[s]?\b/, text) |> List.flatten() |> Enum.uniq()
+    modules = Regex.scan(~r/\b[A-Z]\w*(?:\.[A-Z]\w*)+\b/, text) |> List.flatten() |> Enum.uniq()
+    functions = Regex.scan(~r/\b\w+\/\d+\b/, text) |> List.flatten() |> Enum.uniq()
+
+    ctx = %{}
+    ctx = if files != [], do: Map.put(ctx, :files, files), else: ctx
+    ctx = if modules != [], do: Map.put(ctx, :modules, modules), else: ctx
+    ctx = if functions != [], do: Map.put(ctx, :functions, functions), else: ctx
+    ctx
+  end
+
+  # --- Error Categorization Helpers ---
+
+  defp extract_error_text(details) when is_map(details) do
+    error = Map.get(details, :error) || Map.get(details, "error") || ""
+    message = Map.get(details, :message) || Map.get(details, "message") || ""
+    stacktrace = Map.get(details, :stacktrace) || Map.get(details, "stacktrace") || ""
+
+    [to_string(error), to_string(message), to_string(stacktrace)]
+    |> Enum.join(" ")
+    |> String.trim()
+  end
+
+  defp extract_error_text(_), do: ""
+
+  defp classify_error_type(text) do
+    downcased = String.downcase(text)
+
+    cond do
+      String.contains?(downcased, ["matcherror", "badmatch", "no match", "pattern"]) ->
+        :runtime_match
+
+      String.contains?(downcased, ["undefinedfunction", "undefined function", "undef"]) ->
+        :runtime_undefined
+
+      String.contains?(downcased, ["argumenterror", "badarg", "bad argument", "functionclause"]) ->
+        :runtime_argument
+
+      String.contains?(downcased, ["timeout", "timed out", "genserver call"]) ->
+        :runtime_timeout
+
+      String.contains?(downcased, ["compileerror", "compile error", "syntax error"]) ->
+        :compile_error
+
+      String.contains?(downcased, ["slow", "performance", "latency", "throughput"]) ->
+        :performance
+
+      true ->
+        :unknown
+    end
+  end
+
+  defp classify_error_severity(text) do
+    downcased = String.downcase(text)
+
+    cond do
+      String.contains?(downcased, ["crash", "halt", "fatal", "segfault", "killed"]) -> :critical
+      String.contains?(downcased, ["error", "failure", "failed", "exception"]) -> :error
+      String.contains?(downcased, ["warn", "warning", "deprecat"]) -> :warning
+      true -> :info
+    end
+  end
+
+  defp classify_error_category(text) do
+    downcased = String.downcase(text)
+
+    cond do
+      String.contains?(downcased, [
+        "repo",
+        "postgres",
+        "mysql",
+        "ecto",
+        "query",
+        "sql",
+        "database"
+      ]) ->
+        :database
+
+      String.contains?(downcased, ["socket", "connect", "http", "tcp", "dns", "network"]) ->
+        :network
+
+      String.contains?(downcased, ["file", "path", "directory", "enoent", "eacces"]) ->
+        :filesystem
+
+      String.contains?(downcased, ["memory", "heap", "alloc", "oom"]) ->
+        :memory
+
+      String.contains?(downcased, ["auth", "permission", "denied", "capability", "security"]) ->
+        :security
+
+      true ->
+        :application
+    end
+  end
+
+  defp infer_subsystem(text, codebase_context) do
+    # Try to infer from module names in codebase context
+    modules = (codebase_context || %{})[:modules] || []
+
+    cond do
+      Enum.any?(modules, &String.contains?(&1, "Arbor.Agent")) -> :agent
+      Enum.any?(modules, &String.contains?(&1, "Arbor.Monitor")) -> :monitor
+      Enum.any?(modules, &String.contains?(&1, "Arbor.Security")) -> :security
+      Enum.any?(modules, &String.contains?(&1, "Arbor.Consensus")) -> :consensus
+      Enum.any?(modules, &String.contains?(&1, "Arbor.AI")) -> :ai
+      Enum.any?(modules, &String.contains?(&1, "Arbor.Persistence")) -> :persistence
+      String.contains?(text, "GenServer") -> :genserver
+      true -> :unknown
+    end
+  end
+
+  # --- Fix Strategy Classification ---
+
+  defp classify_fix_strategy(investigation) do
+    root_cause =
+      case investigation.selected_hypothesis do
+        %{root_cause: rc} when is_binary(rc) -> String.downcase(rc)
+        _ -> ""
+      end
+
+    error_type =
+      case investigation.error_classification do
+        %{error_type: et} -> et
+        _ -> nil
+      end
+
+    cond do
+      investigation.suggested_action in [
+        :suppress_fingerprint,
+        :reset_baseline,
+        :kill_process,
+        :force_gc,
+        :stop_supervisor
+      ] ->
+        :runtime_remediation
+
+      error_type in [:runtime_match] || String.contains?(root_cause, ["pattern", "match"]) ->
+        :pattern_fix
+
+      error_type in [:runtime_argument] || String.contains?(root_cause, ["type", "argument"]) ->
+        :type_safety
+
+      error_type in [:compile_error] || String.contains?(root_cause, ["logic", "algorithm"]) ->
+        :logic_refactor
+
+      error_type in [:runtime_timeout, :performance] ||
+          String.contains?(root_cause, ["timeout", "performance", "slow"]) ->
+        :performance_optimization
+
+      String.contains?(root_cause, ["config", "configuration", "env"]) ->
+        :configuration_change
+
+      String.contains?(root_cause, ["race", "concurrency", "deadlock"]) ->
+        :concurrency_fix
+
+      String.contains?(root_cause, ["memory", "leak", "heap"]) ->
+        :memory_management
+
+      true ->
+        nil
+    end
+  end
+
+  # --- Safety Validation Helpers ---
+
+  @dangerous_patterns [
+    {~r/System\.cmd/, "System.cmd — arbitrary command execution"},
+    {~r/System\.halt/, "System.halt — VM termination"},
+    {~r/:erlang\.halt/, ":erlang.halt — VM termination"},
+    {~r/File\.rm/, "File.rm — file deletion"},
+    {~r/File\.rm_rf/, "File.rm_rf — recursive file deletion"},
+    {~r/Code\.eval_string/, "Code.eval_string — dynamic code evaluation"},
+    {~r/Code\.eval_quoted/, "Code.eval_quoted — dynamic code evaluation"},
+    {~r/Code\.compile_string/, "Code.compile_string — dynamic compilation"},
+    {~r/Application\.stop/, "Application.stop — application shutdown"},
+    {~r/delete_all/i, "delete_all — bulk data deletion"},
+    {~r/drop\s+table/i, "DROP TABLE — database table deletion"},
+    {~r/truncate\s+table/i, "TRUNCATE TABLE — database data wipe"}
+  ]
+
+  defp collect_scannable_text(investigation) do
+    texts = []
+
+    # Fix code from proposal
+    hyp = investigation.selected_hypothesis || %{}
+    fix_code = hyp[:fix_code] || ""
+    texts = if fix_code != "", do: [fix_code | texts], else: texts
+
+    # AI analysis evidence
+    ai_texts =
+      investigation.evidence_chain
+      |> Enum.filter(&(&1.type == :ai_analysis))
+      |> Enum.map(fn e -> get_in(e, [:data, :response]) || "" end)
+
+    texts ++ ai_texts
+  end
+
+  defp scan_for_dangerous_patterns(texts) do
+    Enum.flat_map(@dangerous_patterns, fn {pattern, description} ->
+      if Enum.any?(texts, &Regex.match?(pattern, &1)) do
+        [%{pattern: Regex.source(pattern), description: description}]
+      else
+        []
+      end
+    end)
+  end
+
+  defp validate_runtime_action(:kill_process), do: []
+  defp validate_runtime_action(:force_gc), do: []
+  defp validate_runtime_action(:stop_supervisor), do: []
+  defp validate_runtime_action(:suppress_fingerprint), do: []
+  defp validate_runtime_action(:reset_baseline), do: []
+  defp validate_runtime_action(:logged_warning), do: []
+  defp validate_runtime_action(:none), do: []
+
+  defp validate_runtime_action(action) do
+    [%{pattern: "unknown_action", description: "Unknown action: #{action}"}]
+  end
 
   defp generate_id do
     "inv_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
@@ -1042,7 +1519,46 @@ defmodule Arbor.Agent.Investigation do
   defp describe_action(:stop_supervisor, pid), do: "Stop supervisor #{inspect(pid)}"
   defp describe_action(:restart_child, id), do: "Restart child #{inspect(id)}"
   defp describe_action(:logged_warning, _), do: "Log warning (manual intervention needed)"
+
+  defp describe_action(:suppress_fingerprint, _),
+    do: "Suppress anomaly fingerprint for 30 minutes"
+
+  defp describe_action(:reset_baseline, _), do: "Reset EWMA baseline for metric"
+  defp describe_action(:none, _), do: "No action"
   defp describe_action(action, _), do: "#{action}"
+
+  defp build_impact_assessment(investigation, fix_strategy) do
+    action = investigation.suggested_action
+    similar_count = length(investigation.similar_events)
+    safety = investigation.safety_validation
+
+    scope =
+      cond do
+        action in [:kill_process, :force_gc] -> :single_process
+        action in [:stop_supervisor] -> :supervisor_tree
+        action in [:suppress_fingerprint, :reset_baseline] -> :monitoring
+        action in [:logged_warning, :none] -> :none
+        true -> :unknown
+      end
+
+    risk_level =
+      cond do
+        safety && safety.safety_score < 40 -> :high
+        action in [:stop_supervisor] -> :medium
+        action in [:kill_process] -> :medium
+        action in [:force_gc, :suppress_fingerprint, :reset_baseline] -> :low
+        true -> :low
+      end
+
+    %{
+      scope: scope,
+      risk_level: risk_level,
+      breaking_changes: action in [:kill_process, :stop_supervisor],
+      monitoring_needs: similar_count > 3,
+      fix_strategy: fix_strategy,
+      recurrence_likelihood: if(similar_count > 5, do: :high, else: :low)
+    }
+  end
 
   # Extract text string from various AI response formats.
   # Handles plain maps, structs, and raw strings safely.
