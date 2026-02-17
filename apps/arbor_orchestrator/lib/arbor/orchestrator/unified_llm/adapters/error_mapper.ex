@@ -69,19 +69,25 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper do
     end
   end
 
+  defp extract_message_and_code(%{"error" => %{} = error}) do
+    message = Map.get(error, "message") || Map.get(error, :message)
+    code = Map.get(error, "code") || Map.get(error, :code)
+    {maybe_string(message), maybe_string(code)}
+  end
+
+  defp extract_message_and_code(%{"error" => error}) when is_binary(error) do
+    {error, nil}
+  end
+
+  defp extract_message_and_code(%{error: %{} = error}) do
+    message = Map.get(error, :message) || Map.get(error, "message")
+    code = Map.get(error, :code) || Map.get(error, "code")
+    {maybe_string(message), maybe_string(code)}
+  end
+
   defp extract_message_and_code(%{} = body) do
-    message =
-      get_in(body, ["error", "message"]) ||
-        Map.get(body, "message") ||
-        get_in(body, [:error, :message]) ||
-        Map.get(body, :message)
-
-    code =
-      get_in(body, ["error", "code"]) ||
-        Map.get(body, "code") ||
-        get_in(body, [:error, :code]) ||
-        Map.get(body, :code)
-
+    message = Map.get(body, "message") || Map.get(body, :message)
+    code = Map.get(body, "code") || Map.get(body, :code)
     {maybe_string(message), maybe_string(code)}
   end
 

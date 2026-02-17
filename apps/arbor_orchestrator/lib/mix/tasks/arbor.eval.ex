@@ -35,7 +35,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   ## Options
 
-    - `--domain` — eval domain: coding, heartbeat, chat, embedding
+    - `--domain` — eval domain: coding, heartbeat, chat, dot_compilation
     - `--model` — model identifier
     - `--models` — comma-separated model identifiers (multi-model mode)
     - `--provider` — provider name (ollama, lm_studio, anthropic, openai, etc.)
@@ -61,13 +61,15 @@ defmodule Mix.Tasks.Arbor.Eval do
   @domain_datasets %{
     "coding" => "apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl",
     "heartbeat" => "apps/arbor_orchestrator/priv/eval_datasets/heartbeat_json.jsonl",
-    "chat" => "apps/arbor_orchestrator/priv/eval_datasets/chat_quality.jsonl"
+    "chat" => "apps/arbor_orchestrator/priv/eval_datasets/chat_quality.jsonl",
+    "dot_compilation" => "apps/arbor_orchestrator/priv/eval_datasets/dot_compilation.jsonl"
   }
 
   @domain_graders %{
     "coding" => ["compile_check", "functional_test"],
     "heartbeat" => ["json_valid"],
-    "chat" => ["contains"]
+    "chat" => ["contains"],
+    "dot_compilation" => ["dot_diff"]
   }
 
   @impl true
@@ -181,7 +183,8 @@ defmodule Mix.Tasks.Arbor.Eval do
             provider: provider,
             model: model,
             timeout: timeout,
-            stream: use_stream
+            stream: use_stream,
+            domain_system_prompt: domain_system_prompt(domain)
           ]
 
           run_id = PersistenceBridge.generate_run_id(model, domain)
@@ -392,6 +395,7 @@ defmodule Mix.Tasks.Arbor.Eval do
   defp run_samples(samples, grader_names, subject_opts) do
     subject = Subjects.LLM
     graders = Enum.map(grader_names, &Eval.grader/1) |> Enum.reject(&is_nil/1)
+    domain_system = Keyword.get(subject_opts, :domain_system_prompt)
 
     Enum.map(samples, fn sample ->
       id = sample["id"]
@@ -400,18 +404,27 @@ defmodule Mix.Tasks.Arbor.Eval do
       input = sample["input"]
       expected = sample["expected"]
 
-      {actual, timing} =
-        case subject.run(input, subject_opts) do
-          {:ok, %{text: text} = result} ->
-            {text,
-             %{
-               duration_ms: result[:duration_ms] || 0,
-               ttft_ms: result[:ttft_ms],
-               tokens_generated: result[:tokens_generated]
-             }}
+      # Inject domain-level system prompt if sample doesn't have one
+      input = maybe_inject_system_prompt(input, domain_system)
 
-          {:error, reason} ->
-            Mix.shell().info("    ERROR: #{inspect(reason)}")
+      {actual, timing} =
+        try do
+          case subject.run(input, subject_opts) do
+            {:ok, %{text: text} = result} ->
+              {text,
+               %{
+                 duration_ms: result[:duration_ms] || 0,
+                 ttft_ms: result[:ttft_ms],
+                 tokens_generated: result[:tokens_generated]
+               }}
+
+            {:error, reason} ->
+              Mix.shell().info("    ERROR: #{inspect(reason)}")
+              {"", %{duration_ms: 0, ttft_ms: nil, tokens_generated: nil}}
+          end
+        rescue
+          e ->
+            Mix.shell().info("    CRASH: #{Exception.message(e)}")
             {"", %{duration_ms: 0, ttft_ms: nil, tokens_generated: nil}}
         end
 
@@ -436,7 +449,22 @@ defmodule Mix.Tasks.Arbor.Eval do
             "#{name}=#{Float.round(s.score, 2)}"
           end)
 
-        Mix.shell().info("    #{Enum.join(score_strs, ", ")}")
+        duration_str = if timing.duration_ms > 0, do: " (#{timing.duration_ms}ms)", else: ""
+        Mix.shell().info("    #{Enum.join(score_strs, ", ")}#{duration_str}")
+
+        # Show detail for failed samples to help diagnose issues
+        if not passed do
+          Enum.each(scores, fn s ->
+            detail = Map.get(s, :detail, "")
+            if detail != "" and not s.passed do
+              Mix.shell().info("    detail: #{String.slice(to_string(detail), 0, 200)}")
+            end
+          end)
+
+          # Show first line of actual output for failed samples
+          first_line = actual |> String.trim() |> String.split("\n") |> List.first("")
+          Mix.shell().info("    output[#{String.length(actual)} chars]: #{String.slice(first_line, 0, 120)}")
+        end
       end
 
       %{
@@ -453,6 +481,28 @@ defmodule Mix.Tasks.Arbor.Eval do
       }
     end)
   end
+
+  defp domain_system_prompt("dot_compilation") do
+    prompt_mod = Arbor.Actions.Skill.CompilationPrompt
+
+    if Code.ensure_loaded?(prompt_mod) do
+      apply(prompt_mod, :system_prompt, [])
+    else
+      nil
+    end
+  end
+
+  defp domain_system_prompt(_), do: nil
+
+  defp maybe_inject_system_prompt(input, nil), do: input
+
+  defp maybe_inject_system_prompt(%{"system" => _} = input, _system), do: input
+
+  defp maybe_inject_system_prompt(%{} = input, system) when is_binary(system) do
+    Map.put(input, "system", system)
+  end
+
+  defp maybe_inject_system_prompt(input, _system), do: input
 
   # --- List runs ---
 
@@ -580,16 +630,9 @@ defmodule Mix.Tasks.Arbor.Eval do
     Application.ensure_all_started(:req)
     Application.ensure_all_started(:jason)
 
-    # Try to start Ecto for persistence (optional)
+    # Start persistence for DB-backed eval storage (optional — falls back to JSON)
     try do
-      Application.ensure_all_started(:postgrex)
-      Application.ensure_all_started(:ecto_sql)
-
-      repo = Arbor.Persistence.Repo
-
-      if Code.ensure_loaded?(repo) do
-        apply(repo, :start_link, [[]])
-      end
+      Application.ensure_all_started(:arbor_persistence)
     rescue
       _ -> :ok
     catch

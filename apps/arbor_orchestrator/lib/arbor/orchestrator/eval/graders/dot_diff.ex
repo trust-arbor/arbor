@@ -28,42 +28,109 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
 
   @impl true
   def grade(actual, expected, opts \\ []) do
-    with {:ok, actual_graph} <- Arbor.Orchestrator.parse(to_string(actual)),
-         {:ok, expected_graph} <- Arbor.Orchestrator.parse(to_string(expected)) do
-      actual_nodes = Map.values(actual_graph.nodes)
-      expected_nodes = Map.values(expected_graph.nodes)
+    actual_str = to_string(actual)
+    expected_str = to_string(expected)
 
-      node_sim = count_similarity(length(actual_nodes), length(expected_nodes))
-      edge_sim = count_similarity(length(actual_graph.edges), length(expected_graph.edges))
-      handler_sim = handler_distribution_similarity(actual_graph, expected_graph)
-      keyword_sim = keyword_coverage(actual_graph, expected_graph)
+    # Parse expected (should always work — it's our ground truth)
+    case Arbor.Orchestrator.parse(expected_str) do
+      {:ok, expected_graph} ->
+        # Try parsing actual output
+        case Arbor.Orchestrator.parse(actual_str) do
+          {:ok, actual_graph} ->
+            score_graphs(actual_graph, expected_graph, opts)
 
-      w = Map.merge(default_weights(), Keyword.get(opts, :weights, %{}))
+          {:error, _parse_reason} ->
+            # Try extracting DOT from markdown fences or thinking blocks
+            case extract_dot(actual_str) do
+              {:ok, extracted} ->
+                case Arbor.Orchestrator.parse(extracted) do
+                  {:ok, actual_graph} ->
+                    result = score_graphs(actual_graph, expected_graph, opts)
+                    %{result | detail: "[extracted from markdown] " <> result.detail}
 
-      score =
-        w.node_count * node_sim +
-          w.edge_count * edge_sim +
-          w.handler_dist * handler_sim +
-          w.keyword_coverage * keyword_sim
+                  {:error, _} ->
+                    parse_failure_result(actual_str)
+                end
 
-      threshold = Keyword.get(opts, :pass_threshold, 0.5)
+              :none ->
+                parse_failure_result(actual_str)
+            end
+        end
 
-      %{
-        score: score,
-        passed: score >= threshold,
-        detail:
-          build_detail(
-            node_sim,
-            edge_sim,
-            handler_sim,
-            keyword_sim,
-            actual_graph,
-            expected_graph
-          )
-      }
-    else
       {:error, reason} ->
-        %{score: 0.0, passed: false, detail: "Parse error: #{inspect(reason)}"}
+        %{score: 0.0, passed: false, parseable: false,
+          detail: "Expected DOT parse error (bug in dataset): #{inspect(reason)}"}
+    end
+  end
+
+  defp score_graphs(actual_graph, expected_graph, opts) do
+    actual_nodes = Map.values(actual_graph.nodes)
+    expected_nodes = Map.values(expected_graph.nodes)
+
+    node_sim = count_similarity(length(actual_nodes), length(expected_nodes))
+    edge_sim = count_similarity(length(actual_graph.edges), length(expected_graph.edges))
+    handler_sim = handler_distribution_similarity(actual_graph, expected_graph)
+    keyword_sim = keyword_coverage(actual_graph, expected_graph)
+
+    w = Map.merge(default_weights(), Keyword.get(opts, :weights, %{}))
+
+    score =
+      w.node_count * node_sim +
+        w.edge_count * edge_sim +
+        w.handler_dist * handler_sim +
+        w.keyword_coverage * keyword_sim
+
+    threshold = Keyword.get(opts, :pass_threshold, 0.5)
+
+    %{
+      score: score,
+      passed: score >= threshold,
+      parseable: true,
+      detail:
+        build_detail(
+          node_sim,
+          edge_sim,
+          handler_sim,
+          keyword_sim,
+          actual_graph,
+          expected_graph
+        )
+    }
+  end
+
+  defp parse_failure_result(actual_str) do
+    trimmed = String.trim(actual_str)
+    preview = trimmed |> String.split("\n") |> List.first("") |> String.slice(0, 100)
+    contains_digraph = String.contains?(trimmed, "digraph")
+
+    %{
+      score: 0.0,
+      passed: false,
+      parseable: false,
+      detail:
+        "Not valid DOT (#{String.length(trimmed)} chars, " <>
+          "contains_digraph=#{contains_digraph}). " <>
+          "First line: #{preview}"
+    }
+  end
+
+  # Try to extract DOT content from markdown fences or after thinking blocks
+  defp extract_dot(text) do
+    # Strip <think>...</think> blocks (common with thinking models)
+    stripped = Regex.replace(~r/<think>[\s\S]*?<\/think>/m, text, "")
+
+    # Try markdown code fence extraction
+    case Regex.run(~r/```(?:dot|graphviz)?\s*\n([\s\S]*?)```/m, stripped) do
+      [_, dot_content] ->
+        dot = String.trim(dot_content)
+        if String.contains?(dot, "digraph"), do: {:ok, dot}, else: :none
+
+      nil ->
+        # Try bare digraph extraction
+        case Regex.run(~r/(digraph\s+\w+\s*\{[\s\S]*\})/m, stripped) do
+          [_, dot_content] -> {:ok, String.trim(dot_content)}
+          nil -> :none
+        end
     end
   end
 
