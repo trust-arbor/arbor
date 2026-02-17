@@ -12,12 +12,15 @@ for table <- [
   end
 end
 
-for child <- [
-      {Registry, keys: :unique, name: Arbor.Memory.Registry},
-      {Arbor.Memory.IndexSupervisor, []},
-      {Arbor.Persistence.EventLog.ETS, name: :memory_events}
-    ] do
-  Supervisor.start_child(Arbor.Memory.Supervisor, child)
+# Gracefully handle --no-start: only add children if the supervisor is running
+if Process.whereis(Arbor.Memory.Supervisor) do
+  for child <- [
+        {Registry, keys: :unique, name: Arbor.Memory.Registry},
+        {Arbor.Memory.IndexSupervisor, []},
+        {Arbor.Persistence.EventLog.ETS, name: :memory_events}
+      ] do
+    Supervisor.start_child(Arbor.Memory.Supervisor, child)
+  end
 end
 
 ExUnit.start()

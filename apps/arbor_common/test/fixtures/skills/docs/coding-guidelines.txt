@@ -1,0 +1,7 @@
+Coding Guidelines
+
+Follow these guidelines when contributing to the project:
+
+1. Write tests first
+2. Keep functions small
+3. Use descriptive names
