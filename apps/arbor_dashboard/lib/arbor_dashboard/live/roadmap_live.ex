@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
 
@@ -31,23 +32,10 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
         total_items: total
       )
 
-    socket =
-      if connected?(socket) do
-        Arbor.Web.SignalLive.subscribe(socket, "sdlc.*", &reload_roadmap/1)
-      else
-        socket
-      end
+    socket = subscribe_signals(socket, "sdlc.*", &reload_roadmap/1)
 
     {:ok, socket}
   end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
-  end
-
-  @impl true
-  def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp reload_roadmap(socket) do
     stages = socket.assigns.stages

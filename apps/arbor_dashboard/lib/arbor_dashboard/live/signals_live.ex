@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
   import Arbor.Web.Helpers
@@ -59,10 +60,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     {:ok, socket}
   end
 
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
-  end
+  # terminate/2 injected by SignalSubscription — calls unsubscribe automatically
 
   @impl true
   @max_buffer 1000

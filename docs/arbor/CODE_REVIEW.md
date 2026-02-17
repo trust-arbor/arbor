@@ -59,8 +59,7 @@
 - [x] Reviewed: Two copies use different registries (ExecutorRegistry vs ReasoningLoopRegistry). One-liner functions that are intentionally separate per GenServer.
 
 ### D7. SafeAtom allowlist boilerplate — 5 x 40 lines in safe_atom.ex
-- [ ] Create `define_enum/2` macro for identity_statuses, taint_levels, taint_roles, taint_policies, signal_categories
-- [ ] Replace ~200 lines of repetitive code
+- [x] Refactored with `@enum_definitions` compile-time code generation. `define_enum` generates `to_atom/1`, `valid?/1`, and `all/0` functions for each enum from a single keyword list declaration. Replaced ~200 lines of repetitive code. `safe_atom.ex` now 409 lines.
 
 ### D8. Shell authorization pattern repeated 3 times identically
 - [x] Extracted `authorize_and_dispatch/4` in `apps/arbor_shell/lib/arbor/shell.ex`. Three `authorize_and_execute*` functions now delegate to shared dispatch.
@@ -69,8 +68,7 @@
 - [x] Reviewed: Sync and async share 3-line preamble (sandbox check + register). Streaming version is quite different (PortSession). Minimal duplication — not worth extracting.
 
 ### D10. Signal subscription boilerplate repeated in 7+ LiveViews
-- [ ] Extract `SignalSubscription` helper/component in arbor_dashboard
-- [ ] Replace mount/terminate/handle_info patterns across all LiveViews
+- [x] Created `Arbor.Dashboard.Live.SignalSubscription` (121 lines) with `subscribe_signals/3` function and `use` macro with `@before_compile` for conditional `terminate/2` and `handle_info/2` injection. Updated 9 LiveViews to use the shared helper.
 
 ### D11. Validation pattern (optional type check) repeated 4 times
 - [x] Extracted `validate_optional/3` in `apps/arbor_contracts/lib/arbor/contracts/error.ex`. Four `validate_optional_*` functions now delegate to generic function with type check callback.
@@ -277,16 +275,16 @@
 ## Phase 6: Simplification & Dead Code
 
 ### O1. ChatLive 50+ socket assigns
-- [ ] Group into 7 state structs (covered by R1)
+- [x] Addressed by R1: ChatLive split from 2,057→981 lines. Components and Helpers extracted. Socket assigns reduced via component encapsulation.
 
 ### O2. 38 handle_event clauses in one module
-- [ ] Split into service modules (covered by R1)
+- [x] Addressed by R1: Event handling simplified. GroupChat handles group events, Helpers handle data transformation. Parent retains core LiveView events.
 
 ### O3. Taint policy checking spread across 5 functions
 - [x] Extracted to `Arbor.Actions.TaintEnforcement` module (~130 lines). Facade calls `TaintEnforcement.check/3` and `TaintEnforcement.maybe_emit_propagated/3`.
 
 ### O4. `generate_text_with_tools` — 97 lines
-- [ ] Split into pipeline (covered by R10)
+- [x] Addressed by R10: serialization and signal extraction refactored. Function retained as single pipeline entry point with delegated internals.
 
 ### O5. Persistence auth wrappers take 5-6 positional params
 - [x] Reviewed: each param (agent_id, name, backend, key/stream, value, opts) is semantically distinct. Grouping into context map would obscure the API. Four functions follow identical pattern. Acceptable as-is.

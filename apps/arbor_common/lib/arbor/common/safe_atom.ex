@@ -237,248 +237,84 @@ defmodule Arbor.Common.SafeAtom do
   end
 
   # =============================================================================
-  # Identity lifecycle allowlists
+  # Enum generation for reducing allowlist boilerplate
   # =============================================================================
+  #
+  # Each call to `define_enum/3` below generates:
+  #   - A module attribute `@valid_<name>` with the allowed atom list
+  #   - A `<name>/0` function returning the allowed values
+  #   - A `to_<converter>/1` function for safe string-to-atom conversion
+  #
+  # Modes:
+  #   :strict  - returns {:ok, atom} | {:error, {:not_allowed, value}}
+  #   :fallback - returns the atom directly, :unknown on miss
+  #
+  # Accept:
+  #   :binary_only - converter only accepts binary input
+  #   :any         - converter accepts both binary and atom input
 
-  @identity_statuses [:active, :suspended, :revoked]
-
-  @doc """
-  Returns the list of valid identity lifecycle statuses.
-
-  Identity statuses:
-  - `:active` - Identity is active and can be used normally
-  - `:suspended` - Identity is temporarily suspended, can be resumed
-  - `:revoked` - Identity is permanently revoked (terminal state)
-  """
-  @spec identity_statuses() :: [atom()]
-  def identity_statuses, do: @identity_statuses
-
-  @doc """
-  Safely convert a string to an identity status atom.
-
-  Returns `{:ok, status}` if the string is a valid identity status,
-  or `{:error, {:not_allowed, string}}` otherwise.
-
-  ## Examples
-
-      iex> Arbor.Common.SafeAtom.to_identity_status("active")
-      {:ok, :active}
-
-      iex> Arbor.Common.SafeAtom.to_identity_status("suspended")
-      {:ok, :suspended}
-
-      iex> Arbor.Common.SafeAtom.to_identity_status("revoked")
-      {:ok, :revoked}
-
-      iex> Arbor.Common.SafeAtom.to_identity_status("invalid")
-      {:error, {:not_allowed, "invalid"}}
-  """
-  @spec to_identity_status(String.t() | atom()) :: allowed_result()
-  def to_identity_status(value) when is_binary(value) do
-    to_allowed(value, @identity_statuses)
-  end
-
-  def to_identity_status(value) when is_atom(value) do
-    to_allowed(value, @identity_statuses)
-  end
-
-  # =============================================================================
-  # Taint tracking allowlists and helpers
-  # =============================================================================
-
-  @taint_levels [:trusted, :derived, :untrusted, :hostile]
-  @taint_roles [:control, :data]
-  @taint_policies [:strict, :permissive, :audit_only]
-
-  @doc """
-  Returns the list of valid taint levels for the taint tracking system.
-
-  Taint levels (ordered by severity):
-  - `:trusted` - Data from known, verified sources
-  - `:derived` - Data derived from processing that included untrusted context
-  - `:untrusted` - Data from external sources that hasn't been verified
-  - `:hostile` - Data actively identified as malicious
-  """
-  @spec taint_levels() :: [atom()]
-  def taint_levels, do: @taint_levels
-
-  @doc """
-  Returns the list of valid taint roles for action parameters.
-
-  Roles:
-  - `:control` - Parameters that affect execution flow (paths, commands, modules)
-  - `:data` - Parameters that are just processed content
-  """
-  @spec taint_roles() :: [atom()]
-  def taint_roles, do: @taint_roles
-
-  @doc """
-  Safely convert a string to a taint level atom.
-
-  Returns `{:ok, level}` if the string is a valid taint level,
-  or `{:error, {:not_allowed, string}}` otherwise.
-
-  ## Examples
-
-      iex> Arbor.Common.SafeAtom.to_taint_level("trusted")
-      {:ok, :trusted}
-
-      iex> Arbor.Common.SafeAtom.to_taint_level("untrusted")
-      {:ok, :untrusted}
-
-      iex> Arbor.Common.SafeAtom.to_taint_level("invalid")
-      {:error, {:not_allowed, "invalid"}}
-  """
-  @spec to_taint_level(String.t()) :: allowed_result()
-  def to_taint_level(value) when is_binary(value) do
-    to_allowed(value, @taint_levels)
-  end
-
-  @doc """
-  Safely convert a string to a taint role atom.
-
-  Returns `{:ok, role}` if the string is a valid taint role,
-  or `{:error, {:not_allowed, string}}` otherwise.
-
-  ## Examples
-
-      iex> Arbor.Common.SafeAtom.to_taint_role("control")
-      {:ok, :control}
-
-      iex> Arbor.Common.SafeAtom.to_taint_role("data")
-      {:ok, :data}
-
-      iex> Arbor.Common.SafeAtom.to_taint_role("invalid")
-      {:error, {:not_allowed, "invalid"}}
-  """
-  @spec to_taint_role(String.t()) :: allowed_result()
-  def to_taint_role(value) when is_binary(value) do
-    to_allowed(value, @taint_roles)
-  end
-
-  @doc """
-  Returns the list of valid taint policies for capability constraints.
-
-  Taint policies:
-  - `:strict` - Block derived, untrusted, hostile on control params. Only trusted allowed.
-  - `:permissive` - Block untrusted, hostile on control params. Derived allowed (default).
-  - `:audit_only` - Log taint violations but don't block execution.
-  """
-  @spec taint_policies() :: [atom()]
-  def taint_policies, do: @taint_policies
-
-  @doc """
-  Safely convert a string to a taint policy atom.
-
-  Returns `{:ok, policy}` if the string is a valid taint policy,
-  or `{:error, {:not_allowed, string}}` otherwise.
-
-  ## Examples
-
-      iex> Arbor.Common.SafeAtom.to_taint_policy("strict")
-      {:ok, :strict}
-
-      iex> Arbor.Common.SafeAtom.to_taint_policy("permissive")
-      {:ok, :permissive}
-
-      iex> Arbor.Common.SafeAtom.to_taint_policy("audit_only")
-      {:ok, :audit_only}
-
-      iex> Arbor.Common.SafeAtom.to_taint_policy("invalid")
-      {:error, {:not_allowed, "invalid"}}
-  """
-  @spec to_taint_policy(String.t()) :: allowed_result()
-  def to_taint_policy(value) when is_binary(value) do
-    to_allowed(value, @taint_policies)
-  end
-
-  # =============================================================================
-  # Arbor-specific allowlists and helpers
-  # =============================================================================
-
-  @doc """
-  Known signal/event categories in the Arbor system.
-
-  Used by event converters and signal processors to safely convert
-  category strings to atoms.
-  """
-  @signal_categories [:activity, :security, :metrics, :traces, :logs, :alerts, :custom, :unknown]
-
-  @spec signal_categories() :: [atom()]
-  def signal_categories, do: @signal_categories
-
-  @doc """
-  Known subject type prefixes for entity IDs.
-
-  Entity IDs follow the pattern "prefix_id" (e.g., "agent_001", "session_abc").
-  This list defines known prefixes for safe atom conversion.
-  """
-  @subject_types [
-    :agent,
-    :session,
-    :task,
-    :action,
-    :event,
-    :signal,
-    :capability,
-    :identity,
-    :unknown
+  @enum_definitions [
+    {:identity_statuses, [:active, :suspended, :revoked],
+     converter: :to_identity_status, mode: :strict, accept: :any},
+    {:taint_levels, [:trusted, :derived, :untrusted, :hostile],
+     converter: :to_taint_level, mode: :strict, accept: :binary_only},
+    {:taint_roles, [:control, :data],
+     converter: :to_taint_role, mode: :strict, accept: :binary_only},
+    {:taint_policies, [:strict, :permissive, :audit_only],
+     converter: :to_taint_policy, mode: :strict, accept: :binary_only},
+    {:signal_categories, [:activity, :security, :metrics, :traces, :logs, :alerts, :custom, :unknown],
+     converter: :to_category, mode: :fallback, accept: :any},
+    {:subject_types,
+     [:agent, :session, :task, :action, :event, :signal, :capability, :identity, :unknown],
+     converter: :to_subject_type, mode: :fallback, accept: :any}
   ]
 
-  @spec subject_types() :: [atom()]
-  def subject_types, do: @subject_types
+  for {name, values, opts} <- @enum_definitions do
+    converter = Keyword.fetch!(opts, :converter)
+    mode = Keyword.fetch!(opts, :mode)
+    accept = Keyword.fetch!(opts, :accept)
 
-  @doc """
-  Safely convert a category string to an atom.
+    # Safe: name comes from compile-time @enum_definitions literals, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    Module.put_attribute(__MODULE__, :"valid_#{name}", values)
 
-  Returns `:unknown` for unrecognized categories rather than creating new atoms.
+    @doc false
+    @spec unquote(name)() :: [atom()]
+    def unquote(name)(), do: unquote(values)
 
-  ## Examples
+    case {mode, accept} do
+      {:strict, :binary_only} ->
+        @doc false
+        @spec unquote(converter)(String.t()) :: allowed_result()
+        def unquote(converter)(value) when is_binary(value) do
+          to_allowed(value, unquote(values))
+        end
 
-      iex> Arbor.Common.SafeAtom.to_category("activity")
-      :activity
+      {:strict, :any} ->
+        @doc false
+        @spec unquote(converter)(String.t() | atom()) :: allowed_result()
+        def unquote(converter)(value) when is_binary(value) do
+          to_allowed(value, unquote(values))
+        end
 
-      iex> Arbor.Common.SafeAtom.to_category("malicious_category_from_attacker")
-      :unknown
+        def unquote(converter)(value) when is_atom(value) do
+          to_allowed(value, unquote(values))
+        end
 
-      iex> Arbor.Common.SafeAtom.to_category(:security)
-      :security
-  """
-  @spec to_category(String.t() | atom()) :: atom()
-  def to_category(category) when is_binary(category) do
-    case to_allowed(category, @signal_categories) do
-      {:ok, atom} -> atom
-      {:error, _} -> :unknown
+      {:fallback, :any} ->
+        @doc false
+        @spec unquote(converter)(String.t() | atom()) :: atom()
+        def unquote(converter)(value) when is_binary(value) do
+          case to_allowed(value, unquote(values)) do
+            {:ok, atom} -> atom
+            {:error, _} -> :unknown
+          end
+        end
+
+        def unquote(converter)(value) when is_atom(value) do
+          if value in unquote(values), do: value, else: :unknown
+        end
     end
-  end
-
-  def to_category(category) when is_atom(category) do
-    if category in @signal_categories, do: category, else: :unknown
-  end
-
-  @doc """
-  Safely convert a subject type prefix string to an atom.
-
-  Returns `:unknown` for unrecognized prefixes.
-
-  ## Examples
-
-      iex> Arbor.Common.SafeAtom.to_subject_type("agent")
-      :agent
-
-      iex> Arbor.Common.SafeAtom.to_subject_type("evil_prefix")
-      :unknown
-  """
-  @spec to_subject_type(String.t() | atom()) :: atom()
-  def to_subject_type(prefix) when is_binary(prefix) do
-    case to_allowed(prefix, @subject_types) do
-      {:ok, atom} -> atom
-      {:error, _} -> :unknown
-    end
-  end
-
-  def to_subject_type(prefix) when is_atom(prefix) do
-    if prefix in @subject_types, do: prefix, else: :unknown
   end
 
   @doc """

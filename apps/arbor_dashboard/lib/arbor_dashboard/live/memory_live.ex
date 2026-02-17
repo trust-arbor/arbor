@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
   import Arbor.Web.Helpers
@@ -38,7 +39,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       if connected?(socket) do
         Process.send_after(self(), :refresh, @refresh_interval)
 
-        Arbor.Web.SignalLive.subscribe(socket, "memory.*", fn s ->
+        subscribe_signals(socket, "memory.*", fn s ->
           if aid = s.assigns.agent_id do
             load_tab_data(s, s.assigns.active_tab, aid)
           else
@@ -69,10 +70,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     {:ok, socket}
   end
 
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
-  end
+  # terminate/2 injected by SignalSubscription — calls unsubscribe automatically
 
   # ── Events ────────────────────────────────────────────────────────
 
