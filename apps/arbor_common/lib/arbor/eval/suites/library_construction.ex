@@ -12,10 +12,10 @@ defmodule Arbor.Eval.Suites.LibraryConstruction do
   ## Usage
 
       # Check a library
-      {:ok, result} = LibraryConstruction.check_directory("apps/arbor_eval/lib/")
+      {:ok, result} = LibraryConstruction.check_directory("apps/arbor_common/lib/")
 
       # Strict mode for new libraries
-      {:ok, result} = LibraryConstruction.check_directory("apps/arbor_eval/lib/",
+      {:ok, result} = LibraryConstruction.check_directory("apps/arbor_common/lib/",
         strictness: :strict,
         fail_on: :warning
       )
@@ -29,7 +29,7 @@ defmodule Arbor.Eval.Suites.LibraryConstruction do
 
   Use the mix task for CI:
 
-      mix arbor.check_library apps/arbor_eval/lib/ --ci
+      mix arbor.check_library apps/arbor_common/lib/ --ci
 
   ## Strictness Levels
 

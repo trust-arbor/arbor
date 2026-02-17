@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CodeQualityTest do
 
       result = CodeQuality.grade(code, nil)
 
-      # If arbor_eval is loaded, we get real scores
+      # If Arbor.Eval is loaded, we get real scores
       # If not loaded, graceful degradation
       assert is_float(result.score)
       assert is_boolean(result.passed)
@@ -50,7 +50,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CodeQualityTest do
       assert is_binary(result.detail)
     end
 
-    test "gracefully degrades when arbor_eval checks are unavailable" do
+    test "gracefully degrades when eval checks are unavailable" do
       # Pass a non-existent check module
       code = "defmodule Test do end"
       result = CodeQuality.grade(code, nil, checks: [NonExistentModule.Check])

@@ -1,6 +1,6 @@
 defmodule Arbor.Orchestrator.Eval.Graders.CodeQuality do
   @moduledoc """
-  Grader that bridges to `arbor_eval` static analysis checks.
+  Grader that bridges to `arbor_common` static analysis checks.
 
   Runs the code through Arbor.Eval.check_code/2 and scores based on
   how many checks pass. Uses runtime bridge for cross-hierarchy access.
@@ -33,7 +33,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CodeQuality do
       %{
         score: 0.0,
         passed: false,
-        detail: "arbor_eval not available — cannot run static analysis"
+        detail: "Arbor.Eval not available — cannot run static analysis"
       }
     end
   end

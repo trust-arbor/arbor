@@ -159,7 +159,7 @@ defmodule Arbor.Gateway.Dev.Router do
       arbor_gateway arbor_comms arbor_ai arbor_trust arbor_security
       arbor_signals arbor_common arbor_contracts arbor_persistence
       arbor_consensus arbor_historian arbor_agent arbor_actions
-      arbor_shell arbor_web arbor_sandbox arbor_eval
+      arbor_shell arbor_web arbor_sandbox
     )
 
     if app_name in allowed_apps do

@@ -36,7 +36,7 @@ defmodule Arbor.MixProject do
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
 
       # These are umbrella apps now, auto-discovered via apps_path
-      # arbor_eval — code quality evaluation (dev/test only via its mix.exs)
+      # arbor_eval — merged into arbor_common as Arbor.Eval + Arbor.Common.SensitiveData
       # arbor_checkpoint — merged into arbor_persistence as Arbor.Persistence.Checkpoint
     ]
   end

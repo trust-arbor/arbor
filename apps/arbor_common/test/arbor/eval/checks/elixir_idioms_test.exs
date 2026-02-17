@@ -100,7 +100,6 @@ defmodule Arbor.Eval.Checks.ElixirIdiomsTest do
 
   describe "inefficient enum order" do
     test "detects Enum.map followed by Enum.filter (inefficient)" do
-      # Map then filter is inefficient - filter first to reduce list size
       ast =
         quote do
           def test(list) do
@@ -112,14 +111,12 @@ defmodule Arbor.Eval.Checks.ElixirIdiomsTest do
 
       result = ElixirIdioms.run(%{ast: ast})
 
-      # Check in violations (where it's added, with severity :suggestion)
       assert Enum.any?(result.violations, fn v ->
                v.type == :inefficient_enum_order
              end)
     end
 
     test "does not flag Enum.filter followed by Enum.map (efficient)" do
-      # Filter then map is fine - reduces list size first
       ast =
         quote do
           def test(list) do
@@ -131,7 +128,6 @@ defmodule Arbor.Eval.Checks.ElixirIdiomsTest do
 
       result = ElixirIdioms.run(%{ast: ast})
 
-      # Should NOT flag this pattern
       refute Enum.any?(result.violations, fn v ->
                v.type == :inefficient_enum_order
              end)
@@ -164,7 +160,6 @@ defmodule Arbor.Eval.Checks.ElixirIdiomsTest do
 
       result = ElixirIdioms.run(%{ast: ast})
 
-      # Violations with severity :warning
       assert Enum.any?(result.violations, &(&1.type == :genserver_call_no_timeout))
     end
 

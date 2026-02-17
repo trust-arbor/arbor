@@ -49,7 +49,6 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
     end
 
     test "accepts @moduledoc false" do
-      # Build AST from code to ensure @moduledoc false is preserved correctly
       code = """
       defmodule Test do
         @moduledoc false
@@ -60,7 +59,6 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
       {:ok, ast} = Code.string_to_quoted(code)
       result = Documentation.run(%{ast: ast})
 
-      # Should not have missing_moduledoc violations when @moduledoc false is present
       moduledoc_violations = Enum.filter(result.violations, &(&1.type == :missing_moduledoc))
       assert moduledoc_violations == []
     end
@@ -131,7 +129,6 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
 
       result = Documentation.run(%{ast: ast})
 
-      # Should not flag init, handle_call, handle_cast
       refute Enum.any?(result.violations, fn v ->
                v.type == :missing_doc and
                  (String.contains?(v.message, "init") or
@@ -158,12 +155,13 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
       {:ok, ast} = Code.string_to_quoted(code)
       result = Documentation.run(%{ast: ast})
 
-      # Should not flag any expired? function
-      missing_doc_violations = Enum.filter(result.violations, fn v ->
-        v.type == :missing_doc and String.contains?(v.message, "expired?")
-      end)
+      missing_doc_violations =
+        Enum.filter(result.violations, fn v ->
+          v.type == :missing_doc and String.contains?(v.message, "expired?")
+        end)
 
-      assert missing_doc_violations == [], "Multi-clause function should not trigger missing_doc violation"
+      assert missing_doc_violations == [],
+             "Multi-clause function should not trigger missing_doc violation"
     end
 
     test "does not flag three-clause functions when first clause has @doc" do
@@ -181,9 +179,10 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
       {:ok, ast} = Code.string_to_quoted(code)
       result = Documentation.run(%{ast: ast})
 
-      missing_doc_violations = Enum.filter(result.violations, fn v ->
-        v.type == :missing_doc and String.contains?(v.message, "process")
-      end)
+      missing_doc_violations =
+        Enum.filter(result.violations, fn v ->
+          v.type == :missing_doc and String.contains?(v.message, "process")
+        end)
 
       assert missing_doc_violations == []
     end
@@ -201,10 +200,10 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
       {:ok, ast} = Code.string_to_quoted(code)
       result = Documentation.run(%{ast: ast})
 
-      # Should flag exactly one missing_doc for undocumented
-      missing_doc_violations = Enum.filter(result.violations, fn v ->
-        v.type == :missing_doc and String.contains?(v.message, "undocumented")
-      end)
+      missing_doc_violations =
+        Enum.filter(result.violations, fn v ->
+          v.type == :missing_doc and String.contains?(v.message, "undocumented")
+        end)
 
       assert length(missing_doc_violations) == 1
     end
@@ -226,16 +225,18 @@ defmodule Arbor.Eval.Checks.DocumentationTest do
       {:ok, ast} = Code.string_to_quoted(code)
       result = Documentation.run(%{ast: ast})
 
-      # Should not flag documented
-      doc_violations_for_documented = Enum.filter(result.violations, fn v ->
-        v.type == :missing_doc and String.contains?(v.message, "'documented/")
-      end)
+      doc_violations_for_documented =
+        Enum.filter(result.violations, fn v ->
+          v.type == :missing_doc and String.contains?(v.message, "'documented/")
+        end)
+
       assert doc_violations_for_documented == []
 
-      # Should flag undocumented exactly once
-      doc_violations_for_undocumented = Enum.filter(result.violations, fn v ->
-        v.type == :missing_doc and String.contains?(v.message, "'undocumented/")
-      end)
+      doc_violations_for_undocumented =
+        Enum.filter(result.violations, fn v ->
+          v.type == :missing_doc and String.contains?(v.message, "'undocumented/")
+        end)
+
       assert length(doc_violations_for_undocumented) == 1
     end
   end

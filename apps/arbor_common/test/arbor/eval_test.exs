@@ -20,7 +20,8 @@ defmodule Arbor.EvalTest do
     end
 
     test "returns error for invalid code" do
-      assert {:error, {:parse_error, _, _}} = Arbor.Eval.run(Arbor.Eval.Checks.Documentation, code: "def invalid(")
+      assert {:error, {:parse_error, _, _}} =
+               Arbor.Eval.run(Arbor.Eval.Checks.Documentation, code: "def invalid(")
     end
   end
 
@@ -33,10 +34,11 @@ defmodule Arbor.EvalTest do
       end
       """
 
-      {:ok, results} = Arbor.Eval.run_all(
-        [Arbor.Eval.Checks.Documentation, Arbor.Eval.Checks.ElixirIdioms],
-        code: code
-      )
+      {:ok, results} =
+        Arbor.Eval.run_all(
+          [Arbor.Eval.Checks.Documentation, Arbor.Eval.Checks.ElixirIdioms],
+          code: code
+        )
 
       assert length(results) == 2
       assert Enum.any?(results, &(&1.name == "documentation"))
@@ -46,7 +48,6 @@ defmodule Arbor.EvalTest do
 
   describe "check_file/2" do
     test "checks a file" do
-      # Create a temp file
       path = Path.join(System.tmp_dir!(), "test_#{System.unique_integer([:positive])}.ex")
 
       File.write!(path, """
@@ -65,7 +66,8 @@ defmodule Arbor.EvalTest do
     end
 
     test "returns error for missing file" do
-      assert {:error, {:file_read_failed, _, :enoent}} = Arbor.Eval.check_file("/nonexistent/file.ex")
+      assert {:error, {:file_read_failed, _, :enoent}} =
+               Arbor.Eval.check_file("/nonexistent/file.ex")
     end
   end
 

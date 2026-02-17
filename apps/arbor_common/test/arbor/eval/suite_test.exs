@@ -34,7 +34,6 @@ defmodule Arbor.Eval.SuiteTest do
       dir = Path.join(System.tmp_dir!(), "suite_test_dir_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
-      # Create two test files
       File.write!(Path.join(dir, "module_a.ex"), """
       defmodule ModuleA do
         @moduledoc "Module A"
@@ -75,7 +74,6 @@ defmodule Arbor.Eval.SuiteTest do
       dir = Path.join(System.tmp_dir!(), "exclude_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(Path.join(dir, "test"))
 
-      # Create main file
       File.write!(Path.join(dir, "main.ex"), """
       defmodule Main do
         @moduledoc "Main"
@@ -84,7 +82,6 @@ defmodule Arbor.Eval.SuiteTest do
       end
       """)
 
-      # Create test file (should be excluded by default)
       File.write!(Path.join([dir, "test", "main_test.exs"]), """
       defmodule MainTest do
         use ExUnit.Case
@@ -96,7 +93,6 @@ defmodule Arbor.Eval.SuiteTest do
 
       try do
         {:ok, result} = LibraryConstruction.check_directory(dir)
-        # Only the main file should be checked, test file filtered out
         assert result.files_checked == 1
       after
         File.rm_rf!(dir)
@@ -109,7 +105,6 @@ defmodule Arbor.Eval.SuiteTest do
       dir = Path.join(System.tmp_dir!(), "summary_test_#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
 
-      # Create file with violations
       File.write!(Path.join(dir, "has_issues.ex"), """
       defmodule HasIssues do
         def undocumented(), do: :no_doc
@@ -134,10 +129,11 @@ defmodule Arbor.Eval.SuiteTest do
 
   describe "fail_on option" do
     test "fail_on :error only fails on errors" do
-      dir = Path.join(System.tmp_dir!(), "failon_error_test_#{System.unique_integer([:positive])}")
+      dir =
+        Path.join(System.tmp_dir!(), "failon_error_test_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(dir)
 
-      # Create file with only warnings (missing moduledoc is a warning)
       File.write!(Path.join(dir, "warnings_only.ex"), """
       defmodule WarningsOnly do
         def init(_), do: {:ok, []}
@@ -146,7 +142,6 @@ defmodule Arbor.Eval.SuiteTest do
 
       try do
         {:ok, result} = LibraryConstruction.check_directory(dir, fail_on: :error)
-        # Should pass because missing_moduledoc is only a warning
         assert result.passed
       after
         File.rm_rf!(dir)
