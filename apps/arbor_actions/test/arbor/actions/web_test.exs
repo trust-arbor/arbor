@@ -2,9 +2,9 @@ defmodule Arbor.Actions.WebTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Web
-  alias Browse
-  alias Search
-  alias Snapshot
+  alias Arbor.Actions.Web.Browse
+  alias Arbor.Actions.Web.Search
+  alias Arbor.Actions.Web.Snapshot
 
   describe "validate_url/1" do
     test "allows https URLs" do

@@ -705,6 +705,10 @@ defmodule Arbor.Consensus.Coordinator do
     _ ->
       # If security module isn't available, deny by default (fail-closed)
       {:error, {:unauthorized, :security_unavailable}}
+  catch
+    :exit, _ ->
+      # GenServer not running (Identity.Registry etc.) — fail closed
+      {:error, {:unauthorized, :security_unavailable}}
   end
 
   defp maybe_authorize(nil, _proposal), do: :ok
