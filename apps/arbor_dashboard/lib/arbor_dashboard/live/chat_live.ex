@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   require Logger
 

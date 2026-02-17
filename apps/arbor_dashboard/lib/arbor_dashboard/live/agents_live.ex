@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
 
@@ -32,23 +33,10 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       |> stream_configure(:agents, dom_id: &"agent-#{&1.agent_id}")
       |> stream(:agents, profiles)
 
-    socket =
-      if connected?(socket) do
-        Arbor.Web.SignalLive.subscribe(socket, "agent.*", &reload_agents/1)
-      else
-        socket
-      end
+    socket = subscribe_signals(socket, "agent.*", &reload_agents/1)
 
     {:ok, socket}
   end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
-  end
-
-  @impl true
-  def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp reload_agents(socket) do
     {running, profiles} = safe_load_agents()

@@ -24,6 +24,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
   import Arbor.Dashboard.Components.ProposalDiff
@@ -103,11 +104,6 @@ defmodule Arbor.Dashboard.Live.DemoLive do
       end
 
     {:ok, socket}
-  end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true

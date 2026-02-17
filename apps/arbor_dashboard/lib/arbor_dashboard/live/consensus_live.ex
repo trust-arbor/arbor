@@ -7,6 +7,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
 
@@ -32,23 +33,10 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
       |> stream(:proposals, proposals)
       |> stream(:decisions, decisions)
 
-    socket =
-      if connected?(socket) do
-        Arbor.Web.SignalLive.subscribe(socket, "consensus.*", &reload_consensus/1)
-      else
-        socket
-      end
+    socket = subscribe_signals(socket, "consensus.*", &reload_consensus/1)
 
     {:ok, socket}
   end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
-  end
-
-  @impl true
-  def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp reload_consensus(socket) do
     {proposals, decisions, stats, topics} = safe_load_all()

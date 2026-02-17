@@ -8,6 +8,7 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
 
@@ -46,11 +47,6 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
       end
 
     {:ok, socket}
-  end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true

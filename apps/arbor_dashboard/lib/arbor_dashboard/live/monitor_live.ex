@@ -13,6 +13,7 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
   """
 
   use Phoenix.LiveView
+  use Arbor.Dashboard.Live.SignalSubscription
 
   import Arbor.Web.Components
 
@@ -34,7 +35,7 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
       if connected?(socket) do
         :timer.send_interval(@refresh_interval, :refresh)
 
-        Arbor.Web.SignalLive.subscribe(socket, "monitor.*", fn s ->
+        subscribe_signals(socket, "monitor.*", fn s ->
           assign(s, anomalies: safe_fetch_anomalies())
         end)
       else
@@ -42,11 +43,6 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
       end
 
     {:ok, socket}
-  end
-
-  @impl true
-  def terminate(_reason, socket) do
-    Arbor.Web.SignalLive.unsubscribe(socket)
   end
 
   @impl true
