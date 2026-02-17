@@ -58,8 +58,12 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
         end
 
       {:error, reason} ->
-        %{score: 0.0, passed: false, parseable: false,
-          detail: "Expected DOT parse error (bug in dataset): #{inspect(reason)}"}
+        %{
+          score: 0.0,
+          passed: false,
+          parseable: false,
+          detail: "Expected DOT parse error (bug in dataset): #{inspect(reason)}"
+        }
     end
   end
 

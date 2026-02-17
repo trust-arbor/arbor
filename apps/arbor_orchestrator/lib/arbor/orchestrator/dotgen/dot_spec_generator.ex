@@ -296,7 +296,10 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
         else
           handler_type = HandlerRegistry.node_type(node)
           outgoing = Graph.outgoing_edges(graph, id)
-          conditional_edges = Enum.filter(outgoing, fn e -> Edge.attr(e, "condition", "") != "" end)
+
+          conditional_edges =
+            Enum.filter(outgoing, fn e -> Edge.attr(e, "condition", "") != "" end)
+
           parallel = Node.attr(node, "shape") == "component"
 
           cond do

@@ -456,6 +456,7 @@ defmodule Mix.Tasks.Arbor.Eval do
         if not passed do
           Enum.each(scores, fn s ->
             detail = Map.get(s, :detail, "")
+
             if detail != "" and not s.passed do
               Mix.shell().info("    detail: #{String.slice(to_string(detail), 0, 200)}")
             end
@@ -463,7 +464,10 @@ defmodule Mix.Tasks.Arbor.Eval do
 
           # Show first line of actual output for failed samples
           first_line = actual |> String.trim() |> String.split("\n") |> List.first("")
-          Mix.shell().info("    output[#{String.length(actual)} chars]: #{String.slice(first_line, 0, 120)}")
+
+          Mix.shell().info(
+            "    output[#{String.length(actual)} chars]: #{String.slice(first_line, 0, 120)}"
+          )
         end
       end
 

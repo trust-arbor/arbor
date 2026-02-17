@@ -80,11 +80,6 @@ defmodule Arbor.Orchestrator.Handlers.EvalPersistHandler do
           }
         }
 
-      {:error, reason} ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "eval.persist error: #{inspect(reason)}"
-        }
     end
   rescue
     e ->
