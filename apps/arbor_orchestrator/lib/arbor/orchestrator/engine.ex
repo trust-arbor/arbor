@@ -812,6 +812,7 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp emit(opts, event) do
     pipeline_id = Keyword.get(opts, :pipeline_id, :all)
+    event = Map.put_new(event, :timestamp, DateTime.utc_now())
     EventEmitter.emit(pipeline_id, event, opts)
   end
 

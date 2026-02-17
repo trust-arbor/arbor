@@ -6,7 +6,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   and exception-based retry decisions.
   """
 
-  alias Arbor.Orchestrator.Engine.{Authorization, Outcome}
+  alias Arbor.Orchestrator.Engine.{Authorization, Backoff, Outcome}
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Handlers.Registry
 
@@ -285,63 +285,8 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     preset_name =
       Map.get(node.attrs, "retry_policy", Map.get(graph.attrs, "retry_policy", "none"))
       |> to_string()
-      |> String.downcase()
 
-    case preset_name do
-      "standard" ->
-        %{
-          max_attempts: 5,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "aggressive" ->
-        %{
-          max_attempts: 5,
-          initial_delay_ms: 500,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "linear" ->
-        %{
-          max_attempts: 3,
-          initial_delay_ms: 500,
-          backoff_factor: 1.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "patient" ->
-        %{
-          max_attempts: 3,
-          initial_delay_ms: 2_000,
-          backoff_factor: 3.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-
-      "none" ->
-        %{
-          max_attempts: 1,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: false
-        }
-
-      _ ->
-        %{
-          max_attempts: 1,
-          initial_delay_ms: 200,
-          backoff_factor: 2.0,
-          max_delay_ms: 60_000,
-          jitter: true
-        }
-    end
+    Backoff.from_string(preset_name)
   end
 
   defp truthy?(true), do: true

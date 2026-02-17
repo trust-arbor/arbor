@@ -130,6 +130,61 @@ defmodule Arbor.Orchestrator.Graph.NodeTest do
     end
   end
 
+  describe "classes/1" do
+    test "splits comma-separated class string" do
+      node = Node.from_attrs("n", %{"class" => "phase-one, security, critical"})
+      assert Node.classes(node) == ["phase-one", "security", "critical"]
+    end
+
+    test "returns single class as list" do
+      node = Node.from_attrs("n", %{"class" => "build"})
+      assert Node.classes(node) == ["build"]
+    end
+
+    test "returns empty list when no class" do
+      node = Node.from_attrs("n", %{})
+      assert Node.classes(node) == []
+    end
+
+    test "returns empty list for empty class string" do
+      node = Node.from_attrs("n", %{"class" => ""})
+      assert Node.classes(node) == []
+    end
+  end
+
+  describe "timeout_ms" do
+    test "parses seconds to milliseconds" do
+      node = Node.from_attrs("n", %{"timeout" => "30s"})
+      assert node.timeout == "30s"
+      assert node.timeout_ms == 30_000
+    end
+
+    test "parses minutes to milliseconds" do
+      node = Node.from_attrs("n", %{"timeout" => "5m"})
+      assert node.timeout_ms == 300_000
+    end
+
+    test "parses hours to milliseconds" do
+      node = Node.from_attrs("n", %{"timeout" => "1h"})
+      assert node.timeout_ms == 3_600_000
+    end
+
+    test "parses milliseconds directly" do
+      node = Node.from_attrs("n", %{"timeout" => "500ms"})
+      assert node.timeout_ms == 500
+    end
+
+    test "returns nil for unparseable timeout" do
+      node = Node.from_attrs("n", %{"timeout" => "forever"})
+      assert node.timeout_ms == nil
+    end
+
+    test "returns nil when no timeout" do
+      node = Node.from_attrs("n", %{})
+      assert node.timeout_ms == nil
+    end
+  end
+
   describe "attr/3" do
     test "reads from attrs map with string key" do
       node = Node.from_attrs("n", %{"custom_key" => "value"})
