@@ -7,6 +7,7 @@ defmodule Arbor.Consensus.Coordinator.TopicRouting do
   statistics.
   """
 
+  alias Arbor.Consensus.Coordinator.Voting
   alias Arbor.Consensus.{TopicMatcher, TopicRegistry, TopicRule}
   alias Arbor.Contracts.Consensus.Proposal
 
@@ -194,7 +195,7 @@ defmodule Arbor.Consensus.Coordinator.TopicRouting do
 
     # Calculate quorum based on the total perspectives from all evaluators
     perspectives =
-      Arbor.Consensus.Coordinator.Voting.resolve_perspectives_from_evaluators(evaluators)
+      Voting.resolve_perspectives_from_evaluators(evaluators)
 
     quorum =
       if proposal.mode == :advisory do

@@ -39,6 +39,7 @@ defmodule Arbor.Consensus.TopicRegistry do
   use GenServer
 
   alias Arbor.Consensus.TopicRule
+  alias Arbor.Persistence.Checkpoint
 
   require Logger
 
@@ -345,7 +346,7 @@ defmodule Arbor.Consensus.TopicRegistry do
   defp restore_from_checkpoint(_checkpoint_id, nil, _verify_key, _opts), do: %{}
 
   defp restore_from_checkpoint(checkpoint_id, checkpoint_store, verify_key, _opts) do
-    Arbor.Persistence.Checkpoint.load(checkpoint_id, checkpoint_store, retries: 0)
+    Checkpoint.load(checkpoint_id, checkpoint_store, retries: 0)
   rescue
     e ->
       Logger.warning("TopicRegistry: checkpoint load exception: #{inspect(e)}, starting fresh")
@@ -411,7 +412,7 @@ defmodule Arbor.Consensus.TopicRegistry do
     payload = sign_checkpoint(topics, state.signing_key)
 
     try do
-      case Arbor.Persistence.Checkpoint.save(state.checkpoint_id, payload, state.checkpoint_store) do
+      case Checkpoint.save(state.checkpoint_id, payload, state.checkpoint_store) do
         :ok ->
           Logger.debug("TopicRegistry: checkpointed #{map_size(topics)} topics")
 

@@ -46,7 +46,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapterTest do
       files = FabricAdapter.list(@fixtures_dir)
 
       assert is_list(files)
-      assert length(files) >= 1
+      assert files != []
       assert Enum.all?(files, &String.ends_with?(&1, "system.md"))
     end
 

@@ -11,7 +11,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.Agent.{Executor, ReasoningLoop}
+  alias Arbor.Agent.{Executor, Lifecycle, Manager, ReasoningLoop}
   alias Arbor.Web.Helpers
 
   @impl true
@@ -65,7 +65,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   end
 
   def handle_event("stop-agent", %{"id" => agent_id}, socket) do
-    Arbor.Agent.Manager.stop_agent(agent_id)
+    Manager.stop_agent(agent_id)
     {running, profiles} = safe_load_agents()
 
     socket =
@@ -81,7 +81,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   end
 
   def handle_event("delete-agent", %{"id" => agent_id}, socket) do
-    Arbor.Agent.Lifecycle.destroy(agent_id)
+    Lifecycle.destroy(agent_id)
     {running, profiles} = safe_load_agents()
 
     socket =
@@ -665,7 +665,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   defp safe_debug_agent_config(agent_id) do
     # For DebugAgent, check the orchestrator session config
-    case Arbor.Agent.Lifecycle.get_host(agent_id) do
+    case Lifecycle.get_host(agent_id) do
       {:ok, host_pid} ->
         state = :sys.get_state(host_pid)
 

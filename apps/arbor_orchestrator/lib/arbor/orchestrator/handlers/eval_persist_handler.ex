@@ -20,80 +20,78 @@ defmodule Arbor.Orchestrator.Handlers.EvalPersistHandler do
 
   @impl true
   def execute(node, context, _graph, _opts) do
-    try do
-      domain = Map.get(node.attrs, "domain")
+    domain = Map.get(node.attrs, "domain")
 
-      unless domain do
-        raise "eval.persist requires 'domain' attribute"
-      end
+    unless domain do
+      raise "eval.persist requires 'domain' attribute"
+    end
 
-      model =
-        Map.get(node.attrs, "model") ||
-          Context.get(context, "eval.model") ||
-          "unknown"
+    model =
+      Map.get(node.attrs, "model") ||
+        Context.get(context, "eval.model") ||
+        "unknown"
 
-      provider =
-        Map.get(node.attrs, "provider") ||
-          Context.get(context, "eval.provider") ||
-          "unknown"
+    provider =
+      Map.get(node.attrs, "provider") ||
+        Context.get(context, "eval.provider") ||
+        "unknown"
 
-      dataset =
-        Context.get(context, "eval.dataset.path") ||
-          Context.get(context, "eval.dataset_path") ||
-          "unknown"
+    dataset =
+      Context.get(context, "eval.dataset.path") ||
+        Context.get(context, "eval.dataset_path") ||
+        "unknown"
 
-      # Find results — try explicit key, then scan for eval.results.* keys
-      results = find_results(node, context)
-      metrics = find_metrics(node, context)
-      graders = extract_graders(results)
+    # Find results — try explicit key, then scan for eval.results.* keys
+    results = find_results(node, context)
+    metrics = find_metrics(node, context)
+    graders = extract_graders(results)
 
-      run_id = PersistenceBridge.generate_run_id(model, domain)
+    run_id = PersistenceBridge.generate_run_id(model, domain)
 
-      # Compute timing aggregates from per-result timing data
-      timing_metrics = compute_timing_metrics(results)
-      all_metrics = Map.merge(metrics, timing_metrics)
+    # Compute timing aggregates from per-result timing data
+    timing_metrics = compute_timing_metrics(results)
+    all_metrics = Map.merge(metrics, timing_metrics)
 
-      run_attrs = %{
-        id: run_id,
-        domain: domain,
-        model: model,
-        provider: provider,
-        dataset: dataset,
-        graders: graders,
-        sample_count: length(results),
-        duration_ms: Enum.sum(Enum.map(results, &get_duration/1)),
-        metrics: all_metrics,
-        config: %{},
-        status: "completed",
-        metadata: %{}
-      }
+    run_attrs = %{
+      id: run_id,
+      domain: domain,
+      model: model,
+      provider: provider,
+      dataset: dataset,
+      graders: graders,
+      sample_count: length(results),
+      duration_ms: Enum.sum(Enum.map(results, &get_duration/1)),
+      metrics: all_metrics,
+      config: %{},
+      status: "completed",
+      metadata: %{}
+    }
 
-      case PersistenceBridge.create_run(run_attrs) do
-        {:ok, _} ->
-          persist_results(run_id, results)
+    case PersistenceBridge.create_run(run_attrs) do
+      {:ok, _} ->
+        persist_results(run_id, results)
 
-          %Outcome{
-            status: :success,
-            notes: "Persisted run #{run_id} (#{length(results)} results, domain=#{domain})",
-            context_updates: %{
-              "eval.persist.run_id" => run_id,
-              "eval.persist.status" => "completed"
-            }
+        %Outcome{
+          status: :success,
+          notes: "Persisted run #{run_id} (#{length(results)} results, domain=#{domain})",
+          context_updates: %{
+            "eval.persist.run_id" => run_id,
+            "eval.persist.status" => "completed"
           }
+        }
 
-        {:error, reason} ->
-          %Outcome{
-            status: :fail,
-            failure_reason: "eval.persist error: #{inspect(reason)}"
-          }
-      end
-    rescue
-      e ->
+      {:error, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "eval.persist error: #{Exception.message(e)}"
+          failure_reason: "eval.persist error: #{inspect(reason)}"
         }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "eval.persist error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

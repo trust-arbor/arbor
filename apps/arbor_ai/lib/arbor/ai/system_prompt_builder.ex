@@ -8,6 +8,8 @@ defmodule Arbor.AI.SystemPromptBuilder do
   if the data isn't available.
   """
 
+  alias Arbor.Common.LazyLoader
+
   # Per-section token budgets. {:fixed, N} for static sections,
   # {:min_max, min, max, pct} for dynamic sections sized to context window.
   @section_budgets %{
@@ -17,7 +19,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     goals: {:min_max, 200, 4000, 0.05},
     working_memory: {:min_max, 500, 8000, 0.10},
     knowledge_graph: {:min_max, 200, 4000, 0.05},
-    active_skills: {:min_max, 500, 16000, 0.15},
+    active_skills: {:min_max, 500, 16_000, 0.15},
     timing: {:fixed, 200}
   }
 
@@ -172,7 +174,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_self_knowledge_section(agent_id) do
     mod = Arbor.Memory.IdentityConsolidator
 
-    if Arbor.Common.LazyLoader.exported?(mod, :get_self_knowledge, 1) do
+    if LazyLoader.exported?(mod, :get_self_knowledge, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       sk = apply(mod, :get_self_knowledge, [agent_id])
       format_self_knowledge(sk)
@@ -195,7 +197,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_goals_section(agent_id) do
     mod = Arbor.Memory.GoalStore
 
-    if Arbor.Common.LazyLoader.exported?(mod, :get_active_goals, 1) do
+    if LazyLoader.exported?(mod, :get_active_goals, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       goals = apply(mod, :get_active_goals, [agent_id])
       format_goals(goals)

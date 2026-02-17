@@ -1,6 +1,8 @@
 defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Consensus.Evaluators.AdvisoryLLM
+  alias Arbor.Consensus.Evaluators.Consult
   alias Arbor.Orchestrator.Engine
 
   @moduletag :council_pipeline
@@ -153,8 +155,8 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
   describe "Consult.decide/3 integration" do
     test "returns error when graph file not found" do
       result =
-        Arbor.Consensus.Evaluators.Consult.decide(
-          Arbor.Consensus.Evaluators.AdvisoryLLM,
+        Consult.decide(
+          AdvisoryLLM,
           "test question",
           graph: "/nonexistent/path.dot"
         )

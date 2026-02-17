@@ -147,20 +147,18 @@ defmodule Arbor.Orchestrator.Transforms.ModelStylesheet do
   end
 
   defp do_scan_rules([char | rest], current, acc) do
-    cond do
-      char == ?} ->
-        fragment = current ++ [char]
+    if char == ?} do
+      fragment = current ++ [char]
 
-        acc =
-          case parse_rule_fragment(fragment) do
-            nil -> acc
-            pair -> acc ++ [pair]
-          end
+      acc =
+        case parse_rule_fragment(fragment) do
+          nil -> acc
+          pair -> acc ++ [pair]
+        end
 
-        do_scan_rules(rest, [], acc)
-
-      true ->
-        do_scan_rules(rest, current ++ [char], acc)
+      do_scan_rules(rest, [], acc)
+    else
+      do_scan_rules(rest, current ++ [char], acc)
     end
   end
 

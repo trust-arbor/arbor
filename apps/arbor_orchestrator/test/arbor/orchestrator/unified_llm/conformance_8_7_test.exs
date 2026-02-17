@@ -172,7 +172,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
              )
 
     assert_receive {:request_messages, first_msgs}
-    assert Enum.count(first_msgs, &(&1.role == :tool)) == 0
+    refute Enum.any?(first_msgs, &(&1.role == :tool))
 
     assert_receive {:request_messages, second_msgs}
     assert Enum.count(second_msgs, &(&1.role == :tool)) == 2

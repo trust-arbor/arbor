@@ -291,6 +291,7 @@ defmodule Arbor.Contracts.Signal.Event do
 
   defp validate_privacy_level(level, _field) when level in @privacy_levels, do: :ok
 
+  # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
   defp validate_privacy_level(level, field), do: {:error, {:"invalid_#{field}", level}}
 
   defp validate_optional_privacy(nil), do: :ok
@@ -314,6 +315,7 @@ defmodule Arbor.Contracts.Signal.Event do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_binary(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -322,6 +324,7 @@ defmodule Arbor.Contracts.Signal.Event do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_map(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -332,10 +335,12 @@ defmodule Arbor.Contracts.Signal.Event do
     if Enum.all?(list, &is_binary/1) do
       :ok
     else
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       {:error, {:"invalid_#{field}", :not_all_strings}}
     end
   end
 
+  # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
   defp validate_string_list(_, field), do: {:error, {:"invalid_#{field}", :not_a_list}}
 
   # ============================================================================

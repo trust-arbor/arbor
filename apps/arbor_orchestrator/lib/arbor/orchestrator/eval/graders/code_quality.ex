@@ -59,7 +59,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.CodeQuality do
               "all checks passed"
             else
               count = length(violations)
-              samples = violations |> Enum.take(3) |> Enum.map(& &1.message) |> Enum.join("; ")
+              samples = violations |> Enum.take(3) |> Enum.map_join("; ", & &1.message)
               "#{count} violation(s): #{samples}"
             end
 

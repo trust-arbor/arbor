@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.Conformance.ProviderDocVerificationTest do
       assert %{checked_on: %Date{}, sources: sources, notes: notes} = Map.get(verifications, id),
              "Missing provider-doc verification entry for unified_llm matrix row #{id}"
 
-      assert is_list(sources) and length(sources) > 0
+      assert is_list(sources) and sources != []
       assert Enum.any?(sources, &String.contains?(&1, "openai.com"))
       assert Enum.any?(sources, &String.contains?(&1, "claude.com"))
       assert Enum.any?(sources, &String.contains?(&1, "google.dev"))

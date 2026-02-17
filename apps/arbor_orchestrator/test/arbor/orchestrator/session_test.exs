@@ -800,7 +800,7 @@ defmodule Arbor.Orchestrator.SessionTest do
           &(&1 in visited)
         )
 
-      assert length(mode_nodes_visited) >= 1,
+      assert mode_nodes_visited != [],
              "At least one mode branch should be visited. Visited: #{inspect(visited)}"
 
       # Post-processing tail should be visited

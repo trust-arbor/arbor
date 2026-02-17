@@ -9,6 +9,8 @@ defmodule Arbor.Orchestrator.SignalsBridge do
 
   use GenServer
 
+  alias Arbor.Orchestrator.EventEmitter
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -16,7 +18,7 @@ defmodule Arbor.Orchestrator.SignalsBridge do
   @impl true
   def init(_opts) do
     # Subscribe to all pipeline events
-    {:ok, _} = Arbor.Orchestrator.EventEmitter.subscribe(:all)
+    {:ok, _} = EventEmitter.subscribe(:all)
     {:ok, %{}}
   end
 

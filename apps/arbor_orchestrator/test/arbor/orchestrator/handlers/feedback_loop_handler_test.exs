@@ -19,16 +19,14 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandlerTest do
     fn _prompt, _opts ->
       count = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
 
-      cond do
-        rem(count, 2) == 0 ->
-          # Critique call
-          {:ok, "Add more detail and examples"}
-
-        true ->
-          # Revision call — produce progressively longer content
-          base = "## Improved Content\n\nThis is a revised version.\n\n"
-          extra = String.duplicate("- Additional point #{count}\n", count)
-          {:ok, base <> extra}
+      if rem(count, 2) == 0 do
+        # Critique call
+        {:ok, "Add more detail and examples"}
+      else
+        # Revision call — produce progressively longer content
+        base = "## Improved Content\n\nThis is a revised version.\n\n"
+        extra = String.duplicate("- Additional point #{count}\n", count)
+        {:ok, base <> extra}
       end
     end
   end
@@ -248,7 +246,7 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandlerTest do
 
       scores = Jason.decode!(outcome.context_updates["feedback.cu1.scores"])
       assert is_list(scores)
-      assert length(scores) >= 1
+      assert scores != []
     end
   end
 

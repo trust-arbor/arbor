@@ -7,6 +7,7 @@ defmodule Arbor.Consensus.Coordinator.Voting do
   """
 
   alias Arbor.Consensus.{Config, Council, EvaluatorAgent, EventEmitter, EventStore}
+  alias Arbor.Consensus.Coordinator.TopicRouting
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
 
@@ -41,7 +42,7 @@ defmodule Arbor.Consensus.Coordinator.Voting do
 
     # Resolve evaluators and quorum from TopicRegistry
     {evaluators, _full_quorum} =
-      Arbor.Consensus.Coordinator.TopicRouting.resolve_council_config(proposal, state.config)
+      TopicRouting.resolve_council_config(proposal, state.config)
 
     # Build evaluator map and filter to only missing perspectives
     evaluator_map = Council.build_evaluator_map(evaluators)

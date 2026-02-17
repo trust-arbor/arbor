@@ -14,6 +14,9 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
   """
   use Arbor.Test.BehavioralCase
 
+  alias Arbor.Agent.CognitivePrompts
+  alias Arbor.Agent.HeartbeatPrompt
+  alias Arbor.Memory.GoalStore
   alias Arbor.Test.MockLLM
 
   describe "scenario: heartbeat prompt construction" do
@@ -27,7 +30,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
         cognitive_mode: :reflection
       }
 
-      prompt = Arbor.Agent.HeartbeatPrompt.build_prompt(agent_state)
+      prompt = HeartbeatPrompt.build_prompt(agent_state)
 
       assert is_binary(prompt)
       assert String.length(prompt) > 100
@@ -45,7 +48,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
         cognitive_mode: :goal_pursuit
       }
 
-      prompt = Arbor.Agent.HeartbeatPrompt.build_prompt(agent_state)
+      prompt = HeartbeatPrompt.build_prompt(agent_state)
 
       # Goal pursuit mode should reference goals/actions
       assert prompt =~ "goal" or prompt =~ "Goal" or prompt =~ "action" or prompt =~ "Action"
@@ -53,23 +56,23 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
 
     test "CognitivePrompts.prompt_for/1 returns mode-specific instructions" do
       # Each mode has a distinct prompt
-      assert Arbor.Agent.CognitivePrompts.prompt_for(:goal_pursuit) =~ "Goal"
+      assert CognitivePrompts.prompt_for(:goal_pursuit) =~ "Goal"
 
-      assert Arbor.Agent.CognitivePrompts.prompt_for(:consolidation) =~ "consolidat" or
-               Arbor.Agent.CognitivePrompts.prompt_for(:consolidation) =~ "Consolidat"
+      assert CognitivePrompts.prompt_for(:consolidation) =~ "consolidat" or
+               CognitivePrompts.prompt_for(:consolidation) =~ "Consolidat"
 
-      reflection = Arbor.Agent.CognitivePrompts.prompt_for(:reflection)
+      reflection = CognitivePrompts.prompt_for(:reflection)
       assert reflection =~ "Reflection" or reflection =~ "reflection"
 
       # Conversation mode returns empty (no extra instructions)
-      assert Arbor.Agent.CognitivePrompts.prompt_for(:conversation) == ""
+      assert CognitivePrompts.prompt_for(:conversation) == ""
     end
 
     test "all cognitive modes have defined prompts" do
-      modes = Arbor.Agent.CognitivePrompts.modes()
+      modes = CognitivePrompts.modes()
 
       for mode <- modes do
-        prompt = Arbor.Agent.CognitivePrompts.prompt_for(mode)
+        prompt = CognitivePrompts.prompt_for(mode)
         assert is_binary(prompt), "Mode #{inspect(mode)} should return a string prompt"
       end
     end
@@ -156,7 +159,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
       agent_id = "agent_test_goal_lifecycle_#{:erlang.unique_integer([:positive])}"
 
       {:ok, goal} =
-        Arbor.Memory.GoalStore.add_goal(agent_id, "Complete behavioral tests",
+        GoalStore.add_goal(agent_id, "Complete behavioral tests",
           priority: 80,
           type: :achieve
         )
@@ -166,8 +169,8 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
       assert goal.priority == 80
 
       # Retrieve active goals for this agent
-      goals = Arbor.Memory.GoalStore.get_active_goals(agent_id)
-      assert length(goals) >= 1
+      goals = GoalStore.get_active_goals(agent_id)
+      assert goals != []
 
       found = Enum.find(goals, &(&1.id == goal.id))
       assert found != nil
@@ -178,11 +181,11 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
       agent_a = "agent_test_goal_iso_a_#{:erlang.unique_integer([:positive])}"
       agent_b = "agent_test_goal_iso_b_#{:erlang.unique_integer([:positive])}"
 
-      {:ok, _} = Arbor.Memory.GoalStore.add_goal(agent_a, "Goal for agent A")
-      {:ok, _} = Arbor.Memory.GoalStore.add_goal(agent_b, "Goal for agent B")
+      {:ok, _} = GoalStore.add_goal(agent_a, "Goal for agent A")
+      {:ok, _} = GoalStore.add_goal(agent_b, "Goal for agent B")
 
-      goals_a = Arbor.Memory.GoalStore.get_active_goals(agent_a)
-      goals_b = Arbor.Memory.GoalStore.get_active_goals(agent_b)
+      goals_a = GoalStore.get_active_goals(agent_a)
+      goals_b = GoalStore.get_active_goals(agent_b)
 
       assert Enum.all?(goals_a, &(&1.description =~ "agent A"))
       assert Enum.all?(goals_b, &(&1.description =~ "agent B"))

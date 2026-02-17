@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.Middleware.SecretScan do
 
   use Arbor.Orchestrator.Middleware
 
+  alias Arbor.Eval.Checks.PIIDetection
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Middleware.Token
 
@@ -103,7 +104,7 @@ defmodule Arbor.Orchestrator.Middleware.SecretScan do
   defp do_scan_text(text, scan_opts) do
     # Use arbor_eval's PIIDetection for pattern matching
     if Code.ensure_loaded?(Arbor.Eval.Checks.PIIDetection) do
-      Arbor.Eval.Checks.PIIDetection.scan_text(text, scan_opts)
+      PIIDetection.scan_text(text, scan_opts)
     else
       # Fallback: no scanning if arbor_eval not available
       []
@@ -111,9 +112,7 @@ defmodule Arbor.Orchestrator.Middleware.SecretScan do
   end
 
   defp format_findings(findings) do
-    findings
-    |> Enum.map(fn {source, label} -> "Found #{label} in #{source}" end)
-    |> Enum.join(", ")
+    Enum.map_join(findings, ", ", fn {source, label} -> "Found #{label} in #{source}" end)
   end
 
   defp redact_secrets(token, scan_opts) do

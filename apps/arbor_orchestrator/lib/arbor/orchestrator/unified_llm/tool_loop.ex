@@ -26,7 +26,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       {:ok, response} = ToolLoop.run(client, request, workdir: "/path/to/project")
   """
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, ContentPart, CodingTools, Message, Request}
+  alias Arbor.Orchestrator.UnifiedLLM.{Client, CodingTools, ContentPart, Message, Request}
 
   @default_max_turns 15
 

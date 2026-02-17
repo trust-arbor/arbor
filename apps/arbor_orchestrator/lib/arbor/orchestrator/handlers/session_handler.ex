@@ -168,11 +168,11 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "consolidation"
 
         # 3. Goals exist but no pending intents → plan_execution (need decomposition)
-        length(List.wrap(goals)) > 0 and length(List.wrap(intents)) == 0 ->
+        List.wrap(goals) != [] and List.wrap(intents) == [] ->
           "plan_execution"
 
         # 4. Goals exist (with or without intents) → goal_pursuit
-        length(List.wrap(goals)) > 0 ->
+        List.wrap(goals) != [] ->
           "goal_pursuit"
 
         # 5. Otherwise → reflection

@@ -46,12 +46,10 @@ defmodule Arbor.Actions.Judge.Producers.FormatCompliance do
   defp evaluate_format(content) when is_binary(content) do
     trimmed = String.trim(content)
 
-    cond do
-      json_like?(trimmed) ->
-        evaluate_json(trimmed)
-
-      true ->
-        evaluate_text(trimmed)
+    if json_like?(trimmed) do
+      evaluate_json(trimmed)
+    else
+      evaluate_text(trimmed)
     end
   end
 

@@ -34,6 +34,7 @@ defmodule Arbor.Memory.Summarizer do
       #=> {:ok, %{summary: "...", complexity: :moderate, model_used: "..."}}
   """
 
+  alias Arbor.Common.LazyLoader
   alias Arbor.Memory.TokenBudget
 
   @type complexity :: :simple | :moderate | :complex | :highly_complex
@@ -200,7 +201,7 @@ defmodule Arbor.Memory.Summarizer do
   end
 
   defp call_llm_summarize(prompt, system_prompt, model, complexity) do
-    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
+    if LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       llm_opts = [system_prompt: system_prompt, model: model, max_tokens: 1000]
 
       case Arbor.AI.generate_text(prompt, llm_opts) do

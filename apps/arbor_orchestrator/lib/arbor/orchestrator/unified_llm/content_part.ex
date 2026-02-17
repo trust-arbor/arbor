@@ -185,8 +185,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ContentPart do
     content
     |> normalize()
     |> Enum.filter(&(&1.kind == :text))
-    |> Enum.map(& &1.text)
-    |> Enum.join("")
+    |> Enum.map_join(& &1.text)
   end
 
   defp normalize_part(%{kind: kind} = part) when kind in [:text, "text"] do

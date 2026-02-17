@@ -24,71 +24,69 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
 
   @impl true
   def execute(node, context, graph, opts) do
-    try do
-      source_key = Map.get(node.attrs, "source_key")
+    source_key = Map.get(node.attrs, "source_key")
 
-      unless source_key do
-        raise "map handler requires 'source_key' attribute"
-      end
-
-      raw = Context.get(context, source_key)
-
-      unless raw do
-        raise "source key '#{source_key}' not found in context"
-      end
-
-      collection = parse_collection(raw)
-
-      item_key = Map.get(node.attrs, "item_key", "map.current_item")
-      index_key = Map.get(node.attrs, "index_key", "map.current_index")
-      result_key = Map.get(node.attrs, "result_key", "last_response")
-      collect_key = Map.get(node.attrs, "collect_key", "map.results")
-      max_concurrency = parse_int(Map.get(node.attrs, "max_concurrency"), 1)
-      on_error = Map.get(node.attrs, "on_item_error", "skip")
-
-      item_handler = resolve_item_handler(node, opts)
-
-      results =
-        process_items(
-          collection,
-          item_handler,
-          context,
-          graph,
-          opts,
-          %{
-            item_key: item_key,
-            index_key: index_key,
-            result_key: result_key,
-            max_concurrency: max_concurrency
-          }
-        )
-
-      {collected, stats} = collect_results(results, on_error)
-
-      if on_error == "fail" and stats.error_count > 0 do
-        first_error = Enum.find(results, fn {status, _, _} -> status == :error end)
-        reason = if first_error, do: elem(first_error, 2), else: "item processing failed"
-
-        %Outcome{
-          status: :fail,
-          failure_reason: "map failed on item: #{reason}",
-          context_updates: build_updates(collected, stats, collect_key, node)
-        }
-      else
-        %Outcome{
-          status: :success,
-          notes:
-            "Processed #{stats.total} items (#{stats.success_count} ok, #{stats.error_count} errors)",
-          context_updates: build_updates(collected, stats, collect_key, node)
-        }
-      end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "map handler error: #{Exception.message(e)}"
-        }
+    unless source_key do
+      raise "map handler requires 'source_key' attribute"
     end
+
+    raw = Context.get(context, source_key)
+
+    unless raw do
+      raise "source key '#{source_key}' not found in context"
+    end
+
+    collection = parse_collection(raw)
+
+    item_key = Map.get(node.attrs, "item_key", "map.current_item")
+    index_key = Map.get(node.attrs, "index_key", "map.current_index")
+    result_key = Map.get(node.attrs, "result_key", "last_response")
+    collect_key = Map.get(node.attrs, "collect_key", "map.results")
+    max_concurrency = parse_int(Map.get(node.attrs, "max_concurrency"), 1)
+    on_error = Map.get(node.attrs, "on_item_error", "skip")
+
+    item_handler = resolve_item_handler(node, opts)
+
+    results =
+      process_items(
+        collection,
+        item_handler,
+        context,
+        graph,
+        opts,
+        %{
+          item_key: item_key,
+          index_key: index_key,
+          result_key: result_key,
+          max_concurrency: max_concurrency
+        }
+      )
+
+    {collected, stats} = collect_results(results, on_error)
+
+    if on_error == "fail" and stats.error_count > 0 do
+      first_error = Enum.find(results, fn {status, _, _} -> status == :error end)
+      reason = if first_error, do: elem(first_error, 2), else: "item processing failed"
+
+      %Outcome{
+        status: :fail,
+        failure_reason: "map failed on item: #{reason}",
+        context_updates: build_updates(collected, stats, collect_key, node)
+      }
+    else
+      %Outcome{
+        status: :success,
+        notes:
+          "Processed #{stats.total} items (#{stats.success_count} ok, #{stats.error_count} errors)",
+        context_updates: build_updates(collected, stats, collect_key, node)
+      }
+    end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "map handler error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

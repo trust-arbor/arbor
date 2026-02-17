@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Dotgen do
 
   import Arbor.Orchestrator.Mix.Helpers
 
-  alias Arbor.Orchestrator.Dotgen.{SourceAnalyzer, DotGenerator, ManifestGenerator}
+  alias Arbor.Orchestrator.Dotgen.{DotGenerator, ManifestGenerator, SourceAnalyzer}
   alias Arbor.Orchestrator.Validation.Validator
 
   @impl true

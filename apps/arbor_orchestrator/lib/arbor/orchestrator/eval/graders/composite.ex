@@ -45,9 +45,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.Composite do
       passed = score >= 0.5
 
       details =
-        results
-        |> Enum.map(fn {r, w} -> "#{Float.round(r.score, 3)}*#{w}" end)
-        |> Enum.join(" + ")
+        Enum.map_join(results, " + ", fn {r, w} -> "#{Float.round(r.score, 3)}*#{w}" end)
 
       %{
         score: score,

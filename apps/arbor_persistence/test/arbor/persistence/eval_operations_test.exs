@@ -9,8 +9,7 @@ defmodule Arbor.Persistence.EvalOperationsTest do
 
   use ExUnit.Case, async: true
 
-  alias Arbor.Persistence.Schemas.EvalRun
-  alias Arbor.Persistence.Schemas.EvalResult
+  alias Arbor.Persistence.Schemas.{EvalResult, EvalRun}
 
   describe "EvalRun changeset for insert_eval_run" do
     @valid_run_attrs %{

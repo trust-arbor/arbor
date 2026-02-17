@@ -38,65 +38,63 @@ defmodule Arbor.Orchestrator.Handlers.MemoryRecallHandler do
 
   @impl true
   def execute(%Node{attrs: attrs, id: node_id}, context, _graph, opts) do
-    try do
-      store_path = Map.get(attrs, "memory_store")
-      query_key = Map.get(attrs, "query_key", "last_response")
-      strategy = Map.get(attrs, "strategy", "recent")
-      top_k = parse_int(Map.get(attrs, "top_k", "5"), 5)
-      tags_filter = parse_csv(Map.get(attrs, "tags", ""))
-      result_key = Map.get(attrs, "result_key", "recalled_memories")
-      format = Map.get(attrs, "format", "text")
-      include_expired = Map.get(attrs, "include_expired", "false") == "true"
+    store_path = Map.get(attrs, "memory_store")
+    query_key = Map.get(attrs, "query_key", "last_response")
+    strategy = Map.get(attrs, "strategy", "recent")
+    top_k = parse_int(Map.get(attrs, "top_k", "5"), 5)
+    tags_filter = parse_csv(Map.get(attrs, "tags", ""))
+    result_key = Map.get(attrs, "result_key", "recalled_memories")
+    format = Map.get(attrs, "format", "text")
+    include_expired = Map.get(attrs, "include_expired", "false") == "true"
 
-      if is_nil(store_path) or store_path == "" do
-        %Outcome{
-          status: :fail,
-          failure_reason: "memory.recall requires memory_store attribute"
-        }
-      else
-        # Load all memories from JSONL
-        memories = load_memories(store_path, include_expired)
+    if is_nil(store_path) or store_path == "" do
+      %Outcome{
+        status: :fail,
+        failure_reason: "memory.recall requires memory_store attribute"
+      }
+    else
+      # Load all memories from JSONL
+      memories = load_memories(store_path, include_expired)
 
-        # Get query text for keyword strategy
-        query = Context.get(context, query_key) || ""
-        query = if is_binary(query), do: query, else: to_string(query)
+      # Get query text for keyword strategy
+      query = Context.get(context, query_key) || ""
+      query = if is_binary(query), do: query, else: to_string(query)
 
-        # Apply strategy
-        selected = apply_strategy(strategy, memories, query, tags_filter, top_k)
+      # Apply strategy
+      selected = apply_strategy(strategy, memories, query, tags_filter, top_k)
 
-        # Format output
-        output = format_memories(selected, format)
+      # Format output
+      output = format_memories(selected, format)
 
-        # Write to stage dir
-        case Keyword.get(opts, :logs_root) do
-          nil ->
-            :ok
+      # Write to stage dir
+      case Keyword.get(opts, :logs_root) do
+        nil ->
+          :ok
 
-          logs_root ->
-            stage_dir = Path.join(logs_root, node_id)
-            File.mkdir_p!(stage_dir)
-            File.write!(Path.join(stage_dir, "recalled.md"), output)
-        end
-
-        %Outcome{
-          status: :success,
-          context_updates: %{
-            "last_stage" => node_id,
-            result_key => output,
-            "memory.#{node_id}.count" => length(selected),
-            "memory.#{node_id}.strategy" => strategy,
-            "memory.#{node_id}.store_path" => store_path
-          },
-          notes: "Recalled #{length(selected)} memories via #{strategy} strategy"
-        }
+        logs_root ->
+          stage_dir = Path.join(logs_root, node_id)
+          File.mkdir_p!(stage_dir)
+          File.write!(Path.join(stage_dir, "recalled.md"), output)
       end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "MemoryRecall handler error: #{Exception.message(e)}"
-        }
+
+      %Outcome{
+        status: :success,
+        context_updates: %{
+          "last_stage" => node_id,
+          result_key => output,
+          "memory.#{node_id}.count" => length(selected),
+          "memory.#{node_id}.strategy" => strategy,
+          "memory.#{node_id}.store_path" => store_path
+        },
+        notes: "Recalled #{length(selected)} memories via #{strategy} strategy"
+      }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "MemoryRecall handler error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

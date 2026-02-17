@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Security.SignedRequest
-  alias Arbor.Orchestrator.UnifiedLLM.ToolLoop
+  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request, ToolLoop}
 
   # A mock tool executor that captures the opts passed to it
   defmodule CapturingExecutor do
@@ -69,11 +69,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
 
       client = %{module: MockToolClient}
 
-      request = %Arbor.Orchestrator.UnifiedLLM.Request{
+      request = %Request{
         provider: "test",
         model: "test-model",
         messages: [
-          Arbor.Orchestrator.UnifiedLLM.Message.new(:user, "read the file")
+          Message.new(:user, "read the file")
         ],
         tools: [
           %{

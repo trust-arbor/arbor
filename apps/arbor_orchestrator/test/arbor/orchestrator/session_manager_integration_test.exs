@@ -11,6 +11,8 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Orchestrator.Session
+
   @moduletag :integration
 
   @session_manager Arbor.Agent.SessionManager
@@ -69,7 +71,7 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
             start_heartbeat: false
           )
 
-        result = Arbor.Orchestrator.Session.send_message(pid, "Hello from integration test")
+        result = Session.send_message(pid, "Hello from integration test")
         assert {:ok, response} = result
         assert is_binary(response)
       end
@@ -81,11 +83,11 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
             start_heartbeat: false
           )
 
-        {:ok, _} = Arbor.Orchestrator.Session.send_message(pid, "First message")
-        state1 = Arbor.Orchestrator.Session.get_state(pid)
+        {:ok, _} = Session.send_message(pid, "First message")
+        state1 = Session.get_state(pid)
 
-        {:ok, _} = Arbor.Orchestrator.Session.send_message(pid, "Second message")
-        state2 = Arbor.Orchestrator.Session.get_state(pid)
+        {:ok, _} = Session.send_message(pid, "Second message")
+        state2 = Session.get_state(pid)
 
         assert state2.turn_count == state1.turn_count + 1
         assert length(state2.messages) > length(state1.messages)

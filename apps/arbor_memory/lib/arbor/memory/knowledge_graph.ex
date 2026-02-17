@@ -59,7 +59,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
       {graph, pruned_count} = Arbor.Memory.KnowledgeGraph.prune(graph, 0.1)
   """
 
-  alias Arbor.Common.SafeAtom
+  alias Arbor.Common.{LazyLoader, SafeAtom}
   alias Arbor.Memory.KnowledgeGraph.DecayEngine
   alias Arbor.Memory.KnowledgeGraph.GraphSearch
   alias Arbor.Memory.TokenBudget
@@ -1080,7 +1080,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
   # Embedding service helpers
   defp embedding_service_available? do
-    Arbor.Common.LazyLoader.exported?(Arbor.AI, :embed, 2)
+    LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp compute_node_embedding(text) when is_binary(text) do

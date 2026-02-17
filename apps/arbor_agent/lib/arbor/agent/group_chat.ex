@@ -260,9 +260,7 @@ defmodule Arbor.Agent.GroupChat do
       agent_participants =
         state.participants
         |> Map.values()
-        |> Enum.filter(&(&1.type == :agent))
-        |> Enum.filter(&(&1.id != message.sender_id))
-        |> Enum.filter(&Participant.agent_online?/1)
+        |> Enum.filter(&(&1.type == :agent and &1.id != message.sender_id and Participant.agent_online?(&1)))
 
       # Query agents based on response mode
       case state.response_mode do
@@ -296,36 +294,34 @@ defmodule Arbor.Agent.GroupChat do
   end
 
   defp query_single_agent(server, state, participant) do
-    try do
-      # Build conversation context
-      prompt =
-        Context.build_agent_prompt(
-          participant.name,
-          state.messages,
-          max_messages: state.max_history,
-          group_name: state.name
-        )
+    # Build conversation context
+    prompt =
+      Context.build_agent_prompt(
+        participant.name,
+        state.messages,
+        max_messages: state.max_history,
+        group_name: state.name
+      )
 
-      # Query the agent's host process
-      case GenServer.call(participant.host_pid, {:query, prompt, []}, @query_timeout) do
-        {:ok, response} when is_binary(response) and response != "" ->
-          # Send the agent's response back through the group
-          GenServer.cast(server, {:agent_response, participant, response})
+    # Query the agent's host process
+    case GenServer.call(participant.host_pid, {:query, prompt, []}, @query_timeout) do
+      {:ok, response} when is_binary(response) and response != "" ->
+        # Send the agent's response back through the group
+        GenServer.cast(server, {:agent_response, participant, response})
 
-        {:ok, %{text: text}} when is_binary(text) and text != "" ->
-          # Handle structured response with text field
-          GenServer.cast(server, {:agent_response, participant, text})
+      {:ok, %{text: text}} when is_binary(text) and text != "" ->
+        # Handle structured response with text field
+        GenServer.cast(server, {:agent_response, participant, text})
 
-        other ->
-          Logger.debug("Agent #{participant.id} returned non-text response: #{inspect(other)}")
-      end
-    rescue
-      error ->
-        Logger.error("Error querying agent #{participant.id}: #{inspect(error)}")
-    catch
-      :exit, reason ->
-        Logger.warning("Agent #{participant.id} process exited: #{inspect(reason)}")
+      other ->
+        Logger.debug("Agent #{participant.id} returned non-text response: #{inspect(other)}")
     end
+  rescue
+    error ->
+      Logger.error("Error querying agent #{participant.id}: #{inspect(error)}")
+  catch
+    :exit, reason ->
+      Logger.warning("Agent #{participant.id} process exited: #{inspect(reason)}")
   end
 
   defp broadcast(state, message) do

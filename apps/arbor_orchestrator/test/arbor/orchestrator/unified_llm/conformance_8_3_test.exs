@@ -1,9 +1,8 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.Conformance83Test do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.ContentPart
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
+  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request}
 
   test "8.3 text-only messages translate for all providers" do
     request = %Request{model: "demo", messages: [Message.new(:user, "hello")]}

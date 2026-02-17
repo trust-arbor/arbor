@@ -1,8 +1,8 @@
 defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Handlers.Registry
 
   test "matrix: parse simple linear pipeline" do
     dot = """

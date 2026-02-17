@@ -7,6 +7,8 @@ defmodule Arbor.Actions.Judge.ResultStore do
   when Postgres isn't running.
   """
 
+  alias Arbor.Contracts.Judge.Rubric
+
   require Logger
 
   @persistence_mod Arbor.Persistence
@@ -110,7 +112,7 @@ defmodule Arbor.Actions.Judge.ResultStore do
 
     rubric_snapshot =
       if is_struct(rubric) do
-        Arbor.Contracts.Judge.Rubric.snapshot(rubric)
+        Rubric.snapshot(rubric)
       else
         %{}
       end

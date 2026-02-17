@@ -143,8 +143,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
         text
         |> String.split(~r/[\s\p{P}]+/u)
         |> Enum.map(&String.downcase/1)
-        |> Enum.reject(&(String.length(&1) < 3))
-        |> Enum.reject(&stopword?/1)
+        |> Enum.reject(&(String.length(&1) < 3 or stopword?(&1)))
 
       Enum.reduce(tokens, acc, &MapSet.put(&2, &1))
     end)

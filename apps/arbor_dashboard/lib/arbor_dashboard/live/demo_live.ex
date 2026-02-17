@@ -31,6 +31,7 @@ defmodule Arbor.Dashboard.Live.DemoLive do
   import Arbor.Dashboard.Components.InvestigationPanel
 
   alias Arbor.Demo.FaultInjector
+  alias Arbor.Web.SignalLive
 
   @pipeline_stages [
     %{id: "detect", label: "Detect", icon: "🔍"},
@@ -94,11 +95,11 @@ defmodule Arbor.Dashboard.Live.DemoLive do
         :timer.send_interval(@refresh_interval_ms, :refresh)
 
         socket
-        |> Arbor.Web.SignalLive.subscribe_raw("demo.*")
-        |> Arbor.Web.SignalLive.subscribe_raw("monitor.*")
-        |> Arbor.Web.SignalLive.subscribe_raw("consensus.*")
-        |> Arbor.Web.SignalLive.subscribe_raw("code.*")
-        |> Arbor.Web.SignalLive.subscribe_raw("debug_agent.*")
+        |> SignalLive.subscribe_raw("demo.*")
+        |> SignalLive.subscribe_raw("monitor.*")
+        |> SignalLive.subscribe_raw("consensus.*")
+        |> SignalLive.subscribe_raw("code.*")
+        |> SignalLive.subscribe_raw("debug_agent.*")
       else
         socket
       end

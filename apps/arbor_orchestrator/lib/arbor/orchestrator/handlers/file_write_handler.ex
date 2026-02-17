@@ -15,52 +15,50 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      content_key = Map.get(node.attrs, "content_key")
-      output_path = Map.get(node.attrs, "output")
+    content_key = Map.get(node.attrs, "content_key")
+    output_path = Map.get(node.attrs, "output")
 
-      unless content_key do
-        raise "file.write requires 'content_key' attribute"
-      end
-
-      unless output_path do
-        raise "file.write requires 'output' attribute"
-      end
-
-      value = Context.get(context, content_key)
-
-      unless value do
-        raise "context key '#{content_key}' not found"
-      end
-
-      format = Map.get(node.attrs, "format", "raw")
-      append = Map.get(node.attrs, "append") in ["true", true]
-
-      workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
-      resolved_path = resolve_path(output_path, workdir)
-
-      content = format_content(value, format)
-
-      File.mkdir_p!(Path.dirname(resolved_path))
-
-      if append do
-        File.write!(resolved_path, content, [:append])
-      else
-        File.write!(resolved_path, content)
-      end
-
-      %Outcome{
-        status: :success,
-        notes: "Wrote #{byte_size(content)} bytes to #{resolved_path}",
-        context_updates: %{"file.written.#{node.id}" => resolved_path}
-      }
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "file.write error: #{Exception.message(e)}"
-        }
+    unless content_key do
+      raise "file.write requires 'content_key' attribute"
     end
+
+    unless output_path do
+      raise "file.write requires 'output' attribute"
+    end
+
+    value = Context.get(context, content_key)
+
+    unless value do
+      raise "context key '#{content_key}' not found"
+    end
+
+    format = Map.get(node.attrs, "format", "raw")
+    append = Map.get(node.attrs, "append") in ["true", true]
+
+    workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+    resolved_path = resolve_path(output_path, workdir)
+
+    content = format_content(value, format)
+
+    File.mkdir_p!(Path.dirname(resolved_path))
+
+    if append do
+      File.write!(resolved_path, content, [:append])
+    else
+      File.write!(resolved_path, content)
+    end
+
+    %Outcome{
+      status: :success,
+      notes: "Wrote #{byte_size(content)} bytes to #{resolved_path}",
+      context_updates: %{"file.written.#{node.id}" => resolved_path}
+    }
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "file.write error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

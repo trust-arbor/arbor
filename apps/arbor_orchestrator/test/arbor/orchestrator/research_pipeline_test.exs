@@ -2,9 +2,9 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.Dot.Parser
-  alias Arbor.Orchestrator.Handlers.CodergenHandler
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph
+  alias Arbor.Orchestrator.Handlers.CodergenHandler
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
 
   @moduletag :fast
@@ -43,7 +43,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
 
       # Should resolve at least some tools (depends on which Arbor Actions are loaded)
       assert is_list(defs)
-      assert length(defs) > 0
+      assert defs != []
 
       # All should be in OpenAI format
       for d <- defs do

@@ -1,9 +1,8 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.ContentPart
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{ProviderError, Request, StreamEvent}
+  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, ProviderError, Request, StreamEvent}
 
   test "openai adapter targets responses api and maps successful response" do
     request = %Request{

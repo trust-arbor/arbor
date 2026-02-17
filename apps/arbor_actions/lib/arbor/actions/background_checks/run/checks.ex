@@ -424,9 +424,7 @@ defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
     result =
       if Enum.any?(stage_counts, fn {_, count} -> count > 0 end) do
         summary =
-          stage_counts
-          |> Enum.map(fn {stage, count} -> "#{stage}: #{count}" end)
-          |> Enum.join(", ")
+          Enum.map_join(stage_counts, ", ", fn {stage, count} -> "#{stage}: #{count}" end)
 
         add_suggestion(result, :roadmap_summary, "Roadmap: #{summary}", 0.3)
       else
@@ -496,15 +494,15 @@ defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
       Code.ensure_loaded?(Arbor.Agent.Registry) or
         Code.ensure_loaded?(Arbor.Signals)
 
-    if not arbor_loaded do
+    if arbor_loaded do
+      result
+    else
       add_suggestion(
         result,
         :no_runtime,
         "Arbor runtime not detected (modules not loaded)",
         0.5
       )
-    else
-      result
     end
   end
 
@@ -603,39 +601,35 @@ defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
   end
 
   defp extract_tool_names(jsonl_path) do
-    try do
-      jsonl_path
-      |> File.stream!([], :line)
-      |> Stream.filter(&String.contains?(&1, "tool_use"))
-      |> Stream.take(@max_tool_lines_per_file)
-      |> Stream.flat_map(fn line ->
-        try do
-          case Jason.decode(line) do
-            {:ok, %{"message" => %{"content" => content}}} when is_list(content) ->
-              content
-              |> Enum.filter(fn
-                %{"type" => "tool_use", "name" => name} when is_binary(name) -> true
-                _ -> false
-              end)
-              |> Enum.map(fn %{"name" => name} -> name end)
+    jsonl_path
+    |> File.stream!([], :line)
+    |> Stream.filter(&String.contains?(&1, "tool_use"))
+    |> Stream.take(@max_tool_lines_per_file)
+    |> Stream.flat_map(fn line ->
+      try do
+        case Jason.decode(line) do
+          {:ok, %{"message" => %{"content" => content}}} when is_list(content) ->
+            content
+            |> Enum.filter(fn
+              %{"type" => "tool_use", "name" => name} when is_binary(name) -> true
+              _ -> false
+            end)
+            |> Enum.map(fn %{"name" => name} -> name end)
 
-            _ ->
-              []
-          end
-        rescue
-          _ -> []
+          _ ->
+            []
         end
-      end)
-      |> Enum.to_list()
-    rescue
-      _ -> []
-    end
+      rescue
+        _ -> []
+      end
+    end)
+    |> Enum.to_list()
+  rescue
+    _ -> []
   end
 
   defp format_tool_counts(top_n) do
-    top_n
-    |> Enum.map(fn {name, count} -> "#{name}(#{count})" end)
-    |> Enum.join(", ")
+    Enum.map_join(top_n, ", ", fn {name, count} -> "#{name}(#{count})" end)
   end
 
   # ============================================================================

@@ -13,8 +13,8 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
   """
   use ExUnit.Case, async: false
 
-  alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Handlers.{Registry, SessionHandler}
+  alias Arbor.Orchestrator.Session
 
   @session_types ~w(
     session.classify session.memory_recall session.mode_select
@@ -409,7 +409,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
         seed_ref: {:seed, "ref-1"}
       }
 
-      values = Arbor.Orchestrator.Session.build_turn_values(state, "hello")
+      values = Session.build_turn_values(state, "hello")
 
       assert values["session.phase"] == "processing"
       assert values["session.session_type"] == "consultation"

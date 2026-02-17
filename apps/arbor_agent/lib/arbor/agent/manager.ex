@@ -19,8 +19,7 @@ defmodule Arbor.Agent.Manager do
   `Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")`.
   """
 
-  alias Arbor.Agent.APIAgent
-  alias Arbor.Agent.Claude
+  alias Arbor.Agent.{APIAgent, Claude, GroupChat, Lifecycle, Profile}
 
   require Logger
 
@@ -40,13 +39,13 @@ defmodule Arbor.Agent.Manager do
     template = resolve_template(model_config)
     lifecycle_opts = [template: template] ++ Keyword.take(opts, [:capabilities, :initial_goals])
 
-    with {:ok, profile} <- Arbor.Agent.Lifecycle.create(display_name, lifecycle_opts) do
+    with {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume
       updated_profile = put_in(profile.metadata[:last_model_config], model_config)
       profile_path = Path.join([".arbor", "agents", "#{profile.agent_id}.agent.json"])
 
       try do
-        case Arbor.Agent.Profile.to_json(updated_profile) do
+        case Profile.to_json(updated_profile) do
           {:ok, json} -> File.write(profile_path, json)
           _ -> :ok
         end
@@ -88,7 +87,7 @@ defmodule Arbor.Agent.Manager do
   """
   @spec resume_agent(String.t(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def resume_agent(agent_id, opts \\ []) do
-    with {:ok, profile} <- Arbor.Agent.Lifecycle.restore(agent_id) do
+    with {:ok, profile} <- Lifecycle.restore(agent_id) do
       # Get model config from profile metadata or opts
       model_config =
         get_in(profile.metadata, [:last_model_config]) ||
@@ -114,7 +113,7 @@ defmodule Arbor.Agent.Manager do
         {:ok, pid} ->
           # Also start the lifecycle (executor, session) if not already running
           try do
-            Arbor.Agent.Lifecycle.start(
+            Lifecycle.start(
               agent_id,
               Keyword.merge(opts,
                 model: model_config[:id] || model_config["id"],
@@ -191,7 +190,7 @@ defmodule Arbor.Agent.Manager do
   def stop_agent(agent_id) do
     # Stop lifecycle components (session, executor, host) first
     try do
-      Arbor.Agent.Lifecycle.stop(agent_id)
+      Lifecycle.stop(agent_id)
     rescue
       _ -> :ok
     catch
@@ -284,7 +283,7 @@ defmodule Arbor.Agent.Manager do
       Enum.map(participant_specs, fn spec ->
         host_pid =
           if spec.type == :agent do
-            case Arbor.Agent.Lifecycle.get_host(spec.id) do
+            case Lifecycle.get_host(spec.id) do
               {:ok, pid} -> pid
               _ -> nil
             end
@@ -300,7 +299,7 @@ defmodule Arbor.Agent.Manager do
         }
       end)
 
-    Arbor.Agent.GroupChat.create(name, participants: participants)
+    GroupChat.create(name, participants: participants)
   end
 
   @doc """
@@ -311,7 +310,7 @@ defmodule Arbor.Agent.Manager do
   @spec group_send(GenServer.server(), String.t(), String.t(), :agent | :human, String.t()) ::
           :ok
   def group_send(group, sender_id, sender_name, sender_type, content) do
-    Arbor.Agent.GroupChat.send_message(group, sender_id, sender_name, sender_type, content)
+    GroupChat.send_message(group, sender_id, sender_name, sender_type, content)
   end
 
   @doc """
@@ -380,7 +379,7 @@ defmodule Arbor.Agent.Manager do
   defp resolve_template(_), do: Arbor.Agent.Templates.ClaudeCode
 
   defp find_existing_profile(display_name, template) do
-    case Arbor.Agent.Lifecycle.list_agents() do
+    case Lifecycle.list_agents() do
       profiles when is_list(profiles) ->
         match =
           Enum.find(profiles, fn p ->

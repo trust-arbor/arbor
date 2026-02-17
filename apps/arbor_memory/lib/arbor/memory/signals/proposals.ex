@@ -7,12 +7,14 @@ defmodule Arbor.Memory.Signals.Proposals do
   and cognitive adjustments.
   """
 
+  alias Arbor.Memory.Signals
+
   @doc """
   Emit a signal when background checks start.
   """
   @spec emit_background_checks_started(String.t()) :: :ok
   def emit_background_checks_started(agent_id) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :background_checks_started, %{
+    Signals.emit_memory_signal(agent_id, :background_checks_started, %{
       started_at: DateTime.utc_now()
     })
   end
@@ -29,7 +31,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_background_checks_completed(String.t(), map()) :: :ok
   def emit_background_checks_completed(agent_id, result_summary) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :background_checks_completed, %{
+    Signals.emit_memory_signal(agent_id, :background_checks_completed, %{
       action_count: result_summary[:action_count],
       warning_count: result_summary[:warning_count],
       suggestion_count: result_summary[:suggestion_count],
@@ -43,7 +45,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_pattern_detected(String.t(), map()) :: :ok
   def emit_pattern_detected(agent_id, pattern) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :pattern_detected, %{
+    Signals.emit_memory_signal(agent_id, :pattern_detected, %{
       pattern_type: pattern[:type],
       tools: pattern[:tools],
       occurrences: pattern[:occurrences],
@@ -57,7 +59,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_insight_detected(String.t(), map()) :: :ok
   def emit_insight_detected(agent_id, suggestion) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :insight_detected, %{
+    Signals.emit_memory_signal(agent_id, :insight_detected, %{
       category: suggestion[:category],
       content_preview: String.slice(suggestion[:content] || "", 0, 100),
       confidence: suggestion[:confidence],
@@ -70,7 +72,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_proposal_created(String.t(), struct()) :: :ok
   def emit_proposal_created(agent_id, proposal) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :proposal_created, %{
+    Signals.emit_memory_signal(agent_id, :proposal_created, %{
       proposal_id: proposal.id,
       type: proposal.type,
       content_preview: String.slice(proposal.content || "", 0, 100),
@@ -85,7 +87,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_proposal_accepted(String.t(), String.t(), String.t()) :: :ok
   def emit_proposal_accepted(agent_id, proposal_id, node_id) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :proposal_accepted, %{
+    Signals.emit_memory_signal(agent_id, :proposal_accepted, %{
       proposal_id: proposal_id,
       node_id: node_id,
       accepted_at: DateTime.utc_now()
@@ -97,7 +99,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_proposal_rejected(String.t(), String.t(), atom(), String.t() | nil) :: :ok
   def emit_proposal_rejected(agent_id, proposal_id, proposal_type, reason) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :proposal_rejected, %{
+    Signals.emit_memory_signal(agent_id, :proposal_rejected, %{
       proposal_id: proposal_id,
       proposal_type: proposal_type,
       reason: reason,
@@ -110,7 +112,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_proposal_deferred(String.t(), String.t()) :: :ok
   def emit_proposal_deferred(agent_id, proposal_id) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :proposal_deferred, %{
+    Signals.emit_memory_signal(agent_id, :proposal_deferred, %{
       proposal_id: proposal_id,
       deferred_at: DateTime.utc_now()
     })
@@ -131,7 +133,7 @@ defmodule Arbor.Memory.Signals.Proposals do
   """
   @spec emit_cognitive_adjustment(String.t(), atom(), map()) :: :ok
   def emit_cognitive_adjustment(agent_id, adjustment_type, details) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :cognitive_adjustment, %{
+    Signals.emit_memory_signal(agent_id, :cognitive_adjustment, %{
       adjustment_type: adjustment_type,
       details: details,
       emitted_at: DateTime.utc_now()

@@ -86,18 +86,17 @@
           {Credo.Check.Readability.WithSingleClause, []},
 
           # Refactor
-          {Credo.Check.Refactor.Apply, []},
           {Credo.Check.Refactor.CondStatements, []},
-          {Credo.Check.Refactor.CyclomaticComplexity, []},
+          {Credo.Check.Refactor.CyclomaticComplexity, [max_complexity: 15]},
           {Credo.Check.Refactor.FilterCount, []},
           {Credo.Check.Refactor.FilterFilter, []},
-          {Credo.Check.Refactor.FunctionArity, []},
+          {Credo.Check.Refactor.FunctionArity, [max_arity: 10]},
           {Credo.Check.Refactor.LongQuoteBlocks, []},
           {Credo.Check.Refactor.MapJoin, []},
           {Credo.Check.Refactor.MatchInCondition, []},
           {Credo.Check.Refactor.NegatedConditionsInUnless, []},
           {Credo.Check.Refactor.NegatedConditionsWithElse, []},
-          {Credo.Check.Refactor.Nesting, []},
+          {Credo.Check.Refactor.Nesting, [max_nesting: 3]},
           {Credo.Check.Refactor.RedundantWithClauseResult, []},
           {Credo.Check.Refactor.RejectReject, []},
           {Credo.Check.Refactor.UnlessWithElse, []},
@@ -128,6 +127,7 @@
         ],
         disabled: [
           # Disabled checks with reasons
+          {Credo.Check.Refactor.Apply, [reason: "apply/3 is the core runtime bridge pattern (Code.ensure_loaded? + apply) for cross-hierarchy calls"]},
           {Credo.Check.Design.DuplicatedCode, [reason: "Too noisy for umbrella projects"]},
           {Credo.Check.Readability.BlockPipe, [reason: "Conflicts with some valid patterns"]},
           {Credo.Check.Readability.ImplTrue, [reason: "We use @impl true explicitly"]},

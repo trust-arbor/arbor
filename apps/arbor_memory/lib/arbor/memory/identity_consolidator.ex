@@ -66,7 +66,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
       state = IdentityConsolidator.get_consolidation_state("agent_001")
   """
 
-  alias Arbor.Memory.{MemoryStore, Events, InsightDetector, SelfKnowledge, Signals}
+  alias Arbor.Memory.{Events, InsightDetector, MemoryStore, SelfKnowledge, Signals}
   alias Arbor.Memory.IdentityConsolidator.InsightIntegration
   alias Arbor.Memory.IdentityConsolidator.Promotion
 

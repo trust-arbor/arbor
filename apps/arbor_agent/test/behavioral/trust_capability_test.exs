@@ -15,6 +15,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.TrustBounds
+  alias Arbor.Security.CapabilityStore
 
   describe "scenario: capability authorization flow" do
     test "authorize succeeds when agent has matching capability", %{agent_id: agent_id} do
@@ -51,7 +52,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
         metadata: %{test: true}
       }
 
-      Arbor.Security.CapabilityStore.put(cap)
+      CapabilityStore.put(cap)
 
       result = Arbor.Security.authorize(agent_id, "arbor://test/expired")
       # Expired caps should not authorize

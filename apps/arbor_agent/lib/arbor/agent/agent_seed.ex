@@ -47,6 +47,7 @@ defmodule Arbor.Agent.AgentSeed do
   }
 
   alias Arbor.Memory
+  alias Arbor.Memory.WorkingMemory
 
   # Constants
   @default_id "agent"
@@ -583,7 +584,7 @@ defmodule Arbor.Agent.AgentSeed do
           "I responded: #{String.slice(response, 0..200)}..."
 
       working_memory =
-        Arbor.Memory.WorkingMemory.add_thought(
+        WorkingMemory.add_thought(
           state.working_memory,
           thought,
           priority: :medium

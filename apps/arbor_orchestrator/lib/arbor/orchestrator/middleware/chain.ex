@@ -10,8 +10,8 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   Nodes can also skip specific middleware via skip_middleware attribute.
   """
 
-  alias Arbor.Orchestrator.Middleware.Token
   alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Middleware.Token
 
   @registry %{
     "secret_scan" => Arbor.Orchestrator.Middleware.SecretScan

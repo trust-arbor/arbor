@@ -208,15 +208,13 @@ defmodule Arbor.Gateway.MCP.Handler do
         |> Enum.sort_by(fn {category, _} -> category end)
         |> Enum.map_join("\n\n", fn {category, modules} ->
           tool_names =
-            modules
-            |> Enum.map(fn mod ->
+            Enum.map_join(modules, "\n", fn mod ->
               try do
                 "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
               rescue
                 _ -> "  - #{inspect(mod)}"
               end
             end)
-            |> Enum.join("\n")
 
           "## #{category}\n#{tool_names}"
         end)
@@ -573,12 +571,10 @@ defmodule Arbor.Gateway.MCP.Handler do
                 end
 
               progress =
-                cond do
-                  is_map(goal) and Map.has_key?(goal, :progress) ->
-                    " (#{Float.round(goal.progress * 100, 1)}%)"
-
-                  true ->
-                    ""
+                if is_map(goal) and Map.has_key?(goal, :progress) do
+                  " (#{Float.round(goal.progress * 100, 1)}%)"
+                else
+                  ""
                 end
 
               "- #{desc}#{progress}"

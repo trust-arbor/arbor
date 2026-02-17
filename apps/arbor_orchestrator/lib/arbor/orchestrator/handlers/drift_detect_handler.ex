@@ -49,127 +49,125 @@ defmodule Arbor.Orchestrator.Handlers.DriftDetectHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      baseline_path = Map.get(node.attrs, "baseline_path")
-      current_key = Map.get(node.attrs, "current_key", "last_response")
-      dimensions_str = Map.get(node.attrs, "dimensions", Enum.join(@all_dimensions, ","))
-      threshold = parse_float(Map.get(node.attrs, "threshold", "0.7"), 0.7)
-      action = Map.get(node.attrs, "action", "warn")
-      update_baseline = Map.get(node.attrs, "update_baseline", "false") == "true"
-      result_key = Map.get(node.attrs, "result_key", "drift_report")
+    baseline_path = Map.get(node.attrs, "baseline_path")
+    current_key = Map.get(node.attrs, "current_key", "last_response")
+    dimensions_str = Map.get(node.attrs, "dimensions", Enum.join(@all_dimensions, ","))
+    threshold = parse_float(Map.get(node.attrs, "threshold", "0.7"), 0.7)
+    action = Map.get(node.attrs, "action", "warn")
+    update_baseline = Map.get(node.attrs, "update_baseline", "false") == "true"
+    result_key = Map.get(node.attrs, "result_key", "drift_report")
 
-      logs_root = Keyword.get(opts, :logs_root)
+    logs_root = Keyword.get(opts, :logs_root)
 
-      case logs_root do
-        nil -> :ok
-        root -> File.mkdir_p!(Path.join(root, node.id))
-      end
-
-      cond do
-        is_nil(baseline_path) or baseline_path == "" ->
-          %Outcome{status: :fail, failure_reason: "drift.detect requires baseline_path attribute"}
-
-        not File.exists?(baseline_path) ->
-          # No baseline yet — create it from current output
-          current_text = get_text(context, current_key)
-          create_baseline(baseline_path, current_text)
-
-          %Outcome{
-            status: :success,
-            context_updates: %{
-              "last_stage" => node.id,
-              result_key => "Baseline created (first run)",
-              "drift.#{node.id}.score" => 1.0,
-              "drift.#{node.id}.passed" => true,
-              "drift.#{node.id}.dimensions" => Jason.encode!(%{}),
-              "drift.#{node.id}.action_taken" => "pass"
-            },
-            notes: "Created baseline at #{baseline_path} (first run, no comparison)"
-          }
-
-        true ->
-          # Load baseline and current text
-          baseline = load_baseline(baseline_path)
-          current_text = get_text(context, current_key)
-
-          dimensions =
-            parse_csv(dimensions_str) |> Enum.filter(&(&1 in @all_dimensions))
-
-          dimensions = if dimensions == [], do: @all_dimensions, else: dimensions
-
-          # Compute per-dimension scores
-          dim_scores = compute_dimensions(baseline["text"], current_text, dimensions)
-
-          # Overall score: average of all dimension scores
-          overall =
-            if map_size(dim_scores) > 0 do
-              dim_scores |> Map.values() |> Enum.sum() |> Kernel./(map_size(dim_scores))
-            else
-              1.0
-            end
-
-          passed = overall >= threshold
-
-          # Build drift report
-          report = %{
-            "overall_score" => Float.round(overall, 4),
-            "threshold" => threshold,
-            "passed" => passed,
-            "dimensions" => Enum.into(dim_scores, %{}, fn {k, v} -> {k, Float.round(v, 4)} end),
-            "baseline_timestamp" => baseline["timestamp"],
-            "comparison_timestamp" => DateTime.utc_now() |> DateTime.to_iso8601()
-          }
-
-          report_json = Jason.encode!(report, pretty: true)
-
-          case logs_root do
-            nil -> :ok
-            root -> File.write!(Path.join([root, node.id, "drift_report.json"]), report_json)
-          end
-
-          # Update baseline if requested
-          if update_baseline do
-            create_baseline(baseline_path, current_text)
-          end
-
-          # Determine action
-          action_taken =
-            cond do
-              passed -> "pass"
-              action == "fail" -> "fail"
-              true -> "warn"
-            end
-
-          context_updates = %{
-            "last_stage" => node.id,
-            result_key => report_json,
-            "drift.#{node.id}.score" => Float.round(overall, 4),
-            "drift.#{node.id}.passed" => passed,
-            "drift.#{node.id}.dimensions" => Jason.encode!(dim_scores),
-            "drift.#{node.id}.action_taken" => action_taken
-          }
-
-          notes =
-            "Drift score: #{Float.round(overall, 4)} (threshold: #{threshold}) — #{action_taken}"
-
-          if action_taken == "fail" do
-            %Outcome{
-              status: :fail,
-              failure_reason:
-                "Drift detected: score #{Float.round(overall, 4)} below threshold #{threshold}",
-              context_updates: context_updates
-            }
-          else
-            %Outcome{status: :success, context_updates: context_updates, notes: notes}
-          end
-      end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "DriftDetect handler error: #{Exception.message(e)}"
-        }
+    case logs_root do
+      nil -> :ok
+      root -> File.mkdir_p!(Path.join(root, node.id))
     end
+
+    cond do
+      is_nil(baseline_path) or baseline_path == "" ->
+        %Outcome{status: :fail, failure_reason: "drift.detect requires baseline_path attribute"}
+
+      not File.exists?(baseline_path) ->
+        # No baseline yet — create it from current output
+        current_text = get_text(context, current_key)
+        create_baseline(baseline_path, current_text)
+
+        %Outcome{
+          status: :success,
+          context_updates: %{
+            "last_stage" => node.id,
+            result_key => "Baseline created (first run)",
+            "drift.#{node.id}.score" => 1.0,
+            "drift.#{node.id}.passed" => true,
+            "drift.#{node.id}.dimensions" => Jason.encode!(%{}),
+            "drift.#{node.id}.action_taken" => "pass"
+          },
+          notes: "Created baseline at #{baseline_path} (first run, no comparison)"
+        }
+
+      true ->
+        # Load baseline and current text
+        baseline = load_baseline(baseline_path)
+        current_text = get_text(context, current_key)
+
+        dimensions =
+          parse_csv(dimensions_str) |> Enum.filter(&(&1 in @all_dimensions))
+
+        dimensions = if dimensions == [], do: @all_dimensions, else: dimensions
+
+        # Compute per-dimension scores
+        dim_scores = compute_dimensions(baseline["text"], current_text, dimensions)
+
+        # Overall score: average of all dimension scores
+        overall =
+          if map_size(dim_scores) > 0 do
+            dim_scores |> Map.values() |> Enum.sum() |> Kernel./(map_size(dim_scores))
+          else
+            1.0
+          end
+
+        passed = overall >= threshold
+
+        # Build drift report
+        report = %{
+          "overall_score" => Float.round(overall, 4),
+          "threshold" => threshold,
+          "passed" => passed,
+          "dimensions" => Enum.into(dim_scores, %{}, fn {k, v} -> {k, Float.round(v, 4)} end),
+          "baseline_timestamp" => baseline["timestamp"],
+          "comparison_timestamp" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+
+        report_json = Jason.encode!(report, pretty: true)
+
+        case logs_root do
+          nil -> :ok
+          root -> File.write!(Path.join([root, node.id, "drift_report.json"]), report_json)
+        end
+
+        # Update baseline if requested
+        if update_baseline do
+          create_baseline(baseline_path, current_text)
+        end
+
+        # Determine action
+        action_taken =
+          cond do
+            passed -> "pass"
+            action == "fail" -> "fail"
+            true -> "warn"
+          end
+
+        context_updates = %{
+          "last_stage" => node.id,
+          result_key => report_json,
+          "drift.#{node.id}.score" => Float.round(overall, 4),
+          "drift.#{node.id}.passed" => passed,
+          "drift.#{node.id}.dimensions" => Jason.encode!(dim_scores),
+          "drift.#{node.id}.action_taken" => action_taken
+        }
+
+        notes =
+          "Drift score: #{Float.round(overall, 4)} (threshold: #{threshold}) — #{action_taken}"
+
+        if action_taken == "fail" do
+          %Outcome{
+            status: :fail,
+            failure_reason:
+              "Drift detected: score #{Float.round(overall, 4)} below threshold #{threshold}",
+            context_updates: context_updates
+          }
+        else
+          %Outcome{status: :success, context_updates: context_updates, notes: notes}
+        end
+    end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "DriftDetect handler error: #{Exception.message(e)}"
+      }
   end
 
   defp get_text(context, key) do
@@ -271,7 +269,6 @@ defmodule Arbor.Orchestrator.Handlers.DriftDetectHandler do
     max_val = max(a, b)
     if max_val == 0, do: 1.0, else: 1.0 - abs(a - b) / max_val
   end
-
 
   defp parse_float(val, default) when is_binary(val) do
     case Float.parse(val) do

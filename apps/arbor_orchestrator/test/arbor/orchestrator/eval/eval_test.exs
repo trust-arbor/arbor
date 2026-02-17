@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.EvalTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.Eval
-  alias Arbor.Orchestrator.Eval.Graders.{ExactMatch, Contains, RegexMatch, JsonValid, Composite}
+  alias Arbor.Orchestrator.Eval.Graders.{Composite, Contains, ExactMatch, JsonValid, RegexMatch}
   alias Arbor.Orchestrator.Eval.Metrics
 
   describe "grader registry" do

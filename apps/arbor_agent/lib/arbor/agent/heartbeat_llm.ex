@@ -13,7 +13,7 @@ defmodule Arbor.Agent.HeartbeatLLM do
   for fast, lightweight heartbeat thinking without spawning CLI subprocesses.
   """
 
-  alias Arbor.Agent.{CognitivePrompts, HeartbeatPrompt, HeartbeatResponse}
+  alias Arbor.Agent.{CognitivePrompts, Fitness, HeartbeatPrompt, HeartbeatResponse}
 
   require Logger
 
@@ -46,14 +46,18 @@ defmodule Arbor.Agent.HeartbeatLLM do
     llm_duration = System.monotonic_time(:millisecond) - llm_started_at
 
     # Record LLM latency for fitness tracking
-    if agent_id = state[:agent_id] || Map.get(state, :agent_id) do
-      try do
-        Arbor.Agent.Fitness.record_llm_latency(agent_id, llm_duration)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+    case state[:agent_id] || Map.get(state, :agent_id) do
+      nil ->
+        :ok
+
+      agent_id ->
+        try do
+          Fitness.record_llm_latency(agent_id, llm_duration)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
     end
 
     case ai_result do

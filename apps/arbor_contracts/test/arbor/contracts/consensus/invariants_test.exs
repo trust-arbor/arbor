@@ -111,7 +111,7 @@ defmodule Arbor.Contracts.Consensus.InvariantsTest do
     test "returns list of violation strings" do
       patterns = Invariants.violation_patterns()
       assert is_list(patterns)
-      assert length(patterns) > 0
+      assert patterns != []
       assert "quorum = 0" in patterns
       assert "bypass_boundary" in patterns
     end

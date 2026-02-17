@@ -16,6 +16,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Status do
 
   use Mix.Task
 
+  alias Arbor.Orchestrator.JobRegistry
+
   import Arbor.Orchestrator.Mix.Helpers
 
   @shortdoc "Show pipeline execution status"
@@ -37,8 +39,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Status do
   # ===========================================================================
 
   defp read_registry(opts) do
-    active = Arbor.Orchestrator.JobRegistry.list_active()
-    recent = Arbor.Orchestrator.JobRegistry.list_recent()
+    active = JobRegistry.list_active()
+    recent = JobRegistry.list_recent()
 
     if opts[:json] do
       output_json(%{active: active, recent: recent})

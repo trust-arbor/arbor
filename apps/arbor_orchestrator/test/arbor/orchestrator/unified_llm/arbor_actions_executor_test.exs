@@ -2,12 +2,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+  alias Arbor.Orchestrator.UnifiedLLM.CodingTools
 
   describe "definitions/0" do
     test "returns all action definitions in OpenAI format" do
       defs = ArborActionsExecutor.definitions()
       assert is_list(defs)
-      assert length(defs) > 0
+      assert defs != []
 
       # Check OpenAI format
       first = hd(defs)
@@ -138,7 +139,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   describe "integration with CodingTools interface" do
     test "definitions format matches CodingTools.definitions format" do
       arbor_defs = ArborActionsExecutor.definitions(["file_read"])
-      coding_defs = Arbor.Orchestrator.UnifiedLLM.CodingTools.definitions()
+      coding_defs = CodingTools.definitions()
 
       # Both should have same top-level structure
       arbor_first = hd(arbor_defs)
@@ -152,7 +153,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
       # ToolLoop calls executor.execute(name, args, workdir, agent_id: agent_id)
       # Both CodingTools and ArborActionsExecutor must accept this signature
       coding_result =
-        Arbor.Orchestrator.UnifiedLLM.CodingTools.execute(
+        CodingTools.execute(
           "read_file",
           %{"path" => "mix.exs"},
           ".",

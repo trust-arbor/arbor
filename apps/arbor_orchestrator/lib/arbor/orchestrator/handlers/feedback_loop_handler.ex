@@ -34,56 +34,54 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      source_key = Map.get(node.attrs, "source_key", "last_response")
-      content = Context.get(context, source_key)
+    source_key = Map.get(node.attrs, "source_key", "last_response")
+    content = Context.get(context, source_key)
 
-      unless content do
-        raise "feedback.loop: source key '#{source_key}' not found in context"
-      end
-
-      max_iter = parse_int(Map.get(node.attrs, "max_iterations"), @default_max_iterations)
-      threshold = parse_float(Map.get(node.attrs, "score_threshold"), @default_threshold)
-      scoring = Map.get(node.attrs, "scoring_method", "combined")
-      reference = if key = Map.get(node.attrs, "reference_key"), do: Context.get(context, key)
-      plateau_window = parse_int(Map.get(node.attrs, "plateau_window"), @default_plateau_window)
-
-      plateau_tol =
-        parse_float(Map.get(node.attrs, "plateau_tolerance"), @default_plateau_tolerance)
-
-      critique_template =
-        Map.get(
-          node.attrs,
-          "critique_prompt",
-          "Review the following and identify specific improvements:\n\n{content}"
-        )
-
-      task_prompt = Map.get(node.attrs, "prompt", "")
-      system_prompt = Map.get(node.attrs, "system_prompt")
-      llm_backend = Keyword.get(opts, :llm_backend)
-
-      config = %{
-        max_iter: max_iter,
-        threshold: threshold,
-        scoring: scoring,
-        reference: reference,
-        plateau_window: plateau_window,
-        plateau_tol: plateau_tol,
-        critique_template: critique_template,
-        task_prompt: task_prompt,
-        system_prompt: system_prompt,
-        llm_backend: llm_backend
-      }
-
-      result = iterate(to_string(content), config, [], 0)
-      build_outcome(result, node)
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "feedback.loop error: #{Exception.message(e)}"
-        }
+    unless content do
+      raise "feedback.loop: source key '#{source_key}' not found in context"
     end
+
+    max_iter = parse_int(Map.get(node.attrs, "max_iterations"), @default_max_iterations)
+    threshold = parse_float(Map.get(node.attrs, "score_threshold"), @default_threshold)
+    scoring = Map.get(node.attrs, "scoring_method", "combined")
+    reference = if key = Map.get(node.attrs, "reference_key"), do: Context.get(context, key)
+    plateau_window = parse_int(Map.get(node.attrs, "plateau_window"), @default_plateau_window)
+
+    plateau_tol =
+      parse_float(Map.get(node.attrs, "plateau_tolerance"), @default_plateau_tolerance)
+
+    critique_template =
+      Map.get(
+        node.attrs,
+        "critique_prompt",
+        "Review the following and identify specific improvements:\n\n{content}"
+      )
+
+    task_prompt = Map.get(node.attrs, "prompt", "")
+    system_prompt = Map.get(node.attrs, "system_prompt")
+    llm_backend = Keyword.get(opts, :llm_backend)
+
+    config = %{
+      max_iter: max_iter,
+      threshold: threshold,
+      scoring: scoring,
+      reference: reference,
+      plateau_window: plateau_window,
+      plateau_tol: plateau_tol,
+      critique_template: critique_template,
+      task_prompt: task_prompt,
+      system_prompt: system_prompt,
+      llm_backend: llm_backend
+    }
+
+    result = iterate(to_string(content), config, [], 0)
+    build_outcome(result, node)
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "feedback.loop error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

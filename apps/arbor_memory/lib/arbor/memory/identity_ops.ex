@@ -9,9 +9,12 @@ defmodule Arbor.Memory.IdentityOps do
   Use `Arbor.Memory` as the public API.
   """
 
+  alias Arbor.Common.SafeAtom
+
   alias Arbor.Memory.{
     IdentityConsolidator,
     InsightDetector,
+    KnowledgeOps,
     Preferences,
     PreferencesStore,
     ReflectionProcessor,
@@ -93,7 +96,7 @@ defmodule Arbor.Memory.IdentityOps do
 
       _other ->
         # Fall back to storing as a knowledge node
-        Arbor.Memory.KnowledgeOps.add_knowledge(agent_id, %{
+        KnowledgeOps.add_knowledge(agent_id, %{
           type: :insight,
           content: content,
           relevance: confidence,
@@ -343,7 +346,7 @@ defmodule Arbor.Memory.IdentityOps do
       |> String.downcase()
       |> String.replace(~r/\s+/, "_")
 
-    case Arbor.Common.SafeAtom.to_existing(normalized) do
+    case SafeAtom.to_existing(normalized) do
       {:ok, atom} -> atom
       {:error, _} -> normalized
     end

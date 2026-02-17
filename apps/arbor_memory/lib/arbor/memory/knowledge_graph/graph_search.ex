@@ -10,6 +10,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   called internally by the parent module.
   """
 
+  alias Arbor.Common.LazyLoader
   alias Arbor.Memory.KnowledgeGraph
 
   # ============================================================================
@@ -525,7 +526,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
 
   # Embedding service helpers
   defp embedding_service_available? do
-    Arbor.Common.LazyLoader.exported?(Arbor.AI, :embed, 2)
+    LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp compute_node_embedding(text) when is_binary(text) do

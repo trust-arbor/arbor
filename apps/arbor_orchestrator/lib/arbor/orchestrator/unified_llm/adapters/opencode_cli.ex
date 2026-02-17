@@ -37,9 +37,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpencodeCli do
   @impl true
   def complete(%Request{} = request, opts \\ []) do
     with {:ok, cmd, args} <- build_command(request, opts),
-         {:ok, output} <- execute(cmd, args, opts),
-         {:ok, response} <- parse_output(output) do
-      {:ok, response}
+         {:ok, output} <- execute(cmd, args, opts) do
+      parse_output(output)
     end
   end
 
@@ -174,8 +173,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpencodeCli do
   defp extract_text_content(events) do
     events
     |> Enum.filter(fn event -> event["type"] == "text" end)
-    |> Enum.map(fn event -> get_in(event, ["part", "text"]) || "" end)
-    |> Enum.join("")
+    |> Enum.map_join(fn event -> get_in(event, ["part", "text"]) || "" end)
   end
 
   defp extract_usage(events) do
@@ -238,8 +236,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpencodeCli do
       %{type: "text"} -> true
       _ -> false
     end)
-    |> Enum.map(fn part -> Map.get(part, :text, Map.get(part, "text", "")) end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn part -> Map.get(part, :text, Map.get(part, "text", "")) end)
   end
 
   defp extract_text(_), do: ""

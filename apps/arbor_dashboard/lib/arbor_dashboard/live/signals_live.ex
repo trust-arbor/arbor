@@ -12,7 +12,8 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   import Arbor.Web.Components
   import Arbor.Web.Helpers
 
-  alias Arbor.Web.{Helpers, Icons}
+  alias Arbor.Signals.Config, as: SignalsConfig
+  alias Arbor.Web.{Helpers, Icons, SignalLive}
 
   @stats_refresh_interval :timer.seconds(5)
 
@@ -30,7 +31,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     # Subscribe to each non-restricted category individually.
     # "*" is rejected because it overlaps restricted topics (security, identity)
     # and the dashboard has no principal_id yet (needs auth first).
-    restricted = Arbor.Signals.Config.restricted_topics()
+    restricted = SignalsConfig.restricted_topics()
     all_categories = Map.keys(Icons.category_icons())
     subscribed_categories = all_categories -- restricted
 
@@ -51,7 +52,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     socket =
       if connected?(socket) do
         Enum.reduce(subscribed_categories, socket, fn cat, sock ->
-          Arbor.Web.SignalLive.subscribe_raw(sock, "#{cat}.*")
+          SignalLive.subscribe_raw(sock, "#{cat}.*")
         end)
       else
         socket

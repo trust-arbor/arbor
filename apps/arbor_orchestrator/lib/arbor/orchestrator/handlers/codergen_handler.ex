@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   alias Arbor.Orchestrator.UnifiedLLM.{
     ArborActionsExecutor,
@@ -32,7 +32,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     base_updates = %{
       "last_stage" => node.id,
       "last_prompt" => prompt,
-      "context.previous_outcome" => Arbor.Orchestrator.Engine.Context.get(context, "outcome"),
+      "context.previous_outcome" => Context.get(context, "outcome"),
       "llm.model" => Map.get(node.attrs, "llm_model") || Map.get(node.attrs, "model"),
       "llm.provider" => Map.get(node.attrs, "llm_provider") || Map.get(node.attrs, "handler"),
       "llm.reasoning_effort" => Map.get(node.attrs, "reasoning_effort"),
@@ -56,7 +56,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
       "fail_once" ->
         key = "internal.simulate.fail_once.#{node.id}"
-        attempts = Arbor.Orchestrator.Engine.Context.get(context, key, 0)
+        attempts = Context.get(context, key, 0)
 
         if attempts == 0 do
           %Outcome{
@@ -189,13 +189,13 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
       agent_id =
         Map.get(node.attrs, "agent_id") ||
-          Arbor.Orchestrator.Engine.Context.get(context, "session.agent_id", "system")
+          Context.get(context, "session.agent_id", "system")
 
       # Extract signer from context — allows cryptographic identity verification
       # for every tool call executed within the pipeline
       signer =
         Keyword.get(opts, :signer) ||
-          Arbor.Orchestrator.Engine.Context.get(context, "session.signer")
+          Context.get(context, "session.signer")
 
       tool_loop_opts =
         [
@@ -316,7 +316,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
     if perspective && mode == "decision" && !has_explicit_prompt do
       # Use the council question as the prompt for decision-mode perspective nodes
-      question = Arbor.Orchestrator.Engine.Context.get(context, "council.question", "")
+      question = Context.get(context, "council.question", "")
 
       if question != "" do
         "Evaluate the following proposal and cast your vote:\n\n#{question}"

@@ -70,9 +70,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
     adapter = Map.get(@adapters, provider)
 
-    unless adapter do
-      {:error, "unknown provider: #{provider}. Available: #{inspect(Map.keys(@adapters))}"}
-    else
+    if adapter do
       messages = build_messages(prompt, system)
 
       request = %Request{
@@ -89,6 +87,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
       else
         run_complete(adapter, request, model, provider, timeout)
       end
+    else
+      {:error, "unknown provider: #{provider}. Available: #{inspect(Map.keys(@adapters))}"}
     end
   end
 

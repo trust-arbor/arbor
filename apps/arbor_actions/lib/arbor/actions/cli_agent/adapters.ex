@@ -26,6 +26,7 @@ defmodule Arbor.Actions.CliAgent.Adapters do
   """
 
   alias Arbor.Actions.CliAgent.Adapters
+  alias Arbor.Common.LazyLoader
 
   @adapters %{
     "claude" => Adapters.Claude
@@ -62,7 +63,7 @@ defmodule Arbor.Actions.CliAgent.Adapters do
   @spec available_agents() :: [String.t()]
   def available_agents do
     Enum.filter(@adapters, fn {_name, adapter} ->
-      Arbor.Common.LazyLoader.exported?(adapter, :available?, 0) and
+      LazyLoader.exported?(adapter, :available?, 0) and
         adapter.available?()
     end)
     |> Enum.map(fn {name, _adapter} -> name end)

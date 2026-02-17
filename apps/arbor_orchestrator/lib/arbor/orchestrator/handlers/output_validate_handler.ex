@@ -23,44 +23,42 @@ defmodule Arbor.Orchestrator.Handlers.OutputValidateHandler do
 
   @impl true
   def execute(node, context, _graph, _opts) do
-    try do
-      source_key = Map.get(node.attrs, "source_key", "last_response")
-      content = Context.get(context, source_key)
+    source_key = Map.get(node.attrs, "source_key", "last_response")
+    content = Context.get(context, source_key)
 
-      unless content do
-        raise "source key '#{source_key}' not found in context"
-      end
-
-      content_str = to_string(content)
-      format = Map.get(node.attrs, "format")
-      action = Map.get(node.attrs, "action", "fail")
-
-      errors =
-        []
-        |> maybe_validate_format(content_str, format)
-        |> maybe_validate_length(content_str, node.attrs)
-        |> maybe_validate_patterns(content_str, node.attrs)
-        |> maybe_validate_excluded(content_str, node.attrs)
-        |> maybe_validate_json_schema(content_str, node.attrs)
-        |> maybe_validate_regex(content_str, node.attrs)
-        |> Enum.reverse()
-
-      passed = errors == []
-
-      base_updates = %{
-        "validate.#{node.id}.passed" => passed,
-        "validate.#{node.id}.errors" => errors,
-        "validate.#{node.id}.format" => format || "none"
-      }
-
-      build_outcome(action, errors, passed, base_updates, content_str, source_key, node)
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "output.validate error: #{Exception.message(e)}"
-        }
+    unless content do
+      raise "source key '#{source_key}' not found in context"
     end
+
+    content_str = to_string(content)
+    format = Map.get(node.attrs, "format")
+    action = Map.get(node.attrs, "action", "fail")
+
+    errors =
+      []
+      |> maybe_validate_format(content_str, format)
+      |> maybe_validate_length(content_str, node.attrs)
+      |> maybe_validate_patterns(content_str, node.attrs)
+      |> maybe_validate_excluded(content_str, node.attrs)
+      |> maybe_validate_json_schema(content_str, node.attrs)
+      |> maybe_validate_regex(content_str, node.attrs)
+      |> Enum.reverse()
+
+    passed = errors == []
+
+    base_updates = %{
+      "validate.#{node.id}.passed" => passed,
+      "validate.#{node.id}.errors" => errors,
+      "validate.#{node.id}.format" => format || "none"
+    }
+
+    build_outcome(action, errors, passed, base_updates, content_str, source_key, node)
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "output.validate error: #{Exception.message(e)}"
+      }
   end
 
   @impl true
@@ -322,6 +320,8 @@ defmodule Arbor.Orchestrator.Handlers.OutputValidateHandler do
   defp check_required(_parsed, _required), do: ["cannot check required fields on non-object"]
 
   defp validate_regex(content, pattern_str) do
+    # Validates output against user-defined regex from pipeline node attrs
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeRegexCompile
     case Regex.compile(pattern_str) do
       {:ok, regex} ->
         if Regex.match?(regex, content) do
@@ -336,7 +336,6 @@ defmodule Arbor.Orchestrator.Handlers.OutputValidateHandler do
   end
 
   # --- Utilities ---
-
 
   defp parse_integer(nil), do: :none
 

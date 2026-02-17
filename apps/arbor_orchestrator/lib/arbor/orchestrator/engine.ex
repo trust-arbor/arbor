@@ -18,6 +18,7 @@ defmodule Arbor.Orchestrator.Engine do
     Router
   }
 
+  alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
@@ -332,95 +333,93 @@ defmodule Arbor.Orchestrator.Engine do
       path: Path.join(logs_root, "checkpoint.json")
     })
 
-    cond do
-      Router.terminal?(node) ->
-        case Router.resolve_goal_gate_retry_target(graph, outcomes) do
-          {:ok, nil} ->
-            # Before completing, check if there are pending fan-out branches
-            case Router.find_next_ready(pending, graph, completed) do
-              {next_id, next_edge, remaining} ->
-                emit(opts, %{
-                  type: :fan_out_branch_resuming,
-                  node_id: next_id,
-                  pending_count: length(remaining)
-                })
+    if Router.terminal?(node) do
+      case Router.resolve_goal_gate_retry_target(graph, outcomes) do
+        {:ok, nil} ->
+          # Before completing, check if there are pending fan-out branches
+          case Router.find_next_ready(pending, graph, completed) do
+            {next_id, next_edge, remaining} ->
+              emit(opts, %{
+                type: :fan_out_branch_resuming,
+                node_id: next_id,
+                pending_count: length(remaining)
+              })
 
-                loop(
-                  graph,
-                  next_id,
-                  next_edge,
-                  context,
-                  logs_root,
-                  max_steps - 1,
-                  completed,
-                  retries,
-                  outcomes,
-                  remaining,
-                  opts,
-                  pipeline_started_at,
-                  node_durations
-                )
+              loop(
+                graph,
+                next_id,
+                next_edge,
+                context,
+                logs_root,
+                max_steps - 1,
+                completed,
+                retries,
+                outcomes,
+                remaining,
+                opts,
+                pipeline_started_at,
+                node_durations
+              )
 
-              nil ->
-                ordered = Enum.reverse(completed)
-                duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+            nil ->
+              ordered = Enum.reverse(completed)
+              duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
-                emit(opts, %{
-                  type: :pipeline_completed,
-                  completed_nodes: ordered,
-                  duration_ms: duration_ms
-                })
+              emit(opts, %{
+                type: :pipeline_completed,
+                completed_nodes: ordered,
+                duration_ms: duration_ms
+              })
 
-                {:ok,
-                 %{
-                   final_outcome: outcome,
-                   completed_nodes: ordered,
-                   context: Context.snapshot(context),
-                   node_durations: node_durations
-                 }}
-            end
+              {:ok,
+               %{
+                 final_outcome: outcome,
+                 completed_nodes: ordered,
+                 context: Context.snapshot(context),
+                 node_durations: node_durations
+               }}
+          end
 
-          {:ok, retry_target} ->
-            emit(opts, %{type: :goal_gate_retrying, target: retry_target})
+        {:ok, retry_target} ->
+          emit(opts, %{type: :goal_gate_retrying, target: retry_target})
 
-            loop(
-              graph,
-              retry_target,
-              nil,
-              context,
-              logs_root,
-              max_steps - 1,
-              completed,
-              retries,
-              outcomes,
-              pending,
-              opts,
-              pipeline_started_at,
-              node_durations
-            )
+          loop(
+            graph,
+            retry_target,
+            nil,
+            context,
+            logs_root,
+            max_steps - 1,
+            completed,
+            retries,
+            outcomes,
+            pending,
+            opts,
+            pipeline_started_at,
+            node_durations
+          )
 
-          {:error, reason} ->
-            duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-            emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
-            {:error, reason}
-        end
-
-      true ->
-        advance_with_fan_in(
-          graph,
-          node,
-          outcome,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          node_durations
-        )
+        {:error, reason} ->
+          duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+          emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
+          {:error, reason}
+      end
+    else
+      advance_with_fan_in(
+        graph,
+        node,
+        outcome,
+        context,
+        logs_root,
+        max_steps,
+        completed,
+        retries,
+        outcomes,
+        pending,
+        opts,
+        pipeline_started_at,
+        node_durations
+      )
     end
   end
 
@@ -687,7 +686,7 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp emit(opts, event) do
     pipeline_id = Keyword.get(opts, :pipeline_id, :all)
-    Arbor.Orchestrator.EventEmitter.emit(pipeline_id, event, opts)
+    EventEmitter.emit(pipeline_id, event, opts)
   end
 
   defp write_manifest(graph, logs_root) do

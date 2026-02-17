@@ -59,6 +59,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.CompileCheck do
   end
 
   defp try_compile(code) do
+    # Eval grader: compiles LLM-generated code in sandboxed eval context
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
     Code.compile_string(code)
     :ok
   rescue
@@ -81,6 +83,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.CompileCheck do
   end
 
   defp try_compile_silent(code) do
+    # Eval grader: compiles LLM-generated code with boilerplate injection
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
     Code.compile_string(code)
     :ok
   rescue

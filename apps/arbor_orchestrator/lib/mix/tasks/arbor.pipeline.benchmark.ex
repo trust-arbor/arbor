@@ -149,6 +149,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
 
     direct_times =
       bench(iterations, fn ->
+        # Mix task: benchmarks direct execution of mix test
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
         {_output, 0} = System.cmd(elem(test_cmd, 0), elem(test_cmd, 1), stderr_to_stdout: true)
         :ok
       end)
@@ -197,6 +199,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Benchmark do
 
   defp run_direct(commands) do
     Enum.each(commands, fn {cmd, args} ->
+      # Mix task: benchmarks direct command execution for overhead comparison
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
       System.cmd(cmd, args, stderr_to_stdout: true)
     end)
   end

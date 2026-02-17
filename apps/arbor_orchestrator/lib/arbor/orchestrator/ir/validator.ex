@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
   6. **Condition completeness** — conditional nodes have both success and failure paths
   """
 
-  alias Arbor.Orchestrator.IR.{TypedGraph, TypedNode, TypedEdge}
+  alias Arbor.Orchestrator.IR.{TypedEdge, TypedGraph, TypedNode}
   alias Arbor.Orchestrator.Validation.Diagnostic
 
   @doc "Run all typed validation passes. Returns list of diagnostics."

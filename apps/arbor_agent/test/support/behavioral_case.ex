@@ -30,6 +30,10 @@ defmodule Arbor.Test.BehavioralCase do
 
   use ExUnit.CaseTemplate
 
+  alias Arbor.Consensus.TopicRegistry
+  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.CapabilityStore
+
   using do
     quote do
       @moduletag :behavioral
@@ -98,7 +102,7 @@ defmodule Arbor.Test.BehavioralCase do
 
     # Register common test topics
     for topic <- [:test_topic, :code_modification, :test_change] do
-      Arbor.Consensus.TopicRegistry.register_topic(%{
+      TopicRegistry.register_topic(%{
         topic: topic,
         min_quorum: :majority,
         match_patterns: [to_string(topic)]
@@ -152,7 +156,7 @@ defmodule Arbor.Test.BehavioralCase do
     ]
 
     for uri <- capabilities do
-      cap = %Arbor.Contracts.Security.Capability{
+      cap = %Capability{
         id: "cap_behavioral_#{agent_id}_#{URI.encode(uri)}",
         resource_uri: uri,
         principal_id: agent_id,
@@ -163,7 +167,7 @@ defmodule Arbor.Test.BehavioralCase do
         metadata: %{test: true, behavioral: true}
       }
 
-      Arbor.Security.CapabilityStore.put(cap)
+      CapabilityStore.put(cap)
     end
   end
 end

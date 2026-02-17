@@ -22,14 +22,13 @@ defmodule Arbor.Orchestrator.Mix.Helpers do
         |> Enum.map(fn {a, b} -> max(a, b) end)
       end)
 
-    separator = Enum.map(widths, &String.duplicate("-", &1 + 2)) |> Enum.join("+")
+    separator = Enum.map_join(widths, "+", &String.duplicate("-", &1 + 2))
     info("+" <> separator <> "+")
 
     header_line =
       headers
       |> Enum.zip(widths)
-      |> Enum.map(fn {h, w} -> " " <> String.pad_trailing(to_string(h), w) <> " " end)
-      |> Enum.join("|")
+      |> Enum.map_join("|", fn {h, w} -> " " <> String.pad_trailing(to_string(h), w) <> " " end)
 
     Mix.shell().info([:bright, "| " <> header_line <> "|"])
     info("+" <> separator <> "+")
@@ -38,8 +37,7 @@ defmodule Arbor.Orchestrator.Mix.Helpers do
       line =
         row
         |> Enum.zip(widths)
-        |> Enum.map(fn {c, w} -> " " <> String.pad_trailing(to_string(c), w) <> " " end)
-        |> Enum.join("|")
+        |> Enum.map_join("|", fn {c, w} -> " " <> String.pad_trailing(to_string(c), w) <> " " end)
 
       info("| " <> line <> "|")
     end)

@@ -44,95 +44,93 @@ defmodule Arbor.Orchestrator.Handlers.MemoryStoreHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      store_path = Map.get(node.attrs, "memory_store")
-      content_key = Map.get(node.attrs, "content_key", "last_response")
-      tags_str = Map.get(node.attrs, "tags", "")
-      source = Map.get(node.attrs, "source", node.id)
-      ttl_days = parse_int_or_nil(Map.get(node.attrs, "ttl_days"))
-      metadata_keys_str = Map.get(node.attrs, "metadata_keys", "")
+    store_path = Map.get(node.attrs, "memory_store")
+    content_key = Map.get(node.attrs, "content_key", "last_response")
+    tags_str = Map.get(node.attrs, "tags", "")
+    source = Map.get(node.attrs, "source", node.id)
+    ttl_days = parse_int_or_nil(Map.get(node.attrs, "ttl_days"))
+    metadata_keys_str = Map.get(node.attrs, "metadata_keys", "")
 
-      if is_nil(store_path) or store_path == "" do
-        %Outcome{status: :fail, failure_reason: "memory.store requires memory_store attribute"}
-      else
-        # Get the content to store
-        content = Context.get(context, content_key)
-        content = if is_nil(content), do: "", else: to_string(content)
+    if is_nil(store_path) or store_path == "" do
+      %Outcome{status: :fail, failure_reason: "memory.store requires memory_store attribute"}
+    else
+      # Get the content to store
+      content = Context.get(context, content_key)
+      content = if is_nil(content), do: "", else: to_string(content)
 
-        # Parse tags
-        tags = parse_csv(tags_str)
+      # Parse tags
+      tags = parse_csv(tags_str)
 
-        # Build metadata from specified context keys
-        metadata_keys = parse_csv(metadata_keys_str)
+      # Build metadata from specified context keys
+      metadata_keys = parse_csv(metadata_keys_str)
 
-        metadata =
-          Enum.reduce(metadata_keys, %{}, fn key, acc ->
-            val = Context.get(context, key)
-            if val, do: Map.put(acc, key, val), else: acc
-          end)
+      metadata =
+        Enum.reduce(metadata_keys, %{}, fn key, acc ->
+          val = Context.get(context, key)
+          if val, do: Map.put(acc, key, val), else: acc
+        end)
 
-        # Compute expiry
-        expires_at =
-          if ttl_days do
-            DateTime.utc_now()
-            |> DateTime.add(ttl_days * 86400, :second)
-            |> DateTime.to_iso8601()
-          else
-            nil
-          end
-
-        # Build memory entry
-        memory_id = generate_uuid()
-
-        entry = %{
-          "id" => memory_id,
-          "fact" => content,
-          "tags" => tags,
-          "source" => source,
-          "pipeline_run" => Context.get(context, "pipeline_run_id") || "unknown",
-          "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
-          "expires_at" => expires_at,
-          "metadata" => metadata
-        }
-
-        # Write to JSONL
-        File.mkdir_p!(Path.dirname(store_path))
-        line = Jason.encode!(entry) <> "\n"
-        File.write!(store_path, line, [:append])
-
-        # Write to stage dir
-        case Keyword.get(opts, :logs_root) do
-          nil ->
-            :ok
-
-          root ->
-            stage_dir = Path.join(root, node.id)
-            File.mkdir_p!(stage_dir)
-
-            File.write!(
-              Path.join(stage_dir, "stored_memory.json"),
-              Jason.encode!(entry, pretty: true)
-            )
+      # Compute expiry
+      expires_at =
+        if ttl_days do
+          DateTime.utc_now()
+          |> DateTime.add(ttl_days * 86_400, :second)
+          |> DateTime.to_iso8601()
+        else
+          nil
         end
 
-        %Outcome{
-          status: :success,
-          context_updates: %{
-            "last_stage" => node.id,
-            "memory.#{node.id}.stored" => true,
-            "memory.#{node.id}.memory_id" => memory_id,
-            "memory.#{node.id}.store_path" => store_path
-          },
-          notes: "Stored memory #{memory_id} with tags: #{Enum.join(tags, ", ")}"
-        }
+      # Build memory entry
+      memory_id = generate_uuid()
+
+      entry = %{
+        "id" => memory_id,
+        "fact" => content,
+        "tags" => tags,
+        "source" => source,
+        "pipeline_run" => Context.get(context, "pipeline_run_id") || "unknown",
+        "timestamp" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "expires_at" => expires_at,
+        "metadata" => metadata
+      }
+
+      # Write to JSONL
+      File.mkdir_p!(Path.dirname(store_path))
+      line = Jason.encode!(entry) <> "\n"
+      File.write!(store_path, line, [:append])
+
+      # Write to stage dir
+      case Keyword.get(opts, :logs_root) do
+        nil ->
+          :ok
+
+        root ->
+          stage_dir = Path.join(root, node.id)
+          File.mkdir_p!(stage_dir)
+
+          File.write!(
+            Path.join(stage_dir, "stored_memory.json"),
+            Jason.encode!(entry, pretty: true)
+          )
       end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "MemoryStore handler error: #{Exception.message(e)}"
-        }
+
+      %Outcome{
+        status: :success,
+        context_updates: %{
+          "last_stage" => node.id,
+          "memory.#{node.id}.stored" => true,
+          "memory.#{node.id}.memory_id" => memory_id,
+          "memory.#{node.id}.store_path" => store_path
+        },
+        notes: "Stored memory #{memory_id} with tags: #{Enum.join(tags, ", ")}"
+      }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "MemoryStore handler error: #{Exception.message(e)}"
+      }
   end
 
   defp generate_uuid do
@@ -147,7 +145,6 @@ defmodule Arbor.Orchestrator.Handlers.MemoryStoreHandler do
     ]
     |> Enum.join("-")
   end
-
 
   defp parse_int_or_nil(nil), do: nil
   defp parse_int_or_nil(""), do: nil

@@ -1,11 +1,11 @@
 defmodule Arbor.Orchestrator.MiddlewareTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Middleware
-  alias Arbor.Orchestrator.Middleware.{Chain, Token}
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
+  alias Arbor.Orchestrator.Middleware
+  alias Arbor.Orchestrator.Middleware.{Chain, Token}
 
   # Test middleware modules
   defmodule PassThrough do

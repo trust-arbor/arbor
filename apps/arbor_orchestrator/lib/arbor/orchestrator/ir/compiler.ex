@@ -15,9 +15,9 @@ defmodule Arbor.Orchestrator.IR.Compiler do
 
   alias Arbor.Orchestrator.Dot.Duration
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
-  alias Arbor.Orchestrator.IR.{HandlerSchema, TypedNode, TypedEdge, TypedGraph}
+  alias Arbor.Orchestrator.IR.{HandlerSchema, TypedEdge, TypedGraph, TypedNode}
 
   @doc "Compile an untyped graph into a typed graph IR."
   @spec compile(Graph.t()) :: {:ok, TypedGraph.t()} | {:error, term()}

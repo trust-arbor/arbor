@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.Eval.StructsTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Eval.{Sample, EvalResult}
+  alias Arbor.Orchestrator.Eval.{EvalResult, Sample}
 
   describe "Sample" do
     test "from_map builds struct from JSON-decoded map" do

@@ -55,6 +55,9 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   use Mix.Task
 
+  alias Arbor.Orchestrator.Eval
+  alias Arbor.Orchestrator.Eval.Subjects
+
   @domain_datasets %{
     "coding" => "apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl",
     "heartbeat" => "apps/arbor_orchestrator/priv/eval_datasets/heartbeat_json.jsonl",
@@ -387,8 +390,8 @@ defmodule Mix.Tasks.Arbor.Eval do
   defp fmt(val), do: inspect(val)
 
   defp run_samples(samples, grader_names, subject_opts) do
-    subject = Arbor.Orchestrator.Eval.Subjects.LLM
-    graders = Enum.map(grader_names, &Arbor.Orchestrator.Eval.grader/1) |> Enum.reject(&is_nil/1)
+    subject = Subjects.LLM
+    graders = Enum.map(grader_names, &Eval.grader/1) |> Enum.reject(&is_nil/1)
 
     Enum.map(samples, fn sample ->
       id = sample["id"]

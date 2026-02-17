@@ -218,13 +218,11 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
   # ── Source Parsing ──────────────────────────────────────────────────
 
   defp parse_source(source) do
-    try do
-      ast = Code.string_to_quoted!(source, columns: true, token_metadata: true)
-      {:ok, ast}
-    rescue
-      e in [SyntaxError, TokenMissingError, CompileError, MismatchedDelimiterError] ->
-        {:error, "Parse error: #{Exception.message(e)}"}
-    end
+    ast = Code.string_to_quoted!(source, columns: true, token_metadata: true)
+    {:ok, ast}
+  rescue
+    e in [SyntaxError, TokenMissingError, CompileError, MismatchedDelimiterError] ->
+      {:error, "Parse error: #{Exception.message(e)}"}
   end
 
   # ── AST Extraction ─────────────────────────────────────────────────
@@ -424,7 +422,7 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
   # ── Module Name Extraction ─────────────────────────────────────────
 
   defp module_name_from_ast({:__aliases__, _meta, parts}) do
-    parts |> Enum.map(&to_string/1) |> Enum.join(".")
+    Enum.map_join(parts, ".", &to_string/1)
   end
 
   defp module_name_from_ast(atom) when is_atom(atom), do: to_string(atom)
@@ -530,7 +528,7 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
 
   defp extract_clause_head({_kind, _meta, [{:when, _m, [head | guards]}, _body]}) do
     patterns = extract_arg_patterns(head)
-    guard_str = guards |> Enum.map(&Macro.to_string/1) |> Enum.join(" and ")
+    guard_str = Enum.map_join(guards, " and ", &Macro.to_string/1)
     {patterns, guard_str}
   end
 
@@ -575,7 +573,7 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
 
     patterns =
       Enum.map(clauses, fn {:->, _m, [pats, _body]} ->
-        pats |> Enum.map(&Macro.to_string/1) |> Enum.join(", ") |> truncate(40)
+        Enum.map_join(pats, ", ", &Macro.to_string/1) |> truncate(40)
       end)
 
     ["case #{expr_str} -> #{Enum.join(patterns, " | ")}"]
@@ -690,6 +688,8 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
       |> String.replace(".", "\\.")
       |> String.replace("*", ".*")
 
+    # Source analyzer: compiles glob-to-regex for file filtering
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeRegexCompile
     case Regex.compile("^" <> regex_str <> "$") do
       {:ok, regex} -> Regex.match?(regex, filename)
       _ -> false

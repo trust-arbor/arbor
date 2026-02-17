@@ -109,7 +109,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
     end
   end
 
-
   # Simple Agent-based transport storage. The Agent is started lazily
   # on first access and stores a single transport pid.
 
@@ -185,10 +184,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
       %{kind: :text} -> true
       _ -> false
     end)
-    |> Enum.map(fn part ->
+    |> Enum.map_join("\n", fn part ->
       Map.get(part, :text, Map.get(part, "text", ""))
     end)
-    |> Enum.join("\n")
   end
 
   defp extract_text(_), do: ""

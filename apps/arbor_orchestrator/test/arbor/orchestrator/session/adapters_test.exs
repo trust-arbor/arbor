@@ -168,7 +168,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       client =
         build_mock_client(fn req, _opts ->
           msgs = req.messages
-          assert length(msgs) >= 1
+          assert msgs != []
           user_msg = List.last(msgs)
           assert %Message{role: :user, content: "hello"} = user_msg
 

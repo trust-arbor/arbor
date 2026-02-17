@@ -56,15 +56,15 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
     source_key = Map.get(node.attrs, "source_key", "last_response")
     dot_source = Context.get(context, source_key)
 
-    unless dot_source do
-      fail("graph.compose: no DOT source at context key '#{source_key}'")
-    else
+    if dot_source do
       with {:ok, child_context_values} <- build_child_context(node, context),
            {:ok, child_opts} <- build_child_opts(node, opts) do
         run_child(dot_source, child_context_values, child_opts, node, context)
       else
         {:error, reason} -> fail("graph.compose: #{inspect(reason)}")
       end
+    else
+      fail("graph.compose: no DOT source at context key '#{source_key}'")
     end
   end
 
@@ -177,11 +177,11 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
   # --- Result mapping ---
 
   defp map_child_results(node, child_context) when is_map(child_context) do
-    cond do
-      mapping = Map.get(node.attrs, "result_mapping") ->
+    case Map.get(node.attrs, "result_mapping") do
+      mapping when not is_nil(mapping) ->
         apply_explicit_mapping(mapping, child_context)
 
-      true ->
+      _ ->
         prefix = Map.get(node.attrs, "result_prefix", "subgraph.#{node.id}.")
         apply_prefix_mapping(prefix, child_context)
     end

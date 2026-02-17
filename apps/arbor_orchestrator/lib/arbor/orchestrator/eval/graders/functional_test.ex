@@ -46,6 +46,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
     {munged_code, module_map} = munge_module_names(code, suffix)
 
     try do
+      # Eval grader: compiles LLM-generated code for functional testing
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
       Code.compile_string(munged_code)
 
       results =
@@ -58,12 +60,10 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
       score = if total > 0, do: passed_count / total, else: 0.0
 
       details =
-        results
-        |> Enum.map(fn r ->
+        Enum.map_join(results, "; ", fn r ->
           status = if r.passed, do: "PASS", else: "FAIL"
           "#{status}: #{r.call} — #{r.detail}"
         end)
-        |> Enum.join("; ")
 
       %{
         score: score,
@@ -96,19 +96,24 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
           # Run setup if present
           bindings =
             if setup != "" do
+              # Eval grader: runs test setup code from eval spec
+              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
               {_result, bindings} = Code.eval_string(setup)
               bindings
             else
               []
             end
 
-          # Run the call
+          # Eval grader: evaluates test call expression from eval spec
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
           {actual, _} = Code.eval_string(call, bindings)
 
           # Check result
           cond do
             match_pattern ->
               pattern = rewrite_module_refs(match_pattern, module_map)
+              # Eval grader: evaluates match? pattern from eval spec
+              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
               {matches, _} = Code.eval_string("match?(#{pattern}, actual)", actual: actual)
 
               if matches do
@@ -122,6 +127,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
               end
 
             expect ->
+              # Eval grader: evaluates expected value from eval spec
+              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
               {expected_val, _} = Code.eval_string(expect)
 
               if actual == expected_val do
@@ -195,7 +202,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
     # Split on double-quoted strings (preserving them)
     parts = Regex.split(~r/"(?:[^"\\]|\\.)*"/, code, include_captures: true)
 
-    Enum.map(parts, fn part ->
+    Enum.map_join(parts, fn part ->
       if String.starts_with?(part, "\"") do
         # Inside a string literal — don't touch
         part
@@ -204,7 +211,6 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
         String.replace(part, original, replacement)
       end
     end)
-    |> Enum.join()
   end
 
   defp rewrite_module_refs(expr, module_map) do

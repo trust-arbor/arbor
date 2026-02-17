@@ -281,17 +281,15 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
       _ ->
         edges = Graph.outgoing_edges(graph, node.id)
 
-        cond do
-          join_target && Enum.any?(edges, &(&1.to == join_target)) ->
-            join_target
+        if join_target && Enum.any?(edges, &(&1.to == join_target)) do
+          join_target
+        else
+          selected =
+            edges
+            |> Enum.filter(&edge_matches?(&1, outcome, context))
+            |> best_by_weight_then_lexical()
 
-          true ->
-            selected =
-              edges
-              |> Enum.filter(&edge_matches?(&1, outcome, context))
-              |> best_by_weight_then_lexical()
-
-            if selected, do: selected.to, else: nil
+          if selected, do: selected.to, else: nil
         end
     end
   end

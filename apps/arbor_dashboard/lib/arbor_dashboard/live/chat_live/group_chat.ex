@@ -9,7 +9,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   import Phoenix.LiveView
   import Phoenix.Component, only: [assign: 2]
 
-  alias Arbor.Agent.Manager
+  alias Arbor.Agent.{Lifecycle, Manager}
 
   @doc """
   Returns the default assigns for group chat state.
@@ -31,7 +31,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   # ── handle_event callbacks ────────────────────────────────────────
 
   def handle_event("show-group-modal", _params, socket) do
-    available = Arbor.Agent.Lifecycle.list_agents()
+    available = Lifecycle.list_agents()
 
     {:noreply,
      assign(socket,
@@ -190,7 +190,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     agent_specs =
       Enum.map(selected_ids, fn agent_id ->
         name =
-          case Arbor.Agent.Lifecycle.restore(agent_id) do
+          case Lifecycle.restore(agent_id) do
             {:ok, profile} -> profile.display_name || "Agent"
             _ -> "Agent"
           end
