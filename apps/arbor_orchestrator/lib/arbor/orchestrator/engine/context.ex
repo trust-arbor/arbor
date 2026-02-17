@@ -1,6 +1,12 @@
 defmodule Arbor.Orchestrator.Engine.Context do
   @moduledoc false
 
+  @type lineage_entry :: %{
+          node_id: String.t(),
+          timestamp: DateTime.t(),
+          operation: :set | :merge
+        }
+
   @type t :: %__MODULE__{values: map(), logs: [String.t()], lineage: map()}
   defstruct values: %{}, logs: [], lineage: %{}
 
@@ -19,7 +25,8 @@ defmodule Arbor.Orchestrator.Engine.Context do
   @spec set(t(), String.t(), term(), String.t()) :: t()
   def set(%__MODULE__{values: values, lineage: lineage} = ctx, key, value, node_id)
       when is_binary(node_id) do
-    %{ctx | values: Map.put(values, key, value), lineage: Map.put(lineage, key, node_id)}
+    entry = %{node_id: node_id, timestamp: DateTime.utc_now(), operation: :set}
+    %{ctx | values: Map.put(values, key, value), lineage: Map.put(lineage, key, entry)}
   end
 
   @doc "Merge updates into context without tracking lineage."
@@ -32,17 +39,36 @@ defmodule Arbor.Orchestrator.Engine.Context do
   @spec apply_updates(t(), map(), String.t()) :: t()
   def apply_updates(%__MODULE__{values: values, lineage: lineage} = ctx, updates, node_id)
       when is_map(updates) and is_binary(node_id) do
+    now = DateTime.utc_now()
+
     new_lineage =
       updates
       |> Map.keys()
-      |> Enum.reduce(lineage, fn key, acc -> Map.put(acc, key, node_id) end)
+      |> Enum.reduce(lineage, fn key, acc ->
+        entry = %{node_id: node_id, timestamp: now, operation: :merge}
+        Map.put(acc, key, entry)
+      end)
 
     %{ctx | values: Map.merge(values, updates), lineage: new_lineage}
   end
 
-  @doc "Returns the node_id that last set the given context key, or nil."
+  @doc """
+  Returns the node_id that last set the given context key, or nil.
+
+  Backward-compatible: works with both old (string) and new (map) lineage entries.
+  """
   @spec origin(t(), String.t()) :: String.t() | nil
-  def origin(%__MODULE__{lineage: lineage}, key), do: Map.get(lineage, key)
+  def origin(%__MODULE__{lineage: lineage}, key) do
+    case Map.get(lineage, key) do
+      %{node_id: node_id} -> node_id
+      node_id when is_binary(node_id) -> node_id
+      nil -> nil
+    end
+  end
+
+  @doc "Returns the full lineage entry for a context key, or nil."
+  @spec lineage_entry(t(), String.t()) :: lineage_entry() | nil
+  def lineage_entry(%__MODULE__{lineage: lineage}, key), do: Map.get(lineage, key)
 
   @doc "Returns the full lineage map."
   @spec lineage(t()) :: map()
