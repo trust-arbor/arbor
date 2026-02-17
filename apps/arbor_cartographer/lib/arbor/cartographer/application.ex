@@ -67,7 +67,12 @@ defmodule Arbor.Cartographer.Application do
           val
           |> String.split(",")
           |> Enum.map(&String.trim/1)
-          |> Enum.map(&String.to_atom/1)
+          |> Enum.map(fn tag ->
+            case Arbor.Common.SafeAtom.to_existing(tag) do
+              {:ok, atom} -> atom
+              {:error, _} -> tag
+            end
+          end)
       end
 
     if tags != [], do: Keyword.put(opts, :custom_tags, tags), else: opts

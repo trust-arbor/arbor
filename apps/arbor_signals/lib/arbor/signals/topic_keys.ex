@@ -24,6 +24,8 @@ defmodule Arbor.Signals.TopicKeys do
 
   use GenServer
 
+  require Logger
+
   @type topic :: atom()
   @type key_info :: %{
           key: binary(),
@@ -239,6 +241,7 @@ defmodule Arbor.Signals.TopicKeys do
          version: current_version
        }) do
     if payload_version != current_version do
+      Logger.warning("Topic key version mismatch: payload=#{payload_version} current=#{current_version}")
       {:error, :key_version_mismatch}
     else
       crypto_module = crypto_module()

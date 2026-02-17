@@ -140,10 +140,20 @@ defmodule Arbor.Security.SigningKeyStore do
     dir = Path.dirname(path)
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(path, key) do
-      # Set restrictive permissions (owner read/write only)
-      File.chmod(path, 0o600)
-      Logger.info("Generated new master key at #{path}")
+         :ok <- File.write(path, key),
+         :ok <- File.chmod(path, 0o600) do
+      # Verify permissions were actually applied
+      case File.stat(path) do
+        {:ok, %{access: access}} when access in [:read_write, :read] ->
+          Logger.info("Generated new master key at #{path} (mode 0600)")
+
+        {:ok, _} ->
+          Logger.warning("Master key at #{path} may have incorrect permissions")
+
+        {:error, _} ->
+          :ok
+      end
+
       {:ok, key}
     else
       {:error, reason} ->

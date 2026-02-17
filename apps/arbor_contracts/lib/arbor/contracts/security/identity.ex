@@ -35,7 +35,7 @@ defmodule Arbor.Contracts.Security.Identity do
   alias Arbor.Types
 
   @ed25519_public_key_size 32
-  @ed25519_private_key_size 32
+  @ed25519_private_key_sizes [32, 64]
   @x25519_key_size 32
 
   @typedoc "Identity lifecycle status"
@@ -237,14 +237,16 @@ defmodule Arbor.Contracts.Security.Identity do
 
   defp validate_private_key(%{private_key: nil}), do: :ok
 
+  # Accept both 32-byte seed and 64-byte expanded Ed25519 private keys.
+  # Erlang :crypto.generate_key(:eddsa, :ed25519) returns 64-byte expanded keys.
   defp validate_private_key(%{private_key: sk})
-       when is_binary(sk) and byte_size(sk) == @ed25519_private_key_size do
+       when is_binary(sk) and byte_size(sk) in @ed25519_private_key_sizes do
     :ok
   end
 
   defp validate_private_key(%{private_key: sk}) do
     {:error,
-     {:invalid_private_key_size, byte_size_or_type(sk), :expected, @ed25519_private_key_size}}
+     {:invalid_private_key_size, byte_size_or_type(sk), :expected, "32 or 64"}}
   end
 
   defp validate_encryption_public_key(%{encryption_public_key: nil}), do: :ok

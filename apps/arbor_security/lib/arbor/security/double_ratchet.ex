@@ -44,6 +44,7 @@ defmodule Arbor.Security.DoubleRatchet do
   alias Arbor.Security.Crypto
 
   @default_max_skip 100
+  @max_skipped_key_age_ms 3_600_000
   @root_info "arbor-dr-root-v1"
   @chain_info "arbor-dr-chain-v1"
   @msg_info "arbor-dr-msg-v1"
@@ -56,7 +57,7 @@ defmodule Arbor.Security.DoubleRatchet do
           root_key: binary(),
           send_chain: chain(),
           recv_chain: chain(),
-          skipped_keys: %{{binary(), non_neg_integer()} => binary()},
+          skipped_keys: %{{binary(), non_neg_integer()} => {binary(), integer()}},
           max_skip: non_neg_integer()
         }
 
@@ -261,11 +262,12 @@ defmodule Arbor.Security.DoubleRatchet do
 
     skipped_keys_list =
       session.skipped_keys
-      |> Enum.map(fn {{dh_pub, n}, key} ->
+      |> Enum.map(fn {{dh_pub, n}, {key, stored_at}} ->
         %{
           "dh_public" => Base.encode64(dh_pub),
           "n" => n,
-          "key" => Base.encode64(key)
+          "key" => Base.encode64(key),
+          "stored_at" => stored_at
         }
       end)
 
@@ -385,11 +387,13 @@ defmodule Arbor.Security.DoubleRatchet do
       nil ->
         :not_found
 
-      message_key ->
+      {message_key, _stored_at} ->
         case decrypt_with_key(ciphertext, message_key, header, aad) do
           {:ok, plaintext} ->
-            # Remove used key
-            session = %{session | skipped_keys: Map.delete(session.skipped_keys, key_id)}
+            # Remove used key and prune expired skipped keys on access
+            remaining = Map.delete(session.skipped_keys, key_id)
+            remaining = prune_expired_skipped_keys(remaining)
+            session = %{session | skipped_keys: remaining}
             {:ok, session, plaintext}
 
           {:error, :decryption_failed} ->
@@ -461,7 +465,7 @@ defmodule Arbor.Security.DoubleRatchet do
     session = %{
       session
       | recv_chain: %{key: chain_key, n: session.recv_chain.n + 1},
-        skipped_keys: Map.put(session.skipped_keys, key_id, message_key)
+        skipped_keys: Map.put(session.skipped_keys, key_id, {message_key, System.monotonic_time(:millisecond)})
     }
 
     do_skip_keys(session, until)
@@ -479,6 +483,18 @@ defmodule Arbor.Security.DoubleRatchet do
       {:error, :decryption_failed} ->
         {:error, :decryption_failed}
     end
+  end
+
+  # ===========================================================================
+  # Private Functions — Skipped Key Maintenance
+  # ===========================================================================
+
+  defp prune_expired_skipped_keys(skipped_keys) do
+    now = System.monotonic_time(:millisecond)
+
+    Map.filter(skipped_keys, fn {_key_id, {_key, stored_at}} ->
+      now - stored_at < @max_skipped_key_age_ms
+    end)
   end
 
   # ===========================================================================
@@ -500,7 +516,8 @@ defmodule Arbor.Security.DoubleRatchet do
         with {:ok, dh_pub} <- decode_binary(entry["dh_public"]),
              {:ok, key} <- decode_binary(entry["key"]) do
           key_id = {dh_pub, entry["n"]}
-          {:cont, {:ok, Map.put(acc, key_id, key)}}
+          stored_at = entry["stored_at"] || System.monotonic_time(:millisecond)
+          {:cont, {:ok, Map.put(acc, key_id, {key, stored_at})}}
         else
           error -> {:halt, error}
         end

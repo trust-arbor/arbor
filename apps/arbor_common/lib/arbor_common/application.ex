@@ -5,9 +5,23 @@ defmodule Arbor.Common.Application do
 
   @impl true
   def start(_type, _args) do
+    install_log_redaction_filter()
+
     children = []
 
     opts = [strategy: :one_for_one, name: Arbor.Common.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # M7: Install API key/token redaction filter on the default Logger handler.
+  # Must be done at runtime since config.exs can't hold function references.
+  defp install_log_redaction_filter do
+    :logger.add_handler_filter(
+      :default,
+      :api_key_redaction,
+      {&Arbor.Common.LogRedactor.filter/2, :log}
+    )
+  rescue
+    _ -> :ok
   end
 end

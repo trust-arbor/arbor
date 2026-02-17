@@ -194,7 +194,8 @@ defmodule Arbor.Security.Crypto do
   """
   @spec seal(binary(), binary(), binary()) :: map()
   def seal(plaintext, recipient_public, sender_private)
-      when is_binary(plaintext) and is_binary(recipient_public) and is_binary(sender_private) do
+      when is_binary(plaintext) and byte_size(recipient_public) == 32 and
+             byte_size(sender_private) == 32 do
     shared_secret = derive_shared_secret(sender_private, recipient_public)
     key = derive_key(shared_secret, @seal_info)
     {ciphertext, iv, tag} = encrypt(plaintext, key)
@@ -224,7 +225,7 @@ defmodule Arbor.Security.Crypto do
         %{ciphertext: ciphertext, iv: iv, tag: tag, sender_public: sender_public},
         recipient_private
       )
-      when is_binary(recipient_private) do
+      when byte_size(recipient_private) == 32 and byte_size(sender_public) == 32 do
     shared_secret = derive_shared_secret(recipient_private, sender_public)
     key = derive_key(shared_secret, @seal_info)
     decrypt(ciphertext, key, iv, tag)

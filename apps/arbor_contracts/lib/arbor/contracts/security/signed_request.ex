@@ -148,7 +148,14 @@ defmodule Arbor.Contracts.Security.SignedRequest do
 
   defp validate_agent_id(_), do: {:error, :missing_agent_id}
 
-  defp validate_nonce(%{nonce: n}) when is_binary(n) and byte_size(n) == @nonce_size, do: :ok
+  defp validate_nonce(%{nonce: n}) when is_binary(n) and byte_size(n) == @nonce_size do
+    # Reject all-zero nonces as they indicate failed entropy source
+    if n == <<0::size(@nonce_size * 8)>> do
+      {:error, :zero_nonce}
+    else
+      :ok
+    end
+  end
   defp validate_nonce(_), do: {:error, :invalid_nonce_size}
 
   defp validate_signature(%{signature: s}) when is_binary(s) and byte_size(s) > 0, do: :ok

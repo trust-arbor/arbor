@@ -93,6 +93,20 @@ defmodule Arbor.Security.SystemAuthority do
     GenServer.call(__MODULE__, {:verify_agent_endorsement, endorsement})
   end
 
+  @doc """
+  Rotate the system authority's keypair.
+
+  Generates a new identity, registers it in the Identity Registry, and
+  updates the GenServer state. The old keypair is discarded.
+
+  Note: Existing capabilities signed with the old key will fail verification
+  after rotation. Plan rotation during maintenance windows.
+  """
+  @spec rotate() :: {:ok, %{old_agent_id: String.t(), new_agent_id: String.t()}}
+  def rotate do
+    GenServer.call(__MODULE__, :rotate)
+  end
+
   # Server callbacks
 
   @impl true
@@ -169,6 +183,24 @@ defmodule Arbor.Security.SystemAuthority do
 
     result = if valid?, do: :ok, else: {:error, :invalid_endorsement}
     {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call(:rotate, _from, %{identity: old_identity} = state) do
+    case Identity.generate() do
+      {:ok, new_identity} ->
+        :ok = Registry.register(Identity.public_only(new_identity))
+
+        result = %{
+          old_agent_id: old_identity.agent_id,
+          new_agent_id: new_identity.agent_id
+        }
+
+        {:reply, {:ok, result}, %{state | identity: new_identity}}
+
+      {:error, reason} ->
+        {:reply, {:error, {:rotation_failed, reason}}, state}
+    end
   end
 
   # Length-prefixed endorsement payload to prevent field-boundary ambiguity.

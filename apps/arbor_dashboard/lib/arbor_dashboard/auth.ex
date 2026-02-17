@@ -24,9 +24,18 @@ defmodule Arbor.Dashboard.Auth do
         conn
 
       {username, password} ->
+        # H6: Use constant-time comparison to prevent timing attacks.
         case Plug.BasicAuth.parse_basic_auth(conn) do
-          {^username, ^password} ->
-            conn
+          {given_user, given_pass}
+          when is_binary(given_user) and is_binary(given_pass) ->
+            if Plug.Crypto.secure_compare(given_user, username) and
+                 Plug.Crypto.secure_compare(given_pass, password) do
+              conn
+            else
+              conn
+              |> Plug.BasicAuth.request_basic_auth(realm: "Arbor Dashboard")
+              |> halt()
+            end
 
           _ ->
             conn

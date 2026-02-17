@@ -397,7 +397,11 @@ defmodule Arbor.Security.Keychain do
       "tag" => Base.encode64(tag)
     }
 
-    {:ok, Jason.encode!(payload)}
+    # HMAC over the entire payload to protect public data integrity
+    payload_json = Jason.encode!(payload)
+    hmac = :crypto.mac(:hmac, :sha256, encryption_key, payload_json)
+
+    {:ok, Jason.encode!(%{"payload" => payload_json, "hmac" => Base.encode64(hmac)})}
   end
 
   @doc """
@@ -410,7 +414,8 @@ defmodule Arbor.Security.Keychain do
   @spec deserialize(binary(), binary()) :: {:ok, t()} | {:error, term()}
   def deserialize(payload, encryption_key)
       when is_binary(payload) and is_binary(encryption_key) and byte_size(encryption_key) == 32 do
-    with {:ok, data} <- Jason.decode(payload),
+    with {:ok, outer} <- Jason.decode(payload),
+         {:ok, data} <- verify_and_extract_payload(outer, encryption_key, payload),
          :ok <- verify_version(data["version"]),
          {:ok, ciphertext} <- Base.decode64(data["private_encrypted"]),
          {:ok, iv} <- Base.decode64(data["iv"]),
@@ -530,6 +535,27 @@ defmodule Arbor.Security.Keychain do
 
   defp verify_version(@keychain_version), do: :ok
   defp verify_version(_), do: {:error, :unsupported_version}
+
+  defp verify_and_extract_payload(%{"payload" => inner_json, "hmac" => hmac_b64}, encryption_key, _raw) do
+    with {:ok, expected_hmac} <- Base.decode64(hmac_b64) do
+      actual_hmac = :crypto.mac(:hmac, :sha256, encryption_key, inner_json)
+
+      if Plug.Crypto.secure_compare(actual_hmac, expected_hmac) do
+        Jason.decode(inner_json)
+      else
+        {:error, :hmac_verification_failed}
+      end
+    end
+  end
+
+  # Backward compatibility: payloads without HMAC wrapper
+  defp verify_and_extract_payload(data, _encryption_key, _raw) when is_map(data) do
+    if Map.has_key?(data, "version") do
+      {:ok, data}
+    else
+      {:error, :invalid_payload}
+    end
+  end
 
   defp build_keychain_from_data(public, private) do
     with {:ok, sign_pub} <- Base.decode64(public["signing_public"]),
