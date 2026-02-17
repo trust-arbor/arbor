@@ -42,7 +42,9 @@ defmodule Arbor.Agent.DebugAgent do
   alias Arbor.Agent.Manager
   alias Arbor.Agent.Templates.Diagnostician
   alias Arbor.Agent.Verification
+  alias Arbor.Monitor.AnomalyDetector
   alias Arbor.Monitor.AnomalyQueue
+  alias Arbor.Monitor.Fingerprint
 
   require Logger
 
@@ -720,6 +722,9 @@ defmodule Arbor.Agent.DebugAgent do
     action = context[:suggested_action] || :none
     target = context[:action_target]
 
+    # Store anomaly in process dictionary for remediation handlers that need it
+    Process.put(:current_anomaly, state.current_anomaly)
+
     # Execute remediation using the new Remediation actions
     result = execute_remediation_action(action, target)
 
@@ -782,6 +787,41 @@ defmodule Arbor.Agent.DebugAgent do
   defp execute_remediation_action(:logged_warning, _target) do
     Logger.warning("[DebugAgent] Manual intervention may be needed")
     %{success: true, action: :logged_warning, reason: nil}
+  end
+
+  defp execute_remediation_action(:suppress_fingerprint, _target) do
+    # Build fingerprint from current anomaly context and suppress it
+    # The anomaly is in process dictionary (set during safe_execute_fix)
+    # We get the anomaly from the state via the proposal context
+    Logger.info("[DebugAgent] Suppressing anomaly fingerprint for 30 minutes")
+
+    case Process.get(:current_anomaly) do
+      %{} = anomaly ->
+        case Fingerprint.from_anomaly(anomaly) do
+          {:ok, fingerprint} ->
+            AnomalyQueue.suppress(fingerprint, "Debug agent: likely noise", 30)
+            %{success: true, action: :suppress_fingerprint, reason: nil}
+
+          {:error, reason} ->
+            %{success: false, action: :suppress_fingerprint, reason: reason}
+        end
+
+      nil ->
+        %{success: false, action: :suppress_fingerprint, reason: :no_anomaly_context}
+    end
+  end
+
+  defp execute_remediation_action(:reset_baseline, _target) do
+    Logger.info("[DebugAgent] Resetting EWMA baseline for anomaly metric")
+
+    case Process.get(:current_anomaly) do
+      %{skill: skill, details: %{metric: metric}} when not is_nil(skill) and not is_nil(metric) ->
+        AnomalyDetector.reset(skill, metric)
+        %{success: true, action: :reset_baseline, reason: nil}
+
+      _ ->
+        %{success: false, action: :reset_baseline, reason: :no_anomaly_context}
+    end
   end
 
   defp execute_remediation_action(action, target) do

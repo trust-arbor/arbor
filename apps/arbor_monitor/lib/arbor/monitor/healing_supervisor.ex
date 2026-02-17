@@ -42,15 +42,16 @@ defmodule Arbor.Monitor.HealingSupervisor do
     healing_config =
       Keyword.get(opts, :healing, Application.get_env(:arbor_monitor, :healing, []))
 
-    children = [
-      # Queue must start first - other components may reference it
-      {Arbor.Monitor.AnomalyQueue, Keyword.get(healing_config, :anomaly_queue, [])},
-      {Arbor.Monitor.CascadeDetector, Keyword.get(healing_config, :cascade_detector, [])},
-      {Arbor.Monitor.RejectionTracker, Keyword.get(healing_config, :rejection_tracker, [])},
-      {Arbor.Monitor.Verification, Keyword.get(healing_config, :verification, [])},
-      # DynamicSupervisor for healing worker processes
-      {DynamicSupervisor, name: Arbor.Monitor.HealingWorkers, strategy: :one_for_one}
-    ]
+    children =
+      [
+        # Queue must start first - other components may reference it
+        {Arbor.Monitor.AnomalyQueue, Keyword.get(healing_config, :anomaly_queue, [])},
+        {Arbor.Monitor.CascadeDetector, Keyword.get(healing_config, :cascade_detector, [])},
+        {Arbor.Monitor.RejectionTracker, Keyword.get(healing_config, :rejection_tracker, [])},
+        {Arbor.Monitor.Verification, Keyword.get(healing_config, :verification, [])},
+        # DynamicSupervisor for healing worker processes
+        {DynamicSupervisor, name: Arbor.Monitor.HealingWorkers, strategy: :one_for_one}
+      ] ++ maybe_debug_agent_child(healing_config)
 
     Logger.info("[HealingSupervisor] Starting healing infrastructure")
 
@@ -89,5 +90,23 @@ defmodule Arbor.Monitor.HealingSupervisor do
   @spec worker_count() :: non_neg_integer()
   def worker_count do
     DynamicSupervisor.count_children(Arbor.Monitor.HealingWorkers).active
+  end
+
+  # Runtime bridge: start DebugAgent if arbor_agent is loaded.
+  # arbor_monitor is standalone (zero in-umbrella deps), so we use
+  # Code.ensure_loaded? to avoid a compile-time dependency on arbor_agent.
+  defp maybe_debug_agent_child(healing_config) do
+    debug_agent_mod = Arbor.Agent.DebugAgent
+
+    if Code.ensure_loaded?(debug_agent_mod) do
+      opts = Keyword.get(healing_config, :debug_agent, [])
+      opts = Keyword.put_new(opts, :display_name, "debug-agent")
+
+      Logger.info("[HealingSupervisor] Starting DebugAgent (arbor_agent available)")
+      [{debug_agent_mod, opts}]
+    else
+      Logger.debug("[HealingSupervisor] DebugAgent not available (arbor_agent not loaded)")
+      []
+    end
   end
 end

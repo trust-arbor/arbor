@@ -199,7 +199,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
           created_at: DateTime.utc_now()
         }
 
-        {:ok, evaluation}
+        {:ok, Evaluation.seal(evaluation)}
 
       {:error, _reason} ->
         # Try to detect vote from text
@@ -217,7 +217,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
           created_at: DateTime.utc_now()
         }
 
-        {:ok, evaluation}
+        {:ok, Evaluation.seal(evaluation)}
     end
   end
 
@@ -277,7 +277,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
       created_at: DateTime.utc_now()
     }
 
-    {:ok, evaluation}
+    {:ok, Evaluation.seal(evaluation)}
   end
 
   defp abstain_evaluation(proposal, perspective, evaluator_id, reason) do
@@ -293,7 +293,7 @@ defmodule Arbor.Consensus.Evaluator.RuntimeFix do
       created_at: DateTime.utc_now()
     }
 
-    {:ok, evaluation}
+    {:ok, Evaluation.seal(evaluation)}
   end
 
   defp generate_evaluation_id(proposal_id, perspective) do

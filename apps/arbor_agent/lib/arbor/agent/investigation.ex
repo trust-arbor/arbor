@@ -582,11 +582,11 @@ defmodule Arbor.Agent.Investigation do
     pid_hyp ++ top_hyp
   end
 
-  defp hypothesize_beam_issue(symptoms, _anomaly) do
+  defp hypothesize_beam_issue(symptoms, anomaly) do
     process_count = find_symptom(symptoms, :process_count)
     bloated = find_symptom(symptoms, :bloated_queues)
 
-    # Hypothesis 1: Process leak
+    # Hypothesis 1: Process leak (global threshold)
     leak_hyp =
       if process_count && process_count.value > 5000 do
         [
@@ -634,8 +634,112 @@ defmodule Arbor.Agent.Investigation do
         []
       end
 
-    leak_hyp ++ overload_hyp
+    # Hypothesis 3+: EWMA deviation-based hypotheses from anomaly details
+    deviation_hyp = hypothesize_from_deviation(anomaly)
+
+    leak_hyp ++ overload_hyp ++ deviation_hyp
   end
+
+  defp hypothesize_from_deviation(%{details: details, skill: skill})
+       when is_map(details) do
+    metric = Map.get(details, :metric)
+    value = Map.get(details, :value)
+    ewma = Map.get(details, :ewma)
+    stddev = Map.get(details, :stddev)
+    deviation_stddevs = Map.get(details, :deviation_stddevs)
+
+    cond do
+      # Not enough data for deviation analysis
+      is_nil(metric) or is_nil(value) or is_nil(ewma) ->
+        []
+
+      # Low deviation — likely noise, suppress the fingerprint
+      is_number(deviation_stddevs) and deviation_stddevs < 4.0 ->
+        [
+          %{
+            id: generate_id(),
+            root_cause:
+              "#{skill}/#{metric} at #{format_number(value)}, " <>
+                "#{format_number(deviation_stddevs)} stddevs from baseline #{format_number(ewma)} " <>
+                "(likely noise)",
+            confidence: 0.60,
+            evidence: [
+              %{
+                type: :deviation,
+                description: "Low EWMA deviation — below 4.0 stddevs threshold",
+                data: %{
+                  metric: metric,
+                  value: value,
+                  ewma: ewma,
+                  stddev: stddev,
+                  deviation_stddevs: deviation_stddevs
+                },
+                timestamp: DateTime.utc_now()
+              }
+            ],
+            suggested_action: :suppress_fingerprint,
+            action_target: nil
+          }
+        ]
+
+      # High deviation — baseline may have drifted, reset it
+      is_number(deviation_stddevs) and deviation_stddevs >= 4.0 ->
+        [
+          %{
+            id: generate_id(),
+            root_cause:
+              "#{skill}/#{metric} at #{format_number(value)}, " <>
+                "#{format_number(deviation_stddevs)} stddevs from baseline #{format_number(ewma)} " <>
+                "(baseline drift)",
+            confidence: 0.65,
+            evidence: [
+              %{
+                type: :deviation,
+                description: "High EWMA deviation — baseline may have drifted",
+                data: %{
+                  metric: metric,
+                  value: value,
+                  ewma: ewma,
+                  stddev: stddev,
+                  deviation_stddevs: deviation_stddevs
+                },
+                timestamp: DateTime.utc_now()
+              }
+            ],
+            suggested_action: :reset_baseline,
+            action_target: nil
+          }
+        ]
+
+      # Has metric data but no deviation_stddevs — generate descriptive hypothesis
+      true ->
+        [
+          %{
+            id: generate_id(),
+            root_cause:
+              "#{skill}/#{metric} anomaly: value #{format_number(value)}, " <>
+                "baseline #{format_number(ewma)}",
+            confidence: 0.50,
+            evidence: [
+              %{
+                type: :deviation,
+                description: "Metric deviation detected without stddev data",
+                data: %{metric: metric, value: value, ewma: ewma},
+                timestamp: DateTime.utc_now()
+              }
+            ],
+            suggested_action: :logged_warning,
+            action_target: nil
+          }
+        ]
+    end
+  end
+
+  defp hypothesize_from_deviation(_anomaly), do: []
+
+  defp format_number(n) when is_float(n), do: Float.round(n, 2) |> to_string()
+  defp format_number(n) when is_integer(n), do: to_string(n)
+  defp format_number(n), do: inspect(n)
 
   defp hypothesize_supervisor_issue(symptoms, anomaly) do
     sup_info = find_symptom(symptoms, :supervisor_info)
@@ -666,7 +770,10 @@ defmodule Arbor.Agent.Investigation do
   end
 
   defp hypothesize_generic(symptoms, anomaly) do
-    [
+    # Try deviation-based hypothesis first for any skill with EWMA data
+    deviation_hyp = hypothesize_from_deviation(anomaly)
+
+    fallback_hyp = [
       %{
         id: generate_id(),
         root_cause: "Unknown anomaly in #{anomaly.skill}",
@@ -685,6 +792,8 @@ defmodule Arbor.Agent.Investigation do
         action_target: nil
       }
     ]
+
+    if deviation_hyp != [], do: deviation_hyp ++ fallback_hyp, else: fallback_hyp
   end
 
   defp find_symptom(symptoms, type) do
@@ -730,12 +839,21 @@ defmodule Arbor.Agent.Investigation do
         "- #{h.root_cause} (confidence: #{h.confidence})"
       end)
 
+    details = investigation.anomaly.details || %{}
+
+    details_text =
+      Enum.map_join(details, "\n", fn {k, v} ->
+        "  #{k}: #{inspect(v)}"
+      end)
+
     """
-    Analyze this BEAM runtime investigation and refine the diagnosis:
+    Analyze this BEAM runtime investigation and refine the diagnosis.
 
     ## Anomaly
     Skill: #{investigation.anomaly.skill}
     Severity: #{investigation.anomaly.severity}
+    Details:
+    #{details_text}
 
     ## Symptoms Gathered
     #{symptoms_text}
@@ -743,10 +861,25 @@ defmodule Arbor.Agent.Investigation do
     ## Current Hypotheses
     #{hypotheses_text}
 
-    Based on the evidence, provide:
-    1. Which hypothesis is most likely correct and why
-    2. Any additional root cause not considered
-    3. Recommended action with confidence (0.0-1.0)
+    ## Instructions
+    Respond with a JSON object (no other text):
+    ```json
+    {
+      "root_cause": "Brief description of the most likely root cause",
+      "suggested_action": "one of: kill_process, force_gc, stop_supervisor, suppress_fingerprint, reset_baseline, logged_warning, none",
+      "confidence": 0.0 to 1.0,
+      "reasoning": "Why this action is appropriate"
+    }
+    ```
+
+    Valid actions:
+    - kill_process: Kill a specific runaway process
+    - force_gc: Force garbage collection on a bloated process
+    - stop_supervisor: Stop a failing supervisor tree
+    - suppress_fingerprint: Suppress this anomaly for 30 minutes (noise/false positive)
+    - reset_baseline: Reset the EWMA baseline for this metric (baseline drift)
+    - logged_warning: Log for human review, no automated action
+    - none: No action needed
     """
   end
 
@@ -754,7 +887,62 @@ defmodule Arbor.Agent.Investigation do
     # Extract text from response map (Arbor.AI returns %{text: ..., usage: ...})
     text = extract_response_text(response)
 
-    # Extract confidence adjustment from AI response
+    case extract_json(text) do
+      {:ok, parsed} when is_map(parsed) ->
+        parse_ai_json_response(investigation, parsed, text)
+
+      _ ->
+        # Fallback: regex-based confidence extraction
+        parse_ai_text_response(investigation, text)
+    end
+  end
+
+  defp parse_ai_json_response(investigation, parsed, raw_text) do
+    ai_confidence = parse_confidence(parsed["confidence"])
+    ai_action = parse_action(parsed["suggested_action"])
+    ai_root_cause = parsed["root_cause"]
+    ai_reasoning = parsed["reasoning"]
+
+    # Build AI hypothesis
+    ai_hypothesis = %{
+      id: generate_id(),
+      root_cause: ai_root_cause || "AI analysis",
+      confidence: ai_confidence || investigation.confidence,
+      evidence: [
+        %{
+          type: :ai_analysis,
+          description: "AI diagnostic: #{ai_reasoning || "no reasoning provided"}",
+          data: %{response: String.slice(raw_text, 0, 500)},
+          timestamp: DateTime.utc_now()
+        }
+      ],
+      suggested_action: ai_action || investigation.suggested_action,
+      action_target: nil
+    }
+
+    # If AI confidence is higher, promote AI hypothesis to selected
+    effective_confidence = ai_confidence || investigation.confidence
+
+    if effective_confidence > investigation.confidence do
+      %{
+        investigation
+        | confidence: effective_confidence,
+          selected_hypothesis: ai_hypothesis,
+          suggested_action: ai_action || investigation.suggested_action,
+          hypotheses: [ai_hypothesis | investigation.hypotheses],
+          evidence_chain: investigation.evidence_chain ++ ai_hypothesis.evidence
+      }
+    else
+      %{
+        investigation
+        | hypotheses: investigation.hypotheses ++ [ai_hypothesis],
+          evidence_chain: investigation.evidence_chain ++ ai_hypothesis.evidence
+      }
+    end
+  end
+
+  defp parse_ai_text_response(investigation, text) do
+    # Fallback: extract confidence via regex
     confidence_match = Regex.run(~r/confidence[:\s]+(\d+\.?\d*)/i, text)
 
     new_confidence =
@@ -770,7 +958,6 @@ defmodule Arbor.Agent.Investigation do
           investigation.confidence
       end
 
-    # Add AI analysis as evidence
     evidence =
       investigation.evidence_chain ++
         [
@@ -784,6 +971,59 @@ defmodule Arbor.Agent.Investigation do
 
     %{investigation | confidence: new_confidence, evidence_chain: evidence}
   end
+
+  # Multi-strategy JSON extraction (markdown fence → raw decode → brace match)
+  defp extract_json(text) when is_binary(text) do
+    # Strategy 1: JSON in markdown code fence
+    case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do
+      [_, json_str] ->
+        case Jason.decode(String.trim(json_str)) do
+          {:ok, parsed} -> {:ok, parsed}
+          _ -> extract_json_direct(text)
+        end
+
+      nil ->
+        extract_json_direct(text)
+    end
+  end
+
+  defp extract_json(_), do: {:error, :not_text}
+
+  defp extract_json_direct(text) do
+    # Strategy 2: Direct decode of trimmed text
+    case Jason.decode(String.trim(text)) do
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      _ ->
+        # Strategy 3: Find first JSON object via brace matching
+        case Regex.run(~r/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/s, text) do
+          [json_str] -> Jason.decode(json_str)
+          _ -> {:error, :no_json}
+        end
+    end
+  end
+
+  defp parse_confidence(val) when is_float(val) and val >= 0.0 and val <= 1.0, do: val
+  defp parse_confidence(val) when is_float(val) and val > 1.0, do: val / 100.0
+  defp parse_confidence(val) when is_integer(val) and val >= 0 and val <= 1, do: val / 1.0
+  defp parse_confidence(val) when is_integer(val) and val > 1, do: val / 100.0
+  defp parse_confidence(_), do: nil
+
+  @valid_actions ~w(kill_process force_gc stop_supervisor suppress_fingerprint reset_baseline logged_warning none)a
+
+  defp parse_action(str) when is_binary(str) do
+    atom =
+      try do
+        String.to_existing_atom(str)
+      rescue
+        ArgumentError -> nil
+      end
+
+    if atom in @valid_actions, do: atom, else: nil
+  end
+
+  defp parse_action(_), do: nil
 
   defp build_proposal_description(investigation) do
     hyp = investigation.selected_hypothesis || %{}
