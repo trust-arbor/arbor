@@ -66,7 +66,25 @@ defmodule Arbor.Agent.Templates.Researcher do
         resource: "arbor://orchestrator/run",
         description: "Run DOT pipelines for structured research"
       },
-      %{resource: "arbor://council/consult", description: "Consult advisory council perspectives"}
+      %{resource: "arbor://council/consult", description: "Consult advisory council perspectives"},
+      %{
+        resource: "arbor://actions/execute/pipeline.run",
+        description: "Run DOT orchestrator pipelines"
+      },
+      %{
+        resource: "arbor://actions/execute/pipeline.validate",
+        description: "Validate DOT orchestrator pipelines"
+      },
+      %{
+        resource: "arbor://actions/execute/docs.lookup",
+        description: "Look up module/function documentation"
+      },
+      %{
+        resource: "arbor://actions/execute/eval.check",
+        description: "Run code quality checks"
+      },
+      %{resource: "arbor://actions/execute/eval.list", description: "List past eval runs"},
+      %{resource: "arbor://actions/execute/eval.get", description: "Get eval run details"}
     ]
   end
 
