@@ -83,7 +83,9 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     test "filter-change with domain updates filters", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/eval")
 
-      html = render_click(view, "filter-change", %{"domain" => "coding", "status" => "", "model" => ""})
+      html =
+        render_click(view, "filter-change", %{"domain" => "coding", "status" => "", "model" => ""})
+
       assert is_binary(html)
     end
 
@@ -91,7 +93,13 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     test "filter-change with status updates filters", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/eval")
 
-      html = render_click(view, "filter-change", %{"domain" => "", "status" => "completed", "model" => ""})
+      html =
+        render_click(view, "filter-change", %{
+          "domain" => "",
+          "status" => "completed",
+          "model" => ""
+        })
+
       assert is_binary(html)
     end
 

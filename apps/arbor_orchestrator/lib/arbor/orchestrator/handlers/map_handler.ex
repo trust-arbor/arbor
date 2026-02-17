@@ -245,5 +245,4 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
       "map.#{node.id}.errors" => Jason.encode!(error_entries)
     }
   end
-
 end

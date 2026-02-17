@@ -102,14 +102,15 @@ defmodule Arbor.Agent.CheckpointRaceTest do
       tasks =
         for i <- 1..10 do
           Task.async(fn ->
-            state = jido_state(%{
-              agent_id: agent_id,
-              metadata: %{
-                module: TestAgent,
-                started_at: System.system_time(:millisecond),
-                save_index: i
-              }
-            })
+            state =
+              jido_state(%{
+                agent_id: agent_id,
+                metadata: %{
+                  module: TestAgent,
+                  started_at: System.system_time(:millisecond),
+                  save_index: i
+                }
+              })
 
             CheckpointManager.save_checkpoint(state)
           end)
@@ -180,10 +181,15 @@ defmodule Arbor.Agent.CheckpointRaceTest do
       writer_tasks =
         for i <- 1..5 do
           Task.async(fn ->
-            state = jido_state(%{
-              agent_id: agent_id,
-              metadata: %{module: TestAgent, started_at: System.system_time(:millisecond), version: i}
-            })
+            state =
+              jido_state(%{
+                agent_id: agent_id,
+                metadata: %{
+                  module: TestAgent,
+                  started_at: System.system_time(:millisecond),
+                  version: i
+                }
+              })
 
             CheckpointManager.save_checkpoint(state)
           end)
@@ -389,7 +395,9 @@ defmodule Arbor.Agent.CheckpointRaceTest do
   describe "config precedence" do
     test "per-agent opts override application config" do
       custom_store = Arbor.Persistence.Checkpoint.Store.Agent
-      config = CheckpointManager.config(store: custom_store, interval_ms: 1234, query_threshold: 99)
+
+      config =
+        CheckpointManager.config(store: custom_store, interval_ms: 1234, query_threshold: 99)
 
       assert config.store == custom_store
       assert config.interval_ms == 1234

@@ -236,7 +236,9 @@ defmodule Arbor.AI.RoutingConfigTest do
 
       Enum.each(versions, fn {key, value} ->
         assert is_atom(key), "Key #{inspect(key)} should be an atom"
-        assert is_binary(value), "Value for #{inspect(key)} should be a string, got #{inspect(value)}"
+
+        assert is_binary(value),
+               "Value for #{inspect(key)} should be a string, got #{inspect(value)}"
       end)
     end
 

@@ -399,5 +399,4 @@ defmodule Arbor.Actions do
     |> Macro.underscore()
     |> String.replace("/", ".")
   end
-
 end

@@ -458,8 +458,12 @@ defmodule Arbor.AI.RouterTest do
 
         Enum.each(candidates, fn {backend, model} ->
           resolved = RoutingConfig.resolve_model(model)
-          assert is_binary(resolved), "Model #{inspect(model)} for #{tier} tier should resolve to string"
-          assert String.length(resolved) > 0, "Resolved model for #{tier}/#{backend} should not be empty"
+
+          assert is_binary(resolved),
+                 "Model #{inspect(model)} for #{tier} tier should resolve to string"
+
+          assert String.length(resolved) > 0,
+                 "Resolved model for #{tier}/#{backend} should not be empty"
         end)
       end
     end

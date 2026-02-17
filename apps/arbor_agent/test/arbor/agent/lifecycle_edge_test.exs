@@ -11,7 +11,10 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
 
   @moduletag :fast
 
-  @agents_dir Path.join(System.tmp_dir!(), "arbor_lifecycle_edge_test_#{System.unique_integer([:positive])}")
+  @agents_dir Path.join(
+                System.tmp_dir!(),
+                "arbor_lifecycle_edge_test_#{System.unique_integer([:positive])}"
+              )
 
   setup do
     File.rm_rf!(@agents_dir)
@@ -71,7 +74,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
 
   describe "restore/1 edge cases" do
     test "returns :not_found for nonexistent agent" do
-      assert {:error, :not_found} = Lifecycle.restore("totally_nonexistent_#{System.unique_integer([:positive])}")
+      assert {:error, :not_found} =
+               Lifecycle.restore("totally_nonexistent_#{System.unique_integer([:positive])}")
     end
 
     test "returns deserialize error for corrupted JSON file" do
@@ -175,19 +179,20 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
     end
 
     test "profile with all fields populated survives round-trip" do
-      character = Character.new(
-        name: "Full Agent",
-        description: "A fully specified agent",
-        role: "tester",
-        background: "testing background",
-        traits: [%{name: "curious", intensity: 0.9}],
-        values: ["accuracy", "speed"],
-        quirks: ["always double-checks"],
-        tone: "formal",
-        style: "concise",
-        knowledge: [%{content: "knows testing", category: "skills"}],
-        instructions: ["be thorough"]
-      )
+      character =
+        Character.new(
+          name: "Full Agent",
+          description: "A fully specified agent",
+          role: "tester",
+          background: "testing background",
+          traits: [%{name: "curious", intensity: 0.9}],
+          values: ["accuracy", "speed"],
+          quirks: ["always double-checks"],
+          tone: "formal",
+          style: "concise",
+          knowledge: [%{content: "knows testing", category: "skills"}],
+          instructions: ["be thorough"]
+        )
 
       profile = %Profile{
         agent_id: "full-agent-#{System.unique_integer([:positive])}",

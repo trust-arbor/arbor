@@ -492,7 +492,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"flaky", %{"simulate" => "retry", "max_retries" => "1", "retry_initial_delay_ms" => "1"}},
+            {"flaky",
+             %{"simulate" => "retry", "max_retries" => "1", "retry_initial_delay_ms" => "1"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1010,7 +1011,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
 
     @tag :fast
     test "429 status is retryable" do
-      assert Executor.should_retry_exception?(%RuntimeError{message: "HTTP 429 Too Many Requests"})
+      assert Executor.should_retry_exception?(%RuntimeError{
+               message: "HTTP 429 Too Many Requests"
+             })
     end
 
     @tag :fast
@@ -1686,8 +1689,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       opts = collect_events(logs_root: tmp_logs_root())
       assert {:ok, _result} = Engine.run(graph, opts)
 
-      assert_receive {:event,
-                      %{type: :fidelity_resolved, node_id: "task", mode: "full"}}
+      assert_receive {:event, %{type: :fidelity_resolved, node_id: "task", mode: "full"}}
     end
 
     @tag :fast
@@ -1708,8 +1710,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       opts = collect_events(logs_root: tmp_logs_root())
       assert {:ok, _result} = Engine.run(graph, opts)
 
-      assert_receive {:event,
-                      %{type: :fidelity_resolved, node_id: "task", mode: "truncate"}}
+      assert_receive {:event, %{type: :fidelity_resolved, node_id: "task", mode: "truncate"}}
     end
 
     @tag :fast
@@ -1731,8 +1732,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       opts = collect_events(logs_root: tmp_logs_root())
       assert {:ok, _result} = Engine.run(graph, opts)
 
-      assert_receive {:event,
-                      %{type: :fidelity_resolved, node_id: "task", mode: "summary:low"}}
+      assert_receive {:event, %{type: :fidelity_resolved, node_id: "task", mode: "summary:low"}}
     end
 
     @tag :fast
@@ -1753,8 +1753,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       opts = collect_events(logs_root: tmp_logs_root())
       assert {:ok, _result} = Engine.run(graph, opts)
 
-      assert_receive {:event,
-                      %{type: :fidelity_resolved, node_id: "task", mode: "compact"}}
+      assert_receive {:event, %{type: :fidelity_resolved, node_id: "task", mode: "compact"}}
     end
   end
 
@@ -1847,7 +1846,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"failing", %{"simulate" => "fail", "max_retries" => "0", "retry_target" => "repair"}},
+            {"failing",
+             %{"simulate" => "fail", "max_retries" => "0", "retry_target" => "repair"}},
             {"repair", %{"label" => "Repair"}},
             {"normal", %{"label" => "Normal"}},
             {"exit", %{"shape" => "Msquare"}}
@@ -1927,7 +1927,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       assert "flaky" in result.completed_nodes
       assert "exit" in result.completed_nodes
       # The flaky node completed as partial_success, which routes forward
-      assert_receive {:event, %{type: :stage_completed, node_id: "flaky", status: :partial_success}}
+      assert_receive {:event,
+                      %{type: :stage_completed, node_id: "flaky", status: :partial_success}}
     end
   end
 end

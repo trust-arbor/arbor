@@ -222,5 +222,4 @@ defmodule Arbor.Orchestrator.Handlers.MemoryRecallHandler do
         (m["fact"] || "")
     end)
   end
-
 end

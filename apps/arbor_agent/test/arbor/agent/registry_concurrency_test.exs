@@ -45,9 +45,13 @@ defmodule Arbor.Agent.RegistryConcurrencyTest do
 
       # Exactly one should succeed, the rest should get :already_registered
       successes = Enum.filter(results, fn {_i, result, _pid} -> result == :ok end)
-      failures = Enum.filter(results, fn {_i, result, _pid} -> result == {:error, :already_registered} end)
 
-      assert length(successes) == 1, "Expected exactly 1 successful registration, got #{length(successes)}"
+      failures =
+        Enum.filter(results, fn {_i, result, _pid} -> result == {:error, :already_registered} end)
+
+      assert length(successes) == 1,
+             "Expected exactly 1 successful registration, got #{length(successes)}"
+
       assert length(failures) == 9, "Expected exactly 9 failures, got #{length(failures)}"
 
       # Verify the winner is actually in the registry

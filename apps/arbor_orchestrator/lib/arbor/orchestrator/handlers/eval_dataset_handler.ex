@@ -76,5 +76,4 @@ defmodule Arbor.Orchestrator.Handlers.EvalDatasetHandler do
   defp resolve_path(path, workdir) do
     if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
   end
-
 end
