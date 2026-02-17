@@ -36,6 +36,15 @@ defmodule Arbor.Orchestrator.Dot.Parser do
 
   # ── Public API ────────────────────────────────────────────────────
 
+  @doc "Parse a DOT source file from disk."
+  @spec parse_file(Path.t()) :: {:ok, Graph.t()} | {:error, String.t()}
+  def parse_file(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok, source} -> parse(source)
+      {:error, reason} -> {:error, "Could not read #{path}: #{reason}"}
+    end
+  end
+
   @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, String.t()}
   def parse(source) when is_binary(source) do
     source

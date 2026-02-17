@@ -25,6 +25,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Validation.Validator
 
   @type event :: map()
 
@@ -41,8 +42,27 @@ defmodule Arbor.Orchestrator.Engine do
   # Initial tracking state for node_durations and content_hashes
   defp new_tracking, do: %{node_durations: %{}, content_hashes: %{}}
 
+  @doc """
+  Run a graph pipeline.
+
+  Options:
+  - `:validate` — run structural validation before execution (default: `false`).
+    When called via `Orchestrator.run/2`, validation runs at the facade level.
+    Set this to `true` when calling `Engine.run/2` directly.
+  """
   @spec run(Graph.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(%Graph{} = graph, opts \\ []) do
+    if Keyword.get(opts, :validate, false) do
+      case Validator.validate_or_error(graph) do
+        :ok -> do_run(graph, opts)
+        {:error, _} = err -> err
+      end
+    else
+      do_run(graph, opts)
+    end
+  end
+
+  defp do_run(%Graph{} = graph, opts) do
     logs_root = Keyword.get(opts, :logs_root, Path.join(System.tmp_dir!(), "arbor_orchestrator"))
     max_steps = Keyword.get(opts, :max_steps, 500)
     pipeline_started_at = System.monotonic_time(:millisecond)

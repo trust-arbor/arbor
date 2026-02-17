@@ -5,6 +5,35 @@ defmodule Arbor.Orchestrator.Dot.ParserTest do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
+  # ── 0. parse_file/1 ──────────────────────────────────────────────────
+
+  describe "parse_file/1" do
+    test "reads and parses a DOT file from disk" do
+      path = Path.join(System.tmp_dir!(), "test_parser_#{:rand.uniform(999_999)}.dot")
+
+      try do
+        File.write!(path, """
+        digraph FileTest {
+          start [shape=Mdiamond]
+          done [shape=Msquare]
+          start -> done
+        }
+        """)
+
+        assert {:ok, graph} = Parser.parse_file(path)
+        assert graph.id == "FileTest"
+        assert map_size(graph.nodes) == 2
+      after
+        File.rm(path)
+      end
+    end
+
+    test "returns error for missing file" do
+      assert {:error, msg} = Parser.parse_file("/tmp/nonexistent_#{:rand.uniform(999_999)}.dot")
+      assert msg =~ "Could not read"
+    end
+  end
+
   # ── 1. minimal pipeline ──────────────────────────────────────────────
 
   describe "minimal pipeline" do
