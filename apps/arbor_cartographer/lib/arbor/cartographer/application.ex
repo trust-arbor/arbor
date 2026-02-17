@@ -67,13 +67,17 @@ defmodule Arbor.Cartographer.Application do
           val
           |> String.split(",")
           |> Enum.map(&String.trim/1)
-          |> Enum.map(fn tag ->
+          |> Enum.flat_map(fn tag ->
             # Cartographer is standalone (no arbor_common dep).
-            # Tags are operator-configured env vars, not untrusted input.
+            # Only convert to atoms that already exist in the VM to prevent
+            # atom table exhaustion (DoS). Unknown tags are dropped with a warning.
             try do
-              String.to_existing_atom(tag)
+              [String.to_existing_atom(tag)]
             rescue
-              ArgumentError -> String.to_atom(tag)
+              ArgumentError ->
+                require Logger
+                Logger.warning("Ignoring unknown custom tag #{inspect(tag)} — atom does not exist")
+                []
             end
           end)
       end
