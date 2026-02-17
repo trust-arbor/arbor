@@ -48,7 +48,7 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_memory, in_umbrella: true},
 
       # Standalone
-      {:arbor_eval, in_umbrella: true},
+      {:arbor_common, in_umbrella: true},
       {:arbor_demo, in_umbrella: true},
       {:arbor_monitor, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},

@@ -2,16 +2,11 @@ defmodule Arbor.Common.LogRedactor do
   @moduledoc """
   Logger filter that redacts sensitive values from log output.
 
-  Scans log messages and metadata for patterns that look like API keys,
-  tokens, or passwords and replaces them with [REDACTED].
+  Delegates to `Arbor.Common.SensitiveData.redact/1` for pattern matching,
+  which covers both PII and secret patterns.
   """
 
-  @sensitive_patterns [
-    ~r/(?i)(api[_-]?key|token|password|secret|credential)[=:\s]+["']?[\w\-\.]{16,}/,
-    ~r/(?i)bearer\s+[\w\-\.]{16,}/,
-    ~r/sk-[a-zA-Z0-9]{20,}/,
-    ~r/key-[a-zA-Z0-9]{20,}/
-  ]
+  alias Arbor.Common.SensitiveData
 
   @doc false
   def filter(%{msg: msg} = log_event, _extra) do
@@ -30,9 +25,7 @@ defmodule Arbor.Common.LogRedactor do
   def filter(log_event, _extra), do: log_event
 
   defp redact(str) when is_binary(str) do
-    Enum.reduce(@sensitive_patterns, str, fn pattern, acc ->
-      Regex.replace(pattern, acc, "[REDACTED]")
-    end)
+    SensitiveData.redact(str)
   end
 
   defp redact(other), do: other

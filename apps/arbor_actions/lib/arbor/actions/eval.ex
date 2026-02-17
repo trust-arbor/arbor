@@ -16,8 +16,8 @@ defmodule Arbor.Actions.Eval do
 
   ## Architecture
 
-  Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) since both
-  `arbor_eval` and `arbor_orchestrator` are Standalone apps.
+  Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) since
+  `arbor_orchestrator` is a Standalone app.
 
   ## Examples
 
@@ -420,7 +420,7 @@ defmodule Arbor.Actions.Eval do
       Arbor.Eval.Checks.ElixirIdioms,
       Arbor.Eval.Checks.Documentation,
       Arbor.Eval.Checks.NamingConventions,
-      Arbor.Eval.Checks.PiiDetection
+      Arbor.Eval.Checks.PIIDetection
     ]
     |> Enum.filter(&Code.ensure_loaded?/1)
   end
@@ -430,7 +430,7 @@ defmodule Arbor.Actions.Eval do
       "elixir_idioms" => Arbor.Eval.Checks.ElixirIdioms,
       "documentation" => Arbor.Eval.Checks.Documentation,
       "naming_conventions" => Arbor.Eval.Checks.NamingConventions,
-      "pii_detection" => Arbor.Eval.Checks.PiiDetection
+      "pii_detection" => Arbor.Eval.Checks.PIIDetection
     }
   end
 end

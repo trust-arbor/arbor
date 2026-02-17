@@ -11,7 +11,7 @@ defmodule Arbor.Dashboard do
   |-----------|-------------|---------------------|
   | LandingLive | Navigation shell | None |
   | SignalsLive | Real-time signal stream | arbor_signals |
-  | EvalLive | Evaluation results | arbor_eval |
+  | EvalLive | Evaluation results | arbor_common (Arbor.Eval) |
 
   ## Architecture
 

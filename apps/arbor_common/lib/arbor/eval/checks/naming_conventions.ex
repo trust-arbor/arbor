@@ -227,8 +227,7 @@ defmodule Arbor.Eval.Checks.NamingConventions do
     |> Enum.map(fn term ->
       %{
         type: :implementation_in_module_name,
-        message:
-          "Module name '#{module_name}' exposes implementation technology '#{term}'",
+        message: "Module name '#{module_name}' exposes implementation technology '#{term}'",
         line: meta[:line],
         column: nil,
         severity: if(strictness == :strict, do: :warning, else: :suggestion),
@@ -249,8 +248,7 @@ defmodule Arbor.Eval.Checks.NamingConventions do
       [
         %{
           type: :arbor_module_naming,
-          message:
-            "Module '#{module_name}' uses concatenated naming instead of dotted namespace",
+          message: "Module '#{module_name}' uses concatenated naming instead of dotted namespace",
           line: meta[:line],
           column: nil,
           severity: :error,

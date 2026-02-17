@@ -3,6 +3,7 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   Detects potential personally identifiable information (PII) in code.
 
   Uses SafeRegex for timeout-protected pattern matching to prevent ReDoS attacks.
+  Pattern definitions are shared with `Arbor.Common.SensitiveData`.
 
   Based on patterns from Microsoft Presidio and industry best practices.
 
@@ -11,17 +12,8 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   Patterns in this module are derived from:
 
   - **Microsoft Presidio** - Open-source PII detection framework
-    - GitHub: https://github.com/microsoft/presidio
-    - Supported entities: https://microsoft.github.io/presidio/supported_entities/
-    - Patterns used: Credit cards, SSN, phone numbers, email validation
-
   - **Bearer CLI** - SAST tool with 120+ sensitive data types
-    - GitHub: https://github.com/Bearer/bearer
-    - Data types: https://docs.bearer.com/reference/datatypes/
-    - Patterns used: API key formats, secret detection patterns
-
   - **OWASP** - Sensitive data exposure guidelines
-    - https://owasp.org/www-project-web-security-testing-guide/
 
   ## Detected PII Types
   # arbor:allow pii
@@ -31,20 +23,10 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   - Credit card numbers (with Luhn checksum validation)
   - US Social Security Numbers (SSN)
   - Names (configurable list)
-  - API keys and secrets:
-    - OpenAI (sk-...)
-    - GitHub (ghp_, gho_, ghu_, ghs_, ghr_)
-    - AWS (AKIA..., secret access keys)
-    - Google (AIza...)
-    - Stripe (sk_live_, sk_test_, pk_live_, pk_test_)
-    - Slack (xoxb, xoxa, xoxp, xoxr, xoxs)
-    - JWT tokens
-    - Private keys (PEM format)
+  - API keys and secrets (see `Arbor.Common.SensitiveData` for full list)
   - IP addresses
 
   ## Configuration
-
-  You can configure additional patterns or names to check:
 
       Arbor.Eval.run(PIIDetection, code: code,
         additional_names: ["alice", "bob"],
@@ -57,18 +39,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
 
       # arbor:allow pii
       @test_email "test@example.com"
-
-  ## Future Enhancements
-
-  Consider adding from Presidio/Bearer:
-  - IBAN (International Bank Account Numbers)
-  - UK NHS numbers
-  - Passport numbers (various countries)
-  - Driver's license patterns
-  - Medical record numbers
-  - Bitcoin/crypto addresses
-  - Azure/GCP credentials
-
   """
 
   use Arbor.Eval,
@@ -76,111 +46,22 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     category: :security,
     description: "Detects potential PII in source code"
 
-  # Common username patterns in paths
-  defp path_patterns do
-    [
-      ~r{/Users/[a-zA-Z][a-zA-Z0-9_-]+/},
-      ~r{/home/[a-zA-Z][a-zA-Z0-9_-]+/},
-      ~r{C:\\Users\\[a-zA-Z][a-zA-Z0-9_-]+\\}
-    ]
-  end
+  alias Arbor.Common.SensitiveData
+
+  # Delegate pattern definitions to SensitiveData
+  defdelegate path_patterns(), to: SensitiveData
+  defdelegate phone_patterns(), to: SensitiveData
+  defdelegate credit_card_patterns(), to: SensitiveData
+  defdelegate secret_patterns(), to: SensitiveData
+  defdelegate labeled_secret_patterns(), to: SensitiveData
+  defdelegate shannon_entropy(string), to: SensitiveData
+  defdelegate valid_luhn?(number), to: SensitiveData
 
   # Email pattern
   @email_pattern ~r/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
 
-  # Phone number patterns (various formats)
-  # Note: We use word boundaries and specific formats to avoid matching timestamps
-  defp phone_patterns do
-    [
-      # US format with area code and 7 digits
-      ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/,
-      # International format with country code prefix
-      ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
-    ]
-  end
-
-  # ===========================================================================
-  # Credit Card Patterns
-  # Source: Microsoft Presidio - https://microsoft.github.io/presidio/supported_entities/
-  # Validated with Luhn algorithm to reduce false positives
-  # ===========================================================================
-  defp credit_card_patterns do
-    [
-      # Visa: starts with 4, 13-16 digits
-      ~r/\b4[0-9]{12}(?:[0-9]{3})?\b/,
-      # Mastercard: starts with 51-55 or 2221-2720, 16 digits
-      ~r/\b5[1-5][0-9]{14}\b/,
-      ~r/\b2(?:2[2-9][1-9]|2[3-9][0-9]{2}|[3-6][0-9]{3}|7[0-1][0-9]{2}|720[0-9])[0-9]{12}\b/,
-      # American Express: starts with 34 or 37, 15 digits
-      ~r/\b3[47][0-9]{13}\b/,
-      # Discover: starts with 6011, 622126-622925, 644-649, 65
-      ~r/\b6(?:011|5[0-9]{2})[0-9]{12}\b/
-    ]
-  end
-
-  # ===========================================================================
   # US Social Security Number
-  # Source: Microsoft Presidio - https://microsoft.github.io/presidio/supported_entities/
-  # Format: XXX-XX-XXXX (with or without dashes)
-  # Excludes invalid patterns: 000, 666, 900-999 in area number
-  # ===========================================================================
   @ssn_pattern ~r/\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/
-
-  # ===========================================================================
-  # API Key / Secret Patterns
-  # Sources:
-  #   - Bearer CLI: https://docs.bearer.com/reference/datatypes/
-  #   - GitHub secret scanning: https://docs.github.com/en/code-security/secret-scanning
-  #   - AWS documentation
-  #   - Stripe documentation
-  # ===========================================================================
-  defp secret_patterns do
-    [
-      # Generic API key patterns
-      ~r/(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*["'][a-zA-Z0-9_-]{16,}["']/,
-      ~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']+["']/,
-      # Anthropic API keys (sk-ant-...)
-      # Source: Anthropic API documentation
-      ~r/sk-ant-[A-Za-z0-9\-_]{20,}/,
-      # OpenAI-style keys (sk-...)
-      # Source: OpenAI API documentation
-      # Note: Anthropic pattern above is matched first to avoid false overlap
-      ~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/,
-      # GitHub personal access tokens (ghp_, gho_, ghu_, ghs_, ghr_)
-      # Source: https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
-      ~r/gh[pousr]_[a-zA-Z0-9]{36,}/,
-      # Slack tokens (xoxb, xoxa, xoxp, xoxr, xoxs)
-      # Source: Slack API documentation
-      ~r/xox[baprs]-[a-zA-Z0-9-]+/,
-      # AWS Access Key ID (starts with AKIA, ABIA, ACCA, ASIA)
-      # Source: AWS IAM documentation
-      ~r/\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/,
-      # AWS Secret Access Key (40 char base64)
-      ~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/,
-      # Google API key
-      # Source: Google Cloud documentation
-      ~r/AIza[0-9A-Za-z\-_]{35}/,
-      # Stripe keys (sk_live_, sk_test_, pk_live_, pk_test_)
-      # Source: Stripe API documentation
-      ~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/,
-      # Private keys (PEM format marker — RSA, EC, DSA, OPENSSH)
-      ~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/,
-      # JWT tokens (three base64 segments)
-      # Source: RFC 7519
-      ~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/,
-      # GitLab Personal Access Token
-      # Source: GitLab documentation
-      ~r/glpat-[a-zA-Z0-9\-_]{20,}/,
-      # GitHub Fine-Grained PAT
-      # Source: GitHub token formats documentation
-      ~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/,
-      # Database connection strings with embedded credentials
-      # Source: OWASP credential detection guidelines
-      ~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/,
-      # Bearer tokens in authorization headers
-      ~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/
-    ]
-  end
 
   # IP address pattern (basic IPv4)
   @ip_pattern ~r/\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/
@@ -191,19 +72,12 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   # Regex patterns that indicate a timestamp context rather than a phone number
   defp timestamp_regexes do
     [
-      # Cursor format: timestamp:id
       ~r/\d{10,13}:[a-zA-Z_]/,
-      # Docstring examples with timestamps (iex> or result lines)
       ~r/iex>.*\d{10,13}/,
-      # Result tuple with timestamp: {:ok, {1705..., ...}}
       ~r/\{:ok,\s*\{\d{10,13}/,
-      # Any line with a 10+ digit number that starts with 17 (2024 timestamps)
-      # or 16 (2020 timestamps) - these are clearly timestamps, not phone numbers
       ~r/\b1[67]\d{8,11}\b/,
-      # Just a number in a docstring example
       ~r/^\s*#.*\d{10,13}/,
       ~r/^\s*@doc.*\d{10,13}/,
-      # Lines with 13+ digit sequences are likely credit card numbers, not phones
       ~r/\d{13,}/
     ]
   end
@@ -235,20 +109,7 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   """
   @spec scan_text(String.t(), keyword()) :: [{String.t(), String.t()}]
   def scan_text(text, opts \\ []) when is_binary(text) do
-    extra = Keyword.get(opts, :additional_patterns, [])
-    entropy_threshold = Keyword.get(opts, :entropy_threshold, 4.5)
-
-    base_findings =
-      for {regex, label} <- labeled_secret_patterns() ++ extra,
-          match <- find_all_matches(regex, text),
-          do: {label, match}
-
-    entropy_findings =
-      for match <- find_all_matches(~r/[a-zA-Z0-9+\/]{40,}={0,2}/, text),
-          shannon_entropy(match) > entropy_threshold,
-          do: {"High-Entropy Base64", match}
-
-    Enum.uniq(base_findings ++ entropy_findings)
+    SensitiveData.scan_secrets(text, opts)
   end
 
   @impl Arbor.Eval
@@ -479,7 +340,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp check_secrets_line(line, idx, secret_patterns) do
-    # Use SafeRegex with timeout protection against ReDoS attacks
     secret_patterns
     |> Enum.filter(&safe_match?(&1, line))
     |> Enum.take(1)
@@ -493,18 +353,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
         suggestion: "Use environment variables or secure configuration for secrets"
       }
     end)
-  end
-
-  # Timeout-protected regex matching to prevent ReDoS attacks.
-  # Inlined rather than using Arbor.Common.SafeRegex since arbor_eval
-  # is a standalone library with zero in-umbrella dependencies.
-  defp safe_match?(pattern, string) do
-    task = Task.async(fn -> Regex.match?(pattern, string) end)
-
-    case Task.yield(task, 500) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      nil -> false
-    end
   end
 
   defp check_ips(violations, lines, allowlisted) do
@@ -602,6 +450,14 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   # Shared Helpers
   # ============================================================================
 
+  # Timeout-protected regex matching using SafeRegex
+  defp safe_match?(pattern, string) do
+    case Arbor.Common.SafeRegex.match?(pattern, string, timeout: 500) do
+      {:ok, result} -> result
+      {:error, :timeout} -> false
+    end
+  end
+
   defp skip_line?(idx, allowlisted) do
     MapSet.member?(allowlisted, idx) or MapSet.member?(allowlisted, idx - 1)
   end
@@ -639,7 +495,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp test_email?(line) do
-    # Common test/example email patterns
     String.contains?(line, [
       "@example.com",
       "@example.org",
@@ -657,14 +512,10 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp looks_like_timestamp_context?(line, timestamp_regexes) do
-    # Lines containing Unix timestamps (10-13 digits starting with 1) in contexts like:
-    # - "1705123456789:evt_123" (cursor format)
-    # - timestamp_ms, DateTime.from_unix, etc.
     has_timestamp_keyword?(line) or matches_any_timestamp_regex?(line, timestamp_regexes)
   end
 
   defp has_timestamp_keyword?(line) do
-    # Timestamp variable/function context
     String.contains?(line, ["timestamp", "unix", "epoch", "millisecond", "DateTime"])
   end
 
@@ -673,21 +524,15 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp looks_like_docstring_example?(line) do
-    # Lines that appear to be in @doc or @moduledoc examples
     cond do
-      # iex> examples
       String.contains?(line, "iex>") -> true
-      # Docstring markers with path examples
       Regex.match?(~r/^\s*(#|##|Example|Format|URI).*\/home\//, line) -> true
-      # Quoted examples in docs
       Regex.match?(~r/`[^`]*\/home\/[^`]*`/, line) -> true
       true -> false
     end
   end
 
   defp looks_like_uri_path?(line) do
-    # Lines containing URIs that happen to have path components
-    # e.g., "arbor://fs/read/home/user/documents"
     cond do
       Regex.match?(~r/arbor:\/\//, line) -> true
       Regex.match?(~r/https?:\/\//, line) -> true
@@ -708,7 +553,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp mask_phone(phone) do
-    # Keep first 3 and last 2 digits
     digits = Regex.replace(~r/\D/, phone, "")
 
     if String.length(digits) > 5 do
@@ -719,7 +563,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp mask_credit_card(card) do
-    # Keep first 4 and last 4 digits (standard PCI masking)
     digits = Regex.replace(~r/\D/, card, "")
 
     if String.length(digits) >= 8 do
@@ -730,7 +573,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp mask_ssn(ssn) do
-    # Keep only last 4 digits (standard SSN masking)
     digits = Regex.replace(~r/\D/, ssn, "")
 
     if String.length(digits) >= 4 do
@@ -741,7 +583,6 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   end
 
   defp looks_like_test_card?(line) do
-    # Common test card numbers and patterns
     String.contains?(line, [
       "4111111111111111",
       "5500000000000004",
@@ -751,12 +592,10 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       "fake_card",
       "sample_card"
     ]) or
-      # Lines with "test" or "example" context
       Regex.match?(~r/(?i)(test|example|sample|mock|fake|dummy)\s*[:=]/, line)
   end
 
   defp looks_like_test_ssn?(line) do
-    # Common test SSN patterns and context
     String.contains?(line, [
       "123-45-6789",
       "000-00-0000",
@@ -764,102 +603,12 @@ defmodule Arbor.Eval.Checks.PIIDetection do
       "fake_ssn",
       "sample_ssn"
     ]) or
-      # Lines with "test" or "example" context
       Regex.match?(~r/(?i)(test|example|sample|mock|fake|dummy)\s*[:=]/, line)
   end
 
   defp looks_like_version_number?(line) do
-    # Version numbers like "1.2.3-456" can look like SSN
-    # Check for version context
     Regex.match?(~r/(?i)(version|v\d|release|build)\s*[:=]/, line) or
-      # Semantic versioning patterns
       Regex.match?(~r/\d+\.\d+\.\d+-\d+/, line)
-  end
-
-  # ===========================================================================
-  # Luhn Algorithm (ISO/IEC 7812-1)
-  # Used by Microsoft Presidio for credit card validation
-  # Reduces false positives by validating checksum
-  # Reference: https://en.wikipedia.org/wiki/Luhn_algorithm
-  # ===========================================================================
-  defp valid_luhn?(number) do
-    digits =
-      number
-      |> String.replace(~r/\D/, "")
-      |> String.graphemes()
-      |> Enum.map(&String.to_integer/1)
-      |> Enum.reverse()
-
-    if length(digits) < 13 do
-      false
-    else
-      sum = luhn_checksum(digits)
-      rem(sum, 10) == 0
-    end
-  end
-
-  defp luhn_checksum(digits) do
-    digits
-    |> Enum.with_index()
-    |> Enum.reduce(0, fn {digit, idx}, sum ->
-      sum + luhn_digit_value(digit, idx)
-    end)
-  end
-
-  defp luhn_digit_value(digit, idx) when rem(idx, 2) == 1 do
-    doubled = digit * 2
-    if doubled > 9, do: doubled - 9, else: doubled
-  end
-
-  defp luhn_digit_value(digit, _idx), do: digit
-
-  # ============================================================================
-  # Labeled Secret Patterns (for scan_text/2)
-  # ============================================================================
-
-  defp labeled_secret_patterns do
-    [
-      {~r/(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/, "AWS Access Key"},
-      {~r/(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'][A-Za-z0-9\/+=]{40}["']/, "AWS Secret Key"},
-      {~r/sk-ant-[A-Za-z0-9\-_]{20,}/, "Anthropic API Key"},
-      {~r/sk-(?!ant-)[a-zA-Z0-9]{32,}/, "OpenAI API Key"},
-      {~r/gh[pousr]_[a-zA-Z0-9]{36,}/, "GitHub Token"},
-      {~r/github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/, "GitHub Fine-Grained PAT"},
-      {~r/glpat-[a-zA-Z0-9\-_]{20,}/, "GitLab PAT"},
-      {~r/xox[baprs]-[a-zA-Z0-9-]+/, "Slack Token"},
-      {~r/AIza[0-9A-Za-z\-_]{35}/, "Google API Key"},
-      {~r/[sp]k_(?:live|test)_[a-zA-Z0-9]{24,}/, "Stripe Key"},
-      {~r/-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/, "Private Key"},
-      {~r/eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*/, "JWT Token"},
-      {~r/(?:mongodb|postgres|mysql|redis|amqp):\/\/[^:]+:[^@]+@/, "Database Connection String"},
-      {~r/Bearer\s+[a-zA-Z0-9\-._~+\/]{20,}/, "Bearer Token"},
-      {~r/(?i)(password|passwd|pwd)\s*[:=]\s*["'][^"']{8,}["']/, "Password in Config"}
-    ]
-  end
-
-  defp find_all_matches(regex, text) do
-    regex
-    |> Regex.scan(text)
-    |> Enum.map(&hd/1)
-  end
-
-  # ============================================================================
-  # Shannon Entropy (for high-entropy base64 detection)
-  # ============================================================================
-
-  @doc false
-  def shannon_entropy(string) when is_binary(string) do
-    freq = string |> String.graphemes() |> Enum.frequencies()
-    len = String.length(string)
-
-    if len == 0 do
-      0.0
-    else
-      -Enum.reduce(freq, 0.0, fn {_char, count}, acc ->
-        p = count / len
-        acc + p * :math.log2(p)
-      end)
-    end
   end
 
   # ============================================================================

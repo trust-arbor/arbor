@@ -150,7 +150,6 @@ defmodule Arbor.Eval.Checks.NamingConventionsTest do
 
       result = NamingConventions.run(%{ast: ast})
 
-      # Should not suggest expanding opts, ctx, acc
       refute Enum.any?(result.suggestions, fn s ->
                s.type == :abbreviation_used and
                  (String.contains?(s.message, "'opts'") or
@@ -171,7 +170,6 @@ defmodule Arbor.Eval.Checks.NamingConventionsTest do
 
       result = NamingConventions.run(%{ast: ast, strictness: :relaxed})
 
-      # Relaxed mode should be lenient
       assert result.passed
     end
 
@@ -185,7 +183,6 @@ defmodule Arbor.Eval.Checks.NamingConventionsTest do
 
       result = NamingConventions.run(%{ast: ast, strictness: :strict})
 
-      # In strict mode, short non-standard names get suggestions
       assert Enum.any?(result.violations ++ result.suggestions, fn v ->
                v.type in [:short_function_name, :single_letter_function]
              end) or result.passed

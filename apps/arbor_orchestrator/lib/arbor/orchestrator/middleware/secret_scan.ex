@@ -2,8 +2,9 @@ defmodule Arbor.Orchestrator.Middleware.SecretScan do
   @moduledoc """
   Middleware that scans LLM responses and context updates for leaked secrets.
 
-  Delegates pattern matching to `Arbor.Eval.Checks.PIIDetection.scan_text/2`,
-  which provides comprehensive secret detection with Shannon entropy analysis.
+  Delegates pattern matching to `Arbor.Eval.Checks.PIIDetection.scan_text/2`
+  (provided by `arbor_common`), which provides comprehensive secret detection
+  with Shannon entropy analysis.
 
   Runs in the after_node phase. Checks the node outcome's context_updates
   values and the last_response context key for patterns matching common
@@ -102,11 +103,11 @@ defmodule Arbor.Orchestrator.Middleware.SecretScan do
   end
 
   defp do_scan_text(text, scan_opts) do
-    # Use arbor_eval's PIIDetection for pattern matching
+    # Use PIIDetection for pattern matching (provided by arbor_common)
     if Code.ensure_loaded?(Arbor.Eval.Checks.PIIDetection) do
       PIIDetection.scan_text(text, scan_opts)
     else
-      # Fallback: no scanning if arbor_eval not available
+      # Fallback: no scanning if PIIDetection not available
       []
     end
   end
