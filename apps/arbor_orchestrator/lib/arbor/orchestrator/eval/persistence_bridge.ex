@@ -6,6 +6,8 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
   Falls back to RunStore JSON files when persistence is unavailable.
   """
 
+  require Logger
+
   @persistence Arbor.Persistence
   @fallback Arbor.Orchestrator.Eval.RunStore
 
@@ -22,19 +24,32 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
   @doc "Create a new eval run record."
   def create_run(attrs) do
     if available?() do
-      apply(@persistence, :insert_eval_run, [attrs])
+      case apply(@persistence, :insert_eval_run, [attrs]) do
+        {:ok, _} = ok ->
+          Logger.debug("EvalPersistence: created run #{attrs[:id]} in Postgres")
+          ok
+
+        {:error, reason} = err ->
+          Logger.warning("EvalPersistence: DB insert failed: #{inspect(reason)}, falling back to JSON")
+          slug = run_slug(attrs)
+          @fallback.save_run(slug, attrs)
+          {:ok, attrs}
+      end
     else
+      Logger.debug("EvalPersistence: Postgres unavailable, using JSON fallback")
       slug = run_slug(attrs)
       @fallback.save_run(slug, attrs)
       {:ok, attrs}
     end
   rescue
-    _ ->
+    e ->
+      Logger.warning("EvalPersistence: create_run rescue: #{Exception.message(e)}")
       slug = run_slug(attrs)
       @fallback.save_run(slug, attrs)
       {:ok, attrs}
   catch
-    :exit, _ ->
+    :exit, reason ->
+      Logger.warning("EvalPersistence: create_run exit: #{inspect(reason)}")
       slug = run_slug(attrs)
       @fallback.save_run(slug, attrs)
       {:ok, attrs}
@@ -48,9 +63,13 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
       :ok
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("EvalPersistence: update_run rescue: #{Exception.message(e)}")
+      :ok
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("EvalPersistence: update_run exit: #{inspect(reason)}")
+      :ok
   end
 
   @doc "Insert a single eval result."
@@ -61,9 +80,13 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
       :ok
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("EvalPersistence: save_result rescue: #{Exception.message(e)}")
+      :ok
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("EvalPersistence: save_result exit: #{inspect(reason)}")
+      :ok
   end
 
   @doc "Batch insert eval results."

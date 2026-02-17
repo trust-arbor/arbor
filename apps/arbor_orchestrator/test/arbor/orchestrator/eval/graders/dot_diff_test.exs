@@ -62,7 +62,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiffTest do
       result = DotDiff.grade("not valid dot", @simple_dot)
       assert result.score == 0.0
       assert result.passed == false
-      assert result.detail =~ "Parse error"
+      assert result.detail =~ "Not valid DOT"
     end
 
     test "parse error in expected returns 0.0" do

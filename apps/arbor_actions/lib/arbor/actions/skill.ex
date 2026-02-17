@@ -574,23 +574,31 @@ defmodule Arbor.Actions.Skill do
       body = Map.get(skill, :body) || ""
       name = Map.get(skill, :name) || "unnamed"
 
-      prompt = """
-      Convert this skill into a DOT graph for orchestrator execution.
-      The graph should use Arbor handler types (codergen, shell, consensus, etc.)
-      and follow the node attribute format: [type="handler_type" attr="value"].
+      prompt_mod = Arbor.Actions.Skill.CompilationPrompt
+
+      system_prompt =
+        if Code.ensure_loaded?(prompt_mod) do
+          prompt_mod.system_prompt()
+        else
+          "Convert this skill into a DOT graph. Use Arbor handler types (codergen, shell, llm, etc.) with [type=\"handler_type\" prompt=\"...\"] attributes. Output ONLY the DOT graph."
+        end
+
+      user_prompt = """
+      Compile this skill to a DOT graph:
 
       Skill name: #{name}
-      Skill body:
-      #{body}
 
-      Output ONLY the DOT graph, starting with `digraph` and ending with `}`.
+      #{body}
       """
 
       ai_mod = Arbor.AI
 
       if Code.ensure_loaded?(ai_mod) and function_exported?(ai_mod, :generate_text_via_api, 2) do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        case apply(ai_mod, :generate_text_via_api, [prompt, [model: "fast"]]) do
+        case apply(ai_mod, :generate_text_via_api, [
+               user_prompt,
+               [model: "fast", system_prompt: system_prompt]
+             ]) do
           {:ok, response} ->
             dot = extract_dot_from_response(response)
             if dot, do: {:ok, dot}, else: {:error, :no_dot_in_response}
