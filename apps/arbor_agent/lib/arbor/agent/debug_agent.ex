@@ -394,8 +394,11 @@ defmodule Arbor.Agent.DebugAgent do
       anomaly
       |> Investigation.start()
       |> Investigation.gather_symptoms()
+      |> Investigation.find_similar_events()
       |> Investigation.generate_hypotheses()
+      |> Investigation.categorize_error()
       |> maybe_enhance_with_ai()
+      |> Investigation.validate_safety()
 
     # Log investigation summary
     summary = Investigation.summary(investigation)
