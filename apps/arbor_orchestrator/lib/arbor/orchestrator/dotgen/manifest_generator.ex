@@ -219,8 +219,7 @@ defmodule Arbor.Orchestrator.Dotgen.ManifestGenerator do
     modules =
       file_infos
       |> Enum.map(fn %{module: m} -> m end)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.reject(&String.starts_with?(&1, "Mix.Tasks."))
+      |> Enum.reject(&(is_nil(&1) or String.starts_with?(&1, "Mix.Tasks.")))
 
     case modules do
       [] ->

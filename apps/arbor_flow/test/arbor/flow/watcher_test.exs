@@ -26,6 +26,7 @@ defmodule Arbor.Flow.WatcherTest do
   # Uses pid-based reference (name: nil would fail since name is required),
   # so we generate a unique atom from test_id to avoid collisions.
   defp start_test_watcher(ctx, overrides \\ []) do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = Keyword.get(overrides, :name, :"watcher_#{ctx.test_id}")
 
     defaults = [
@@ -77,6 +78,7 @@ defmodule Arbor.Flow.WatcherTest do
 
       {:ok, _pid} =
         Watcher.start_link(
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
           name: :"watcher_create_dir_#{test_id}",
           directories: [new_dir],
           tracker: tracker,
@@ -85,6 +87,7 @@ defmodule Arbor.Flow.WatcherTest do
         )
 
       assert File.dir?(new_dir)
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       Watcher.stop(:"watcher_create_dir_#{test_id}")
     end
 
@@ -102,6 +105,7 @@ defmodule Arbor.Flow.WatcherTest do
 
       result =
         Watcher.start_link(
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
           name: :"watcher_no_dirs_#{ctx.test_id}",
           tracker: ctx.tracker
         )

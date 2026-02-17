@@ -14,6 +14,7 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
   use Arbor.Test.BehavioralCase
 
   alias Arbor.AI.AgentSDK.Hooks
+  alias Arbor.AI.AgentSDK.Tool
   alias Arbor.AI.AgentSDK.ToolServer
 
   # -- Inline test tool module --
@@ -65,6 +66,7 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
   describe "scenario: ToolServer registration and execution" do
     setup do
       # Start a dedicated ToolServer for this test
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"tool_server_#{:erlang.unique_integer([:positive])}"
       {:ok, pid} = ToolServer.start_link(name: name)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
@@ -136,6 +138,7 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
 
   describe "scenario: handler-based tool registration" do
     setup do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"tool_server_handler_#{:erlang.unique_integer([:positive])}"
       {:ok, pid} = ToolServer.start_link(name: name)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
@@ -297,7 +300,7 @@ defmodule Arbor.Behavioral.ToolExecutionTest do
 
     test "to_json_schema/1 produces valid JSON schema format" do
       schema = TestTools.__tool_schema__("greet")
-      json_schema = Arbor.AI.AgentSDK.Tool.to_json_schema(schema)
+      json_schema = Tool.to_json_schema(schema)
 
       assert json_schema["name"] == "greet"
       assert is_binary(json_schema["description"])

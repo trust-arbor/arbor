@@ -1,9 +1,10 @@
 defmodule Arbor.Orchestrator.Handlers.AdaptHandlerTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.AdaptHandler
 
   @moduletag :adapt_handler
@@ -427,7 +428,7 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandlerTest do
         attrs: %{"goal" => "test adapt"}
       }
 
-      assert {:ok, result} = Arbor.Orchestrator.Engine.run(graph)
+      assert {:ok, result} = Engine.run(graph)
 
       # The injected node should have been reached
       assert "injected" in result.completed_nodes

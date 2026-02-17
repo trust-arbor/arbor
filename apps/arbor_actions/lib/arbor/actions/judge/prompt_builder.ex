@@ -52,21 +52,17 @@ defmodule Arbor.Actions.Judge.PromptBuilder do
 
   defp build_system_prompt(rubric, evidence_summary, mode) do
     dimensions_text =
-      rubric.dimensions
-      |> Enum.map(fn dim ->
+      Enum.map_join(rubric.dimensions, "\n", fn dim ->
         "- #{dim[:name]} (weight: #{dim[:weight]}): #{dim[:description]}"
       end)
-      |> Enum.join("\n")
 
     evidence_text =
       case evidence_summary["checks"] do
-        checks when is_list(checks) and length(checks) > 0 ->
-          checks
-          |> Enum.map(fn c ->
+        checks when is_list(checks) and checks != [] ->
+          Enum.map_join(checks, "\n", fn c ->
             status = if c["passed"], do: "PASS", else: "FAIL"
             "- [#{status}] #{c["type"]}: #{c["detail"]} (score: #{c["score"]})"
           end)
-          |> Enum.join("\n")
 
         _ ->
           "No pre-computed evidence available."
@@ -131,7 +127,7 @@ defmodule Arbor.Actions.Judge.PromptBuilder do
       end
 
     parts =
-      if peers && is_list(peers) && length(peers) > 0 do
+      if peers && is_list(peers) && peers != [] do
         peer_text = Enum.map_join(peers, "\n---\n", & &1)
         parts ++ ["\n## Peer Outputs (for comparison)\n\n#{peer_text}"]
       else

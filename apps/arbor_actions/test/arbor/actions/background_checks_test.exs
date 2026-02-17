@@ -28,7 +28,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
 
   defp old_erl_datetime(days_ago) do
     seconds =
-      :calendar.datetime_to_gregorian_seconds(:calendar.universal_time()) - days_ago * 86400
+      :calendar.datetime_to_gregorian_seconds(:calendar.universal_time()) - days_ago * 86_400
 
     :calendar.gregorian_seconds_to_datetime(seconds)
   end

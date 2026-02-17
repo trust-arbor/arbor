@@ -30,8 +30,8 @@ defmodule Arbor.AI.QuotaTracker do
 
   use GenServer
 
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.BufferedStore
 
   require Logger
 

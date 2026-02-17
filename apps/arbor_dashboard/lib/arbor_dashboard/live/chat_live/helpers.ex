@@ -6,6 +6,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
   for display purposes.
   """
 
+  alias Arbor.Web.Helpers, as: WebHelpers
+
   # ── Message & Role Styling ─────────────────────────────────────────
 
   def message_style(role, sender_type, group_mode)
@@ -143,7 +145,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
 
   # ── Time & Token Formatting ────────────────────────────────────────
 
-  def format_time(%DateTime{} = dt), do: Arbor.Web.Helpers.format_relative_time(dt)
+  def format_time(%DateTime{} = dt), do: WebHelpers.format_relative_time(dt)
   def format_time(_), do: ""
 
   # ── Query Error Formatting ─────────────────────────────────────────

@@ -14,6 +14,7 @@ defmodule Arbor.Behavioral.ConsensusAdvisoryTest do
   use Arbor.Test.BehavioralCase
 
   alias Arbor.Consensus.Evaluators.Consult
+  alias Arbor.Consensus.TopicRegistry
   alias Arbor.Contracts.Consensus.Evaluation
 
   # -- Inline test evaluators (self-contained, no cross-app test deps) --
@@ -163,15 +164,15 @@ defmodule Arbor.Behavioral.ConsensusAdvisoryTest do
   describe "scenario: topic routing" do
     test "registered topics are found by TopicRegistry" do
       # :test_topic was registered in BehavioralCase setup
-      assert {:ok, _rule} = Arbor.Consensus.TopicRegistry.get(:test_topic)
+      assert {:ok, _rule} = TopicRegistry.get(:test_topic)
     end
 
     test "TopicRegistry.exists?/1 returns true for registered topics" do
-      assert Arbor.Consensus.TopicRegistry.exists?(:test_topic) == true
+      assert TopicRegistry.exists?(:test_topic) == true
     end
 
     test "unregistered topics return not_found" do
-      result = Arbor.Consensus.TopicRegistry.get(:completely_unknown_topic_xyz)
+      result = TopicRegistry.get(:completely_unknown_topic_xyz)
       assert result == {:error, :not_found}
     end
   end

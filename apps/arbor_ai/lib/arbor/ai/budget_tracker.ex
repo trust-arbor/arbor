@@ -53,8 +53,8 @@ defmodule Arbor.AI.BudgetTracker do
   use GenServer
   require Logger
 
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.BufferedStore
   alias Arbor.Signals
 
   # ETS table name

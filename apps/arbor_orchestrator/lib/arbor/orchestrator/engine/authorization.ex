@@ -68,6 +68,8 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Middleware.Chain
+  alias Arbor.Orchestrator.Middleware.Token
 
   @always_authorized ~w(start exit)
 
@@ -151,7 +153,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   end
 
   defp call_handler(handler, node, context, graph, opts) do
-    chain = Arbor.Orchestrator.Middleware.Chain.build(opts, graph, node)
+    chain = Chain.build(opts, graph, node)
 
     if chain == [] do
       # No middleware — direct handler call (zero overhead)
@@ -162,8 +164,6 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   end
 
   defp execute_with_middleware(handler, node, context, graph, opts, chain) do
-    alias Arbor.Orchestrator.Middleware.{Chain, Token}
-
     token = %Token{
       node: node,
       context: context,

@@ -101,10 +101,9 @@ defmodule Arbor.Orchestrator.Dotgen.DotGenerator do
     file_prompts =
       file_infos
       |> Enum.with_index(1)
-      |> Enum.map(fn {info, idx} ->
+      |> Enum.map_join("\n\n", fn {info, idx} ->
         "FILE #{idx}: #{format_file_prompt(info)}"
       end)
-      |> Enum.join("\n\n")
 
     prefix =
       if n == 1,
@@ -232,9 +231,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotGenerator do
   # ── Private Helpers ─────────────────────────────────────────────────
 
   defp format_struct_fields(fields) do
-    fields
-    |> Enum.map(fn {name, default} -> "  #{name}: #{default}" end)
-    |> Enum.join(", \n")
+    Enum.map_join(fields, ", \n", fn {name, default} -> "  #{name}: #{default}" end)
   end
 
   defp format_function(
@@ -295,9 +292,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotGenerator do
       node_id = "impl_#{idx}"
 
       comment =
-        group
-        |> Enum.map(fn %{module: m} -> m end)
-        |> Enum.join(", ")
+        Enum.map_join(group, ", ", fn %{module: m} -> m end)
 
       {node_id, prompt, comment}
     end)
@@ -305,9 +300,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotGenerator do
 
   defp build_test_node(file_infos) do
     modules =
-      file_infos
-      |> Enum.map(fn %{module: m} -> m end)
-      |> Enum.join(", ")
+      Enum.map_join(file_infos, ", ", fn %{module: m} -> m end)
 
     paths =
       file_infos

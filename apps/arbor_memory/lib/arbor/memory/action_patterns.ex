@@ -34,6 +34,7 @@ defmodule Arbor.Memory.ActionPatterns do
 
   require Logger
 
+  alias Arbor.Common.LazyLoader
   alias Arbor.Memory.{KnowledgeGraph, Proposal, Signals}
 
   @type action :: %{
@@ -433,7 +434,7 @@ defmodule Arbor.Memory.ActionPatterns do
   end
 
   defp get_llm_client do
-    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
+    if LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       Arbor.AI
     else
       nil

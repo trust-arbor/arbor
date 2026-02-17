@@ -7,9 +7,9 @@ defmodule Arbor.Orchestrator.Session.SupervisorTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Orchestrator.Handlers.SessionHandler
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Supervisor, as: SessionSupervisor
-  alias Arbor.Orchestrator.Handlers.SessionHandler
 
   @moduletag :session_lifecycle
 

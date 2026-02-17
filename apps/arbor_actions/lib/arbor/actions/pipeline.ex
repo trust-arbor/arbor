@@ -139,7 +139,13 @@ defmodule Arbor.Actions.Pipeline do
     end
 
     defp extract_status(%{final_outcome: %{status: status}}), do: status
-    defp extract_status(%{context: %{"outcome" => outcome}}), do: String.to_atom(outcome)
+
+    defp extract_status(%{context: %{"outcome" => outcome}}) do
+      String.to_existing_atom(outcome)
+    rescue
+      ArgumentError -> :unknown
+    end
+
     defp extract_status(_), do: :unknown
 
     defp sanitize_context(engine_result) do

@@ -41,75 +41,73 @@ defmodule Arbor.Orchestrator.Handlers.AccumulatorHandler do
 
   @impl true
   def execute(node, context, _graph, _opts) do
-    try do
-      operation = Map.get(node.attrs, "operation")
-      input_key = Map.get(node.attrs, "input_key")
+    operation = Map.get(node.attrs, "operation")
+    input_key = Map.get(node.attrs, "input_key")
 
-      unless operation do
-        raise "accumulator requires 'operation' attribute"
-      end
+    unless operation do
+      raise "accumulator requires 'operation' attribute"
+    end
 
-      unless operation in @all_ops do
-        raise "unknown accumulator operation '#{operation}'. " <>
-                "Must be one of: #{Enum.join(@all_ops, ", ")}"
-      end
+    unless operation in @all_ops do
+      raise "unknown accumulator operation '#{operation}'. " <>
+              "Must be one of: #{Enum.join(@all_ops, ", ")}"
+    end
 
-      unless input_key do
-        raise "accumulator requires 'input_key' attribute"
-      end
+    unless input_key do
+      raise "accumulator requires 'input_key' attribute"
+    end
 
-      acc_key = Map.get(node.attrs, "accumulator_key", "accumulator.#{node.id}")
-      limit = parse_limit(Map.get(node.attrs, "limit"))
-      limit_action = Map.get(node.attrs, "limit_action", "warn")
-      meta_prefix = "accumulator.#{node.id}"
+    acc_key = Map.get(node.attrs, "accumulator_key", "accumulator.#{node.id}")
+    limit = parse_limit(Map.get(node.attrs, "limit"))
+    limit_action = Map.get(node.attrs, "limit_action", "warn")
+    meta_prefix = "accumulator.#{node.id}"
 
-      input_value = Context.get(context, input_key)
-      previous = Context.get(context, acc_key)
+    input_value = Context.get(context, input_key)
+    previous = Context.get(context, acc_key)
 
-      init_value = resolve_init(Map.get(node.attrs, "init_value"), operation)
-      current = if is_nil(previous), do: init_value, else: decode_accumulator(previous, operation)
+    init_value = resolve_init(Map.get(node.attrs, "init_value"), operation)
+    current = if is_nil(previous), do: init_value, else: decode_accumulator(previous, operation)
 
-      {result, display_value, extra_updates} = apply_operation(operation, current, input_value)
+    {result, display_value, extra_updates} = apply_operation(operation, current, input_value)
 
-      {final_result, final_display, limit_exceeded, limit_note} =
-        check_limit(result, display_value, limit, limit_action, operation)
+    {final_result, final_display, limit_exceeded, limit_note} =
+      check_limit(result, display_value, limit, limit_action, operation)
 
-      case limit_note do
-        {:fail, reason} ->
-          %Outcome{
-            status: :fail,
-            failure_reason: reason
-          }
-
-        _ ->
-          encoded = encode_accumulator(final_result, operation)
-
-          updates =
-            %{
-              acc_key => encoded,
-              "#{meta_prefix}.operation" => operation,
-              "#{meta_prefix}.input" => to_context_string(input_value),
-              "#{meta_prefix}.previous" => to_context_string(previous),
-              "#{meta_prefix}.limit_exceeded" => to_string(limit_exceeded)
-            }
-            |> Map.merge(extra_updates)
-            |> maybe_add_avg(meta_prefix, final_display, operation)
-
-          notes = build_notes(operation, input_value, final_display, limit_exceeded, limit_note)
-
-          %Outcome{
-            status: :success,
-            notes: notes,
-            context_updates: updates
-          }
-      end
-    rescue
-      e ->
+    case limit_note do
+      {:fail, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "accumulator error: #{Exception.message(e)}"
+          failure_reason: reason
+        }
+
+      _ ->
+        encoded = encode_accumulator(final_result, operation)
+
+        updates =
+          %{
+            acc_key => encoded,
+            "#{meta_prefix}.operation" => operation,
+            "#{meta_prefix}.input" => to_context_string(input_value),
+            "#{meta_prefix}.previous" => to_context_string(previous),
+            "#{meta_prefix}.limit_exceeded" => to_string(limit_exceeded)
+          }
+          |> Map.merge(extra_updates)
+          |> maybe_add_avg(meta_prefix, final_display, operation)
+
+        notes = build_notes(operation, input_value, final_display, limit_exceeded, limit_note)
+
+        %Outcome{
+          status: :success,
+          notes: notes,
+          context_updates: updates
         }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "accumulator error: #{Exception.message(e)}"
+      }
   end
 
   @impl true
@@ -413,12 +411,10 @@ defmodule Arbor.Orchestrator.Handlers.AccumulatorHandler do
   defp build_notes(operation, input, display, limit_exceeded, limit_note) do
     base = "#{operation}: input=#{to_context_string(input)}, result=#{to_context_string(display)}"
 
-    cond do
-      limit_exceeded and is_binary(limit_note) ->
-        "#{base} (#{limit_note})"
-
-      true ->
-        base
+    if limit_exceeded and is_binary(limit_note) do
+      "#{base} (#{limit_note})"
+    else
+      base
     end
   end
 end

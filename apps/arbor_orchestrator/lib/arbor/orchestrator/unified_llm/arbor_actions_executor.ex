@@ -184,17 +184,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   defp atomize_if_known(key, _known_atoms) when is_atom(key), do: {:ok, key}
 
   defp atomize_if_known(key, known_atoms) when is_binary(key) do
-    try do
-      atom = String.to_existing_atom(key)
+    atom = String.to_existing_atom(key)
 
-      if MapSet.member?(known_atoms, atom) do
-        {:ok, atom}
-      else
-        :unknown
-      end
-    rescue
-      ArgumentError -> :unknown
+    if MapSet.member?(known_atoms, atom) do
+      {:ok, atom}
+    else
+      :unknown
     end
+  rescue
+    ArgumentError -> :unknown
   end
 
   # Inject workdir for actions that need directory context.

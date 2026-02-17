@@ -27,6 +27,7 @@ defmodule Arbor.Persistence do
   alias Arbor.Contracts.Persistence.Filter
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence.Event
+  alias Arbor.Persistence.Repo
 
   # ---------------------------------------------------------------
   # Authorized API (for agent callers)
@@ -205,23 +206,23 @@ defmodule Arbor.Persistence do
   # Eval operations
   # ---------------------------------------------------------------
 
-  alias Arbor.Persistence.Schemas.{EvalRun, EvalResult}
+  alias Arbor.Persistence.Schemas.{EvalResult, EvalRun}
 
   @doc "Insert a new eval run."
   @spec insert_eval_run(map()) :: {:ok, EvalRun.t()} | {:error, Ecto.Changeset.t()}
   def insert_eval_run(attrs) do
     %EvalRun{}
     |> EvalRun.changeset(attrs)
-    |> Arbor.Persistence.Repo.insert()
+    |> Repo.insert()
   end
 
   @doc "Update an existing eval run."
   @spec update_eval_run(String.t(), map()) ::
           {:ok, EvalRun.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def update_eval_run(run_id, attrs) do
-    case Arbor.Persistence.Repo.get(EvalRun, run_id) do
+    case Repo.get(EvalRun, run_id) do
       nil -> {:error, :not_found}
-      run -> run |> EvalRun.changeset(attrs) |> Arbor.Persistence.Repo.update()
+      run -> run |> EvalRun.changeset(attrs) |> Repo.update()
     end
   end
 
@@ -230,7 +231,7 @@ defmodule Arbor.Persistence do
   def insert_eval_result(attrs) do
     %EvalResult{}
     |> EvalResult.changeset(attrs)
-    |> Arbor.Persistence.Repo.insert()
+    |> Repo.insert()
   end
 
   @doc "Batch insert eval results. Returns {count, nil}."
@@ -245,7 +246,7 @@ defmodule Arbor.Persistence do
         |> Map.put_new("inserted_at", now)
       end)
 
-    Arbor.Persistence.Repo.insert_all(EvalResult, entries, on_conflict: :nothing)
+    Repo.insert_all(EvalResult, entries, on_conflict: :nothing)
   end
 
   @doc "List eval runs with optional filters: domain, model, provider, status."
@@ -255,7 +256,7 @@ defmodule Arbor.Persistence do
 
     query = from(r in EvalRun, order_by: [desc: r.inserted_at])
     query = eval_apply_filters(query, filters)
-    {:ok, Arbor.Persistence.Repo.all(query)}
+    {:ok, Repo.all(query)}
   end
 
   @doc "Get a single eval run with preloaded results."
@@ -263,7 +264,7 @@ defmodule Arbor.Persistence do
   def get_eval_run(run_id) do
     import Ecto.Query
 
-    case Arbor.Persistence.Repo.one(
+    case Repo.one(
            from(r in EvalRun, where: r.id == ^run_id, preload: [:results])
          ) do
       nil -> {:error, :not_found}
@@ -282,7 +283,7 @@ defmodule Arbor.Persistence do
         order_by: [asc: r.model, desc: r.inserted_at]
       )
 
-    {:ok, Arbor.Persistence.Repo.all(query)}
+    {:ok, Repo.all(query)}
   end
 
   @eval_where_filters [:domain, :model, :provider, :status]

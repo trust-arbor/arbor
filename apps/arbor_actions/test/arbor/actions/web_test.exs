@@ -2,6 +2,9 @@ defmodule Arbor.Actions.WebTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Web
+  alias Browse
+  alias Search
+  alias Snapshot
 
   describe "validate_url/1" do
     test "allows https URLs" do
@@ -82,18 +85,18 @@ defmodule Arbor.Actions.WebTest do
 
   describe "Browse action schema" do
     test "has correct name and category" do
-      assert Arbor.Actions.Web.Browse.name() == "web_browse"
+      assert Browse.name() == "web_browse"
     end
 
     test "declares taint roles" do
-      roles = Arbor.Actions.Web.Browse.taint_roles()
+      roles = Browse.taint_roles()
       assert roles.url == :control
       assert roles.selector == :control
       assert roles.format == :data
     end
 
     test "generates valid tool schema" do
-      tool = Arbor.Actions.Web.Browse.to_tool()
+      tool = Browse.to_tool()
       assert tool.name == "web_browse"
       assert tool.description =~ "web page"
       assert tool.parameters_schema["required"] == ["url"]
@@ -104,7 +107,7 @@ defmodule Arbor.Actions.WebTest do
 
     test "rejects SSRF URLs" do
       assert {:error, msg} =
-               Arbor.Actions.Web.Browse.run(
+               Browse.run(
                  %{url: "http://169.254.169.254/latest/meta-data/"},
                  %{}
                )
@@ -115,17 +118,17 @@ defmodule Arbor.Actions.WebTest do
 
   describe "Search action schema" do
     test "has correct name and category" do
-      assert Arbor.Actions.Web.Search.name() == "web_search"
+      assert Search.name() == "web_search"
     end
 
     test "declares taint roles" do
-      roles = Arbor.Actions.Web.Search.taint_roles()
+      roles = Search.taint_roles()
       assert roles.query == :control
       assert roles.max_results == :data
     end
 
     test "generates valid tool schema" do
-      tool = Arbor.Actions.Web.Search.to_tool()
+      tool = Search.to_tool()
       assert tool.name == "web_search"
       assert tool.description =~ "Brave Search"
       assert tool.parameters_schema["required"] == ["query"]
@@ -136,18 +139,18 @@ defmodule Arbor.Actions.WebTest do
 
   describe "Snapshot action schema" do
     test "has correct name and category" do
-      assert Arbor.Actions.Web.Snapshot.name() == "web_snapshot"
+      assert Snapshot.name() == "web_snapshot"
     end
 
     test "declares taint roles" do
-      roles = Arbor.Actions.Web.Snapshot.taint_roles()
+      roles = Snapshot.taint_roles()
       assert roles.url == :control
       assert roles.selector == :control
       assert roles.include_links == :data
     end
 
     test "generates valid tool schema" do
-      tool = Arbor.Actions.Web.Snapshot.to_tool()
+      tool = Snapshot.to_tool()
       assert tool.name == "web_snapshot"
       assert tool.description =~ "LLM-optimized"
       assert tool.parameters_schema["required"] == ["url"]
@@ -158,7 +161,7 @@ defmodule Arbor.Actions.WebTest do
 
     test "rejects SSRF URLs" do
       assert {:error, msg} =
-               Arbor.Actions.Web.Snapshot.run(
+               Snapshot.run(
                  %{url: "http://127.0.0.1:8080/admin"},
                  %{}
                )

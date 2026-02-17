@@ -40,6 +40,7 @@ defmodule Arbor.Consensus.TopicMatcher do
 
   """
 
+  alias Arbor.Common.LazyLoader
   alias Arbor.Consensus.{Config, TopicRule}
 
   require Logger
@@ -275,7 +276,7 @@ defmodule Arbor.Consensus.TopicMatcher do
   end
 
   defp llm_available? do
-    Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2)
+    LazyLoader.exported?(Arbor.AI, :generate_text, 2)
   end
 
   defp llm_enabled_by_default? do

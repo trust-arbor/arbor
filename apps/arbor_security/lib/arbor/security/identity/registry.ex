@@ -28,7 +28,6 @@ defmodule Arbor.Security.Identity.Registry do
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
 
-
   # Client API
 
   @doc """

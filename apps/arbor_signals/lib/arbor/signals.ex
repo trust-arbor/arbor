@@ -50,7 +50,7 @@ defmodule Arbor.Signals do
 
   @behaviour Arbor.Contracts.API.Signals
 
-  alias Arbor.Signals.{Bus, Signal, Store, Taint}
+  alias Arbor.Signals.{Bus, Config, Signal, Store, Taint, TopicKeys}
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -178,12 +178,12 @@ defmodule Arbor.Signals do
   # Encrypt signal data for restricted topics before storage.
   # This prevents plaintext sensitive payloads from sitting in the Store.
   defp protect_restricted_signal(%Signal{category: category, data: data} = signal) do
-    restricted_topics = Arbor.Signals.Config.restricted_topics()
+    restricted_topics = Config.restricted_topics()
 
     if category in restricted_topics and data != %{} and not already_encrypted?(data) do
       try do
         with {:ok, json} <- Jason.encode(data),
-             {:ok, encrypted} <- Arbor.Signals.TopicKeys.encrypt(category, json) do
+             {:ok, encrypted} <- TopicKeys.encrypt(category, json) do
           %{signal | data: %{__encrypted__: true, payload: encrypted}}
         else
           {:error, _reason} ->

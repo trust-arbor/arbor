@@ -4,6 +4,7 @@ defmodule Arbor.Common.SkillLibraryTest do
   @moduletag :fast
 
   alias Arbor.Common.SkillLibrary
+  alias Arbor.Contracts.Skill
 
   @fixtures_dir Path.expand("../../fixtures/skills", __DIR__)
 
@@ -82,7 +83,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
       skills = SkillLibrary.list()
       assert is_list(skills)
-      assert length(skills) > 0
+      assert skills != []
 
       GenServer.stop(pid)
     end
@@ -147,7 +148,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
       results = SkillLibrary.search("security")
       assert is_list(results)
-      assert length(results) > 0
+      assert results != []
 
       # Security perspective should be in results (matches name)
       names = Enum.map(results, &Map.get(&1, :name))
@@ -162,7 +163,7 @@ defmodule Arbor.Common.SkillLibraryTest do
 
       results = SkillLibrary.search("defensive")
       assert is_list(results)
-      assert length(results) > 0
+      assert results != []
 
       GenServer.stop(pid)
     end
@@ -205,7 +206,7 @@ defmodule Arbor.Common.SkillLibraryTest do
       {:ok, pid} = SkillLibrary.start_link(dirs: [])
 
       {:ok, skill} =
-        Arbor.Contracts.Skill.new(%{
+        Skill.new(%{
           name: "test-skill",
           description: "A test skill for testing",
           body: "Test body content",

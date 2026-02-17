@@ -1,8 +1,8 @@
 defmodule Arbor.Orchestrator.AgentLoop.ProviderProfilesTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.AgentLoop.Session
   alias Arbor.Orchestrator.AgentLoop.ProviderProfiles.{Anthropic, Gemini, OpenAI}
+  alias Arbor.Orchestrator.AgentLoop.Session
 
   test "openai profile includes apply_patch and openai system prompt" do
     request = OpenAI.build_request(%Session{}, llm_model: "gpt-5")

@@ -24,7 +24,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   use GenServer
 
-  alias Arbor.Consensus.{Config, EventEmitter, StateRecovery}
+  alias Arbor.Consensus.{Config, EventEmitter, EventStore, StateRecovery}
   alias Arbor.Consensus.Coordinator.{TopicRouting, Voting}
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
@@ -904,7 +904,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp store_event(event) do
     if Config.event_store_enabled?() do
-      Arbor.Consensus.EventStore.append(event)
+      EventStore.append(event)
     end
   rescue
     _ -> :ok

@@ -243,9 +243,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   defp decode_object(_), do: {:error, :no_object_generated}
 
   defp validate_object(object, opts) do
-    with :ok <- validate_object_schema(object, opts),
-         :ok <- validate_object_callback(object, opts) do
-      :ok
+    with :ok <- validate_object_schema(object, opts) do
+      validate_object_callback(object, opts)
     end
   end
 
@@ -286,9 +285,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
 
     with :ok <- validate_schema_type(value, expected_type),
          :ok <- validate_schema_required(value, schema),
-         :ok <- validate_schema_properties(value, schema),
-         :ok <- validate_schema_items(value, schema) do
-      :ok
+         :ok <- validate_schema_properties(value, schema) do
+      validate_schema_items(value, schema)
     end
   end
 
@@ -678,28 +676,26 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   end
 
   defp safe_execute_stream_tool(execute, arguments) do
-    try do
-      case execute.(arguments) do
-        {:ok, map} when is_map(map) ->
-          %{"status" => "ok", "result" => map}
+    case execute.(arguments) do
+      {:ok, map} when is_map(map) ->
+        %{"status" => "ok", "result" => map}
 
-        {:error, reason} ->
-          %{"status" => "error", "error" => inspect(reason), "type" => :execution_failed}
+      {:error, reason} ->
+        %{"status" => "error", "error" => inspect(reason), "type" => :execution_failed}
 
-        map when is_map(map) ->
-          %{"status" => "ok", "result" => map}
+      map when is_map(map) ->
+        %{"status" => "ok", "result" => map}
 
-        other ->
-          %{"status" => "ok", "result" => %{"value" => inspect(other)}}
-      end
-    rescue
-      exception ->
-        %{
-          "status" => "error",
-          "error" => Exception.message(exception),
-          "type" => :execution_failed
-        }
+      other ->
+        %{"status" => "ok", "result" => %{"value" => inspect(other)}}
     end
+  rescue
+    exception ->
+      %{
+        "status" => "error",
+        "error" => Exception.message(exception),
+        "type" => :execution_failed
+      }
   end
 
   defp fallback_tool_stream_result(reason) do
@@ -771,16 +767,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   end
 
   defp produce_stream_events(owner, ref, events) do
-    try do
-      Enum.each(events, fn event -> send(owner, {ref, :event, event}) end)
-      send(owner, {ref, :done})
-    rescue
-      exception ->
-        send(owner, {ref, :producer_error, {:error, exception, __STACKTRACE__}})
-    catch
-      kind, reason ->
-        send(owner, {ref, :producer_error, {kind, reason, __STACKTRACE__}})
-    end
+    Enum.each(events, fn event -> send(owner, {ref, :event, event}) end)
+    send(owner, {ref, :done})
+  rescue
+    exception ->
+      send(owner, {ref, :producer_error, {:error, exception, __STACKTRACE__}})
+  catch
+    kind, reason ->
+      send(owner, {ref, :producer_error, {kind, reason, __STACKTRACE__}})
   end
 
   defp next_controlled_stream_item(%{done?: true} = state), do: {:halt, state}

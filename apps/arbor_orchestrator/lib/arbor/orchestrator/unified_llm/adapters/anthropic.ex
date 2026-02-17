@@ -496,8 +496,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
     thinking_text =
       content_parts
       |> Enum.filter(&(&1.kind == :thinking))
-      |> Enum.map(&to_string(Map.get(&1, :text, "")))
-      |> Enum.join(" ")
+      |> Enum.map_join(" ", &to_string(Map.get(&1, :text, "")))
       |> String.trim()
 
     if thinking_text == "" do

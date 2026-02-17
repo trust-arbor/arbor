@@ -32,9 +32,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
   @impl true
   def complete(%Request{} = request, opts \\ []) do
     with {:ok, cmd, args} <- build_command(request, opts),
-         {:ok, output} <- execute(cmd, args, opts),
-         {:ok, response} <- parse_output(output) do
-      {:ok, response}
+         {:ok, output} <- execute(cmd, args, opts) do
+      parse_output(output)
     end
   end
 
@@ -172,8 +171,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
       event["type"] == "item.completed" &&
         get_in(event, ["item", "type"]) == "agent_message"
     end)
-    |> Enum.map(fn event -> get_in(event, ["item", "text"]) || "" end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn event -> get_in(event, ["item", "text"]) || "" end)
   end
 
   defp extract_usage(events) do
@@ -234,8 +232,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
       %{type: "text"} -> true
       _ -> false
     end)
-    |> Enum.map(fn part -> Map.get(part, :text, Map.get(part, "text", "")) end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn part -> Map.get(part, :text, Map.get(part, "text", "")) end)
   end
 
   defp extract_text(_), do: ""

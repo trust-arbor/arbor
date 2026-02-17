@@ -7,8 +7,8 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
   """
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Handlers.SessionHandler
+  alias Arbor.Orchestrator.Session
 
   @moduletag :session_integration
 

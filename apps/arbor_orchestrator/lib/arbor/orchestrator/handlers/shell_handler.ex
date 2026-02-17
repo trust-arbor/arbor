@@ -23,57 +23,55 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      command = Map.get(node.attrs, "command")
+    command = Map.get(node.attrs, "command")
 
-      unless command do
-        raise "shell handler requires 'command' attribute"
-      end
+    unless command do
+      raise "shell handler requires 'command' attribute"
+    end
 
-      timeout = parse_int(Map.get(node.attrs, "timeout"), @default_timeout)
-      on_error = Map.get(node.attrs, "on_error", "fail")
+    timeout = parse_int(Map.get(node.attrs, "timeout"), @default_timeout)
+    on_error = Map.get(node.attrs, "on_error", "fail")
 
-      cwd =
-        Map.get(node.attrs, "cwd") ||
-          Context.get(context, "workdir") ||
-          Keyword.get(opts, :workdir, ".")
+    cwd =
+      Map.get(node.attrs, "cwd") ||
+        Context.get(context, "workdir") ||
+        Keyword.get(opts, :workdir, ".")
 
-      sandbox = Map.get(node.attrs, "sandbox", "basic")
+    sandbox = Map.get(node.attrs, "sandbox", "basic")
 
-      case run_command(command, cwd: cwd, timeout: timeout, sandbox: sandbox) do
-        {:ok, output, exit_code} ->
-          base_updates = %{
-            "shell.#{node.id}.exit_code" => exit_code,
-            "shell.#{node.id}.output" => output,
-            "last_response" => output
-          }
+    case run_command(command, cwd: cwd, timeout: timeout, sandbox: sandbox) do
+      {:ok, output, exit_code} ->
+        base_updates = %{
+          "shell.#{node.id}.exit_code" => exit_code,
+          "shell.#{node.id}.output" => output,
+          "last_response" => output
+        }
 
-          if exit_code == 0 do
-            %Outcome{
-              status: :success,
-              notes: truncate(output, 500),
-              context_updates: base_updates
-            }
-          else
-            handle_error(on_error, exit_code, output, base_updates, node)
-          end
-
-        {:error, reason} ->
+        if exit_code == 0 do
           %Outcome{
-            status: :fail,
-            failure_reason: "shell error: #{inspect(reason)}",
-            context_updates: %{
-              "shell.#{node.id}.error" => inspect(reason)
-            }
+            status: :success,
+            notes: truncate(output, 500),
+            context_updates: base_updates
           }
-      end
-    rescue
-      e ->
+        else
+          handle_error(on_error, exit_code, output, base_updates, node)
+        end
+
+      {:error, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "shell handler error: #{Exception.message(e)}"
+          failure_reason: "shell error: #{inspect(reason)}",
+          context_updates: %{
+            "shell.#{node.id}.error" => inspect(reason)
+          }
         }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "shell handler error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

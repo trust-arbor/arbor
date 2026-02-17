@@ -5,10 +5,10 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
   Provides two things:
 
   1. `subscribe_signals/3` — wraps the `connected?` guard around
-     `Arbor.Web.SignalLive.subscribe/3` so mount functions don't repeat it.
+     `SignalLive.subscribe/3` so mount functions don't repeat it.
 
   2. `use Arbor.Dashboard.Live.SignalSubscription` — injects a default
-     `terminate/2` that calls `Arbor.Web.SignalLive.unsubscribe/1` and a
+     `terminate/2` that calls `SignalLive.unsubscribe/1` and a
      catch-all `handle_info/2` that returns `{:noreply, socket}`.
 
   ## Usage — reload mode (most dashboards)
@@ -32,7 +32,7 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
   ## Usage — raw mode (signal feeds)
 
   For LiveViews that handle `{:signal_received, signal}` directly, call
-  `Arbor.Web.SignalLive.subscribe_raw/2` as before and only `use` this
+  `SignalLive.subscribe_raw/2` as before and only `use` this
   module for the terminate cleanup:
 
       use Arbor.Dashboard.Live.SignalSubscription
@@ -40,7 +40,7 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
       def mount(_params, _session, socket) do
         socket =
           if connected?(socket) do
-            Arbor.Web.SignalLive.subscribe_raw(socket, "demo.*")
+            SignalLive.subscribe_raw(socket, "demo.*")
           else
             socket
           end
@@ -65,6 +65,8 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
 
   Must be called from within a LiveView `mount/3` callback.
   """
+  alias Arbor.Web.SignalLive
+
   @spec subscribe_signals(
           Phoenix.LiveView.Socket.t(),
           String.t(),
@@ -72,7 +74,7 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
         ) :: Phoenix.LiveView.Socket.t()
   def subscribe_signals(socket, pattern, reload_fn) do
     if Phoenix.LiveView.connected?(socket) do
-      Arbor.Web.SignalLive.subscribe(socket, pattern, reload_fn)
+      SignalLive.subscribe(socket, pattern, reload_fn)
     else
       socket
     end
@@ -100,7 +102,7 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
         quote do
           @impl true
           def terminate(_reason, socket) do
-            Arbor.Web.SignalLive.unsubscribe(socket)
+            SignalLive.unsubscribe(socket)
           end
         end
       end

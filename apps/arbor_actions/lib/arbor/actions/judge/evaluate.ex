@@ -86,6 +86,7 @@ defmodule Arbor.Actions.Judge.Evaluate do
 
   alias Arbor.Actions
   alias Arbor.Actions.Judge.{EvidenceRunner, PromptBuilder, ResultStore, Rubrics}
+  alias Arbor.Common.{LazyLoader, SafeAtom}
   alias Arbor.Contracts.Judge.{Rubric, Verdict}
 
   def taint_roles do
@@ -265,7 +266,7 @@ defmodule Arbor.Actions.Judge.Evaluate do
 
   defp call_llm(system_prompt, user_prompt, nil) do
     # Runtime bridge to Arbor.AI
-    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
+    if LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       case apply(Arbor.AI, :generate_text, [
              user_prompt,
              [system_prompt: system_prompt, temperature: 0.15]
@@ -314,7 +315,7 @@ defmodule Arbor.Actions.Judge.Evaluate do
   defp safe_to_atom(s) when is_atom(s), do: s
 
   defp safe_to_atom(s) when is_binary(s) do
-    case Arbor.Common.SafeAtom.to_existing(s) do
+    case SafeAtom.to_existing(s) do
       {:ok, atom} -> atom
       {:error, _} -> s
     end

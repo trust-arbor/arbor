@@ -2,8 +2,8 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
-  alias Arbor.Orchestrator.IR.{Compiler, TypedGraph, TypedNode, TypedEdge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
+  alias Arbor.Orchestrator.IR.{Compiler, TypedEdge, TypedGraph, TypedNode}
 
   defp simple_graph do
     %Graph{id: "Test"}

@@ -16,7 +16,13 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   alias Arbor.Orchestrator.Engine.{Authorization, Condition, Context, Executor, Outcome, Router}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
+  alias Arbor.Orchestrator.Handlers.CodergenHandler
+  alias Arbor.Orchestrator.Handlers.ConditionalHandler
+  alias Arbor.Orchestrator.Handlers.ExitHandler
+  alias Arbor.Orchestrator.Handlers.Handler
+  alias Arbor.Orchestrator.Handlers.Helpers
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Handlers.StartHandler
 
   setup_all do
     # Ensure the EventRegistry is running for Engine.run tests
@@ -1526,71 +1532,71 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   describe "Helpers.parse_int/2" do
     @tag :fast
     test "parses valid string integer" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_int("42", 0) == 42
+      assert Helpers.parse_int("42", 0) == 42
     end
 
     @tag :fast
     test "returns default for nil" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_int(nil, 10) == 10
+      assert Helpers.parse_int(nil, 10) == 10
     end
 
     @tag :fast
     test "returns default for non-numeric string" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_int("abc", 5) == 5
+      assert Helpers.parse_int("abc", 5) == 5
     end
 
     @tag :fast
     test "returns integer value directly" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_int(99, 0) == 99
+      assert Helpers.parse_int(99, 0) == 99
     end
 
     @tag :fast
     test "returns default for non-string non-integer" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_int(3.14, 0) == 0
+      assert Helpers.parse_int(3.14, 0) == 0
     end
   end
 
   describe "Helpers.parse_csv/1" do
     @tag :fast
     test "splits comma-separated values" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv("a, b, c") == ["a", "b", "c"]
+      assert Helpers.parse_csv("a, b, c") == ["a", "b", "c"]
     end
 
     @tag :fast
     test "returns empty list for nil" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv(nil) == []
+      assert Helpers.parse_csv(nil) == []
     end
 
     @tag :fast
     test "returns empty list for empty string" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv("") == []
+      assert Helpers.parse_csv("") == []
     end
 
     @tag :fast
     test "handles single value" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv("single") == ["single"]
+      assert Helpers.parse_csv("single") == ["single"]
     end
 
     @tag :fast
     test "rejects blank entries" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv("a,,b, ,c") == ["a", "b", "c"]
+      assert Helpers.parse_csv("a,,b, ,c") == ["a", "b", "c"]
     end
 
     @tag :fast
     test "returns empty list for non-binary" do
-      assert Arbor.Orchestrator.Handlers.Helpers.parse_csv(42) == []
+      assert Helpers.parse_csv(42) == []
     end
   end
 
   describe "Helpers.maybe_add/3" do
     @tag :fast
     test "adds non-nil value" do
-      assert Arbor.Orchestrator.Handlers.Helpers.maybe_add([], :key, "value") == [key: "value"]
+      assert Helpers.maybe_add([], :key, "value") == [key: "value"]
     end
 
     @tag :fast
     test "skips nil value" do
-      assert Arbor.Orchestrator.Handlers.Helpers.maybe_add([], :key, nil) == []
+      assert Helpers.maybe_add([], :key, nil) == []
     end
   end
 
@@ -1601,30 +1607,22 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   describe "Handler.idempotency_of/1" do
     @tag :fast
     test "returns handler-declared idempotency" do
-      assert Arbor.Orchestrator.Handlers.Handler.idempotency_of(
-               Arbor.Orchestrator.Handlers.StartHandler
-             ) == :idempotent
+      assert Handler.idempotency_of(StartHandler) == :idempotent
     end
 
     @tag :fast
     test "returns :idempotent for exit handler" do
-      assert Arbor.Orchestrator.Handlers.Handler.idempotency_of(
-               Arbor.Orchestrator.Handlers.ExitHandler
-             ) == :idempotent
+      assert Handler.idempotency_of(ExitHandler) == :idempotent
     end
 
     @tag :fast
     test "returns :idempotent for conditional handler" do
-      assert Arbor.Orchestrator.Handlers.Handler.idempotency_of(
-               Arbor.Orchestrator.Handlers.ConditionalHandler
-             ) == :idempotent
+      assert Handler.idempotency_of(ConditionalHandler) == :idempotent
     end
 
     @tag :fast
     test "returns :idempotent_with_key for codergen handler" do
-      assert Arbor.Orchestrator.Handlers.Handler.idempotency_of(
-               Arbor.Orchestrator.Handlers.CodergenHandler
-             ) == :idempotent_with_key
+      assert Handler.idempotency_of(CodergenHandler) == :idempotent_with_key
     end
   end
 

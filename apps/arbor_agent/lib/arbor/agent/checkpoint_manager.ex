@@ -41,6 +41,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
   alias Arbor.Agent.Seed
   alias Arbor.Memory
+  alias Arbor.Persistence.Checkpoint
 
   # ============================================================================
   # Save
@@ -75,7 +76,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = resolve_store(opts)
     data = Seed.to_map(seed)
 
-    case safe_call(fn -> Arbor.Persistence.Checkpoint.save(seed.agent_id, data, store) end) do
+    case safe_call(fn -> Checkpoint.save(seed.agent_id, data, store) end) do
       :ok ->
         Logger.debug("Seed checkpoint saved for #{seed.agent_id}")
         :ok
@@ -106,7 +107,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = resolve_store(opts)
     retries = Keyword.get(opts, :retries, 1)
 
-    case safe_call(fn -> Arbor.Persistence.Checkpoint.load(agent_id, store, retries: retries) end) do
+    case safe_call(fn -> Checkpoint.load(agent_id, store, retries: retries) end) do
       {:ok, data} when is_map(data) ->
         Logger.info("Checkpoint loaded for #{agent_id}")
         {:ok, data}
@@ -232,7 +233,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
     checkpoint_data = extract_seed_state(state, opts)
 
-    case safe_call(fn -> Arbor.Persistence.Checkpoint.save(agent_id, checkpoint_data, store) end) do
+    case safe_call(fn -> Checkpoint.save(agent_id, checkpoint_data, store) end) do
       :ok ->
         Logger.debug("Checkpoint saved for #{agent_id}")
         :ok
@@ -252,7 +253,7 @@ defmodule Arbor.Agent.CheckpointManager do
     store = Keyword.get(opts, :store) || state.checkpoint_storage
     data = extract_jido_state(state)
 
-    case Arbor.Persistence.Checkpoint.save(state.agent_id, data, store) do
+    case Checkpoint.save(state.agent_id, data, store) do
       :ok ->
         Logger.debug("Checkpoint saved for agent #{state.agent_id}")
         :ok

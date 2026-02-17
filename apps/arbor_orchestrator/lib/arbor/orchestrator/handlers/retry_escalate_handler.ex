@@ -32,43 +32,41 @@ defmodule Arbor.Orchestrator.Handlers.RetryEscalateHandler do
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      prompt = resolve_prompt(node, context)
+    prompt = resolve_prompt(node, context)
 
-      unless prompt do
-        raise "retry.escalate requires a prompt via source_key or prompt attribute"
-      end
-
-      models = parse_csv(Map.get(node.attrs, "models", @default_models))
-      escalate_on = parse_csv(Map.get(node.attrs, "escalate_on", @default_escalate_on))
-      timeout_ms = parse_int(Map.get(node.attrs, "timeout_ms"), @default_timeout)
-      threshold = parse_float(Map.get(node.attrs, "score_threshold"), @default_threshold)
-      score_key = Map.get(node.attrs, "score_key")
-      system_prompt = Map.get(node.attrs, "system_prompt")
-      llm_backend = Keyword.get(opts, :llm_backend)
-
-      score = if score_key, do: parse_float(Context.get(context, score_key), nil), else: nil
-
-      result =
-        try_models(models, prompt, %{
-          system_prompt: system_prompt,
-          timeout_ms: timeout_ms,
-          threshold: threshold,
-          escalate_on: escalate_on,
-          score: score,
-          llm_backend: llm_backend,
-          history: [],
-          attempt: 0
-        })
-
-      build_outcome(result, node)
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "retry.escalate error: #{Exception.message(e)}"
-        }
+    unless prompt do
+      raise "retry.escalate requires a prompt via source_key or prompt attribute"
     end
+
+    models = parse_csv(Map.get(node.attrs, "models", @default_models))
+    escalate_on = parse_csv(Map.get(node.attrs, "escalate_on", @default_escalate_on))
+    timeout_ms = parse_int(Map.get(node.attrs, "timeout_ms"), @default_timeout)
+    threshold = parse_float(Map.get(node.attrs, "score_threshold"), @default_threshold)
+    score_key = Map.get(node.attrs, "score_key")
+    system_prompt = Map.get(node.attrs, "system_prompt")
+    llm_backend = Keyword.get(opts, :llm_backend)
+
+    score = if score_key, do: parse_float(Context.get(context, score_key), nil), else: nil
+
+    result =
+      try_models(models, prompt, %{
+        system_prompt: system_prompt,
+        timeout_ms: timeout_ms,
+        threshold: threshold,
+        escalate_on: escalate_on,
+        score: score,
+        llm_backend: llm_backend,
+        history: [],
+        attempt: 0
+      })
+
+    build_outcome(result, node)
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "retry.escalate error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCliTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli
-  alias Arbor.Orchestrator.UnifiedLLM.{Request, Response, Message}
+  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request, Response}
 
   describe "provider/0" do
     test "returns claude_cli" do

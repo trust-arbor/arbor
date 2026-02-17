@@ -68,10 +68,7 @@ defmodule Arbor.AI.SessionBridgeTest do
 
     @tag :integration
     test "starts an ephemeral session and returns a response" do
-      unless Code.ensure_loaded?(Arbor.Orchestrator.Session) do
-        IO.puts("Skipping: arbor_orchestrator not available")
-        :ok
-      else
+      if Code.ensure_loaded?(Arbor.Orchestrator.Session) do
         # The session will fail without a real LLM, but we can verify it
         # starts and returns {:unavailable, _} rather than crashing
         result =
@@ -88,15 +85,15 @@ defmodule Arbor.AI.SessionBridgeTest do
         # - {:unavailable, {:session_start_failed, _}} if DOT parsing fails
         # The important thing is it doesn't crash
         assert match?({:ok, _}, result) or match?({:unavailable, _}, result)
+      else
+        IO.puts("Skipping: arbor_orchestrator not available")
+        :ok
       end
     end
 
     @tag :integration
     test "response has the expected format when session succeeds" do
-      unless Code.ensure_loaded?(Arbor.Orchestrator.Session) do
-        IO.puts("Skipping: arbor_orchestrator not available")
-        :ok
-      else
+      if Code.ensure_loaded?(Arbor.Orchestrator.Session) do
         case SessionBridge.try_session_call("test",
                provider: :anthropic,
                model: "claude-sonnet-4-5-20250929",
@@ -113,6 +110,9 @@ defmodule Arbor.AI.SessionBridgeTest do
             # Expected in CI/test environments without LLM
             :ok
         end
+      else
+        IO.puts("Skipping: arbor_orchestrator not available")
+        :ok
       end
     end
   end

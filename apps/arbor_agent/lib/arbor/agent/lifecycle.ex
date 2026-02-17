@@ -28,7 +28,7 @@ defmodule Arbor.Agent.Lifecycle do
       profiles = Lifecycle.list_agents()
   """
 
-  alias Arbor.Agent.{Character, Executor, Profile}
+  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, SessionManager}
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
@@ -194,7 +194,7 @@ defmodule Arbor.Agent.Lifecycle do
   @spec stop(String.t()) :: :ok | {:error, term()}
   def stop(agent_id) do
     try do
-      Arbor.Agent.SessionManager.stop_session(agent_id)
+      SessionManager.stop_session(agent_id)
     catch
       :exit, _ -> :ok
     end
@@ -304,7 +304,7 @@ defmodule Arbor.Agent.Lifecycle do
           start_heartbeat: true
         )
 
-      case Arbor.Agent.SessionManager.ensure_session(agent_id, session_opts) do
+      case SessionManager.ensure_session(agent_id, session_opts) do
         {:ok, _pid} ->
           Logger.info("Session started for agent #{agent_id}", mode: mode)
 
@@ -327,7 +327,7 @@ defmodule Arbor.Agent.Lifecycle do
         provider: Keyword.get(opts, :provider, :openrouter)
       ]
 
-      case Arbor.Agent.APIAgent.start_link(host_opts) do
+      case APIAgent.start_link(host_opts) do
         {:ok, _pid} ->
           Logger.info("APIAgent host started for agent #{agent_id}")
 

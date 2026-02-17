@@ -124,8 +124,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.List do
         type_summary =
           p.type_counts
           |> Enum.sort_by(fn {_type, count} -> -count end)
-          |> Enum.map(fn {type, count} -> "#{count} #{type}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn {type, count} -> "#{count} #{type}" end)
 
         info("    nodes: #{p.nodes} (#{type_summary})")
         info("    edges: #{p.edges}")

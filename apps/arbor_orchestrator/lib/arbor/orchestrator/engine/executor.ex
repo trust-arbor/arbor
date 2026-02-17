@@ -7,6 +7,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   """
 
   alias Arbor.Orchestrator.Engine.{Authorization, Outcome}
+  alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Handlers.Registry
 
   import Arbor.Orchestrator.Handlers.Helpers
@@ -32,104 +33,41 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   end
 
   defp do_execute_with_retry(handler, node, context, graph, retries, opts, attempt, max_attempts) do
-    try do
-      outcome = Authorization.authorize_and_execute(handler, node, context, graph, opts)
+    outcome = Authorization.authorize_and_execute(handler, node, context, graph, opts)
 
-      case outcome.status do
-        status when status in [:success, :partial_success] ->
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+    case outcome.status do
+      status when status in [:success, :partial_success] ->
+        duration_ms =
+          System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
-          emit(opts, %{
-            type: :stage_completed,
-            node_id: node.id,
-            status: status,
-            duration_ms: duration_ms
-          })
+        emit(opts, %{
+          type: :stage_completed,
+          node_id: node.id,
+          status: status,
+          duration_ms: duration_ms
+        })
 
-          {outcome, Map.delete(retries, node.id)}
+        {outcome, Map.delete(retries, node.id)}
 
-        status when status in [:retry, :fail] ->
-          if attempt < max_attempts do
-            delay = retry_delay_ms(node, graph, attempt, opts)
-
-            if status == :fail do
-              emit(opts, %{
-                type: :stage_failed,
-                node_id: node.id,
-                error: outcome.failure_reason || "stage failed",
-                will_retry: true
-              })
-            end
-
-            emit(opts, %{
-              type: :stage_retrying,
-              node_id: node.id,
-              attempt: attempt,
-              delay_ms: delay
-            })
-
-            sleep(opts, delay)
-
-            retries = Map.put(retries, node.id, attempt)
-
-            do_execute_with_retry(
-              handler,
-              node,
-              context,
-              graph,
-              retries,
-              opts,
-              attempt + 1,
-              max_attempts
-            )
-          else
-            terminal_outcome =
-              case status do
-                :retry ->
-                  if truthy?(Map.get(node.attrs, "allow_partial", false)) do
-                    %Outcome{
-                      status: :partial_success,
-                      notes: "retries exhausted, partial accepted"
-                    }
-                  else
-                    %Outcome{status: :fail, failure_reason: "max retries exceeded"}
-                  end
-
-                :fail ->
-                  outcome
-              end
-
-            emit_stage_terminal(opts, node.id, terminal_outcome)
-            {terminal_outcome, retries}
-          end
-
-        :skipped ->
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-          emit(opts, %{
-            type: :stage_completed,
-            node_id: node.id,
-            status: :skipped,
-            duration_ms: duration_ms
-          })
-
-          {outcome, retries}
-      end
-    rescue
-      exception ->
-        if should_retry_exception?(exception) and attempt < max_attempts do
+      status when status in [:retry, :fail] ->
+        if attempt < max_attempts do
           delay = retry_delay_ms(node, graph, attempt, opts)
 
-          emit(opts, %{
-            type: :stage_failed,
-            node_id: node.id,
-            error: Exception.message(exception),
-            will_retry: true
-          })
+          if status == :fail do
+            emit(opts, %{
+              type: :stage_failed,
+              node_id: node.id,
+              error: outcome.failure_reason || "stage failed",
+              will_retry: true
+            })
+          end
 
-          emit(opts, %{type: :stage_retrying, node_id: node.id, attempt: attempt, delay_ms: delay})
+          emit(opts, %{
+            type: :stage_retrying,
+            node_id: node.id,
+            attempt: attempt,
+            delay_ms: delay
+          })
 
           sleep(opts, delay)
 
@@ -146,22 +84,83 @@ defmodule Arbor.Orchestrator.Engine.Executor do
             max_attempts
           )
         else
-          outcome = %Outcome{status: :fail, failure_reason: Exception.message(exception)}
+          terminal_outcome =
+            case status do
+              :retry ->
+                if truthy?(Map.get(node.attrs, "allow_partial", false)) do
+                  %Outcome{
+                    status: :partial_success,
+                    notes: "retries exhausted, partial accepted"
+                  }
+                else
+                  %Outcome{status: :fail, failure_reason: "max retries exceeded"}
+                end
 
-          duration_ms =
-            System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+              :fail ->
+                outcome
+            end
 
-          emit(opts, %{
-            type: :stage_failed,
-            node_id: node.id,
-            error: Exception.message(exception),
-            will_retry: false,
-            duration_ms: duration_ms
-          })
-
-          {outcome, retries}
+          emit_stage_terminal(opts, node.id, terminal_outcome)
+          {terminal_outcome, retries}
         end
+
+      :skipped ->
+        duration_ms =
+          System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+
+        emit(opts, %{
+          type: :stage_completed,
+          node_id: node.id,
+          status: :skipped,
+          duration_ms: duration_ms
+        })
+
+        {outcome, retries}
     end
+  rescue
+    exception ->
+      if should_retry_exception?(exception) and attempt < max_attempts do
+        delay = retry_delay_ms(node, graph, attempt, opts)
+
+        emit(opts, %{
+          type: :stage_failed,
+          node_id: node.id,
+          error: Exception.message(exception),
+          will_retry: true
+        })
+
+        emit(opts, %{type: :stage_retrying, node_id: node.id, attempt: attempt, delay_ms: delay})
+
+        sleep(opts, delay)
+
+        retries = Map.put(retries, node.id, attempt)
+
+        do_execute_with_retry(
+          handler,
+          node,
+          context,
+          graph,
+          retries,
+          opts,
+          attempt + 1,
+          max_attempts
+        )
+      else
+        outcome = %Outcome{status: :fail, failure_reason: Exception.message(exception)}
+
+        duration_ms =
+          System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
+
+        emit(opts, %{
+          type: :stage_failed,
+          node_id: node.id,
+          error: Exception.message(exception),
+          will_retry: false,
+          duration_ms: duration_ms
+        })
+
+        {outcome, retries}
+      end
   end
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
@@ -352,7 +351,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   defp emit(opts, event) do
     pipeline_id = Keyword.get(opts, :pipeline_id, :all)
-    Arbor.Orchestrator.EventEmitter.emit(pipeline_id, event, opts)
+    EventEmitter.emit(pipeline_id, event, opts)
   end
 
   defp sleep(opts, delay_ms) do

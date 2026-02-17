@@ -115,9 +115,8 @@ defmodule Arbor.Orchestrator.Eval do
   defp maybe_shuffle(samples, opts) do
     case Keyword.get(opts, :shuffle, false) do
       true ->
-        seed = Keyword.get(opts, :seed, :rand.uniform(1_000_000))
-        samples |> Enum.map(&{:rand.uniform_real(), &1}) |> Enum.sort() |> Enum.map(&elem(&1, 1))
         # Use deterministic shuffle with seed
+        seed = Keyword.get(opts, :seed, :rand.uniform(1_000_000))
         :rand.seed(:exsss, {seed, seed, seed})
         Enum.shuffle(samples)
 

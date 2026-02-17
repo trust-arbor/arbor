@@ -93,7 +93,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
       cond do
         # First call: write a file
-        length(tool_msgs) == 0 ->
+        tool_msgs == [] ->
           {:ok,
            tool_call_response("c1", "write_file", %{
              "path" => "output.txt",

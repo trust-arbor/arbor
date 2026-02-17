@@ -102,8 +102,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.New do
   defp camelize(name) do
     name
     |> String.split(~r/[-_]/)
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join("")
+    |> Enum.map_join(&String.capitalize/1)
   end
 
   # --- Templates ---

@@ -8,9 +8,9 @@ defmodule Arbor.Orchestrator.Validation.Validator do
   - all edge targets exist
   """
 
+  alias Arbor.Orchestrator.Engine.Condition
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Validation.Diagnostic
-  alias Arbor.Orchestrator.Engine.Condition
 
   defmodule ValidationError do
     defexception [:diagnostics, message: "Pipeline validation failed"]

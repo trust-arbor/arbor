@@ -187,6 +187,7 @@ defmodule Arbor.Contracts.AI.ResourceBudget do
     case get_attr(attrs, key) do
       nil -> :ok
       n when is_integer(n) and n > 0 -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -195,6 +196,7 @@ defmodule Arbor.Contracts.AI.ResourceBudget do
     case get_attr(attrs, key) do
       nil -> :ok
       n when is_number(n) and n >= 0 -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end

@@ -171,6 +171,7 @@ defmodule Arbor.Contracts.Session.ToolCall do
       nil -> {:error, {:missing_required, key}}
       val when is_binary(val) and byte_size(val) > 0 -> :ok
       "" -> {:error, {:missing_required, key}}
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -179,6 +180,7 @@ defmodule Arbor.Contracts.Session.ToolCall do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_binary(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -191,6 +193,7 @@ defmodule Arbor.Contracts.Session.ToolCall do
     case get_attr(attrs, key) do
       nil -> :ok
       %DateTime{} -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -199,6 +202,7 @@ defmodule Arbor.Contracts.Session.ToolCall do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_integer(val) and val >= 0 -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -207,6 +211,7 @@ defmodule Arbor.Contracts.Session.ToolCall do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_map(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end

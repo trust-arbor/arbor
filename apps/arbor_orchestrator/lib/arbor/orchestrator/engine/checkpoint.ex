@@ -10,6 +10,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()}
         }
 
+  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+
   defstruct timestamp: "",
             current_node: "",
             completed_nodes: [],
@@ -30,7 +32,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       current_node: current_node,
       completed_nodes: completed_nodes,
       node_retries: node_retries,
-      context_values: Arbor.Orchestrator.Engine.Context.snapshot(context),
+      context_values: Context.snapshot(context),
       node_outcomes: node_outcomes
     }
   end
@@ -119,7 +121,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         |> Map.get("node_outcomes", %{})
         |> Enum.map(fn {node_id, outcome_map} ->
           {node_id,
-           %Arbor.Orchestrator.Engine.Outcome{
+           %Outcome{
              status: parse_status(Map.get(outcome_map, "status", "success")),
              preferred_label: Map.get(outcome_map, "preferred_label"),
              suggested_next_ids: Map.get(outcome_map, "suggested_next_ids", []),

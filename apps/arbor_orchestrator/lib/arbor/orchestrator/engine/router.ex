@@ -85,32 +85,30 @@ defmodule Arbor.Orchestrator.Engine.Router do
   defp select_next_edge(node, outcome, context, graph) do
     edges = Graph.outgoing_edges(graph, node.id)
 
-    cond do
-      edges == [] ->
-        nil
+    if edges == [] do
+      nil
+    else
+      condition_matched = Enum.filter(edges, &edge_condition_matches?(&1, outcome, context))
+      unconditional = Enum.filter(edges, &(Map.get(&1.attrs, "condition", "") in ["", nil]))
 
-      true ->
-        condition_matched = Enum.filter(edges, &edge_condition_matches?(&1, outcome, context))
-        unconditional = Enum.filter(edges, &(Map.get(&1.attrs, "condition", "") in ["", nil]))
+      cond do
+        condition_matched != [] ->
+          best_by_weight_then_lexical(condition_matched)
 
-        cond do
-          condition_matched != [] ->
-            best_by_weight_then_lexical(condition_matched)
+        outcome.preferred_label not in [nil, ""] ->
+          Enum.find(unconditional, fn edge ->
+            normalize_label(Map.get(edge.attrs, "label", "")) ==
+              normalize_label(outcome.preferred_label || "")
+          end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
 
-          outcome.preferred_label not in [nil, ""] ->
-            Enum.find(unconditional, fn edge ->
-              normalize_label(Map.get(edge.attrs, "label", "")) ==
-                normalize_label(outcome.preferred_label || "")
-            end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+        outcome.suggested_next_ids != [] ->
+          Enum.find_value(outcome.suggested_next_ids, fn suggested_id ->
+            Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
+          end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
 
-          outcome.suggested_next_ids != [] ->
-            Enum.find_value(outcome.suggested_next_ids, fn suggested_id ->
-              Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
-            end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
-
-          true ->
-            best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
-        end
+        true ->
+          best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+      end
     end
   end
 

@@ -16,7 +16,7 @@ defmodule Arbor.Orchestrator.GraphMutation do
   """
 
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
 
   @doc "Decodes a JSON string into a list of operation maps."
   @spec parse(String.t()) :: {:ok, [map()]} | {:error, String.t()}

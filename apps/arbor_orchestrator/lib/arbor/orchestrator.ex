@@ -10,12 +10,14 @@ defmodule Arbor.Orchestrator do
   - Unified LLM client specification
   """
 
+  alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
   alias Arbor.Orchestrator.Transforms.ModelStylesheet
   alias Arbor.Orchestrator.Transforms.VariableExpansion
+  alias Arbor.Orchestrator.Validation.Diagnostic
   alias Arbor.Orchestrator.Validation.Validator
 
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
@@ -31,7 +33,7 @@ defmodule Arbor.Orchestrator do
     else
       {:error, reason} ->
         [
-          Arbor.Orchestrator.Validation.Diagnostic.error(
+          Diagnostic.error(
             "parse_error",
             "Could not parse pipeline: #{inspect(reason)}"
           )
@@ -89,7 +91,7 @@ defmodule Arbor.Orchestrator do
 
       {:error, reason} ->
         [
-          Arbor.Orchestrator.Validation.Diagnostic.error(
+          Diagnostic.error(
             "compile_error",
             "Could not compile to typed IR: #{inspect(reason)}"
           )
@@ -98,7 +100,7 @@ defmodule Arbor.Orchestrator do
   end
 
   @spec conformance_matrix() :: map()
-  def conformance_matrix, do: Arbor.Orchestrator.Conformance.Matrix.summary()
+  def conformance_matrix, do: Conformance.Matrix.summary()
 
   defp ensure_graph(%Graph{} = graph, opts), do: apply_transforms(graph, opts)
 

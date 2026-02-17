@@ -273,7 +273,7 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
       build_evaluation(%{
         proposal_id: "dot_council",
         evaluator_id: branch_id,
-        perspective: String.to_atom(sanitize_perspective(branch_id)),
+        perspective: safe_to_atom(sanitize_perspective(branch_id)),
         vote: vote,
         reasoning: reasoning,
         confidence: confidence,
@@ -391,6 +391,16 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
       "" -> "general"
       other -> other
     end
+  end
+
+  # Perspective names come from DOT graph branch IDs which are bounded by the pipeline spec,
+  # not from untrusted user input. The sanitize_perspective/1 function further constrains
+  # the value to alphanumeric + underscore characters.
+  defp safe_to_atom(str) when is_binary(str) do
+    String.to_existing_atom(str)
+  rescue
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    ArgumentError -> String.to_atom(str)
   end
 
   defp parse_mode("advisory"), do: :advisory

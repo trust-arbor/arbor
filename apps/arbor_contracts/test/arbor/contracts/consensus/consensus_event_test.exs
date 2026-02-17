@@ -149,6 +149,7 @@ defmodule Arbor.Contracts.Consensus.ConsensusEventTest do
             result: :ok
           })
 
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         assert e.event_type == :"execution_#{status}"
       end
     end

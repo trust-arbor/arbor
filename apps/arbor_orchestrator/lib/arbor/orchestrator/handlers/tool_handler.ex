@@ -60,33 +60,33 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   def idempotency, do: :side_effecting
 
   defp run_command(command, _node, context, opts) do
-    try do
-      [executable | args] = OptionParser.split(command)
-      cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
+    [executable | args] = OptionParser.split(command)
+    cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
 
-      {output, exit_code} = System.cmd(executable, args, cmd_opts)
+    # Tool handler: executes shell commands from pipeline tool_command attr
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
+    {output, exit_code} = System.cmd(executable, args, cmd_opts)
 
-      if exit_code == 0 do
-        %Outcome{
-          status: :success,
-          notes: "Tool completed: #{command}",
-          context_updates: %{"tool.output" => output}
-        }
-      else
-        %Outcome{
-          status: :fail,
-          failure_reason:
-            "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
-          context_updates: %{"tool.output" => output}
-        }
-      end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "Tool execution error: #{Exception.message(e)}"
-        }
+    if exit_code == 0 do
+      %Outcome{
+        status: :success,
+        notes: "Tool completed: #{command}",
+        context_updates: %{"tool.output" => output}
+      }
+    else
+      %Outcome{
+        status: :fail,
+        failure_reason:
+          "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
+        context_updates: %{"tool.output" => output}
+      }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "Tool execution error: #{Exception.message(e)}"
+      }
   end
 
   defp workdir_opt(context, opts) do

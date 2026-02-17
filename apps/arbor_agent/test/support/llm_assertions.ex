@@ -18,6 +18,8 @@ defmodule Arbor.Test.LLMAssertions do
 
   import ExUnit.Assertions
 
+  alias Arbor.Signals.Store, as: SignalsStore
+
   @doc """
   Asserts that a result is a successful LLM response with non-empty content.
 
@@ -194,7 +196,7 @@ defmodule Arbor.Test.LLMAssertions do
 
   @doc false
   def signal_count(prefix) do
-    case Arbor.Signals.Store.recent(100) do
+    case SignalsStore.recent(100) do
       {:ok, signals} ->
         Enum.count(signals, fn s ->
           type = Map.get(s, :type, "") |> to_string()

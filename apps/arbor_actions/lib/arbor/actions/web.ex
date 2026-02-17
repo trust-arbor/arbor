@@ -131,6 +131,7 @@ defmodule Arbor.Actions.Web do
     alias Arbor.Actions
     alias Arbor.Actions.Web
     alias Arbor.Common.SafeAtom
+    alias JidoBrowser.Actions.ReadPage
 
     @allowed_formats [:markdown, :text, :html]
 
@@ -148,7 +149,7 @@ defmodule Arbor.Actions.Web do
         format = normalize_format(params[:format])
         selector = Map.get(params, :selector, "body")
 
-        case JidoBrowser.Actions.ReadPage.run(
+        case ReadPage.run(
                %{url: url, selector: selector, format: format},
                %{}
              ) do
@@ -247,13 +248,14 @@ defmodule Arbor.Actions.Web do
       ]
 
     alias Arbor.Actions
+    alias JidoBrowser.Actions.SearchWeb
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{query: query} = params, _context) do
       Actions.emit_started(__MODULE__, %{query: query})
 
-      case JidoBrowser.Actions.SearchWeb.run(params, %{}) do
+      case SearchWeb.run(params, %{}) do
         {:ok, result} ->
           Actions.emit_completed(__MODULE__, %{
             query: query,
@@ -354,6 +356,7 @@ defmodule Arbor.Actions.Web do
 
     alias Arbor.Actions
     alias Arbor.Actions.Web
+    alias JidoBrowser.Actions.SnapshotUrl
 
     @doc false
     def taint_roles do
@@ -373,7 +376,7 @@ defmodule Arbor.Actions.Web do
       with :ok <- Web.validate_url(url) do
         Actions.emit_started(__MODULE__, %{url: url})
 
-        case JidoBrowser.Actions.SnapshotUrl.run(params, %{}) do
+        case SnapshotUrl.run(params, %{}) do
           {:ok, result} ->
             content_length =
               case result do

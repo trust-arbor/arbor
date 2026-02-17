@@ -640,9 +640,8 @@ defmodule Arbor.Security do
 
       true ->
         with {:ok, verified_agent_id} <- Verifier.verify(signed_request),
-             :ok <- check_identity_binding(verified_agent_id, principal_id),
-             :ok <- check_resource_binding(signed_request, opts) do
-          :ok
+             :ok <- check_identity_binding(verified_agent_id, principal_id) do
+          check_resource_binding(signed_request, opts)
         end
     end
   end

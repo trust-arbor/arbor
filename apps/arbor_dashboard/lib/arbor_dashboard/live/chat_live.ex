@@ -15,10 +15,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Web.Helpers
   import Arbor.Dashboard.Live.ChatLive.Components
 
-  alias Arbor.Agent.{APIAgent, Claude, Manager}
+  alias Arbor.Agent.{APIAgent, Claude, Lifecycle, Manager}
+  alias Arbor.Dashboard.ChatState
   alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
   alias Arbor.Dashboard.Live.ChatLive.Helpers, as: ChatHelpers
-  alias Arbor.Dashboard.ChatState
+  alias Arbor.Web.SignalLive
 
   @impl true
   def mount(_params, _session, socket) do
@@ -26,7 +27,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     {existing_agent, socket} =
       if connected?(socket) do
-        socket = Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")
+        socket = SignalLive.subscribe_raw(socket, "agent.*")
         {Manager.find_first_agent(), socket}
       else
         {:not_found, socket}
@@ -112,8 +113,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     socket =
       if connected?(socket) do
         socket
-        |> Arbor.Web.SignalLive.subscribe_raw("agent.*")
-        |> Arbor.Web.SignalLive.subscribe_raw("memory.*")
+        |> SignalLive.subscribe_raw("agent.*")
+        |> SignalLive.subscribe_raw("memory.*")
       else
         socket
       end
@@ -140,7 +141,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       case Arbor.Agent.running?(agent_id) do
         true ->
           # Agent is already running — just reconnect
-          case Arbor.Agent.Lifecycle.get_host(agent_id) do
+          case Lifecycle.get_host(agent_id) do
             {:ok, pid} ->
               metadata = get_agent_metadata(agent_id)
               {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
@@ -172,7 +173,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def terminate(_reason, socket) do
     # Agent survives navigation — managed by Supervisor, not LiveView.
     # Only unsubscribe from signals.
-    Arbor.Web.SignalLive.unsubscribe(socket)
+    SignalLive.unsubscribe(socket)
   end
 
   @impl true

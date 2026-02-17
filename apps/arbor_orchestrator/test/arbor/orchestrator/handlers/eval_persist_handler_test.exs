@@ -1,8 +1,8 @@
 defmodule Arbor.Orchestrator.Handlers.EvalPersistHandlerTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Handlers.EvalPersistHandler
   alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Handlers.EvalPersistHandler
 
   defp make_node(attrs) do
     %{

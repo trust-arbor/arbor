@@ -23,59 +23,57 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
 
   @impl true
   def execute(node, context, _graph, _opts) do
-    try do
-      samples = Context.get(context, "eval.dataset", [])
+    samples = Context.get(context, "eval.dataset", [])
 
-      unless is_list(samples) and samples != [] do
-        raise "eval.run requires samples in context key 'eval.dataset' — run eval.dataset first"
-      end
-
-      grader_names = parse_csv(Map.get(node.attrs, "graders", ""))
-
-      if grader_names == [] do
-        raise "eval.run requires 'graders' attribute (comma-separated grader names)"
-      end
-
-      subject = resolve_subject(node)
-      {model, provider} = resolve_model_provider(node, context)
-
-      # Pass model/provider as opts to the subject
-      subject_opts =
-        []
-        |> maybe_add(:model, model)
-        |> maybe_add(:provider, provider)
-
-      results = Eval.run_eval(samples, subject, grader_names, subject_opts)
-
-      passed_count = Enum.count(results, & &1["passed"])
-
-      context_updates = %{
-        "eval.results.#{node.id}" => results,
-        "eval.results.#{node.id}.count" => length(results),
-        "eval.results.#{node.id}.passed" => passed_count
-      }
-
-      # Propagate model/provider to downstream nodes
-      context_updates =
-        if model, do: Map.put(context_updates, "eval.model", model), else: context_updates
-
-      context_updates =
-        if provider,
-          do: Map.put(context_updates, "eval.provider", provider),
-          else: context_updates
-
-      %Outcome{
-        status: :success,
-        notes: "Evaluated #{length(results)} samples: #{passed_count}/#{length(results)} passed",
-        context_updates: context_updates
-      }
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "eval.run error: #{Exception.message(e)}"
-        }
+    unless is_list(samples) and samples != [] do
+      raise "eval.run requires samples in context key 'eval.dataset' — run eval.dataset first"
     end
+
+    grader_names = parse_csv(Map.get(node.attrs, "graders", ""))
+
+    if grader_names == [] do
+      raise "eval.run requires 'graders' attribute (comma-separated grader names)"
+    end
+
+    subject = resolve_subject(node)
+    {model, provider} = resolve_model_provider(node, context)
+
+    # Pass model/provider as opts to the subject
+    subject_opts =
+      []
+      |> maybe_add(:model, model)
+      |> maybe_add(:provider, provider)
+
+    results = Eval.run_eval(samples, subject, grader_names, subject_opts)
+
+    passed_count = Enum.count(results, & &1["passed"])
+
+    context_updates = %{
+      "eval.results.#{node.id}" => results,
+      "eval.results.#{node.id}.count" => length(results),
+      "eval.results.#{node.id}.passed" => passed_count
+    }
+
+    # Propagate model/provider to downstream nodes
+    context_updates =
+      if model, do: Map.put(context_updates, "eval.model", model), else: context_updates
+
+    context_updates =
+      if provider,
+        do: Map.put(context_updates, "eval.provider", provider),
+        else: context_updates
+
+    %Outcome{
+      status: :success,
+      notes: "Evaluated #{length(results)} samples: #{passed_count}/#{length(results)} passed",
+      context_updates: context_updates
+    }
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "eval.run error: #{Exception.message(e)}"
+      }
   end
 
   @impl true
@@ -118,7 +116,6 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
       _ -> nil
     end
   end
-
 
   # --- Subject resolution ---
 

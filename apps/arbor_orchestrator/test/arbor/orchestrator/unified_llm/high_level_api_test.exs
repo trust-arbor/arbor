@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Orchestrator.UnifiedLLM
   alias Arbor.Orchestrator.UnifiedLLM.{
     AbortError,
     Client,
@@ -177,7 +178,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, response} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "hi"
@@ -193,7 +194,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     messages = [Message.new(:user, "hello")]
 
     assert {:ok, response} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                system: "rules",
@@ -209,7 +210,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, :prompt_and_messages_mutually_exclusive} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "x",
@@ -222,7 +223,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "demo",
                prompt: "hi"
@@ -236,7 +237,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, %{"ok" => true}} =
-             Arbor.Orchestrator.UnifiedLLM.generate_object(
+             UnifiedLLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hi",
@@ -249,7 +250,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, %{"ok" => true}} =
-             Arbor.Orchestrator.UnifiedLLM.generate_object(
+             UnifiedLLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hi",
@@ -261,7 +262,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
              )
 
     assert {:error, %NoObjectGeneratedError{reason: {:schema_property_invalid, "ok", _}}} =
-             Arbor.Orchestrator.UnifiedLLM.generate_object(
+             UnifiedLLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hi",
@@ -278,7 +279,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, object_stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream_object(
+             UnifiedLLM.stream_object(
                client: client,
                model: "json-stream-model",
                prompt: "hi",
@@ -297,7 +298,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, object_stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream_object(
+             UnifiedLLM.stream_object(
                client: client,
                model: "bad-json-stream-model",
                prompt: "hi"
@@ -311,7 +312,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, %NoObjectGeneratedError{reason: :no_object_generated}} =
-             Arbor.Orchestrator.UnifiedLLM.generate_object(
+             UnifiedLLM.generate_object(
                client: client,
                model: "demo",
                prompt: "hi"
@@ -325,7 +326,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     tool = %Tool{name: "lookup", execute: fn _ -> %{"ok" => true} end}
 
     assert {:ok, response} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "run",
@@ -354,7 +355,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     stop_when = fn %{tool_calls: tool_calls} -> tool_calls != [] end
 
     assert {:ok, response} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "run",
@@ -372,7 +373,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "slow-model",
                prompt: "hi",
@@ -385,7 +386,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "slow-stream",
                prompt: "hi",
@@ -398,7 +399,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:ok, stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "slow-event-stream",
                prompt: "hi",
@@ -413,7 +414,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, %AbortError{}} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "hi",
@@ -421,7 +422,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
              )
 
     assert {:error, %AbortError{}} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "demo",
                prompt: "hi",
@@ -437,7 +438,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     :atomics.put(abort_state, 1, 0)
 
     assert {:ok, stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "slow-event-stream",
                prompt: "hi",
@@ -457,7 +458,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
 
     assert {:error, :provider_failed} =
-             Arbor.Orchestrator.UnifiedLLM.generate_object(
+             UnifiedLLM.generate_object(
                client: client,
                model: "error-model",
                prompt: "hi"
@@ -472,7 +473,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     tool = %Tool{name: "lookup", execute: fn _ -> %{"ok" => true} end}
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             Arbor.Orchestrator.UnifiedLLM.generate(
+             UnifiedLLM.generate(
                client: client,
                model: "demo",
                prompt: "run",
@@ -489,7 +490,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
     tool = %Tool{name: "lookup", execute: fn _ -> %{"ok" => true} end}
 
     assert {:ok, stream} =
-             Arbor.Orchestrator.UnifiedLLM.stream(
+             UnifiedLLM.stream(
                client: client,
                model: "demo",
                prompt: "run",

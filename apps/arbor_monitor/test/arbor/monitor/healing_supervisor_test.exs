@@ -1,7 +1,7 @@
 defmodule Arbor.Monitor.HealingSupervisorTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Monitor.HealingSupervisor
+  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, Fingerprint, HealingSupervisor, RejectionTracker}
 
   setup do
     # Start the HealingSupervisor for tests
@@ -12,17 +12,17 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
   describe "child processes" do
     @tag :fast
     test "AnomalyQueue is running" do
-      assert Process.whereis(Arbor.Monitor.AnomalyQueue) != nil
+      assert Process.whereis(AnomalyQueue) != nil
     end
 
     @tag :fast
     test "CascadeDetector is running" do
-      assert Process.whereis(Arbor.Monitor.CascadeDetector) != nil
+      assert Process.whereis(CascadeDetector) != nil
     end
 
     @tag :fast
     test "RejectionTracker is running" do
-      assert Process.whereis(Arbor.Monitor.RejectionTracker) != nil
+      assert Process.whereis(RejectionTracker) != nil
     end
 
     @tag :fast
@@ -131,8 +131,8 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     test "uses one_for_one strategy" do
       # Verify that crashing one child does not crash others
       # Get current PIDs of static children
-      anomaly_queue_pid = Process.whereis(Arbor.Monitor.AnomalyQueue)
-      cascade_detector_pid = Process.whereis(Arbor.Monitor.CascadeDetector)
+      anomaly_queue_pid = Process.whereis(AnomalyQueue)
+      cascade_detector_pid = Process.whereis(CascadeDetector)
 
       assert is_pid(anomaly_queue_pid)
       assert is_pid(cascade_detector_pid)
@@ -144,7 +144,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
 
     @tag :fast
     test "child processes restart after crash" do
-      original_pid = Process.whereis(Arbor.Monitor.CascadeDetector)
+      original_pid = Process.whereis(CascadeDetector)
       assert is_pid(original_pid)
 
       # Kill the CascadeDetector
@@ -153,7 +153,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
       # Give the supervisor time to restart it
       Process.sleep(50)
 
-      new_pid = Process.whereis(Arbor.Monitor.CascadeDetector)
+      new_pid = Process.whereis(CascadeDetector)
       assert is_pid(new_pid)
       assert new_pid != original_pid
       assert Process.alive?(new_pid)
@@ -161,17 +161,17 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
 
     @tag :fast
     test "other children survive when one child crashes" do
-      anomaly_queue_pid = Process.whereis(Arbor.Monitor.AnomalyQueue)
+      anomaly_queue_pid = Process.whereis(AnomalyQueue)
       verification_pid = Process.whereis(Arbor.Monitor.Verification)
 
       # Kill CascadeDetector
-      cascade_pid = Process.whereis(Arbor.Monitor.CascadeDetector)
+      cascade_pid = Process.whereis(CascadeDetector)
       Process.exit(cascade_pid, :kill)
 
       Process.sleep(50)
 
       # AnomalyQueue and Verification should still be the same PIDs
-      assert Process.whereis(Arbor.Monitor.AnomalyQueue) == anomaly_queue_pid
+      assert Process.whereis(AnomalyQueue) == anomaly_queue_pid
       assert Process.whereis(Arbor.Monitor.Verification) == verification_pid
     end
 
@@ -182,7 +182,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
       assert Process.alive?(worker_pid)
 
       # Kill a static child (CascadeDetector)
-      cascade_pid = Process.whereis(Arbor.Monitor.CascadeDetector)
+      cascade_pid = Process.whereis(CascadeDetector)
       Process.exit(cascade_pid, :kill)
 
       Process.sleep(50)
@@ -200,7 +200,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     test "starts with default configuration when no opts provided" do
       # The setup already starts with defaults - verify children are functioning
       # CascadeDetector should respond with default threshold
-      status = Arbor.Monitor.CascadeDetector.status()
+      status = CascadeDetector.status()
       assert is_integer(status.threshold)
       assert status.threshold > 0
     end
@@ -221,7 +221,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
       )
 
       # The CascadeDetector should have the custom threshold
-      status = Arbor.Monitor.CascadeDetector.status()
+      status = CascadeDetector.status()
       assert status.threshold == 10
     end
   end
@@ -236,16 +236,16 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
       }
 
       # Should not raise
-      Arbor.Monitor.CascadeDetector.record_anomaly(anomaly)
-      assert Arbor.Monitor.CascadeDetector.current_rate() >= 0
+      CascadeDetector.record_anomaly(anomaly)
+      assert CascadeDetector.current_rate() >= 0
     end
 
     @tag :fast
     test "RejectionTracker can record rejections after supervisor starts" do
-      fp = Arbor.Monitor.Fingerprint.new(:memory, :total_bytes, :above)
+      fp = Fingerprint.new(:memory, :total_bytes, :above)
 
       result =
-        Arbor.Monitor.RejectionTracker.record_rejection(fp, "test_prop", "test reason")
+        RejectionTracker.record_rejection(fp, "test_prop", "test reason")
 
       assert result.strategy == :retry_with_context
       assert result.rejection_count == 1
@@ -259,7 +259,7 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
         details: %{metric: :process_count, value: 500, ewma: 400, stddev: 30}
       }
 
-      assert {:ok, :enqueued} = Arbor.Monitor.AnomalyQueue.enqueue(anomaly)
+      assert {:ok, :enqueued} = AnomalyQueue.enqueue(anomaly)
     end
   end
 end

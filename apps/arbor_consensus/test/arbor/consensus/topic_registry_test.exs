@@ -1,8 +1,9 @@
 defmodule Arbor.Consensus.TopicRegistryTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Persistence.Checkpoint.Store.ETS, as: CheckpointETS
   alias Arbor.Consensus.{TopicRegistry, TopicRule}
+  alias Arbor.Persistence.Checkpoint
+  alias Arbor.Persistence.Checkpoint.Store.ETS, as: CheckpointETS
 
   setup do
     # Use unique table and registry names for test isolation
@@ -333,7 +334,7 @@ defmodule Arbor.Consensus.TopicRegistryTest do
         }
       }
 
-      :ok = Arbor.Persistence.Checkpoint.save(ctx.checkpoint_id, unsigned_data, Arbor.Persistence.Checkpoint.Store.ETS)
+      :ok = Checkpoint.save(ctx.checkpoint_id, unsigned_data, CheckpointETS)
 
       # Start registry with signing — should accept unsigned checkpoint
       {:ok, _pid} =

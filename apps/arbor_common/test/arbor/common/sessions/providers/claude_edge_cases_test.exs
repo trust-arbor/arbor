@@ -82,7 +82,7 @@ defmodule Arbor.Common.Sessions.Providers.ClaudeEdgeCasesTest do
         "type" => "user",
         "uuid" => "msg-001",
         "sessionId" => "session-001",
-        "timestamp" => 1234567890,
+        "timestamp" => 1_234_567_890,
         "message" => %{"role" => "user", "content" => "test"}
       }
 

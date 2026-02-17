@@ -563,9 +563,8 @@ defmodule Arbor.Orchestrator.AgentLoop.Loop do
       required = Map.get(schema, "required") || Map.get(schema, :required) || []
       properties = Map.get(schema, "properties") || Map.get(schema, :properties) || %{}
 
-      with :ok <- validate_required_fields(args, required),
-           :ok <- validate_property_types(args, properties) do
-        :ok
+      with :ok <- validate_required_fields(args, required) do
+        validate_property_types(args, properties)
       end
     else
       {:error, {:invalid_arguments, {:schema_type, type}}}

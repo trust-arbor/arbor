@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.IR.{Compiler, Validator}
 
   defp compile!(graph) do
@@ -196,7 +196,7 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
       # We don't count conditional exits from cycle nodes as bounds in our simple check
       # Actually we DO check has_conditional_exit? for "conditional" handler_type
       # step_b is codergen, not conditional — so it won't be considered bounded
-      assert length(loop_warnings) >= 1
+      assert loop_warnings != []
       assert hd(loop_warnings).message =~ "Cycle"
     end
 

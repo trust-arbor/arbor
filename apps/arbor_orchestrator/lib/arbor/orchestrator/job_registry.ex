@@ -8,6 +8,8 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   use GenServer
 
+  alias Arbor.Orchestrator.EventEmitter
+
   @table_name :arbor_orchestrator_jobs
   @max_history 50
 
@@ -82,7 +84,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
     :ets.new(@table_name, [:set, :public, :named_table, keypos: 1])
 
     # Subscribe to all pipeline events
-    {:ok, _} = Arbor.Orchestrator.EventEmitter.subscribe(:all)
+    {:ok, _} = EventEmitter.subscribe(:all)
 
     {:ok, %{}}
   end

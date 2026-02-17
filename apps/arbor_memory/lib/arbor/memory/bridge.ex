@@ -59,6 +59,7 @@ defmodule Arbor.Memory.Bridge do
   automatically via `Intent.from_map/1` and `Percept.from_map/1`.
   """
 
+  alias Arbor.Common.LazyLoader
   alias Arbor.Contracts.Memory.Intent
   alias Arbor.Contracts.Memory.Percept
 
@@ -580,7 +581,7 @@ defmodule Arbor.Memory.Bridge do
   end
 
   defp resolve_signals_module do
-    if Arbor.Common.LazyLoader.exported?(Arbor.Signals, :healthy?, 0) do
+    if LazyLoader.exported?(Arbor.Signals, :healthy?, 0) do
       Arbor.Signals
     else
       nil
@@ -588,7 +589,7 @@ defmodule Arbor.Memory.Bridge do
   end
 
   defp emit_bridge_interrupt_signal(agent_id, target_id, reason) do
-    if Arbor.Common.LazyLoader.exported?(Arbor.Memory.Signals, :emit_bridge_interrupt, 3) do
+    if LazyLoader.exported?(Arbor.Memory.Signals, :emit_bridge_interrupt, 3) do
       Arbor.Memory.Signals.emit_bridge_interrupt(agent_id, target_id, reason)
     end
   end

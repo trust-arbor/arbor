@@ -267,6 +267,7 @@ defmodule Arbor.Consensus.CouncilManager do
 
   @doc false
   def perspective_agent_name(perspective) do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     :"advisory_#{perspective}"
   end
 

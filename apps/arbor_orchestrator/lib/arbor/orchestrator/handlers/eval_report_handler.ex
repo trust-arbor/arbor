@@ -12,60 +12,59 @@ defmodule Arbor.Orchestrator.Handlers.EvalReportHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Graph
 
   @impl true
   def execute(node, context, graph, opts) do
-    try do
-      format = Map.get(node.attrs, "format", "terminal")
-      source = Map.get(node.attrs, "source") || find_source(graph, node, "eval.run")
+    format = Map.get(node.attrs, "format", "terminal")
+    source = Map.get(node.attrs, "source") || find_source(graph, node, "eval.run")
 
-      metrics_source =
-        Map.get(node.attrs, "metrics_source") || find_source(graph, node, "eval.aggregate")
+    metrics_source =
+      Map.get(node.attrs, "metrics_source") || find_source(graph, node, "eval.aggregate")
 
-      results = Context.get(context, "eval.results.#{source}", [])
-      metrics = Context.get(context, "eval.metrics.#{metrics_source}", %{})
+    results = Context.get(context, "eval.results.#{source}", [])
+    metrics = Context.get(context, "eval.metrics.#{metrics_source}", %{})
 
-      report = format_report(results, metrics, format)
+    report = format_report(results, metrics, format)
 
-      case Map.get(node.attrs, "output") do
-        nil ->
-          # Store in context
-          %Outcome{
-            status: :success,
-            notes: report,
-            context_updates: %{
-              "eval.report.#{node.id}" => report,
-              "eval.report.#{node.id}.format" => format
-            }
-          }
-
-        output_path ->
-          workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
-
-          resolved =
-            if Path.type(output_path) == :absolute,
-              do: output_path,
-              else: Path.join(workdir, output_path)
-
-          File.mkdir_p!(Path.dirname(resolved))
-          File.write!(resolved, report)
-
-          %Outcome{
-            status: :success,
-            notes: "Report written to #{resolved}",
-            context_updates: %{
-              "eval.report.#{node.id}" => report,
-              "eval.report.#{node.id}.path" => resolved
-            }
-          }
-      end
-    rescue
-      e ->
+    case Map.get(node.attrs, "output") do
+      nil ->
+        # Store in context
         %Outcome{
-          status: :fail,
-          failure_reason: "eval.report error: #{Exception.message(e)}"
+          status: :success,
+          notes: report,
+          context_updates: %{
+            "eval.report.#{node.id}" => report,
+            "eval.report.#{node.id}.format" => format
+          }
+        }
+
+      output_path ->
+        workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+
+        resolved =
+          if Path.type(output_path) == :absolute,
+            do: output_path,
+            else: Path.join(workdir, output_path)
+
+        File.mkdir_p!(Path.dirname(resolved))
+        File.write!(resolved, report)
+
+        %Outcome{
+          status: :success,
+          notes: "Report written to #{resolved}",
+          context_updates: %{
+            "eval.report.#{node.id}" => report,
+            "eval.report.#{node.id}.path" => resolved
+          }
         }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "eval.report error: #{Exception.message(e)}"
+      }
   end
 
   @impl true
@@ -81,21 +80,18 @@ defmodule Arbor.Orchestrator.Handlers.EvalReportHandler do
     failed = total - passed
 
     metrics_section =
-      metrics
-      |> Enum.map(fn {k, v} -> "| #{k} | #{Float.round(v, 4)} |" end)
-      |> Enum.join("\n")
+      Enum.map_join(metrics, "\n", fn {k, v} -> "| #{k} | #{Float.round(v, 4)} |" end)
 
     failures =
       results
       |> Enum.reject(& &1["passed"])
       |> Enum.take(5)
-      |> Enum.map(fn r ->
+      |> Enum.map_join("\n", fn r ->
         scores = r["scores"] || []
-        score_str = scores |> Enum.map(fn s -> "#{s.score}" end) |> Enum.join(", ")
+        score_str = Enum.map_join(scores, ", ", fn s -> "#{s.score}" end)
 
         "- **#{r["id"]}**: expected=`#{truncate(r["expected"], 60)}` actual=`#{truncate(to_string(r["actual"]), 60)}` scores=[#{score_str}]"
       end)
-      |> Enum.join("\n")
 
     """
     # Evaluation Report
@@ -119,18 +115,15 @@ defmodule Arbor.Orchestrator.Handlers.EvalReportHandler do
     passed = Enum.count(results, & &1["passed"])
 
     metrics_lines =
-      metrics
-      |> Enum.map(fn {k, v} -> "  #{k}: #{Float.round(v, 4)}" end)
-      |> Enum.join("\n")
+      Enum.map_join(metrics, "\n", fn {k, v} -> "  #{k}: #{Float.round(v, 4)}" end)
 
     failures =
       results
       |> Enum.reject(& &1["passed"])
       |> Enum.take(3)
-      |> Enum.map(fn r ->
+      |> Enum.map_join("\n", fn r ->
         "  - #{r["id"]}: expected=#{truncate(r["expected"], 40)} actual=#{truncate(to_string(r["actual"]), 40)}"
       end)
-      |> Enum.join("\n")
 
     """
     === Evaluation Report ===
@@ -144,7 +137,7 @@ defmodule Arbor.Orchestrator.Handlers.EvalReportHandler do
 
   defp find_source(graph, current_node, type_prefix) do
     graph
-    |> Arbor.Orchestrator.Graph.incoming_edges(current_node.id)
+    |> Graph.incoming_edges(current_node.id)
     |> Enum.map(& &1.from)
     |> Enum.find(fn node_id ->
       case Map.get(graph.nodes, node_id) do

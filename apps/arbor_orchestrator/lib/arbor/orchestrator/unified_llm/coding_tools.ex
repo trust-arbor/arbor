@@ -174,6 +174,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.CodingTools do
     pattern_str = args["pattern"] || ""
     glob = args["glob"] || "**/*"
 
+    # Coding tool: compiles user-provided search pattern for code search
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeRegexCompile
     case Regex.compile(pattern_str) do
       {:ok, regex} ->
         full_glob = Path.join(workdir, glob)

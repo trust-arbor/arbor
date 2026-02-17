@@ -12,7 +12,7 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.Web.{Helpers, Icons}
+  alias Arbor.Web.{Helpers, Icons, SignalLive}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -41,7 +41,7 @@ defmodule Arbor.Dashboard.Live.ActivityLive do
 
     socket =
       if connected?(socket) do
-        Arbor.Web.SignalLive.subscribe_raw(socket, "*")
+        SignalLive.subscribe_raw(socket, "*")
       else
         socket
       end

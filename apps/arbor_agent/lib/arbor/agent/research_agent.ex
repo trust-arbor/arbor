@@ -24,7 +24,7 @@ defmodule Arbor.Agent.ResearchAgent do
       profiles = ResearchAgent.list()
   """
 
-  alias Arbor.Agent.{Manager, APIAgent, Lifecycle}
+  alias Arbor.Agent.{APIAgent, Lifecycle, Manager}
 
   @template Arbor.Agent.Templates.Researcher
 

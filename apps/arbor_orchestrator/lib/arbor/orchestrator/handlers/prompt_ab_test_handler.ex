@@ -39,101 +39,99 @@ defmodule Arbor.Orchestrator.Handlers.PromptAbTestHandler do
 
   @impl true
   def execute(node, context, graph, opts) do
-    try do
-      backend = resolve_backend(node)
-      variant_a = expand_goal(Map.get(node.attrs, "variant_a", ""), graph)
-      variant_b = expand_goal(Map.get(node.attrs, "variant_b", ""), graph)
-      count = parse_int(Map.get(node.attrs, "count", "1"), 1)
-      persistence = Map.get(node.attrs, "persistence")
-      auto_promote = Map.get(node.attrs, "auto_promote", "false") == "true"
-      min_samples = parse_int(Map.get(node.attrs, "min_samples", "20"), 20)
-      significance = parse_float(Map.get(node.attrs, "significance", "0.05"), 0.05)
+    backend = resolve_backend(node)
+    variant_a = expand_goal(Map.get(node.attrs, "variant_a", ""), graph)
+    variant_b = expand_goal(Map.get(node.attrs, "variant_b", ""), graph)
+    count = parse_int(Map.get(node.attrs, "count", "1"), 1)
+    persistence = Map.get(node.attrs, "persistence")
+    auto_promote = Map.get(node.attrs, "auto_promote", "false") == "true"
+    min_samples = parse_int(Map.get(node.attrs, "min_samples", "20"), 20)
+    significance = parse_float(Map.get(node.attrs, "significance", "0.05"), 0.05)
 
-      stage_dir =
-        case Keyword.get(opts, :logs_root) do
-          nil -> nil
-          root -> Path.join(root, node.id)
+    stage_dir =
+      case Keyword.get(opts, :logs_root) do
+        nil -> nil
+        root -> Path.join(root, node.id)
+      end
+
+    if stage_dir do
+      File.mkdir_p!(stage_dir)
+    end
+
+    if variant_a == "" or variant_b == "" do
+      %Outcome{
+        status: :fail,
+        failure_reason: "prompt.ab_test requires both variant_a and variant_b attributes"
+      }
+    else
+      # Run both variants `count` times each
+      a_responses = run_variant(backend, node, variant_a, context, count, stage_dir, "a")
+      b_responses = run_variant(backend, node, variant_b, context, count, stage_dir, "b")
+
+      # Judge: compare responses
+      {score_a, score_b, winner, _judgment} =
+        judge_variants(
+          backend,
+          node,
+          variant_a,
+          variant_b,
+          a_responses,
+          b_responses,
+          context,
+          graph
+        )
+
+      # Build context updates
+      winning_response = if winner == "a", do: hd(a_responses), else: hd(b_responses)
+
+      updates = %{
+        "last_stage" => node.id,
+        "last_response" => winning_response,
+        "prompt_ab.#{node.id}.winner" => winner,
+        "prompt_ab.#{node.id}.score_a" => score_a,
+        "prompt_ab.#{node.id}.score_b" => score_b
+      }
+
+      # Persistence: append to JSONL log, compute cumulative stats
+      updates =
+        if persistence do
+          entry = build_log_entry(node.id, winner, score_a, score_b, variant_a, variant_b)
+          append_to_log(persistence, entry)
+          {a_wins, b_wins} = compute_cumulative(persistence)
+          promoted = check_promotion(auto_promote, a_wins, b_wins, min_samples, significance)
+
+          updates
+          |> Map.put("prompt_ab.#{node.id}.history_file", persistence)
+          |> Map.put("prompt_ab.#{node.id}.cumulative_a_wins", a_wins)
+          |> Map.put("prompt_ab.#{node.id}.cumulative_b_wins", b_wins)
+          |> then(fn u ->
+            if promoted, do: Map.put(u, "prompt_ab.#{node.id}.promoted", promoted), else: u
+          end)
+        else
+          updates
         end
 
-      if stage_dir do
-        File.mkdir_p!(stage_dir)
-      end
+      notes = "AB Test: variant #{winner} wins (A=#{score_a}, B=#{score_b})"
 
-      if variant_a == "" or variant_b == "" do
-        %Outcome{
-          status: :fail,
-          failure_reason: "prompt.ab_test requires both variant_a and variant_b attributes"
-        }
-      else
-        # Run both variants `count` times each
-        a_responses = run_variant(backend, node, variant_a, context, count, stage_dir, "a")
-        b_responses = run_variant(backend, node, variant_b, context, count, stage_dir, "b")
+      notes =
+        if updates["prompt_ab.#{node.id}.promoted"] do
+          notes <> " | AUTO-PROMOTED: variant #{updates["prompt_ab.#{node.id}.promoted"]}"
+        else
+          notes
+        end
 
-        # Judge: compare responses
-        {score_a, score_b, winner, _judgment} =
-          judge_variants(
-            backend,
-            node,
-            variant_a,
-            variant_b,
-            a_responses,
-            b_responses,
-            context,
-            graph
-          )
-
-        # Build context updates
-        winning_response = if winner == "a", do: hd(a_responses), else: hd(b_responses)
-
-        updates = %{
-          "last_stage" => node.id,
-          "last_response" => winning_response,
-          "prompt_ab.#{node.id}.winner" => winner,
-          "prompt_ab.#{node.id}.score_a" => score_a,
-          "prompt_ab.#{node.id}.score_b" => score_b
-        }
-
-        # Persistence: append to JSONL log, compute cumulative stats
-        updates =
-          if persistence do
-            entry = build_log_entry(node.id, winner, score_a, score_b, variant_a, variant_b)
-            append_to_log(persistence, entry)
-            {a_wins, b_wins} = compute_cumulative(persistence)
-            promoted = check_promotion(auto_promote, a_wins, b_wins, min_samples, significance)
-
-            updates
-            |> Map.put("prompt_ab.#{node.id}.history_file", persistence)
-            |> Map.put("prompt_ab.#{node.id}.cumulative_a_wins", a_wins)
-            |> Map.put("prompt_ab.#{node.id}.cumulative_b_wins", b_wins)
-            |> then(fn u ->
-              if promoted, do: Map.put(u, "prompt_ab.#{node.id}.promoted", promoted), else: u
-            end)
-          else
-            updates
-          end
-
-        notes = "AB Test: variant #{winner} wins (A=#{score_a}, B=#{score_b})"
-
-        notes =
-          if updates["prompt_ab.#{node.id}.promoted"] do
-            notes <> " | AUTO-PROMOTED: variant #{updates["prompt_ab.#{node.id}.promoted"]}"
-          else
-            notes
-          end
-
-        %Outcome{
-          status: :success,
-          context_updates: updates,
-          notes: notes
-        }
-      end
-    rescue
-      e ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "PromptAbTest handler error: #{Exception.message(e)}"
-        }
+      %Outcome{
+        status: :success,
+        context_updates: updates,
+        notes: notes
+      }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "PromptAbTest handler error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

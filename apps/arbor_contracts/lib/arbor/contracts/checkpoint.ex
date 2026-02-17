@@ -304,6 +304,7 @@ defmodule Arbor.Contracts.Checkpoint do
     case get_attr(attrs, key) do
       nil -> {:error, {:missing_required, key}}
       val when is_binary(val) and byte_size(val) > 0 -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> {:error, {:"invalid_#{key}", val}}
     end
   end
@@ -312,6 +313,7 @@ defmodule Arbor.Contracts.Checkpoint do
     case get_attr(attrs, key) do
       nil -> {:error, {:missing_required, key}}
       val when is_map(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> {:error, {:"invalid_#{key}", val}}
     end
   end
@@ -320,6 +322,7 @@ defmodule Arbor.Contracts.Checkpoint do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_binary(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> {:error, {:"invalid_#{key}", val}}
     end
   end
@@ -328,6 +331,7 @@ defmodule Arbor.Contracts.Checkpoint do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_integer(val) and val > 0 -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> {:error, {:"invalid_#{key}", val}}
     end
   end
@@ -336,6 +340,7 @@ defmodule Arbor.Contracts.Checkpoint do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_map(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> {:error, {:"invalid_#{key}", val}}
     end
   end

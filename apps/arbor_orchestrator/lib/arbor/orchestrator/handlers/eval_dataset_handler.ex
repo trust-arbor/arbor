@@ -12,63 +12,62 @@ defmodule Arbor.Orchestrator.Handlers.EvalDatasetHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Eval
 
   import Arbor.Orchestrator.Handlers.Helpers
 
   @impl true
   def execute(node, context, _graph, opts) do
-    try do
-      dataset_path = Map.get(node.attrs, "dataset")
+    dataset_path = Map.get(node.attrs, "dataset")
 
-      unless dataset_path do
-        raise "eval.dataset requires 'dataset' attribute"
-      end
+    unless dataset_path do
+      raise "eval.dataset requires 'dataset' attribute"
+    end
 
-      workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
-      resolved = resolve_path(dataset_path, workdir)
+    workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+    resolved = resolve_path(dataset_path, workdir)
 
-      load_opts = []
+    load_opts = []
 
-      load_opts =
-        if Map.get(node.attrs, "shuffle") in ["true", true],
-          do: [{:shuffle, true} | load_opts],
-          else: load_opts
+    load_opts =
+      if Map.get(node.attrs, "shuffle") in ["true", true],
+        do: [{:shuffle, true} | load_opts],
+        else: load_opts
 
-      load_opts =
-        if Map.get(node.attrs, "seed"),
-          do: [{:seed, parse_int(Map.get(node.attrs, "seed"), 0)} | load_opts],
-          else: load_opts
+    load_opts =
+      if Map.get(node.attrs, "seed"),
+        do: [{:seed, parse_int(Map.get(node.attrs, "seed"), 0)} | load_opts],
+        else: load_opts
 
-      load_opts =
-        if Map.get(node.attrs, "limit"),
-          do: [{:limit, parse_int(Map.get(node.attrs, "limit"), 0)} | load_opts],
-          else: load_opts
+    load_opts =
+      if Map.get(node.attrs, "limit"),
+        do: [{:limit, parse_int(Map.get(node.attrs, "limit"), 0)} | load_opts],
+        else: load_opts
 
-      case Arbor.Orchestrator.Eval.load_dataset(resolved, load_opts) do
-        {:ok, samples} ->
-          %Outcome{
-            status: :success,
-            notes: "Loaded #{length(samples)} samples from #{dataset_path}",
-            context_updates: %{
-              "eval.dataset" => samples,
-              "eval.dataset.count" => length(samples),
-              "eval.dataset.path" => resolved
-            }
+    case Eval.load_dataset(resolved, load_opts) do
+      {:ok, samples} ->
+        %Outcome{
+          status: :success,
+          notes: "Loaded #{length(samples)} samples from #{dataset_path}",
+          context_updates: %{
+            "eval.dataset" => samples,
+            "eval.dataset.count" => length(samples),
+            "eval.dataset.path" => resolved
           }
+        }
 
-        {:error, reason} ->
-          %Outcome{
-            status: :fail,
-            failure_reason: "Failed to load dataset: #{reason}"
-          }
-      end
-    rescue
-      e ->
+      {:error, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "eval.dataset error: #{Exception.message(e)}"
+          failure_reason: "Failed to load dataset: #{reason}"
         }
     end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "eval.dataset error: #{Exception.message(e)}"
+      }
   end
 
   @impl true

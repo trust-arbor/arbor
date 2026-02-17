@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
     Client,
     ConfigurationError,
     Message,
+    ProviderError,
     Request,
     RequestTimeoutError,
     Response,
@@ -88,7 +89,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
           Process.put(:retry_adapter_calls, 1)
 
           {:error,
-           Arbor.Orchestrator.UnifiedLLM.ProviderError.exception(
+           ProviderError.exception(
              message: "transient",
              provider: "retry-adapter",
              retryable: true
@@ -270,7 +271,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
       |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
 
     models = Client.list_models(client, provider: "xai")
-    assert length(models) > 0
+    assert models != []
     assert Enum.any?(models, &(&1.id == "grok-4-1-fast"))
 
     # Each model has the expected fields from LLMDB

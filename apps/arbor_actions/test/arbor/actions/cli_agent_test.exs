@@ -1,9 +1,9 @@
 defmodule Arbor.Actions.CliAgentTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Actions.CliAgent.Execute
   alias Arbor.Actions.CliAgent.Adapters
   alias Arbor.Actions.CliAgent.Adapters.Claude
+  alias Arbor.Actions.CliAgent.Execute
 
   @moduletag :fast
 

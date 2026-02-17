@@ -3,6 +3,8 @@ defmodule Arbor.Agent.ServerTest do
 
   alias Arbor.Agent.Server
   alias Arbor.Agent.Test.{FailingAction, IncrementAction, TestAgent}
+  alias Arbor.Persistence.Checkpoint
+  alias Arbor.Persistence.Checkpoint.Store.Agent, as: CheckpointStoreAgent
 
   @moduletag :fast
 
@@ -163,7 +165,7 @@ defmodule Arbor.Agent.ServerTest do
   describe "checkpoint integration" do
     test "saves and restores from checkpoint storage" do
       # Start checkpoint storage
-      {:ok, storage_pid} = Arbor.Persistence.Checkpoint.Store.Agent.start_link()
+      {:ok, storage_pid} = CheckpointStoreAgent.start_link()
 
       # Start agent with checkpoint storage
       {:ok, pid} =
@@ -171,7 +173,7 @@ defmodule Arbor.Agent.ServerTest do
           agent_id: "checkpoint-test",
           agent_module: TestAgent,
           initial_state: %{value: 100},
-          checkpoint_storage: Arbor.Persistence.Checkpoint.Store.Agent
+          checkpoint_storage: CheckpointStoreAgent
         )
 
       Process.sleep(50)
@@ -181,9 +183,9 @@ defmodule Arbor.Agent.ServerTest do
 
       # Verify checkpoint was saved
       assert {:ok, _data} =
-               Arbor.Persistence.Checkpoint.load(
+               Checkpoint.load(
                  "checkpoint-test",
-                 Arbor.Persistence.Checkpoint.Store.Agent,
+                 CheckpointStoreAgent,
                  retries: 0
                )
 
@@ -197,7 +199,7 @@ defmodule Arbor.Agent.ServerTest do
           agent_id: "checkpoint-test",
           agent_module: TestAgent,
           initial_state: %{value: 0},
-          checkpoint_storage: Arbor.Persistence.Checkpoint.Store.Agent
+          checkpoint_storage: CheckpointStoreAgent
         )
 
       Process.sleep(50)
@@ -207,7 +209,7 @@ defmodule Arbor.Agent.ServerTest do
 
       on_exit(fn ->
         if Process.alive?(pid2), do: GenServer.stop(pid2)
-        if Process.alive?(storage_pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        if Process.alive?(storage_pid), do: CheckpointStoreAgent.stop()
       end)
     end
 
@@ -232,14 +234,14 @@ defmodule Arbor.Agent.ServerTest do
 
   describe "auto-checkpoint" do
     test "saves checkpoints at configured interval" do
-      {:ok, storage_pid} = Arbor.Persistence.Checkpoint.Store.Agent.start_link()
+      {:ok, storage_pid} = CheckpointStoreAgent.start_link()
 
       {:ok, pid} =
         Server.start_link(
           agent_id: "auto-cp-test",
           agent_module: TestAgent,
           initial_state: %{value: 50},
-          checkpoint_storage: Arbor.Persistence.Checkpoint.Store.Agent,
+          checkpoint_storage: CheckpointStoreAgent,
           auto_checkpoint_interval: 100
         )
 
@@ -250,29 +252,29 @@ defmodule Arbor.Agent.ServerTest do
 
       # Should have at least one checkpoint saved
       assert {:ok, _data} =
-               Arbor.Persistence.Checkpoint.load(
+               Checkpoint.load(
                  "auto-cp-test",
-                 Arbor.Persistence.Checkpoint.Store.Agent,
+                 CheckpointStoreAgent,
                  retries: 0
                )
 
       on_exit(fn ->
         if Process.alive?(pid), do: GenServer.stop(pid)
-        if Process.alive?(storage_pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        if Process.alive?(storage_pid), do: CheckpointStoreAgent.stop()
       end)
     end
   end
 
   describe "termination" do
     test "saves checkpoint on graceful stop" do
-      {:ok, storage_pid} = Arbor.Persistence.Checkpoint.Store.Agent.start_link()
+      {:ok, storage_pid} = CheckpointStoreAgent.start_link()
 
       {:ok, pid} =
         Server.start_link(
           agent_id: "term-test",
           agent_module: TestAgent,
           initial_state: %{value: 77},
-          checkpoint_storage: Arbor.Persistence.Checkpoint.Store.Agent
+          checkpoint_storage: CheckpointStoreAgent
         )
 
       Process.sleep(50)
@@ -283,14 +285,14 @@ defmodule Arbor.Agent.ServerTest do
 
       # Checkpoint should have been saved during termination
       assert {:ok, _data} =
-               Arbor.Persistence.Checkpoint.load(
+               Checkpoint.load(
                  "term-test",
-                 Arbor.Persistence.Checkpoint.Store.Agent,
+                 CheckpointStoreAgent,
                  retries: 0
                )
 
       on_exit(fn ->
-        if Process.alive?(storage_pid), do: Arbor.Persistence.Checkpoint.Store.Agent.stop()
+        if Process.alive?(storage_pid), do: CheckpointStoreAgent.stop()
       end)
     end
 

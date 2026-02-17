@@ -69,6 +69,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
       ensure_epmd()
       suffix = :rand.uniform(99_999)
       # Safe: suffix is bounded integer from :rand, creates finite atom space
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"arbor_mix_#{suffix}@localhost"
       {:ok, _} = Node.start(name, :shortnames)
       Node.set_cookie(cookie())

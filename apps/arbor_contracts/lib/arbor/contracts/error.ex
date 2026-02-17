@@ -299,6 +299,7 @@ defmodule Arbor.Contracts.Error do
   defp validate_optional(attrs, key, type_check) do
     case get_attr(attrs, key) do
       nil -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       val -> if type_check.(val), do: :ok, else: {:error, {:"invalid_#{key}", val}}
     end
   end

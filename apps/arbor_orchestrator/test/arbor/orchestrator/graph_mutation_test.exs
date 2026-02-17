@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.GraphMutationTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.GraphMutation
 
   # --- Helpers ---

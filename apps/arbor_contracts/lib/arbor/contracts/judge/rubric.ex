@@ -93,7 +93,7 @@ defmodule Arbor.Contracts.Judge.Rubric do
 
   defp validate_dimensions(attrs) do
     case Map.get(attrs, :dimensions) do
-      dims when is_list(dims) and length(dims) > 0 ->
+      dims when is_list(dims) and dims != [] ->
         Enum.reduce_while(dims, :ok, fn dim, _acc ->
           cond do
             not is_map(dim) ->

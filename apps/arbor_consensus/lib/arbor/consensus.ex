@@ -44,6 +44,7 @@ defmodule Arbor.Consensus do
   @behaviour Arbor.Contracts.API.Consensus
 
   alias Arbor.Consensus.{Coordinator, EventStore}
+  alias Arbor.Consensus.Evaluators.Consult
 
   # ============================================================================
   # Proposal Lifecycle
@@ -237,7 +238,7 @@ defmodule Arbor.Consensus do
   @spec decide(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def decide(description, opts \\ []) do
     evaluator = Keyword.get(opts, :evaluator, Arbor.Consensus.Evaluators.AdvisoryLLM)
-    Arbor.Consensus.Evaluators.Consult.decide(evaluator, description, opts)
+    Consult.decide(evaluator, description, opts)
   end
 
   # ============================================================================

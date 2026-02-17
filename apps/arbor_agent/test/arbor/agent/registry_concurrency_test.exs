@@ -171,7 +171,7 @@ defmodule Arbor.Agent.RegistryConcurrencyTest do
       results = Task.await_many(tasks, 5_000)
 
       successes = Enum.filter(results, fn {result, _pid} -> result == :ok end)
-      assert length(successes) >= 1, "At least one re-registration should succeed"
+      assert successes != [], "At least one re-registration should succeed"
 
       # The registry should have exactly one live entry
       assert {:ok, entry} = Registry.lookup(agent_id)

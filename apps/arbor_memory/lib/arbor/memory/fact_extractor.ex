@@ -44,6 +44,8 @@ defmodule Arbor.Memory.FactExtractor do
 
   require Logger
 
+  alias Arbor.Common.LazyLoader
+
   @type fact :: %{
           content: String.t(),
           category: :person | :project | :technical | :preference | :relationship,
@@ -543,7 +545,7 @@ defmodule Arbor.Memory.FactExtractor do
 
   @doc false
   def llm_available? do
-    Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2)
+    LazyLoader.exported?(Arbor.AI, :generate_text, 2)
   end
 
   @doc """

@@ -176,6 +176,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
       # Verify it actually compiles
       compile_result =
         try do
+          # Live test: compiling LLM-generated code to verify correctness
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
           Code.compile_string(code)
           :ok
         rescue
@@ -188,6 +190,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
       # Try to exercise the generated module
       exercise_result =
         try do
+          # Live test: compiling and exercising LLM-generated GenServer
+          # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
           [{mod, _}] = Code.compile_string(code)
 
           # The model might expect keyword opts or a plain map — try both

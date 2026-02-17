@@ -271,7 +271,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       # All perspectives use the same high-quality model (Gemini 3 Flash Preview)
       unique_models = map |> Map.values() |> Enum.uniq()
 
-      assert length(unique_models) >= 1,
+      assert unique_models != [],
              "expected at least 1 model, got: #{inspect(unique_models)}"
     end
 

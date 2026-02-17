@@ -58,13 +58,13 @@ defmodule Arbor.Memory do
   """
 
   alias Arbor.Memory.{
+    GoalIntentOps,
     GraphOps,
+    IdentityOps,
     IndexOps,
     IndexSupervisor,
     KnowledgeGraph,
     KnowledgeOps,
-    IdentityOps,
-    GoalIntentOps,
     SessionOps,
     Signals,
     WorkingMemoryStore

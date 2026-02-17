@@ -30,6 +30,8 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   `category`, `source`, `path`, and `metadata`.
   """
 
+  alias Arbor.Contracts.Skill
+
   @skill_filename "SKILL.md"
 
   @typedoc "Parsed skill — either `Arbor.Contracts.Skill.t()` or a plain map with the same keys."
@@ -125,7 +127,7 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
   defp build_skill(attrs) do
     if Code.ensure_loaded?(Arbor.Contracts.Skill) and
          function_exported?(Arbor.Contracts.Skill, :new, 1) do
-      Arbor.Contracts.Skill.new(attrs)
+      Skill.new(attrs)
     else
       {:ok, attrs}
     end

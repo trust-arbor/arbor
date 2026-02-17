@@ -1,6 +1,8 @@
 defmodule Arbor.Orchestrator.Conformance36Test do
   use ExUnit.Case, async: true
 
+  alias Arbor.Orchestrator.Engine
+
   test "3.6 standard preset applies max attempts when max_retries is omitted" do
     dot = """
     digraph Flow {
@@ -99,31 +101,31 @@ defmodule Arbor.Orchestrator.Conformance36Test do
   end
 
   test "3.6 should_retry predicate classifies transient vs terminal errors" do
-    assert Arbor.Orchestrator.Engine.should_retry_exception?(
+    assert Engine.should_retry_exception?(
              RuntimeError.exception("network timeout")
            )
 
-    assert Arbor.Orchestrator.Engine.should_retry_exception?(
+    assert Engine.should_retry_exception?(
              RuntimeError.exception("HTTP 429 rate limit")
            )
 
-    assert Arbor.Orchestrator.Engine.should_retry_exception?(
+    assert Engine.should_retry_exception?(
              RuntimeError.exception("provider 5xx")
            )
 
-    refute Arbor.Orchestrator.Engine.should_retry_exception?(
+    refute Engine.should_retry_exception?(
              RuntimeError.exception("401 unauthorized")
            )
 
-    refute Arbor.Orchestrator.Engine.should_retry_exception?(
+    refute Engine.should_retry_exception?(
              RuntimeError.exception("403 forbidden")
            )
 
-    refute Arbor.Orchestrator.Engine.should_retry_exception?(
+    refute Engine.should_retry_exception?(
              RuntimeError.exception("400 bad request")
            )
 
-    refute Arbor.Orchestrator.Engine.should_retry_exception?(
+    refute Engine.should_retry_exception?(
              RuntimeError.exception("validation failed")
            )
   end

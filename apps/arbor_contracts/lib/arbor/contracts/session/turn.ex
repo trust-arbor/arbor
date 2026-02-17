@@ -259,6 +259,7 @@ defmodule Arbor.Contracts.Session.Turn do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_binary(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end
@@ -267,6 +268,7 @@ defmodule Arbor.Contracts.Session.Turn do
     case get_attr(attrs, key) do
       nil -> :ok
       val when is_map(val) -> :ok
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end
   end

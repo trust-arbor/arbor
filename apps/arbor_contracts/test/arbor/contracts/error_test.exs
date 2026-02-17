@@ -219,7 +219,7 @@ defmodule Arbor.Contracts.ErrorTest do
     end
 
     test "wraps arbitrary term with inspect" do
-      err = Error.wrap(12345)
+      err = Error.wrap(12_345)
       assert err.code == :wrapped_error
       assert err.message == "12345"
     end

@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.IR.TypedGraph do
   capability analysis, taint tracking, and resource bounds verification.
   """
 
-  alias Arbor.Orchestrator.IR.{TypedNode, TypedEdge}
+  alias Arbor.Orchestrator.IR.{TypedEdge, TypedNode}
 
   @type data_class :: :public | :internal | :sensitive | :secret
 

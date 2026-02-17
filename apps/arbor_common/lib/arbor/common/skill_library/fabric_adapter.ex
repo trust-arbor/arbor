@@ -34,6 +34,8 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
   `category`, `source`, `path`, and `metadata`.
   """
 
+  alias Arbor.Contracts.Skill
+
   @pattern_filename "system.md"
 
   @typedoc "Parsed skill — either `Arbor.Contracts.Skill.t()` or a plain map with the same keys."
@@ -106,7 +108,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
   defp build_skill(attrs) do
     if Code.ensure_loaded?(Arbor.Contracts.Skill) and
          function_exported?(Arbor.Contracts.Skill, :new, 1) do
-      Arbor.Contracts.Skill.new(attrs)
+      Skill.new(attrs)
     else
       {:ok, attrs}
     end

@@ -27,7 +27,7 @@ defmodule Arbor.Agent.APIAgent do
 
   require Logger
 
-  alias Arbor.Agent.APIConfig
+  alias Arbor.Agent.{APIConfig, SessionManager}
 
   @type option ::
           {:id, String.t()}
@@ -161,7 +161,7 @@ defmodule Arbor.Agent.APIAgent do
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
     # Route through persistent Session
-    case Arbor.Agent.SessionManager.get_session(state.id) do
+    case SessionManager.get_session(state.id) do
       {:ok, session_pid} ->
         handle_session_query(prompt, opts, state, session_pid)
 
@@ -328,9 +328,9 @@ defmodule Arbor.Agent.APIAgent do
 
     # Prepend volatile context to user message
     full_prompt =
-      if volatile_context not in ["", nil],
-        do: volatile_context <> "\n\n---\n\n## User Message\n" <> prompt,
-        else: prompt
+      if volatile_context in ["", nil],
+        do: prompt,
+        else: volatile_context <> "\n\n---\n\n## User Message\n" <> prompt
 
     api_opts = [
       provider: state.provider,

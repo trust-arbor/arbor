@@ -3,6 +3,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   Minimal unified-llm client scaffold with provider routing and middleware.
   """
 
+  alias Arbor.Orchestrator.ToolHooks
+
   alias Arbor.Orchestrator.UnifiedLLM.{
     AbortError,
     ConfigurationError,
@@ -26,14 +28,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     LMStudio,
     Ollama,
     OpenAI,
-    OpenRouter,
     OpencodeCli,
+    OpenRouter,
     XAI,
     Zai,
     ZaiCodingPlan
   }
-
-  alias Arbor.Orchestrator.ToolHooks
 
   @default_client_key {__MODULE__, :default_client}
 
@@ -506,16 +506,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     emit_step(on_step, Map.merge(%{type: :tool_hook_pre, tool: name, id: id}, pre_result))
 
     output =
-      cond do
-        pre_result.decision == :skip ->
-          %{
-            "status" => "skipped",
-            "error" => pre_result.reason || "tool call skipped by pre-hook",
-            "type" => :hook_skipped
-          }
-
-        true ->
-          execute_tool_after_pre(name, id, arguments, tools, on_step)
+      if pre_result.decision == :skip do
+        %{
+          "status" => "skipped",
+          "error" => pre_result.reason || "tool call skipped by pre-hook",
+          "type" => :hook_skipped
+        }
+      else
+        execute_tool_after_pre(name, id, arguments, tools, on_step)
       end
 
     post_payload = %{
@@ -680,14 +678,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
          provider: nil,
          model: model
        }) do
-    cond do
-      is_binary(default_provider) and default_provider != "" ->
-        resolve_adapter(client, %Request{provider: default_provider, model: model})
-
-      true ->
-        with {:ok, provider} <- infer_provider(model) do
-          {:error, {:provider_not_explicit, provider}}
-        end
+    if is_binary(default_provider) and default_provider != "" do
+      resolve_adapter(client, %Request{provider: default_provider, model: model})
+    else
+      with {:ok, provider} <- infer_provider(model) do
+        {:error, {:provider_not_explicit, provider}}
+      end
     end
   end
 

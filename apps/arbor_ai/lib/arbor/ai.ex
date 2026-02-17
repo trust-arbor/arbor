@@ -69,10 +69,13 @@ defmodule Arbor.AI do
     Config,
     ResponseNormalizer,
     Router,
+    SessionBridge,
     SessionReader,
     SystemPromptBuilder,
     TaskMeta,
+    ToolAuthorization,
     ToolSignals,
+    UnifiedBridge,
     UsageStats
   }
 
@@ -193,7 +196,7 @@ defmodule Arbor.AI do
     opts = snapshot_config(opts)
 
     # Strangler fig: try unified Client first, fall back to ReqLLM
-    case Arbor.AI.UnifiedBridge.generate_text(prompt, opts) do
+    case UnifiedBridge.generate_text(prompt, opts) do
       {:ok, response} ->
         {:ok, response}
 
@@ -291,7 +294,7 @@ defmodule Arbor.AI do
     # as the agent's deputy could call tools the agent itself lacks capability for.
     # Pre-flight authorization ensures the LLM never even sees unauthorized tools.
     agent_id = Keyword.get(opts, :agent_id)
-    tools_map = Arbor.AI.ToolAuthorization.filter_authorized_tools(agent_id, tools_map)
+    tools_map = ToolAuthorization.filter_authorized_tools(agent_id, tools_map)
 
     # Auto-build rich system prompt if none provided and agent_id is available
     system_prompt =
@@ -330,7 +333,7 @@ defmodule Arbor.AI do
       |> Keyword.put(:system_prompt, system_prompt)
       |> Keyword.put(:tools, action_modules)
 
-    case Arbor.AI.SessionBridge.try_session_call(prompt, session_opts) do
+    case SessionBridge.try_session_call(prompt, session_opts) do
       {:ok, response} ->
         # Session path succeeded — response is already in the right format
         duration_ms = System.monotonic_time(:millisecond) - start_time

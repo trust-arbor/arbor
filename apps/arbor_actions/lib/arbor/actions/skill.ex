@@ -144,6 +144,7 @@ defmodule Arbor.Actions.Skill do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Memory.WorkingMemory
 
     require Logger
 
@@ -163,7 +164,7 @@ defmodule Arbor.Actions.Skill do
            {:ok, skill} <- apply(lib, :get, [skill_name]),
            :ok <- check_untrusted_activation(skill, agent_id),
            {:ok, wm} <- get_working_memory(agent_id),
-           wm_mod = Arbor.Memory.WorkingMemory,
+           wm_mod = WorkingMemory,
            {:ok, updated_wm} <- apply(wm_mod, :activate_skill, [wm, skill]) do
         save_working_memory(agent_id, updated_wm)
 
@@ -247,16 +248,16 @@ defmodule Arbor.Actions.Skill do
       if Code.ensure_loaded?(mem_mod) and function_exported?(mem_mod, :get_working_memory, 1) do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
         case apply(mem_mod, :get_working_memory, [agent_id]) do
-          nil -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id)}
+          nil -> {:ok, WorkingMemory.new(agent_id)}
           wm -> {:ok, wm}
         end
       else
-        {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+        {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
       end
     rescue
-      _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     catch
-      :exit, _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      :exit, _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     end
 
     defp save_working_memory(agent_id, wm) do
@@ -304,6 +305,7 @@ defmodule Arbor.Actions.Skill do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Memory.WorkingMemory
 
     def taint_roles, do: %{skill_name: :control}
 
@@ -314,7 +316,7 @@ defmodule Arbor.Actions.Skill do
 
       Actions.emit_started(__MODULE__, %{skill_name: skill_name, agent_id: agent_id})
 
-      wm_mod = Arbor.Memory.WorkingMemory
+      wm_mod = WorkingMemory
 
       with {:ok, wm} <- get_working_memory(agent_id) do
         updated_wm = wm_mod.deactivate_skill(wm, skill_name)
@@ -331,16 +333,16 @@ defmodule Arbor.Actions.Skill do
       if Code.ensure_loaded?(mem_mod) and function_exported?(mem_mod, :get_working_memory, 1) do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
         case apply(mem_mod, :get_working_memory, [agent_id]) do
-          nil -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+          nil -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
           wm -> {:ok, wm}
         end
       else
-        {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+        {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
       end
     rescue
-      _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     catch
-      :exit, _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      :exit, _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     end
 
     defp save_working_memory(agent_id, wm) do
@@ -374,6 +376,7 @@ defmodule Arbor.Actions.Skill do
       schema: []
 
     alias Arbor.Actions
+    alias Arbor.Memory.WorkingMemory
 
     def taint_roles, do: %{}
 
@@ -383,7 +386,7 @@ defmodule Arbor.Actions.Skill do
 
       Actions.emit_started(__MODULE__, %{agent_id: agent_id})
 
-      wm_mod = Arbor.Memory.WorkingMemory
+      wm_mod = WorkingMemory
 
       skills =
         with {:ok, wm} <- get_working_memory(agent_id) do
@@ -411,16 +414,16 @@ defmodule Arbor.Actions.Skill do
       if Code.ensure_loaded?(mem_mod) and function_exported?(mem_mod, :get_working_memory, 1) do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
         case apply(mem_mod, :get_working_memory, [agent_id]) do
-          nil -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+          nil -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
           wm -> {:ok, wm}
         end
       else
-        {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+        {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
       end
     rescue
-      _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     catch
-      :exit, _ -> {:ok, Arbor.Memory.WorkingMemory.new(agent_id, rebuild_from_signals: false)}
+      :exit, _ -> {:ok, WorkingMemory.new(agent_id, rebuild_from_signals: false)}
     end
   end
 
