@@ -66,7 +66,10 @@ defmodule Arbor.Agent.Templates.Researcher do
         resource: "arbor://orchestrator/run",
         description: "Run DOT pipelines for structured research"
       },
-      %{resource: "arbor://council/consult", description: "Consult advisory council perspectives"},
+      %{
+        resource: "arbor://council/consult",
+        description: "Consult advisory council perspectives"
+      },
       %{
         resource: "arbor://actions/execute/pipeline.run",
         description: "Run DOT orchestrator pipelines"

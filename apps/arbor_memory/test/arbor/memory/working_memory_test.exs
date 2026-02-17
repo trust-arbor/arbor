@@ -20,7 +20,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert wm.concerns == []
       assert wm.curiosity == []
       assert wm.engagement_level == 0.5
-      assert wm.version == 2
+      assert wm.version == 3
       assert wm.name == nil
       assert wm.current_human == nil
       assert wm.current_conversation == nil
@@ -742,7 +742,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert stats.has_relationship_context == true
       assert is_integer(stats.estimated_tokens)
       assert is_integer(stats.thought_tokens)
-      assert stats.version == 2
+      assert stats.version == 3
       assert is_integer(stats.uptime_seconds)
     end
   end

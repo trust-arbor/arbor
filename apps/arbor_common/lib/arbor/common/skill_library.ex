@@ -105,8 +105,10 @@ defmodule Arbor.Common.SkillLibrary do
   @doc """
   Search for skills by keyword query.
 
-  Does case-insensitive keyword matching against name, description, tags,
-  and body. Results are sorted by relevance:
+  When `Arbor.Persistence.SkillSearch` is available, delegates to hybrid
+  BM25 + pgvector search. Otherwise falls back to ETS keyword matching.
+
+  Results are sorted by relevance:
 
   1. Name match (weight 4)
   2. Description match (weight 3)
@@ -117,6 +119,7 @@ defmodule Arbor.Common.SkillLibrary do
 
   - `:limit` — maximum number of results (default: unlimited)
   - `:category` — restrict search to a specific category
+  - `:hybrid` — force hybrid search when true, ETS when false (default: auto)
 
   ## Examples
 
@@ -127,6 +130,66 @@ defmodule Arbor.Common.SkillLibrary do
   @impl Arbor.Contracts.SkillLibrary
   @spec search(String.t(), keyword()) :: [Arbor.Contracts.SkillLibrary.skill()]
   def search(query, opts \\ []) when is_binary(query) do
+    use_hybrid = Keyword.get(opts, :hybrid)
+
+    if use_hybrid != false and hybrid_search_available?() do
+      hybrid_search(query, opts)
+    else
+      ets_search(query, opts)
+    end
+  end
+
+  @doc """
+  Hybrid search delegating to persistence layer.
+
+  Uses BM25 + pgvector via `Arbor.Persistence.SkillSearch`.
+  Falls back to ETS keyword search if persistence is unavailable.
+  """
+  @impl Arbor.Contracts.SkillLibrary
+  def hybrid_search(query, opts \\ []) when is_binary(query) do
+    search_mod = Arbor.Persistence.SkillSearch
+
+    if Code.ensure_loaded?(search_mod) and function_exported?(search_mod, :hybrid_search, 3) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(search_mod, :hybrid_search, [query, nil, opts])
+    else
+      ets_search(query, opts)
+    end
+  rescue
+    _ -> ets_search(query, opts)
+  catch
+    :exit, _ -> ets_search(query, opts)
+  end
+
+  @doc """
+  Sync all cached skills to the persistent store.
+
+  Writes the current ETS cache to Postgres for hybrid search indexing.
+  Runs asynchronously after ETS population.
+  """
+  @impl Arbor.Contracts.SkillLibrary
+  def sync_to_store(_opts \\ []) do
+    search_mod = Arbor.Persistence.SkillSearch
+
+    if Code.ensure_loaded?(search_mod) and function_exported?(search_mod, :upsert_batch, 1) do
+      skills = ets_all(@table)
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(search_mod, :upsert_batch, [skills])
+    else
+      {:ok, 0}
+    end
+  rescue
+    e ->
+      Logger.warning("[SkillLibrary] sync_to_store failed: #{inspect(e)}")
+      {:error, e}
+  catch
+    :exit, reason ->
+      Logger.warning("[SkillLibrary] sync_to_store exit: #{inspect(reason)}")
+      {:error, reason}
+  end
+
+  # ETS-based keyword search (original implementation)
+  defp ets_search(query, opts) do
     downcased = String.downcase(query)
 
     @table
@@ -248,6 +311,13 @@ defmodule Arbor.Common.SkillLibrary do
   @impl GenServer
   def handle_info({:scan_dirs, dirs}, state) do
     scan_all_dirs(dirs)
+    # Async sync to persistent store for hybrid search
+    maybe_async_sync()
+    {:noreply, state}
+  end
+
+  def handle_info(:sync_to_store, state) do
+    sync_to_store()
     {:noreply, state}
   end
 
@@ -471,5 +541,17 @@ defmodule Arbor.Common.SkillLibrary do
 
   defp configured_dirs do
     Application.get_env(:arbor_common, :skill_dirs, [".arbor/skills"])
+  end
+
+  defp hybrid_search_available? do
+    mod = Arbor.Persistence.SkillSearch
+    Code.ensure_loaded?(mod) and function_exported?(mod, :hybrid_search, 3)
+  end
+
+  defp maybe_async_sync do
+    if hybrid_search_available?() do
+      # Delay sync slightly to avoid contention during startup
+      Process.send_after(self(), :sync_to_store, 1_000)
+    end
   end
 end

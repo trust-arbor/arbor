@@ -123,4 +123,34 @@ defmodule Arbor.Contracts.SkillLibrary do
   or `{:error, reason}` if the directory cannot be read.
   """
   @callback index(dir :: String.t(), opts()) :: {:ok, non_neg_integer()} | {:error, term()}
+
+  @doc """
+  Search for skills using hybrid search (BM25 + pgvector semantic).
+
+  Combines full-text search and vector similarity for more accurate
+  skill discovery. Backends that don't support hybrid search should
+  fall back to keyword-based search.
+
+  ## Options
+
+  - `:limit` — maximum number of results (default: 10)
+  - `:category` — restrict search to a specific category
+  - `:taint_filter` — filter by taint level (e.g., `:trusted`)
+  - `:min_score` — minimum relevance score threshold
+
+  Returns skills ordered by combined relevance score.
+  """
+  @callback hybrid_search(query :: String.t(), opts()) :: [Skill.t()]
+
+  @doc """
+  Sync all cached skills to a persistent store.
+
+  Writes the current in-memory skill cache to a database or other
+  persistent backend for hybrid search indexing.
+
+  Returns `{:ok, count}` with the number of skills synced.
+  """
+  @callback sync_to_store(opts()) :: {:ok, non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks [hybrid_search: 2, sync_to_store: 1]
 end

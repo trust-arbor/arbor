@@ -17,6 +17,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     goals: {:min_max, 200, 4000, 0.05},
     working_memory: {:min_max, 500, 8000, 0.10},
     knowledge_graph: {:min_max, 200, 4000, 0.05},
+    active_skills: {:min_max, 500, 16000, 0.15},
     timing: {:fixed, 200}
   }
 
@@ -71,6 +72,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     sections = [
       truncate_section(build_goals_section(agent_id), budgets.goals),
       truncate_section(build_working_memory_section(agent_id), budgets.working_memory),
+      truncate_section(build_active_skills_section(agent_id), budgets.active_skills),
       truncate_section(build_knowledge_graph_section(agent_id), budgets.knowledge_graph),
       truncate_section(build_timing_section(opts), budgets.timing)
     ]
@@ -139,6 +141,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
         goals: 1000,
         working_memory: 4000,
         knowledge_graph: 1000,
+        active_skills: 4000,
         timing: 200
       }
     end
@@ -257,6 +260,37 @@ defmodule Arbor.AI.SystemPromptBuilder do
     %{wm | recent_thoughts: filtered_thoughts, curiosity: filtered_curiosity}
   rescue
     _ -> wm
+  end
+
+  defp build_active_skills_section(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory) and
+         function_exported?(Arbor.Memory, :get_working_memory, 1) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      wm = apply(Arbor.Memory, :get_working_memory, [agent_id])
+      format_active_skills(wm)
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp format_active_skills(nil), do: nil
+
+  defp format_active_skills(wm) do
+    skills = Map.get(wm, :active_skills, [])
+
+    if skills == [] do
+      nil
+    else
+      skill_sections =
+        skills
+        |> Enum.map_join("\n\n---\n\n", fn skill ->
+          "### #{skill.name}\n\n#{skill.body}"
+        end)
+
+      "## Active Skills\n\n#{skill_sections}"
+    end
   end
 
   defp build_knowledge_graph_section(agent_id) do

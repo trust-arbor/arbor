@@ -65,7 +65,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
   require Logger
 
-  @version 2
+  @version 3
 
   @type thought :: %{
           content: String.t(),
@@ -82,6 +82,13 @@ defmodule Arbor.Memory.WorkingMemory do
           added_at: DateTime.t()
         }
 
+  @type active_skill :: %{
+          name: String.t(),
+          description: String.t(),
+          body: String.t(),
+          activated_at: DateTime.t()
+        }
+
   @type t :: %__MODULE__{
           agent_id: String.t(),
           name: String.t() | nil,
@@ -89,6 +96,7 @@ defmodule Arbor.Memory.WorkingMemory do
           current_conversation: map() | nil,
           recent_thoughts: [thought()],
           active_goals: [goal()],
+          active_skills: [active_skill()],
           relationship_context: String.t() | map() | nil,
           concerns: [String.t()],
           curiosity: [String.t()],
@@ -108,6 +116,7 @@ defmodule Arbor.Memory.WorkingMemory do
     :current_conversation,
     recent_thoughts: [],
     active_goals: [],
+    active_skills: [],
     relationship_context: nil,
     concerns: [],
     curiosity: [],
@@ -332,6 +341,71 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   # ============================================================================
+  # Active Skill Management
+  # ============================================================================
+
+  @default_max_active_skills 5
+
+  @doc """
+  Activate a skill in working memory.
+
+  The skill's name, description, and body are stored in `active_skills`.
+  Returns `{:error, :max_skills_reached}` if the limit is exceeded.
+  Returns `{:error, :already_active}` if the skill is already active.
+
+  ## Options
+
+  - `:max_active_skills` — maximum active skills (default: #{@default_max_active_skills})
+  """
+  @spec activate_skill(t(), map() | struct(), keyword()) :: {:ok, t()} | {:error, atom()}
+  def activate_skill(wm, skill, opts \\ []) do
+    max = Keyword.get(opts, :max_active_skills, @default_max_active_skills)
+    name = Map.get(skill, :name)
+
+    cond do
+      has_skill?(wm, name) ->
+        {:error, :already_active}
+
+      length(wm.active_skills) >= max ->
+        {:error, :max_skills_reached}
+
+      true ->
+        entry = %{
+          name: name,
+          description: Map.get(skill, :description, ""),
+          body: Map.get(skill, :body, ""),
+          activated_at: DateTime.utc_now()
+        }
+
+        {:ok, %{wm | active_skills: [entry | wm.active_skills]}}
+    end
+  end
+
+  @doc """
+  Deactivate a skill by name.
+  """
+  @spec deactivate_skill(t(), String.t()) :: t()
+  def deactivate_skill(wm, skill_name) when is_binary(skill_name) do
+    %{wm | active_skills: Enum.reject(wm.active_skills, &(&1.name == skill_name))}
+  end
+
+  @doc """
+  List currently active skills.
+  """
+  @spec list_active_skills(t()) :: [active_skill()]
+  def list_active_skills(%__MODULE__{active_skills: skills}), do: skills
+
+  @doc """
+  Check if a skill is currently active.
+  """
+  @spec has_skill?(t(), String.t()) :: boolean()
+  def has_skill?(%__MODULE__{active_skills: skills}, name) when is_binary(name) do
+    Enum.any?(skills, &(&1.name == name))
+  end
+
+  def has_skill?(_, _), do: false
+
+  # ============================================================================
   # Identity and Relationship
   # ============================================================================
 
@@ -549,6 +623,7 @@ defmodule Arbor.Memory.WorkingMemory do
       "current_conversation" => wm.current_conversation,
       "recent_thoughts" => Enum.map(wm.recent_thoughts, &serialize_thought/1),
       "active_goals" => Enum.map(wm.active_goals, &serialize_goal/1),
+      "active_skills" => Enum.map(wm.active_skills, &serialize_active_skill/1),
       "relationship_context" => wm.relationship_context,
       "concerns" => wm.concerns,
       "curiosity" => wm.curiosity,
@@ -583,6 +658,7 @@ defmodule Arbor.Memory.WorkingMemory do
       current_conversation: get_field.(:current_conversation),
       recent_thoughts: Enum.map(raw_thoughts, &deserialize_thought/1),
       active_goals: Enum.map(raw_goals, &deserialize_goal/1),
+      active_skills: Enum.map(get_field.(:active_skills) || [], &deserialize_active_skill/1),
       relationship_context: get_field.(:relationship_context),
       concerns: get_field.(:concerns) || [],
       curiosity: get_field.(:curiosity) || [],
@@ -609,8 +685,14 @@ defmodule Arbor.Memory.WorkingMemory do
   @spec migrate(t() | map()) :: t()
   def migrate(%__MODULE__{version: @version} = wm), do: wm
 
+  def migrate(%__MODULE__{version: 2} = wm) do
+    %{wm | version: @version, active_skills: wm.active_skills || []}
+    |> ensure_defaults()
+    |> migrate()
+  end
+
   def migrate(%__MODULE__{version: 1} = wm) do
-    %{wm | version: @version, max_tokens: nil, model: nil}
+    %{wm | version: @version, max_tokens: nil, model: nil, active_skills: []}
     |> ensure_defaults()
     |> migrate()
   end
@@ -630,6 +712,7 @@ defmodule Arbor.Memory.WorkingMemory do
       wm
       | recent_thoughts: wm.recent_thoughts || [],
         active_goals: wm.active_goals || [],
+        active_skills: wm.active_skills || [],
         curiosity: wm.curiosity || [],
         concerns: wm.concerns || [],
         engagement_level: wm.engagement_level || 0.5,
@@ -965,6 +1048,26 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp deserialize_goal(%{description: _} = goal), do: goal
+
+  defp serialize_active_skill(%{name: name, description: desc, body: body, activated_at: at}) do
+    %{
+      "name" => name,
+      "description" => desc,
+      "body" => body,
+      "activated_at" => serialize_datetime(at)
+    }
+  end
+
+  defp deserialize_active_skill(%{"name" => name} = data) do
+    %{
+      name: name,
+      description: data["description"] || "",
+      body: data["body"] || "",
+      activated_at: parse_datetime(data["activated_at"]) || DateTime.utc_now()
+    }
+  end
+
+  defp deserialize_active_skill(%{name: _} = skill), do: skill
 
   defp serialize_token_spec(nil), do: nil
   defp serialize_token_spec(n) when is_integer(n), do: n
