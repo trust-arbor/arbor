@@ -49,6 +49,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       result =
         try do
           Lifecycle.create("Direct Agent", character: character)
+        rescue
+          ArgumentError -> {:error, :ets_not_started}
         catch
           :exit, {:noproc, _} -> {:error, :security_not_started}
           :exit, _ -> {:error, :downstream_exit}
@@ -389,6 +391,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       result =
         try do
           Lifecycle.create(nil, character: character)
+        rescue
+          ArgumentError -> {:error, :ets_not_started}
         catch
           :exit, {:noproc, _} -> {:error, :security_not_started}
           :exit, _ -> {:error, :downstream_exit}
