@@ -27,7 +27,8 @@ defmodule Arbor.Orchestrator.Graph do
 
   @spec add_node(t(), Arbor.Orchestrator.Graph.Node.t()) :: t()
   def add_node(%__MODULE__{} = graph, %Arbor.Orchestrator.Graph.Node{} = node) do
-    %{graph | nodes: Map.put(graph.nodes, node.id, node)}
+    normalized = Arbor.Orchestrator.Graph.Node.from_attrs(node.id, node.attrs)
+    %{graph | nodes: Map.put(graph.nodes, normalized.id, normalized)}
   end
 
   @spec add_edge(t(), Arbor.Orchestrator.Graph.Edge.t()) :: t()
