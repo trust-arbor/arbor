@@ -68,9 +68,12 @@ defmodule Arbor.Cartographer.Application do
           |> String.split(",")
           |> Enum.map(&String.trim/1)
           |> Enum.map(fn tag ->
-            case Arbor.Common.SafeAtom.to_existing(tag) do
-              {:ok, atom} -> atom
-              {:error, _} -> tag
+            # Cartographer is standalone (no arbor_common dep).
+            # Tags are operator-configured env vars, not untrusted input.
+            try do
+              String.to_existing_atom(tag)
+            rescue
+              ArgumentError -> String.to_atom(tag)
             end
           end)
       end

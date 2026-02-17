@@ -394,10 +394,11 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
   end
 
   defp safe_perspective_atom(name) do
-    case Arbor.Common.SafeAtom.to_existing(name) do
-      {:ok, atom} -> atom
-      {:error, _} -> :general
-    end
+    # Orchestrator is standalone (no arbor_common dep).
+    # Perspective names come from DOT graph branch IDs, already sanitized.
+    String.to_existing_atom(name)
+  rescue
+    ArgumentError -> :general
   end
 
   defp parse_mode("advisory"), do: :advisory
