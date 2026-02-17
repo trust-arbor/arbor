@@ -238,9 +238,11 @@ defmodule Arbor.Orchestrator.Engine do
                }}
 
             {:edge, edge} ->
+              next_id = if Map.get(edge, :loop_restart, false), do: nil, else: edge.to
+
               {:ok,
                %{
-                 next_node_id: edge.to,
+                 next_node_id: next_id,
                  context: context,
                  completed_nodes: completed,
                  retries: retries,
@@ -630,22 +632,32 @@ defmodule Arbor.Orchestrator.Engine do
     # Try the preferred target, with fan-in gate check
     case preferred do
       {:edge, edge} ->
-        advance_to_target(
-          edge.to,
-          edge,
-          graph,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          new_pending,
-          outcome,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        if Map.get(edge, :loop_restart, false) do
+          emit(opts, %{
+            type: :loop_restart,
+            edge: %{from: edge.from, to: edge.to},
+            reason: :loop_restart_edge
+          })
+
+          finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at)
+        else
+          advance_to_target(
+            edge.to,
+            edge,
+            graph,
+            context,
+            logs_root,
+            max_steps,
+            completed,
+            retries,
+            outcomes,
+            new_pending,
+            outcome,
+            opts,
+            pipeline_started_at,
+            tracking
+          )
+        end
 
       {:node_id, target_id} ->
         advance_to_target(

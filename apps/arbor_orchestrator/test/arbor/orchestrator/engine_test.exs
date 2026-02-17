@@ -801,4 +801,51 @@ defmodule Arbor.Orchestrator.EngineTest do
     assert result.context["outcome"] == "success"
     assert_receive {:event, %{type: :tool_hook_pre, node_id: "tool"}}
   end
+
+  test "loop_restart edge terminates pipeline with current outcome" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      task [label="Task"]
+      checkpoint [label="Checkpoint"]
+      exit [shape=Msquare]
+      start -> task
+      task -> checkpoint [loop_restart="true"]
+      task -> exit
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # Pipeline should complete
+    assert "task" in result.completed_nodes
+    assert result.final_outcome != nil
+  end
+
+  test "loop_restart edge emits loop_restart event" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      task [simulate="fail"]
+      repair [label="Repair"]
+      exit [shape=Msquare]
+      start -> task
+      task -> repair [condition="outcome=fail", loop_restart="true"]
+      task -> exit [condition="outcome=success"]
+    }
+    """
+
+    parent = self()
+    on_event = fn event -> send(parent, {:event, event}) end
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
+
+    # task fails, takes the loop_restart edge, pipeline terminates
+    assert "task" in result.completed_nodes
+    refute "exit" in result.completed_nodes
+    assert_receive {:event, %{type: :loop_restart, reason: :loop_restart_edge}}
+  end
 end
