@@ -127,37 +127,10 @@ defmodule Arbor.Orchestrator.Engine.Router do
 
   # --- Goal gate retry resolution ---
 
-  @doc false
-  def resolve_goal_gate_retry_target(graph, outcomes) do
-    failed_gate =
-      outcomes
-      |> Enum.find_value(fn {node_id, outcome} ->
-        node = Map.get(graph.nodes, node_id)
-
-        if node != nil and truthy?(Map.get(node.attrs, "goal_gate", false)) and
-             outcome.status not in [:success, :partial_success] do
-          node
-        else
-          nil
-        end
-      end)
-
-    if failed_gate == nil do
-      {:ok, nil}
-    else
-      targets = [
-        Map.get(failed_gate.attrs, "retry_target"),
-        Map.get(failed_gate.attrs, "fallback_retry_target"),
-        Map.get(graph.attrs, "retry_target"),
-        Map.get(graph.attrs, "fallback_retry_target")
-      ]
-
-      case Enum.find(targets, &valid_target?(graph, &1)) do
-        nil -> {:error, :goal_gate_unsatisfied_no_retry_target}
-        target -> {:ok, target}
-      end
-    end
-  end
+  @doc "Delegates to `Arbor.Orchestrator.Engine.GoalGate.resolve_retry_target/2`."
+  defdelegate resolve_goal_gate_retry_target(graph, outcomes),
+    to: Arbor.Orchestrator.Engine.GoalGate,
+    as: :resolve_retry_target
 
   # --- Fan-in/fan-out helpers ---
 
@@ -242,9 +215,4 @@ defmodule Arbor.Orchestrator.Engine.Router do
   def terminal?(node) do
     Map.get(node.attrs, "shape") == "Msquare" or String.downcase(node.id) in ["exit", "end"]
   end
-
-  defp truthy?(true), do: true
-  defp truthy?("true"), do: true
-  defp truthy?(1), do: true
-  defp truthy?(_), do: false
 end
