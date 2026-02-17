@@ -290,6 +290,14 @@ defmodule Arbor.Actions do
         Arbor.Actions.Eval.Check,
         Arbor.Actions.Eval.ListRuns,
         Arbor.Actions.Eval.GetRun
+      ],
+      skill: [
+        Arbor.Actions.Skill.Search,
+        Arbor.Actions.Skill.Activate,
+        Arbor.Actions.Skill.Deactivate,
+        Arbor.Actions.Skill.ListActive,
+        Arbor.Actions.Skill.Import,
+        Arbor.Actions.Skill.Compile
       ]
     }
   end

@@ -58,15 +58,21 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
     with {:ok, content} <- File.read(path),
          {:ok, frontmatter, body} <- split_frontmatter(content),
          {:ok, fields} <- parse_frontmatter(frontmatter) do
+      trimmed_body = String.trim(body)
+
       attrs = %{
         name: Map.get(fields, "name", name_from_path(path)),
         description: Map.get(fields, "description", ""),
-        body: String.trim(body),
+        body: trimmed_body,
         tags: parse_list(Map.get(fields, "tags", [])),
         category: Map.get(fields, "category"),
         source: :skill,
         path: path,
-        metadata: extra_fields(fields)
+        metadata: extra_fields(fields),
+        license: Map.get(fields, "license"),
+        compatibility: Map.get(fields, "compatibility"),
+        allowed_tools: parse_allowed_tools(Map.get(fields, "allowed-tools")),
+        content_hash: compute_content_hash(trimmed_body)
       }
 
       build_skill(attrs)
@@ -180,7 +186,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
   defp parse_list(_), do: []
 
   # Known frontmatter fields that map to Skill struct fields.
-  @known_fields ~w(name description tags category)
+  @known_fields ~w(name description tags category license compatibility allowed-tools)
 
   # Extract any fields beyond the known set into metadata.
   defp extra_fields(fields) do
@@ -190,6 +196,22 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
       empty when map_size(empty) == 0 -> %{}
       metadata -> metadata
     end
+  end
+
+  # Parse allowed-tools: space-delimited string → list, or pass through lists.
+  defp parse_allowed_tools(nil), do: []
+  defp parse_allowed_tools(tools) when is_list(tools), do: Enum.map(tools, &to_string/1)
+
+  defp parse_allowed_tools(tools) when is_binary(tools) do
+    tools
+    |> String.split(~r/[\s,]+/, trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  # Compute SHA256 content hash of the skill body.
+  defp compute_content_hash(body) when is_binary(body) do
+    :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
   end
 
   # Derive a skill name from the file path.

@@ -33,6 +33,12 @@ defmodule Arbor.Contracts.Skill do
     field(:source, atom(), default: :skill)
     field(:path, String.t() | nil)
     field(:metadata, map(), default: %{})
+    field(:license, String.t() | nil)
+    field(:compatibility, String.t() | nil)
+    field(:allowed_tools, [String.t()], default: [])
+    field(:content_hash, String.t() | nil)
+    field(:provenance, map() | nil)
+    field(:taint, atom(), default: :trusted)
   end
 
   @doc """
@@ -63,7 +69,13 @@ defmodule Arbor.Contracts.Skill do
         category: Map.get(attrs, :category),
         source: Map.get(attrs, :source, :skill),
         path: Map.get(attrs, :path),
-        metadata: Map.get(attrs, :metadata, %{})
+        metadata: Map.get(attrs, :metadata, %{}),
+        license: Map.get(attrs, :license),
+        compatibility: Map.get(attrs, :compatibility),
+        allowed_tools: Map.get(attrs, :allowed_tools, []),
+        content_hash: Map.get(attrs, :content_hash),
+        provenance: Map.get(attrs, :provenance),
+        taint: Map.get(attrs, :taint, :trusted)
       }
 
       {:ok, skill}
