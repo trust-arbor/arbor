@@ -46,6 +46,14 @@ defmodule Arbor.Orchestrator.Graph.Node do
             fan_out: false,
             simulate: nil
 
+  @known_attrs ~w(shape type prompt label goal_gate max_retries retry_target
+    fallback_retry_target timeout llm_model llm_provider reasoning_effort
+    allow_partial content_hash fidelity class fan_out simulate)
+
+  @doc "List of attribute keys that have typed struct fields."
+  @spec known_attrs() :: [String.t()]
+  def known_attrs, do: @known_attrs
+
   @doc "Populate typed fields from the attrs map."
   @spec from_attrs(String.t(), map()) :: t()
   def from_attrs(id, attrs) when is_map(attrs) do
@@ -78,6 +86,14 @@ defmodule Arbor.Orchestrator.Graph.Node do
   def skippable?(%__MODULE__{} = node) do
     shape = node.shape || Map.get(node.attrs, "shape")
     shape in ["Mdiamond", "Msquare", "diamond"]
+  end
+
+  @doc "Compute a SHA-256 content hash of this node's sorted attrs."
+  @spec content_hash(t()) :: String.t()
+  def content_hash(%__MODULE__{id: id, attrs: attrs}) do
+    sorted_attrs = attrs |> Enum.sort() |> :erlang.term_to_binary()
+    payload = :erlang.term_to_binary({id, sorted_attrs})
+    :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
   end
 
   @doc "Returns true if this node has external side effects."

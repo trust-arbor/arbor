@@ -147,6 +147,56 @@ defmodule Arbor.Orchestrator.Graph.NodeTest do
     end
   end
 
+  describe "content_hash/1" do
+    test "produces deterministic SHA-256 hex hash" do
+      node = Node.from_attrs("test", %{"type" => "codergen", "prompt" => "hello"})
+      hash1 = Node.content_hash(node)
+      hash2 = Node.content_hash(node)
+
+      assert hash1 == hash2
+      assert byte_size(hash1) == 64
+      assert Regex.match?(~r/^[0-9a-f]{64}$/, hash1)
+    end
+
+    test "different attrs produce different hashes" do
+      node1 = Node.from_attrs("n", %{"prompt" => "hello"})
+      node2 = Node.from_attrs("n", %{"prompt" => "world"})
+
+      refute Node.content_hash(node1) == Node.content_hash(node2)
+    end
+
+    test "different ids produce different hashes" do
+      node1 = Node.from_attrs("a", %{"prompt" => "same"})
+      node2 = Node.from_attrs("b", %{"prompt" => "same"})
+
+      refute Node.content_hash(node1) == Node.content_hash(node2)
+    end
+
+    test "order of attrs does not affect hash" do
+      attrs1 = %{"b" => "2", "a" => "1"}
+      attrs2 = %{"a" => "1", "b" => "2"}
+
+      assert Node.content_hash(Node.from_attrs("n", attrs1)) ==
+               Node.content_hash(Node.from_attrs("n", attrs2))
+    end
+  end
+
+  describe "known_attrs/0" do
+    test "returns a list of strings" do
+      attrs = Node.known_attrs()
+      assert is_list(attrs)
+      assert Enum.all?(attrs, &is_binary/1)
+    end
+
+    test "includes key typed fields" do
+      attrs = Node.known_attrs()
+      assert "type" in attrs
+      assert "prompt" in attrs
+      assert "shape" in attrs
+      assert "fan_out" in attrs
+    end
+  end
+
   describe "backward compatibility" do
     test "bare struct construction still works" do
       node = %Node{id: "x", attrs: %{"shape" => "box"}}

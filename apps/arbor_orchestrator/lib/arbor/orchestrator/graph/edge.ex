@@ -10,7 +10,8 @@ defmodule Arbor.Orchestrator.Graph.Edge do
           label: String.t() | nil,
           weight: non_neg_integer() | nil,
           fidelity: String.t() | nil,
-          thread_id: String.t() | nil
+          thread_id: String.t() | nil,
+          loop_restart: boolean()
         }
 
   defstruct from: "",
@@ -20,7 +21,14 @@ defmodule Arbor.Orchestrator.Graph.Edge do
             label: nil,
             weight: nil,
             fidelity: nil,
-            thread_id: nil
+            thread_id: nil,
+            loop_restart: false
+
+  @known_attrs ~w(condition label weight fidelity thread_id loop_restart)
+
+  @doc "List of attribute keys that have typed struct fields."
+  @spec known_attrs() :: [String.t()]
+  def known_attrs, do: @known_attrs
 
   @doc "Populate typed fields from the attrs map."
   @spec from_attrs(String.t(), String.t(), map()) :: t()
@@ -33,7 +41,8 @@ defmodule Arbor.Orchestrator.Graph.Edge do
       label: Map.get(attrs, "label"),
       weight: parse_weight(Map.get(attrs, "weight")),
       fidelity: Map.get(attrs, "fidelity"),
-      thread_id: Map.get(attrs, "thread_id")
+      thread_id: Map.get(attrs, "thread_id"),
+      loop_restart: truthy?(Map.get(attrs, "loop_restart", false))
     }
   end
 
@@ -49,6 +58,11 @@ defmodule Arbor.Orchestrator.Graph.Edge do
   end
 
   # -- Private helpers --
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?(1), do: true
+  defp truthy?(_), do: false
 
   defp parse_weight(nil), do: nil
 
