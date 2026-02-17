@@ -40,11 +40,14 @@ defmodule Arbor.Agent.TemplateTest do
 
     test "required_capabilities include read access and memory" do
       caps = Researcher.required_capabilities()
-      assert length(caps) == 5
+      assert length(caps) == 11
       resources = Enum.map(caps, & &1.resource)
       assert "arbor://fs/read/**" in resources
       assert "arbor://memory/**" in resources
       assert "arbor://shell/safe" in resources
+      assert "arbor://actions/execute/pipeline.run" in resources
+      assert "arbor://actions/execute/docs.lookup" in resources
+      assert "arbor://actions/execute/eval.check" in resources
     end
 
     test "character renders to valid system prompt" do

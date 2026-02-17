@@ -278,6 +278,18 @@ defmodule Arbor.Actions do
       judge: [
         Arbor.Actions.Judge.Evaluate,
         Arbor.Actions.Judge.Quick
+      ],
+      pipeline: [
+        Arbor.Actions.Pipeline.Run,
+        Arbor.Actions.Pipeline.Validate
+      ],
+      docs: [
+        Arbor.Actions.Docs.Lookup
+      ],
+      eval: [
+        Arbor.Actions.Eval.Check,
+        Arbor.Actions.Eval.ListRuns,
+        Arbor.Actions.Eval.GetRun
       ]
     }
   end
