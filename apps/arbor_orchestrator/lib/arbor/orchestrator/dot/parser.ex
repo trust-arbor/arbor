@@ -320,7 +320,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
         if Map.has_key?(acc, nid) do
           acc
         else
-          Map.put(acc, nid, %Node{id: nid, attrs: state.node_defaults})
+          Map.put(acc, nid, Node.from_attrs(nid, state.node_defaults))
         end
       end)
 
@@ -328,7 +328,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
     edges =
       chain
       |> Enum.chunk_every(2, 1, :discard)
-      |> Enum.map(fn [from, to] -> %Edge{from: from, to: to, attrs: edge_attrs} end)
+      |> Enum.map(fn [from, to] -> Edge.from_attrs(from, to, edge_attrs) end)
 
     {:ok, %{state | rest: rest, nodes: nodes, edges: state.edges ++ edges}}
   end
@@ -347,7 +347,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   defp parse_node(state, id, rest) do
     {attrs, rest} = try_parse_attrs(rest)
     merged = Map.merge(state.node_defaults, attrs)
-    node = %Node{id: id, attrs: merged}
+    node = Node.from_attrs(id, merged)
     {:ok, %{state | rest: rest, nodes: Map.put(state.nodes, id, node)}}
   end
 

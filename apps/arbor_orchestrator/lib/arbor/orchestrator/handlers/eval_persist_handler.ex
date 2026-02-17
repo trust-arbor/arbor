@@ -79,7 +79,6 @@ defmodule Arbor.Orchestrator.Handlers.EvalPersistHandler do
             "eval.persist.status" => "completed"
           }
         }
-
     end
   rescue
     e ->

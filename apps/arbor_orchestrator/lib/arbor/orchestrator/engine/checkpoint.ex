@@ -7,7 +7,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           completed_nodes: [String.t()],
           node_retries: map(),
           context_values: map(),
-          node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()}
+          node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()},
+          context_lineage: map(),
+          content_hashes: map()
         }
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
@@ -17,23 +19,28 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
             completed_nodes: [],
             node_retries: %{},
             context_values: %{},
-            node_outcomes: %{}
+            node_outcomes: %{},
+            context_lineage: %{},
+            content_hashes: %{}
 
   @spec from_state(
           String.t(),
           [String.t()],
           map(),
           Arbor.Orchestrator.Engine.Context.t(),
-          map()
+          map(),
+          keyword()
         ) :: t()
-  def from_state(current_node, completed_nodes, node_retries, context, node_outcomes) do
+  def from_state(current_node, completed_nodes, node_retries, context, node_outcomes, opts \\ []) do
     %__MODULE__{
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
       current_node: current_node,
       completed_nodes: completed_nodes,
       node_retries: node_retries,
       context_values: Context.snapshot(context),
-      node_outcomes: node_outcomes
+      node_outcomes: node_outcomes,
+      context_lineage: Keyword.get(opts, :context_lineage, Context.lineage(context)),
+      content_hashes: Keyword.get(opts, :content_hashes, %{})
     }
   end
 
@@ -139,7 +146,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
          completed_nodes: Map.get(decoded, "completed_nodes", []),
          node_retries: Map.get(decoded, "node_retries", %{}),
          context_values: Map.get(decoded, "context_values", %{}),
-         node_outcomes: outcomes
+         node_outcomes: outcomes,
+         context_lineage: Map.get(decoded, "context_lineage", %{}),
+         content_hashes: Map.get(decoded, "content_hashes", %{})
        }}
     end
   end
