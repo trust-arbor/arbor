@@ -76,7 +76,11 @@ defmodule Arbor.Cartographer.Application do
             rescue
               ArgumentError ->
                 require Logger
-                Logger.warning("Ignoring unknown custom tag #{inspect(tag)} — atom does not exist")
+
+                Logger.warning(
+                  "Ignoring unknown custom tag #{inspect(tag)} — atom does not exist"
+                )
+
                 []
             end
           end)
