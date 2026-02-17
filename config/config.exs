@@ -8,6 +8,9 @@ config :logger,
 # Arbor libraries use structured logging with keys like :agent_id, :tool, etc.
 config :logger, :default_formatter, metadata: :all
 
+# M7: API key redaction filter installed at runtime by Arbor.Common.Application
+# See Arbor.Common.LogRedactor for the filter implementation.
+
 # Comms channels — secrets loaded from .env via runtime.exs
 config :arbor_comms, :signal,
   enabled: true,

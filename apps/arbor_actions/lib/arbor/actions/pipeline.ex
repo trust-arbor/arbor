@@ -141,9 +141,10 @@ defmodule Arbor.Actions.Pipeline do
     defp extract_status(%{final_outcome: %{status: status}}), do: status
 
     defp extract_status(%{context: %{"outcome" => outcome}}) do
-      String.to_existing_atom(outcome)
-    rescue
-      ArgumentError -> :unknown
+      case Arbor.Common.SafeAtom.to_allowed(outcome, ~w(success failure error pending cancelled)a) do
+        {:ok, status} -> status
+        {:error, _} -> :unknown
+      end
     end
 
     defp extract_status(_), do: :unknown

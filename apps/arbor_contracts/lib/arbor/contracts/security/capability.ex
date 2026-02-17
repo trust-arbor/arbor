@@ -51,6 +51,7 @@ defmodule Arbor.Contracts.Security.Capability do
     field(:signature, binary(), enforce: false)
     field(:issuer_id, Types.agent_id(), enforce: false)
     field(:issuer_signature, Types.signature(), enforce: false)
+    field(:signed_at, DateTime.t(), enforce: false)
     field(:delegation_chain, [Types.delegation_record()], default: [])
     field(:metadata, map(), default: %{})
   end
@@ -190,7 +191,8 @@ defmodule Arbor.Contracts.Security.Capability do
       length_prefix(DateTime.to_iso8601(cap.granted_at)) <>
       length_prefix(expires_bin) <>
       length_prefix(Integer.to_string(cap.delegation_depth)) <>
-      length_prefix(constraints_json)
+      length_prefix(constraints_json) <>
+      length_prefix(if cap.signed_at, do: DateTime.to_iso8601(cap.signed_at), else: "")
   end
 
   defp length_prefix(field) when is_binary(field) do

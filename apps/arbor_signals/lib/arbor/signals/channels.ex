@@ -277,7 +277,7 @@ defmodule Arbor.Signals.Channels do
       key_history: [],
       pending_invitations: %{},
       rotation_timer: nil,
-      authority_keypair: %{public: authority_public, private: authority_private}
+      authority_keypair: %{public: authority_public, private: encrypt_state_key(authority_private)}
     }
 
     state = put_in(state, [:channels, channel_id], entry)
@@ -758,7 +758,7 @@ defmodule Arbor.Signals.Channels do
       case lookup_encryption_key(member_id) do
         {:ok, member_enc_pub} ->
           # Seal the new key for this member using the channel's authority keypair
-          sealed_key = seal_key(new_key, member_enc_pub, authority_keypair.private)
+          sealed_key = seal_key(new_key, member_enc_pub, decrypt_state_key(authority_keypair.private))
 
           signal =
             Signal.new(:channel, :key_redistributed, %{
@@ -776,6 +776,40 @@ defmodule Arbor.Signals.Channels do
           :ok
       end
     end)
+  end
+
+  # Encrypt private key material in GenServer state to reduce exposure window.
+  # Uses a per-process ephemeral key derived from the process's own identity.
+  defp encrypt_state_key(private_key) when is_binary(private_key) do
+    state_key = state_encryption_key()
+    crypto = crypto_module()
+    {ciphertext, iv, tag} = crypto.encrypt(private_key, state_key)
+    {ciphertext, iv, tag}
+  end
+
+  defp decrypt_state_key({ciphertext, iv, tag}) do
+    state_key = state_encryption_key()
+    crypto = crypto_module()
+    {:ok, private_key} = crypto.decrypt(ciphertext, state_key, iv, tag)
+    private_key
+  end
+
+  defp decrypt_state_key(private_key) when is_binary(private_key) do
+    # Backward compatibility: unencrypted key
+    private_key
+  end
+
+  defp state_encryption_key do
+    # Derive a stable per-process key from the process dictionary
+    case Process.get(:__channels_state_key__) do
+      nil ->
+        key = :crypto.strong_rand_bytes(32)
+        Process.put(:__channels_state_key__, key)
+        key
+
+      key ->
+        key
+    end
   end
 
   # Emit security-category signals for membership audit trail

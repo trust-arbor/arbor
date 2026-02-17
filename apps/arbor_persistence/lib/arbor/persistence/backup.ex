@@ -303,16 +303,18 @@ defmodule Arbor.Persistence.Backup do
       db_config.database
     ]
 
-    env = if db_config.password != "", do: [{"PGPASSWORD", db_config.password}], else: []
+    # M6: Use .pgpass file instead of PGPASSWORD env var to avoid
+    # exposure in /proc/*/environ or process listings.
+    with_pgpass(db_config, fn env ->
+      case System.cmd("pg_dump", args, env: env, stderr_to_stdout: true) do
+        {_output, 0} ->
+          {:ok, temp_path}
 
-    case System.cmd("pg_dump", args, env: env, stderr_to_stdout: true) do
-      {_output, 0} ->
-        {:ok, temp_path}
-
-      {output, code} ->
-        File.rm(temp_path)
-        {:error, {:pg_dump_failed, code, output}}
-    end
+        {output, code} ->
+          File.rm(temp_path)
+          {:error, {:pg_dump_failed, code, output}}
+      end
+    end)
   end
 
   defp encrypt_backup(temp_path, config) do
@@ -382,21 +384,23 @@ defmodule Arbor.Persistence.Backup do
       temp_path
     ]
 
-    env = if db_config.password != "", do: [{"PGPASSWORD", db_config.password}], else: []
-
-    case System.cmd("pg_restore", args, env: env, stderr_to_stdout: true) do
-      {_output, 0} ->
-        :ok
-
-      {output, code} ->
-        # pg_restore returns non-zero for warnings too, check for actual errors
-        if String.contains?(output, "ERROR") do
-          {:error, {:pg_restore_failed, code, output}}
-        else
-          # Warnings are okay
+    # M6: Use .pgpass file instead of PGPASSWORD env var to avoid
+    # exposure in /proc/*/environ or process listings.
+    with_pgpass(db_config, fn env ->
+      case System.cmd("pg_restore", args, env: env, stderr_to_stdout: true) do
+        {_output, 0} ->
           :ok
-        end
-    end
+
+        {output, code} ->
+          # pg_restore returns non-zero for warnings too, check for actual errors
+          if String.contains?(output, "ERROR") do
+            {:error, {:pg_restore_failed, code, output}}
+          else
+            # Warnings are okay
+            :ok
+          end
+      end
+    end)
   end
 
   # ============================================================================
@@ -505,5 +509,33 @@ defmodule Arbor.Persistence.Backup do
     Signals.emit(:persistence, :backup_failed, %{
       reason: inspect(reason, limit: 200)
     })
+  end
+
+  # ============================================================================
+  # Credential Handling
+  # ============================================================================
+
+  # M6: Use a temporary .pgpass file instead of PGPASSWORD env var to avoid
+  # exposure in /proc/*/environ or process listings.
+  defp with_pgpass(db_config, fun) do
+    if db_config.password != "" do
+      pgpass_path =
+        Path.join(System.tmp_dir!(), ".pgpass_arbor_#{:erlang.unique_integer([:positive])}")
+
+      # .pgpass format: hostname:port:database:username:password
+      pgpass_line =
+        "#{db_config.hostname}:#{db_config.port}:#{db_config.database}:#{db_config.username}:#{db_config.password}"
+
+      File.write!(pgpass_path, pgpass_line <> "\n")
+      File.chmod!(pgpass_path, 0o600)
+
+      try do
+        fun.([{"PGPASSFILE", pgpass_path}])
+      after
+        File.rm(pgpass_path)
+      end
+    else
+      fun.([])
+    end
   end
 end

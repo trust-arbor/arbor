@@ -297,7 +297,13 @@ defmodule Arbor.Security.KeychainTest do
       encryption_key = :crypto.strong_rand_bytes(32)
 
       {:ok, serialized} = Keychain.serialize(kc, encryption_key)
-      {:ok, payload} = Jason.decode(serialized)
+      {:ok, outer} = Jason.decode(serialized)
+
+      # HMAC-wrapped format
+      assert is_binary(outer["payload"])
+      assert is_binary(outer["hmac"])
+
+      {:ok, payload} = Jason.decode(outer["payload"])
 
       # Private key should be in encrypted section, not visible in public section
       refute Map.has_key?(payload["public"], "signing_private")
@@ -317,7 +323,9 @@ defmodule Arbor.Security.KeychainTest do
       {:ok, serialized} = Keychain.serialize(kc, encryption_key)
       result = Keychain.deserialize(serialized, wrong_key)
 
-      assert {:error, :invalid_encryption_key} = result
+      # With HMAC, wrong key is caught at HMAC verification before decryption
+      assert {:error, reason} = result
+      assert reason in [:hmac_verification_failed, :invalid_encryption_key]
     end
 
     test "tampered encrypted payload fails deserialization" do
@@ -325,22 +333,25 @@ defmodule Arbor.Security.KeychainTest do
       encryption_key = :crypto.strong_rand_bytes(32)
 
       {:ok, serialized} = Keychain.serialize(kc, encryption_key)
-      {:ok, data} = Jason.decode(serialized)
+      {:ok, outer} = Jason.decode(serialized)
 
-      # Tamper with the encrypted private data
-      original_encrypted = data["private_encrypted"]
+      # Tamper with the inner payload (will break HMAC)
+      {:ok, inner_data} = Jason.decode(outer["payload"])
+      original_encrypted = inner_data["private_encrypted"]
       {:ok, decoded} = Base.decode64(original_encrypted)
       <<first_byte::8, rest::binary>> = decoded
       tampered_bytes = <<Bitwise.bxor(first_byte, 0xFF)::8, rest::binary>>
       tampered_encrypted = Base.encode64(tampered_bytes)
 
-      tampered_data = %{data | "private_encrypted" => tampered_encrypted}
-      tampered = Jason.encode!(tampered_data)
+      tampered_inner = %{inner_data | "private_encrypted" => tampered_encrypted}
+      tampered_outer = %{outer | "payload" => Jason.encode!(tampered_inner)}
+      tampered = Jason.encode!(tampered_outer)
 
       result = Keychain.deserialize(tampered, encryption_key)
 
-      # Should fail due to decryption failure (tampered ciphertext)
-      assert {:error, :invalid_encryption_key} = result
+      # Should fail due to HMAC verification (tampered payload)
+      assert {:error, reason} = result
+      assert reason in [:hmac_verification_failed, :invalid_encryption_key]
     end
 
     test "different agents get different encryption results" do
@@ -421,7 +432,9 @@ defmodule Arbor.Security.KeychainTest do
       {:ok, escrowed} = Keychain.create_escrow(kc, agent_key, escrow_key)
       result = Keychain.recover_from_escrow(escrowed, escrow_key, wrong_agent_key)
 
-      assert {:error, :invalid_encryption_key} = result
+      # With HMAC, wrong key may be caught at HMAC verification or decryption
+      assert {:error, reason} = result
+      assert reason in [:hmac_verification_failed, :invalid_encryption_key]
     end
   end
 end

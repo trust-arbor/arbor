@@ -159,8 +159,14 @@ defmodule Arbor.Security.Identity.Registry do
     GenServer.call(__MODULE__, {:revoke_identity, agent_id, reason})
   end
 
+  # DEPRECATED: get_status creates a TOCTOU race with separate lookup+status check.
+  # Prefer lookup/1 which returns the full identity including status atomically.
   @doc """
   Get the current status of an identity.
+
+  **Deprecated**: This function creates a TOCTOU (time-of-check-time-of-use) race
+  condition when used in combination with `lookup/1`. Prefer using `lookup/1` which
+  returns the full identity including status atomically.
 
   ## Examples
 

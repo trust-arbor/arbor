@@ -12,6 +12,10 @@ dotenv_path =
   end
 
 if File.exists?(dotenv_path) do
+  if config_env() != :prod and dotenv_path == Path.join(File.cwd!(), ".env") do
+    IO.puts("[arbor] Loading .env from CWD: #{dotenv_path} (dev/test only)")
+  end
+
   dotenv_path
   |> File.read!()
   |> String.split("\n", trim: true)
