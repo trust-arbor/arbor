@@ -47,8 +47,9 @@ config :arbor_security, identity_verification: false
 # Signals — allow OpenAuthorizer in dev (production requires CapabilityAuthorizer)
 config :arbor_signals, allow_open_authorizer: true
 
-# Agent — start DebugAgent for self-healing demo
-config :arbor_agent, start_debug_agent: true
+# Agent — DebugAgent is started by HealingSupervisor (arbor_monitor),
+# not here, to avoid duplicate process registration.
+config :arbor_agent, start_debug_agent: false
 
 # Monitor — short suppression window for demo (30 seconds instead of 30 minutes)
 config :arbor_monitor, suppression_window_ms: :timer.seconds(30)
