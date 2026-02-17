@@ -1660,9 +1660,9 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
 
       text = KnowledgeGraph.to_prompt_text(graph)
       # Target should show incoming edge from source
-      assert text =~ "← causes: Source node"
+      assert text =~ "<- causes: Source node"
       # Source should show outgoing edge to target
-      assert text =~ "→ causes: Target node"
+      assert text =~ "-> causes: Target node"
     end
   end
 
