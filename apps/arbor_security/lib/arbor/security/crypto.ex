@@ -99,6 +99,11 @@ defmodule Arbor.Security.Crypto do
   1. Extract: `PRK = HMAC-SHA256(salt, ikm)` where salt defaults to 32 zero bytes
   2. Expand: `OKM = HMAC-SHA256(PRK, info || 0x01)` (single block for ≤32 bytes)
 
+  **Audit note (2026-02-16):** This implementation was audited against RFC 5869.
+  Neither JOSE nor Plug.Crypto provide an HKDF primitive — verified by checking
+  `:application.get_key(:jose, :modules)` and `Plug.Crypto` exports. Hand-rolled
+  implementation is the only option for Elixir/Erlang at this time.
+
   ## Parameters
 
   - `ikm` — input keying material (e.g., ECDH shared secret)

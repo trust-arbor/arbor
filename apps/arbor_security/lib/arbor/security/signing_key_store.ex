@@ -7,7 +7,7 @@ defmodule Arbor.Security.SigningKeyStore do
 
   ## Encryption
 
-  Uses a stable master key stored at `.arbor/security/master.key`. The master
+  Uses a stable master key stored at `~/.arbor/security/master.key`. The master
   key is generated on first use and persists across restarts. The signing key
   encryption key is derived from the master key via HKDF with purpose-specific
   info string.
@@ -24,7 +24,6 @@ defmodule Arbor.Security.SigningKeyStore do
   require Logger
 
   @store_name :arbor_security_signing_keys
-  @master_key_path ".arbor/security/master.key"
   @key_derivation_info "arbor-signing-key-encryption-v1"
 
   # Runtime bridge — arbor_persistence is Level 1 peer
@@ -153,6 +152,7 @@ defmodule Arbor.Security.SigningKeyStore do
   end
 
   defp master_key_path do
-    Application.get_env(:arbor_security, :master_key_path, @master_key_path)
+    default = Path.join(System.user_home!(), ".arbor/security/master.key")
+    Application.get_env(:arbor_security, :master_key_path, default)
   end
 end

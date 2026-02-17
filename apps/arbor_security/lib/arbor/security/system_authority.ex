@@ -148,7 +148,7 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def handle_call({:endorse_agent, agent_identity}, _from, %{identity: authority} = state) do
-    payload = agent_identity.public_key <> agent_identity.agent_id
+    payload = endorsement_payload(agent_identity.public_key, agent_identity.agent_id)
     signature = Crypto.sign(payload, authority.private_key)
 
     endorsement = %{
@@ -164,10 +164,16 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def handle_call({:verify_agent_endorsement, endorsement}, _from, %{identity: authority} = state) do
-    payload = endorsement.agent_public_key <> endorsement.agent_id
+    payload = endorsement_payload(endorsement.agent_public_key, endorsement.agent_id)
     valid? = Crypto.verify(payload, endorsement.authority_signature, authority.public_key)
 
     result = if valid?, do: :ok, else: {:error, :invalid_endorsement}
     {:reply, result, state}
+  end
+
+  # Length-prefixed endorsement payload to prevent field-boundary ambiguity.
+  defp endorsement_payload(public_key, agent_id) do
+    <<byte_size(public_key)::32, public_key::binary,
+      byte_size(agent_id)::32, agent_id::binary>>
   end
 end
