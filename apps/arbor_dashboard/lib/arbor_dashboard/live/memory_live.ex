@@ -686,7 +686,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   # ── Expanded Section Renderers ───────────────────────────────────
 
   defp render_expanded_section(%{expanded_section: :thoughts} = assigns) do
-    thoughts = get_in(assigns.tab_data, [:working_memory, :recent_thoughts]) || []
+    thoughts = wm_field(assigns.tab_data, :recent_thoughts) || []
     assigns = assign(assigns, :thoughts, thoughts)
 
     ~H"""
@@ -716,7 +716,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp render_expanded_section(%{expanded_section: :concerns} = assigns) do
-    concerns = get_in(assigns.tab_data, [:working_memory, :concerns]) || []
+    concerns = wm_field(assigns.tab_data, :concerns) || []
     assigns = assign(assigns, :concerns, concerns)
 
     ~H"""
@@ -740,7 +740,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp render_expanded_section(%{expanded_section: :curiosity} = assigns) do
-    curiosity = get_in(assigns.tab_data, [:working_memory, :curiosity]) || []
+    curiosity = wm_field(assigns.tab_data, :curiosity) || []
     assigns = assign(assigns, :curiosity_items, curiosity)
 
     ~H"""
@@ -1101,5 +1101,15 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       |> Enum.map(fn id -> %{agent_id: id, last_seen: nil, message_count: nil} end)
 
     recent ++ ets_only
+  end
+
+  # Safely access a field on the working_memory struct in tab_data.
+  # WorkingMemory is a struct that doesn't implement Access,
+  # so get_in/2 with atom keys fails. Use Map.get/2 instead.
+  defp wm_field(tab_data, field) when is_atom(field) do
+    case tab_data[:working_memory] do
+      %{} = wm -> Map.get(wm, field)
+      _ -> nil
+    end
   end
 end
