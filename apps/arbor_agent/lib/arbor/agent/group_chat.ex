@@ -260,7 +260,9 @@ defmodule Arbor.Agent.GroupChat do
       agent_participants =
         state.participants
         |> Map.values()
-        |> Enum.filter(&(&1.type == :agent and &1.id != message.sender_id and Participant.agent_online?(&1)))
+        |> Enum.filter(
+          &(&1.type == :agent and &1.id != message.sender_id and Participant.agent_online?(&1))
+        )
 
       # Query agents based on response mode
       case state.response_mode do

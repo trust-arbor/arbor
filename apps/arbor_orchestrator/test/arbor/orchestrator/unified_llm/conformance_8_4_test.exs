@@ -2,6 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM
+
   alias Arbor.Orchestrator.UnifiedLLM.{
     AbortError,
     Client,

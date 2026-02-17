@@ -107,9 +107,9 @@ defmodule Arbor.Common.SkillLibraryTest do
       assert is_list(tagged_skills)
 
       assert Enum.all?(tagged_skills, fn skill ->
-        tags = Map.get(skill, :tags) || []
-        "security" in tags
-      end)
+               tags = Map.get(skill, :tags) || []
+               "security" in tags
+             end)
 
       GenServer.stop(pid)
     end

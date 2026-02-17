@@ -101,33 +101,19 @@ defmodule Arbor.Orchestrator.Conformance36Test do
   end
 
   test "3.6 should_retry predicate classifies transient vs terminal errors" do
-    assert Engine.should_retry_exception?(
-             RuntimeError.exception("network timeout")
-           )
+    assert Engine.should_retry_exception?(RuntimeError.exception("network timeout"))
 
-    assert Engine.should_retry_exception?(
-             RuntimeError.exception("HTTP 429 rate limit")
-           )
+    assert Engine.should_retry_exception?(RuntimeError.exception("HTTP 429 rate limit"))
 
-    assert Engine.should_retry_exception?(
-             RuntimeError.exception("provider 5xx")
-           )
+    assert Engine.should_retry_exception?(RuntimeError.exception("provider 5xx"))
 
-    refute Engine.should_retry_exception?(
-             RuntimeError.exception("401 unauthorized")
-           )
+    refute Engine.should_retry_exception?(RuntimeError.exception("401 unauthorized"))
 
-    refute Engine.should_retry_exception?(
-             RuntimeError.exception("403 forbidden")
-           )
+    refute Engine.should_retry_exception?(RuntimeError.exception("403 forbidden"))
 
-    refute Engine.should_retry_exception?(
-             RuntimeError.exception("400 bad request")
-           )
+    refute Engine.should_retry_exception?(RuntimeError.exception("400 bad request"))
 
-    refute Engine.should_retry_exception?(
-             RuntimeError.exception("validation failed")
-           )
+    refute Engine.should_retry_exception?(RuntimeError.exception("validation failed"))
   end
 
   defp collect_retry_events(events, 0), do: Enum.reverse(events)

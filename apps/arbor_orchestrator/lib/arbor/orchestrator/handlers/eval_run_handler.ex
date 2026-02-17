@@ -151,5 +151,4 @@ defmodule Arbor.Orchestrator.Handlers.EvalRunHandler do
   rescue
     _ -> Arbor.Orchestrator.Eval.Subjects.Passthrough
   end
-
 end

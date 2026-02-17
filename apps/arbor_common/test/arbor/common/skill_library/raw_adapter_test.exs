@@ -68,8 +68,8 @@ defmodule Arbor.Common.SkillLibrary.RawAdapterTest do
 
       # Should NOT include files from advisory/ since it has SKILL.md
       refute Enum.any?(files, fn f ->
-        String.contains?(f, "advisory") and String.ends_with?(f, "SKILL.md")
-      end)
+               String.contains?(f, "advisory") and String.ends_with?(f, "SKILL.md")
+             end)
     end
 
     test "includes top-level raw files" do

@@ -979,5 +979,4 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp format_thought(t) do
     %{content: to_string(t), timestamp: DateTime.utc_now()}
   end
-
 end
