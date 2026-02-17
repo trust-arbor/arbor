@@ -41,6 +41,7 @@ defmodule Arbor.Signals.Channels do
   """
 
   use GenServer
+  require Logger
 
   alias Arbor.Identifiers
   alias Arbor.Signals.Bus
@@ -754,28 +755,37 @@ defmodule Arbor.Signals.Channels do
     new_version = entry.channel.key_version + 1
     authority_keypair = entry.authority_keypair
 
-    Enum.each(members, fn member_id ->
-      case lookup_encryption_key(member_id) do
-        {:ok, member_enc_pub} ->
-          # Seal the new key for this member using the channel's authority keypair
-          sealed_key = seal_key(new_key, member_enc_pub, decrypt_state_key(authority_keypair.private))
+    case decrypt_state_key(authority_keypair.private) do
+      {:ok, authority_private} ->
+        Enum.each(members, fn member_id ->
+          case lookup_encryption_key(member_id) do
+            {:ok, member_enc_pub} ->
+              sealed_key = seal_key(new_key, member_enc_pub, authority_private)
 
-          signal =
-            Signal.new(:channel, :key_redistributed, %{
-              channel_id: channel_id,
-              recipient_id: member_id,
-              key_version: new_version,
-              sealed_key: sealed_key,
-              authority_public_key: authority_keypair.public
-            })
+              signal =
+                Signal.new(:channel, :key_redistributed, %{
+                  channel_id: channel_id,
+                  recipient_id: member_id,
+                  key_version: new_version,
+                  sealed_key: sealed_key,
+                  authority_public_key: authority_keypair.public
+                })
 
-          Bus.publish(signal)
+              Bus.publish(signal)
 
-        {:error, _reason} ->
-          # Member's encryption key not found, skip
-          :ok
-      end
-    end)
+            {:error, _reason} ->
+              # Member's encryption key not found, skip
+              :ok
+          end
+        end)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Failed to decrypt authority keypair for channel #{channel_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
   end
 
   # Encrypt private key material in GenServer state to reduce exposure window.
@@ -790,13 +800,16 @@ defmodule Arbor.Signals.Channels do
   defp decrypt_state_key({ciphertext, iv, tag}) do
     state_key = state_encryption_key()
     crypto = crypto_module()
-    {:ok, private_key} = crypto.decrypt(ciphertext, state_key, iv, tag)
-    private_key
+
+    case crypto.decrypt(ciphertext, state_key, iv, tag) do
+      {:ok, private_key} -> {:ok, private_key}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp decrypt_state_key(private_key) when is_binary(private_key) do
     # Backward compatibility: unencrypted key
-    private_key
+    {:ok, private_key}
   end
 
   defp state_encryption_key do

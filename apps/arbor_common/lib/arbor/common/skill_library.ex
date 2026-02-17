@@ -545,7 +545,18 @@ defmodule Arbor.Common.SkillLibrary do
 
   defp hybrid_search_available? do
     mod = Arbor.Persistence.SkillSearch
-    Code.ensure_loaded?(mod) and function_exported?(mod, :hybrid_search, 3)
+    repo = Arbor.Persistence.Repo
+
+    Code.ensure_loaded?(mod) and function_exported?(mod, :hybrid_search, 3) and
+      Code.ensure_loaded?(repo) and repo_started?(repo)
+  end
+
+  defp repo_started?(repo) do
+    # Process.whereis checks if the Repo GenServer is actually running,
+    # not just that the module is loaded. Without this, hybrid_search
+    # delegates to the persistence layer which rescues the Repo error
+    # and returns [] — silently swallowing the ETS fallback.
+    Process.whereis(repo) != nil
   end
 
   defp maybe_async_sync do

@@ -209,9 +209,9 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       assert loaded.engagement_level == 0.7
     end
 
-    test "returns 400 if working_memory missing" do
+    test "returns 400 if working_memory missing", %{agent_id: agent_id} do
       conn =
-        conn(:put, "/working/test_agent", Jason.encode!(%{}))
+        conn(:put, "/working/#{agent_id}", Jason.encode!(%{}))
         |> put_req_header("content-type", "application/json")
         |> Router.call(@opts)
 
