@@ -77,8 +77,7 @@ defmodule Arbor.Orchestrator.Authoring.DotGeneratorTest do
       backend = fn _prompt ->
         :counters.add(fix_call_count, 1, 1)
 
-        {:ok,
-         "<<PIPELINE_SPEC>>\n#{@valid_dot}\n<<END_PIPELINE_SPEC>>"}
+        {:ok, "<<PIPELINE_SPEC>>\n#{@valid_dot}\n<<END_PIPELINE_SPEC>>"}
       end
 
       conv = Conversation.new(:blank, system_prompt: "test")

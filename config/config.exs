@@ -44,6 +44,10 @@ config :arbor_comms, :handler,
   conversation_window: 20,
   dedup_window_seconds: 300
 
+# P0-1: Default taint enforcement policy for authorize_and_execute.
+# :audit_only logs violations without blocking. Use :strict to block.
+config :arbor_actions, default_taint_policy: :audit_only
+
 # Channel senders for arbor_actions (runtime resolution, no compile-time dep)
 config :arbor_actions, :channel_senders, %{
   signal: Arbor.Comms.Channels.Signal,
@@ -61,6 +65,9 @@ config :arbor_common, :hands,
   config_dir: "~/.claude-hands",
   sandbox_image: "claude-sandbox",
   sandbox_credentials_volume: "claude-sandbox-credentials"
+
+# P0-4: Default workspace for MCP file operations (FileGuard scope)
+config :arbor_gateway, mcp_workspace: "~/.arbor/workspace"
 
 # Persistence — Ecto repos for mix tasks (create, migrate, rollback)
 config :arbor_persistence,
