@@ -7,6 +7,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   """
 
   alias Arbor.Orchestrator.Engine.{Authorization, Backoff, Outcome}
+  alias Arbor.Orchestrator.Event
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Handlers.Registry
 
@@ -40,12 +41,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         duration_ms =
           System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
-        emit(opts, %{
-          type: :stage_completed,
-          node_id: node.id,
-          status: status,
-          duration_ms: duration_ms
-        })
+        emit(opts, Event.stage_completed(node.id, status, duration_ms: duration_ms))
 
         {outcome, Map.delete(retries, node.id)}
 
@@ -54,20 +50,15 @@ defmodule Arbor.Orchestrator.Engine.Executor do
           delay = retry_delay_ms(node, graph, attempt, opts)
 
           if status == :fail do
-            emit(opts, %{
-              type: :stage_failed,
-              node_id: node.id,
-              error: outcome.failure_reason || "stage failed",
-              will_retry: true
-            })
+            emit(
+              opts,
+              Event.stage_failed(node.id, outcome.failure_reason || "stage failed",
+                will_retry: true
+              )
+            )
           end
 
-          emit(opts, %{
-            type: :stage_retrying,
-            node_id: node.id,
-            attempt: attempt,
-            delay_ms: delay
-          })
+          emit(opts, Event.stage_retrying(node.id, attempt, delay))
 
           sleep(opts, delay)
 
@@ -108,12 +99,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         duration_ms =
           System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
-        emit(opts, %{
-          type: :stage_completed,
-          node_id: node.id,
-          status: :skipped,
-          duration_ms: duration_ms
-        })
+        emit(opts, Event.stage_completed(node.id, :skipped, duration_ms: duration_ms))
 
         {outcome, retries}
     end
@@ -122,14 +108,8 @@ defmodule Arbor.Orchestrator.Engine.Executor do
       if should_retry_exception?(exception) and attempt < max_attempts do
         delay = retry_delay_ms(node, graph, attempt, opts)
 
-        emit(opts, %{
-          type: :stage_failed,
-          node_id: node.id,
-          error: Exception.message(exception),
-          will_retry: true
-        })
-
-        emit(opts, %{type: :stage_retrying, node_id: node.id, attempt: attempt, delay_ms: delay})
+        emit(opts, Event.stage_failed(node.id, Exception.message(exception), will_retry: true))
+        emit(opts, Event.stage_retrying(node.id, attempt, delay))
 
         sleep(opts, delay)
 
@@ -151,13 +131,13 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         duration_ms =
           System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
-        emit(opts, %{
-          type: :stage_failed,
-          node_id: node.id,
-          error: Exception.message(exception),
-          will_retry: false,
-          duration_ms: duration_ms
-        })
+        emit(
+          opts,
+          Event.stage_failed(node.id, Exception.message(exception),
+            will_retry: false,
+            duration_ms: duration_ms
+          )
+        )
 
         {outcome, retries}
       end
@@ -165,25 +145,12 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
     duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-    emit(opts, %{
-      type: :stage_failed,
-      node_id: node_id,
-      error: reason,
-      will_retry: false,
-      duration_ms: duration_ms
-    })
+    emit(opts, Event.stage_failed(node_id, reason, will_retry: false, duration_ms: duration_ms))
   end
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: status}) do
     duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
-
-    emit(opts, %{
-      type: :stage_completed,
-      node_id: node_id,
-      status: status,
-      duration_ms: duration_ms
-    })
+    emit(opts, Event.stage_completed(node_id, status, duration_ms: duration_ms))
   end
 
   @doc false

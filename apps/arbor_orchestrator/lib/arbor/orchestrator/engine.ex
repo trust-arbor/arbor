@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.Engine do
     Router
   }
 
+  alias Arbor.Orchestrator.Event
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -69,12 +70,10 @@ defmodule Arbor.Orchestrator.Engine do
 
     :ok = write_manifest(graph, logs_root)
 
-    emit(opts, %{
-      type: :pipeline_started,
-      graph_id: graph.id,
-      logs_root: logs_root,
-      node_count: map_size(graph.nodes)
-    })
+    emit(
+      opts,
+      Event.pipeline_started(graph.id, logs_root: logs_root, node_count: map_size(graph.nodes))
+    )
 
     case initial_state(graph, logs_root, opts) do
       {:ok,
@@ -84,11 +83,7 @@ defmodule Arbor.Orchestrator.Engine do
         final_outcome = last_id && Map.get(outcomes, last_id)
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
-        emit(opts, %{
-          type: :pipeline_completed,
-          completed_nodes: completed,
-          duration_ms: duration_ms
-        })
+        emit(opts, Event.pipeline_completed(completed, duration_ms))
 
         {:ok,
          %{
@@ -123,7 +118,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       {:error, reason} = error ->
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-        emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
+        emit(opts, Event.pipeline_failed(reason, duration_ms))
         error
     end
   end
@@ -134,11 +129,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       with {:ok, checkpoint} <- Checkpoint.load(checkpoint_path),
            {:ok, state} <- state_from_checkpoint(graph, checkpoint) do
-        emit(opts, %{
-          type: :pipeline_resumed,
-          checkpoint: checkpoint_path,
-          current_node: checkpoint.current_node
-        })
+        emit(opts, Event.pipeline_resumed(checkpoint_path, checkpoint.current_node))
 
         {:ok, Map.put(state, :content_hashes, checkpoint.content_hashes || %{})}
       end
@@ -298,7 +289,7 @@ defmodule Arbor.Orchestrator.Engine do
        )
        when max_steps <= 0 do
     duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-    emit(opts, %{type: :pipeline_failed, reason: :max_steps_exceeded, duration_ms: duration_ms})
+    emit(opts, Event.pipeline_failed(:max_steps_exceeded, duration_ms))
     {:error, :max_steps_exceeded}
   end
 
@@ -337,7 +328,7 @@ defmodule Arbor.Orchestrator.Engine do
         ContentHash.can_skip?(node, computed_hash, stored_hash, handler)
 
     if skip? do
-      emit(opts, %{type: :stage_skipped, node_id: node.id, reason: :content_hash_match})
+      emit(opts, Event.stage_skipped(node.id, :content_hash_match))
 
       # Restore the previous outcome if available, otherwise success
       outcome = Map.get(outcomes, node.id, %Outcome{status: :skipped})
@@ -392,14 +383,8 @@ defmodule Arbor.Orchestrator.Engine do
       end
     else
       # Normal execution path
-      emit(opts, %{type: :stage_started, node_id: node.id})
-
-      emit(opts, %{
-        type: :fidelity_resolved,
-        node_id: node.id,
-        mode: fidelity.mode,
-        thread_id: fidelity.thread_id
-      })
+      emit(opts, Event.stage_started(node.id))
+      emit(opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
       stage_started_at = System.monotonic_time(:millisecond)
 
@@ -447,11 +432,7 @@ defmodule Arbor.Orchestrator.Engine do
       :ok = write_node_status(node.id, outcome, logs_root)
       maybe_store_artifact(opts, node.id, outcome)
 
-      emit(opts, %{
-        type: :checkpoint_saved,
-        node_id: node.id,
-        path: Path.join(logs_root, "checkpoint.json")
-      })
+      emit(opts, Event.checkpoint_saved(node.id, Path.join(logs_root, "checkpoint.json")))
 
       if Router.terminal?(node) do
         handle_terminal(
@@ -510,11 +491,7 @@ defmodule Arbor.Orchestrator.Engine do
         # Before completing, check if there are pending fan-out branches
         case Router.find_next_ready(pending, graph, completed) do
           {next_id, next_edge, remaining} ->
-            emit(opts, %{
-              type: :fan_out_branch_resuming,
-              node_id: next_id,
-              pending_count: length(remaining)
-            })
+            emit(opts, Event.fan_out_branch_resuming(next_id, length(remaining)))
 
             loop(
               graph,
@@ -537,7 +514,7 @@ defmodule Arbor.Orchestrator.Engine do
         end
 
       {:ok, retry_target} ->
-        emit(opts, %{type: :goal_gate_retrying, target: retry_target})
+        emit(opts, Event.goal_gate_retrying(retry_target))
 
         loop(
           graph,
@@ -557,7 +534,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-        emit(opts, %{type: :pipeline_failed, reason: reason, duration_ms: duration_ms})
+        emit(opts, Event.pipeline_failed(reason, duration_ms))
         {:error, reason}
     end
   end
@@ -566,11 +543,7 @@ defmodule Arbor.Orchestrator.Engine do
     ordered = Enum.reverse(completed)
     duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
-    emit(opts, %{
-      type: :pipeline_completed,
-      completed_nodes: ordered,
-      duration_ms: duration_ms
-    })
+    emit(opts, Event.pipeline_completed(ordered, duration_ms))
 
     {:ok,
      %{
@@ -621,24 +594,15 @@ defmodule Arbor.Orchestrator.Engine do
     new_pending = Router.merge_pending(extra_targets, pending)
 
     if extra_targets != [] do
-      emit(opts, %{
-        type: :fan_out_detected,
-        node_id: node.id,
-        branch_count: length(extra_targets) + 1,
-        targets: [preferred_id | Enum.map(extra_targets, fn {id, _} -> id end)]
-      })
+      all_targets = [preferred_id | Enum.map(extra_targets, fn {id, _} -> id end)]
+      emit(opts, Event.fan_out_detected(node.id, length(extra_targets) + 1, all_targets))
     end
 
     # Try the preferred target, with fan-in gate check
     case preferred do
       {:edge, edge} ->
         if Map.get(edge, :loop_restart, false) do
-          emit(opts, %{
-            type: :loop_restart,
-            edge: %{from: edge.from, to: edge.to},
-            reason: :loop_restart_edge
-          })
-
+          emit(opts, Event.loop_restart(edge.from, edge.to))
           finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at)
         else
           advance_to_target(
@@ -744,15 +708,13 @@ defmodule Arbor.Orchestrator.Engine do
       )
     else
       # Target not ready -- add to pending and find next ready node
-      emit(opts, %{
-        type: :fan_in_deferred,
-        node_id: target_id,
-        waiting_for:
-          graph
-          |> Graph.incoming_edges(target_id)
-          |> Enum.map(& &1.from)
-          |> Enum.reject(&(&1 in completed))
-      })
+      waiting_for =
+        graph
+        |> Graph.incoming_edges(target_id)
+        |> Enum.map(& &1.from)
+        |> Enum.reject(&(&1 in completed))
+
+      emit(opts, Event.fan_in_deferred(target_id, waiting_for))
 
       all_pending = [{target_id, edge} | pending]
 
