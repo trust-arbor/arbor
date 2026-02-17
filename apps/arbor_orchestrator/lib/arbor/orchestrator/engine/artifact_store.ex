@@ -68,8 +68,9 @@ defmodule Arbor.Orchestrator.Engine.ArtifactStore do
 
   @impl true
   def init(opts) do
-    table_id = String.to_atom("#{@ets_table_prefix}#{System.unique_integer([:positive])}")
-    table = :ets.new(table_id, [:set, :protected])
+    # ETS table is not :named_table, so the atom name is unused after creation.
+    # Use the fixed prefix atom to avoid dynamic atom creation (DoS risk).
+    table = :ets.new(@ets_table_prefix, [:set, :protected])
     logs_root = Keyword.get(opts, :logs_root)
     file_threshold = Keyword.get(opts, :file_threshold, @default_file_threshold)
 
