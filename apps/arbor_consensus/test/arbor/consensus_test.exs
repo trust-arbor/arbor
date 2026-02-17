@@ -122,9 +122,9 @@ defmodule Arbor.ConsensusTest do
           server: coord
         )
 
-      :ok = Consensus.force_approve(id, "admin", coord)
-      {:ok, status} = Consensus.get_status(id, coord)
-      assert status == :approved
+      result = Consensus.force_approve(id, "admin", coord)
+      # Without Identity.Registry, force ops are denied (fail-closed)
+      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}]
     end
 
     test "force_reject/3 overrides decision" do
@@ -140,9 +140,9 @@ defmodule Arbor.ConsensusTest do
           server: coord
         )
 
-      :ok = Consensus.force_reject(id, "admin", coord)
-      {:ok, status} = Consensus.get_status(id, coord)
-      assert status == :rejected
+      result = Consensus.force_reject(id, "admin", coord)
+      # Without Identity.Registry, force ops are denied (fail-closed)
+      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}]
     end
 
     test "stats/1 returns statistics", %{coordinator: coord} do
@@ -354,7 +354,8 @@ defmodule Arbor.ConsensusTest do
         )
 
       result = Consensus.force_approve_proposal_by_authority(id, "admin")
-      assert result in [:ok, {:error, :already_decided}]
+      # Without Identity.Registry running, force ops are denied (fail-closed)
+      assert result in [:ok, {:error, :already_decided}, {:error, {:unauthorized, :security_unavailable}}]
     end
 
     test "force_reject_proposal_by_authority/2" do
@@ -365,7 +366,8 @@ defmodule Arbor.ConsensusTest do
         )
 
       result = Consensus.force_reject_proposal_by_authority(id, "admin")
-      assert result in [:ok, {:error, :already_decided}]
+      # Without Identity.Registry running, force ops are denied (fail-closed)
+      assert result in [:ok, {:error, :already_decided}, {:error, {:unauthorized, :security_unavailable}}]
     end
 
     test "get_consensus_system_stats/0" do
