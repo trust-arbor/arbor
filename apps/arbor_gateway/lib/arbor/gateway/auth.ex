@@ -60,8 +60,17 @@ defmodule Arbor.Gateway.Auth do
 
       _ ->
         case get_req_header(conn, "x-api-key") do
-          [key] -> {:ok, String.trim(key)}
-          _ -> :error
+          [key] ->
+            {:ok, String.trim(key)}
+
+          _ ->
+            # Fallback: query param token for MCP clients that can't send custom headers
+            conn = Plug.Conn.fetch_query_params(conn)
+
+            case conn.query_params do
+              %{"token" => token} when token != "" -> {:ok, token}
+              _ -> :error
+            end
         end
     end
   end

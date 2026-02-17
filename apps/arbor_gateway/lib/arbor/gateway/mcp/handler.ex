@@ -22,6 +22,29 @@ defmodule Arbor.Gateway.MCP.Handler do
   @server_version "0.1.0"
 
   # ===========================================================================
+  # Direct dispatch API (used by ExMCP.MessageProcessor / HttpPlug)
+  # ===========================================================================
+
+  @doc false
+  def get_capabilities do
+    %{"tools" => %{}}
+  end
+
+  @doc false
+  def get_tools do
+    tool_list()
+    |> Map.new(fn tool -> {tool.name, tool} end)
+  end
+
+  @doc false
+  def handle_tool_call(name, arguments, _state) do
+    case handle_call_tool(name, arguments, %{}) do
+      {:ok, result, _new_state} -> {:ok, result}
+      {:error, reason, _new_state} -> {:error, reason}
+    end
+  end
+
+  # ===========================================================================
   # Handler Callbacks
   # ===========================================================================
 
@@ -43,7 +66,11 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   @impl ExMCP.Server.Handler
   def handle_list_tools(_cursor, state) do
-    tools = [
+    {:ok, tool_list(), nil, state}
+  end
+
+  defp tool_list do
+    [
       %{
         name: "arbor_actions",
         description:
@@ -132,8 +159,6 @@ defmodule Arbor.Gateway.MCP.Handler do
         }
       }
     ]
-
-    {:ok, tools, nil, state}
   end
 
   @impl ExMCP.Server.Handler
