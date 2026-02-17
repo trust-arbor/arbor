@@ -55,13 +55,15 @@ defmodule Arbor.Orchestrator.Engine.ContextTest do
       assert Context.origin(ctx, "k1") == nil
     end
 
-    test "lineage/1 returns full lineage map" do
+    test "lineage/1 returns full lineage map with enriched entries" do
       ctx =
         Context.new()
         |> Context.set("a", 1, "n1")
         |> Context.set("b", 2, "n2")
 
-      assert Context.lineage(ctx) == %{"a" => "n1", "b" => "n2"}
+      lineage = Context.lineage(ctx)
+      assert %{node_id: "n1", operation: :set, timestamp: %DateTime{}} = lineage["a"]
+      assert %{node_id: "n2", operation: :set, timestamp: %DateTime{}} = lineage["b"]
     end
 
     test "lineage starts empty" do
