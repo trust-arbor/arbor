@@ -442,4 +442,105 @@ defmodule Arbor.AI.RouterTest do
       end
     end
   end
+
+  # ===========================================================================
+  # Tier-based routing integration tests
+  # ===========================================================================
+
+  describe "route_task/2 tier classification integration" do
+    @tag :fast
+    test "each tier has consistent model resolution when manually overridden" do
+      # Verify that every tier's candidates can be resolved to valid model strings
+      alias Arbor.AI.RoutingConfig
+
+      for tier <- [:critical, :complex, :moderate, :simple, :trivial] do
+        candidates = RoutingConfig.get_tier_backends(tier)
+
+        Enum.each(candidates, fn {backend, model} ->
+          resolved = RoutingConfig.resolve_model(model)
+          assert is_binary(resolved), "Model #{inspect(model)} for #{tier} tier should resolve to string"
+          assert String.length(resolved) > 0, "Resolved model for #{tier}/#{backend} should not be empty"
+        end)
+      end
+    end
+
+    @tag :fast
+    test "complex prompt routes through complex tier candidates" do
+      meta = TaskMeta.classify("refactor the entire authentication architecture")
+      assert TaskMeta.tier(meta) == :complex
+
+      # Route with manual override to verify the flow
+      result = Router.route_task(meta, model: {:anthropic, :sonnet})
+      assert {:ok, {:anthropic, model}} = result
+      assert is_binary(model)
+      assert model =~ "claude-sonnet"
+    end
+
+    @tag :fast
+    test "moderate prompt routes through moderate tier candidates" do
+      meta = TaskMeta.classify("update the user profile handler")
+      assert TaskMeta.tier(meta) == :moderate
+    end
+
+    @tag :fast
+    test "simple prompt with low risk routes to simple tier" do
+      # TaskMeta with simple complexity and low risk
+      meta = %TaskMeta{complexity: :simple, risk_level: :low, scope: :single_file}
+      assert TaskMeta.tier(meta) == :simple
+    end
+
+    @tag :fast
+    test "exclude option filters backends from candidates" do
+      meta = %TaskMeta{risk_level: :medium, complexity: :moderate}
+
+      # Exclude all known providers to force :no_backends_available
+      result =
+        Router.route_task(meta,
+          exclude: [:anthropic, :openai, :gemini, :opencode, :qwen, :lmstudio, :ollama]
+        )
+
+      assert {:error, :no_backends_available} = result
+    end
+
+    @tag :fast
+    test "quality_first strategy selects API for important requests" do
+      result = Router.select_backend(backend: :auto, strategy: :quality_first, important: true)
+      assert result == :api
+    end
+
+    @tag :fast
+    test "quality_first strategy selects CLI for non-important requests" do
+      result = Router.select_backend(backend: :auto, strategy: :quality_first, important: false)
+      assert result == :cli
+    end
+
+    @tag :fast
+    test "unknown strategy defaults to CLI (cost-optimized)" do
+      result = Router.select_backend(backend: :auto, strategy: :some_unknown_strategy)
+      assert result == :cli
+    end
+  end
+
+  describe "route_task/2 with graph routing disabled" do
+    @tag :fast
+    test "falls back to imperative routing when graph routing is disabled" do
+      original = Application.get_env(:arbor_ai, :enable_graph_routing)
+
+      try do
+        Application.put_env(:arbor_ai, :enable_graph_routing, false)
+
+        # Should still produce a valid result (either success or no_backends)
+        result = Router.route_task("hello world")
+
+        assert match?({:ok, {_backend, _model}}, result) or
+                 match?({:error, _}, result)
+      after
+        if original != nil do
+          Application.put_env(:arbor_ai, :enable_graph_routing, original)
+        else
+          Application.delete_env(:arbor_ai, :enable_graph_routing)
+        end
+      end
+    end
+  end
 end

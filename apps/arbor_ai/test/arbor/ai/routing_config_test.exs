@@ -230,5 +230,102 @@ defmodule Arbor.AI.RoutingConfigTest do
       assert Map.has_key?(versions, :opus)
       assert Map.has_key?(versions, :haiku)
     end
+
+    test "all values are strings" do
+      versions = RoutingConfig.model_versions()
+
+      Enum.each(versions, fn {key, value} ->
+        assert is_atom(key), "Key #{inspect(key)} should be an atom"
+        assert is_binary(value), "Value for #{inspect(key)} should be a string, got #{inspect(value)}"
+      end)
+    end
+
+    test "contains entries for all major providers" do
+      versions = RoutingConfig.model_versions()
+      # Anthropic
+      assert Map.has_key?(versions, :opus)
+      assert Map.has_key?(versions, :sonnet)
+      assert Map.has_key?(versions, :haiku)
+      # OpenAI
+      assert Map.has_key?(versions, :gpt5)
+      assert Map.has_key?(versions, :gpt4)
+      # Google
+      assert Map.has_key?(versions, :gemini_pro)
+      assert Map.has_key?(versions, :gemini_flash)
+      # Generic
+      assert Map.has_key?(versions, :auto)
+    end
+  end
+
+  describe "resolve_model/1 edge cases" do
+    test "resolves :auto to \"auto\"" do
+      assert RoutingConfig.resolve_model(:auto) == "auto"
+    end
+
+    test "resolves :grok to grok beta string" do
+      model = RoutingConfig.resolve_model(:grok)
+      assert is_binary(model)
+      assert model =~ "grok"
+    end
+
+    test "resolves :qwen_code to qwen coder string" do
+      model = RoutingConfig.resolve_model(:qwen_code)
+      assert is_binary(model)
+      assert model =~ "qwen"
+    end
+
+    test "empty string passes through unchanged" do
+      assert RoutingConfig.resolve_model("") == ""
+    end
+  end
+
+  describe "get_tier_backends/1 structure" do
+    test "all tiers return {atom, atom} tuples" do
+      for tier <- [:critical, :complex, :moderate, :simple, :trivial] do
+        backends = RoutingConfig.get_tier_backends(tier)
+
+        Enum.each(backends, fn {backend, model} ->
+          assert is_atom(backend), "Backend in #{tier} should be atom, got #{inspect(backend)}"
+          assert is_atom(model), "Model in #{tier} should be atom, got #{inspect(model)}"
+        end)
+      end
+    end
+
+    test "critical tier always has anthropic:opus as first candidate" do
+      [{first_backend, first_model} | _] = RoutingConfig.get_tier_backends(:critical)
+      assert first_backend == :anthropic
+      assert first_model == :opus
+    end
+  end
+
+  describe "get_fallback_chain/1 structure" do
+    test "fallback chain contains local and cloud backends" do
+      chain = RoutingConfig.get_fallback_chain()
+
+      backends = Enum.map(chain, fn {backend, _} -> backend end)
+      # Should have at least one local and one cloud
+      assert :lmstudio in backends or :ollama in backends
+      assert :anthropic in backends or :openai in backends or :gemini in backends
+    end
+
+    test "excluding all backends returns empty list" do
+      all_fallback_backends =
+        RoutingConfig.get_fallback_chain()
+        |> Enum.map(fn {backend, _} -> backend end)
+
+      chain = RoutingConfig.get_fallback_chain(exclude: all_fallback_backends)
+      assert chain == []
+    end
+  end
+
+  describe "get_embedding_providers/1 with :auto preference" do
+    test "auto preference returns providers in default order" do
+      providers = RoutingConfig.get_embedding_providers(prefer: :auto)
+      assert is_list(providers)
+
+      # Should be same as default (local-first)
+      default_providers = RoutingConfig.get_embedding_providers(prefer: :local)
+      assert providers == default_providers
+    end
   end
 end
