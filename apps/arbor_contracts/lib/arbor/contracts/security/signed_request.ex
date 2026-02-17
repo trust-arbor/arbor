@@ -7,8 +7,9 @@ defmodule Arbor.Contracts.Security.SignedRequest do
 
   ## Wire Format
 
-  The signing payload is computed deterministically:
-  `payload <> agent_id <> DateTime.to_iso8601(timestamp) <> nonce`
+  The signing payload uses length-prefixed encoding to prevent field-boundary
+  ambiguity attacks. Each variable-length field is prefixed with its byte size
+  as a 32-bit big-endian integer: `<<len::32, field::binary>>`.
 
   ## Usage
 
@@ -96,8 +97,9 @@ defmodule Arbor.Contracts.Security.SignedRequest do
   @doc """
   Compute the canonical signing payload for a SignedRequest.
 
-  This is the exact byte sequence that is signed/verified:
-  `payload <> agent_id <> DateTime.to_iso8601(timestamp) <> nonce`
+  Each variable-length field is length-prefixed (`<<byte_size::32, field::binary>>`)
+  to prevent field-boundary ambiguity attacks. Fixed-size fields (nonce) are
+  appended directly.
 
   Used by both signing and verification to ensure deterministic serialization.
   """
@@ -109,10 +111,16 @@ defmodule Arbor.Contracts.Security.SignedRequest do
   # Private
 
   defp compute_signing_payload(%__MODULE__{} = request) do
-    request.payload <>
-      request.agent_id <>
-      DateTime.to_iso8601(request.timestamp) <>
+    timestamp_bin = DateTime.to_iso8601(request.timestamp)
+
+    length_prefix(request.payload) <>
+      length_prefix(request.agent_id) <>
+      length_prefix(timestamp_bin) <>
       request.nonce
+  end
+
+  defp length_prefix(field) when is_binary(field) do
+    <<byte_size(field)::32, field::binary>>
   end
 
   defp validate(%__MODULE__{} = request) do
