@@ -285,7 +285,7 @@
 - [x] Resolved by D15 refactoring (parse_enum extraction eliminated the dead clause)
 
 ### O7. Synchronous checkpoint in terminate
-- [ ] `apps/arbor_agent/lib/arbor/agent/server.ex:276-289` — DEFERRED: making terminate async risks data loss on shutdown. Needs careful design with async-then-confirm pattern.
+- [x] `apps/arbor_agent/lib/arbor/agent/server.ex` — Implemented async-then-confirm: `terminate/2` now spawns `Task.async` for checkpoint save and `Task.await` with 5s timeout. On timeout, logs warning and continues cleanup. No data loss when store is reachable; no supervision tree blocking when store is slow/hung.
 
 ### O8. Three dispatch functions with identical structure in comms
 - [x] Reviewed: `send/4`, `reply/2`, `deliver_envelope/3` share signal emission but differ meaningfully in recipient resolution, option building, and message construction. Extraction would reduce readability. Acceptable as-is.

@@ -39,6 +39,10 @@ defmodule Arbor.Agent.Server do
 
   require Logger
 
+  # Maximum time to wait for a checkpoint save during terminate/2.
+  # Prevents blocking the supervision tree on slow or hung storage.
+  @terminate_checkpoint_timeout_ms 5_000
+
   @type state :: %{
           agent_id: String.t(),
           agent_module: module(),
@@ -279,8 +283,17 @@ defmodule Arbor.Agent.Server do
     # Emit agent stopped signal
     emit_stopped(state, reason)
 
-    # Save final checkpoint before dying
-    CheckpointManager.save_checkpoint(state)
+    # Save final checkpoint with bounded timeout so we don't block
+    # the supervision tree if the storage backend is slow or hung.
+    try do
+      task = Task.async(fn -> CheckpointManager.save_checkpoint(state) end)
+      Task.await(task, @terminate_checkpoint_timeout_ms)
+    catch
+      :exit, {:timeout, _} ->
+        Logger.warning(
+          "Agent.Server #{state.agent_id}: checkpoint save timed out during terminate"
+        )
+    end
 
     # Unregister from registry
     Registry.unregister(state.agent_id)
