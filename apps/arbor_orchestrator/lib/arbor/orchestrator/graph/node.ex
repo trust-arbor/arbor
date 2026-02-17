@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
           retry_target: String.t() | nil,
           fallback_retry_target: String.t() | nil,
           timeout: String.t() | nil,
+          timeout_ms: non_neg_integer() | nil,
           llm_model: String.t() | nil,
           llm_provider: String.t() | nil,
           reasoning_effort: String.t() | nil,
@@ -36,6 +37,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
             retry_target: nil,
             fallback_retry_target: nil,
             timeout: nil,
+            timeout_ms: nil,
             llm_model: nil,
             llm_provider: nil,
             reasoning_effort: nil,
@@ -69,6 +71,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
       retry_target: Map.get(attrs, "retry_target"),
       fallback_retry_target: Map.get(attrs, "fallback_retry_target"),
       timeout: Map.get(attrs, "timeout"),
+      timeout_ms: parse_timeout_ms(Map.get(attrs, "timeout")),
       llm_model: Map.get(attrs, "llm_model"),
       llm_provider: Map.get(attrs, "llm_provider"),
       reasoning_effort: Map.get(attrs, "reasoning_effort"),
@@ -111,6 +114,16 @@ defmodule Arbor.Orchestrator.Graph.Node do
     ]
   end
 
+  @doc "Split the comma-separated class string into a list."
+  @spec classes(t()) :: [String.t()]
+  def classes(%__MODULE__{} = node) do
+    case node.class || Map.get(node.attrs, "class") do
+      nil -> []
+      "" -> []
+      str when is_binary(str) -> str |> String.split(",") |> Enum.map(&String.trim/1)
+    end
+  end
+
   @spec attr(t(), String.t() | atom(), term()) :: term()
   def attr(node, key, default \\ nil)
 
@@ -141,4 +154,25 @@ defmodule Arbor.Orchestrator.Graph.Node do
   end
 
   defp parse_max_retries(_), do: nil
+
+  defp parse_timeout_ms(nil), do: nil
+
+  defp parse_timeout_ms(val) when is_binary(val) do
+    case Regex.run(~r/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)$/, val) do
+      [_, num, "ms"] -> parse_number(num) |> trunc()
+      [_, num, "s"] -> (parse_number(num) * 1_000) |> trunc()
+      [_, num, "m"] -> (parse_number(num) * 60_000) |> trunc()
+      [_, num, "h"] -> (parse_number(num) * 3_600_000) |> trunc()
+      _ -> nil
+    end
+  end
+
+  defp parse_timeout_ms(_), do: nil
+
+  defp parse_number(str) do
+    case Float.parse(str) do
+      {f, ""} -> f
+      _ -> 0.0
+    end
+  end
 end
