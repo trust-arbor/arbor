@@ -275,7 +275,7 @@ defmodule Arbor.Consensus.TopicMatcher do
   end
 
   defp llm_available? do
-    Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2)
+    Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2)
   end
 
   defp llm_enabled_by_default? do

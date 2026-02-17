@@ -433,7 +433,7 @@ defmodule Arbor.Memory.ActionPatterns do
   end
 
   defp get_llm_client do
-    if Code.ensure_loaded?(Arbor.AI) and function_exported?(Arbor.AI, :generate_text, 2) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.AI, :generate_text, 2) do
       Arbor.AI
     else
       nil

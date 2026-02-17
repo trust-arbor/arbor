@@ -172,7 +172,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_self_knowledge_section(agent_id) do
     mod = Arbor.Memory.IdentityConsolidator
 
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :get_self_knowledge, 1) do
+    if Arbor.Common.LazyLoader.exported?(mod, :get_self_knowledge, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       sk = apply(mod, :get_self_knowledge, [agent_id])
       format_self_knowledge(sk)
@@ -195,7 +195,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_goals_section(agent_id) do
     mod = Arbor.Memory.GoalStore
 
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :get_active_goals, 1) do
+    if Arbor.Common.LazyLoader.exported?(mod, :get_active_goals, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       goals = apply(mod, :get_active_goals, [agent_id])
       format_goals(goals)

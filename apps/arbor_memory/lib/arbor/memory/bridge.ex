@@ -580,7 +580,7 @@ defmodule Arbor.Memory.Bridge do
   end
 
   defp resolve_signals_module do
-    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :healthy?, 0) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.Signals, :healthy?, 0) do
       Arbor.Signals
     else
       nil
@@ -588,8 +588,7 @@ defmodule Arbor.Memory.Bridge do
   end
 
   defp emit_bridge_interrupt_signal(agent_id, target_id, reason) do
-    if Code.ensure_loaded?(Arbor.Memory.Signals) and
-         function_exported?(Arbor.Memory.Signals, :emit_bridge_interrupt, 3) do
+    if Arbor.Common.LazyLoader.exported?(Arbor.Memory.Signals, :emit_bridge_interrupt, 3) do
       Arbor.Memory.Signals.emit_bridge_interrupt(agent_id, target_id, reason)
     end
   end
