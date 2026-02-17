@@ -34,7 +34,7 @@ defmodule Arbor.Signals.BusTest do
         Bus.subscribe(
           "security.*",
           fn signal ->
-            send(test_pid, {:cat_wild, signal})
+            send(test_pid, {:cat_wild, signal.category, signal.type})
             :ok
           end,
           async: false,
@@ -42,10 +42,15 @@ defmodule Arbor.Signals.BusTest do
         )
 
       Bus.publish(Signal.new(:security, :auth_check, %{}))
-      assert_receive {:cat_wild, %Signal{type: :auth_check}}, 500
+      assert_receive {:cat_wild, :security, :auth_check}, 500
+
+      # Drain any stray security signals from concurrent tests before checking
+      drain_messages(:cat_wild)
 
       Bus.publish(Signal.new(:activity, :other, %{}))
-      refute_receive {:cat_wild, _}, 100
+      # Only refute the specific signal we just published — other concurrent tests
+      # may publish security.* signals that legitimately match this subscription
+      refute_receive {:cat_wild, :activity, :other}, 100
 
       Bus.unsubscribe(sub_id)
     end
@@ -459,6 +464,17 @@ defmodule Arbor.Signals.BusTest do
     @impl true
     def authorize_subscription(_principal_id, _topic) do
       {:error, :unauthorized}
+    end
+  end
+
+  # Drain any pending messages with the given tag to avoid cross-test interference.
+  # Other tests running concurrently may publish signals to the shared Bus,
+  # causing stray messages to arrive in this process's mailbox.
+  defp drain_messages(tag) do
+    receive do
+      {^tag, _, _} -> drain_messages(tag)
+    after
+      0 -> :ok
     end
   end
 

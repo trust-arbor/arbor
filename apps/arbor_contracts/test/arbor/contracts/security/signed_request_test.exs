@@ -44,10 +44,12 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
 
       canonical = SignedRequest.signing_payload(signed)
 
+      timestamp_bin = DateTime.to_iso8601(signed.timestamp)
+
       expected =
-        "hello" <>
-          ctx.agent_id <>
-          DateTime.to_iso8601(signed.timestamp) <>
+        <<byte_size("hello")::32, "hello"::binary>> <>
+          <<byte_size(ctx.agent_id)::32, ctx.agent_id::binary>> <>
+          <<byte_size(timestamp_bin)::32, timestamp_bin::binary>> <>
           signed.nonce
 
       assert canonical == expected

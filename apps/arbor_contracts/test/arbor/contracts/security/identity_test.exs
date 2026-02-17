@@ -33,7 +33,7 @@ defmodule Arbor.Contracts.Security.IdentityTest do
     test "rejects invalid private key size" do
       {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert {:error, {:invalid_private_key_size, _, :expected, 32}} =
+      assert {:error, {:invalid_private_key_size, _, :expected, "32 or 64"}} =
                Identity.new(public_key: public_key, private_key: <<1, 2, 3>>)
     end
 

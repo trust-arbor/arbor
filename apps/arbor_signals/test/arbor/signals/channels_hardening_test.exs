@@ -48,6 +48,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       Application.delete_env(:arbor_signals, :crypto_module)
       Application.delete_env(:arbor_signals, :identity_registry_module)
       Application.delete_env(:arbor_signals, :channel_rotate_on_leave)
+      Application.delete_env(:arbor_signals, :channel_auto_rotate_interval_ms)
     end)
 
     :ok
@@ -295,6 +296,11 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       {:ok, key_after} = Channels.get_key(channel_id, creator_id)
       assert key_after != key_before
+
+      # Cancel the auto-rescheduled timer to prevent signal leakage into later tests
+      :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)
+      # Delete channel so any lingering timer becomes a no-op
+      :ok = Channels.leave(channel_id, creator_id)
     end
 
     test "cancel_scheduled_rotation stops the timer" do
@@ -314,6 +320,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       {:ok, key_after} = Channels.get_key(channel_id, creator_id)
       assert key_after == key_before
+
+      # Clean up channel
+      :ok = Channels.leave(channel_id, creator_id)
     end
   end
 
@@ -350,10 +359,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       creator_id = "agent_creator"
       {:ok, channel, _key} = Channels.create("audit-test", creator_id)
 
-      assert_receive {:signal, signal}, 100
+      # Match on specific type to avoid picking up stale auto-rotate signals
+      assert_receive {:signal, %{type: :channel_created} = signal}, 100
       assert signal.category == :security
-      assert signal.type == :channel_created
-      # Data has string keys after JSON round-trip through encryption
       assert signal.data["channel_id"] == channel.id
       assert signal.data["agent_id"] == creator_id
 
@@ -484,11 +492,17 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       # Revoke triggers rotation with reason :member_revoked
       :ok = Channels.revoke(channel_id, member_id, creator_id)
 
-      signals = await_signals([:channel_key_rotated])
+      # Collect signals and find the rotation with the correct reason.
+      # Stale auto-rotate timers may emit "scheduled" signals — filter for "member_revoked".
+      rotation_signal =
+        receive_until_match(
+          fn signal ->
+            signal.type == :channel_key_rotated and signal.data["reason"] == "member_revoked"
+          end,
+          1_000
+        )
 
-      rotation_signal = Enum.find(signals, &(&1.type == :channel_key_rotated))
       assert rotation_signal != nil
-      # Data has string keys after JSON round-trip; reason becomes string too
       assert rotation_signal.data["reason"] == "member_revoked"
 
       Bus.unsubscribe(sub_id)
@@ -496,19 +510,6 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
   end
 
   # Helper functions
-
-  defp collect_signals(timeout) do
-    collect_signals([], timeout)
-  end
-
-  defp collect_signals(acc, timeout) do
-    receive do
-      {:signal, signal} ->
-        collect_signals([signal | acc], timeout)
-    after
-      timeout -> Enum.reverse(acc)
-    end
-  end
 
   # Wait for specific signal types with a bounded timeout.
   # Returns collected signals once all expected types are found
@@ -546,6 +547,31 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       _ -> flush_messages()
     after
       0 -> :ok
+    end
+  end
+
+  # Receive signals until one matches the predicate, or timeout expires.
+  defp receive_until_match(predicate, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    receive_until_match_loop(predicate, deadline)
+  end
+
+  defp receive_until_match_loop(predicate, deadline) do
+    wait = deadline - System.monotonic_time(:millisecond)
+
+    if wait <= 0 do
+      nil
+    else
+      receive do
+        {:signal, signal} ->
+          if predicate.(signal) do
+            signal
+          else
+            receive_until_match_loop(predicate, deadline)
+          end
+      after
+        wait -> nil
+      end
     end
   end
 end
