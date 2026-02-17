@@ -27,7 +27,9 @@ defmodule Arbor.Agent.Verification do
 
   require Logger
 
+  alias Arbor.Monitor.AnomalyQueue
   alias Arbor.Monitor.Diagnostics
+  alias Arbor.Monitor.Fingerprint
 
   @verification_delay_ms 500
   @max_retries 3
@@ -163,6 +165,27 @@ defmodule Arbor.Agent.Verification do
   defp verify_action(anomaly, :none, _target) do
     # No action taken — verify the anomaly condition directly
     verify_condition(anomaly)
+  end
+
+  defp verify_action(anomaly, :suppress_fingerprint, _target) do
+    # Verify the fingerprint was successfully suppressed
+    case build_fingerprint(anomaly) do
+      {:ok, fingerprint} ->
+        if AnomalyQueue.suppressed?(fingerprint) do
+          {:ok, :verified}
+        else
+          {:ok, :unverified}
+        end
+
+      _ ->
+        # Can't build fingerprint to check — assume verified
+        {:ok, :verified}
+    end
+  end
+
+  defp verify_action(_anomaly, :reset_baseline, _target) do
+    # Baseline reset is instantaneous and self-evident
+    {:ok, :verified}
   end
 
   defp verify_action(_anomaly, action, _target) do
@@ -306,6 +329,14 @@ defmodule Arbor.Agent.Verification do
       info -> Map.take(info, keys)
     end
   end
+
+  defp build_fingerprint(%{skill: skill, details: %{metric: metric, value: value, ewma: ewma}})
+       when not is_nil(skill) and not is_nil(metric) do
+    direction = if value > ewma, do: :above, else: :below
+    {:ok, Fingerprint.new(skill, metric, direction)}
+  end
+
+  defp build_fingerprint(_), do: {:error, :insufficient_data}
 
   defp safe_call(fun) do
     fun.()

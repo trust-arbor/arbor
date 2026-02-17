@@ -36,9 +36,11 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     end
 
     @tag :fast
-    test "all five children are started" do
+    test "all core children are started" do
       children = Supervisor.which_children(HealingSupervisor)
-      assert length(children) == 5
+      # 5 core children + optional DebugAgent if arbor_agent is loaded
+      assert length(children) >= 5
+      assert length(children) <= 6
     end
   end
 

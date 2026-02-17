@@ -454,11 +454,13 @@ defmodule Arbor.Consensus.Coordinator do
         state = kill_active_council(state, proposal_id)
 
         proposal = Proposal.update_status(proposal, :vetoed)
+        fingerprint = compute_fingerprint(proposal)
 
         state = %{
           state
           | proposals: Map.put(state.proposals, proposal_id, proposal),
-            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal),
+            pending_fingerprints: Map.delete(state.pending_fingerprints, fingerprint)
         }
 
         record_event(state, :proposal_cancelled, %{
@@ -746,11 +748,14 @@ defmodule Arbor.Consensus.Coordinator do
         proposal = Proposal.update_status(proposal, status)
         state = %{state | proposals: Map.put(state.proposals, proposal_id, proposal)}
 
-        # Free quota on terminal statuses
+        # Free quota and fingerprint on terminal statuses
         if terminal_status?(status) do
+          fingerprint = compute_fingerprint(proposal)
+
           %{
             state
-            | proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+            | proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal),
+              pending_fingerprints: Map.delete(state.pending_fingerprints, fingerprint)
           }
         else
           state
