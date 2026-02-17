@@ -65,6 +65,8 @@ defmodule Arbor.Security do
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
 
+  require Logger
+
   # ===========================================================================
   # Public API — short, human-friendly names
   # ===========================================================================
@@ -337,8 +339,6 @@ defmodule Arbor.Security do
   # or hiding buttons) where a false positive is acceptable.
   @impl Arbor.Contracts.API.Security
   def check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, _action) do
-    require Logger
-
     Logger.warning(
       "can?/3 called for #{principal_id} on #{resource_uri} — " <>
         "this skips identity, constraints, and reflexes. Use authorize/4 for security decisions."
@@ -616,7 +616,12 @@ defmodule Arbor.Security do
         if Config.strict_identity_mode?() do
           {:error, {:unauthorized, :unknown_identity}}
         else
-          # Permissive mode: allow through to capability check
+          # P0-3: Permissive mode — allow through but log for observability.
+          # This surfaces unknown identities in dev/test without blocking.
+          Logger.warning(
+            "[Security] Unknown identity #{principal_id} allowed in permissive mode"
+          )
+
           :ok
         end
     end
@@ -710,7 +715,6 @@ defmodule Arbor.Security do
     end
   rescue
     _ ->
-      require Logger
       Logger.error("Reflex check failed due to exception — failing closed for safety")
       {:error, {:reflex_check_failed, :exception}}
   end

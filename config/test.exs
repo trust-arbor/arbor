@@ -21,7 +21,10 @@ config :arbor_security,
   # Disable identity verification by default in tests — most tests don't have
   # crypto infrastructure. Tests that specifically test identity verification
   # opt in with verify_identity: true.
-  identity_verification: false
+  identity_verification: false,
+  # P0-3: Permissive identity mode in tests — most tests don't register identities.
+  # Production uses strict mode (unknown identities rejected).
+  strict_identity_mode: false
 
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
@@ -79,6 +82,9 @@ config :arbor_memory,
 # pgvector tests (requires postgres + pgvector extension)
 config :arbor_persistence,
   embedding_dimension: 768
+
+# P0-1: Keep permissive taint in tests — existing tests don't set taint context
+config :arbor_actions, default_taint_policy: :permissive
 
 # Use hash-based test embeddings when no real providers are available
 config :arbor_ai, embedding_test_fallback: true

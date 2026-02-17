@@ -284,7 +284,26 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   # C1/C2: All MCP action execution MUST go through authorize_and_execute.
   # agent_id is required — the unchecked execute_action path is removed.
+  # P0-4: Verify agent_id is a registered, active identity before executing.
   defp run_action(action_name, params, agent_id) when is_binary(agent_id) and agent_id != "" do
+    # P0-4: Verify agent identity exists and is active. Fail-closed when
+    # security module is unavailable.
+    case verify_agent_identity(agent_id) do
+      :ok ->
+        run_verified_action(action_name, params, agent_id)
+
+      {:error, reason} ->
+        "## Unauthorized\n\nAgent identity verification failed for '#{agent_id}': #{inspect(reason)}."
+    end
+  end
+
+  # C1: Reject calls without agent_id
+  defp run_action(action_name, _params, _agent_id) do
+    "## Error\n\nAgent ID is required to execute '#{action_name}'. " <>
+      "Provide a valid agent_id parameter."
+  end
+
+  defp run_verified_action(action_name, params, agent_id) do
     case find_action_module(action_name) do
       {:ok, mod} ->
         # Atomize known param keys for the action
@@ -319,10 +338,36 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
-  # C1: Reject calls without agent_id
-  defp run_action(action_name, _params, _agent_id) do
-    "## Error\n\nAgent ID is required to execute '#{action_name}'. " <>
-      "Provide a valid agent_id parameter."
+  # P0-4: Verify agent_id corresponds to a registered, active identity.
+  # When security module is loaded and available, check identity. When security
+  # processes aren't running (dev/test with start_children: false), allow through
+  # with a warning — fail-closed only when module itself isn't available.
+  defp verify_agent_identity(agent_id) do
+    if Code.ensure_loaded?(Arbor.Security) do
+      # Check if security processes are actually running
+      if security_processes_available?() do
+        case bridge_call(Arbor.Security, :identity_active?, [agent_id]) do
+          {:ok, true} -> :ok
+          {:ok, false} -> {:error, :unknown_or_inactive_identity}
+          {:error, _reason} -> {:error, :identity_check_failed}
+        end
+      else
+        # Security module loaded but processes not started (dev/test).
+        # Log and allow — identity verification requires running Registry.
+        Logger.debug(
+          "[MCP] Security processes not running, skipping identity verification for #{agent_id}"
+        )
+
+        :ok
+      end
+    else
+      {:error, :security_unavailable}
+    end
+  end
+
+  defp security_processes_available? do
+    # Identity.Registry is the process that handles identity_active? queries
+    Process.whereis(Arbor.Security.Identity.Registry) != nil
   end
 
   # C2: Default workspace for file path validation on MCP-originated requests

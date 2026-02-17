@@ -28,11 +28,6 @@ defmodule Arbor.Agent.Executor do
 
   require Logger
 
-  # H3: Shadow mode disabled — authorize/4 is now the sole authority for
-  # capability decisions. can?/3 is still called for divergence logging
-  # during the transition period but no longer drives the decision.
-  @shadow_mode false
-
   @type state :: %{
           agent_id: String.t(),
           status: :running | :paused | :stopped,
@@ -370,43 +365,17 @@ defmodule Arbor.Agent.Executor do
     :authorized
   end
 
+  # P0-2: Use full authorize/4 pipeline directly (reflexes, identity,
+  # constraints, escalation, audit). Shadow mode removed — can?/3 is only
+  # for UI hints, not security decisions.
   defp check_capabilities(%Intent{action: action}, state) do
-    # Check agent has capability to execute this action
     resource = "arbor://agent/action/#{action}"
-    agent_id = state.agent_id
 
-    can_result = check_can(agent_id, resource)
-    authorize_result = check_authorize(agent_id, resource)
-    maybe_log_shadow_divergence(agent_id, resource, can_result, authorize_result)
-
-    if @shadow_mode, do: can_result, else: authorize_result
-  end
-
-  # Fast ETS-only capability check (boolean → :authorized | {:blocked, _})
-  defp check_can(agent_id, resource) do
-    case safe_call(fn -> Arbor.Security.can?(agent_id, resource, :execute) end) do
-      true -> :authorized
-      false -> {:blocked, :unauthorized}
-      _ -> {:blocked, :security_unavailable}
-    end
-  end
-
-  # Full authorization pipeline (reflexes, identity, constraints, escalation, audit)
-  defp check_authorize(agent_id, resource) do
-    case safe_call(fn -> Arbor.Security.authorize(agent_id, resource, :execute) end) do
+    case safe_call(fn -> Arbor.Security.authorize(state.agent_id, resource, :execute) end) do
       {:ok, :authorized} -> :authorized
       {:ok, :pending_approval, _ref} -> {:blocked, :pending_approval}
       {:error, reason} -> {:blocked, reason}
       _ -> {:blocked, :security_unavailable}
-    end
-  end
-
-  defp maybe_log_shadow_divergence(agent_id, resource, can_result, authorize_result) do
-    if can_result != authorize_result do
-      Logger.warning(
-        "[Executor] Security shadow-mode divergence for agent=#{agent_id} resource=#{resource}: " <>
-          "can?=#{inspect(can_result)} authorize=#{inspect(authorize_result)}"
-      )
     end
   end
 

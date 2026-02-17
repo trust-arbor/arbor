@@ -195,7 +195,9 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
           state
         )
 
-      assert text =~ "not found"
+      # P0-4: When Identity Registry is running, unregistered agent_id is rejected
+      # before action lookup. When not running, falls through to action lookup.
+      assert text =~ "not found" or text =~ "Unauthorized"
     end
 
     test "rejects execution without agent_id", %{state: state} do

@@ -63,6 +63,7 @@ defmodule Arbor.Orchestrator.Authoring.SystemPromptTest do
 
     test "includes all essential handler types" do
       prompt = SystemPrompt.for_mode(:blank)
+
       for type <- ["start", "exit", "codergen", "conditional", "parallel"] do
         assert prompt =~ type, "Missing handler type: #{type}"
       end
@@ -70,6 +71,7 @@ defmodule Arbor.Orchestrator.Authoring.SystemPromptTest do
 
     test "includes node attributes" do
       prompt = SystemPrompt.for_mode(:blank)
+
       for attr <- ["prompt", "max_retries", "goal_gate", "fidelity", "fan_out"] do
         assert prompt =~ attr, "Missing node attribute: #{attr}"
       end

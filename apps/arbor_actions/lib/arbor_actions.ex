@@ -114,6 +114,10 @@ defmodule Arbor.Actions do
     # Extract signing data from context (if present) before passing to action
     {signed_request, clean_context} = Map.pop(context, :signed_request)
 
+    # P0-1: Inject default taint policy from config if not already set in context.
+    # Ensures taint enforcement is active even when callers don't explicitly set policy.
+    clean_context = maybe_inject_taint_policy(clean_context)
+
     action_name = action_module_to_name(action_module)
     resource = "arbor://actions/execute/#{action_name}"
 
@@ -388,6 +392,20 @@ defmodule Arbor.Actions do
   end
 
   defp truncate_value(value), do: value
+
+  # P0-1: Inject default taint policy from config when not already in context.
+  # TaintEnforcement.check reads :taint_policy from context — this ensures
+  # the configured default (e.g. :audit_only) is used instead of always :permissive.
+  defp maybe_inject_taint_policy(context) when is_map(context) do
+    if Map.has_key?(context, :taint_policy) do
+      context
+    else
+      default = Application.get_env(:arbor_actions, :default_taint_policy, :permissive)
+      Map.put(context, :taint_policy, default)
+    end
+  end
+
+  defp maybe_inject_taint_policy(context), do: context
 
   # Convert an action module to its snake_case name for capability URIs
   defp action_module_to_name(module) do
