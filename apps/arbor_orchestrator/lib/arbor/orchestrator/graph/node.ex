@@ -65,7 +65,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
       shape: Map.get(attrs, "shape"),
       type: Map.get(attrs, "type"),
       prompt: Map.get(attrs, "prompt"),
-      label: Map.get(attrs, "label"),
+      label: Map.get(attrs, "label", id),
       goal_gate: truthy?(Map.get(attrs, "goal_gate", false)),
       max_retries: parse_max_retries(Map.get(attrs, "max_retries")),
       retry_target: Map.get(attrs, "retry_target"),
