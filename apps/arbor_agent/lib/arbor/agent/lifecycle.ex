@@ -65,7 +65,8 @@ defmodule Arbor.Agent.Lifecycle do
          :ok <- persist_signing_key(agent_id, identity),
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
-         :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []) do
+         :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
+         :ok <- seed_template_identity(agent_id, character, opts) do
       profile =
         build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts)
 
@@ -165,6 +166,10 @@ defmodule Arbor.Agent.Lifecycle do
       {:ok, profile} ->
         # Re-register identity and capabilities (ETS-only, lost on restart)
         ensure_identity_and_capabilities(profile)
+
+        # Re-initialize memory (knowledge graph ETS, index supervisor)
+        # These are in-memory only and lost on restart
+        init_memory(agent_id, [])
 
         executor_opts =
           Keyword.merge(opts,
@@ -358,6 +363,7 @@ defmodule Arbor.Agent.Lifecycle do
           |> Keyword.put_new(:trust_tier, template_mod.trust_tier())
           |> Keyword.put_new(:initial_goals, template_mod.initial_goals())
           |> Keyword.put_new(:capabilities, template_mod.required_capabilities())
+          |> Keyword.put_new(:template_module, template_mod)
 
         {:ok, character, opts}
     end
@@ -447,6 +453,74 @@ defmodule Arbor.Agent.Lifecycle do
     end)
 
     :ok
+  end
+
+  @doc """
+  Seed template identity data (values, traits, knowledge, thoughts) into memory.
+
+  Idempotent — skips if SelfKnowledge already has values seeded.
+  Called automatically during `create/2`, but can also be called manually
+  to backfill existing agents created before template seeding was added.
+  """
+  @spec seed_template_identity(String.t(), Character.t(), keyword()) :: :ok
+  def seed_template_identity(agent_id, character, opts) do
+    template_mod = Keyword.get(opts, :template_module)
+
+    # Knowledge graph is ETS-only (transient) — always re-seed on startup
+    seed_knowledge_graph(agent_id, character)
+
+    # Identity data (values, traits, thoughts) is durably persisted —
+    # only seed once (skip if SelfKnowledge already has values)
+    sk = Arbor.Memory.get_self_knowledge(agent_id)
+
+    unless sk && sk.values != [] do
+      seed_durable_identity(agent_id, character, template_mod)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("[Lifecycle] seed_template_identity failed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("[Lifecycle] seed_template_identity exit: #{inspect(reason)}")
+      :ok
+  end
+
+  defp seed_knowledge_graph(agent_id, character) do
+    for item <- character.knowledge || [] do
+      content = item[:content] || item["content"] || to_string(item)
+      category = item[:category] || item["category"] || "general"
+
+      Arbor.Memory.add_knowledge(agent_id, %{
+        type: :fact,
+        content: content,
+        relevance: 0.8,
+        metadata: %{category: category, source: :template}
+      })
+    end
+  end
+
+  defp seed_durable_identity(agent_id, character, template_mod) do
+    # Seed values from template callback
+    for value <- (template_mod && template_mod.values()) || character.values || [] do
+      Arbor.Memory.add_insight(agent_id, to_string(value), :value, confidence: 0.8)
+    end
+
+    # Seed personality traits from character
+    for trait <- character.traits || [] do
+      name = trait[:name] || trait["name"] || to_string(trait)
+      intensity = trait[:intensity] || trait["intensity"] || 0.7
+      Arbor.Memory.add_insight(agent_id, name, :trait, confidence: intensity)
+    end
+
+    # Seed initial thoughts from template callback
+    if template_mod do
+      for thought <- template_mod.initial_thoughts() || [] do
+        Arbor.Memory.record_thinking(agent_id, thought)
+      end
+    end
   end
 
   defp build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts) do
