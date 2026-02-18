@@ -4,10 +4,10 @@ defmodule Mix.Tasks.Arbor.Consult do
   Consult the advisory evaluator council about a design question.
 
       $ mix arbor.consult "Should evaluator agents be persistent GenServers?"
-      $ mix arbor.consult "Should we use Redis or ETS?" --perspective brainstorming
+      $ mix arbor.consult --question "Should we use Redis or ETS?" --perspective brainstorming
       $ mix arbor.consult "Persistent agents?" -p stability --docs .arbor/roadmap/3-in-progress/consensus-redesign.md
       $ mix arbor.consult "Full review" --all --docs design.md --context "budget:low,timeline:2 weeks"
-      $ mix arbor.consult "Build order?" --all --save --docs design.md
+      $ mix arbor.consult -q "Build order?" --all --save --docs design.md
       $ mix arbor.consult "What is consciousness?" --multi-model --save
       $ mix arbor.consult "Review this code" --provider anthropic:claude-sonnet-4-5-20250929
       $ mix arbor.consult "Quick question" -r --provider ollama:deepseek-v3.2:cloud
@@ -15,6 +15,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   ## Options
 
+    * `--question` / `-q`     — Question text (alternative to positional argument)
     * `--perspective` / `-p`  — Ask a single perspective (default: brainstorming)
     * `--adversarial` / `-r`   — Shorthand for --perspective adversarial (red team)
     * `--all` / `-a`          — Ask all perspectives (expensive: N LLM calls)
@@ -69,6 +70,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   @perspectives AdvisoryLLM.perspectives()
 
   @switches [
+    question: :string,
     perspective: :string,
     adversarial: :boolean,
     all: :boolean,
@@ -83,6 +85,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   ]
 
   @aliases [
+    q: :question,
     p: :perspective,
     r: :adversarial,
     a: :all,
@@ -98,8 +101,10 @@ defmodule Mix.Tasks.Arbor.Consult do
   def run([]) do
     Mix.shell().error("""
     Usage: mix arbor.consult "your question" [options]
+           mix arbor.consult --question "your question" [options]
 
     Options:
+      -q, --question TEXT      Question text (alternative to positional argument)
       -p, --perspective NAME   Ask one perspective (default: brainstorming)
       -r, --adversarial        Shorthand for --perspective adversarial (red team)
       -a, --all                Ask all perspectives
@@ -121,7 +126,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   def run(args) do
     {opts, positional, _invalid} = OptionParser.parse(args, strict: @switches, aliases: @aliases)
 
-    question = Enum.join(positional, " ")
+    question = opts[:question] || Enum.join(positional, " ")
 
     if question == "" do
       Mix.shell().error("Error: no question provided")
