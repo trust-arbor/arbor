@@ -18,10 +18,11 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     * `:recall_beliefs`    — `fn agent_id -> {:ok, beliefs} | {:error, reason} | beliefs`
     * `:memory_update`     — `fn agent_id, turn_data -> :ok`
     * `:checkpoint`        — `fn session_id, turn_count, snapshot -> :ok`
-    * `:route_actions`     — `fn actions, agent_id -> :ok`
-    * `:route_intents`     — `fn agent_id -> :ok`
-    * `:update_goals`      — `fn goal_updates, new_goals, agent_id -> :ok`
-    * `:background_checks` — `fn agent_id -> results`
+    * `:route_actions`            — `fn actions, agent_id -> :ok`
+    * `:route_intents`            — `fn agent_id -> :ok`
+    * `:update_goals`             — `fn goal_updates, new_goals, agent_id -> :ok`
+    * `:apply_identity_insights`  — `fn insights, agent_id -> :ok`
+    * `:background_checks`        — `fn agent_id -> results`
 
   If an adapter key is missing, the handler returns success with empty
   context_updates (graceful degradation). If an adapter raises or throws,
@@ -286,7 +287,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.memory_notes" => Map.get(parsed, "memory_notes", []),
           "session.decompositions" => Map.get(parsed, "decompositions", []),
           "session.new_intents" => Map.get(parsed, "new_intents", []),
-          "session.proposal_decisions" => Map.get(parsed, "proposal_decisions", [])
+          "session.proposal_decisions" => Map.get(parsed, "proposal_decisions", []),
+          "session.identity_insights" => Map.get(parsed, "identity_insights", [])
         })
 
       _ ->
@@ -297,7 +299,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.memory_notes" => [],
           "session.decompositions" => [],
           "session.new_intents" => [],
-          "session.proposal_decisions" => []
+          "session.proposal_decisions" => [],
+          "session.identity_insights" => []
         })
     end
   end
@@ -324,11 +327,23 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
           try do
             route.(actions, agent_id)
-            ok(%{"session.actions_routed" => true})
           catch
             kind, reason -> fail("route_actions: #{inspect({kind, reason})}")
           end
         end)
+
+        # Process identity insights (if adapter provided)
+        with_adapter(adapters, :apply_identity_insights, fn apply_fn ->
+          insights = Context.get(ctx, "session.identity_insights", [])
+
+          try do
+            apply_fn.(insights, agent_id)
+          catch
+            kind, reason -> fail("apply_identity_insights: #{inspect({kind, reason})}")
+          end
+        end)
+
+        ok(%{"session.actions_routed" => true})
     end
   end
 

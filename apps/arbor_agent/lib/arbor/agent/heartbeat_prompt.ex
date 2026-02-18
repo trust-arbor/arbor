@@ -77,6 +77,9 @@ defmodule Arbor.Agent.HeartbeatPrompt do
           {"action": "file_read", "params": {"path": "/x"}, "reasoning": "why",
            "preconditions": "what must be true", "success_criteria": "how to verify"}
         ], "contingency": "fallback plan if steps fail"}
+      ],
+      "identity_insights": [
+        {"category": "capability|trait|value", "content": "what you discovered", "confidence": 0.8}
       ]
     }
 
@@ -87,6 +90,10 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     When pending proposals are shown, review them and decide whether to accept (integrate into
     your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
     proposal_decisions for proposals you've actively reviewed.
+
+    Use identity_insights to report discoveries about yourself — capabilities you've demonstrated,
+    personality traits you notice, or values that guide your decisions. Each insight has a category
+    (capability, trait, or value), content describing it, and confidence (0.0-1.0).
     """
   end
 
@@ -336,7 +343,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     ## Response Format
     Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
     Required keys: "thinking", "actions", "memory_notes", "goal_updates".
-    Optional keys: "new_goals", "proposal_decisions", "decompositions".
+    Optional keys: "new_goals", "proposal_decisions", "decompositions", "identity_insights".
     If you have no active goals, use "new_goals" to create some.
     In plan_execution mode, use "decompositions" to break goals into executable steps.
     """

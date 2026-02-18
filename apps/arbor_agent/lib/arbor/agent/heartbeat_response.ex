@@ -18,7 +18,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           goal_updates: [map()],
           new_goals: [map()],
           proposal_decisions: [map()],
-          decompositions: [map()]
+          decompositions: [map()],
+          identity_insights: [map()]
         }
 
   @doc """
@@ -44,7 +45,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           goal_updates: parse_goal_updates(data),
           new_goals: parse_new_goals(data),
           proposal_decisions: parse_proposal_decisions(data),
-          decompositions: parse_decompositions(data)
+          decompositions: parse_decompositions(data),
+          identity_insights: parse_identity_insights(data)
         }
 
       _ ->
@@ -58,7 +60,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           goal_updates: [],
           new_goals: [],
           proposal_decisions: [],
-          decompositions: []
+          decompositions: [],
+          identity_insights: []
         }
     end
   end
@@ -75,7 +78,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
       goal_updates: [],
       new_goals: [],
       proposal_decisions: [],
-      decompositions: []
+      decompositions: [],
+      identity_insights: []
     }
   end
 
@@ -277,6 +281,42 @@ defmodule Arbor.Agent.HeartbeatResponse do
   end
 
   defp parse_decomposition_intention(_), do: nil
+
+  @allowed_insight_categories ~w(capability skill trait personality value)
+
+  defp parse_identity_insights(data) do
+    case Map.get(data, "identity_insights") do
+      insights when is_list(insights) ->
+        insights
+        |> Enum.map(&parse_single_insight/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.take(5)
+
+      _ ->
+        []
+    end
+  end
+
+  defp parse_single_insight(%{"category" => cat, "content" => content} = insight)
+       when is_binary(cat) and is_binary(content) and content != "" do
+    if cat in @allowed_insight_categories do
+      %{
+        category: String.to_existing_atom(cat),
+        content: content,
+        confidence: parse_confidence(insight["confidence"])
+      }
+    else
+      nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp parse_single_insight(_), do: nil
+
+  defp parse_confidence(c) when is_float(c) and c >= 0.0 and c <= 1.0, do: c
+  defp parse_confidence(c) when is_integer(c) and c >= 0 and c <= 100, do: c / 100.0
+  defp parse_confidence(_), do: 0.5
 
   # Convert string to atom safely — only allows known action types
   defp safe_to_atom(nil), do: :unknown

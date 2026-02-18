@@ -100,6 +100,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       route_actions: build_route_actions(),
       route_intents: build_route_intents(),
       update_goals: build_update_goals(),
+      apply_identity_insights: build_apply_identity_insights(),
       background_checks: build_background_checks(),
       trust_tier_resolver: build_trust_tier_resolver()
     }
@@ -389,6 +390,37 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       end)
 
       :ok
+    end
+  end
+
+  # ── Identity Insights ─────────────────────────────────────────────
+  #
+  # SessionHandler calls: apply_identity_insights.(insights, agent_id)
+  # Each insight is %{"category" => "capability|trait|value", "content" => "...", "confidence" => 0.8}
+  # Routes through Arbor.Memory.add_insight for self-knowledge updates.
+
+  defp build_apply_identity_insights do
+    fn insights, agent_id ->
+      try do
+        memory = Arbor.Memory
+
+        Enum.each(List.wrap(insights), fn insight ->
+          category = insight["category"] || insight[:category]
+          content = insight["content"] || insight[:content]
+          confidence = insight["confidence"] || insight[:confidence] || 0.5
+
+          if category && content do
+            cat_atom =
+              if is_atom(category), do: category, else: String.to_existing_atom(category)
+
+            bridge(memory, :add_insight, [agent_id, content, cat_atom, [confidence: confidence]], :ok)
+          end
+        end)
+
+        :ok
+      rescue
+        _ -> :ok
+      end
     end
   end
 

@@ -320,17 +320,16 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           </span>
         </div>
 
-        <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">Capabilities</h3>
-        <div :if={caps(@tab_data[:self_knowledge]) == []} style="padding: 0.5rem;">
+        <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">Granted Capabilities</h3>
+        <div :if={(@tab_data[:security_caps] || []) == []} style="padding: 0.5rem;">
           <.empty_state icon="⚡" title="No capabilities" hint="" />
         </div>
         <div
-          :for={cap <- caps(@tab_data[:self_knowledge])}
+          :for={uri <- @tab_data[:security_caps] || []}
           style="display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem; margin-bottom: 0.2rem; font-size: 0.85em;"
         >
           <span>⚡</span>
-          <span style="font-weight: 500;">{elem(cap, 0)}</span>
-          <.badge label={"#{round(elem(cap, 1) * 100)}%"} color={:blue} />
+          <span style="font-family: monospace; font-size: 0.9em;">{uri}</span>
         </div>
       </div>
       <.empty_state
@@ -920,7 +919,20 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp load_tab_data(socket, "identity", agent_id) do
     sk = safe_call(fn -> Arbor.Memory.get_self_knowledge(agent_id) end)
-    assign(socket, tab_data: %{self_knowledge: sk})
+
+    security_caps =
+      case safe_call(fn -> Arbor.Security.list_capabilities(agent_id) end) do
+        {:ok, caps} when is_list(caps) ->
+          caps
+          |> Enum.map(& &1.resource_uri)
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        _ ->
+          []
+      end
+
+    assign(socket, tab_data: %{self_knowledge: sk, security_caps: security_caps})
   end
 
   defp load_tab_data(socket, "goals", agent_id) do
@@ -1072,13 +1084,27 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp to_map_safe(other), do: other
 
   defp traits(nil), do: []
-  defp traits(sk), do: Map.get(sk, :personality_traits, [])
+
+  defp traits(sk) do
+    Map.get(sk, :personality_traits, [])
+    |> Enum.map(fn
+      %{trait: name, strength: s} -> {to_string(name), s}
+      %{"trait" => name, "strength" => s} -> {to_string(name), s}
+      other -> {inspect(other), 0.5}
+    end)
+  end
 
   defp values(nil), do: []
-  defp values(sk), do: Map.get(sk, :values, [])
 
-  defp caps(nil), do: []
-  defp caps(sk), do: Map.get(sk, :capabilities, [])
+  defp values(sk) do
+    Map.get(sk, :values, [])
+    |> Enum.map(fn
+      %{value: name, importance: i} -> {to_string(name), i}
+      %{"value" => name, "importance" => i} -> {to_string(name), i}
+      other -> {inspect(other), 0.5}
+    end)
+  end
+
 
   defp discover_agents do
     # Combine agents from ETS tables and ChatState recent list
