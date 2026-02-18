@@ -66,9 +66,9 @@ defmodule Arbor.Dashboard.Live.LandingLive do
 
       <.card title="Activity">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
-          Unified activity feed with agent and category filtering.
+          Persisted event history with agent and category filtering.
         </p>
-        <a href="/activity" class="aw-nav-link">Open Activity Dashboard &rarr;</a>
+        <a href="/events" class="aw-nav-link">Open Events Dashboard &rarr;</a>
       </.card>
 
       <.card title="Agents">

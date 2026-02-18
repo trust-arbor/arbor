@@ -13,7 +13,7 @@ defmodule Arbor.Dashboard.Router do
       live "/signals", SignalsLive
       live "/eval", EvalLive
       live "/consensus", ConsensusLive
-      live "/activity", ActivityLive
+      live "/events", EventsLive
       live "/agents", AgentsLive
       live "/monitor", MonitorLive
       live "/roadmap", RoadmapLive
