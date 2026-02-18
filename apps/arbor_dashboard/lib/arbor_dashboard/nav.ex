@@ -10,12 +10,12 @@ defmodule Arbor.Dashboard.Nav do
   import Phoenix.Component, only: [assign: 3]
 
   alias Arbor.Dashboard.Live.{
-    ActivityLive,
     AgentsLive,
     ChatLive,
     ConsensusLive,
     DemoLive,
     EvalLive,
+    EventsLive,
     LandingLive,
     MemoryLive,
     MonitorLive,
@@ -28,7 +28,7 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/signals", label: "Signals", icon: "\u{1F4E1}", view: SignalsLive},
     %{href: "/eval", label: "Eval", icon: "\u{1F4CA}", view: EvalLive},
     %{href: "/consensus", label: "Consensus", icon: "\u{1F5F3}", view: ConsensusLive},
-    %{href: "/activity", label: "Activity", icon: "\u{1F4CA}", view: ActivityLive},
+    %{href: "/events", label: "Events", icon: "\u{1F4DC}", view: EventsLive},
     %{href: "/agents", label: "Agents", icon: "\u{1F916}", view: AgentsLive},
     %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},

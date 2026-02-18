@@ -45,7 +45,9 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         paused: false,
         buffered_signals: [],
         subscribed_categories: subscribed_categories,
-        filter_open: false
+        filter_open: false,
+        time_filter: :all,
+        agent_filter: nil
       )
       |> stream(:signals, signals)
 
@@ -76,7 +78,9 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         {:noreply, socket}
       end
     else
-      if MapSet.member?(socket.assigns.active_categories, signal.category) do
+      if MapSet.member?(socket.assigns.active_categories, signal.category) &&
+           matches_time?(signal, socket.assigns.time_filter) &&
+           matches_agent?(signal, socket.assigns.agent_filter) do
         {:noreply, stream_insert(socket, :signals, signal, at: 0)}
       else
         {:noreply, socket}
@@ -120,7 +124,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         do: MapSet.delete(active, cat),
         else: MapSet.put(active, cat)
 
-    signals = reload_signals(active)
+    signals = reload_signals(active, socket.assigns.time_filter, socket.assigns.agent_filter)
 
     socket =
       socket
@@ -132,7 +136,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
 
   def handle_event("filter-select-all", _params, socket) do
     active = MapSet.new(socket.assigns.subscribed_categories)
-    signals = reload_signals(active)
+    signals = reload_signals(active, socket.assigns.time_filter, socket.assigns.agent_filter)
 
     socket =
       socket
@@ -147,6 +151,50 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
       socket
       |> assign(:active_categories, MapSet.new())
       |> stream(:signals, [], reset: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("filter-time", %{"range" => range}, socket) do
+    range_atom =
+      case range do
+        "all" -> :all
+        "hour" -> :hour
+        "today" -> :today
+        _ -> :all
+      end
+
+    signals = reload_signals(socket.assigns.active_categories, range_atom, socket.assigns.agent_filter)
+
+    socket =
+      socket
+      |> assign(:time_filter, range_atom)
+      |> stream(:signals, signals, reset: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("filter-agent", %{"agent" => agent}, socket) do
+    agent_filter = if agent == "", do: nil, else: agent
+
+    signals = reload_signals(socket.assigns.active_categories, socket.assigns.time_filter, agent_filter)
+
+    socket =
+      socket
+      |> assign(:agent_filter, agent_filter)
+      |> stream(:signals, signals, reset: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_event("clear-filters", _params, socket) do
+    signals = reload_signals(socket.assigns.active_categories, :all, nil)
+
+    socket =
+      socket
+      |> assign(:time_filter, :all)
+      |> assign(:agent_filter, nil)
+      |> stream(:signals, signals, reset: true)
 
     {:noreply, socket}
   end
@@ -257,6 +305,38 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
       </div>
     </div>
 
+    <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center;">
+      <button
+        :for={range <- [:all, :hour, :today]}
+        phx-click="filter-time"
+        phx-value-range={range}
+        class={"aw-filter-btn #{if @time_filter == range, do: "aw-filter-active"}"}
+      >
+        {time_label(range)}
+      </button>
+
+      <form phx-change="filter-agent" style="display: inline; margin-left: 0.5rem;">
+        <input
+          type="text"
+          name="agent"
+          value={@agent_filter || ""}
+          placeholder="Filter by agent..."
+          class="aw-input"
+          style="width: 180px; padding: 0.25rem 0.5rem; font-size: 0.85em;"
+          phx-debounce="300"
+        />
+      </form>
+
+      <button
+        :if={@time_filter != :all or @agent_filter != nil}
+        phx-click="clear-filters"
+        class="aw-btn aw-btn-default"
+        style="margin-left: auto;"
+      >
+        Clear filters
+      </button>
+    </div>
+
     <div id="signals-stream" phx-update="stream" style="margin-top: 1rem;">
       <div
         :for={{dom_id, signal} <- @streams.signals}
@@ -327,13 +407,40 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     """
   end
 
-  defp reload_signals(active_categories) do
+  defp reload_signals(active_categories, time_filter, agent_filter) do
     if MapSet.size(active_categories) == 0 do
       []
     else
       safe_recent(limit: 50)
-      |> Enum.filter(fn s -> MapSet.member?(active_categories, s.category) end)
+      |> Enum.filter(fn s ->
+        MapSet.member?(active_categories, s.category) &&
+          matches_time?(s, time_filter) &&
+          matches_agent?(s, agent_filter)
+      end)
     end
+  end
+
+  defp time_label(:all), do: "All time"
+  defp time_label(:hour), do: "Last hour"
+  defp time_label(:today), do: "Today"
+
+  defp matches_time?(_signal, :all), do: true
+
+  defp matches_time?(signal, :hour) do
+    DateTime.diff(DateTime.utc_now(), signal.timestamp, :second) < 3600
+  end
+
+  defp matches_time?(signal, :today) do
+    DateTime.diff(DateTime.utc_now(), signal.timestamp, :second) < 86_400
+  end
+
+  defp matches_agent?(_signal, nil), do: true
+
+  defp matches_agent?(signal, agent_id) do
+    sig_agent =
+      get_in(signal.data, [:agent_id]) || get_in(signal.data, ["agent_id"]) || ""
+
+    String.contains?(to_string(sig_agent), agent_id)
   end
 
   defp format_signal_data(data) when data == %{}, do: "(empty)"
