@@ -897,6 +897,9 @@ defmodule Arbor.Agent.DebugAgent do
   defp safe_lifecycle_ensure(display_name, agent_id, opts) do
     case Lifecycle.start(agent_id, opts) do
       {:ok, _pid} ->
+        # Backfill identity data for agents created before template seeding
+        character = Diagnostician.character()
+        Lifecycle.seed_template_identity(agent_id, character, template_module: Diagnostician)
         agent_id
 
       {:error, :not_found} ->
