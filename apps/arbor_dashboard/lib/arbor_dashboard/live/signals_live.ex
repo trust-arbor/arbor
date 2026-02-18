@@ -164,7 +164,8 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         _ -> :all
       end
 
-    signals = reload_signals(socket.assigns.active_categories, range_atom, socket.assigns.agent_filter)
+    signals =
+      reload_signals(socket.assigns.active_categories, range_atom, socket.assigns.agent_filter)
 
     socket =
       socket
@@ -177,7 +178,8 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   def handle_event("filter-agent", %{"agent" => agent}, socket) do
     agent_filter = if agent == "", do: nil, else: agent
 
-    signals = reload_signals(socket.assigns.active_categories, socket.assigns.time_filter, agent_filter)
+    signals =
+      reload_signals(socket.assigns.active_categories, socket.assigns.time_filter, agent_filter)
 
     socket =
       socket
