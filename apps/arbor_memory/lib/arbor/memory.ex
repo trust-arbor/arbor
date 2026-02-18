@@ -110,8 +110,14 @@ defmodule Arbor.Memory do
       end
 
     if graph_enabled do
-      graph = KnowledgeGraph.new(agent_id, opts)
-      GraphOps.save_graph(agent_id, graph)
+      case GraphOps.load_persisted_graph(agent_id) do
+        {:ok, graph} ->
+          GraphOps.save_graph(agent_id, graph)
+
+        {:error, _} ->
+          graph = KnowledgeGraph.new(agent_id, opts)
+          GraphOps.save_graph(agent_id, graph)
+      end
     end
 
     Signals.emit_memory_initialized(agent_id, %{
