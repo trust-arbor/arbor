@@ -148,25 +148,7 @@ defmodule Arbor.Memory.ChatHistory do
     if MemoryStore.available?() do
       case MemoryStore.load_by_prefix("chat_history", agent_id) do
         {:ok, pairs} ->
-          Enum.each(pairs, fn {key, msg_map} ->
-            case String.split(key, ":", parts: 2) do
-              [^agent_id, msg_id] ->
-                msg = restore_timestamps(msg_map)
-                :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
-
-              _ ->
-                :ok
-            end
-          end)
-
-          :ets.match_object(@ets_table, {{agent_id, :_}, :_})
-          |> Enum.map(fn {_key, msg} -> msg end)
-          |> Enum.sort(fn a, b ->
-            case {a[:timestamp], b[:timestamp]} do
-              {%DateTime{} = ta, %DateTime{} = tb} -> DateTime.compare(ta, tb) != :gt
-              _ -> true
-            end
-          end)
+          restore_agent_messages(pairs, agent_id)
 
         _ ->
           []
@@ -176,21 +158,37 @@ defmodule Arbor.Memory.ChatHistory do
     end
   end
 
+  defp restore_agent_messages(pairs, agent_id) do
+    Enum.each(pairs, fn {key, msg_map} ->
+      case String.split(key, ":", parts: 2) do
+        [^agent_id, msg_id] ->
+          msg = restore_timestamps(msg_map)
+          :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
+
+        _ ->
+          :ok
+      end
+    end)
+
+    :ets.match_object(@ets_table, {{agent_id, :_}, :_})
+    |> Enum.map(fn {_key, msg} -> msg end)
+    |> sort_by_timestamp()
+  end
+
+  defp sort_by_timestamp(messages) do
+    Enum.sort(messages, fn a, b ->
+      case {a[:timestamp], b[:timestamp]} do
+        {%DateTime{} = ta, %DateTime{} = tb} -> DateTime.compare(ta, tb) != :gt
+        _ -> true
+      end
+    end)
+  end
+
   defp load_all_messages_from_postgres do
     if MemoryStore.available?() do
       case MemoryStore.load_all("chat_history") do
         {:ok, pairs} ->
-          Enum.each(pairs, fn {key, msg_map} ->
-            case String.split(key, ":", parts: 2) do
-              [agent_id, msg_id] ->
-                msg = restore_timestamps(msg_map)
-                :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
-
-              _ ->
-                Logger.warning("ChatHistory: invalid key format from Postgres: #{key}")
-            end
-          end)
-
+          Enum.each(pairs, &restore_message_from_pair/1)
           Logger.info("ChatHistory: loaded #{length(pairs)} messages from Postgres")
 
         _ ->
@@ -200,6 +198,17 @@ defmodule Arbor.Memory.ChatHistory do
   rescue
     e ->
       Logger.warning("ChatHistory: failed to load from Postgres: #{inspect(e)}")
+  end
+
+  defp restore_message_from_pair({key, msg_map}) do
+    case String.split(key, ":", parts: 2) do
+      [agent_id, msg_id] ->
+        msg = restore_timestamps(msg_map)
+        :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
+
+      _ ->
+        Logger.warning("ChatHistory: invalid key format from Postgres: #{key}")
+    end
   end
 
   defp restore_timestamps(msg) do

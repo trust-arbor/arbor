@@ -28,9 +28,10 @@ defmodule Arbor.Orchestrator do
   @spec validate(String.t() | Graph.t(), keyword()) ::
           [Arbor.Orchestrator.Validation.Diagnostic.t()]
   def validate(source_or_graph, opts \\ []) do
-    with {:ok, graph} <- ensure_graph(source_or_graph, opts) do
-      Validator.validate(graph)
-    else
+    case ensure_graph(source_or_graph, opts) do
+      {:ok, graph} ->
+        Validator.validate(graph)
+
       {:error, reason} ->
         [
           Diagnostic.error(

@@ -460,17 +460,7 @@ defmodule Arbor.Memory.GoalStore do
     if MemoryStore.available?() do
       case MemoryStore.load_all("goals") do
         {:ok, pairs} ->
-          Enum.each(pairs, fn {key, goal_map} ->
-            case String.split(key, ":", parts: 2) do
-              [agent_id, _goal_id] ->
-                goal = goal_from_map(goal_map)
-                :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
-
-              _ ->
-                Logger.warning("GoalStore: invalid key format from Postgres: #{key}")
-            end
-          end)
-
+          Enum.each(pairs, &restore_goal_from_pair/1)
           Logger.info("GoalStore: loaded #{length(pairs)} goals from Postgres")
 
         _ ->
@@ -480,6 +470,17 @@ defmodule Arbor.Memory.GoalStore do
   rescue
     e ->
       Logger.warning("GoalStore: failed to load from Postgres: #{inspect(e)}")
+  end
+
+  defp restore_goal_from_pair({key, goal_map}) do
+    case String.split(key, ":", parts: 2) do
+      [agent_id, _goal_id] ->
+        goal = goal_from_map(goal_map)
+        :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+
+      _ ->
+        Logger.warning("GoalStore: invalid key format from Postgres: #{key}")
+    end
   end
 
   defp build_tree(goal, all_goals) do

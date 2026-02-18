@@ -44,6 +44,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Retry do
 
       {:error, reason} = error ->
         if attempt < max_retries and should_retry.(reason) do
+          # credo:disable-for-next-line Credo.Check.Readability.WithSingleClause
           with {:ok, delay} <-
                  retry_delay(reason, initial_delay, factor, attempt + 1, max_delay, jitter) do
             if is_function(on_retry, 2),

@@ -444,29 +444,34 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp build_store_decompositions do
     fn decompositions, agent_id ->
-      Enum.each(List.wrap(decompositions), fn decomp ->
-        goal_id = decomp["goal_id"] || decomp[:goal_id]
-        intentions = decomp["intentions"] || decomp[:intentions] || []
-
-        Enum.each(List.wrap(intentions), fn intent_data ->
-          action = intent_data["action"] || intent_data[:action] || "unknown"
-          description = intent_data["description"] || intent_data[:description] || action
-
-          intent =
-            bridge(
-              Arbor.Contracts.Memory.Intent,
-              :action,
-              [action, description, [goal_id: goal_id]],
-              nil
-            )
-
-          if intent do
-            bridge(Arbor.Memory, :record_intent, [agent_id, intent], :ok)
-          end
-        end)
-      end)
-
+      Enum.each(List.wrap(decompositions), &store_decomposition(&1, agent_id))
       :ok
+    end
+  end
+
+  defp store_decomposition(decomp, agent_id) do
+    goal_id = decomp["goal_id"] || decomp[:goal_id]
+    intentions = decomp["intentions"] || decomp[:intentions] || []
+
+    Enum.each(List.wrap(intentions), fn intent_data ->
+      store_intent(intent_data, goal_id, agent_id)
+    end)
+  end
+
+  defp store_intent(intent_data, goal_id, agent_id) do
+    action = intent_data["action"] || intent_data[:action] || "unknown"
+    description = intent_data["description"] || intent_data[:description] || action
+
+    intent =
+      bridge(
+        Arbor.Contracts.Memory.Intent,
+        :action,
+        [action, description, [goal_id: goal_id]],
+        nil
+      )
+
+    if intent do
+      bridge(Arbor.Memory, :record_intent, [agent_id, intent], :ok)
     end
   end
 
@@ -479,35 +484,31 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp build_process_proposal_decisions do
     fn decisions, agent_id ->
-      Enum.each(List.wrap(decisions), fn decision ->
-        proposal_id = decision["proposal_id"] || decision[:proposal_id]
-        action = decision["decision"] || decision[:decision]
-
-        if proposal_id do
-          case action do
-            "accept" ->
-              bridge(Arbor.Memory.Proposal, :accept, [agent_id, proposal_id], :ok)
-
-            "reject" ->
-              reason = decision["reason"] || decision[:reason]
-
-              bridge(
-                Arbor.Memory.Proposal,
-                :reject,
-                [agent_id, proposal_id, [reason: reason]],
-                :ok
-              )
-
-            _ ->
-              # "defer" or unknown — no-op (stays in queue)
-              :ok
-          end
-        end
-      end)
-
+      Enum.each(List.wrap(decisions), &apply_proposal_decision(&1, agent_id))
       :ok
     end
   end
+
+  defp apply_proposal_decision(decision, agent_id) do
+    proposal_id = decision["proposal_id"] || decision[:proposal_id]
+    action = decision["decision"] || decision[:decision]
+
+    if proposal_id do
+      dispatch_proposal_action(action, agent_id, proposal_id, decision)
+    end
+  end
+
+  defp dispatch_proposal_action("accept", agent_id, proposal_id, _decision) do
+    bridge(Arbor.Memory.Proposal, :accept, [agent_id, proposal_id], :ok)
+  end
+
+  defp dispatch_proposal_action("reject", agent_id, proposal_id, decision) do
+    reason = decision["reason"] || decision[:reason]
+    bridge(Arbor.Memory.Proposal, :reject, [agent_id, proposal_id, [reason: reason]], :ok)
+  end
+
+  # "defer" or unknown — no-op (stays in queue)
+  defp dispatch_proposal_action(_action, _agent_id, _proposal_id, _decision), do: :ok
 
   # ── Consolidate ─────────────────────────────────────────────────────
   #

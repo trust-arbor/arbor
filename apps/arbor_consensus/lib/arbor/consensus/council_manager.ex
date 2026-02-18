@@ -44,28 +44,7 @@ defmodule Arbor.Consensus.CouncilManager do
   """
   @spec ensure_started() :: :ok
   def ensure_started do
-    results =
-      Enum.map(@perspectives, fn perspective ->
-        agent_name = perspective_agent_name(perspective)
-
-        case EvaluatorAgent.Supervisor.lookup_agent(agent_name) do
-          {:ok, pid} when is_pid(pid) ->
-            if Process.alive?(pid) do
-              {:already_running, perspective}
-            else
-              case start_perspective(perspective) do
-                {:ok, _pid} -> {:started, perspective}
-                {:error, reason} -> {:error, perspective, reason}
-              end
-            end
-
-          :not_found ->
-            case start_perspective(perspective) do
-              {:ok, _pid} -> {:started, perspective}
-              {:error, reason} -> {:error, perspective, reason}
-            end
-        end
-      end)
+    results = Enum.map(@perspectives, &ensure_perspective_started/1)
 
     errors = for {:error, p, reason} <- results, do: {p, reason}
 
@@ -81,6 +60,25 @@ defmodule Arbor.Consensus.CouncilManager do
     end
 
     :ok
+  end
+
+  defp ensure_perspective_started(perspective) do
+    agent_name = perspective_agent_name(perspective)
+
+    case EvaluatorAgent.Supervisor.lookup_agent(agent_name) do
+      {:ok, pid} when is_pid(pid) ->
+        if Process.alive?(pid), do: {:already_running, perspective}, else: try_start(perspective)
+
+      :not_found ->
+        try_start(perspective)
+    end
+  end
+
+  defp try_start(perspective) do
+    case start_perspective(perspective) do
+      {:ok, _pid} -> {:started, perspective}
+      {:error, reason} -> {:error, perspective, reason}
+    end
   end
 
   @doc """

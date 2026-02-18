@@ -183,7 +183,6 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     end
   end
 
-  @tag :fast
   describe "MemoryLive refresh with agent" do
     @tag :fast
     test "refresh reloads current tab data", %{conn: conn} do

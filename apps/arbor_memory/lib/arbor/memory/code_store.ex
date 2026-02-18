@@ -272,17 +272,7 @@ defmodule Arbor.Memory.CodeStore do
     if MemoryStore.available?() do
       case MemoryStore.load_all("code_patterns") do
         {:ok, pairs} ->
-          # Group by agent_id (keys are "agent_id:entry_id")
-          grouped =
-            Enum.group_by(pairs, fn {key, _data} ->
-              key |> String.split(":", parts: 2) |> List.first()
-            end)
-
-          Enum.each(grouped, fn {agent_id, agent_pairs} ->
-            entries = Enum.map(agent_pairs, fn {_key, data} -> deserialize_entry(data) end)
-            if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
-          end)
-
+          restore_code_entries(pairs)
           Logger.info("CodeStore: loaded #{length(pairs)} entries from Postgres")
 
         _ ->
@@ -292,5 +282,18 @@ defmodule Arbor.Memory.CodeStore do
   rescue
     e ->
       Logger.warning("CodeStore: failed to load from Postgres: #{inspect(e)}")
+  end
+
+  defp restore_code_entries(pairs) do
+    # Group by agent_id (keys are "agent_id:entry_id")
+    grouped =
+      Enum.group_by(pairs, fn {key, _data} ->
+        key |> String.split(":", parts: 2) |> List.first()
+      end)
+
+    Enum.each(grouped, fn {agent_id, agent_pairs} ->
+      entries = Enum.map(agent_pairs, fn {_key, data} -> deserialize_entry(data) end)
+      if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
+    end)
   end
 end
