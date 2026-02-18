@@ -92,20 +92,27 @@ defmodule Arbor.Monitor.HealingSupervisor do
     DynamicSupervisor.count_children(Arbor.Monitor.HealingWorkers).active
   end
 
-  # Runtime bridge: start DebugAgent if arbor_agent is loaded.
+  # Runtime bridge: start DebugAgent if arbor_agent is loaded and enabled.
   # arbor_monitor is standalone (zero in-umbrella deps), so we use
   # Code.ensure_loaded? to avoid a compile-time dependency on arbor_agent.
+  # Disable via: config :arbor_monitor, start_debug_agent: false
   defp maybe_debug_agent_child(healing_config) do
+    enabled = Application.get_env(:arbor_monitor, :start_debug_agent, true)
     debug_agent_mod = Arbor.Agent.DebugAgent
 
-    if Code.ensure_loaded?(debug_agent_mod) do
+    if enabled && Code.ensure_loaded?(debug_agent_mod) do
       opts = Keyword.get(healing_config, :debug_agent, [])
       opts = Keyword.put_new(opts, :display_name, "debug-agent")
 
       Logger.info("[HealingSupervisor] Starting DebugAgent (arbor_agent available)")
       [{debug_agent_mod, opts}]
     else
-      Logger.debug("[HealingSupervisor] DebugAgent not available (arbor_agent not loaded)")
+      unless enabled do
+        Logger.debug("[HealingSupervisor] DebugAgent disabled via config")
+      else
+        Logger.debug("[HealingSupervisor] DebugAgent not available (arbor_agent not loaded)")
+      end
+
       []
     end
   end

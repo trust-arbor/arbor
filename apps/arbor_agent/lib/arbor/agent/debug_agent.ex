@@ -225,6 +225,9 @@ defmodule Arbor.Agent.DebugAgent do
       }
     }
 
+    # Register in the agent registry so the dashboard can see us
+    safe_register(agent_id)
+
     # Schedule first work check
     schedule_work_check(poll_interval)
     safe_emit(:debug_agent, :started, %{agent_id: agent_id})
@@ -830,6 +833,18 @@ defmodule Arbor.Agent.DebugAgent do
   defp execute_remediation_action(action, target) do
     Logger.info("[DebugAgent] No handler for action #{action} on #{inspect(target)}")
     %{success: true, action: :none, reason: nil}
+  end
+
+  defp safe_register(agent_id) do
+    Arbor.Agent.Registry.register(agent_id, self(), %{
+      module: __MODULE__,
+      type: :debug_agent,
+      display_name: "Diagnostician"
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp safe_emit(category, type, data) do
