@@ -182,6 +182,7 @@ defmodule Arbor.Agent.DebugAgent do
         Keyword.get(opts, :id) ||
         resolve_agent_id(display_name) ||
         display_name
+
     poll_interval = Keyword.get(opts, :poll_interval, @poll_interval_ms)
     model_config = Keyword.get(opts, :model_config, @default_model_config)
 

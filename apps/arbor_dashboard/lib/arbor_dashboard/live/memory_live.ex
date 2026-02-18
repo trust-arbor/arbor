@@ -320,7 +320,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
           </span>
         </div>
 
-        <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">Granted Capabilities</h3>
+        <h3 style="font-size: 0.95em; margin-top: 1rem; margin-bottom: 0.5rem;">
+          Granted Capabilities
+        </h3>
         <div :if={(@tab_data[:security_caps] || []) == []} style="padding: 0.5rem;">
           <.empty_state icon="⚡" title="No capabilities" hint="" />
         </div>
@@ -962,7 +964,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp load_tab_data(socket, "proposals", agent_id) do
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
+    proposals =
+      unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
+
     stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
     assign(socket, tab_data: %{proposals: proposals, stats: stats})
   end
@@ -984,7 +988,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
 
     direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
-    proposals_list = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
+
+    proposals_list =
+      unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
 
     near_threshold =
       unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
@@ -1026,7 +1032,9 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp maybe_load_section_data(socket, :proposals, agent_id) do
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
+    proposals =
+      unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
+
     stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
 
     socket
@@ -1104,7 +1112,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       other -> {inspect(other), 0.5}
     end)
   end
-
 
   defp discover_agents do
     # Combine agents from ETS tables and ChatState recent list

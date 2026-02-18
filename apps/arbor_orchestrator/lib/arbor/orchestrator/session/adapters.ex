@@ -37,7 +37,10 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     * `:route_actions`      -- `fn actions, agent_id -> :ok`
     * `:route_intents`      -- `fn agent_id -> :ok`
     * `:update_goals`       -- `fn goal_updates, new_goals, agent_id -> :ok`
-    * `:background_checks`  -- `fn agent_id -> results`
+    * `:store_decompositions`  -- `fn decompositions, agent_id -> :ok`
+    * `:process_proposal_decisions` -- `fn decisions, agent_id -> :ok`
+    * `:consolidate`         -- `fn agent_id -> :ok`
+    * `:background_checks`   -- `fn agent_id -> results`
 
   ## Design
 
@@ -101,6 +104,9 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       route_intents: build_route_intents(),
       update_goals: build_update_goals(),
       apply_identity_insights: build_apply_identity_insights(),
+      store_decompositions: build_store_decompositions(),
+      process_proposal_decisions: build_process_proposal_decisions(),
+      consolidate: build_consolidate(),
       background_checks: build_background_checks(),
       trust_tier_resolver: build_trust_tier_resolver()
     }
@@ -413,7 +419,12 @@ defmodule Arbor.Orchestrator.Session.Adapters do
             cat_atom =
               if is_atom(category), do: category, else: String.to_existing_atom(category)
 
-            bridge(memory, :add_insight, [agent_id, content, cat_atom, [confidence: confidence]], :ok)
+            bridge(
+              memory,
+              :add_insight,
+              [agent_id, content, cat_atom, [confidence: confidence]],
+              :ok
+            )
           end
         end)
 
@@ -421,6 +432,102 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       rescue
         _ -> :ok
       end
+    end
+  end
+
+  # ── Store Decompositions ──────────────────────────────────────────
+  #
+  # SessionHandler calls: store_decompositions.(decompositions, agent_id)
+  # Each decomposition: %{"goal_id" => id, "intentions" => [%{"action" => ..., "description" => ...}]}
+  # Creates Intent structs and records them via Memory.record_intent.
+  # Returns: :ok
+
+  defp build_store_decompositions do
+    fn decompositions, agent_id ->
+      Enum.each(List.wrap(decompositions), fn decomp ->
+        goal_id = decomp["goal_id"] || decomp[:goal_id]
+        intentions = decomp["intentions"] || decomp[:intentions] || []
+
+        Enum.each(List.wrap(intentions), fn intent_data ->
+          action = intent_data["action"] || intent_data[:action] || "unknown"
+          description = intent_data["description"] || intent_data[:description] || action
+
+          intent =
+            bridge(
+              Arbor.Contracts.Memory.Intent,
+              :action,
+              [action, description, [goal_id: goal_id]],
+              nil
+            )
+
+          if intent do
+            bridge(Arbor.Memory, :record_intent, [agent_id, intent], :ok)
+          end
+        end)
+      end)
+
+      :ok
+    end
+  end
+
+  # ── Process Proposal Decisions ──────────────────────────────────────
+  #
+  # SessionHandler calls: process_proposal_decisions.(decisions, agent_id)
+  # Each decision: %{"proposal_id" => id, "decision" => "accept"|"reject"|"defer"}
+  # Routes to Proposal.accept/reject/defer.
+  # Returns: :ok
+
+  defp build_process_proposal_decisions do
+    fn decisions, agent_id ->
+      Enum.each(List.wrap(decisions), fn decision ->
+        proposal_id = decision["proposal_id"] || decision[:proposal_id]
+        action = decision["decision"] || decision[:decision]
+
+        if proposal_id do
+          case action do
+            "accept" ->
+              bridge(Arbor.Memory.Proposal, :accept, [agent_id, proposal_id], :ok)
+
+            "reject" ->
+              reason = decision["reason"] || decision[:reason]
+
+              bridge(
+                Arbor.Memory.Proposal,
+                :reject,
+                [agent_id, proposal_id, [reason: reason]],
+                :ok
+              )
+
+            _ ->
+              # "defer" or unknown — no-op (stays in queue)
+              :ok
+          end
+        end
+      end)
+
+      :ok
+    end
+  end
+
+  # ── Consolidate ─────────────────────────────────────────────────────
+  #
+  # SessionHandler calls: consolidate.(agent_id)
+  # Runs knowledge graph decay/prune + identity consolidation.
+  # Returns: :ok
+
+  defp build_consolidate do
+    fn agent_id ->
+      try do
+        # KG decay + prune
+        bridge(Arbor.Memory, :consolidate, [agent_id, []], :ok)
+
+        # Identity consolidation (creates proposals, not direct apply)
+        bridge(Arbor.Memory.IdentityConsolidator, :consolidate, [agent_id, []], :ok)
+      rescue
+        _ -> :ok
+      end
+
+      :ok
     end
   end
 
@@ -472,7 +579,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp build_recall_intents do
     fn agent_id ->
-      case bridge(Arbor.Memory.IntentStore, :pending_intents_for_agent, [agent_id], []) do
+      case bridge(Arbor.Memory, :pending_intentions, [agent_id], []) do
         {:ok, intents} -> {:ok, intents}
         intents when is_list(intents) -> {:ok, intents}
         _ -> {:ok, []}
