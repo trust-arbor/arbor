@@ -56,6 +56,12 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     do_proposal_status(proposal_id)
   end
 
+  # Background checks — compound module name doesn't match single-underscore naming convention
+  def dispatch(:background_checks_run, params) do
+    action_mod = Module.concat([Arbor, Actions, BackgroundChecks, Run])
+    run_runtime_action(action_mod, params, :background_checks_failed, :health_checks_unavailable)
+  end
+
   # Generic action dispatch — try to find a matching action module
   def dispatch(action, params) when is_atom(action) do
     action_module = find_action_module(action)
