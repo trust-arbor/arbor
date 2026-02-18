@@ -228,9 +228,17 @@ defmodule Arbor.Agent.Eval.TrialRunner do
   end
 
   defp seed_agent_state(agent_id, seed, _tier_config) do
-    # Seed goals
-    for goal <- seed.goals do
-      safe_call(fn -> Arbor.Memory.add_goal(agent_id, goal) end)
+    # Seed goals — must construct Goal structs, not pass plain maps
+    for goal_map <- seed.goals do
+      safe_call(fn ->
+        goal =
+          Arbor.Contracts.Memory.Goal.new(goal_map.description,
+            priority: priority_to_int(goal_map[:priority]),
+            success_criteria: goal_map[:success_criteria]
+          )
+
+        Arbor.Memory.add_goal(agent_id, goal)
+      end)
     end
 
     # Seed self-knowledge
@@ -317,9 +325,17 @@ defmodule Arbor.Agent.Eval.TrialRunner do
   end
 
   defp apply_goal_outputs(agent_id, parsed) do
-    # New goals
-    for goal <- parsed.new_goals do
-      safe_call(fn -> Arbor.Memory.add_goal(agent_id, goal) end)
+    # New goals — must construct Goal structs from parsed maps
+    for goal_map <- parsed.new_goals do
+      safe_call(fn ->
+        goal =
+          Arbor.Contracts.Memory.Goal.new(goal_map.description,
+            priority: priority_to_int(goal_map[:priority]),
+            success_criteria: goal_map[:success_criteria]
+          )
+
+        Arbor.Memory.add_goal(agent_id, goal)
+      end)
     end
 
     # Goal progress updates
@@ -390,6 +406,12 @@ defmodule Arbor.Agent.Eval.TrialRunner do
   defp load_chat_history(agent_id) do
     safe_call(fn -> Arbor.Memory.load_chat_history(agent_id) end) || []
   end
+
+  defp priority_to_int(:high), do: 80
+  defp priority_to_int(:medium), do: 50
+  defp priority_to_int(:low), do: 20
+  defp priority_to_int(n) when is_integer(n), do: n
+  defp priority_to_int(_), do: 50
 
   defp safe_call(fun) do
     fun.()
