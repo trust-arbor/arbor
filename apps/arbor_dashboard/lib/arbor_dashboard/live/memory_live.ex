@@ -351,20 +351,20 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 6px; background: rgba(74, 255, 158, 0.05); border: 1px solid var(--aw-border, #333);"
       >
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
-          <span style="font-weight: 500; font-size: 0.9em;">{goal.description}</span>
+          <span style="font-weight: 500; font-size: 0.9em;">{goal[:description]}</span>
           <div style="display: flex; gap: 0.25rem;">
-            <.badge label={to_string(goal.status)} color={goal_color(goal.status)} />
-            <.badge :if={goal[:type]} label={to_string(goal.type)} color={:gray} />
-            <.badge label={"P#{goal.priority}"} color={:blue} />
+            <.badge label={to_string(goal[:status])} color={goal_color(goal[:status])} />
+            <.badge :if={goal[:type]} label={to_string(goal[:type])} color={:gray} />
+            <.badge label={"P#{goal[:priority]}"} color={:blue} />
           </div>
         </div>
         <div style="background: rgba(128,128,128,0.2); height: 4px; border-radius: 2px; overflow: hidden; margin-bottom: 0.2rem;">
-          <div style={"background: #22c55e; height: 100%; width: #{round(goal.progress * 100)}%;"}>
+          <div style={"background: #22c55e; height: 100%; width: #{round((goal[:progress] || 0) * 100)}%;"}>
           </div>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 0.75em; color: var(--aw-text-muted, #888);">
-          <span>{round(goal.progress * 100)}% complete</span>
-          <span :if={goal[:deadline]}>Deadline: {format_deadline(goal.deadline)}</span>
+          <span>{round((goal[:progress] || 0) * 100)}% complete</span>
+          <span :if={goal[:deadline]}>Deadline: {format_deadline(goal[:deadline])}</span>
         </div>
       </div>
       <.empty_state
@@ -774,20 +774,20 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       style="margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 6px; background: rgba(74, 255, 158, 0.05); border: 1px solid var(--aw-border, #333);"
     >
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
-        <span style="font-weight: 500; font-size: 0.9em;">{goal.description}</span>
+        <span style="font-weight: 500; font-size: 0.9em;">{goal[:description]}</span>
         <div style="display: flex; gap: 0.25rem;">
-          <.badge label={to_string(goal.status)} color={goal_color(goal.status)} />
-          <.badge :if={goal[:type]} label={to_string(goal.type)} color={:gray} />
-          <.badge label={"P#{goal.priority}"} color={:blue} />
+          <.badge label={to_string(goal[:status])} color={goal_color(goal[:status])} />
+          <.badge :if={goal[:type]} label={to_string(goal[:type])} color={:gray} />
+          <.badge label={"P#{goal[:priority]}"} color={:blue} />
         </div>
       </div>
       <div style="background: rgba(128,128,128,0.2); height: 4px; border-radius: 2px; overflow: hidden; margin-bottom: 0.2rem;">
-        <div style={"background: #22c55e; height: 100%; width: #{round(goal.progress * 100)}%;"}>
+        <div style={"background: #22c55e; height: 100%; width: #{round((goal[:progress] || 0) * 100)}%;"}>
         </div>
       </div>
       <div style="display: flex; justify-content: space-between; font-size: 0.75em; color: var(--aw-text-muted, #888);">
-        <span>{round(goal.progress * 100)}% complete</span>
-        <span :if={goal[:deadline]}>Deadline: {format_deadline(goal.deadline)}</span>
+        <span>{round((goal[:progress] || 0) * 100)}% complete</span>
+        <span :if={goal[:deadline]}>Deadline: {format_deadline(goal[:deadline])}</span>
       </div>
     </div>
     <.empty_state
@@ -926,7 +926,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp load_tab_data(socket, "goals", agent_id) do
     goals =
       case safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) do
-        result when is_list(result) -> result
+        result when is_list(result) -> to_maps(result)
         _ -> []
       end
 
@@ -950,7 +950,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp load_tab_data(socket, "proposals", agent_id) do
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
     stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
     assign(socket, tab_data: %{proposals: proposals, stats: stats})
   end
@@ -968,11 +968,11 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     kg = get_in(result, [:memory_system, :knowledge_graph]) || %{}
     wm = get_in(result, [:memory_system, :working_memory]) || %{}
     proposals_summary = get_in(result, [:memory_system, :proposals]) || %{}
-    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
+    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end)) |> to_maps()
     engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
 
     direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
-    proposals_list = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    proposals_list = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
 
     near_threshold =
       unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
@@ -1009,12 +1009,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   end
 
   defp maybe_load_section_data(socket, :goals, agent_id) do
-    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end))
+    goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end)) |> to_maps()
     update(socket, :tab_data, &Map.put(&1, :goals, goals))
   end
 
   defp maybe_load_section_data(socket, :proposals, agent_id) do
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
+    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
     stats = unwrap_map(safe_call(fn -> Arbor.Memory.proposal_stats(agent_id) end)) || %{}
 
     socket
@@ -1064,6 +1064,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp format_deadline(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d")
   defp format_deadline(other), do: to_string(other)
+
+  # Structs (Goal, Proposal) don't implement Access — bracket access crashes.
+  # Normalize to plain maps at the load boundary so templates can use map[:key].
+  defp to_maps(list) when is_list(list), do: Enum.map(list, &to_map_safe/1)
+  defp to_map_safe(%_{} = struct), do: Map.from_struct(struct)
+  defp to_map_safe(other), do: other
 
   defp traits(nil), do: []
   defp traits(sk), do: Map.get(sk, :personality_traits, [])
