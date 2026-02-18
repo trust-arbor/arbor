@@ -173,14 +173,15 @@ defmodule Arbor.Agent.DebugAgent do
 
   @impl true
   def init(opts) do
-    # agent_id is provided by Manager/Supervisor when started via start_managed
-    # Falls back to display_name for standalone/test usage
+    display_name = Keyword.get(opts, :display_name, @default_display_name)
+
+    # Resolve crypto identity from persisted profile if one exists,
+    # otherwise fall back to display_name for standalone/test usage
     agent_id =
       Keyword.get(opts, :agent_id) ||
         Keyword.get(opts, :id) ||
-        Keyword.get(opts, :display_name, @default_display_name)
-
-    display_name = Keyword.get(opts, :display_name, @default_display_name)
+        resolve_agent_id(display_name) ||
+        display_name
     poll_interval = Keyword.get(opts, :poll_interval, @poll_interval_ms)
     model_config = Keyword.get(opts, :model_config, @default_model_config)
 
@@ -225,8 +226,8 @@ defmodule Arbor.Agent.DebugAgent do
       }
     }
 
-    # Register in the agent registry so the dashboard can see us
-    safe_register(agent_id)
+    # Defer registry registration to avoid startup race with Registry GenServer
+    Process.send_after(self(), :register_in_registry, 1_000)
 
     # Schedule first work check
     schedule_work_check(poll_interval)
@@ -282,6 +283,18 @@ defmodule Arbor.Agent.DebugAgent do
   def handle_info(:poll_decision, state) do
     new_state = poll_decision(state)
     {:noreply, new_state}
+  end
+
+  def handle_info(:register_in_registry, state) do
+    case safe_register(state.agent_id) do
+      :ok ->
+        {:noreply, state}
+
+      _ ->
+        # Registry not ready yet — retry
+        Process.send_after(self(), :register_in_registry, 2_000)
+        {:noreply, state}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -835,6 +848,21 @@ defmodule Arbor.Agent.DebugAgent do
     %{success: true, action: :none, reason: nil}
   end
 
+  defp resolve_agent_id(display_name) do
+    case Lifecycle.list_agents() do
+      profiles when is_list(profiles) ->
+        match = Enum.find(profiles, fn p -> p.display_name == display_name end)
+        if match, do: match.agent_id
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   defp safe_register(agent_id) do
     Arbor.Agent.Registry.register(agent_id, self(), %{
       module: __MODULE__,
@@ -842,9 +870,9 @@ defmodule Arbor.Agent.DebugAgent do
       display_name: "Diagnostician"
     })
   rescue
-    _ -> :ok
+    _ -> :error
   catch
-    :exit, _ -> :ok
+    :exit, _ -> :error
   end
 
   defp safe_emit(category, type, data) do

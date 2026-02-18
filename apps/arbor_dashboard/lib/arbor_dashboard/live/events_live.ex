@@ -11,7 +11,6 @@ defmodule Arbor.Dashboard.Live.EventsLive do
 
   import Arbor.Web.Components
 
-
   alias Arbor.Web.{Helpers, Icons}
 
   @refresh_interval :timer.seconds(30)
