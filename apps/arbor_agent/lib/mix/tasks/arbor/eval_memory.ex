@@ -109,6 +109,7 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
 
     for {tier, data} <- Enum.sort(summary.tiers) do
       m = data.avg_metrics
+
       Mix.shell().info("""
 
       ── Tier #{tier}: #{data.name} (#{data.trial_count} trial(s)) ──

@@ -57,7 +57,10 @@ defmodule Arbor.Agent.Eval.TrialRunner do
                 "[MemoryAblation] Heartbeat #{beat} failed: #{inspect(reason)}, continuing"
               )
 
-              [%{heartbeat: beat, error: reason, parsed: HeartbeatResponse.empty_response()} | acc]
+              [
+                %{heartbeat: beat, error: reason, parsed: HeartbeatResponse.empty_response()}
+                | acc
+              ]
           end
         end)
         |> Enum.reverse()

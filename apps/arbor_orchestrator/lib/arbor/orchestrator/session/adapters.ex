@@ -524,13 +524,15 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       wm = bridge(Arbor.Memory, :load_working_memory, [agent_id], nil)
 
       if wm && Code.ensure_loaded?(wm_mod) do
-        wm = Enum.reduce(List.wrap(concerns), wm, fn c, acc ->
-          apply(wm_mod, :add_concern, [acc, c])
-        end)
+        wm =
+          Enum.reduce(List.wrap(concerns), wm, fn c, acc ->
+            apply(wm_mod, :add_concern, [acc, c])
+          end)
 
-        wm = Enum.reduce(List.wrap(curiosity), wm, fn c, acc ->
-          apply(wm_mod, :add_curiosity, [acc, c])
-        end)
+        wm =
+          Enum.reduce(List.wrap(curiosity), wm, fn c, acc ->
+            apply(wm_mod, :add_curiosity, [acc, c])
+          end)
 
         bridge(Arbor.Memory, :save_working_memory, [agent_id, wm], :ok)
       end
