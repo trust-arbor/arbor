@@ -10,36 +10,53 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   alias Arbor.Agent.{CognitivePrompts, TimingContext}
   alias Arbor.Memory
 
+  @prompt_sections [
+    :timing,
+    :cognitive,
+    :self_knowledge,
+    :conversation,
+    :goals,
+    :tools,
+    :proposals,
+    :patterns,
+    :percepts,
+    :pending,
+    :directive,
+    :response_format
+  ]
+
+  @doc "All available prompt section names."
+  def prompt_section_names, do: @prompt_sections
+
   @doc """
   Build the full heartbeat prompt from agent state.
 
-  Returns a string combining:
-  - Temporal context (time since last user message, etc.)
-  - Cognitive mode prompt (introspection, consolidation, etc.)
-  - Self-knowledge summary
-  - Conversation context from context window
-  - Active goals summary
-  - Recent percept results
-  - Pending messages summary
+  Returns a string combining temporal context, cognitive mode, goals,
+  and other sections. Supports section filtering via
+  `state[:enabled_prompt_sections]` — pass `:all` (default) or a list
+  of section atoms to include.
   """
   @spec build_prompt(map()) :: String.t()
   def build_prompt(state) do
     mode = Map.get(state, :cognitive_mode, :consolidation)
+    enabled = Map.get(state, :enabled_prompt_sections, :all)
 
     [
-      timing_section(state),
-      cognitive_section(mode),
-      self_knowledge_section(state),
-      conversation_section(state),
-      goals_section(state, mode),
-      tools_section(),
-      proposals_section(state),
-      patterns_section(state),
-      percepts_section(state),
-      pending_section(state),
-      directive_section(mode, state),
-      response_format_section()
+      {:timing, fn -> timing_section(state) end},
+      {:cognitive, fn -> cognitive_section(mode) end},
+      {:self_knowledge, fn -> self_knowledge_section(state) end},
+      {:conversation, fn -> conversation_section(state) end},
+      {:goals, fn -> goals_section(state, mode) end},
+      {:tools, fn -> tools_section() end},
+      {:proposals, fn -> proposals_section(state) end},
+      {:patterns, fn -> patterns_section(state) end},
+      {:percepts, fn -> percepts_section(state) end},
+      {:pending, fn -> pending_section(state) end},
+      {:directive, fn -> directive_section(mode, state) end},
+      {:response_format, fn -> response_format_section() end}
     ]
+    |> Enum.filter(fn {name, _} -> enabled == :all or name in enabled end)
+    |> Enum.map(fn {_name, builder} -> builder.() end)
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n")
   end
