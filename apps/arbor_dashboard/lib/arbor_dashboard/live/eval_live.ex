@@ -13,7 +13,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
 
   @tabs ~w(runs models)
 
-  @domains ~w(coding chat heartbeat embedding)
+  @domains ~w(coding chat heartbeat embedding advisory_consultation llm_judge)
   @statuses ~w(completed running failed)
 
   # Make lists available in templates via assigns
@@ -725,6 +725,8 @@ defmodule Arbor.Dashboard.Live.EvalLive do
   defp domain_color("chat"), do: :green
   defp domain_color("heartbeat"), do: :purple
   defp domain_color("embedding"), do: :orange
+  defp domain_color("advisory_consultation"), do: :yellow
+  defp domain_color("llm_judge"), do: :red
   defp domain_color(_), do: :gray
 
   defp status_color("completed"), do: :green
