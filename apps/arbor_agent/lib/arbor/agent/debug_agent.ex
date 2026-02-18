@@ -186,12 +186,15 @@ defmodule Arbor.Agent.DebugAgent do
     model_config = Keyword.get(opts, :model_config, @default_model_config)
 
     # Start executor and session for AI-enhanced diagnosis
+    # If no profile exists yet, create one from the Diagnostician template
+    # (seeds memory into the durable store). On subsequent restarts,
+    # GoalStore/IntentStore already loaded persisted data from Postgres.
     lifecycle_opts = [
       model: model_config[:id] || model_config[:model],
       provider: model_config[:provider]
     ]
 
-    safe_lifecycle_start(agent_id, lifecycle_opts)
+    agent_id = safe_lifecycle_ensure(display_name, agent_id, lifecycle_opts)
 
     # Start circuit breaker for this agent
     circuit_breaker = start_circuit_breaker(display_name)
@@ -887,12 +890,42 @@ defmodule Arbor.Agent.DebugAgent do
   # Lifecycle Helpers
   # ============================================================================
 
-  defp safe_lifecycle_start(agent_id, opts) do
-    Lifecycle.start(agent_id, opts)
+  # Try Lifecycle.start (existing profile). If not found, create via
+  # Lifecycle.create with the Diagnostician template — this seeds memory
+  # (goals, knowledge, etc.) into the durable store. Returns the actual
+  # agent_id (which may be a newly generated crypto ID).
+  defp safe_lifecycle_ensure(display_name, agent_id, opts) do
+    case Lifecycle.start(agent_id, opts) do
+      {:ok, _pid} ->
+        agent_id
+
+      {:error, :not_found} ->
+        # First boot — create identity and seed memory from template
+        Logger.info("[DebugAgent] No profile found, creating from Diagnostician template")
+
+        case Lifecycle.create(display_name, template: Diagnostician) do
+          {:ok, profile} ->
+            # Start the newly created agent's executor/session
+            Lifecycle.start(profile.agent_id, opts)
+            profile.agent_id
+
+          {:error, reason} ->
+            Logger.warning("[DebugAgent] Failed to create profile: #{inspect(reason)}")
+            agent_id
+        end
+
+      {:error, reason} ->
+        Logger.warning("[DebugAgent] Lifecycle start failed: #{inspect(reason)}")
+        agent_id
+    end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[DebugAgent] Lifecycle error: #{Exception.message(e)}")
+      agent_id
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("[DebugAgent] Lifecycle exit: #{inspect(reason)}")
+      agent_id
   end
 
   # Circuit Breaker Helpers
