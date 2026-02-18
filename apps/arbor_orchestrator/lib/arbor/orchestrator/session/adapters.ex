@@ -39,6 +39,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     * `:update_goals`       -- `fn goal_updates, new_goals, agent_id -> :ok`
     * `:store_decompositions`  -- `fn decompositions, agent_id -> :ok`
     * `:process_proposal_decisions` -- `fn decisions, agent_id -> :ok`
+    * `:update_working_memory` -- `fn agent_id, concerns, curiosity -> :ok`
     * `:consolidate`         -- `fn agent_id -> :ok`
     * `:background_checks`   -- `fn agent_id -> results`
 
@@ -106,6 +107,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       apply_identity_insights: build_apply_identity_insights(),
       store_decompositions: build_store_decompositions(),
       process_proposal_decisions: build_process_proposal_decisions(),
+      update_working_memory: build_update_working_memory(),
       consolidate: build_consolidate(),
       background_checks: build_background_checks(),
       trust_tier_resolver: build_trust_tier_resolver()
@@ -509,6 +511,33 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   # "defer" or unknown — no-op (stays in queue)
   defp dispatch_proposal_action(_action, _agent_id, _proposal_id, _decision), do: :ok
+
+  # ── Update Working Memory (concerns + curiosity) ───────────────────
+  #
+  # SessionHandler calls: update_working_memory.(agent_id, concerns, curiosity)
+  # Routes parsed concerns/curiosity strings to WorkingMemory.
+
+  defp build_update_working_memory do
+    wm_mod = Arbor.Memory.WorkingMemory
+
+    fn agent_id, concerns, curiosity ->
+      wm = bridge(Arbor.Memory, :load_working_memory, [agent_id], nil)
+
+      if wm && Code.ensure_loaded?(wm_mod) do
+        wm = Enum.reduce(List.wrap(concerns), wm, fn c, acc ->
+          apply(wm_mod, :add_concern, [acc, c])
+        end)
+
+        wm = Enum.reduce(List.wrap(curiosity), wm, fn c, acc ->
+          apply(wm_mod, :add_curiosity, [acc, c])
+        end)
+
+        bridge(Arbor.Memory, :save_working_memory, [agent_id, wm], :ok)
+      end
+
+      :ok
+    end
+  end
 
   # ── Consolidate ─────────────────────────────────────────────────────
   #

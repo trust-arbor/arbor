@@ -42,6 +42,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :store_decompositions,
         :process_proposal_decisions,
         :consolidate,
+        :update_working_memory,
         :background_checks,
         :trust_tier_resolver
       ]
