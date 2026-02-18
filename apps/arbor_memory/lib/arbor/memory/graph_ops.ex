@@ -7,7 +7,7 @@ defmodule Arbor.Memory.GraphOps do
   as the first parameter and handle ETS lookup + save automatically.
   """
 
-  alias Arbor.Memory.{KnowledgeGraph, Signals}
+  alias Arbor.Memory.{KnowledgeGraph, MemoryStore, Signals}
 
   @graph_ets :arbor_memory_graphs
 
@@ -33,6 +33,42 @@ defmodule Arbor.Memory.GraphOps do
   def save_graph(agent_id, graph) do
     :ets.insert(@graph_ets, {agent_id, graph})
     :ok
+  end
+
+  @doc """
+  Persist the knowledge graph to Postgres asynchronously.
+
+  Serializes via `KnowledgeGraph.to_map/1` and writes through MemoryStore.
+  Failures are logged but never affect the caller.
+  """
+  @spec persist_graph_async(String.t()) :: :ok
+  def persist_graph_async(agent_id) do
+    case get_graph(agent_id) do
+      {:ok, graph} ->
+        graph_map = KnowledgeGraph.to_map(graph)
+        MemoryStore.persist_async("knowledge_graph", agent_id, graph_map)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  @doc """
+  Load a persisted knowledge graph from Postgres.
+
+  Returns `{:ok, graph}` if found, `{:error, :not_found}` otherwise.
+  Used during agent restart to recover learned knowledge.
+  """
+  @spec load_persisted_graph(String.t()) :: {:ok, KnowledgeGraph.t()} | {:error, :not_found}
+  def load_persisted_graph(agent_id) do
+    case MemoryStore.load("knowledge_graph", agent_id) do
+      {:ok, graph_map} when is_map(graph_map) ->
+        graph = KnowledgeGraph.from_map(graph_map)
+        {:ok, graph}
+
+      _ ->
+        {:error, :not_found}
+    end
   end
 
   @doc """
@@ -88,6 +124,7 @@ defmodule Arbor.Memory.GraphOps do
     with {:ok, graph} <- get_graph(agent_id),
          {:ok, new_graph, node_id} <- KnowledgeGraph.add_node(graph, node_data) do
       save_graph(agent_id, new_graph)
+      persist_graph_async(agent_id)
       Signals.emit_knowledge_added(agent_id, node_id, node_data[:type])
       {:ok, node_id}
     end
@@ -107,6 +144,7 @@ defmodule Arbor.Memory.GraphOps do
          {:ok, new_graph} <-
            KnowledgeGraph.add_edge(graph, source_id, target_id, relationship, opts) do
       save_graph(agent_id, new_graph)
+      persist_graph_async(agent_id)
       Signals.emit_knowledge_linked(agent_id, source_id, target_id, relationship)
       :ok
     end
@@ -121,6 +159,7 @@ defmodule Arbor.Memory.GraphOps do
     with {:ok, graph} <- get_graph(agent_id),
          {:ok, new_graph, node} <- KnowledgeGraph.reinforce(graph, node_id) do
       save_graph(agent_id, new_graph)
+      persist_graph_async(agent_id)
       {:ok, node}
     end
   end
@@ -173,6 +212,7 @@ defmodule Arbor.Memory.GraphOps do
     with {:ok, graph} <- get_graph(agent_id),
          {:ok, new_graph, node_id} <- KnowledgeGraph.approve_pending(graph, pending_id) do
       save_graph(agent_id, new_graph)
+      persist_graph_async(agent_id)
       Signals.emit_pending_approved(agent_id, pending_id, node_id)
       {:ok, node_id}
     end
@@ -186,6 +226,7 @@ defmodule Arbor.Memory.GraphOps do
     with {:ok, graph} <- get_graph(agent_id),
          {:ok, new_graph} <- KnowledgeGraph.reject_pending(graph, pending_id) do
       save_graph(agent_id, new_graph)
+      persist_graph_async(agent_id)
       Signals.emit_pending_rejected(agent_id, pending_id)
       :ok
     end
@@ -223,6 +264,7 @@ defmodule Arbor.Memory.GraphOps do
     with {:ok, graph} <- get_graph(agent_id) do
       updated_graph = KnowledgeGraph.cascade_recall(graph, node_id, boost_amount, opts)
       save_graph(agent_id, updated_graph)
+      persist_graph_async(agent_id)
       {:ok, KnowledgeGraph.stats(updated_graph)}
     end
   end
@@ -266,5 +308,6 @@ defmodule Arbor.Memory.GraphOps do
   def import_knowledge_graph(agent_id, graph_map) do
     graph = KnowledgeGraph.from_map(graph_map)
     save_graph(agent_id, graph)
+    persist_graph_async(agent_id)
   end
 end

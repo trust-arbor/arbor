@@ -235,12 +235,34 @@ defmodule Arbor.Memory.Consolidation do
       decayed_graph = KnowledgeGraph.decay(graph)
       decayed_count = map_size(graph.nodes)
 
-      # Prune
+      # Identify nodes that will be pruned (for archival)
       threshold = Keyword.get(opts, :prune_threshold, 0.1)
+
+      to_prune =
+        decayed_graph.nodes
+        |> Map.values()
+        |> Enum.reject(fn node -> node.pinned or node.relevance >= threshold end)
+
+      # Archive pruned nodes to Historian before removal
+      Enum.each(to_prune, fn node ->
+        Events.record_knowledge_archived(agent_id, %{
+          node_id: node.id,
+          type: node.type,
+          content: node.content,
+          relevance: node.relevance,
+          created_at: node.created_at,
+          last_accessed: node.last_accessed,
+          access_count: node.access_count,
+          reason: :low_relevance
+        })
+      end)
+
+      # Prune
       {pruned_graph, pruned_count} = KnowledgeGraph.prune(decayed_graph, threshold)
 
-      # Save
+      # Save to ETS + persist to Postgres
       GraphOps.save_graph(agent_id, pruned_graph)
+      GraphOps.persist_graph_async(agent_id)
 
       # Calculate duration
       duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -284,8 +306,9 @@ defmodule Arbor.Memory.Consolidation do
 
     with {:ok, graph} <- GraphOps.get_graph(agent_id),
          {:ok, new_graph, metrics} <- consolidate(agent_id, graph, opts) do
-      # Save updated graph
+      # Save updated graph to ETS + Postgres
       GraphOps.save_graph(agent_id, new_graph)
+      GraphOps.persist_graph_async(agent_id)
 
       # Emit completion signals
       Signals.emit_consolidation_completed(agent_id, metrics)
