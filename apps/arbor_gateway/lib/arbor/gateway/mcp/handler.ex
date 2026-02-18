@@ -458,20 +458,22 @@ defmodule Arbor.Gateway.MCP.Handler do
         format_agent_list(agents)
 
       _ ->
-        # Try AgentManager
-        case bridge_call(Arbor.Agent.Manager, :list_agents, []) do
-          {:ok, agents} when is_list(agents) ->
-            if agents == [] do
-              "No agents running."
-            else
-              Enum.map_join(agents, "\n", fn {id, pid} ->
-                "- #{id} (#{inspect(pid)})"
-              end)
-            end
+        list_agents_via_manager()
+    end
+  end
 
-          _ ->
-            "Agent registry unavailable."
-        end
+  defp list_agents_via_manager do
+    case bridge_call(Arbor.Agent.Manager, :list_agents, []) do
+      {:ok, []} ->
+        "No agents running."
+
+      {:ok, agents} when is_list(agents) ->
+        Enum.map_join(agents, "\n", fn {id, pid} ->
+          "- #{id} (#{inspect(pid)})"
+        end)
+
+      _ ->
+        "Agent registry unavailable."
     end
   end
 
@@ -574,23 +576,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp get_capabilities(agent_id) do
     case bridge_call(Arbor.Security, :list_capabilities, [agent_id, []]) do
       {:ok, {:ok, caps}} when is_list(caps) ->
-        if caps == [] do
-          "## Capabilities\nNo capabilities granted."
-        else
-          cap_list =
-            Enum.map_join(caps, "\n", fn cap ->
-              resource =
-                cond do
-                  is_binary(cap) -> cap
-                  is_map(cap) -> Map.get(cap, :resource, Map.get(cap, "resource", inspect(cap)))
-                  true -> inspect(cap)
-                end
-
-              "- #{resource}"
-            end)
-
-          "## Capabilities\n#{cap_list}"
-        end
+        format_capabilities(caps)
 
       {:ok, caps} when is_list(caps) ->
         "## Capabilities\n#{Enum.map_join(caps, "\n", &"- #{inspect(&1)}")}"
@@ -600,38 +586,51 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  defp format_capabilities([]), do: "## Capabilities\nNo capabilities granted."
+
+  defp format_capabilities(caps) do
+    cap_list = Enum.map_join(caps, "\n", &format_capability/1)
+    "## Capabilities\n#{cap_list}"
+  end
+
+  defp format_capability(cap) when is_binary(cap), do: "- #{cap}"
+
+  defp format_capability(cap) when is_map(cap) do
+    resource = Map.get(cap, :resource, Map.get(cap, "resource", inspect(cap)))
+    "- #{resource}"
+  end
+
+  defp format_capability(cap), do: "- #{inspect(cap)}"
+
   defp get_goals(agent_id) do
     case bridge_call(Arbor.Memory.GoalStore, :get_active_goals, [agent_id]) do
       {:ok, goals} when is_list(goals) ->
-        if goals == [] do
-          "## Goals\nNo active goals."
-        else
-          goal_list =
-            Enum.map_join(goals, "\n", fn goal ->
-              desc =
-                cond do
-                  is_map(goal) and Map.has_key?(goal, :description) -> goal.description
-                  is_map(goal) and Map.has_key?(goal, "description") -> goal["description"]
-                  true -> inspect(goal)
-                end
-
-              progress =
-                if is_map(goal) and Map.has_key?(goal, :progress) do
-                  " (#{Float.round(goal.progress * 100, 1)}%)"
-                else
-                  ""
-                end
-
-              "- #{desc}#{progress}"
-            end)
-
-          "## Goals\n#{goal_list}"
-        end
+        format_goals(goals)
 
       _ ->
         "## Goals\nGoal store unavailable."
     end
   end
+
+  defp format_goals([]), do: "## Goals\nNo active goals."
+
+  defp format_goals(goals) do
+    goal_list = Enum.map_join(goals, "\n", &format_goal/1)
+    "## Goals\n#{goal_list}"
+  end
+
+  defp format_goal(goal) when is_map(goal) do
+    desc = Map.get(goal, :description, Map.get(goal, "description", inspect(goal)))
+
+    progress =
+      if Map.has_key?(goal, :progress),
+        do: " (#{Float.round(goal.progress * 100, 1)}%)",
+        else: ""
+
+    "- #{desc}#{progress}"
+  end
+
+  defp format_goal(goal), do: "- #{inspect(goal)}"
 
   defp get_pipeline_status do
     if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do

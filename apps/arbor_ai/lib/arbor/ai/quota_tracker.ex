@@ -295,36 +295,9 @@ defmodule Arbor.AI.QuotaTracker do
     if Process.whereis(@store_name) do
       case BufferedStore.list(name: @store_name) do
         {:ok, keys} ->
-          now = DateTime.utc_now()
-
           keys
           |> Enum.filter(&String.starts_with?(&1, "quota:"))
-          |> Enum.reduce(%{}, fn key, acc ->
-            case BufferedStore.get(key, name: @store_name) do
-              {:ok, %{data: data}} ->
-                with {:ok, available_at, _} <- DateTime.from_iso8601(data["available_at"]),
-                     true <- DateTime.compare(available_at, now) == :gt do
-                  backend =
-                    key |> String.replace_prefix("quota:", "") |> String.to_existing_atom()
-
-                  info = %{
-                    available_at: available_at,
-                    marked_at: parse_datetime(data["marked_at"]),
-                    reason: data["reason"] || "quota exhausted"
-                  }
-
-                  Map.put(acc, backend, info)
-                else
-                  _ ->
-                    # Expired or unparseable — clean up
-                    delete_quota_key(key)
-                    acc
-                end
-
-              _ ->
-                acc
-            end
-          end)
+          |> Enum.reduce(%{}, &restore_quota_key/2)
 
         _ ->
           %{}
@@ -334,6 +307,33 @@ defmodule Arbor.AI.QuotaTracker do
     end
   catch
     _, _ -> %{}
+  end
+
+  defp restore_quota_key(key, acc) do
+    now = DateTime.utc_now()
+
+    case BufferedStore.get(key, name: @store_name) do
+      {:ok, %{data: data}} ->
+        with {:ok, available_at, _} <- DateTime.from_iso8601(data["available_at"]),
+             true <- DateTime.compare(available_at, now) == :gt do
+          backend = key |> String.replace_prefix("quota:", "") |> String.to_existing_atom()
+
+          info = %{
+            available_at: available_at,
+            marked_at: parse_datetime(data["marked_at"]),
+            reason: data["reason"] || "quota exhausted"
+          }
+
+          Map.put(acc, backend, info)
+        else
+          _ ->
+            delete_quota_key(key)
+            acc
+        end
+
+      _ ->
+        acc
+    end
   end
 
   defp delete_quota_key(key) do

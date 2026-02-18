@@ -200,18 +200,19 @@ defmodule Arbor.Gateway.Memory.Router do
   # GET /api/memory/working/:agent_id — Get working memory for an agent
   # M1: Authorize agent_id against memory capability before allowing read.
   get "/working/:agent_id" do
-    with :ok <- authorize_memory_access(agent_id, :read) do
-      case Memory.get_working_memory(agent_id) do
-        nil ->
-          json_response(conn, 404, %{status: "error", reason: "No working memory found"})
+    case authorize_memory_access(agent_id, :read) do
+      :ok ->
+        case Memory.get_working_memory(agent_id) do
+          nil ->
+            json_response(conn, 404, %{status: "error", reason: "No working memory found"})
 
-        wm ->
-          json_response(conn, 200, %{
-            status: "ok",
-            working_memory: Memory.serialize_working_memory(wm)
-          })
-      end
-    else
+          wm ->
+            json_response(conn, 200, %{
+              status: "ok",
+              working_memory: Memory.serialize_working_memory(wm)
+            })
+        end
+
       {:error, reason} ->
         json_response(conn, 403, %{status: "error", reason: "unauthorized: #{inspect(reason)}"})
     end
@@ -220,19 +221,20 @@ defmodule Arbor.Gateway.Memory.Router do
   # PUT /api/memory/working/:agent_id — Save working memory for an agent
   # M1: Authorize agent_id against memory capability before allowing write.
   put "/working/:agent_id" do
-    with :ok <- authorize_memory_access(agent_id, :write) do
-      case Schemas.Memory.validate(Schemas.Memory.working_memory_request(), conn.body_params) do
-        {:ok, validated} ->
-          # Ensure agent_id in data matches the URL
-          wm_data = Map.put(validated["working_memory"], "agent_id", agent_id)
-          wm = Memory.deserialize_working_memory(wm_data)
-          Memory.save_working_memory(agent_id, wm)
-          json_response(conn, 200, %{status: "ok"})
+    case authorize_memory_access(agent_id, :write) do
+      :ok ->
+        case Schemas.Memory.validate(Schemas.Memory.working_memory_request(), conn.body_params) do
+          {:ok, validated} ->
+            # Ensure agent_id in data matches the URL
+            wm_data = Map.put(validated["working_memory"], "agent_id", agent_id)
+            wm = Memory.deserialize_working_memory(wm_data)
+            Memory.save_working_memory(agent_id, wm)
+            json_response(conn, 200, %{status: "ok"})
 
-        {:error, errors} ->
-          json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
-      end
-    else
+          {:error, errors} ->
+            json_response(conn, 400, %{status: "error", reason: "invalid_params", details: errors})
+        end
+
       {:error, reason} ->
         json_response(conn, 403, %{status: "error", reason: "unauthorized: #{inspect(reason)}"})
     end
