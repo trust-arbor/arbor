@@ -29,7 +29,10 @@ defmodule Arbor.Memory.MemoryStore do
   def persist(namespace, key, data) when is_binary(namespace) and is_binary(key) do
     if available?() do
       composite_key = "#{namespace}:#{key}"
-      record = Record.new(key, data, id: composite_key)
+      # Use composite_key as Record.key so it survives the Postgres round-trip.
+      # The Postgres backend stores Record.key, so load_from_backend restores
+      # ETS keys matching what BufferedStore.put originally used.
+      record = Record.new(composite_key, data, id: composite_key)
       BufferedStore.put(composite_key, record, name: @store_name)
     end
 
@@ -65,9 +68,18 @@ defmodule Arbor.Memory.MemoryStore do
       composite_key = "#{namespace}:#{key}"
 
       case BufferedStore.get(composite_key, name: @store_name) do
-        {:ok, %Record{data: data}} -> {:ok, data}
-        {:error, :not_found} -> {:error, :not_found}
-        {:error, _} = error -> error
+        {:ok, %Record{data: data}} ->
+          {:ok, data}
+
+        {:error, :not_found} ->
+          # Fallback: try bare key (old data loaded from Postgres without prefix)
+          case BufferedStore.get(key, name: @store_name) do
+            {:ok, %Record{data: data}} -> {:ok, data}
+            _ -> {:error, :not_found}
+          end
+
+        {:error, _} = error ->
+          error
       end
     else
       {:error, :not_found}
@@ -93,15 +105,41 @@ defmodule Arbor.Memory.MemoryStore do
 
       {:ok, keys} = BufferedStore.list(name: @store_name)
 
+      # Match keys with namespace prefix (new format) first
+      prefixed = Enum.filter(keys, &String.starts_with?(&1, prefix))
+
       records =
-        keys
-        |> Enum.filter(&String.starts_with?(&1, prefix))
-        |> Enum.reduce([], fn composite_key, acc ->
-          case BufferedStore.get(composite_key, name: @store_name) do
-            {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
-            _ -> acc
-          end
-        end)
+        if prefixed != [] do
+          # New format: ETS key = "namespace:original_key", Record.key = same
+          Enum.reduce(prefixed, [], fn composite_key, acc ->
+            case BufferedStore.get(composite_key, name: @store_name) do
+              {:ok, %Record{key: k, data: data}} ->
+                # Strip namespace prefix to return original key
+                original_key = String.replace_prefix(k, prefix, "")
+                [{original_key, data} | acc]
+
+              _ ->
+                acc
+            end
+          end)
+        else
+          # Backwards compat: old data loaded from Postgres has bare Record.key
+          # in ETS (no namespace prefix). Check Record.id for namespace match.
+          Enum.reduce(keys, [], fn ets_key, acc ->
+            case BufferedStore.get(ets_key, name: @store_name) do
+              {:ok, %Record{id: id, key: k, data: data}}
+              when is_binary(id) ->
+                if String.starts_with?(id, prefix) do
+                  [{k, data} | acc]
+                else
+                  acc
+                end
+
+              _ ->
+                acc
+            end
+          end)
+        end
 
       {:ok, Enum.reverse(records)}
     else
@@ -125,15 +163,42 @@ defmodule Arbor.Memory.MemoryStore do
 
       {:ok, keys} = BufferedStore.list(name: @store_name)
 
+      # Match prefixed keys first
+      prefixed = Enum.filter(keys, &String.starts_with?(&1, full_prefix))
+
       records =
-        keys
-        |> Enum.filter(&String.starts_with?(&1, full_prefix))
-        |> Enum.reduce([], fn composite_key, acc ->
-          case BufferedStore.get(composite_key, name: @store_name) do
-            {:ok, %Record{key: k, data: data}} -> [{k, data} | acc]
-            _ -> acc
-          end
-        end)
+        if prefixed != [] do
+          Enum.reduce(prefixed, [], fn composite_key, acc ->
+            case BufferedStore.get(composite_key, name: @store_name) do
+              {:ok, %Record{key: k, data: data}} ->
+                original_key = String.replace_prefix(k, "#{namespace}:", "")
+                [{original_key, data} | acc]
+
+              _ ->
+                acc
+            end
+          end)
+        else
+          # Fallback: check bare keys with matching Record.id
+          Enum.reduce(keys, [], fn ets_key, acc ->
+            if String.starts_with?(ets_key, prefix) do
+              case BufferedStore.get(ets_key, name: @store_name) do
+                {:ok, %Record{id: id, key: k, data: data}}
+                when is_binary(id) ->
+                  if String.starts_with?(id, full_prefix) do
+                    [{k, data} | acc]
+                  else
+                    acc
+                  end
+
+                _ ->
+                  acc
+              end
+            else
+              acc
+            end
+          end)
+        end
 
       {:ok, Enum.reverse(records)}
     else
