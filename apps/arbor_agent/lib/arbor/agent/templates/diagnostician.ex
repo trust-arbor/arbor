@@ -73,19 +73,26 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   @impl true
   def required_capabilities do
     [
-      # Read monitor metrics and anomalies
-      %{resource: "arbor://monitor/read/**"},
-      # Request AI analysis for root cause
-      %{resource: "arbor://ai/analyze"},
-      # Submit and revise proposals
-      %{resource: "arbor://consensus/proposal/submit"},
-      %{resource: "arbor://consensus/proposal/revise"},
-      # Hot reload (requires council approval to execute)
-      %{resource: "arbor://code/reload/**"},
-      # Action-based capabilities for Executor dispatch
+      # All operations route through Executor → ActionDispatch.
+      # Only action-based capabilities needed.
+
+      # Read and write project files for code analysis and changes
+      %{resource: "arbor://agent/action/file_read"},
+      %{resource: "arbor://agent/action/file_write"},
+      # AI analysis for root cause diagnosis
       %{resource: "arbor://agent/action/ai_analyze"},
+      # Submit, revise, and check proposals via governance
       %{resource: "arbor://agent/action/proposal_submit"},
-      %{resource: "arbor://agent/action/code_hot_load"}
+      %{resource: "arbor://agent/action/proposal_revise"},
+      %{resource: "arbor://agent/action/proposal_status"},
+      # Hot reload (requires council approval to execute)
+      %{resource: "arbor://agent/action/code_hot_load"},
+      # Read runtime health data (metrics, anomalies, status)
+      %{resource: "arbor://agent/action/monitor_read"},
+      # Shell access for diagnostics (recon, observer, etc.)
+      %{resource: "arbor://agent/action/shell_execute"},
+      # Background health checks
+      %{resource: "arbor://agent/action/background_checks_run"}
     ]
   end
 
