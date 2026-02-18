@@ -63,6 +63,12 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       "memory_notes": [
         "observations or facts worth remembering"
       ],
+      "concerns": [
+        "things that worry you or seem problematic"
+      ],
+      "curiosity": [
+        "questions you want to explore or things that intrigue you"
+      ],
       "goal_updates": [
         {"goal_id": "id", "progress": 0.5, "note": "progress description"}
       ],
@@ -86,6 +92,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     Always include your thinking. Use actions to interact with the world.
     Use goal_updates to report progress on active goals (include goal_id and new progress 0.0-1.0).
     Use new_goals to suggest goals you want to pursue. Each needs a description, priority, and success criteria.
+    Use concerns to flag things that worry you — risks, blockers, uncertainties, or problems you've noticed.
+    Use curiosity to note questions you want to explore or things that intrigue you about your situation.
 
     When pending proposals are shown, review them and decide whether to accept (integrate into
     your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
@@ -343,7 +351,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     ## Response Format
     Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
     Required keys: "thinking", "actions", "memory_notes", "goal_updates".
-    Optional keys: "new_goals", "proposal_decisions", "decompositions", "identity_insights".
+    Optional keys: "new_goals", "concerns", "curiosity", "proposal_decisions", "decompositions", "identity_insights".
     If you have no active goals, use "new_goals" to create some.
     In plan_execution mode, use "decompositions" to break goals into executable steps.
     """

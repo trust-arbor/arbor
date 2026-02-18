@@ -61,6 +61,9 @@ digraph Heartbeat {
   // ── Post-processing: apply proposal decisions ────────────
   process_proposals [type="session.process_proposal_decisions"]
 
+  // ── Post-processing: update working memory (concerns, curiosity) ─
+  update_wm [type="session.update_working_memory"]
+
   // ── Action routing and goal updates ──────────────────────
   route_actions [type="session.route_actions"]
   update_goals [type="session.update_goals"]
@@ -88,5 +91,5 @@ digraph Heartbeat {
   consolidate -> process
 
   // Shared post-processing tail
-  process -> store_decompositions -> process_proposals -> route_actions -> update_goals -> done
+  process -> store_decompositions -> process_proposals -> update_wm -> route_actions -> update_goals -> done
 }

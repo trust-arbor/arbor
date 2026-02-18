@@ -15,6 +15,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: String.t(),
           actions: [map()],
           memory_notes: [String.t()],
+          concerns: [String.t()],
+          curiosity: [String.t()],
           goal_updates: [map()],
           new_goals: [map()],
           proposal_decisions: [map()],
@@ -42,6 +44,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: get_string(data, "thinking", text),
           actions: parse_actions(data),
           memory_notes: parse_memory_notes(data),
+          concerns: parse_string_list(data, "concerns"),
+          curiosity: parse_string_list(data, "curiosity"),
           goal_updates: parse_goal_updates(data),
           new_goals: parse_new_goals(data),
           proposal_decisions: parse_proposal_decisions(data),
@@ -57,6 +61,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
           thinking: text,
           actions: [],
           memory_notes: [],
+          concerns: [],
+          curiosity: [],
           goal_updates: [],
           new_goals: [],
           proposal_decisions: [],
@@ -75,6 +81,8 @@ defmodule Arbor.Agent.HeartbeatResponse do
       thinking: "",
       actions: [],
       memory_notes: [],
+      concerns: [],
+      curiosity: [],
       goal_updates: [],
       new_goals: [],
       proposal_decisions: [],
@@ -123,10 +131,12 @@ defmodule Arbor.Agent.HeartbeatResponse do
     end
   end
 
-  defp parse_memory_notes(data) do
-    case Map.get(data, "memory_notes") do
-      notes when is_list(notes) ->
-        notes
+  defp parse_memory_notes(data), do: parse_string_list(data, "memory_notes")
+
+  defp parse_string_list(data, key) do
+    case Map.get(data, key) do
+      items when is_list(items) ->
+        items
         |> Enum.filter(&is_binary/1)
         |> Enum.reject(&(&1 == ""))
 

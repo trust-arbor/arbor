@@ -58,7 +58,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   @side_effecting ~w(session.llm_call session.tool_dispatch session.memory_update
                      session.checkpoint session.route_actions session.update_goals
                      session.store_decompositions session.process_proposal_decisions
-                     session.consolidate)
+                     session.consolidate session.update_working_memory)
 
   # --- Behaviour callbacks ---
 
@@ -290,6 +290,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.goal_updates" => Map.get(parsed, "goal_updates", []),
           "session.new_goals" => Map.get(parsed, "new_goals", []),
           "session.memory_notes" => Map.get(parsed, "memory_notes", []),
+          "session.concerns" => Map.get(parsed, "concerns", []),
+          "session.curiosity" => Map.get(parsed, "curiosity", []),
           "session.decompositions" => Map.get(parsed, "decompositions", []),
           "session.new_intents" => Map.get(parsed, "new_intents", []),
           "session.proposal_decisions" => Map.get(parsed, "proposal_decisions", []),
@@ -302,6 +304,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.goal_updates" => [],
           "session.new_goals" => [],
           "session.memory_notes" => [],
+          "session.concerns" => [],
+          "session.curiosity" => [],
           "session.decompositions" => [],
           "session.new_intents" => [],
           "session.proposal_decisions" => [],
@@ -347,6 +351,21 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         ok(%{"session.consolidated" => true})
       catch
         kind, reason -> fail("consolidate: #{inspect({kind, reason})}")
+      end
+    end)
+  end
+
+  defp handle_type("session.update_working_memory", ctx, adapters, _meta) do
+    with_adapter(adapters, :update_working_memory, fn update_wm ->
+      agent_id = Context.get(ctx, "session.agent_id")
+      concerns = Context.get(ctx, "session.concerns", [])
+      curiosity = Context.get(ctx, "session.curiosity", [])
+
+      try do
+        update_wm.(agent_id, concerns, curiosity)
+        ok(%{"session.wm_updated" => true})
+      catch
+        kind, reason -> fail("update_working_memory: #{inspect({kind, reason})}")
       end
     end)
   end
