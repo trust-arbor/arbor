@@ -43,7 +43,7 @@ defmodule Arbor.Consensus do
 
   @behaviour Arbor.Contracts.API.Consensus
 
-  alias Arbor.Consensus.{Coordinator, EventStore}
+  alias Arbor.Consensus.{ConsultationLog, Coordinator, EventStore}
   alias Arbor.Consensus.Evaluators.Consult
 
   # ============================================================================
@@ -240,6 +240,31 @@ defmodule Arbor.Consensus do
     evaluator = Keyword.get(opts, :evaluator, Arbor.Consensus.Evaluators.AdvisoryLLM)
     Consult.decide(evaluator, description, opts)
   end
+
+  # ============================================================================
+  # Consultations (Advisory Council)
+  # ============================================================================
+
+  @doc """
+  List advisory council consultations.
+
+  Delegates to `ConsultationLog.list_consultations/1`.
+
+  ## Filters
+
+    * `:limit` — max results (default: 50)
+    * `:status` — "completed", "failed"
+  """
+  @spec list_consultations(keyword()) :: {:ok, [map()]} | {:error, :unavailable}
+  defdelegate list_consultations(filters \\ []), to: ConsultationLog
+
+  @doc """
+  Get a single consultation with all perspective results preloaded.
+
+  Delegates to `ConsultationLog.get_consultation/1`.
+  """
+  @spec get_consultation(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate get_consultation(run_id), to: ConsultationLog
 
   # ============================================================================
   # Event Store

@@ -388,7 +388,7 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
     |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
     |> String.trim_leading("_")
     |> case do
-      "" -> "general"
+      "" -> "adversarial"
       other -> other
     end
   end
@@ -398,7 +398,7 @@ defmodule Arbor.Orchestrator.Handlers.ConsensusHandler do
     # Perspective names come from DOT graph branch IDs, already sanitized.
     String.to_existing_atom(name)
   rescue
-    ArgumentError -> :general
+    ArgumentError -> :adversarial
   end
 
   defp parse_mode("advisory"), do: :advisory

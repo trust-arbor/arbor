@@ -34,7 +34,7 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
       expected_perspectives = ~w(
         brainstorming user_experience security privacy stability
         capability emergence vision performance generalization
-        resource_usage consistency general
+        resource_usage consistency adversarial
       )
 
       for perspective <- expected_perspectives do
@@ -79,13 +79,13 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
       assert MapSet.member?(edge_pairs, {"start", "evaluate"})
 
       # evaluate -> each perspective
-      for p <- ~w(brainstorming security stability vision general) do
+      for p <- ~w(brainstorming security stability vision adversarial) do
         assert MapSet.member?(edge_pairs, {"evaluate", p}),
                "Missing edge: evaluate -> #{p}"
       end
 
       # each perspective -> collect
-      for p <- ~w(brainstorming security stability vision general) do
+      for p <- ~w(brainstorming security stability vision adversarial) do
         assert MapSet.member?(edge_pairs, {p, "collect"}),
                "Missing edge: #{p} -> collect"
       end

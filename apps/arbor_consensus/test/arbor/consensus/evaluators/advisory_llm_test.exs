@@ -20,7 +20,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     :generalization,
     :resource_usage,
     :consistency,
-    :general
+    :adversarial
   ]
 
   # LLM function that returns a mock JSON response (replaces ai_module: MockAI)
@@ -76,7 +76,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
           :generalization,
           :resource_usage,
           :consistency,
-          :general
+          :adversarial
         ] do
       test "evaluates from #{perspective} perspective" do
         proposal = TestHelpers.build_proposal(%{description: "Test #{unquote(perspective)}"})
@@ -348,10 +348,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                )
     end
 
-    test "general perspective has a default" do
+    test "adversarial perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
       assert {"openrouter", "google/gemini-3-flash-preview"} =
-               AdvisoryLLM.resolve_provider_model(:general)
+               AdvisoryLLM.resolve_provider_model(:adversarial)
     end
 
     test "OpenRouter model defaults resolve correctly" do
@@ -407,9 +407,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     end
 
     test "provider_map/0 reflects runtime configuration" do
-      AdvisoryLLM.configure_perspective(:general, "lm_studio:qwen3-coder")
+      AdvisoryLLM.configure_perspective(:adversarial, "lm_studio:qwen3-coder")
       map = AdvisoryLLM.provider_map()
-      assert map[:general] == "lm_studio:qwen3-coder"
+      assert map[:adversarial] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
       assert map[:security] == "openrouter:google/gemini-3-flash-preview"
     end

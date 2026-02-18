@@ -63,7 +63,8 @@ defmodule Arbor.Web.Icons do
     usability: "👤",
     cost: "💰",
     risk: "⚠️",
-    innovation: "💡"
+    innovation: "💡",
+    adversarial: "🗡"
   }
 
   @status_icons %{

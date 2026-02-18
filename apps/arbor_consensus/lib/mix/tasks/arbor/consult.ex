@@ -10,13 +10,13 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult "Build order?" --all --save --docs design.md
       $ mix arbor.consult "What is consciousness?" --multi-model --save
       $ mix arbor.consult "Review this code" --provider anthropic:claude-sonnet-4-5-20250929
-      $ mix arbor.consult "Quick question" -g --provider ollama:deepseek-v3.2:cloud
+      $ mix arbor.consult "Quick question" -r --provider ollama:deepseek-v3.2:cloud
       $ mix arbor.consult "Analyze this" --skill security-perspective
 
   ## Options
 
     * `--perspective` / `-p`  — Ask a single perspective (default: brainstorming)
-    * `--general` / `-g`      — Shorthand for --perspective general
+    * `--adversarial` / `-r`   — Shorthand for --perspective adversarial (red team)
     * `--all` / `-a`          — Ask all perspectives (expensive: N LLM calls)
     * `--multi-model` / `-m`  — Same perspective across all unique providers
     * `--save` / `-s`         — Save results to .arbor/council/<slug>/
@@ -54,7 +54,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   Use a specific provider:model:
 
-      $ mix arbor.consult "Quick question" -g --provider ollama:deepseek-v3.2:cloud
+      $ mix arbor.consult "Quick question" -r --provider ollama:deepseek-v3.2:cloud
 
   Use a skill as system prompt:
 
@@ -70,7 +70,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   @switches [
     perspective: :string,
-    general: :boolean,
+    adversarial: :boolean,
     all: :boolean,
     multi_model: :boolean,
     save: :boolean,
@@ -84,7 +84,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   @aliases [
     p: :perspective,
-    g: :general,
+    r: :adversarial,
     a: :all,
     m: :multi_model,
     s: :save,
@@ -101,7 +101,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     Options:
       -p, --perspective NAME   Ask one perspective (default: brainstorming)
-      -g, --general            Shorthand for --perspective general
+      -r, --adversarial        Shorthand for --perspective adversarial (red team)
       -a, --all                Ask all perspectives
       -m, --multi-model        Same perspective, all unique providers (use with -p)
       -s, --save               Save results to .arbor/council/
@@ -128,10 +128,10 @@ defmodule Mix.Tasks.Arbor.Consult do
       exit({:shutdown, 1})
     end
 
-    # --general / -g is shorthand for --perspective general
+    # --adversarial / -r is shorthand for --perspective adversarial
     opts =
-      if opts[:general] do
-        Keyword.put(opts, :perspective, "general")
+      if opts[:adversarial] do
+        Keyword.put(opts, :perspective, "adversarial")
       else
         opts
       end
