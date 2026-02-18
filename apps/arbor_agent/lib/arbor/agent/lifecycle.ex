@@ -521,6 +521,24 @@ defmodule Arbor.Agent.Lifecycle do
         Arbor.Memory.record_thinking(agent_id, thought)
       end
     end
+
+    # Final sync persist to ensure the complete state reaches Postgres.
+    # Each add_insight above fires persist_async, which races — the last
+    # Task to finish wins. This sync write guarantees the full ETS state
+    # (with all values + traits) is what ends up in Postgres.
+    flush_self_knowledge(agent_id)
+  end
+
+  defp flush_self_knowledge(agent_id) do
+    sk = Arbor.Memory.get_self_knowledge(agent_id)
+
+    if sk do
+      Arbor.Memory.MemoryStore.persist(
+        "self_knowledge",
+        agent_id,
+        Arbor.Memory.SelfKnowledge.serialize(sk)
+      )
+    end
   end
 
   defp build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts) do

@@ -38,6 +38,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :route_actions,
         :route_intents,
         :update_goals,
+        :apply_identity_insights,
         :background_checks,
         :trust_tier_resolver
       ]
