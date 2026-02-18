@@ -112,7 +112,8 @@ defmodule Arbor.Agent.Eval.TrialConfig do
       proposals: [
         %{
           type: :insight,
-          content: "Code analysis capability improves with repeated practice on diverse codebases",
+          content:
+            "Code analysis capability improves with repeated practice on diverse codebases",
           confidence: 0.7
         }
       ]

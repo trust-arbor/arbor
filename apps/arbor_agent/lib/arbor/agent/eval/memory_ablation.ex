@@ -76,7 +76,10 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
             trial_result
 
           {:error, reason} ->
-            Logger.error("[MemoryAblation] Tier #{tier_num} run #{run_num} failed: #{inspect(reason)}")
+            Logger.error(
+              "[MemoryAblation] Tier #{tier_num} run #{run_num} failed: #{inspect(reason)}"
+            )
+
             %{tier: tier_num, tier_name: tier_config.name, error: reason}
         end
       end
