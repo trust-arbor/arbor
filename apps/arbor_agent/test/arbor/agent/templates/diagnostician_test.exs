@@ -132,19 +132,35 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
     test "includes AI analysis capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "ai/analyze"))
+      assert Enum.any?(resources, &(&1 =~ "ai_analyze"))
     end
 
     test "includes proposal submission capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "proposal/submit"))
+      assert Enum.any?(resources, &(&1 =~ "proposal_submit"))
     end
 
-    test "includes code reload capability" do
+    test "includes code hot load capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "code/reload"))
+      assert Enum.any?(resources, &(&1 =~ "code_hot_load"))
+    end
+
+    test "includes file read/write capabilities" do
+      caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
+      assert Enum.any?(resources, &(&1 =~ "file_read"))
+      assert Enum.any?(resources, &(&1 =~ "file_write"))
+    end
+
+    test "all capabilities use action-based URI format" do
+      caps = Diagnostician.required_capabilities()
+
+      Enum.each(caps, fn cap ->
+        assert cap.resource =~ "arbor://agent/action/",
+               "Expected action-based URI, got: #{cap.resource}"
+      end)
     end
   end
 
