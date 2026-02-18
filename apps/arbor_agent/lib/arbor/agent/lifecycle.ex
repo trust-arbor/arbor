@@ -171,6 +171,11 @@ defmodule Arbor.Agent.Lifecycle do
         # These are in-memory only and lost on restart
         init_memory(agent_id, [])
 
+        # Reload persisted goals and intents into ETS
+        # (GoalStore/IntentStore load all agents on GenServer init, but may
+        #  have missed this agent if MemoryStore wasn't available at startup)
+        reload_persisted_memory(agent_id)
+
         executor_opts =
           Keyword.merge(opts,
             agent_id: agent_id,
@@ -436,6 +441,15 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp init_memory(agent_id, opts) do
     Arbor.Memory.init_for_agent(agent_id, opts)
+  end
+
+  defp reload_persisted_memory(agent_id) do
+    Arbor.Memory.GoalStore.reload_for_agent(agent_id)
+    Arbor.Memory.IntentStore.reload_for_agent(agent_id)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp set_initial_goals(_agent_id, []), do: :ok

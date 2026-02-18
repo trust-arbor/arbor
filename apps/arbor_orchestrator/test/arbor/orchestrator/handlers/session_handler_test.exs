@@ -303,6 +303,102 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
     end
   end
 
+  # --- store_decompositions ---
+
+  describe "session.store_decompositions" do
+    test "calls adapter with decompositions" do
+      test_pid = self()
+
+      adapters = %{
+        store_decompositions: fn decomps, id ->
+          send(test_pid, {:stored, decomps, id})
+          :ok
+        end
+      }
+
+      ctx = %{
+        "session.decompositions" => [
+          %{
+            "goal_id" => "g1",
+            "intentions" => [%{"action" => "search", "description" => "find data"}]
+          }
+        ],
+        "session.agent_id" => "a1"
+      }
+
+      outcome = run("session.store_decompositions", ctx, adapters)
+      assert outcome.status == :success
+      assert outcome.context_updates["session.decompositions_stored"] == true
+      assert_received {:stored, [%{"goal_id" => "g1", "intentions" => _}], "a1"}
+    end
+
+    test "degrades gracefully when adapter missing" do
+      outcome = run("session.store_decompositions", %{"session.agent_id" => "a1"}, %{})
+      assert outcome.status == :success
+      assert outcome.context_updates == %{}
+    end
+  end
+
+  # --- process_proposal_decisions ---
+
+  describe "session.process_proposal_decisions" do
+    test "calls adapter with decisions" do
+      test_pid = self()
+
+      adapters = %{
+        process_proposal_decisions: fn decisions, id ->
+          send(test_pid, {:proposals, decisions, id})
+          :ok
+        end
+      }
+
+      ctx = %{
+        "session.proposal_decisions" => [
+          %{"proposal_id" => "p1", "decision" => "accept"},
+          %{"proposal_id" => "p2", "decision" => "reject", "reason" => "not relevant"}
+        ],
+        "session.agent_id" => "a1"
+      }
+
+      outcome = run("session.process_proposal_decisions", ctx, adapters)
+      assert outcome.status == :success
+      assert outcome.context_updates["session.proposals_processed"] == true
+      assert_received {:proposals, [%{"proposal_id" => "p1"} | _], "a1"}
+    end
+
+    test "degrades gracefully when adapter missing" do
+      outcome = run("session.process_proposal_decisions", %{"session.agent_id" => "a1"}, %{})
+      assert outcome.status == :success
+      assert outcome.context_updates == %{}
+    end
+  end
+
+  # --- consolidate ---
+
+  describe "session.consolidate" do
+    test "calls adapter with agent_id" do
+      test_pid = self()
+
+      adapters = %{
+        consolidate: fn id ->
+          send(test_pid, {:consolidated, id})
+          :ok
+        end
+      }
+
+      outcome = run("session.consolidate", %{"session.agent_id" => "a1"}, adapters)
+      assert outcome.status == :success
+      assert outcome.context_updates["session.consolidated"] == true
+      assert_received {:consolidated, "a1"}
+    end
+
+    test "degrades gracefully when adapter missing" do
+      outcome = run("session.consolidate", %{"session.agent_id" => "a1"}, %{})
+      assert outcome.status == :success
+      assert outcome.context_updates == %{}
+    end
+  end
+
   # --- unknown type ---
 
   describe "unknown type" do
@@ -323,6 +419,12 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
     test "per-type classification" do
       assert SessionHandler.idempotency_for("session.llm_call") == :side_effecting
       assert SessionHandler.idempotency_for("session.tool_dispatch") == :side_effecting
+      assert SessionHandler.idempotency_for("session.store_decompositions") == :side_effecting
+
+      assert SessionHandler.idempotency_for("session.process_proposal_decisions") ==
+               :side_effecting
+
+      assert SessionHandler.idempotency_for("session.consolidate") == :side_effecting
       assert SessionHandler.idempotency_for("session.classify") == :read_only
       assert SessionHandler.idempotency_for("session.format") == :read_only
       assert SessionHandler.idempotency_for("session.mode_select") == :read_only

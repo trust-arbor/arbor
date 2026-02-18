@@ -303,6 +303,36 @@ defmodule Arbor.Memory.GoalStore do
     :ok
   end
 
+  @doc """
+  Reload goals for a specific agent from Postgres into ETS.
+
+  Ensures persisted goals are available after agent restart, even if
+  GoalStore's init didn't find them (e.g., MemoryStore wasn't available).
+  """
+  @spec reload_for_agent(String.t()) :: :ok
+  def reload_for_agent(agent_id) do
+    if MemoryStore.available?() do
+      prefix = "#{agent_id}:"
+
+      case MemoryStore.load_all("goals") do
+        {:ok, pairs} ->
+          pairs
+          |> Enum.filter(fn {key, _} -> String.starts_with?(key, prefix) end)
+          |> Enum.each(fn {_key, goal_map} ->
+            goal = goal_from_map(goal_map)
+            :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+          end)
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   # ============================================================================
   # Export / Import (for Seed capture & restore)
   # ============================================================================

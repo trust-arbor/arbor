@@ -307,6 +307,33 @@ defmodule Arbor.Memory.IntentStore do
     :ok
   end
 
+  @doc """
+  Reload intents for a specific agent from Postgres into ETS.
+
+  Ensures persisted intents are available after agent restart.
+  """
+  @spec reload_for_agent(String.t()) :: :ok
+  def reload_for_agent(agent_id) do
+    if MemoryStore.available?() do
+      case MemoryStore.load_all("intents") do
+        {:ok, pairs} ->
+          Enum.each(pairs, fn {key, data} ->
+            if key == agent_id do
+              agent_data = deserialize_agent_data(data)
+              :ets.insert(@ets_table, {agent_id, agent_data})
+            end
+          end)
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   # ============================================================================
   # GenServer Callbacks
   # ============================================================================

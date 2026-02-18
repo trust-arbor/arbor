@@ -39,6 +39,9 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :route_intents,
         :update_goals,
         :apply_identity_insights,
+        :store_decompositions,
+        :process_proposal_decisions,
+        :consolidate,
         :background_checks,
         :trust_tier_resolver
       ]
@@ -586,6 +589,11 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       assert is_map(adapters.background_checks.("int-agent"))
       assert {:ok, tier} = adapters.trust_tier_resolver.("int-agent")
       assert is_atom(tier)
+
+      # New adapters — should return :ok without crashing
+      assert :ok = adapters.store_decompositions.([], "int-agent")
+      assert :ok = adapters.process_proposal_decisions.([], "int-agent")
+      assert :ok = adapters.consolidate.("int-agent")
     end
 
     test "adapters with minimal options still work" do
@@ -601,6 +609,11 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       assert is_map(adapters.background_checks.("min-agent"))
       assert {:ok, tier} = adapters.trust_tier_resolver.("min-agent")
       assert is_atom(tier)
+
+      # New adapters — should return :ok without crashing
+      assert :ok = adapters.store_decompositions.([], "min-agent")
+      assert :ok = adapters.process_proposal_decisions.([], "min-agent")
+      assert :ok = adapters.consolidate.("min-agent")
     end
   end
 

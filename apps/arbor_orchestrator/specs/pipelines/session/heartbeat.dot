@@ -12,7 +12,7 @@
 // │    goal_pursuit    — LLM call focused on advancing active goals        │
 // │    reflection      — LLM call for self-reflection and learning         │
 // │    plan_execution  — LLM call to decompose goals into intentions       │
-// │    consolidation   — memory maintenance (decay, prune, summarize)      │
+// │    consolidation   — memory maintenance (decay, prune, identity)       │
 // │                                                                        │
 // │  Mode selection logic (in session.mode_select handler):                │
 // │    - Active goals exist         → goal_pursuit                         │
@@ -22,8 +22,8 @@
 // │                                                                        │
 // │  All four branches converge at process, which parses the LLM/memory   │
 // │  result into structured actions, goal updates, and memory notes.       │
-// │  The post-processing tail (route_actions → update_goals → done) is    │
-// │  shared across all modes.                                              │
+// │  The post-processing tail stores decompositions as intents, applies    │
+// │  proposal decisions, routes actions, updates goals, then finishes.     │
 // └─────────────────────────────────────────────────────────────────────────┘
 
 digraph Heartbeat {
@@ -49,11 +49,17 @@ digraph Heartbeat {
   llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
   llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
 
-  // ── Consolidation (memory maintenance, no LLM call) ──────
-  consolidate [type="session.memory_update", mode="consolidation"]
+  // ── Consolidation (KG decay/prune + identity consolidation) ─
+  consolidate [type="session.consolidate"]
 
   // ── Result processing ────────────────────────────────────
   process [type="session.process_results"]
+
+  // ── Post-processing: store decompositions as intents ─────
+  store_decompositions [type="session.store_decompositions"]
+
+  // ── Post-processing: apply proposal decisions ────────────
+  process_proposals [type="session.process_proposal_decisions"]
 
   // ── Action routing and goal updates ──────────────────────
   route_actions [type="session.route_actions"]
@@ -82,5 +88,5 @@ digraph Heartbeat {
   consolidate -> process
 
   // Shared post-processing tail
-  process -> route_actions -> update_goals -> done
+  process -> store_decompositions -> process_proposals -> route_actions -> update_goals -> done
 }

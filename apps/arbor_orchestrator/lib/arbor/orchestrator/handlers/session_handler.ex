@@ -22,6 +22,9 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     * `:route_intents`            — `fn agent_id -> :ok`
     * `:update_goals`             — `fn goal_updates, new_goals, agent_id -> :ok`
     * `:apply_identity_insights`  — `fn insights, agent_id -> :ok`
+    * `:store_decompositions`     — `fn decompositions, agent_id -> :ok`
+    * `:process_proposal_decisions` — `fn decisions, agent_id -> :ok`
+    * `:consolidate`              — `fn agent_id -> :ok`
     * `:background_checks`        — `fn agent_id -> results`
 
   If an adapter key is missing, the handler returns success with empty
@@ -53,7 +56,9 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @side_effecting ~w(session.llm_call session.tool_dispatch session.memory_update
-                     session.checkpoint session.route_actions session.update_goals)
+                     session.checkpoint session.route_actions session.update_goals
+                     session.store_decompositions session.process_proposal_decisions
+                     session.consolidate)
 
   # --- Behaviour callbacks ---
 
@@ -303,6 +308,47 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.identity_insights" => []
         })
     end
+  end
+
+  defp handle_type("session.store_decompositions", ctx, adapters, _meta) do
+    with_adapter(adapters, :store_decompositions, fn store ->
+      decompositions = Context.get(ctx, "session.decompositions", [])
+      agent_id = Context.get(ctx, "session.agent_id")
+
+      try do
+        store.(decompositions, agent_id)
+        ok(%{"session.decompositions_stored" => true})
+      catch
+        kind, reason -> fail("store_decompositions: #{inspect({kind, reason})}")
+      end
+    end)
+  end
+
+  defp handle_type("session.process_proposal_decisions", ctx, adapters, _meta) do
+    with_adapter(adapters, :process_proposal_decisions, fn process ->
+      decisions = Context.get(ctx, "session.proposal_decisions", [])
+      agent_id = Context.get(ctx, "session.agent_id")
+
+      try do
+        process.(decisions, agent_id)
+        ok(%{"session.proposals_processed" => true})
+      catch
+        kind, reason -> fail("process_proposal_decisions: #{inspect({kind, reason})}")
+      end
+    end)
+  end
+
+  defp handle_type("session.consolidate", ctx, adapters, _meta) do
+    with_adapter(adapters, :consolidate, fn consolidate ->
+      agent_id = Context.get(ctx, "session.agent_id")
+
+      try do
+        consolidate.(agent_id)
+        ok(%{"session.consolidated" => true})
+      catch
+        kind, reason -> fail("consolidate: #{inspect({kind, reason})}")
+      end
+    end)
   end
 
   defp handle_type("session.route_actions", ctx, adapters, meta) do
