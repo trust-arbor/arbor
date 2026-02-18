@@ -171,15 +171,15 @@ digraph council_decision {
     system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is CONSISTENCY: evaluate alignment with existing patterns. Arbor uses contract-first design, facade pattern, capability-based security, SafeAtom/SafePath, signal bus, OTP supervision. Focus on: pattern adherence, justified novelty, naming conventions, hierarchy fit, discoverability."
   ]
 
-  general [
+  adversarial [
     type="codergen"
     simulate="false"
-    perspective="general"
+    perspective="adversarial"
     llm_provider="openrouter"
     llm_model="google/gemini-3-flash-preview"
     temperature="0.3"
     max_tokens="4096"
-    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is GENERAL ADVISORY: broad analysis across all dimensions. Focus on: most important considerations, trade-offs, what you'd want to know before approving, risks/opportunities a focused perspective might miss, simplest thing that works."
+    system_prompt="You are an advisory evaluator for Arbor, a distributed AI agent orchestration platform on Elixir/OTP with capability-based security. Your role is ADVERSARIAL RED TEAM: actively attack this proposal. Find every way it can fail, be exploited, or produce unintended consequences. Focus on: exploitation vectors, adversarial conditions, violated assumptions, trust boundary crossings, worst-case silent failures, blast radius, denial-of-service vectors, new attack surface. Be harsh and specific — name concrete attack scenarios."
   ]
 
   // Collect all perspective results
@@ -205,7 +205,7 @@ digraph council_decision {
   evaluate -> generalization -> collect
   evaluate -> resource_usage -> collect
   evaluate -> consistency -> collect
-  evaluate -> general -> collect
+  evaluate -> adversarial -> collect
 
   collect -> decide -> done
 }

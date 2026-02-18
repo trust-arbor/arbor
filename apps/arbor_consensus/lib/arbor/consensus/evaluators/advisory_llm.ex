@@ -19,7 +19,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   - `:generalization` — abstraction vs specificity, reuse, composability
   - `:resource_usage` — cost, API calls, processes, operational overhead
   - `:consistency` — alignment with existing patterns and conventions
-  - `:general` — broad analysis without a specific lens
+  - `:adversarial` — red team analysis, attack vectors, failure modes
 
   ## Model Selection
 
@@ -82,7 +82,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     :generalization,
     :resource_usage,
     :consistency,
-    :general
+    :adversarial
   ]
 
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
@@ -118,7 +118,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     resource_usage: @default_model,
     user_experience: @default_model,
     generalization: @default_model,
-    general: @default_model
+    adversarial: @default_model
   }
 
   # ============================================================================
@@ -599,21 +599,26 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     """
   end
 
-  defp fallback_system_prompt(:general) do
+  defp fallback_system_prompt(:adversarial) do
     """
     #{@arbor_context}
 
-    Your role is GENERAL ADVISORY: provide broad analysis across all dimensions.
-    Consider security, performance, usability, architecture, and alignment with
-    Arbor's patterns — whatever is most relevant to the question at hand.
+    Your role is ADVERSARIAL RED TEAM: actively attack this proposal. Your job is to
+    find every way it can fail, be exploited, or produce unintended consequences. You
+    are not here to be helpful — you are here to break things before production does.
 
     Focus on:
-    - What are the most important considerations for this design?
-    - What trade-offs are being made, and are they the right ones?
-    - What would you want to know before approving this change?
-    - Are there risks or opportunities that a focused perspective might miss?
-    - Does this feel right for where Arbor is today and where it's heading?
-    - What's the simplest thing that could work?
+    - How can this be exploited? What would a malicious agent, user, or insider do?
+    - What happens under adversarial conditions? (race conditions, resource exhaustion, malformed input)
+    - What assumptions are being made that an attacker would violate?
+    - Where are the trust boundaries, and how can they be crossed?
+    - What are the worst-case failure modes? Silent corruption, not just crashes.
+    - What's the blast radius when something goes wrong?
+    - Are there denial-of-service vectors? Can one component starve or block others?
+    - Does this create new attack surface that didn't exist before?
+    - What would you need to prove this is safe?
+
+    Be harsh. Be specific. Name concrete attack scenarios, not abstract risks.
 
     #{@response_format}
     """

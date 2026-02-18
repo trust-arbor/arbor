@@ -241,9 +241,7 @@ defmodule Arbor.Persistence do
 
     entries =
       Enum.map(results_attrs, fn attrs ->
-        attrs
-        |> Map.put_new(:inserted_at, now)
-        |> Map.put_new("inserted_at", now)
+        Map.put_new(attrs, :inserted_at, now)
       end)
 
     Repo.insert_all(EvalResult, entries, on_conflict: :nothing)

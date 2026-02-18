@@ -111,7 +111,7 @@ defmodule Arbor.Consensus.ConsultationLogTest do
       eval = %{vote: :approve}
       llm_meta = %{}
 
-      assert :ok = ConsultationLog.log_single("minimal eval", :general, eval, llm_meta)
+      assert :ok = ConsultationLog.log_single("minimal eval", :adversarial, eval, llm_meta)
     end
   end
 
