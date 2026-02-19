@@ -55,7 +55,7 @@ defmodule Arbor.Orchestrator.Graph.NodeTest do
 
       assert node.id == "minimal"
       assert node.attrs == %{}
-      assert node.shape == nil
+      assert node.shape == "box"
       assert node.type == nil
       assert node.prompt == nil
       assert node.goal_gate == false

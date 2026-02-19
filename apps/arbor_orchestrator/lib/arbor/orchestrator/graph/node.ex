@@ -62,7 +62,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
     %__MODULE__{
       id: id,
       attrs: attrs,
-      shape: Map.get(attrs, "shape"),
+      shape: Map.get(attrs, "shape", "box"),
       type: Map.get(attrs, "type"),
       prompt: Map.get(attrs, "prompt"),
       label: Map.get(attrs, "label", id),
