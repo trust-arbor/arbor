@@ -305,7 +305,7 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       :ok
     end
 
-    test "custom handlers override both core and compat" do
+    test "custom handlers override core handlers" do
       defmodule TestHandler do
         @behaviour Arbor.Orchestrator.Handlers.Handler
         @impl true
