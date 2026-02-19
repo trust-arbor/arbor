@@ -1,63 +1,68 @@
 defmodule Arbor.Orchestrator.IR.Compiler do
   @moduledoc """
-  Compiles an untyped `Graph.t()` into a `TypedGraph.t()`.
+  Compiles an untyped `Graph.t()` into an enriched `Graph.t()`.
 
-  The compilation step:
+  The compilation step enriches the graph in-place:
   1. Resolve each node's handler type and module
   2. Validate node attrs against handler schema
   3. Extract capabilities, data classifications, resource bounds
   4. Parse edge conditions into typed AST
   5. Compute graph-level aggregates (total capabilities, max classification)
-  6. Build typed adjacency maps
+  6. Rebuild adjacency maps with enriched edges
 
-  Design: generic attrs at parse → typed IR at compile → validate on typed IR → execute
+  Design: generic attrs at parse → enriched Graph at compile → validate on compiled Graph → execute
   """
 
   alias Arbor.Orchestrator.Dot.Duration
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
-  alias Arbor.Orchestrator.IR.{HandlerSchema, TypedEdge, TypedGraph, TypedNode}
+  alias Arbor.Orchestrator.IR.HandlerSchema
 
-  @doc "Compile an untyped graph into a typed graph IR."
-  @spec compile(Graph.t()) :: {:ok, TypedGraph.t()} | {:error, term()}
+  @doc "Compile an untyped graph into an enriched graph with typed IR fields."
+  @spec compile(Graph.t()) :: {:ok, Graph.t()} | {:error, term()}
   def compile(%Graph{} = graph) do
-    typed_nodes =
+    enriched_nodes =
       graph.nodes
       |> Enum.map(fn {id, node} -> {id, compile_node(node)} end)
       |> Map.new()
 
-    typed_edges = Enum.map(graph.edges, &compile_edge(&1, typed_nodes))
+    enriched_edges = Enum.map(graph.edges, &compile_edge(&1, enriched_nodes))
 
-    adjacency = build_adjacency(typed_edges, :from)
-    reverse_adjacency = build_adjacency(typed_edges, :to)
+    adjacency = build_adjacency(enriched_edges, :from)
+    reverse_adjacency = build_adjacency(enriched_edges, :to)
 
-    capabilities = aggregate_capabilities(typed_nodes)
-    handler_types = Map.new(typed_nodes, fn {id, node} -> {id, node.handler_type} end)
-    max_class = compute_max_classification(typed_nodes)
+    capabilities = aggregate_capabilities(enriched_nodes)
 
-    typed_graph = %TypedGraph{
-      id: graph.id,
-      attrs: graph.attrs,
-      nodes: typed_nodes,
-      edges: typed_edges,
-      adjacency: adjacency,
-      reverse_adjacency: reverse_adjacency,
-      capabilities_required: capabilities,
-      handler_types: handler_types,
-      max_data_classification: max_class
+    handler_types =
+      Map.new(enriched_nodes, fn {id, node} ->
+        {id, Registry.node_type(node)}
+      end)
+
+    max_class = compute_max_classification(enriched_nodes)
+
+    enriched_graph = %Graph{
+      graph
+      | nodes: enriched_nodes,
+        edges: enriched_edges,
+        adjacency: adjacency,
+        reverse_adjacency: reverse_adjacency,
+        compiled: true,
+        capabilities_required: capabilities,
+        handler_types: handler_types,
+        max_data_classification: max_class
     }
 
-    {:ok, typed_graph}
+    {:ok, enriched_graph}
   rescue
     e -> {:error, Exception.message(e)}
   end
 
   @doc "Compile, raising on error."
-  @spec compile!(Graph.t()) :: TypedGraph.t()
+  @spec compile!(Graph.t()) :: Graph.t()
   def compile!(%Graph{} = graph) do
     case compile(graph) do
-      {:ok, typed} -> typed
+      {:ok, enriched} -> enriched
       {:error, reason} -> raise "IR compilation failed: #{reason}"
     end
   end
@@ -72,19 +77,16 @@ defmodule Arbor.Orchestrator.IR.Compiler do
     idempotency = Handler.idempotency_of(handler_module)
     data_class = resolve_data_classification(node, schema)
     capabilities = resolve_capabilities(node, schema)
-    resource_bounds = extract_resource_bounds(node)
+    _resource_bounds = extract_resource_bounds(node)
 
-    %TypedNode{
-      id: node.id,
-      handler_type: handler_type,
-      handler_module: handler_module,
-      attrs: node.attrs,
-      schema: schema,
-      capabilities_required: capabilities,
-      data_classification: data_class,
-      idempotency: idempotency,
-      resource_bounds: resource_bounds,
-      schema_errors: schema_errors
+    %Node{
+      node
+      | handler_module: handler_module,
+        handler_schema: schema,
+        capabilities_required: capabilities,
+        data_classification: data_class,
+        idempotency: idempotency,
+        schema_errors: schema_errors
     }
   end
 
@@ -139,23 +141,21 @@ defmodule Arbor.Orchestrator.IR.Compiler do
 
   # --- Edge compilation ---
 
-  defp compile_edge(%Edge{} = edge, typed_nodes) do
-    condition = TypedEdge.parse_condition(Map.get(edge.attrs, "condition"))
-    source_class = get_node_classification(typed_nodes, edge.from)
-    target_class = get_node_classification(typed_nodes, edge.to)
+  defp compile_edge(%Edge{} = edge, enriched_nodes) do
+    parsed = Edge.parse_condition(Map.get(edge.attrs, "condition"))
+    source_class = get_node_classification(enriched_nodes, edge.from)
+    target_class = get_node_classification(enriched_nodes, edge.to)
 
-    %TypedEdge{
-      from: edge.from,
-      to: edge.to,
-      attrs: edge.attrs,
-      condition: condition,
-      source_classification: source_class,
-      target_classification: target_class
+    %Edge{
+      edge
+      | parsed_condition: parsed,
+        source_classification: source_class,
+        target_classification: target_class
     }
   end
 
-  defp get_node_classification(typed_nodes, node_id) do
-    case Map.get(typed_nodes, node_id) do
+  defp get_node_classification(enriched_nodes, node_id) do
+    case Map.get(enriched_nodes, node_id) do
       nil -> :public
       node -> node.data_classification
     end
@@ -170,16 +170,16 @@ defmodule Arbor.Orchestrator.IR.Compiler do
     end)
   end
 
-  defp aggregate_capabilities(typed_nodes) do
-    typed_nodes
+  defp aggregate_capabilities(enriched_nodes) do
+    enriched_nodes
     |> Enum.flat_map(fn {_id, node} -> node.capabilities_required end)
     |> MapSet.new()
   end
 
-  defp compute_max_classification(typed_nodes) do
-    typed_nodes
+  defp compute_max_classification(enriched_nodes) do
+    enriched_nodes
     |> Enum.reduce(:public, fn {_id, node}, acc ->
-      TypedGraph.max_classification(acc, node.data_classification)
+      Graph.max_classification(acc, node.data_classification)
     end)
   end
 end

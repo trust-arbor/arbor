@@ -83,10 +83,10 @@ defmodule Mix.Tasks.Arbor.Pipeline.Compile do
     end
   end
 
-  defp print_summary(file, typed, errors, warnings, verbose) do
-    node_count = map_size(typed.nodes)
-    edge_count = length(typed.edges)
-    caps = typed.capabilities_required |> MapSet.to_list() |> Enum.sort()
+  defp print_summary(file, compiled, errors, warnings, verbose) do
+    node_count = map_size(compiled.nodes)
+    edge_count = length(compiled.edges)
+    caps = compiled.capabilities_required |> MapSet.to_list() |> Enum.sort()
 
     if errors == [] do
       success("✓ #{file}")
@@ -95,7 +95,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Compile do
     end
 
     info("  Nodes: #{node_count}, Edges: #{edge_count}")
-    info("  Max classification: #{typed.max_data_classification}")
+    info("  Max classification: #{compiled.max_data_classification}")
 
     if caps != [] do
       info("  Capabilities required: #{Enum.join(caps, ", ")}")
@@ -104,12 +104,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.Compile do
     if verbose do
       info("  Handler types:")
 
-      typed.nodes
+      compiled.nodes
       |> Enum.sort_by(fn {id, _} -> id end)
       |> Enum.each(fn {id, node} ->
         idempotency = node.idempotency
         classification = node.data_classification
-        info("    #{id}: #{node.handler_type} (#{idempotency}, #{classification})")
+        handler_type = Map.get(compiled.handler_types, id, "unknown")
+        info("    #{id}: #{handler_type} (#{idempotency}, #{classification})")
       end)
     end
 
