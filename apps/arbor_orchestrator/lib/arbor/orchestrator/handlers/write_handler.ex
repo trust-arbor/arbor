@@ -33,9 +33,7 @@ defmodule Arbor.Orchestrator.Handlers.WriteHandler do
     case target do
       "memory" ->
         op = Map.get(node.attrs, "op", "working_save")
-        memory_type = "memory.#{op}"
-        node_with_type = %{node | attrs: Map.put(node.attrs, "type", memory_type)}
-        MemoryHandler.execute(node_with_type, context, graph, opts)
+        dispatch_memory_write(op, node, context, graph, opts)
 
       "file" ->
         FileWriteHandler.execute(node, context, graph, opts)
@@ -54,6 +52,18 @@ defmodule Arbor.Orchestrator.Handlers.WriteHandler do
 
   @impl true
   def idempotency, do: :side_effecting
+
+  # Specialized memory operations dispatch to their own handlers
+  defp dispatch_memory_write("store_file", node, context, graph, opts) do
+    delegate_to(Arbor.Orchestrator.Handlers.MemoryStoreHandler, node, context, graph, opts)
+  end
+
+  defp dispatch_memory_write(op, node, context, graph, opts) do
+    # Standard memory ops go through MemoryHandler
+    memory_type = "memory.#{op}"
+    node_with_type = %{node | attrs: Map.put(node.attrs, "type", memory_type)}
+    MemoryHandler.execute(node_with_type, context, graph, opts)
+  end
 
   defp delegate_eval("persist", node, context, graph, opts) do
     delegate_to(Arbor.Orchestrator.Handlers.EvalPersistHandler, node, context, graph, opts)

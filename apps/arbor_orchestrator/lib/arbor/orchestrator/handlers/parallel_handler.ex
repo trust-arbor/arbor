@@ -160,11 +160,11 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
             }
 
           {:ok, node} ->
-            handler = Registry.resolve(node)
+            {handler, resolved_node} = Registry.resolve_with_attrs(node)
 
             outcome =
               try do
-                handler.execute(node, context, graph, opts)
+                handler.execute(resolved_node, context, graph, opts)
               rescue
                 exception -> %Outcome{status: :fail, failure_reason: Exception.message(exception)}
               end

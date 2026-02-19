@@ -31,11 +31,8 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
 
     case source do
       "memory" ->
-        # Reconstruct the memory.* type from the op attribute for delegation
         op = Map.get(node.attrs, "op", "recall")
-        memory_type = "memory.#{op}"
-        node_with_type = %{node | attrs: Map.put(node.attrs, "type", memory_type)}
-        MemoryHandler.execute(node_with_type, context, graph, opts)
+        dispatch_memory_read(op, node, context, graph, opts)
 
       "eval_dataset" ->
         delegate_to(
@@ -59,6 +56,24 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
 
   @impl true
   def idempotency, do: :read_only
+
+  # Specialized memory operations dispatch to their own handlers
+  defp dispatch_memory_read("recall_store", node, context, graph, opts) do
+    delegate_to(
+      Arbor.Orchestrator.Handlers.MemoryRecallHandler,
+      node,
+      context,
+      graph,
+      opts
+    )
+  end
+
+  defp dispatch_memory_read(op, node, context, graph, opts) do
+    # Standard memory ops go through MemoryHandler
+    memory_type = "memory.#{op}"
+    node_with_type = %{node | attrs: Map.put(node.attrs, "type", memory_type)}
+    MemoryHandler.execute(node_with_type, context, graph, opts)
+  end
 
   defp read_file(node, context, opts) do
     path = Map.get(node.attrs, "source_key") || Map.get(node.attrs, "path")

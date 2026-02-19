@@ -284,9 +284,18 @@ defmodule Arbor.Orchestrator.Handlers.FeedbackLoopHandlerTest do
   end
 
   describe "registry" do
-    test "feedback.loop type resolves to FeedbackLoopHandler" do
+    test "feedback.loop type resolves to ComposeHandler (Phase 4 delegation)" do
       node = make_node("reg", %{})
-      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) == FeedbackLoopHandler
+
+      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) ==
+               Arbor.Orchestrator.Handlers.ComposeHandler
+    end
+
+    test "feedback.loop type injects mode attribute via resolve_with_attrs" do
+      node = make_node("reg", %{})
+      {handler, resolved_node} = Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(node)
+      assert handler == Arbor.Orchestrator.Handlers.ComposeHandler
+      assert resolved_node.attrs["mode"] == "feedback"
     end
   end
 end

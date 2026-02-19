@@ -117,9 +117,18 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   end
 
   describe "registry" do
-    test "shell type resolves to ShellHandler" do
+    test "shell type resolves to ExecHandler (Phase 4 delegation)" do
       node = make_node("reg_test", %{})
-      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) == ShellHandler
+
+      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) ==
+               Arbor.Orchestrator.Handlers.ExecHandler
+    end
+
+    test "shell type injects target attribute via resolve_with_attrs" do
+      node = make_node("reg_test", %{})
+      {handler, resolved_node} = Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(node)
+      assert handler == Arbor.Orchestrator.Handlers.ExecHandler
+      assert resolved_node.attrs["target"] == "shell"
     end
   end
 end

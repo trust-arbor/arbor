@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     - **Compat handlers** — all existing type strings mapped to their current handler modules
     - **Custom handlers** — runtime-registered handlers via `register/2`
 
-  Resolution order: custom > compat > core. Default: CodergenHandler.
+  Resolution order: custom > alias-resolved core > compat > default (CodergenHandler).
   """
 
   alias Arbor.Orchestrator.Graph.Node
@@ -162,8 +162,8 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "session.store_identity" => SessionHandler
   }
 
-  # Merged: core overridden by compat (preserves existing behavior)
-  @handlers Map.merge(@core_handlers, @compat_handlers)
+  # Merged: compat overridden by core (core handlers take priority)
+  @handlers Map.merge(@compat_handlers, @core_handlers)
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
   @doc "Returns the canonical core type for any type string."
@@ -186,8 +186,64 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
 
   @spec resolve(Node.t()) :: module()
   def resolve(%Node{} = node) do
-    handlers = Map.merge(@handlers, custom_handlers())
-    Map.get(handlers, node_type(node), CodergenHandler)
+    {handler, _resolved_node} = resolve_with_attrs(node)
+    handler
+  end
+
+  @doc """
+  Resolves a node to its handler module AND applies alias attribute injection.
+
+  Returns `{handler_module, prepared_node}` where `prepared_node` has any
+  alias-injected attributes merged into its attrs. The original type is
+  preserved (e.g. "consensus.propose" stays as `type` attr) so delegated
+  handlers can dispatch on it.
+
+  Resolution order:
+  1. Custom handlers (highest priority, by raw type)
+  2. Alias resolution → core handler lookup (primary path)
+  3. Canonical type mapping (for aliases without attr injection)
+  4. Direct lookup in merged handlers (compat fallback)
+  5. Default to CodergenHandler
+  """
+  @spec resolve_with_attrs(Node.t()) :: {module(), Node.t()}
+  def resolve_with_attrs(%Node{} = node) do
+    raw_type = node_type(node)
+    custom = custom_handlers()
+
+    # Custom handlers always take priority
+    case Map.get(custom, raw_type) do
+      nil ->
+        resolve_via_aliases(raw_type, node)
+
+      handler ->
+        {handler, node}
+    end
+  end
+
+  defp resolve_via_aliases(raw_type, node) do
+    alias_mod = Arbor.Orchestrator.Stdlib.Aliases
+
+    case alias_mod.resolve(raw_type) do
+      {canonical_type, injected_attrs} ->
+        # Merge injected attrs into node (don't overwrite existing attrs)
+        merged_attrs = Map.merge(injected_attrs, node.attrs)
+        prepared_node = %{node | attrs: merged_attrs}
+        handler = Map.get(@handlers, canonical_type, CodergenHandler)
+        {handler, prepared_node}
+
+      :passthrough ->
+        # Check alias_map for types that map without attr injection
+        # (e.g. "conditional" → "branch", "parallel.fan_in" → "fan_in")
+        canonical = alias_mod.canonical_type(raw_type)
+
+        if canonical != raw_type do
+          handler = Map.get(@handlers, canonical, CodergenHandler)
+          {handler, node}
+        else
+          handler = Map.get(@handlers, raw_type, CodergenHandler)
+          {handler, node}
+        end
+    end
   end
 
   @spec register(String.t(), module()) :: :ok

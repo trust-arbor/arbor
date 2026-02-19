@@ -172,6 +172,32 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "feedback.loop" => {"compose", %{"mode" => "feedback"}},
     "stack.manager_loop" => {"compose", %{"mode" => "manager_loop"}},
 
+    # Consensus — delegates to ConsensusHandler via ComposeHandler
+    "consensus.propose" => {"compose", %{"mode" => "consensus"}},
+    "consensus.ask" => {"compose", %{"mode" => "consensus"}},
+    "consensus.await" => {"compose", %{"mode" => "consensus"}},
+    "consensus.check" => {"compose", %{"mode" => "consensus"}},
+    "consensus.decide" => {"compose", %{"mode" => "consensus"}},
+
+    # Session — delegates to SessionHandler via ComposeHandler
+    "session.classify" => {"compose", %{"mode" => "session"}},
+    "session.memory_recall" => {"compose", %{"mode" => "session"}},
+    "session.mode_select" => {"compose", %{"mode" => "session"}},
+    "session.llm_call" => {"compose", %{"mode" => "session"}},
+    "session.tool_dispatch" => {"compose", %{"mode" => "session"}},
+    "session.format" => {"compose", %{"mode" => "session"}},
+    "session.memory_update" => {"compose", %{"mode" => "session"}},
+    "session.checkpoint" => {"compose", %{"mode" => "session"}},
+    "session.background_checks" => {"compose", %{"mode" => "session"}},
+    "session.process_results" => {"compose", %{"mode" => "session"}},
+    "session.route_actions" => {"compose", %{"mode" => "session"}},
+    "session.update_goals" => {"compose", %{"mode" => "session"}},
+    "session.store_decompositions" => {"compose", %{"mode" => "session"}},
+    "session.process_proposal_decisions" => {"compose", %{"mode" => "session"}},
+    "session.consolidate" => {"compose", %{"mode" => "session"}},
+    "session.update_working_memory" => {"compose", %{"mode" => "session"}},
+    "session.store_identity" => {"compose", %{"mode" => "session"}},
+
     # Wait — source attribute
     "wait.human" => {"wait", %{"source" => "human"}},
 

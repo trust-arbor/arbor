@@ -301,9 +301,19 @@ defmodule Arbor.Orchestrator.Handlers.AccumulatorHandlerTest do
   end
 
   describe "registry" do
-    test "accumulator type resolves to AccumulatorHandler" do
+    test "accumulator type resolves to WriteHandler (Phase 4 delegation)" do
       node = make_node("reg", %{})
-      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) == AccumulatorHandler
+
+      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) ==
+               Arbor.Orchestrator.Handlers.WriteHandler
+    end
+
+    test "accumulator type injects target attribute via resolve_with_attrs" do
+      node = make_node("reg", %{})
+      {handler, resolved_node} = Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(node)
+      assert handler == Arbor.Orchestrator.Handlers.WriteHandler
+      assert resolved_node.attrs["target"] == "accumulator"
+      assert resolved_node.attrs["mode"] == "append"
     end
   end
 end

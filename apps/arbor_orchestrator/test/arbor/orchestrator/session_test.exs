@@ -69,11 +69,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       {:error, {:already_started, _pid}} -> :ok
     end
 
-    # Register SessionHandler for all session.* types once for the whole module.
-    # Using setup_all prevents race conditions with other async test modules.
-    for type <- @session_types do
-      Arbor.Orchestrator.Handlers.Registry.register(type, SessionHandler)
-    end
+    # Session types resolved via alias path since Phase 4 — no custom registration needed.
 
     :ok
   end
