@@ -110,6 +110,9 @@ defmodule Arbor.Comms.Channels.Signal do
       {:error, reason} ->
         {:error, reason}
     end
+  catch
+    :exit, {:noproc, _} ->
+      {:error, {:shell_unavailable, "Shell.ExecutionRegistry not running"}}
   end
 
   defp find_signal_cli do
