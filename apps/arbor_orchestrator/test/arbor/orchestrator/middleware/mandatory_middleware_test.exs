@@ -157,14 +157,14 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       assert result.outcome.context_updates == %{"last_response" => "hello"}
     end
 
-    test "strips internal keys from context updates" do
+    test "strips graph keys but preserves handler state and engine keys" do
       token =
         make_token_with_outcome(%{}, %{}, %{
           context_updates: %{
             "last_response" => "hello",
-            "internal.simulate.key" => "value",
+            "internal.simulate.key" => "handler_state",
             "graph.cache" => "data",
-            "__private" => "secret",
+            "__adapted_graph__" => "engine_needs_this",
             "public_key" => "visible"
           }
         })
@@ -174,9 +174,10 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
 
       assert Map.has_key?(updates, "last_response")
       assert Map.has_key?(updates, "public_key")
-      refute Map.has_key?(updates, "internal.simulate.key")
       refute Map.has_key?(updates, "graph.cache")
-      refute Map.has_key?(updates, "__private")
+      # Handler state and engine keys preserved — needed for retry loops and graph adaptation
+      assert Map.has_key?(updates, "internal.simulate.key")
+      assert Map.has_key?(updates, "__adapted_graph__")
     end
 
     test "passes through when no outcome" do
@@ -271,13 +272,14 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       assert Map.has_key?(registry, "signal_emit")
     end
 
-    test "build/3 works without mandatory middleware enabled" do
-      # Default config has mandatory_middleware: false
+    test "build/3 includes mandatory middleware when enabled" do
+      # Config now has mandatory_middleware: true (test.exs)
       graph = %Graph{nodes: %{}, edges: [], attrs: %{}}
       node = %Node{id: "test", attrs: %{}}
       chain = Chain.build([], graph, node)
-      # Should not include mandatory chain by default
-      refute CapabilityCheck in chain
+      assert CapabilityCheck in chain
+      assert TaintCheck in chain
+      assert Sanitization in chain
     end
 
     test "build/3 still respects engine, graph, and node middleware" do
