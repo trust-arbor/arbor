@@ -174,6 +174,78 @@ defmodule Arbor.AI.BackendTrust do
   def trust_order, do: @trust_order
 
   # ===========================================================================
+  # Data-Visibility Capabilities (Sensitivity Routing)
+  # ===========================================================================
+
+  @type sensitivity :: :public | :internal | :confidential | :restricted
+
+  # Default data-visibility capabilities per backend.
+  # Local providers can see everything; cloud providers are progressively limited.
+  @default_capabilities %{
+    lmstudio: [:public, :internal, :confidential, :restricted],
+    ollama: [:public, :internal, :confidential, :restricted],
+    anthropic: [:public, :internal, :confidential],
+    opencode: [:public, :internal, :confidential],
+    openai: [:public, :internal],
+    gemini: [:public, :internal],
+    qwen: [:public],
+    openrouter: [:public]
+  }
+
+  @doc """
+  Check if a backend can handle data at the given sensitivity level.
+
+  Returns `true` if the backend's data-visibility capabilities include
+  the specified sensitivity. Unknown backends default to `:public` only.
+
+  ## Examples
+
+      iex> BackendTrust.can_see?(:lmstudio, :restricted)
+      true
+
+      iex> BackendTrust.can_see?(:openai, :restricted)
+      false
+
+      iex> BackendTrust.can_see?(:openai, :internal)
+      true
+  """
+  @spec can_see?(atom(), sensitivity()) :: boolean()
+  def can_see?(backend, sensitivity) when is_atom(backend) and is_atom(sensitivity) do
+    sensitivity in data_capabilities(backend)
+  end
+
+  @doc """
+  Get the list of sensitivity levels a backend can handle.
+
+  Returns the backend's configured data-visibility capabilities.
+  Unknown backends default to `[:public]` only.
+
+  ## Examples
+
+      iex> BackendTrust.data_capabilities(:lmstudio)
+      [:public, :internal, :confidential, :restricted]
+
+      iex> BackendTrust.data_capabilities(:qwen)
+      [:public]
+  """
+  @spec data_capabilities(atom()) :: [sensitivity()]
+  def data_capabilities(backend) when is_atom(backend) do
+    capabilities()
+    |> Map.get(backend, [:public])
+  end
+
+  @doc """
+  Get all configured backend capabilities.
+
+  Returns the merged result of defaults and any application config overrides.
+  """
+  @spec capabilities() :: %{atom() => [sensitivity()]}
+  def capabilities do
+    config_caps = Application.get_env(:arbor_ai, :backend_capabilities, %{})
+    Map.merge(@default_capabilities, config_caps)
+  end
+
+  # ===========================================================================
   # Private Functions
   # ===========================================================================
 

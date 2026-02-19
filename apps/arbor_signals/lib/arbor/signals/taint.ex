@@ -334,4 +334,207 @@ defmodule Arbor.Signals.Taint do
   def merge_metadata(base_meta, taint_meta) when is_map(base_meta) and is_map(taint_meta) do
     Map.merge(base_meta, taint_meta)
   end
+
+  # =============================================================================
+  # Struct-Aware Functions (Phase 1 Taint Extension)
+  # =============================================================================
+
+  # Alias for the 4-dimensional taint struct in contracts
+  @taint_struct Arbor.Contracts.Security.Taint
+
+  @sensitivity_ordered [:public, :internal, :confidential, :restricted]
+  @confidence_ordered [:unverified, :plausible, :corroborated, :verified]
+
+  # ── Sensitivity ──────────────────────────────────────────────────────
+
+  @doc "Check if a value is a valid sensitivity level."
+  @spec valid_sensitivity?(term()) :: boolean()
+  def valid_sensitivity?(s) when s in @sensitivity_ordered, do: true
+  def valid_sensitivity?(_), do: false
+
+  @doc "Get numeric rank for a sensitivity level (0=public, 3=restricted)."
+  @spec sensitivity_severity(atom()) :: non_neg_integer()
+  def sensitivity_severity(:public), do: 0
+  def sensitivity_severity(:internal), do: 1
+  def sensitivity_severity(:confidential), do: 2
+  def sensitivity_severity(:restricted), do: 3
+
+  @doc "Return the higher sensitivity of two levels."
+  @spec max_sensitivity(atom(), atom()) :: atom()
+  def max_sensitivity(a, b) do
+    if sensitivity_severity(a) >= sensitivity_severity(b), do: a, else: b
+  end
+
+  # ── Confidence ───────────────────────────────────────────────────────
+
+  @doc "Check if a value is a valid confidence level."
+  @spec valid_confidence?(term()) :: boolean()
+  def valid_confidence?(c) when c in @confidence_ordered, do: true
+  def valid_confidence?(_), do: false
+
+  @doc "Get numeric rank for a confidence level (0=unverified, 3=verified)."
+  @spec confidence_rank(atom()) :: non_neg_integer()
+  def confidence_rank(:unverified), do: 0
+  def confidence_rank(:plausible), do: 1
+  def confidence_rank(:corroborated), do: 2
+  def confidence_rank(:verified), do: 3
+
+  @doc "Return the lower confidence of two levels (conservative merge)."
+  @spec min_confidence(atom(), atom()) :: atom()
+  def min_confidence(a, b) do
+    if confidence_rank(a) <= confidence_rank(b), do: a, else: b
+  end
+
+  # ── Sanitizations (bitmask) ──────────────────────────────────────────
+
+  @doc "Check if a specific sanitization has been applied."
+  @spec sanitized?(non_neg_integer(), atom()) :: boolean()
+  def sanitized?(bitmask, sanitization_name) when is_integer(bitmask) do
+    case @taint_struct.sanitization_bit(sanitization_name) do
+      {:ok, bit} -> Bitwise.band(bitmask, bit) != 0
+      :error -> false
+    end
+  end
+
+  @doc "Apply a sanitization to a bitmask."
+  @spec apply_sanitization(non_neg_integer(), atom()) :: non_neg_integer()
+  def apply_sanitization(bitmask, sanitization_name) when is_integer(bitmask) do
+    case @taint_struct.sanitization_bit(sanitization_name) do
+      {:ok, bit} -> Bitwise.bor(bitmask, bit)
+      :error -> bitmask
+    end
+  end
+
+  @doc "Intersect two sanitization bitmasks (only keep sanitizations present in BOTH)."
+  @spec intersect_sanitizations(non_neg_integer(), non_neg_integer()) :: non_neg_integer()
+  def intersect_sanitizations(a, b) when is_integer(a) and is_integer(b) do
+    Bitwise.band(a, b)
+  end
+
+  # ── Struct Propagation ───────────────────────────────────────────────
+
+  @doc """
+  Propagate taint through a transformation of multiple struct inputs.
+
+  Four-dimensional propagation:
+  - level: max(inputs)
+  - sensitivity: max(inputs)
+  - sanitizations: band(inputs) — only keep sanitizations present in ALL inputs
+  - confidence: min(inputs) — conservative
+
+  Chain is concatenated from all inputs.
+  """
+  @spec propagate_taint([struct()]) :: struct()
+  def propagate_taint([]) do
+    struct(@taint_struct, level: :trusted, sensitivity: :public, confidence: :verified)
+  end
+
+  def propagate_taint(inputs) when is_list(inputs) do
+    Enum.reduce(inputs, nil, fn taint, acc ->
+      if acc == nil do
+        taint
+      else
+        struct(@taint_struct,
+          level: max_taint(acc.level, taint.level),
+          sensitivity: max_sensitivity(acc.sensitivity, taint.sensitivity),
+          sanitizations: intersect_sanitizations(acc.sanitizations, taint.sanitizations),
+          confidence: min_confidence(acc.confidence, taint.confidence),
+          source: acc.source || taint.source,
+          chain: Enum.uniq(acc.chain ++ taint.chain)
+        )
+      end
+    end)
+  end
+
+  # ── Serialization (JSONB persistence) ────────────────────────────────
+
+  @doc """
+  Convert a Taint struct to a string-keyed map suitable for JSONB storage.
+
+  Atom fields are converted to strings for safe JSON round-tripping.
+  """
+  @spec to_persistable(struct()) :: map()
+  def to_persistable(%{__struct__: @taint_struct} = taint) do
+    %{
+      "taint_level" => to_string(taint.level),
+      "taint_sensitivity" => to_string(taint.sensitivity),
+      "taint_sanitizations" => taint.sanitizations,
+      "taint_confidence" => to_string(taint.confidence),
+      "taint_source" => taint.source,
+      "taint_chain" => taint.chain
+    }
+  end
+
+  @doc """
+  Restore a Taint struct from a persistable map.
+
+  Uses `String.to_existing_atom/1` for safe deserialization.
+  Fail-closed: corrupt values get the most restrictive defaults.
+  """
+  @spec from_persistable(map()) :: struct()
+  def from_persistable(map) when is_map(map) do
+    struct(@taint_struct,
+      level: safe_atom(map["taint_level"], :hostile, @levels_ordered),
+      sensitivity:
+        safe_atom(map["taint_sensitivity"], :restricted, @sensitivity_ordered),
+      sanitizations: safe_integer(map["taint_sanitizations"], 0),
+      confidence:
+        safe_atom(map["taint_confidence"], :unverified, @confidence_ordered),
+      source: map["taint_source"],
+      chain: safe_list(map["taint_chain"])
+    )
+  end
+
+  # ── LLM Output Taint ────────────────────────────────────────────────
+
+  @doc """
+  Create taint for LLM output.
+
+  Wipes ALL sanitization bits (council decision #6: LLM output cannot be
+  assumed to preserve any input sanitization). Inherits worst level,
+  sensitivity, and confidence from the input taint.
+  """
+  @spec for_llm_output(struct()) :: struct()
+  def for_llm_output(%{__struct__: @taint_struct} = input_taint) do
+    struct(@taint_struct,
+      level: max_taint(input_taint.level, :derived),
+      sensitivity: input_taint.sensitivity,
+      sanitizations: 0,
+      confidence: min_confidence(input_taint.confidence, :plausible),
+      source: "llm_output",
+      chain: input_taint.chain ++ [input_taint.source || "llm"]
+    )
+  end
+
+  # ── Bridge: atom → struct ────────────────────────────────────────────
+
+  @doc """
+  Upgrade a bare taint level atom to a full Taint struct.
+
+  Used at boundaries where legacy atom-based taint meets the new struct system.
+  """
+  @spec from_level(level()) :: struct()
+  def from_level(level) when level in @levels_ordered do
+    struct(@taint_struct, level: level)
+  end
+
+  # ── Private helpers ──────────────────────────────────────────────────
+
+  defp safe_atom(nil, fallback, _allowed), do: fallback
+  defp safe_atom(value, fallback, allowed) when is_binary(value) do
+    atom = String.to_existing_atom(value)
+    if atom in allowed, do: atom, else: fallback
+  rescue
+    ArgumentError -> fallback
+  end
+  defp safe_atom(value, fallback, allowed) when is_atom(value) do
+    if value in allowed, do: value, else: fallback
+  end
+  defp safe_atom(_, fallback, _allowed), do: fallback
+
+  defp safe_integer(value, _fallback) when is_integer(value) and value >= 0, do: value
+  defp safe_integer(_, fallback), do: fallback
+
+  defp safe_list(value) when is_list(value), do: value
+  defp safe_list(_), do: []
 end

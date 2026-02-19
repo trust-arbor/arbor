@@ -148,4 +148,63 @@ defmodule Arbor.AI.BackendTrustTest do
       assert BackendTrust.trust_order() == [:highest, :high, :medium, :low]
     end
   end
+
+  # ── Data-Visibility Capabilities ────────────────────────────────────
+
+  describe "can_see?/2" do
+    test "local backends can see all sensitivity levels" do
+      for level <- [:public, :internal, :confidential, :restricted] do
+        assert BackendTrust.can_see?(:lmstudio, level)
+        assert BackendTrust.can_see?(:ollama, level)
+      end
+    end
+
+    test "anthropic can see up to confidential" do
+      assert BackendTrust.can_see?(:anthropic, :public)
+      assert BackendTrust.can_see?(:anthropic, :internal)
+      assert BackendTrust.can_see?(:anthropic, :confidential)
+      refute BackendTrust.can_see?(:anthropic, :restricted)
+    end
+
+    test "openai can see up to internal" do
+      assert BackendTrust.can_see?(:openai, :public)
+      assert BackendTrust.can_see?(:openai, :internal)
+      refute BackendTrust.can_see?(:openai, :confidential)
+      refute BackendTrust.can_see?(:openai, :restricted)
+    end
+
+    test "qwen can only see public" do
+      assert BackendTrust.can_see?(:qwen, :public)
+      refute BackendTrust.can_see?(:qwen, :internal)
+    end
+
+    test "unknown backends default to public only" do
+      assert BackendTrust.can_see?(:unknown, :public)
+      refute BackendTrust.can_see?(:unknown, :internal)
+    end
+  end
+
+  describe "data_capabilities/1" do
+    test "returns full list for local backends" do
+      assert BackendTrust.data_capabilities(:lmstudio) ==
+               [:public, :internal, :confidential, :restricted]
+    end
+
+    test "returns limited list for cloud backends" do
+      assert BackendTrust.data_capabilities(:openrouter) == [:public]
+    end
+
+    test "returns [:public] for unknown backends" do
+      assert BackendTrust.data_capabilities(:unknown) == [:public]
+    end
+  end
+
+  describe "capabilities/0" do
+    test "returns default capabilities map" do
+      caps = BackendTrust.capabilities()
+      assert is_map(caps)
+      assert caps[:lmstudio] == [:public, :internal, :confidential, :restricted]
+      assert caps[:qwen] == [:public]
+    end
+  end
 end

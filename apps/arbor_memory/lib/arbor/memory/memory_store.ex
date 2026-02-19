@@ -24,15 +24,18 @@ defmodule Arbor.Memory.MemoryStore do
   Persist a record to the durable store (sync).
 
   Returns `:ok` on success or if the store is unavailable (graceful degradation).
+
+  ## Options
+
+  - `:taint` - A `Arbor.Contracts.Security.Taint` struct to persist alongside
+    the data. Stored in `record.metadata["taint"]` as a string-keyed map.
   """
-  @spec persist(String.t(), String.t(), map()) :: :ok
-  def persist(namespace, key, data) when is_binary(namespace) and is_binary(key) do
+  @spec persist(String.t(), String.t(), map(), keyword()) :: :ok
+  def persist(namespace, key, data, opts \\ []) when is_binary(namespace) and is_binary(key) do
     if available?() do
       composite_key = "#{namespace}:#{key}"
-      # Use composite_key as Record.key so it survives the Postgres round-trip.
-      # The Postgres backend stores Record.key, so load_from_backend restores
-      # ETS keys matching what BufferedStore.put originally used.
-      record = Record.new(composite_key, data, id: composite_key)
+      metadata = build_taint_metadata(opts)
+      record = Record.new(composite_key, data, id: composite_key, metadata: metadata)
       BufferedStore.put(composite_key, record, name: @store_name)
     end
 
@@ -50,10 +53,11 @@ defmodule Arbor.Memory.MemoryStore do
   Persist a record asynchronously.
 
   Spawns a Task to write. Failures are logged but don't affect the caller.
+  Accepts the same options as `persist/4`.
   """
-  @spec persist_async(String.t(), String.t(), map()) :: :ok
-  def persist_async(namespace, key, data) do
-    Task.start(fn -> persist(namespace, key, data) end)
+  @spec persist_async(String.t(), String.t(), map(), keyword()) :: :ok
+  def persist_async(namespace, key, data, opts \\ []) do
+    Task.start(fn -> persist(namespace, key, data, opts) end)
     :ok
   end
 
@@ -201,6 +205,42 @@ defmodule Arbor.Memory.MemoryStore do
   end
 
   @doc """
+  Load a single record with taint metadata as a TaintedValue.
+
+  Unlike `load/2`, this returns the data wrapped in a `TaintedValue` struct
+  that carries the persisted taint metadata. Legacy data (without taint metadata)
+  gets conservative defaults: `:trusted` level, `:internal` sensitivity,
+  `:unverified` confidence.
+
+  Returns `{:ok, TaintedValue.t()}` or `{:error, term()}`.
+  """
+  @spec load_tainted(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
+  def load_tainted(namespace, key) do
+    if available?() do
+      composite_key = "#{namespace}:#{key}"
+
+      case load_record_with_metadata(composite_key, key) do
+        {:ok, data, metadata} ->
+          taint = restore_taint(metadata)
+          tainted_value = wrap_tainted(data, taint)
+          {:ok, tainted_value}
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      {:error, :not_found}
+    end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "MemoryStore.load_tainted failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+      )
+
+      {:error, :not_found}
+  end
+
+  @doc """
   Delete a record.
   """
   @spec delete(String.t(), String.t()) :: :ok
@@ -276,10 +316,12 @@ defmodule Arbor.Memory.MemoryStore do
         try do
           case Arbor.AI.embed(content) do
             {:ok, %{embedding: embedding}} ->
-              metadata = %{
-                type: type && to_string(type),
-                source: namespace
-              }
+              metadata =
+                %{
+                  type: type && to_string(type),
+                  source: namespace
+                }
+                |> maybe_add_taint_to_embedding(opts)
 
               Embedding.store(agent_id, content, embedding, metadata)
 
@@ -355,5 +397,98 @@ defmodule Arbor.Memory.MemoryStore do
       nil -> search_opts
       filter -> Keyword.put(search_opts, :type_filter, to_string(filter))
     end
+  end
+
+  # ── Taint persistence helpers ────────────────────────────────────────
+
+  defp build_taint_metadata(opts) do
+    case Keyword.get(opts, :taint) do
+      nil ->
+        %{}
+
+      taint ->
+        if taint_module_available?() do
+          %{"taint" => apply(Arbor.Signals.Taint, :to_persistable, [taint])}
+        else
+          %{}
+        end
+    end
+  end
+
+  defp restore_taint(metadata) when is_map(metadata) do
+    case Map.get(metadata, "taint") do
+      nil ->
+        # Legacy data — conservative default taint
+        default_taint_struct()
+
+      taint_map when is_map(taint_map) ->
+        if taint_module_available?() do
+          apply(Arbor.Signals.Taint, :from_persistable, [taint_map])
+        else
+          default_taint_struct()
+        end
+    end
+  end
+
+  defp restore_taint(_), do: default_taint_struct()
+
+  defp default_taint_struct do
+    if Code.ensure_loaded?(Arbor.Contracts.Security.Taint) do
+      struct(Arbor.Contracts.Security.Taint,
+        level: :trusted,
+        sensitivity: :internal,
+        sanitizations: 0,
+        confidence: :unverified
+      )
+    else
+      %{level: :trusted, sensitivity: :internal, sanitizations: 0, confidence: :unverified}
+    end
+  end
+
+  defp wrap_tainted(data, taint) do
+    if Code.ensure_loaded?(Arbor.Contracts.Security.TaintedValue) do
+      apply(Arbor.Contracts.Security.TaintedValue, :wrap, [data, taint])
+    else
+      %{value: data, taint: taint}
+    end
+  end
+
+  defp load_record_with_metadata(composite_key, bare_key) do
+    case BufferedStore.get(composite_key, name: @store_name) do
+      {:ok, %Record{data: data, metadata: metadata}} ->
+        {:ok, data, metadata || %{}}
+
+      {:error, :not_found} ->
+        # Fallback: try bare key
+        case BufferedStore.get(bare_key, name: @store_name) do
+          {:ok, %Record{data: data, metadata: metadata}} ->
+            {:ok, data, metadata || %{}}
+
+          _ ->
+            {:error, :not_found}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp maybe_add_taint_to_embedding(metadata, opts) do
+    case Keyword.get(opts, :taint) do
+      nil ->
+        metadata
+
+      taint ->
+        if taint_module_available?() do
+          Map.put(metadata, :taint, apply(Arbor.Signals.Taint, :to_persistable, [taint]))
+        else
+          metadata
+        end
+    end
+  end
+
+  defp taint_module_available? do
+    Code.ensure_loaded?(Arbor.Signals.Taint) and
+      function_exported?(Arbor.Signals.Taint, :to_persistable, 1)
   end
 end
