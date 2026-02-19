@@ -150,11 +150,15 @@ defmodule Arbor.Signals do
   @impl true
   def emit_signal_for_category_and_type(category, type, data, opts) do
     signal = Signal.new(category, type, data, opts)
+    # Set emitter_pid server-side so it can't be spoofed by callers
+    signal = %{signal | emitter_pid: self()}
     emit_preconstructed_signal(signal)
   end
 
   @impl true
   def emit_preconstructed_signal(%Signal{} = signal) do
+    # Stamp emitter_pid if not already set (e.g., pre-constructed signals)
+    signal = if signal.emitter_pid, do: signal, else: %{signal | emitter_pid: self()}
     if healthy?() do
       # Encrypt restricted-topic signals BEFORE storing to prevent
       # plaintext sensitive data in the Store. Bus.publish will skip
