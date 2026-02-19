@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.Application do
       {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
       Arbor.Orchestrator.SignalsBridge,
       Arbor.Orchestrator.JobRegistry,
+      Arbor.Orchestrator.DotCache,
       {DynamicSupervisor, name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one},
       {Registry, keys: :unique, name: Arbor.Orchestrator.SessionRegistry},
       Arbor.Orchestrator.Session.Supervisor,

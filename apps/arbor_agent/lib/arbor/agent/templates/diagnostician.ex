@@ -74,25 +74,25 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   def required_capabilities do
     [
       # All operations route through Executor → ActionDispatch.
-      # Only action-based capabilities needed.
+      # Canonical URI format matches ToolBridge: arbor://actions/execute/<dotted_name>
 
       # Read and write project files for code analysis and changes
-      %{resource: "arbor://agent/action/file_read"},
-      %{resource: "arbor://agent/action/file_write"},
+      %{resource: "arbor://actions/execute/file.read"},
+      %{resource: "arbor://actions/execute/file.write"},
       # AI analysis for root cause diagnosis
-      %{resource: "arbor://agent/action/ai_analyze"},
+      %{resource: "arbor://actions/execute/ai.analyze"},
       # Submit, revise, and check proposals via governance
-      %{resource: "arbor://agent/action/proposal_submit"},
-      %{resource: "arbor://agent/action/proposal_revise"},
-      %{resource: "arbor://agent/action/proposal_status"},
+      %{resource: "arbor://actions/execute/proposal.submit"},
+      %{resource: "arbor://actions/execute/proposal.revise"},
+      %{resource: "arbor://actions/execute/proposal.status"},
       # Hot reload (requires council approval to execute)
-      %{resource: "arbor://agent/action/code_hot_load"},
+      %{resource: "arbor://actions/execute/code.hot_load"},
       # Read runtime health data (metrics, anomalies, status)
-      %{resource: "arbor://agent/action/monitor_read"},
+      %{resource: "arbor://actions/execute/monitor.read"},
       # Shell access for diagnostics (recon, observer, etc.)
-      %{resource: "arbor://agent/action/shell_execute"},
+      %{resource: "arbor://actions/execute/shell.execute"},
       # Background health checks
-      %{resource: "arbor://agent/action/background_checks_run"}
+      %{resource: "arbor://actions/execute/background_checks.run"}
     ]
   end
 
