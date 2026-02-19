@@ -203,8 +203,12 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   - `:limit` - Max results
   - `:sort_by` - Sort field (`:relevance`, `:created_at`, `:last_accessed`)
   """
-  @spec find_by_type_and_criteria(KnowledgeGraph.t(), KnowledgeGraph.node_type(), (KnowledgeGraph.knowledge_node() -> boolean()), keyword()) ::
-          [KnowledgeGraph.knowledge_node()]
+  @spec find_by_type_and_criteria(
+          KnowledgeGraph.t(),
+          KnowledgeGraph.node_type(),
+          (KnowledgeGraph.knowledge_node() -> boolean()),
+          keyword()
+        ) :: [KnowledgeGraph.knowledge_node()]
   def find_by_type_and_criteria(graph, type, criteria_fn, opts \\ []) do
     limit = Keyword.get(opts, :limit)
     sort_by = Keyword.get(opts, :sort_by, :relevance)
@@ -385,7 +389,11 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
 
   Returns the selected nodes in relevance order.
   """
-  @spec select_by_token_budget([KnowledgeGraph.knowledge_node()], non_neg_integer(), map()) :: [KnowledgeGraph.knowledge_node()]
+  @spec select_by_token_budget(
+          [KnowledgeGraph.knowledge_node()],
+          non_neg_integer(),
+          map()
+        ) :: [KnowledgeGraph.knowledge_node()]
   def select_by_token_budget(nodes, max_tokens, type_quotas \\ %{}) do
     sorted = Enum.sort_by(nodes, & &1.relevance, :desc)
 
