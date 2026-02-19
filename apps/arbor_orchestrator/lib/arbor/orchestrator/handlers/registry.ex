@@ -117,7 +117,12 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "session.background_checks" => SessionHandler,
     "session.process_results" => SessionHandler,
     "session.route_actions" => SessionHandler,
-    "session.update_goals" => SessionHandler
+    "session.update_goals" => SessionHandler,
+    "session.store_decompositions" => SessionHandler,
+    "session.process_proposal_decisions" => SessionHandler,
+    "session.consolidate" => SessionHandler,
+    "session.update_working_memory" => SessionHandler,
+    "session.store_identity" => SessionHandler
   }
   @custom_handlers_key {__MODULE__, :custom_handlers}
 

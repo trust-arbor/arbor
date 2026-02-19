@@ -58,7 +58,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   @side_effecting ~w(session.llm_call session.tool_dispatch session.memory_update
                      session.checkpoint session.route_actions session.update_goals
                      session.store_decompositions session.process_proposal_decisions
-                     session.consolidate session.update_working_memory)
+                     session.consolidate session.update_working_memory
+                     session.store_identity)
 
   # --- Behaviour callbacks ---
 
@@ -294,7 +295,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.curiosity" => validated_list(parsed, "curiosity", &is_binary/1),
           "session.decompositions" => validated_list(parsed, "decompositions", &is_map/1),
           "session.new_intents" => validated_list(parsed, "new_intents", &is_map/1),
-          "session.proposal_decisions" => validated_list(parsed, "proposal_decisions", &valid_proposal_decision?/1),
+          "session.proposal_decisions" =>
+            validated_list(parsed, "proposal_decisions", &valid_proposal_decision?/1),
           "session.identity_insights" => validated_list(parsed, "identity_insights", &is_map/1)
         })
 
@@ -424,6 +426,20 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
         ok(%{"session.actions_routed" => true})
     end
+  end
+
+  defp handle_type("session.store_identity", ctx, adapters, _meta) do
+    with_adapter(adapters, :apply_identity_insights, fn apply_fn ->
+      insights = Context.get(ctx, "session.identity_insights", [])
+      agent_id = Context.get(ctx, "session.agent_id")
+
+      try do
+        apply_fn.(insights, agent_id)
+        ok(%{"session.identity_stored" => true})
+      catch
+        kind, reason -> fail("store_identity: #{inspect({kind, reason})}")
+      end
+    end)
   end
 
   defp handle_type("session.update_goals", ctx, adapters, _meta) do
