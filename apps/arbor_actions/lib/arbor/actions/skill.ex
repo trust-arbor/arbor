@@ -389,9 +389,8 @@ defmodule Arbor.Actions.Skill do
       wm_mod = WorkingMemory
 
       skills =
-        with {:ok, wm} <- get_working_memory(agent_id) do
-          wm_mod.list_active_skills(wm)
-        else
+        case get_working_memory(agent_id) do
+          {:ok, wm} -> wm_mod.list_active_skills(wm)
           _ -> []
         end
 

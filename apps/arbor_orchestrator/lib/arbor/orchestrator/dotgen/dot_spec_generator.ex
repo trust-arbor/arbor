@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.{Node, Edge}
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.Registry, as: HandlerRegistry
 
   # Known node attributes that get special treatment in the node inventory.

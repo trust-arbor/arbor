@@ -562,9 +562,7 @@ defmodule Arbor.Agent.Investigation do
   end
 
   defp stringify_map(map) when is_map(map) do
-    map
-    |> Enum.map(fn {k, v} -> "#{k} #{inspect(v)}" end)
-    |> Enum.join(" ")
+    Enum.map_join(map, " ", fn {k, v} -> "#{k} #{inspect(v)}" end)
   end
 
   defp stringify_map(other), do: inspect(other)
