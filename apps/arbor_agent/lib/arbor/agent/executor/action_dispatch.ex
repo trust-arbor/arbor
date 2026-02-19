@@ -12,6 +12,67 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   # ── Public API ──
 
   @doc """
+  Resolve an action atom to its canonical dotted name for capability URIs.
+
+  The canonical format matches what ToolBridge/arbor_actions uses:
+  `arbor://actions/execute/<dotted_name>`.
+
+  ## Examples
+
+      iex> ActionDispatch.canonical_action_name(:file_read)
+      {:ok, "file.read"}
+
+      iex> ActionDispatch.canonical_action_name(:background_checks_run)
+      {:ok, "background_checks.run"}
+
+      iex> ActionDispatch.canonical_action_name(:unknown_thing)
+      :error
+  """
+  @spec canonical_action_name(atom()) :: {:ok, String.t()} | :error
+  def canonical_action_name(action) when is_atom(action) do
+    # Check hardcoded dispatch mappings first (compound names like
+    # :background_checks_run that find_action_module can't discover,
+    # and inline-handled actions like :ai_analyze), then fall back
+    # to naming convention discovery.
+    case hardcoded_canonical_name(action) do
+      {:ok, _} = result ->
+        result
+
+      :error ->
+        case find_action_module(action) do
+          nil -> :error
+          module -> {:ok, module_to_dotted_name(module)}
+        end
+    end
+  end
+
+  @doc """
+  Convert an action module to its canonical dotted name for capability URIs.
+
+  Same logic as `arbor_actions.ex`'s `action_module_to_name/1` — drops
+  everything up to and including "Actions", joins remainder with dots,
+  then underscores.
+
+  ## Examples
+
+      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.File.Read)
+      "file.read"
+
+      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.BackgroundChecks.Run)
+      "background_checks.run"
+  """
+  @spec module_to_dotted_name(module()) :: String.t()
+  def module_to_dotted_name(module) do
+    module
+    |> Module.split()
+    |> Enum.drop_while(&(&1 != "Actions"))
+    |> Enum.drop(1)
+    |> Enum.join(".")
+    |> Macro.underscore()
+    |> String.replace("/", ".")
+  end
+
+  @doc """
   Dispatch an action with the given parameters.
 
   Returns `{:ok, result}` or `{:error, reason}`.
@@ -223,6 +284,16 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       nil -> {:error, {:action_failed, action}}
     end
   end
+
+  # Map actions with hardcoded dispatch clauses to canonical dotted names.
+  # Covers compound namespace modules (BackgroundChecks.Run) and inline-handled
+  # actions (ai_analyze, proposal_status) that find_action_module can't discover.
+  defp hardcoded_canonical_name(:background_checks_run), do: {:ok, "background_checks.run"}
+  defp hardcoded_canonical_name(:proposal_submit), do: {:ok, "proposal.submit"}
+  defp hardcoded_canonical_name(:code_hot_load), do: {:ok, "code.hot_load"}
+  defp hardcoded_canonical_name(:ai_analyze), do: {:ok, "ai.analyze"}
+  defp hardcoded_canonical_name(:proposal_status), do: {:ok, "proposal.status"}
+  defp hardcoded_canonical_name(_), do: :error
 
   # Try to find an action module by naming convention
   # e.g., :file_read -> Arbor.Actions.File.Read

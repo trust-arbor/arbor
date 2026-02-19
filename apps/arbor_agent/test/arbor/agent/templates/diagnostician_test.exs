@@ -126,40 +126,40 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
     test "includes monitor read access" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "monitor"))
+      assert Enum.any?(resources, &(&1 =~ "monitor.read"))
     end
 
     test "includes AI analysis capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "ai_analyze"))
+      assert Enum.any?(resources, &(&1 =~ "ai.analyze"))
     end
 
     test "includes proposal submission capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "proposal_submit"))
+      assert Enum.any?(resources, &(&1 =~ "proposal.submit"))
     end
 
     test "includes code hot load capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "code_hot_load"))
+      assert Enum.any?(resources, &(&1 =~ "code.hot_load"))
     end
 
     test "includes file read/write capabilities" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "file_read"))
-      assert Enum.any?(resources, &(&1 =~ "file_write"))
+      assert Enum.any?(resources, &(&1 =~ "file.read"))
+      assert Enum.any?(resources, &(&1 =~ "file.write"))
     end
 
-    test "all capabilities use action-based URI format" do
+    test "all capabilities use canonical URI format" do
       caps = Diagnostician.required_capabilities()
 
       Enum.each(caps, fn cap ->
-        assert cap.resource =~ "arbor://agent/action/",
-               "Expected action-based URI, got: #{cap.resource}"
+        assert cap.resource =~ "arbor://actions/execute/",
+               "Expected canonical URI, got: #{cap.resource}"
       end)
     end
   end

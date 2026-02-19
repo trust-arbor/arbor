@@ -368,8 +368,16 @@ defmodule Arbor.Agent.Executor do
   # P0-2: Use full authorize/4 pipeline directly (reflexes, identity,
   # constraints, escalation, audit). Shadow mode removed — can?/3 is only
   # for UI hints, not security decisions.
+  #
+  # URI unification: use the canonical dotted name format matching ToolBridge
+  # (e.g., "arbor://actions/execute/file.read" instead of "arbor://agent/action/file_read").
+  # Falls back to old format for actions without a discoverable module.
   defp check_capabilities(%Intent{action: action}, state) do
-    resource = "arbor://agent/action/#{action}"
+    resource =
+      case ActionDispatch.canonical_action_name(action) do
+        {:ok, name} -> "arbor://actions/execute/#{name}"
+        :error -> "arbor://agent/action/#{action}"
+      end
 
     case safe_call(fn -> Arbor.Security.authorize(state.agent_id, resource, :execute) end) do
       {:ok, :authorized} -> :authorized

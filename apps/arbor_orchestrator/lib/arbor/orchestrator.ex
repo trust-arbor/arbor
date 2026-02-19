@@ -106,12 +106,39 @@ defmodule Arbor.Orchestrator do
   defp ensure_graph(%Graph{} = graph, opts), do: apply_transforms(graph, opts)
 
   defp ensure_graph(source, opts) when is_binary(source) do
-    with {:ok, graph} <- Parser.parse(source) do
-      apply_transforms(graph, opts)
+    if Keyword.get(opts, :cache, true) do
+      ensure_graph_cached(source, opts)
+    else
+      with {:ok, graph} <- Parser.parse(source) do
+        apply_transforms(graph, opts)
+      end
     end
   end
 
   defp ensure_graph(_, _), do: {:error, :invalid_graph_input}
+
+  defp ensure_graph_cached(source, opts) do
+    alias Arbor.Orchestrator.DotCache
+
+    cache_key = DotCache.cache_key(source)
+
+    case DotCache.get(cache_key) do
+      {:ok, graph} ->
+        apply_transforms(graph, opts)
+
+      :miss ->
+        with {:ok, graph} <- Parser.parse(source) do
+          DotCache.put(cache_key, graph)
+          apply_transforms(graph, opts)
+        end
+    end
+  rescue
+    # Cache unavailable (GenServer not started) — fall back to uncached
+    ArgumentError ->
+      with {:ok, graph} <- Parser.parse(source) do
+        apply_transforms(graph, opts)
+      end
+  end
 
   defp apply_transforms(graph, opts) do
     transforms = [VariableExpansion, ModelStylesheet | Keyword.get(opts, :transforms, [])]

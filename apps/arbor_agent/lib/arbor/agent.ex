@@ -133,7 +133,7 @@ defmodule Arbor.Agent do
   @doc """
   Execute an action on a running agent with authorization check.
 
-  Verifies the caller has the `arbor://agent/action/{action_name}` capability
+  Verifies the caller has the `arbor://actions/execute/{action_name}` capability
   before executing. Use this when an agent is executing actions on behalf of
   another agent or external request.
 
@@ -157,7 +157,7 @@ defmodule Arbor.Agent do
           | {:error, :unauthorized | :not_found | any()}
   def authorize_action(caller_id, agent_id, action, timeout \\ 5000) do
     action_name = extract_action_name(action)
-    resource = "arbor://agent/action/#{action_name}"
+    resource = "arbor://actions/execute/#{action_name}"
 
     case Arbor.Security.authorize(caller_id, resource, :execute) do
       {:ok, :authorized} ->
@@ -356,18 +356,12 @@ defmodule Arbor.Agent do
   # ===========================================================================
 
   # Extract the action name from an action spec (module or {module, params} tuple)
+  # Uses the canonical dotted format matching ToolBridge (e.g., "file.read")
   defp extract_action_name({action_module, _params}) when is_atom(action_module) do
-    action_module_to_name(action_module)
+    Arbor.Agent.Executor.ActionDispatch.module_to_dotted_name(action_module)
   end
 
   defp extract_action_name(action_module) when is_atom(action_module) do
-    action_module_to_name(action_module)
-  end
-
-  defp action_module_to_name(module) do
-    module
-    |> Module.split()
-    |> List.last()
-    |> Macro.underscore()
+    Arbor.Agent.Executor.ActionDispatch.module_to_dotted_name(action_module)
   end
 end
