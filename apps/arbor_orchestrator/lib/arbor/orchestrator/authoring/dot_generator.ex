@@ -120,8 +120,7 @@ defmodule Arbor.Orchestrator.Authoring.DotGenerator do
         else
           error_text =
             errors
-            |> Enum.map(fn d -> "- [#{d.rule}] #{d.message}" end)
-            |> Enum.join("\n")
+            |> Enum.map_join("\n", fn d -> "- [#{d.rule}] #{d.message}" end)
 
           fix_prompt =
             "The generated pipeline has validation errors:\n#{error_text}\n\n" <>

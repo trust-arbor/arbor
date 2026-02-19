@@ -55,13 +55,11 @@ defmodule Mix.Tasks.Arbor.ImportConsultations do
       Enum.reduce(dirs, %{imported: 0, skipped: 0, failed: 0}, fn dir, acc ->
         dir_name = Path.basename(dir)
 
-        cond do
-          MapSet.member?(existing_datasets, dir_name) ->
-            Mix.shell().info("  SKIP #{dir_name} (already imported)")
-            %{acc | skipped: acc.skipped + 1}
-
-          true ->
-            try_import(dir, dir_name, dry_run?, acc)
+        if MapSet.member?(existing_datasets, dir_name) do
+          Mix.shell().info("  SKIP #{dir_name} (already imported)")
+          %{acc | skipped: acc.skipped + 1}
+        else
+          try_import(dir, dir_name, dry_run?, acc)
         end
       end)
 

@@ -107,10 +107,10 @@ defmodule Arbor.Monitor.HealingSupervisor do
       Logger.info("[HealingSupervisor] Starting DebugAgent (arbor_agent available)")
       [{debug_agent_mod, opts}]
     else
-      unless enabled do
-        Logger.debug("[HealingSupervisor] DebugAgent disabled via config")
-      else
+      if enabled do
         Logger.debug("[HealingSupervisor] DebugAgent not available (arbor_agent not loaded)")
+      else
+        Logger.debug("[HealingSupervisor] DebugAgent disabled via config")
       end
 
       []
