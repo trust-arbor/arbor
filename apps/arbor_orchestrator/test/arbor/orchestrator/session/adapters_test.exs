@@ -367,6 +367,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
 
       tool_calls = [%{"name" => "my_special_tool", "arguments" => %{}}]
       assert {:ok, [result]} = adapters.tool_dispatch.(tool_calls, "test-agent")
+      # Tool name is always included in the result string, even on error/unavailable
       assert result =~ "my_special_tool"
     end
 
@@ -376,6 +377,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       tool_calls = [%{name: "atom_tool", arguments: %{key: "value"}}]
       assert {:ok, [result]} = adapters.tool_dispatch.(tool_calls, "test-agent")
       assert is_binary(result)
+      # Tool name is always included in the result string, even on error/unavailable
       assert result =~ "atom_tool"
     end
 

@@ -154,14 +154,18 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
 
   describe "Consult.decide/3 integration" do
     test "returns error when graph file not found" do
-      result =
-        Consult.decide(
-          AdvisoryLLM,
-          "test question",
-          graph: "/nonexistent/path.dot"
-        )
+      if Code.ensure_loaded?(Arbor.Consensus.Evaluators.Consult) do
+        result =
+          apply(Arbor.Consensus.Evaluators.Consult, :decide, [
+            Arbor.Consensus.Evaluators.AdvisoryLLM,
+            "test question",
+            [graph: "/nonexistent/path.dot"]
+          ])
 
-      assert {:error, {:graph_file_not_found, _, _}} = result
+        assert {:error, {:graph_file_not_found, _, _}} = result
+      else
+        IO.puts("  [skipped] Consult module not available (standalone orchestrator)")
+      end
     end
   end
 end

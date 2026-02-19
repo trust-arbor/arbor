@@ -130,24 +130,32 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
     end
 
     test "reflex fires before capability check in authorize/4" do
-      # Even with a valid capability, a dangerous command context should block
-      agent_id = "agent_reflex_test_#{:erlang.unique_integer([:positive])}"
+      # Ensure reflex checking is enabled for this test (may be disabled globally in test.exs)
+      prev = Application.get_env(:arbor_security, :reflex_checking_enabled, true)
+      Application.put_env(:arbor_security, :reflex_checking_enabled, true)
 
-      {:ok, _cap} =
-        Arbor.Security.grant(
-          principal: agent_id,
-          resource: "arbor://shell/execute"
-        )
+      try do
+        # Even with a valid capability, a dangerous command context should block
+        agent_id = "agent_reflex_test_#{:erlang.unique_integer([:positive])}"
 
-      result =
-        Arbor.Security.authorize(
-          agent_id,
-          "arbor://shell/execute",
-          nil,
-          command: "rm -rf /"
-        )
+        {:ok, _cap} =
+          Arbor.Security.grant(
+            principal: agent_id,
+            resource: "arbor://shell/execute"
+          )
 
-      assert {:error, _} = result
+        result =
+          Arbor.Security.authorize(
+            agent_id,
+            "arbor://shell/execute",
+            nil,
+            command: "rm -rf /"
+          )
+
+        assert {:error, _} = result
+      after
+        Application.put_env(:arbor_security, :reflex_checking_enabled, prev)
+      end
     end
   end
 

@@ -9,6 +9,9 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
 
   @moduletag :fast
 
+  # Arbor.Actions is only available when running in the umbrella context.
+  @actions_available Code.ensure_loaded?(Arbor.Actions)
+
   @specs_dir Path.join([__DIR__, "..", "..", "..", "specs", "pipelines"])
 
   describe "research-codebase.dot" do
@@ -41,14 +44,20 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
       action_names = String.split(tools_str, ",", trim: true)
       defs = ArborActionsExecutor.definitions(action_names)
 
-      # Should resolve at least some tools (depends on which Arbor Actions are loaded)
       assert is_list(defs)
-      assert defs != []
 
-      # All should be in OpenAI format
-      for d <- defs do
-        assert d["type"] == "function"
-        assert is_binary(d["function"]["name"])
+      if @actions_available do
+        # Should resolve at least some tools when Arbor Actions are loaded
+        assert defs != []
+
+        # All should be in OpenAI format
+        for d <- defs do
+          assert d["type"] == "function"
+          assert is_binary(d["function"]["name"])
+        end
+      else
+        # Graceful degradation — returns empty list when standalone
+        assert defs == []
       end
     end
 

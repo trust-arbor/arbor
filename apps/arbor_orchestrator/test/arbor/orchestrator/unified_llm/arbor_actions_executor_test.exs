@@ -4,36 +4,56 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
   alias Arbor.Orchestrator.UnifiedLLM.CodingTools
 
+  # Arbor.Actions is only available when running in the umbrella context.
+  # When running standalone (cd apps/arbor_orchestrator && mix test), it's not loaded.
+  @actions_available Code.ensure_loaded?(Arbor.Actions)
+
   describe "definitions/0" do
     test "returns all action definitions in OpenAI format" do
       defs = ArborActionsExecutor.definitions()
       assert is_list(defs)
-      assert defs != []
 
-      # Check OpenAI format
-      first = hd(defs)
-      assert first["type"] == "function"
-      assert is_map(first["function"])
-      assert is_binary(first["function"]["name"])
-      assert is_binary(first["function"]["description"])
-      assert is_map(first["function"]["parameters"])
+      if @actions_available do
+        assert defs != []
+
+        # Check OpenAI format
+        first = hd(defs)
+        assert first["type"] == "function"
+        assert is_map(first["function"])
+        assert is_binary(first["function"]["name"])
+        assert is_binary(first["function"]["description"])
+        assert is_map(first["function"]["parameters"])
+      else
+        # Graceful degradation — returns empty list when Arbor.Actions unavailable
+        assert defs == []
+      end
     end
   end
 
   describe "definitions/1" do
     test "returns definitions for specific action names" do
       defs = ArborActionsExecutor.definitions(["file_read", "file_write"])
-      assert length(defs) == 2
 
-      names = Enum.map(defs, & &1["function"]["name"])
-      assert "file_read" in names
-      assert "file_write" in names
+      if @actions_available do
+        assert length(defs) == 2
+
+        names = Enum.map(defs, & &1["function"]["name"])
+        assert "file_read" in names
+        assert "file_write" in names
+      else
+        assert defs == []
+      end
     end
 
     test "skips unknown action names" do
       defs = ArborActionsExecutor.definitions(["file_read", "nonexistent_action"])
-      assert length(defs) == 1
-      assert hd(defs)["function"]["name"] == "file_read"
+
+      if @actions_available do
+        assert length(defs) == 1
+        assert hd(defs)["function"]["name"] == "file_read"
+      else
+        assert defs == []
+      end
     end
 
     test "returns empty list for all unknown names" do
@@ -43,7 +63,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
 
     test "handles whitespace in action names" do
       defs = ArborActionsExecutor.definitions([" file_read ", "file_write"])
-      assert length(defs) == 2
+
+      if @actions_available do
+        assert length(defs) == 2
+      else
+        assert defs == []
+      end
     end
   end
 
@@ -59,8 +84,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
     end
 
     test "returns error for unknown action" do
-      assert {:error, "Unknown action: nonexistent"} =
-               ArborActionsExecutor.execute("nonexistent", %{}, ".")
+      result = ArborActionsExecutor.execute("nonexistent", %{}, ".")
+
+      if @actions_available do
+        assert {:error, "Unknown action: nonexistent"} = result
+      else
+        assert {:error, "Arbor.Actions not available"} = result
+      end
     end
 
     test "accepts agent_id via opts" do
@@ -98,7 +128,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
           assert content =~ "defp deps"
 
         {:error, reason} ->
-          # Authorization failure is acceptable, but NOT a nil path error
+          # Authorization failure or unavailability is acceptable, but NOT a nil path error
           refute reason =~ "nil"
       end
     end
@@ -137,16 +167,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   end
 
   describe "integration with CodingTools interface" do
+    @tag :skip_unless_actions
     test "definitions format matches CodingTools.definitions format" do
-      arbor_defs = ArborActionsExecutor.definitions(["file_read"])
-      coding_defs = CodingTools.definitions()
+      unless @actions_available do
+        IO.puts("  [skipped] Arbor.Actions not available (standalone orchestrator)")
+        assert true
+      else
+        arbor_defs = ArborActionsExecutor.definitions(["file_read"])
+        coding_defs = CodingTools.definitions()
 
-      # Both should have same top-level structure
-      arbor_first = hd(arbor_defs)
-      coding_first = hd(coding_defs)
+        # Both should have same top-level structure
+        arbor_first = hd(arbor_defs)
+        coding_first = hd(coding_defs)
 
-      assert Map.keys(arbor_first) == Map.keys(coding_first)
-      assert Map.keys(arbor_first["function"]) == Map.keys(coding_first["function"])
+        assert Map.keys(arbor_first) == Map.keys(coding_first)
+        assert Map.keys(arbor_first["function"]) == Map.keys(coding_first["function"])
+      end
     end
 
     test "execute/4 is compatible with ToolLoop's calling convention" do
