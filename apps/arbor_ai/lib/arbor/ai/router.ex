@@ -304,6 +304,7 @@ defmodule Arbor.AI.Router do
       candidates
       |> filter_by_exclusions(exclude)
       |> filter_by_trust(min_trust)
+      |> filter_by_sensitivity(opts)
       |> filter_by_availability()
       |> filter_by_quota()
       |> filter_by_budget(tier)
@@ -318,6 +319,7 @@ defmodule Arbor.AI.Router do
         fallback_candidates =
           fallback
           |> filter_by_trust(min_trust)
+          |> filter_by_sensitivity(opts)
           |> filter_by_availability()
           |> filter_by_quota()
           |> filter_by_budget(tier)
@@ -354,6 +356,18 @@ defmodule Arbor.AI.Router do
     Enum.filter(candidates, fn {backend, _model} ->
       BackendTrust.meets_minimum?(backend, min_trust)
     end)
+  end
+
+  defp filter_by_sensitivity(candidates, opts) do
+    case Keyword.get(opts, :data_sensitivity) do
+      nil ->
+        candidates
+
+      sensitivity when is_atom(sensitivity) ->
+        Enum.filter(candidates, fn {backend, _model} ->
+          BackendTrust.can_see?(backend, sensitivity)
+        end)
+    end
   end
 
   defp filter_by_availability(candidates) do
