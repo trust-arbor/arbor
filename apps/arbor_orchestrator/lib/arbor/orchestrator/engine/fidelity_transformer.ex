@@ -137,8 +137,9 @@ defmodule Arbor.Orchestrator.Engine.FidelityTransformer do
       summarizable
       |> Enum.reject(fn {_k, v} -> v in [nil, "", []] end)
       |> Enum.sort_by(fn {k, _} -> k end)
-      |> Enum.map(fn {k, v} -> "#{k}: #{inspect(v, limit: 500, printable_limit: 1000)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {k, v} ->
+        "#{k}: #{inspect(v, limit: 500, printable_limit: 1000)}"
+      end)
 
     if content_text == "" do
       context

@@ -97,11 +97,10 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
       toc =
         paths
         |> Enum.with_index(1)
-        |> Enum.map(fn {path, idx} ->
+        |> Enum.map_join("\n", fn {path, idx} ->
           name = Path.basename(path, ".dot")
           "#{idx}. [#{name}](#pipeline-#{name})"
         end)
-        |> Enum.join("\n")
 
       combined =
         [
@@ -261,8 +260,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
 
         rows =
           attrs
-          |> Enum.map(fn {k, v} -> "| #{k} | #{v} |" end)
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", fn {k, v} -> "| #{k} | #{v} |" end)
 
         "\n" <> header <> rows <> "\n"
       else
@@ -312,21 +310,19 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
             parallel ->
               targets =
                 outgoing
-                |> Enum.map(fn e -> "   - `#{e.to}`" end)
-                |> Enum.join("\n")
+                |> Enum.map_join("\n", fn e -> "   - `#{e.to}`" end)
 
               "#{idx}. At `#{id}`, execution splits into parallel branches:\n#{targets}"
 
             conditional_edges != [] ->
               branches =
                 conditional_edges
-                |> Enum.map(fn e ->
+                |> Enum.map_join("\n", fn e ->
                   label = Edge.attr(e, "label", "")
                   label_part = if label != "", do: " (#{label})", else: ""
                   condition = Edge.attr(e, "condition", "")
                   "   - On `#{condition}`#{label_part}: proceeds to `#{e.to}`"
                 end)
-                |> Enum.join("\n")
 
               "#{idx}. At `#{id}` (#{handler_type}), the pipeline branches:\n#{branches}"
 
@@ -394,12 +390,11 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
       rows =
         context_map
         |> Enum.sort_by(fn {key, _} -> key end)
-        |> Enum.map(fn {key, %{written_by: writers, read_by: readers}} ->
+        |> Enum.map_join("\n", fn {key, %{written_by: writers, read_by: readers}} ->
           w = if writers == [], do: "—", else: writers |> Enum.reverse() |> Enum.join(", ")
           r = if readers == [], do: "—", else: readers |> Enum.reverse() |> Enum.join(", ")
           "| `#{key}` | #{w} | #{r} |"
         end)
-        |> Enum.join("\n")
 
       [
         "## Data Flow",
@@ -470,13 +465,12 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
     else
       entries =
         conditional_edges
-        |> Enum.map(fn edge ->
+        |> Enum.map_join("\n", fn edge ->
           label = Edge.attr(edge, "label", "")
           condition = Edge.attr(edge, "condition", "")
           label_part = if label != "", do: " (label: #{label})", else: ""
           "- `#{edge.from}` → `#{edge.to}`: condition `#{condition}`#{label_part}"
         end)
-        |> Enum.join("\n")
 
       [
         "## Conditions and Routing",

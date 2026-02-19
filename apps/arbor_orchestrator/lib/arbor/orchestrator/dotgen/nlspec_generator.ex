@@ -60,8 +60,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
     module_specs =
       file_infos
       |> Enum.sort_by(& &1.module)
-      |> Enum.map(&generate_module_spec(&1, include_private: include_private))
-      |> Enum.join("\n---\n\n")
+      |> Enum.map_join("\n---\n\n", &generate_module_spec(&1, include_private: include_private))
 
     test_section = format_test_coverage(file_infos)
 
@@ -169,8 +168,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
 
     rows =
       fields
-      |> Enum.map(fn {field, default} -> "| `#{field}` | `#{default}` |" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {field, default} -> "| `#{field}` | `#{default}` |" end)
 
     header <> rows <> "\n"
   end
@@ -179,8 +177,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
 
   defp format_types(types) do
     types
-    |> Enum.map(fn type_def -> "```elixir\n#{type_def}\n```" end)
-    |> Enum.join("\n\n")
+    |> Enum.map_join("\n\n", fn type_def -> "```elixir\n#{type_def}\n```" end)
     |> Kernel.<>("\n")
   end
 
@@ -189,8 +186,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
   defp format_public_api(%{public_functions: functions}) do
     entries =
       functions
-      |> Enum.map(&format_function_entry/1)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", &format_function_entry/1)
 
     "\n#### Public API\n\n" <> entries
   end
@@ -215,7 +211,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
     items =
       clauses
       |> Enum.with_index(1)
-      |> Enum.map(fn {clause, idx} ->
+      |> Enum.map_join("\n", fn {clause, idx} ->
         guard_part =
           case clause.guard do
             nil -> ""
@@ -226,7 +222,6 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
         patterns = Enum.join(clause.patterns, ", ")
         "#{idx}. `(#{patterns})`#{guard_part} — #{clause.body_summary}"
       end)
-      |> Enum.join("\n")
 
     "**Clauses:**\n\n#{items}\n"
   end
@@ -236,8 +231,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
   defp format_branches(branches) do
     items =
       branches
-      |> Enum.map(fn branch -> "- #{branch}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn branch -> "- #{branch}" end)
 
     "**Branches:**\n\n#{items}\n"
   end
@@ -259,8 +253,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
       if callbacks != [] do
         callback_items =
           callbacks
-          |> Enum.map(fn cb -> "- `#{cb}`" end)
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", fn cb -> "- `#{cb}`" end)
 
         parts ++ ["\n**Callbacks:**\n\n#{callback_items}\n"]
       else
@@ -283,8 +276,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
 
         rows =
           attrs
-          |> Enum.map(fn attr -> "| `@#{attr.name}` | `#{attr.value}` |" end)
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", fn attr -> "| `@#{attr.name}` | `#{attr.value}` |" end)
 
         "\n#### Configuration\n\n" <> header <> rows <> "\n"
     end
@@ -297,31 +289,28 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
   defp format_implementation_notes(%{private_functions: functions}, true) do
     entries =
       functions
-      |> Enum.map(fn func ->
+      |> Enum.map_join("\n", fn func ->
         summary = "- `#{func.name}/#{func.arity}` — #{func.body_summary}"
 
         clauses_part =
           if Map.has_key?(func, :clauses) && length(Map.get(func, :clauses, [])) > 1 do
             func.clauses
-            |> Enum.map(fn clause ->
+            |> Enum.map_join("\n", fn clause ->
               patterns = Enum.join(clause.patterns, ", ")
               "  - `(#{patterns})` → #{clause.body_summary}"
             end)
-            |> Enum.join("\n")
           end
 
         branches_part =
           if Map.has_key?(func, :case_branches) && Map.get(func, :case_branches, []) != [] do
             func.case_branches
-            |> Enum.map(fn branch -> "  - #{branch}" end)
-            |> Enum.join("\n")
+            |> Enum.map_join("\n", fn branch -> "  - #{branch}" end)
           end
 
         [summary, clauses_part, branches_part]
         |> Enum.reject(&is_nil/1)
         |> Enum.join("\n")
       end)
-      |> Enum.join("\n")
 
     "\n#### Implementation Notes\n\n#{entries}\n"
   end
@@ -343,8 +332,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
       descs ->
         items =
           descs
-          |> Enum.map(fn desc -> "- #{desc}" end)
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", fn desc -> "- #{desc}" end)
 
         "\n### Test Coverage\n\n#{items}\n"
     end
@@ -356,11 +344,10 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
     items =
       section_names
       |> Enum.with_index(1)
-      |> Enum.map(fn {name, idx} ->
+      |> Enum.map_join("\n", fn {name, idx} ->
         anchor = sanitize_anchor(name)
         "#{idx}. [#{name}](##{anchor})"
       end)
-      |> Enum.join("\n")
 
     "\n## Table of Contents\n\n#{items}\n\n"
   end
@@ -377,8 +364,7 @@ defmodule Arbor.Orchestrator.Dotgen.NLSpecGenerator do
 
         rows =
           infos
-          |> Enum.map(fn fi -> "| `#{fi.module}` | `#{fi.path}` |" end)
-          |> Enum.join("\n")
+          |> Enum.map_join("\n", fn fi -> "| `#{fi.module}` | `#{fi.path}` |" end)
 
         header <> rows <> "\n"
     end

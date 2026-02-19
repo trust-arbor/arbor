@@ -26,8 +26,7 @@ defmodule Arbor.Orchestrator.Authoring.SystemPrompt do
     shape_docs =
       @shape_to_type
       |> Enum.sort_by(fn {_k, v} -> v end)
-      |> Enum.map(fn {shape, type} -> "  - shape=#{shape} → #{type}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {shape, type} -> "  - shape=#{shape} → #{type}" end)
 
     """
     You are a pipeline architect for the Arbor Orchestrator Engine.

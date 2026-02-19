@@ -41,12 +41,11 @@ defmodule Arbor.Orchestrator.Authoring.Conversation do
 
     history_part =
       conv.history
-      |> Enum.map(fn
+      |> Enum.map_join("\n\n", fn
         {:user, msg} -> "USER: #{msg}"
         {:assistant, msg} -> "ASSISTANT: #{msg}"
         {:system, msg} -> "SYSTEM: #{msg}"
       end)
-      |> Enum.join("\n\n")
 
     system_part <> history_part
   end
