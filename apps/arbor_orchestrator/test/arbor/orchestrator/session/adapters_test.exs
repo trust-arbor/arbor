@@ -594,7 +594,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       # New adapters — should return :ok without crashing
       assert :ok = adapters.store_decompositions.([], "int-agent")
       assert :ok = adapters.process_proposal_decisions.([], "int-agent")
-      assert :ok = adapters.consolidate.("int-agent")
+
+      # Consolidate returns metrics map (errors captured, not raised)
+      result = adapters.consolidate.("int-agent")
+      assert %{kg: _, identity: _} = result
     end
 
     test "adapters with minimal options still work" do
@@ -614,7 +617,10 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       # New adapters — should return :ok without crashing
       assert :ok = adapters.store_decompositions.([], "min-agent")
       assert :ok = adapters.process_proposal_decisions.([], "min-agent")
-      assert :ok = adapters.consolidate.("min-agent")
+
+      # Consolidate returns metrics map (errors captured, not raised)
+      result = adapters.consolidate.("min-agent")
+      assert %{kg: _, identity: _} = result
     end
   end
 

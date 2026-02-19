@@ -80,13 +80,22 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # --- Command execution with runtime bridge ---
 
   defp run_command(command, opts) do
-    if arbor_shell_available?() do
-      case run_via_arbor_shell(command, opts) do
-        {:error, {:noproc, _}} -> run_via_system_cmd(command, opts)
-        result -> result
-      end
-    else
-      run_via_system_cmd(command, opts)
+    sandbox = Keyword.get(opts, :sandbox, "basic")
+
+    cond do
+      sandbox == "none" ->
+        # Explicit sandbox="none" in DOT spec — caller accepts unsandboxed execution.
+        # Skip Arbor.Shell entirely to avoid :noproc when process isn't running.
+        run_via_system_cmd(command, opts)
+
+      arbor_shell_available?() ->
+        run_via_arbor_shell(command, opts)
+
+      true ->
+        # Fail-closed: don't silently fall back to unsandboxed Port.open
+        # when Arbor.Shell is unavailable. The :noproc fallback previously
+        # removed all sandboxing on transient process failures.
+        {:error, :sandbox_unavailable}
     end
   end
 
