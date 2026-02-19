@@ -1,6 +1,10 @@
 defmodule Arbor.Orchestrator.Graph.Node do
   @moduledoc false
 
+  alias Arbor.Orchestrator.IR.HandlerSchema
+
+  @type data_class :: :public | :internal | :sensitive | :secret
+
   @type t :: %__MODULE__{
           id: String.t(),
           attrs: map(),
@@ -23,7 +27,14 @@ defmodule Arbor.Orchestrator.Graph.Node do
           fidelity: String.t() | nil,
           class: String.t() | nil,
           fan_out: boolean(),
-          simulate: String.t() | nil
+          simulate: String.t() | nil,
+          # IR compilation fields (nil/empty until Compiler.compile/1 enriches them)
+          handler_module: module() | nil,
+          handler_schema: HandlerSchema.t() | nil,
+          capabilities_required: [String.t()],
+          data_classification: data_class() | nil,
+          idempotency: atom() | nil,
+          schema_errors: [{:error | :warning, String.t()}]
         }
 
   defstruct id: "",
@@ -46,7 +57,13 @@ defmodule Arbor.Orchestrator.Graph.Node do
             fidelity: nil,
             class: nil,
             fan_out: false,
-            simulate: nil
+            simulate: nil,
+            handler_module: nil,
+            handler_schema: nil,
+            capabilities_required: [],
+            data_classification: nil,
+            idempotency: nil,
+            schema_errors: []
 
   @known_attrs ~w(shape type prompt label goal_gate max_retries retry_target
     fallback_retry_target timeout llm_model llm_provider reasoning_effort
@@ -101,6 +118,8 @@ defmodule Arbor.Orchestrator.Graph.Node do
 
   @doc "Returns true if this node has external side effects."
   @spec side_effecting?(t()) :: boolean()
+  def side_effecting?(%__MODULE__{idempotency: :side_effecting}), do: true
+
   def side_effecting?(%__MODULE__{} = node) do
     node_type = node.type || Map.get(node.attrs, "type")
 
@@ -113,6 +132,21 @@ defmodule Arbor.Orchestrator.Graph.Node do
       "consensus.decide"
     ]
   end
+
+  @doc "Returns true if this node requires the given capability."
+  @spec requires_capability?(t(), String.t()) :: boolean()
+  def requires_capability?(%__MODULE__{capabilities_required: caps}, capability),
+    do: capability in caps
+
+  @doc "Returns true if this node has schema validation errors (severity :error)."
+  @spec has_schema_errors?(t()) :: boolean()
+  def has_schema_errors?(%__MODULE__{schema_errors: errors}),
+    do: Enum.any?(errors, fn {severity, _} -> severity == :error end)
+
+  @doc "Returns true if this node has been enriched by the IR compiler."
+  @spec compiled?(t()) :: boolean()
+  def compiled?(%__MODULE__{handler_module: nil}), do: false
+  def compiled?(%__MODULE__{}), do: true
 
   @doc "Split the comma-separated class string into a list."
   @spec classes(t()) :: [String.t()]

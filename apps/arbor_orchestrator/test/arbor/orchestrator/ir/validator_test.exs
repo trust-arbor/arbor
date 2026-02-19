@@ -6,8 +6,8 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
   alias Arbor.Orchestrator.IR.{Compiler, Validator}
 
   defp compile!(graph) do
-    {:ok, typed} = Compiler.compile(graph)
-    typed
+    {:ok, compiled} = Compiler.compile(graph)
+    compiled
   end
 
   defp simple_graph do
@@ -186,16 +186,6 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
     test "warns about unbounded loops" do
       diags = unbounded_loop_graph() |> compile!() |> Validator.validate()
       loop_warnings = Enum.filter(diags, &(&1.rule == "unbounded_loop"))
-      # The loop step_a → step_b → step_a has no max_retries or goal_gate but does
-      # have a conditional exit — so it should NOT warn (conditional provides exit)
-      # Actually step_b → step_a is the back-edge and the loop contains no bounds
-      # BUT step_b has an outgoing conditional edge to done which means it can exit
-      # However, the loop itself has no max_retries or goal_gate guarantee
-      # The cycle detection should find step_a → step_b → step_a
-      # step_a has no bounds, step_b has no bounds, but the conditional exit exists
-      # We don't count conditional exits from cycle nodes as bounds in our simple check
-      # Actually we DO check has_conditional_exit? for "conditional" handler_type
-      # step_b is codergen, not conditional — so it won't be considered bounded
       assert loop_warnings != []
       assert hd(loop_warnings).message =~ "Cycle"
     end
@@ -249,6 +239,15 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
     end
   end
 
+  describe "validate/1 — not compiled guard" do
+    test "returns error for uncompiled graph" do
+      graph = simple_graph()
+      diags = Validator.validate(graph)
+      assert length(diags) == 1
+      assert hd(diags).rule == "not_compiled"
+    end
+  end
+
   describe "validate/1 — real DOT pipeline specs" do
     @specs_dir "specs/pipelines"
 
@@ -290,24 +289,19 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
     defp assert_pipeline_compiles_and_validates(path) do
       source = File.read!(path)
       {:ok, graph} = Arbor.Orchestrator.parse(source)
-      {:ok, typed} = Compiler.compile(graph)
+      {:ok, compiled} = Compiler.compile(graph)
 
-      assert %Arbor.Orchestrator.IR.TypedGraph{} = typed
-      assert map_size(typed.nodes) > 0
+      assert %Graph{compiled: true} = compiled
+      assert map_size(compiled.nodes) > 0
 
-      diags = Validator.validate(typed)
+      diags = Validator.validate(compiled)
 
       # No condition parse errors (structural correctness)
       parse_errors = Enum.filter(diags, &(&1.rule == "condition_parse"))
       assert parse_errors == [], "Condition parse errors in #{path}: #{inspect(parse_errors)}"
 
-      # Taint warnings are expected — codergen nodes default to :internal,
-      # structural nodes (conditional, exit) default to :public.
-      # These are legitimate findings, not test failures.
-      # In production, DOT specs would add data_class attrs to suppress.
-
       # Verify capabilities are reported
-      assert MapSet.size(typed.capabilities_required) >= 0
+      assert MapSet.size(compiled.capabilities_required) >= 0
     end
   end
 end

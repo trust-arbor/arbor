@@ -1,8 +1,8 @@
 defmodule Arbor.Orchestrator.IR.Validator do
   @moduledoc """
-  Typed validation passes that run on `TypedGraph.t()`.
+  Typed validation passes that run on a compiled `Graph.t()`.
 
-  These passes are only possible with the typed IR because they require
+  These passes are only possible with the compiled IR because they require
   resolved handler types, capabilities, data classifications, and parsed
   edge conditions. They complement (not replace) the structural validation
   in `Arbor.Orchestrator.Validation.Validator`.
@@ -17,12 +17,13 @@ defmodule Arbor.Orchestrator.IR.Validator do
   6. **Condition completeness** — conditional nodes have both success and failure paths
   """
 
-  alias Arbor.Orchestrator.IR.{TypedEdge, TypedGraph, TypedNode}
+  alias Arbor.Orchestrator.Graph
+  alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Validation.Diagnostic
 
   @doc "Run all typed validation passes. Returns list of diagnostics."
-  @spec validate(TypedGraph.t()) :: [Diagnostic.t()]
-  def validate(%TypedGraph{} = graph) do
+  @spec validate(Graph.t()) :: [Diagnostic.t()]
+  def validate(%Graph{compiled: true} = graph) do
     []
     |> add_schema_errors(graph)
     |> add_capability_info(graph)
@@ -33,21 +34,25 @@ defmodule Arbor.Orchestrator.IR.Validator do
     |> add_condition_parse_errors(graph)
   end
 
+  def validate(%Graph{compiled: false}) do
+    [Diagnostic.error("not_compiled", "Graph must be compiled before typed validation")]
+  end
+
   @doc "Run only schema validation. Fastest pass."
-  @spec validate_schema(TypedGraph.t()) :: [Diagnostic.t()]
-  def validate_schema(%TypedGraph{} = graph) do
+  @spec validate_schema(Graph.t()) :: [Diagnostic.t()]
+  def validate_schema(%Graph{compiled: true} = graph) do
     add_schema_errors([], graph)
   end
 
   @doc "Run only taint analysis. Returns taint flow violations."
-  @spec validate_taint(TypedGraph.t()) :: [Diagnostic.t()]
-  def validate_taint(%TypedGraph{} = graph) do
+  @spec validate_taint(Graph.t()) :: [Diagnostic.t()]
+  def validate_taint(%Graph{compiled: true} = graph) do
     add_taint_errors([], graph)
   end
 
   # --- Pass 1: Schema validation ---
 
-  defp add_schema_errors(diags, %TypedGraph{nodes: nodes}) do
+  defp add_schema_errors(diags, %Graph{nodes: nodes}) do
     schema_diags =
       nodes
       |> Enum.flat_map(fn {_id, node} ->
@@ -68,7 +73,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   # --- Pass 2: Capability analysis ---
 
-  defp add_capability_info(diags, %TypedGraph{} = graph) do
+  defp add_capability_info(diags, %Graph{} = graph) do
     if MapSet.size(graph.capabilities_required) > 0 do
       caps = graph.capabilities_required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
 
@@ -88,7 +93,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   @classification_rank %{public: 0, internal: 1, sensitive: 2, secret: 3}
 
-  defp add_taint_errors(diags, %TypedGraph{} = graph) do
+  defp add_taint_errors(diags, %Graph{} = graph) do
     taint_diags =
       graph.edges
       |> Enum.flat_map(fn edge ->
@@ -105,7 +110,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
     taint_diags ++ diags
   end
 
-  defp check_taint_flow(%TypedNode{} = source, %TypedNode{} = target) do
+  defp check_taint_flow(%Node{} = source, %Node{} = target) do
     source_rank = Map.get(@classification_rank, source.data_classification, 0)
     target_rank = Map.get(@classification_rank, target.data_classification, 0)
 
@@ -133,13 +138,13 @@ defmodule Arbor.Orchestrator.IR.Validator do
     end
   end
 
-  defp has_explicit_classification?(%TypedNode{attrs: attrs}) do
+  defp has_explicit_classification?(%Node{attrs: attrs}) do
     Map.has_key?(attrs, "data_class")
   end
 
   # --- Pass 4: Loop detection ---
 
-  defp add_loop_warnings(diags, %TypedGraph{} = graph) do
+  defp add_loop_warnings(diags, %Graph{} = graph) do
     cycles = detect_cycles(graph)
 
     loop_diags =
@@ -166,7 +171,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
     loop_diags ++ diags
   end
 
-  defp detect_cycles(%TypedGraph{nodes: nodes} = graph) do
+  defp detect_cycles(%Graph{nodes: nodes} = graph) do
     node_ids = Map.keys(nodes)
 
     {cycles, _} =
@@ -193,7 +198,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
       else
         new_path = path ++ [node_id]
         new_stack = MapSet.put(in_stack, node_id)
-        neighbors = TypedGraph.outgoing_edges(graph, node_id) |> Enum.map(& &1.to)
+        neighbors = Graph.outgoing_edges(graph, node_id) |> Enum.map(& &1.to)
 
         {cycles, final_visited} =
           Enum.reduce(neighbors, {[], MapSet.put(visited, node_id)}, fn neighbor,
@@ -209,7 +214,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
     end
   end
 
-  defp cycle_has_bounds?(cycle_nodes, %TypedGraph{nodes: nodes}) do
+  defp cycle_has_bounds?(cycle_nodes, %Graph{nodes: nodes}) do
     Enum.any?(cycle_nodes, fn node_id ->
       case Map.get(nodes, node_id) do
         nil ->
@@ -221,28 +226,29 @@ defmodule Arbor.Orchestrator.IR.Validator do
     end)
   end
 
-  defp has_retry_limit?(%TypedNode{resource_bounds: %{max_retries: n}})
-       when is_integer(n) and n > 0, do: true
+  defp has_retry_limit?(%Node{max_retries: n}) when is_integer(n) and n > 0, do: true
 
-  defp has_retry_limit?(%TypedNode{attrs: attrs}) do
+  defp has_retry_limit?(%Node{attrs: attrs}) do
     Map.get(attrs, "max_retries") not in [nil, "", 0]
   end
 
-  defp has_goal_gate?(%TypedNode{attrs: attrs}) do
+  defp has_goal_gate?(%Node{attrs: attrs}) do
     Map.get(attrs, "goal_gate") in [true, "true"]
   end
 
-  defp has_conditional_exit?(%TypedNode{handler_type: "conditional"}), do: true
-  defp has_conditional_exit?(_), do: false
+  defp has_conditional_exit?(%Node{} = node) do
+    handler_type = Arbor.Orchestrator.Handlers.Registry.node_type(node)
+    handler_type == "conditional"
+  end
 
   # --- Pass 5: Resource bounds ---
 
-  defp add_resource_warnings(diags, %TypedGraph{nodes: nodes}) do
+  defp add_resource_warnings(diags, %Graph{nodes: nodes, handler_types: handler_types}) do
     resource_diags =
       nodes
       |> Enum.flat_map(fn {_id, node} ->
-        if TypedNode.side_effecting?(node) do
-          check_resource_bounds(node)
+        if Node.side_effecting?(node) do
+          check_resource_bounds(node, handler_types)
         else
           []
         end
@@ -251,21 +257,20 @@ defmodule Arbor.Orchestrator.IR.Validator do
     resource_diags ++ diags
   end
 
-  defp check_resource_bounds(%TypedNode{} = node) do
-    warnings = []
+  defp check_resource_bounds(%Node{} = node, handler_types) do
+    handler_type = Map.get(handler_types, node.id)
 
     warnings =
-      if node.handler_type == "tool" and node.resource_bounds.max_retries == nil do
+      if handler_type == "tool" and node.max_retries == nil do
         [
           Diagnostic.warning(
             "missing_resource_bound",
             "Side-effecting tool node '#{node.id}' has no max_retries limit",
             node_id: node.id
           )
-          | warnings
         ]
       else
-        warnings
+        []
       end
 
     warnings
@@ -273,11 +278,11 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   # --- Pass 6: Condition completeness ---
 
-  defp add_condition_completeness_warnings(diags, %TypedGraph{} = graph) do
+  defp add_condition_completeness_warnings(diags, %Graph{handler_types: handler_types} = graph) do
     completeness_diags =
       graph.nodes
       |> Enum.flat_map(fn {_id, node} ->
-        if node.handler_type == "conditional" do
+        if Map.get(handler_types, node.id) == "conditional" do
           check_condition_completeness(node, graph)
         else
           []
@@ -287,12 +292,12 @@ defmodule Arbor.Orchestrator.IR.Validator do
     completeness_diags ++ diags
   end
 
-  defp check_condition_completeness(%TypedNode{} = node, %TypedGraph{} = graph) do
-    outgoing = TypedGraph.outgoing_edges(graph, node.id)
+  defp check_condition_completeness(%Node{} = node, %Graph{} = graph) do
+    outgoing = Graph.outgoing_edges(graph, node.id)
 
-    has_success = Enum.any?(outgoing, &TypedEdge.success_path?/1)
-    has_failure = Enum.any?(outgoing, &TypedEdge.failure_path?/1)
-    has_unconditional = Enum.any?(outgoing, &TypedEdge.unconditional?/1)
+    has_success = Enum.any?(outgoing, &Edge.success_path?/1)
+    has_failure = Enum.any?(outgoing, &Edge.failure_path?/1)
+    has_unconditional = Enum.any?(outgoing, &Edge.unconditional?/1)
 
     cond do
       has_unconditional ->
@@ -323,11 +328,11 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   # --- Pass 7: Condition parse errors ---
 
-  defp add_condition_parse_errors(diags, %TypedGraph{edges: edges}) do
+  defp add_condition_parse_errors(diags, %Graph{edges: edges}) do
     parse_diags =
       edges
       |> Enum.flat_map(fn edge ->
-        case edge.condition do
+        case edge.parsed_condition do
           {:parse_error, raw} ->
             [
               Diagnostic.error(

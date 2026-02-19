@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
-  alias Arbor.Orchestrator.IR.{Compiler, TypedEdge, TypedGraph, TypedNode}
+  alias Arbor.Orchestrator.IR.Compiler
 
   defp simple_graph do
     %Graph{id: "Test"}
@@ -67,95 +67,99 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
 
   describe "compile/1" do
     test "compiles a simple graph successfully" do
-      assert {:ok, %TypedGraph{} = typed} = Compiler.compile(simple_graph())
-      assert typed.id == "Test"
-      assert map_size(typed.nodes) == 3
-      assert length(typed.edges) == 2
+      assert {:ok, %Graph{compiled: true} = compiled} = Compiler.compile(simple_graph())
+      assert compiled.id == "Test"
+      assert map_size(compiled.nodes) == 3
+      assert length(compiled.edges) == 2
     end
 
     test "resolves handler types correctly" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["start"].handler_type == "start"
-      assert typed.nodes["work"].handler_type == "codergen"
-      assert typed.nodes["done"].handler_type == "exit"
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.handler_types["start"] == "start"
+      assert compiled.handler_types["work"] == "codergen"
+      assert compiled.handler_types["done"] == "exit"
     end
 
     test "resolves handler modules" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["start"].handler_module == Arbor.Orchestrator.Handlers.StartHandler
-      assert typed.nodes["work"].handler_module == Arbor.Orchestrator.Handlers.ComputeHandler
-      assert typed.nodes["done"].handler_module == Arbor.Orchestrator.Handlers.ExitHandler
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.nodes["start"].handler_module == Arbor.Orchestrator.Handlers.StartHandler
+      assert compiled.nodes["work"].handler_module == Arbor.Orchestrator.Handlers.ComputeHandler
+      assert compiled.nodes["done"].handler_module == Arbor.Orchestrator.Handlers.ExitHandler
     end
 
     test "resolves idempotency from handler module" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["start"].idempotency == :idempotent
-      assert typed.nodes["work"].idempotency == :idempotent_with_key
-      assert typed.nodes["done"].idempotency == :idempotent
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.nodes["start"].idempotency == :idempotent
+      assert compiled.nodes["work"].idempotency == :idempotent_with_key
+      assert compiled.nodes["done"].idempotency == :idempotent
     end
 
     test "aggregates capabilities" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert MapSet.member?(typed.capabilities_required, "llm_query")
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert MapSet.member?(compiled.capabilities_required, "llm_query")
 
-      {:ok, tool_typed} = Compiler.compile(tool_graph())
-      assert MapSet.member?(tool_typed.capabilities_required, "shell_exec")
+      {:ok, tool_compiled} = Compiler.compile(tool_graph())
+      assert MapSet.member?(tool_compiled.capabilities_required, "shell_exec")
     end
 
     test "builds handler_types map" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.handler_types["start"] == "start"
-      assert typed.handler_types["work"] == "codergen"
-      assert typed.handler_types["done"] == "exit"
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.handler_types["start"] == "start"
+      assert compiled.handler_types["work"] == "codergen"
+      assert compiled.handler_types["done"] == "exit"
     end
 
-    test "builds typed adjacency maps" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert [%TypedEdge{to: "work"}] = TypedGraph.outgoing_edges(typed, "start")
-      assert [%TypedEdge{from: "work"}] = TypedGraph.incoming_edges(typed, "done")
+    test "builds enriched adjacency maps" do
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert [%Edge{to: "work"}] = Graph.outgoing_edges(compiled, "start")
+      assert [%Edge{from: "work"}] = Graph.incoming_edges(compiled, "done")
     end
 
     test "preserves original attrs" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["work"].attrs["prompt"] == "Do something"
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.nodes["work"].attrs["prompt"] == "Do something"
     end
   end
 
   describe "compile/1 — data classification" do
     test "uses schema default when no data_class attr" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["start"].data_classification == :public
-      assert typed.nodes["work"].data_classification == :internal
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.nodes["start"].data_classification == :public
+      assert compiled.nodes["work"].data_classification == :internal
     end
 
     test "uses explicit data_class attr" do
-      {:ok, typed} = Compiler.compile(classified_graph())
-      assert typed.nodes["secret_work"].data_classification == :secret
-      assert typed.nodes["public_output"].data_classification == :public
+      {:ok, compiled} = Compiler.compile(classified_graph())
+      assert compiled.nodes["secret_work"].data_classification == :secret
+      assert compiled.nodes["public_output"].data_classification == :public
     end
 
     test "computes max_data_classification" do
-      {:ok, typed} = Compiler.compile(classified_graph())
-      assert typed.max_data_classification == :secret
+      {:ok, compiled} = Compiler.compile(classified_graph())
+      assert compiled.max_data_classification == :secret
     end
   end
 
   describe "compile/1 — edge conditions" do
     test "parses condition strings into typed conditions" do
-      {:ok, typed} = Compiler.compile(conditional_graph())
+      {:ok, compiled} = Compiler.compile(conditional_graph())
 
-      success_edge = Enum.find(typed.edges, fn e -> e.from == "check" and e.to == "yes_path" end)
-      assert success_edge.condition == {:eq, "outcome", "success"}
+      success_edge =
+        Enum.find(compiled.edges, fn e -> e.from == "check" and e.to == "yes_path" end)
 
-      fail_edge = Enum.find(typed.edges, fn e -> e.from == "check" and e.to == "no_path" end)
-      assert fail_edge.condition == {:eq, "outcome", "fail"}
+      assert success_edge.parsed_condition == {:eq, "outcome", "success"}
+
+      fail_edge =
+        Enum.find(compiled.edges, fn e -> e.from == "check" and e.to == "no_path" end)
+
+      assert fail_edge.parsed_condition == {:eq, "outcome", "fail"}
     end
 
-    test "unconditional edges have nil condition" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      edge = Enum.find(typed.edges, fn e -> e.from == "start" end)
-      assert edge.condition == nil
-      assert TypedEdge.unconditional?(edge)
+    test "unconditional edges have nil parsed_condition" do
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      edge = Enum.find(compiled.edges, fn e -> e.from == "start" end)
+      assert edge.parsed_condition == nil
+      assert Edge.unconditional?(edge)
     end
   end
 
@@ -169,33 +173,33 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
         |> Graph.add_edge(%Edge{from: "start", to: "no_prompt"})
         |> Graph.add_edge(%Edge{from: "no_prompt", to: "done"})
 
-      {:ok, typed} = Compiler.compile(graph)
-      assert TypedNode.has_errors?(typed.nodes["no_prompt"])
-      assert TypedGraph.has_schema_errors?(typed)
+      {:ok, compiled} = Compiler.compile(graph)
+      assert Node.has_schema_errors?(compiled.nodes["no_prompt"])
+      assert Graph.has_schema_errors?(compiled)
     end
 
     test "valid nodes have no schema errors" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert not TypedGraph.has_schema_errors?(typed)
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert not Graph.has_schema_errors?(compiled)
     end
   end
 
   describe "compile/1 — resource bounds" do
     test "extracts max_retries from attrs" do
-      {:ok, typed} = Compiler.compile(tool_graph())
-      assert typed.nodes["run_tests"].resource_bounds.max_retries == 3
+      {:ok, compiled} = Compiler.compile(tool_graph())
+      assert compiled.nodes["run_tests"].max_retries == 3
     end
 
     test "nil for unset resource bounds" do
-      {:ok, typed} = Compiler.compile(simple_graph())
-      assert typed.nodes["work"].resource_bounds.max_retries == nil
+      {:ok, compiled} = Compiler.compile(simple_graph())
+      assert compiled.nodes["work"].max_retries == nil
     end
   end
 
   describe "compile!/1" do
-    test "returns typed graph directly" do
-      typed = Compiler.compile!(simple_graph())
-      assert %TypedGraph{} = typed
+    test "returns compiled graph directly" do
+      compiled = Compiler.compile!(simple_graph())
+      assert %Graph{compiled: true} = compiled
     end
   end
 
@@ -212,8 +216,8 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
         |> Graph.add_edge(%Edge{from: "start", to: "work"})
         |> Graph.add_edge(%Edge{from: "work", to: "done"})
 
-      {:ok, typed} = Compiler.compile(graph)
-      caps = typed.nodes["work"].capabilities_required
+      {:ok, compiled} = Compiler.compile(graph)
+      caps = compiled.nodes["work"].capabilities_required
       assert "llm_query" in caps
       assert "custom_cap" in caps
       assert "another_cap" in caps

@@ -58,14 +58,14 @@ defmodule Arbor.Orchestrator do
   end
 
   @doc """
-  Compile a DOT source or Graph into a typed intermediate representation.
+  Compile a DOT source or Graph into an enriched Graph with typed IR fields.
 
-  The typed IR resolves handler types, validates attribute schemas, computes
-  capabilities, data classifications, and parses edge conditions — enabling
-  security analysis (taint tracking, capability requirements, loop bounds).
+  The compilation step resolves handler types, validates attribute schemas,
+  computes capabilities, data classifications, and parses edge conditions —
+  enabling security analysis (taint tracking, capability requirements, loop bounds).
   """
   @spec compile(String.t() | Graph.t(), keyword()) ::
-          {:ok, IR.TypedGraph.t()} | {:error, term()}
+          {:ok, Graph.t()} | {:error, term()}
   def compile(source_or_graph, opts \\ []) do
     with {:ok, graph} <- ensure_graph(source_or_graph, opts) do
       IR.Compiler.compile(graph)
@@ -73,22 +73,22 @@ defmodule Arbor.Orchestrator do
   end
 
   @doc """
-  Run typed validation passes on a compiled IR graph.
+  Run typed validation passes on a compiled Graph.
 
   Returns diagnostics from schema validation, capability analysis,
   taint reachability, loop detection, and resource bounds checking.
   These passes complement the structural validation from `validate/2`.
   """
-  @spec validate_typed(String.t() | Graph.t() | IR.TypedGraph.t(), keyword()) ::
+  @spec validate_typed(String.t() | Graph.t(), keyword()) ::
           [Arbor.Orchestrator.Validation.Diagnostic.t()]
-  def validate_typed(%IR.TypedGraph{} = typed, _opts) do
-    IR.Validator.validate(typed)
+  def validate_typed(%Graph{compiled: true} = compiled, _opts) do
+    IR.Validator.validate(compiled)
   end
 
   def validate_typed(source_or_graph, opts) do
     case compile(source_or_graph, opts) do
-      {:ok, typed} ->
-        IR.Validator.validate(typed)
+      {:ok, compiled} ->
+        IR.Validator.validate(compiled)
 
       {:error, reason} ->
         [
