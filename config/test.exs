@@ -91,3 +91,6 @@ config :arbor_ai, embedding_test_fallback: true
 
 # Don't probe local LLM servers (LM Studio, Ollama) during tests
 config :arbor_orchestrator, discover_local_providers: false
+
+# Enable mandatory middleware (Phase 5 handler primitives)
+config :arbor_orchestrator, mandatory_middleware: true

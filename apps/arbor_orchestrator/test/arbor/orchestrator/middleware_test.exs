@@ -143,18 +143,20 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
     end
   end
 
+  @mandatory_chain Chain.default_mandatory_chain()
+
   describe "Chain.build/3" do
-    test "empty when no middleware configured" do
+    test "mandatory middleware included when no other middleware configured" do
       graph = %Graph{id: "test", attrs: %{}}
       node = %Node{id: "test", attrs: %{}}
-      assert Chain.build([], graph, node) == []
+      assert Chain.build([], graph, node) == @mandatory_chain
     end
 
-    test "includes engine-level middleware" do
+    test "includes engine-level middleware after mandatory" do
       graph = %Graph{id: "test", attrs: %{}}
       node = %Node{id: "test", attrs: %{}}
       chain = Chain.build([middleware: [PassThrough]], graph, node)
-      assert chain == [PassThrough]
+      assert chain == @mandatory_chain ++ [PassThrough]
     end
 
     test "includes graph-level middleware from attrs" do
@@ -178,7 +180,8 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
       graph = %Graph{id: "test", attrs: %{"middleware" => "test_skip_target"}}
       node = %Node{id: "test", attrs: %{"skip_middleware" => "test_skip_target"}}
       chain = Chain.build([], graph, node)
-      assert chain == []
+      # Mandatory chain remains; only the skipped one is removed
+      assert chain == @mandatory_chain
     end
 
     test "combines all three layers" do
@@ -187,7 +190,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
       graph = %Graph{id: "test", attrs: %{"middleware" => "test_graph_mw"}}
       node = %Node{id: "test", attrs: %{"middleware" => "test_node_mw"}}
       chain = Chain.build([middleware: [PassThrough]], graph, node)
-      assert chain == [PassThrough, TrackOrder, TrackOrder2]
+      assert chain == @mandatory_chain ++ [PassThrough, TrackOrder, TrackOrder2]
     end
 
     test "deduplicates middleware" do
@@ -195,13 +198,13 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
       graph = %Graph{id: "test", attrs: %{"middleware" => "test_dedup"}}
       node = %Node{id: "test", attrs: %{}}
       chain = Chain.build([middleware: [PassThrough]], graph, node)
-      assert chain == [PassThrough]
+      assert chain == @mandatory_chain ++ [PassThrough]
     end
 
     test "handles nil node" do
       graph = %Graph{id: "test", attrs: %{}}
       chain = Chain.build([middleware: [PassThrough]], graph, nil)
-      assert chain == [PassThrough]
+      assert chain == @mandatory_chain ++ [PassThrough]
     end
 
     test "handles multiple comma-separated middleware names" do
@@ -210,7 +213,7 @@ defmodule Arbor.Orchestrator.MiddlewareTest do
       graph = %Graph{id: "test", attrs: %{}}
       node = %Node{id: "test", attrs: %{"middleware" => "test_multi_a, test_multi_b"}}
       chain = Chain.build([], graph, node)
-      assert chain == [TrackOrder, TrackOrder2]
+      assert chain == @mandatory_chain ++ [TrackOrder, TrackOrder2]
     end
   end
 

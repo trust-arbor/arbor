@@ -13,8 +13,13 @@ defmodule Arbor.Orchestrator.Middleware.CheckpointMiddleware do
 
   use Arbor.Orchestrator.Middleware
 
-  # Keys with these prefixes are stripped before checkpoint persistence
-  @internal_prefixes ["internal.", "graph.", "__"]
+  # Keys with these prefixes are stripped from context_updates in-flight.
+  # NOTE: Only "graph." prefixed keys are stripped here (graph metadata not
+  # relevant to downstream nodes). Engine keys ("__" prefix) and handler state
+  # ("internal." prefix) are preserved — they may be needed for retry loops
+  # and graph adaptation. Engine keys are stripped at the actual persistence
+  # boundary in Checkpoint.write/3.
+  @internal_prefixes ["graph."]
 
   @impl true
   def after_node(token) do
