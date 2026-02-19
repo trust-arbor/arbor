@@ -18,7 +18,8 @@ defmodule Arbor.Orchestrator.Engine do
     Fidelity,
     FidelityTransformer,
     Outcome,
-    Router
+    Router,
+    State
   }
 
   alias Arbor.Orchestrator.Event
@@ -39,9 +40,6 @@ defmodule Arbor.Orchestrator.Engine do
 
   # Public API delegations for backward compatibility
   defdelegate should_retry_exception?(exception), to: Executor
-
-  # Initial tracking state for node_durations and content_hashes
-  defp new_tracking, do: %{node_durations: %{}, content_hashes: %{}}
 
   @doc """
   Run a graph pipeline.
@@ -96,25 +94,30 @@ defmodule Arbor.Orchestrator.Engine do
       {:ok, state} ->
         tracking =
           case state do
-            %{content_hashes: hashes} -> %{new_tracking() | content_hashes: hashes}
-            _ -> new_tracking()
+            %{content_hashes: hashes} ->
+              %{%State{}.tracking | content_hashes: hashes}
+
+            _ ->
+              %State{}.tracking
           end
 
-        loop(
-          graph,
-          state.next_node_id,
-          nil,
-          state.context,
-          logs_root,
-          max_steps,
-          state.completed_nodes,
-          state.retries,
-          state.outcomes,
-          _pending = [],
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        engine_state = %State{
+          graph: graph,
+          node_id: state.next_node_id,
+          incoming_edge: nil,
+          context: state.context,
+          logs_root: logs_root,
+          max_steps: max_steps,
+          completed: state.completed_nodes,
+          retries: state.retries,
+          outcomes: state.outcomes,
+          pending: [],
+          opts: opts,
+          pipeline_started_at: pipeline_started_at,
+          tracking: tracking
+        }
+
+        loop(engine_state)
 
       {:error, reason} = error ->
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
@@ -249,55 +252,27 @@ defmodule Arbor.Orchestrator.Engine do
   defp parse_status("skipped"), do: :skipped
   defp parse_status(_), do: :success
 
-  defp loop(
-         _graph,
-         _node_id,
-         _incoming_edge,
-         _context,
-         _logs_root,
-         max_steps,
-         _done,
-         _retries,
-         _outcomes,
-         _pending,
-         opts,
-         pipeline_started_at,
-         _tracking
-       )
+  defp loop(%State{max_steps: max_steps, opts: opts, pipeline_started_at: pipeline_started_at})
        when max_steps <= 0 do
     duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
     emit(opts, Event.pipeline_failed(:max_steps_exceeded, duration_ms))
     {:error, :max_steps_exceeded}
   end
 
-  defp loop(
-         graph,
-         node_id,
-         incoming_edge,
-         context,
-         logs_root,
-         max_steps,
-         completed,
-         retries,
-         outcomes,
-         pending,
-         opts,
-         pipeline_started_at,
-         tracking
-       ) do
-    node = Map.fetch!(graph.nodes, node_id)
+  defp loop(%State{} = state) do
+    node = Map.fetch!(state.graph.nodes, state.node_id)
 
-    fidelity = Fidelity.resolve(node, incoming_edge, graph, context)
+    fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, state.context)
 
     context =
-      context
+      state.context
       |> Context.set("current_node", node.id, node.id)
       |> Context.set("internal.fidelity.mode", fidelity.mode, node.id)
       |> maybe_set_fidelity_thread(fidelity, node.id)
 
     # Content-hash skip check
     computed_hash = ContentHash.compute(node, context)
-    stored_hash = Map.get(tracking.content_hashes, node.id)
+    stored_hash = Map.get(state.tracking.content_hashes, node.id)
     handler = Registry.resolve(node)
 
     skip? =
@@ -305,69 +280,50 @@ defmodule Arbor.Orchestrator.Engine do
         ContentHash.can_skip?(node, computed_hash, stored_hash, handler)
 
     if skip? do
-      emit(opts, Event.stage_skipped(node.id, :content_hash_match))
+      emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
 
       # Restore the previous outcome if available, otherwise success
-      outcome = Map.get(outcomes, node.id, %Outcome{status: :skipped})
-      completed = [node.id | completed]
+      outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
+      completed = [node.id | state.completed]
 
       context =
         context
         |> Context.set("outcome", to_string(outcome.status), node.id)
         |> Context.set("__completed_nodes__", completed, node.id)
 
-      tracking = put_in(tracking.content_hashes[node.id], computed_hash)
+      tracking =
+        state.tracking
+        |> put_in([:content_hashes, node.id], computed_hash)
 
       checkpoint =
-        Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
+        Checkpoint.from_state(
+          node.id,
+          Enum.reverse(completed),
+          state.retries,
+          context,
+          state.outcomes,
           content_hashes: tracking.content_hashes
         )
 
-      :ok = Checkpoint.write(checkpoint, logs_root)
+      :ok = Checkpoint.write(checkpoint, state.logs_root)
+
+      updated_state = %{state | context: context, completed: completed, tracking: tracking}
 
       if Router.terminal?(node) do
-        handle_terminal(
-          graph,
-          node,
-          outcome,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        handle_terminal(node, outcome, updated_state)
       else
-        advance_with_fan_in(
-          graph,
-          node,
-          outcome,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        advance_with_fan_in(node, outcome, updated_state)
       end
     else
       # Normal execution path
-      emit(opts, Event.stage_started(node.id))
-      emit(opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
+      emit(state.opts, Event.stage_started(node.id))
+      emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
       stage_started_at = System.monotonic_time(:millisecond)
 
       handler_opts =
-        opts
-        |> Keyword.put_new(:logs_root, logs_root)
+        state.opts
+        |> Keyword.put_new(:logs_root, state.logs_root)
         |> Keyword.put(:stage_started_at, stage_started_at)
 
       # Apply fidelity transform only when explicitly set on node/edge/graph
@@ -379,14 +335,20 @@ defmodule Arbor.Orchestrator.Engine do
         end
 
       {outcome, retries} =
-        Executor.execute_with_retry(node, handler_context, graph, retries, handler_opts)
+        Executor.execute_with_retry(
+          node,
+          handler_context,
+          state.graph,
+          state.retries,
+          handler_opts
+        )
 
-      completed = [node.id | completed]
-      outcomes = Map.put(outcomes, node.id, outcome)
+      completed = [node.id | state.completed]
+      outcomes = Map.put(state.outcomes, node.id, outcome)
       stage_duration = System.monotonic_time(:millisecond) - stage_started_at
 
       tracking =
-        tracking
+        state.tracking
         |> put_in([:node_durations, node.id], stage_duration)
         |> put_in([:content_hashes, node.id], computed_hash)
 
@@ -398,136 +360,85 @@ defmodule Arbor.Orchestrator.Engine do
         |> maybe_set_preferred_label(outcome, node.id)
 
       # Check for graph adaptation (graph.adapt handler stores mutated graph in context)
-      {graph, context} = check_graph_adaptation(graph, context)
+      {graph, context} = check_graph_adaptation(state.graph, context)
 
       checkpoint =
         Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
           content_hashes: tracking.content_hashes
         )
 
-      :ok = Checkpoint.write(checkpoint, logs_root)
-      :ok = write_node_status(node.id, outcome, logs_root)
-      maybe_store_artifact(opts, node.id, outcome)
+      :ok = Checkpoint.write(checkpoint, state.logs_root)
+      :ok = write_node_status(node.id, outcome, state.logs_root)
+      maybe_store_artifact(state.opts, node.id, outcome)
 
-      emit(opts, Event.checkpoint_saved(node.id, Path.join(logs_root, "checkpoint.json")))
+      emit(
+        state.opts,
+        Event.checkpoint_saved(node.id, Path.join(state.logs_root, "checkpoint.json"))
+      )
+
+      updated_state = %{
+        state
+        | graph: graph,
+          context: context,
+          completed: completed,
+          retries: retries,
+          outcomes: outcomes,
+          tracking: tracking
+      }
 
       if Router.terminal?(node) do
-        handle_terminal(
-          graph,
-          node,
-          outcome,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        handle_terminal(node, outcome, updated_state)
       else
-        advance_with_fan_in(
-          graph,
-          node,
-          outcome,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        advance_with_fan_in(node, outcome, updated_state)
       end
     end
   end
 
   # Extracted terminal node handling to reduce duplication
-  defp handle_terminal(
-         graph,
-         _node,
-         outcome,
-         context,
-         logs_root,
-         max_steps,
-         completed,
-         retries,
-         outcomes,
-         pending,
-         opts,
-         pipeline_started_at,
-         tracking
-       ) do
-    case Router.resolve_goal_gate_retry_target(graph, outcomes) do
+  defp handle_terminal(_node, outcome, %State{} = state) do
+    case Router.resolve_goal_gate_retry_target(state.graph, state.outcomes) do
       {:ok, nil} ->
         # Before completing, check if there are pending fan-out branches
-        case Router.find_next_ready(pending, graph, completed) do
+        case Router.find_next_ready(state.pending, state.graph, state.completed) do
           {next_id, next_edge, remaining} ->
-            emit(opts, Event.fan_out_branch_resuming(next_id, length(remaining)))
+            emit(state.opts, Event.fan_out_branch_resuming(next_id, length(remaining)))
 
-            loop(
-              graph,
-              next_id,
-              next_edge,
-              context,
-              logs_root,
-              max_steps - 1,
-              completed,
-              retries,
-              outcomes,
-              remaining,
-              opts,
-              pipeline_started_at,
-              tracking
-            )
+            loop(%{
+              state
+              | node_id: next_id,
+                incoming_edge: next_edge,
+                max_steps: state.max_steps - 1,
+                pending: remaining
+            })
 
           nil ->
-            finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at)
+            finish_pipeline(outcome, state)
         end
 
       {:ok, retry_target} ->
-        emit(opts, Event.goal_gate_retrying(retry_target))
+        emit(state.opts, Event.goal_gate_retrying(retry_target))
 
-        loop(
-          graph,
-          retry_target,
-          nil,
-          context,
-          logs_root,
-          max_steps - 1,
-          completed,
-          retries,
-          outcomes,
-          pending,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        loop(%{state | node_id: retry_target, incoming_edge: nil, max_steps: state.max_steps - 1})
 
       {:error, reason} ->
-        duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-        emit(opts, Event.pipeline_failed(reason, duration_ms))
+        duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
+        emit(state.opts, Event.pipeline_failed(reason, duration_ms))
         {:error, reason}
     end
   end
 
-  defp finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at) do
-    ordered = Enum.reverse(completed)
-    duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+  defp finish_pipeline(outcome, %State{} = state) do
+    ordered = Enum.reverse(state.completed)
+    duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
 
-    emit(opts, Event.pipeline_completed(ordered, duration_ms))
+    emit(state.opts, Event.pipeline_completed(ordered, duration_ms))
 
     {:ok,
      %{
        final_outcome: outcome,
        completed_nodes: ordered,
-       context: Context.snapshot(context),
-       node_durations: tracking.node_durations
+       context: Context.snapshot(state.context),
+       node_durations: state.tracking.node_durations
      }}
   end
 
@@ -535,23 +446,9 @@ defmodule Arbor.Orchestrator.Engine do
   # but also detects implicit fan-out (multiple unconditional edges) and
   # queues sibling branches in pending. Before executing any node, checks
   # that all predecessors are complete (fan-in gate).
-  defp advance_with_fan_in(
-         graph,
-         node,
-         outcome,
-         context,
-         logs_root,
-         max_steps,
-         completed,
-         retries,
-         outcomes,
-         pending,
-         opts,
-         pipeline_started_at,
-         tracking
-       ) do
+  defp advance_with_fan_in(node, outcome, %State{} = state) do
     # Use existing routing logic to pick the preferred next target
-    preferred = Router.select_next_step(node, outcome, context, graph)
+    preferred = Router.select_next_step(node, outcome, state.context, state.graph)
 
     preferred_id =
       case preferred do
@@ -561,85 +458,49 @@ defmodule Arbor.Orchestrator.Engine do
       end
 
     # Detect fan-out: collect sibling unconditional edges (excluding preferred)
-    fan_out_edges = Router.collect_fan_out_siblings(node, outcome, context, graph)
+    fan_out_edges = Router.collect_fan_out_siblings(node, outcome, state.context, state.graph)
 
     extra_targets =
       fan_out_edges
       |> Enum.map(fn e -> {e.to, e} end)
-      |> Enum.reject(fn {id, _} -> id == preferred_id or id in completed end)
+      |> Enum.reject(fn {id, _} -> id == preferred_id or id in state.completed end)
 
-    new_pending = Router.merge_pending(extra_targets, pending)
+    new_pending = Router.merge_pending(extra_targets, state.pending)
 
     if extra_targets != [] do
       all_targets = [preferred_id | Enum.map(extra_targets, fn {id, _} -> id end)]
-      emit(opts, Event.fan_out_detected(node.id, length(extra_targets) + 1, all_targets))
+      emit(state.opts, Event.fan_out_detected(node.id, length(extra_targets) + 1, all_targets))
     end
+
+    updated_state = %{state | pending: new_pending}
 
     # Try the preferred target, with fan-in gate check
     case preferred do
       {:edge, edge} ->
         if Map.get(edge, :loop_restart, false) do
-          emit(opts, Event.loop_restart(edge.from, edge.to))
-          finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at)
+          emit(state.opts, Event.loop_restart(edge.from, edge.to))
+          finish_pipeline(outcome, updated_state)
         else
-          advance_to_target(
-            edge.to,
-            edge,
-            graph,
-            context,
-            logs_root,
-            max_steps,
-            completed,
-            retries,
-            outcomes,
-            new_pending,
-            outcome,
-            opts,
-            pipeline_started_at,
-            tracking
-          )
+          advance_to_target(edge.to, edge, outcome, updated_state)
         end
 
       {:node_id, target_id} ->
-        advance_to_target(
-          target_id,
-          nil,
-          graph,
-          context,
-          logs_root,
-          max_steps,
-          completed,
-          retries,
-          outcomes,
-          new_pending,
-          outcome,
-          opts,
-          pipeline_started_at,
-          tracking
-        )
+        advance_to_target(target_id, nil, outcome, updated_state)
 
       nil ->
         # No preferred target -- check pending for ready nodes
-        case Router.find_next_ready(new_pending, graph, completed) do
+        case Router.find_next_ready(new_pending, state.graph, state.completed) do
           {next_id, next_edge, remaining} ->
-            loop(
-              graph,
-              next_id,
-              next_edge,
-              context,
-              logs_root,
-              max_steps - 1,
-              completed,
-              retries,
-              outcomes,
-              remaining,
-              opts,
-              pipeline_started_at,
-              tracking
-            )
+            loop(%{
+              updated_state
+              | node_id: next_id,
+                incoming_edge: next_edge,
+                max_steps: state.max_steps - 1,
+                pending: remaining
+            })
 
           nil ->
-            finish_pipeline(outcome, completed, context, tracking, opts, pipeline_started_at)
+            finish_pipeline(outcome, updated_state)
         end
     end
   end
@@ -648,74 +509,38 @@ defmodule Arbor.Orchestrator.Engine do
   # The fan-in gate only activates when we're actively tracking fan-out
   # branches (pending is non-empty). This avoids blocking targets whose
   # predecessors were executed internally by handlers (e.g., ParallelHandler).
-  defp advance_to_target(
-         target_id,
-         edge,
-         graph,
-         context,
-         logs_root,
-         max_steps,
-         completed,
-         retries,
-         outcomes,
-         pending,
-         last_outcome,
-         opts,
-         pipeline_started_at,
-         tracking
-       ) do
+  defp advance_to_target(target_id, edge, last_outcome, %State{} = state) do
     fan_in_ready =
-      pending == [] or Router.all_predecessors_complete?(graph, target_id, completed)
+      state.pending == [] or
+        Router.all_predecessors_complete?(state.graph, target_id, state.completed)
 
     if fan_in_ready do
-      loop(
-        graph,
-        target_id,
-        edge,
-        context,
-        logs_root,
-        max_steps - 1,
-        completed,
-        retries,
-        outcomes,
-        pending,
-        opts,
-        pipeline_started_at,
-        tracking
-      )
+      loop(%{state | node_id: target_id, incoming_edge: edge, max_steps: state.max_steps - 1})
     else
       # Target not ready -- add to pending and find next ready node
       waiting_for =
-        graph
+        state.graph
         |> Graph.incoming_edges(target_id)
         |> Enum.map(& &1.from)
-        |> Enum.reject(&(&1 in completed))
+        |> Enum.reject(&(&1 in state.completed))
 
-      emit(opts, Event.fan_in_deferred(target_id, waiting_for))
+      emit(state.opts, Event.fan_in_deferred(target_id, waiting_for))
 
-      all_pending = [{target_id, edge} | pending]
+      all_pending = [{target_id, edge} | state.pending]
 
-      case Router.find_next_ready(all_pending, graph, completed) do
+      case Router.find_next_ready(all_pending, state.graph, state.completed) do
         {next_id, next_edge, remaining} ->
-          loop(
-            graph,
-            next_id,
-            next_edge,
-            context,
-            logs_root,
-            max_steps - 1,
-            completed,
-            retries,
-            outcomes,
-            remaining,
-            opts,
-            pipeline_started_at,
-            tracking
-          )
+          loop(%{
+            state
+            | node_id: next_id,
+              incoming_edge: next_edge,
+              max_steps: state.max_steps - 1,
+              pending: remaining
+          })
 
         nil ->
           # Nothing ready -- pipeline complete or deadlock
-          finish_pipeline(last_outcome, completed, context, tracking, opts, pipeline_started_at)
+          finish_pipeline(last_outcome, %{state | pending: all_pending})
       end
     end
   end

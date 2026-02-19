@@ -14,6 +14,8 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   - full string escapes (`\\n`, `\\t`, `\\\\`, `\\"`)
   - `//` and `/* */` comments
   - duration parsing utility
+  - line-number tracking in error messages
+  - error accumulation mode (`accumulate_errors: true`)
   """
 
   alias Arbor.Orchestrator.Graph
@@ -24,6 +26,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   defmodule ParseState do
     @moduledoc false
     defstruct rest: "",
+              source: "",
               graph_id: "",
               graph_attrs: %{},
               node_defaults: %{},
@@ -31,29 +34,50 @@ defmodule Arbor.Orchestrator.Dot.Parser do
               nodes: %{},
               edges: [],
               subgraphs: [],
-              errors: []
+              errors: [],
+              accumulate_errors: false
   end
 
   # ── Public API ────────────────────────────────────────────────────
 
   @doc "Parse a DOT source file from disk."
-  @spec parse_file(Path.t()) :: {:ok, Graph.t()} | {:error, String.t()}
-  def parse_file(path) when is_binary(path) do
+  @spec parse_file(Path.t(), keyword()) ::
+          {:ok, Graph.t()} | {:ok, Graph.t(), [String.t()]} | {:error, String.t() | [String.t()]}
+  def parse_file(path, opts \\ []) when is_binary(path) do
     case File.read(path) do
-      {:ok, source} -> parse(source)
+      {:ok, source} -> parse(source, opts)
       {:error, reason} -> {:error, "Could not read #{path}: #{reason}"}
     end
   end
 
-  @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, String.t()}
-  def parse(source) when is_binary(source) do
-    source
-    |> strip_comments()
-    |> String.trim()
-    |> parse_digraph()
-    |> case do
-      {:ok, state} -> {:ok, build_graph(state)}
-      {:error, _} = err -> err
+  @doc """
+  Parse a DOT source string.
+
+  Options:
+  - `:accumulate_errors` — when `true`, collect parse errors and attempt to
+    continue via skip-to-next-statement recovery. Returns `{:ok, graph, errors}`
+    when recoverable errors were found. Default: `false`.
+  """
+  @spec parse(String.t(), keyword()) ::
+          {:ok, Graph.t()} | {:ok, Graph.t(), [String.t()]} | {:error, String.t() | [String.t()]}
+  def parse(source, opts \\ []) when is_binary(source) do
+    accumulate = Keyword.get(opts, :accumulate_errors, false)
+
+    processed =
+      source
+      |> strip_comments()
+      |> String.trim_trailing()
+
+    case parse_digraph(processed, accumulate) do
+      {:ok, state} ->
+        if accumulate and state.errors != [] do
+          {:ok, build_graph(state), Enum.reverse(state.errors)}
+        else
+          {:ok, build_graph(state)}
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -85,17 +109,30 @@ defmodule Arbor.Orchestrator.Dot.Parser do
 
   defp strip_comments(source) do
     source
-    |> String.replace(~r/\/\*[\s\S]*?\*\//, "")
+    |> replace_block_comments()
     |> String.replace(~r/\/\/.*$/m, "")
+  end
+
+  # Replace block comments with equivalent newlines to preserve line numbers
+  defp replace_block_comments(source) do
+    Regex.replace(~r/\/\*[\s\S]*?\*\//, source, fn match ->
+      String.duplicate("\n", count_newlines(match))
+    end)
   end
 
   # ── Top-Level: digraph ───────────────────────────────────────────
 
-  defp parse_digraph(source) do
+  defp parse_digraph(source, accumulate) do
     with {:ok, rest} <- consume_keyword(source, "digraph"),
          {id, rest} when id != "" <- read_identifier(skip_ws(rest)),
          {:ok, rest} <- consume_char(skip_ws(rest), ?{, "Expected '{' after digraph identifier") do
-      state = %ParseState{rest: rest, graph_id: id}
+      state = %ParseState{
+        rest: rest,
+        source: source,
+        graph_id: id,
+        accumulate_errors: accumulate
+      }
+
       finish_digraph(parse_statements(state))
     else
       {"", _rest} -> {:error, "Expected digraph identifier"}
@@ -104,7 +141,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   end
 
   defp finish_digraph({:ok, %ParseState{rest: rest} = state}) do
-    case consume_char(skip_ws(rest), ?}, "Expected closing '}' for digraph") do
+    case consume_char(skip_ws(rest), ?}, with_line(state, "Expected closing '}' for digraph")) do
       {:ok, rest} -> {:ok, %{state | rest: rest}}
       {:error, _} = err -> err
     end
@@ -132,8 +169,14 @@ defmodule Arbor.Orchestrator.Dot.Parser do
             next_state = %{next_state | rest: skip_separator(next_state.rest)}
             parse_statements(next_state)
 
-          {:error, _} = err ->
-            err
+          {:error, msg} ->
+            if state.accumulate_errors do
+              skipped_rest = skip_to_next_statement(rest)
+              next_state = %{state | rest: skipped_rest, errors: [msg | state.errors]}
+              parse_statements(next_state)
+            else
+              {:error, msg}
+            end
         end
     end
   end
@@ -198,13 +241,19 @@ defmodule Arbor.Orchestrator.Dot.Parser do
     {_, rest} = consume_word(rest, "subgraph")
     {sub_id, rest} = read_identifier(skip_ws(rest))
 
-    case consume_char(skip_ws(rest), ?{, "Expected '{' after subgraph identifier") do
+    case consume_char(
+           skip_ws(rest),
+           ?{,
+           with_line(state, "Expected '{' after subgraph identifier")
+         ) do
       {:ok, rest} ->
         sub_state = %ParseState{
           rest: rest,
+          source: state.source,
           graph_id: sub_id,
           node_defaults: state.node_defaults,
-          edge_defaults: state.edge_defaults
+          edge_defaults: state.edge_defaults,
+          accumulate_errors: state.accumulate_errors
         }
 
         with {:ok, sub_done} <- parse_statements(sub_state),
@@ -212,7 +261,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
                consume_char(
                  skip_ws(sub_done.rest),
                  ?},
-                 "Expected closing '}' for subgraph"
+                 with_line(sub_done, "Expected closing '}' for subgraph")
                ) do
           merge_subgraph(state, sub_done, sub_id, after_brace)
         end
@@ -244,6 +293,9 @@ defmodule Arbor.Orchestrator.Dot.Parser do
       attrs: sub_attrs
     }
 
+    # Merge accumulated errors from subgraph back to parent
+    merged_errors = sub_done.errors ++ state.errors
+
     {:ok,
      %{
        state
@@ -252,7 +304,8 @@ defmodule Arbor.Orchestrator.Dot.Parser do
          edges: state.edges ++ sub_done.edges,
          node_defaults: Map.merge(state.node_defaults, sub_done.node_defaults),
          edge_defaults: Map.merge(state.edge_defaults, sub_done.edge_defaults),
-         subgraphs: state.subgraphs ++ [subgraph_meta]
+         subgraphs: state.subgraphs ++ [subgraph_meta],
+         errors: merged_errors
      }}
   end
 
@@ -306,7 +359,7 @@ defmodule Arbor.Orchestrator.Dot.Parser do
     {next_id, after_next} = read_identifier(rest)
 
     if next_id == "" do
-      {:error, "Expected node identifier after '->'"}
+      {:error, with_line(%{state | rest: rest}, "Expected node identifier after '->'")}
     else
       chain = chain ++ [next_id]
       after_next_trimmed = skip_ws(after_next)
@@ -628,6 +681,25 @@ defmodule Arbor.Orchestrator.Dot.Parser do
       _ -> 0
     end
   end
+
+  # ── Helper: Line Tracking ────────────────────────────────────────
+
+  # Compute the current line number based on how much of the source has been consumed.
+  # This works because `rest` is always a contiguous suffix of `source` —
+  # the parser only consumes from the front, never rearranges.
+  defp current_line(%ParseState{source: source, rest: rest}) do
+    consumed = byte_size(source) - byte_size(rest)
+
+    if consumed > 0 and consumed <= byte_size(source) do
+      source |> binary_part(0, consumed) |> count_newlines() |> Kernel.+(1)
+    else
+      1
+    end
+  end
+
+  defp with_line(%ParseState{} = state, msg), do: "Line #{current_line(state)}: #{msg}"
+
+  defp count_newlines(str), do: str |> :binary.matches("\n") |> length()
 
   # ── Graph Construction ───────────────────────────────────────────
 
