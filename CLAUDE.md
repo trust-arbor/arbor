@@ -43,6 +43,10 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
 | **Duplicating logic from another library** | That library should expose it via its facade. |
 | **Creating or modifying contracts** | Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) first. |
 
+## DOT Pipelines
+
+For writing and running orchestrator DOT pipelines, see [DOT_PIPELINE_GUIDE.md](docs/arbor/DOT_PIPELINE_GUIDE.md).
+
 ## Custom Aliases
 
 ```bash
