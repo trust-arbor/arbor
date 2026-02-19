@@ -563,16 +563,7 @@ defmodule Arbor.Security.CapabilityStore do
     if Process.whereis(@cap_store) do
       case apply(@buffered_store, :list, [[name: @cap_store]]) do
         {:ok, keys} ->
-          Enum.reduce(keys, state, fn key, acc ->
-            case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
-              {:ok, %Record{data: data}} ->
-                restore_capability(acc, data)
-
-              {:error, reason} ->
-                Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
-                acc
-            end
-          end)
+          Enum.reduce(keys, state, &restore_key_from_store/2)
 
         {:error, _reason} ->
           state
@@ -584,6 +575,17 @@ defmodule Arbor.Security.CapabilityStore do
     _, reason ->
       Logger.warning("Failed to restore capabilities: #{inspect(reason)}")
       state
+  end
+
+  defp restore_key_from_store(key, acc) do
+    case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
+      {:ok, %Record{data: data}} ->
+        restore_capability(acc, data)
+
+      {:error, reason} ->
+        Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
+        acc
+    end
   end
 
   defp restore_capability(state, data) do

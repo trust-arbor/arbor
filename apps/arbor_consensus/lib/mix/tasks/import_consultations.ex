@@ -61,20 +61,7 @@ defmodule Mix.Tasks.Arbor.ImportConsultations do
             %{acc | skipped: acc.skipped + 1}
 
           true ->
-            case import_consultation(dir, dry_run?) do
-              {:ok, count} ->
-                label = if dry_run?, do: "WOULD IMPORT", else: "IMPORTED"
-                Mix.shell().info("  #{label} #{dir_name} (#{count} perspectives)")
-                %{acc | imported: acc.imported + 1}
-
-              {:skip, reason} ->
-                Mix.shell().info("  SKIP #{dir_name} (#{reason})")
-                %{acc | skipped: acc.skipped + 1}
-
-              {:error, reason} ->
-                Mix.shell().error("  FAIL #{dir_name}: #{inspect(reason)}")
-                %{acc | failed: acc.failed + 1}
-            end
+            try_import(dir, dir_name, dry_run?, acc)
         end
       end)
 
@@ -101,6 +88,23 @@ defmodule Mix.Tasks.Arbor.ImportConsultations do
 
       true ->
         {:skip, "no perspectives found"}
+    end
+  end
+
+  defp try_import(dir, dir_name, dry_run?, acc) do
+    case import_consultation(dir, dry_run?) do
+      {:ok, count} ->
+        label = if dry_run?, do: "WOULD IMPORT", else: "IMPORTED"
+        Mix.shell().info("  #{label} #{dir_name} (#{count} perspectives)")
+        %{acc | imported: acc.imported + 1}
+
+      {:skip, reason} ->
+        Mix.shell().info("  SKIP #{dir_name} (#{reason})")
+        %{acc | skipped: acc.skipped + 1}
+
+      {:error, reason} ->
+        Mix.shell().error("  FAIL #{dir_name}: #{inspect(reason)}")
+        %{acc | failed: acc.failed + 1}
     end
   end
 

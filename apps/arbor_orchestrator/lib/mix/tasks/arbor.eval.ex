@@ -454,20 +454,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
         # Show detail for failed samples to help diagnose issues
         if not passed do
-          Enum.each(scores, fn s ->
-            detail = Map.get(s, :detail, "")
-
-            if detail != "" and not s.passed do
-              Mix.shell().info("    detail: #{String.slice(to_string(detail), 0, 200)}")
-            end
-          end)
-
-          # Show first line of actual output for failed samples
-          first_line = actual |> String.trim() |> String.split("\n") |> List.first("")
-
-          Mix.shell().info(
-            "    output[#{String.length(actual)} chars]: #{String.slice(first_line, 0, 120)}"
-          )
+          print_failure_details(scores, actual)
         end
       end
 
@@ -497,6 +484,22 @@ defmodule Mix.Tasks.Arbor.Eval do
   end
 
   defp domain_system_prompt(_), do: nil
+
+  defp print_failure_details(scores, actual) do
+    Enum.each(scores, fn s ->
+      detail = Map.get(s, :detail, "")
+
+      if detail != "" and not s.passed do
+        Mix.shell().info("    detail: #{String.slice(to_string(detail), 0, 200)}")
+      end
+    end)
+
+    first_line = actual |> String.trim() |> String.split("\n") |> List.first("")
+
+    Mix.shell().info(
+      "    output[#{String.length(actual)} chars]: #{String.slice(first_line, 0, 120)}"
+    )
+  end
 
   defp maybe_inject_system_prompt(input, nil), do: input
 

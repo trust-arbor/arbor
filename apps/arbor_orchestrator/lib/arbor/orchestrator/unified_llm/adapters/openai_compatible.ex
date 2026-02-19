@@ -471,24 +471,26 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
             chunk
             |> String.split("\n")
             |> Enum.filter(&String.starts_with?(&1, "data: "))
-            |> Enum.flat_map(fn line ->
-              payload = String.trim_leading(line, "data: ")
-
-              if payload == "[DONE]" do
-                []
-              else
-                case Jason.decode(payload) do
-                  {:ok, parsed} -> [parsed]
-                  _ -> []
-                end
-              end
-            end)
+            |> Enum.flat_map(&parse_sse_line/1)
           end)
 
         {:ok, stream}
 
       {:error, reason} ->
         {:error, ErrorMapper.from_transport(config.provider, reason)}
+    end
+  end
+
+  defp parse_sse_line(line) do
+    payload = String.trim_leading(line, "data: ")
+
+    if payload == "[DONE]" do
+      []
+    else
+      case Jason.decode(payload) do
+        {:ok, parsed} -> [parsed]
+        _ -> []
+      end
     end
   end
 

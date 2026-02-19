@@ -363,10 +363,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
               {:cont, :ok}
 
             {:ok, prop_value} ->
-              case validate_schema_value(prop_value, prop_schema) do
-                :ok -> {:cont, :ok}
-                {:error, reason} -> {:halt, {:error, {:schema_property_invalid, key_str, reason}}}
-              end
+              validate_property_value(prop_value, prop_schema, key_str)
           end
         end)
 
@@ -376,6 +373,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   end
 
   defp validate_schema_properties(_value, _schema), do: :ok
+
+  defp validate_property_value(prop_value, prop_schema, key_str) do
+    case validate_schema_value(prop_value, prop_schema) do
+      :ok -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, {:schema_property_invalid, key_str, reason}}}
+    end
+  end
 
   defp validate_schema_items(value, schema) when is_list(value) do
     case Map.get(schema, "items") || Map.get(schema, :items) do

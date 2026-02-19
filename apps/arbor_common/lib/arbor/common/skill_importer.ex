@@ -219,27 +219,32 @@ defmodule Arbor.Common.SkillImporter do
     overwrite = Keyword.get(opts, :overwrite, false)
 
     if Code.ensure_loaded?(lib) and function_exported?(lib, :register, 1) do
-      Enum.filter(skills, fn skill ->
-        # Build a Skill struct for registration
-        case build_skill_struct(skill) do
-          {:ok, struct} ->
-            if overwrite do
-              # credo:disable-for-next-line Credo.Check.Refactor.Apply
-              apply(lib, :register, [struct]) == :ok
-            else
-              # credo:disable-for-next-line Credo.Check.Refactor.Apply
-              case apply(lib, :get, [Map.get(skill, :name)]) do
-                {:error, :not_found} -> apply(lib, :register, [struct]) == :ok
-                _ -> false
-              end
-            end
-
-          {:error, _} ->
-            false
-        end
-      end)
+      Enum.filter(skills, &register_skill(&1, lib, overwrite))
     else
       []
+    end
+  end
+
+  defp register_skill(skill, lib, overwrite) do
+    case build_skill_struct(skill) do
+      {:ok, struct} ->
+        do_register(struct, skill, lib, overwrite)
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp do_register(struct, _skill, lib, true = _overwrite) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    apply(lib, :register, [struct]) == :ok
+  end
+
+  defp do_register(struct, skill, lib, false = _overwrite) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(lib, :get, [Map.get(skill, :name)]) do
+      {:error, :not_found} -> apply(lib, :register, [struct]) == :ok
+      _ -> false
     end
   end
 
