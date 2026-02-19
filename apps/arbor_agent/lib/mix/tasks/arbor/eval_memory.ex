@@ -5,12 +5,16 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
   Tests which memory subsystems actually affect agent behavior by running
   controlled heartbeat trials with progressively richer memory context.
 
+  Designed to be run as a standalone process (not via Task.start) so it
+  survives context rollovers and session restarts.
+
   ## Usage
 
       mix arbor.eval.memory                          # All tiers, 1 run, 10 heartbeats
       mix arbor.eval.memory --tiers 0,1,5            # Specific tiers
       mix arbor.eval.memory --runs 3 --heartbeats 15 # More runs, more heartbeats
       mix arbor.eval.memory --model google/gemini-3-flash-preview
+      mix arbor.eval.memory --tag v2                  # Tag runs for identification
 
   ## Options
 
@@ -19,14 +23,15 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     * `--heartbeats` - Heartbeats per run (default: 10)
     * `--model` - LLM model (default: google/gemini-3-flash-preview)
     * `--provider` - LLM provider (default: openrouter)
+    * `--tag` - Version/experiment tag stored in metadata (default: none)
 
-  ## Tiers
+  ## Tiers (v2 design — conversation is infrastructure)
 
-    0: Stateless  — timing + tools + format only
-    1: Minimal    — + goals, directive
-    2: Operational — + cognitive mode, percepts, pending
-    3: Narrative   — + self-knowledge, conversation
-    4: Evolutionary — + proposals, patterns
+    0: Baseline    — timing + tools + format + conversation + directive
+    1: Goals       — baseline + goals
+    2: Identity    — baseline + self_knowledge
+    3: Combined    — baseline + goals + self_knowledge
+    4: Operational — + cognitive, percepts, pending
     5: Full        — all sections
   """
 
@@ -39,7 +44,8 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     runs: :integer,
     heartbeats: :integer,
     model: :string,
-    provider: :string
+    provider: :string,
+    tag: :string
   ]
 
   @impl Mix.Task
@@ -49,6 +55,9 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     {:ok, _} = Application.ensure_all_started(:arbor_ai)
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
 
+    # Ensure persistence is available for storing results
+    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
 
     tiers = parse_tiers(opts[:tiers])
@@ -56,6 +65,7 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     heartbeats = opts[:heartbeats] || 10
     model = opts[:model] || "google/gemini-3-flash-preview"
     provider = String.to_existing_atom(opts[:provider] || "openrouter")
+    tag = opts[:tag]
 
     Mix.shell().info("""
 
@@ -67,6 +77,7 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
     ║  Heartbeats: #{pad(to_string(heartbeats), 38)}║
     ║  Model:      #{pad(model, 38)}║
     ║  Provider:   #{pad(to_string(provider), 38)}║
+    ║  Tag:        #{pad(tag || "(none)", 38)}║
     ╚══════════════════════════════════════════════════════╝
     """)
 
@@ -75,7 +86,8 @@ defmodule Mix.Tasks.Arbor.EvalMemory do
       runs: runs,
       heartbeats: heartbeats,
       model: model,
-      provider: provider
+      provider: provider,
+      tag: tag
     ]
 
     result = Arbor.Agent.Eval.MemoryAblation.run(ablation_opts)
