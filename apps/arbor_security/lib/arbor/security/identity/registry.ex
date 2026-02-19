@@ -468,16 +468,7 @@ defmodule Arbor.Security.Identity.Registry do
     if Process.whereis(@id_store) do
       case apply(@buffered_store, :list, [[name: @id_store]]) do
         {:ok, keys} ->
-          Enum.reduce(keys, state, fn key, acc ->
-            case apply(@buffered_store, :get, [key, [name: @id_store]]) do
-              {:ok, %Record{data: data}} ->
-                restore_entry(acc, data)
-
-              {:error, reason} ->
-                Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
-                acc
-            end
-          end)
+          Enum.reduce(keys, state, &restore_key_from_store/2)
 
         {:error, _reason} ->
           state
@@ -489,6 +480,17 @@ defmodule Arbor.Security.Identity.Registry do
     _, reason ->
       Logger.warning("Failed to restore identities: #{inspect(reason)}")
       state
+  end
+
+  defp restore_key_from_store(key, acc) do
+    case apply(@buffered_store, :get, [key, [name: @id_store]]) do
+      {:ok, %Record{data: data}} ->
+        restore_entry(acc, data)
+
+      {:error, reason} ->
+        Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
+        acc
+    end
   end
 
   defp restore_entry(state, data) do

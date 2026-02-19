@@ -272,26 +272,7 @@ defmodule Arbor.Orchestrator.AgentLoop.Loop do
               data: data
             })
 
-            case event_type do
-              :tool_call_start ->
-                emit(opts, %Event{
-                  type: :tool_call_started,
-                  session_id: session.id,
-                  turn: next_turn,
-                  data: data
-                })
-
-              :tool_call_end ->
-                emit(opts, %Event{
-                  type: :tool_call_completed,
-                  session_id: session.id,
-                  turn: next_turn,
-                  data: data
-                })
-
-              _ ->
-                :ok
-            end
+            emit_tool_event_alias(event_type, data, session.id, next_turn, opts)
           end)
 
           session =
@@ -753,6 +734,16 @@ defmodule Arbor.Orchestrator.AgentLoop.Loop do
     msg = %{role: role, content: to_string(content), metadata: metadata}
     %{session | messages: messages ++ [msg]}
   end
+
+  defp emit_tool_event_alias(:tool_call_start, data, session_id, turn, opts) do
+    emit(opts, %Event{type: :tool_call_started, session_id: session_id, turn: turn, data: data})
+  end
+
+  defp emit_tool_event_alias(:tool_call_end, data, session_id, turn, opts) do
+    emit(opts, %Event{type: :tool_call_completed, session_id: session_id, turn: turn, data: data})
+  end
+
+  defp emit_tool_event_alias(_event_type, _data, _session_id, _turn, _opts), do: :ok
 
   defp emit(opts, %Event{} = event) do
     case Keyword.get(opts, :on_event) do

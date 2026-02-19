@@ -296,13 +296,8 @@ defmodule Arbor.Common.SensitiveData do
       sum =
         digits
         |> Enum.with_index()
-        |> Enum.reduce(0, fn {digit, idx}, sum ->
-          if rem(idx, 2) == 1 do
-            doubled = digit * 2
-            sum + if(doubled > 9, do: doubled - 9, else: doubled)
-          else
-            sum + digit
-          end
+        |> Enum.reduce(0, fn {digit, idx}, acc ->
+          acc + luhn_digit_value(digit, idx)
         end)
 
       rem(sum, 10) == 0
@@ -312,6 +307,13 @@ defmodule Arbor.Common.SensitiveData do
   # ===========================================================================
   # Private helpers
   # ===========================================================================
+
+  defp luhn_digit_value(digit, idx) when rem(idx, 2) == 1 do
+    doubled = digit * 2
+    if doubled > 9, do: doubled - 9, else: doubled
+  end
+
+  defp luhn_digit_value(digit, _idx), do: digit
 
   defp find_all_matches(regex, text) do
     regex

@@ -317,11 +317,10 @@ defmodule Arbor.Memory.IntentStore do
     if MemoryStore.available?() do
       case MemoryStore.load_all("intents") do
         {:ok, pairs} ->
-          Enum.each(pairs, fn {key, data} ->
-            if key == agent_id do
-              agent_data = deserialize_agent_data(data)
-              :ets.insert(@ets_table, {agent_id, agent_data})
-            end
+          pairs
+          |> Enum.filter(fn {key, _} -> key == agent_id end)
+          |> Enum.each(fn {_key, data} ->
+            :ets.insert(@ets_table, {agent_id, deserialize_agent_data(data)})
           end)
 
         _ ->

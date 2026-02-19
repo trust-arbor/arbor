@@ -285,23 +285,24 @@ defmodule Mix.Tasks.Arbor.Pipeline.Dotgen do
 
         case SourceAnalyzer.analyze_directory(dir, analyze_opts) do
           {:ok, infos} ->
-            # Enrich each file with test-derived examples
-            Enum.map(infos, fn info ->
-              case SourceAnalyzer.find_companion_test(info.path) do
-                nil ->
-                  Map.put(info, :test_examples, nil)
-
-                test_path ->
-                  case SourceAnalyzer.extract_test_examples(test_path) do
-                    {:ok, examples} -> Map.put(info, :test_examples, examples)
-                    _ -> Map.put(info, :test_examples, nil)
-                  end
-              end
-            end)
+            Enum.map(infos, &enrich_with_test_examples/1)
 
           {:error, reason} ->
             error("Failed to analyze directory: #{reason}")
             System.halt(1)
+        end
+    end
+  end
+
+  defp enrich_with_test_examples(info) do
+    case SourceAnalyzer.find_companion_test(info.path) do
+      nil ->
+        Map.put(info, :test_examples, nil)
+
+      test_path ->
+        case SourceAnalyzer.extract_test_examples(test_path) do
+          {:ok, examples} -> Map.put(info, :test_examples, examples)
+          _ -> Map.put(info, :test_examples, nil)
         end
     end
   end

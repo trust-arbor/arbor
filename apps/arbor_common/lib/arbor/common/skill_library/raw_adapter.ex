@@ -95,29 +95,19 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
     if File.dir?(dir) do
       dir
       |> File.ls!()
-      |> Enum.flat_map(fn entry ->
-        full_path = Path.join(dir, entry)
-
-        cond do
-          File.dir?(full_path) ->
-            # Skip subdirectories that have a SKILL.md (those belong to SkillAdapter)
-            if has_skill_file?(full_path) do
-              []
-            else
-              # Include raw files from subdirs without SKILL.md
-              list_raw_files(full_path)
-            end
-
-          raw_file?(entry) ->
-            [full_path]
-
-          true ->
-            []
-        end
-      end)
+      |> Enum.flat_map(&classify_entry(Path.join(dir, &1), &1))
       |> Enum.sort()
     else
       []
+    end
+  end
+
+  defp classify_entry(full_path, entry) do
+    cond do
+      File.dir?(full_path) and has_skill_file?(full_path) -> []
+      File.dir?(full_path) -> list_raw_files(full_path)
+      raw_file?(entry) -> [full_path]
+      true -> []
     end
   end
 

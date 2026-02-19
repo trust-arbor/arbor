@@ -291,15 +291,7 @@ defmodule Arbor.Memory.Thinking do
     if MemoryStore.available?() do
       case MemoryStore.load_all("thinking") do
         {:ok, pairs} ->
-          Enum.each(pairs, fn {agent_id, data} ->
-            entries =
-              (data["entries"] || [])
-              |> Enum.map(&deserialize_entry/1)
-              |> Enum.take(buffer_size)
-
-            if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
-          end)
-
+          Enum.each(pairs, &load_agent_thinking(&1, buffer_size))
           Logger.info("Thinking: loaded #{length(pairs)} agent records from Postgres")
 
         _ ->
@@ -309,6 +301,15 @@ defmodule Arbor.Memory.Thinking do
   rescue
     e ->
       Logger.warning("Thinking: failed to load from Postgres: #{inspect(e)}")
+  end
+
+  defp load_agent_thinking({agent_id, data}, buffer_size) do
+    entries =
+      (data["entries"] || [])
+      |> Enum.map(&deserialize_entry/1)
+      |> Enum.take(buffer_size)
+
+    if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
   end
 
   # ============================================================================

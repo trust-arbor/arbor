@@ -110,35 +110,9 @@ defmodule Arbor.Memory.MemoryStore do
 
       records =
         if prefixed != [] do
-          # New format: ETS key = "namespace:original_key", Record.key = same
-          Enum.reduce(prefixed, [], fn composite_key, acc ->
-            case BufferedStore.get(composite_key, name: @store_name) do
-              {:ok, %Record{key: k, data: data}} ->
-                # Strip namespace prefix to return original key
-                original_key = String.replace_prefix(k, prefix, "")
-                [{original_key, data} | acc]
-
-              _ ->
-                acc
-            end
-          end)
+          load_prefixed_records(prefixed, prefix)
         else
-          # Backwards compat: old data loaded from Postgres has bare Record.key
-          # in ETS (no namespace prefix). Check Record.id for namespace match.
-          Enum.reduce(keys, [], fn ets_key, acc ->
-            case BufferedStore.get(ets_key, name: @store_name) do
-              {:ok, %Record{id: id, key: k, data: data}}
-              when is_binary(id) ->
-                if String.starts_with?(id, prefix) do
-                  [{k, data} | acc]
-                else
-                  acc
-                end
-
-              _ ->
-                acc
-            end
-          end)
+          load_compat_records(keys, prefix)
         end
 
       {:ok, Enum.reverse(records)}
@@ -168,36 +142,9 @@ defmodule Arbor.Memory.MemoryStore do
 
       records =
         if prefixed != [] do
-          Enum.reduce(prefixed, [], fn composite_key, acc ->
-            case BufferedStore.get(composite_key, name: @store_name) do
-              {:ok, %Record{key: k, data: data}} ->
-                original_key = String.replace_prefix(k, "#{namespace}:", "")
-                [{original_key, data} | acc]
-
-              _ ->
-                acc
-            end
-          end)
+          load_prefixed_records(prefixed, "#{namespace}:")
         else
-          # Fallback: check bare keys with matching Record.id
-          Enum.reduce(keys, [], fn ets_key, acc ->
-            if String.starts_with?(ets_key, prefix) do
-              case BufferedStore.get(ets_key, name: @store_name) do
-                {:ok, %Record{id: id, key: k, data: data}}
-                when is_binary(id) ->
-                  if String.starts_with?(id, full_prefix) do
-                    [{k, data} | acc]
-                  else
-                    acc
-                  end
-
-                _ ->
-                  acc
-              end
-            else
-              acc
-            end
-          end)
+          load_compat_records_by_prefix(keys, prefix, full_prefix)
         end
 
       {:ok, Enum.reverse(records)}
@@ -211,6 +158,46 @@ defmodule Arbor.Memory.MemoryStore do
       )
 
       {:ok, []}
+  end
+
+  # ── Record loading helpers ──────────────────────────────────────────
+
+  defp load_prefixed_records(prefixed_keys, prefix) do
+    Enum.reduce(prefixed_keys, [], fn composite_key, acc ->
+      case BufferedStore.get(composite_key, name: @store_name) do
+        {:ok, %Record{key: k, data: data}} ->
+          [{String.replace_prefix(k, prefix, ""), data} | acc]
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp load_compat_records(keys, prefix) do
+    Enum.reduce(keys, [], fn ets_key, acc ->
+      case BufferedStore.get(ets_key, name: @store_name) do
+        {:ok, %Record{id: id, key: k, data: data}} when is_binary(id) ->
+          if String.starts_with?(id, prefix), do: [{k, data} | acc], else: acc
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp load_compat_records_by_prefix(keys, key_prefix, id_prefix) do
+    keys
+    |> Enum.filter(&String.starts_with?(&1, key_prefix))
+    |> Enum.reduce([], fn ets_key, acc ->
+      case BufferedStore.get(ets_key, name: @store_name) do
+        {:ok, %Record{id: id, key: k, data: data}} when is_binary(id) ->
+          if String.starts_with?(id, id_prefix), do: [{k, data} | acc], else: acc
+
+        _ ->
+          acc
+      end
+    end)
   end
 
   @doc """

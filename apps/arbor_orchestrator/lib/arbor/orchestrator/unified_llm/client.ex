@@ -810,20 +810,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       result =
         Enum.find_value(adapter_keys, fn name ->
           case Map.get(@llmdb_provider_map, name) do
-            nil ->
-              nil
-
-            llmdb_id ->
-              case llmdb_model(llmdb_id, model_id) do
-                {:ok, model} -> {:ok, model_to_map(model)}
-                _ -> nil
-              end
+            nil -> nil
+            llmdb_id -> lookup_llmdb_model(llmdb_id, model_id)
           end
         end)
 
       result || {:error, :model_not_found}
     else
       {:error, :model_not_found}
+    end
+  end
+
+  defp lookup_llmdb_model(llmdb_id, model_id) do
+    case llmdb_model(llmdb_id, model_id) do
+      {:ok, model} -> {:ok, model_to_map(model)}
+      _ -> nil
     end
   end
 

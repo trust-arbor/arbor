@@ -150,6 +150,7 @@ defmodule Arbor.Agent.Eval.TrialRunner do
               {:message, content, ts}
             end)
         }
+
         Map.put(state, :context_window, window)
       else
         state

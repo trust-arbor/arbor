@@ -233,27 +233,7 @@ defmodule Arbor.Consensus.ConsultationLog do
           Enum.flat_map(runs, fn run ->
             case get_consultation(run.id) do
               {:ok, run_with_results} ->
-                Enum.map(run_with_results.results, fn result ->
-                  %{
-                    consultation_id: run.id,
-                    question: get_in(run.config, ["question"]) || run.dataset,
-                    domain: run.domain,
-                    perspective: result.sample_id,
-                    provider: get_in(result.metadata, ["provider"]),
-                    model: get_in(result.metadata, ["model"]),
-                    input: result.input,
-                    response: result.actual,
-                    vote: get_in(result.scores, ["vote"]),
-                    confidence: get_in(result.scores, ["confidence"]),
-                    risk_score: get_in(result.scores, ["risk_score"]),
-                    benefit_score: get_in(result.scores, ["benefit_score"]),
-                    duration_ms: result.duration_ms,
-                    concerns: get_in(result.metadata, ["concerns"]),
-                    recommendations: get_in(result.metadata, ["recommendations"]),
-                    created_at: result.inserted_at
-                  }
-                  |> Jason.encode!()
-                end)
+                Enum.map(run_with_results.results, &result_to_jsonl(run, &1))
 
               {:error, _} ->
                 []
@@ -272,6 +252,28 @@ defmodule Arbor.Consensus.ConsultationLog do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp result_to_jsonl(run, result) do
+    %{
+      consultation_id: run.id,
+      question: get_in(run.config, ["question"]) || run.dataset,
+      domain: run.domain,
+      perspective: result.sample_id,
+      provider: get_in(result.metadata, ["provider"]),
+      model: get_in(result.metadata, ["model"]),
+      input: result.input,
+      response: result.actual,
+      vote: get_in(result.scores, ["vote"]),
+      confidence: get_in(result.scores, ["confidence"]),
+      risk_score: get_in(result.scores, ["risk_score"]),
+      benefit_score: get_in(result.scores, ["benefit_score"]),
+      duration_ms: result.duration_ms,
+      concerns: get_in(result.metadata, ["concerns"]),
+      recommendations: get_in(result.metadata, ["recommendations"]),
+      created_at: result.inserted_at
+    }
+    |> Jason.encode!()
+  end
 
   defp available? do
     Code.ensure_loaded?(@persistence_mod) and
