@@ -802,7 +802,44 @@ defmodule Arbor.Orchestrator.EngineTest do
     assert_receive {:event, %{type: :tool_hook_pre, node_id: "tool"}}
   end
 
-  test "loop_restart edge terminates pipeline with current outcome" do
+  test "auto_status overrides failure to success" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      task [simulate="fail", auto_status="true"]
+      exit [shape=Msquare]
+      start -> task
+      task -> exit
+    }
+    """
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot)
+
+    # auto_status converts fail to success
+    assert "task" in result.completed_nodes
+    assert "exit" in result.completed_nodes
+    assert result.final_outcome.status == :success
+  end
+
+  test "auto_status does not affect already-successful outcomes" do
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      task [auto_status="true"]
+      exit [shape=Msquare]
+      start -> task
+      task -> exit
+    }
+    """
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot)
+
+    assert "task" in result.completed_nodes
+    assert "exit" in result.completed_nodes
+    assert result.final_outcome.status == :success
+  end
+
+  test "loop_restart edge re-launches from target with fresh log directory" do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
@@ -820,8 +857,9 @@ defmodule Arbor.Orchestrator.EngineTest do
 
     assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
 
-    # Pipeline should complete
-    assert "task" in result.completed_nodes
+    # After loop_restart, pipeline re-runs from checkpoint with fresh state.
+    # Only nodes from the restarted iteration appear in completed_nodes.
+    assert "checkpoint" in result.completed_nodes
     assert result.final_outcome != nil
   end
 
@@ -843,8 +881,8 @@ defmodule Arbor.Orchestrator.EngineTest do
 
     assert {:ok, result} = Arbor.Orchestrator.run(dot, on_event: on_event)
 
-    # task fails, takes the loop_restart edge, pipeline terminates
-    assert "task" in result.completed_nodes
+    # task fails, takes the loop_restart edge, pipeline restarts from repair
+    assert "repair" in result.completed_nodes
     refute "exit" in result.completed_nodes
     assert_receive {:event, %{type: :loop_restart, reason: :loop_restart_edge}}
   end

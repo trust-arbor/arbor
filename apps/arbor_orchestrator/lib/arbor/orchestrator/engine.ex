@@ -343,6 +343,10 @@ defmodule Arbor.Orchestrator.Engine do
           handler_opts
         )
 
+      # auto_status: when enabled and handler didn't produce a success,
+      # synthesize SUCCESS so the pipeline continues (spec §4.5)
+      outcome = maybe_auto_status(outcome, node)
+
       completed = [node.id | state.completed]
       outcomes = Map.put(state.outcomes, node.id, outcome)
       stage_duration = System.monotonic_time(:millisecond) - stage_started_at
@@ -442,6 +446,49 @@ defmodule Arbor.Orchestrator.Engine do
      }}
   end
 
+  # Restart the pipeline from a target node with a fresh log directory.
+  # Used by loop_restart edges (spec §3.2 step 7). Context is preserved
+  # so the new iteration can see results from the previous one.
+  defp restart_pipeline(target_node_id, %State{} = state) do
+    new_logs_root = next_versioned_path(state.logs_root)
+    File.mkdir_p!(new_logs_root)
+    :ok = write_manifest(state.graph, new_logs_root)
+
+    loop(%{
+      state
+      | node_id: target_node_id,
+        incoming_edge: nil,
+        logs_root: new_logs_root,
+        completed: [],
+        retries: %{},
+        outcomes: %{},
+        pending: [],
+        tracking: %{node_durations: %{}, content_hashes: %{}}
+    })
+  end
+
+  defp next_versioned_path(path) do
+    case Regex.run(~r/-v(\d+)$/, path) do
+      [_, n] -> String.replace(path, ~r/-v\d+$/, "-v#{String.to_integer(n) + 1}")
+      nil -> "#{path}-v2"
+    end
+  end
+
+  defp maybe_auto_status(%Outcome{status: status} = outcome, node)
+       when status in [:fail, :retry] do
+    if Map.get(node.attrs, "auto_status") in [true, "true"] do
+      %Outcome{
+        status: :success,
+        notes: "auto-status: handler completed without writing status",
+        context_updates: outcome.context_updates
+      }
+    else
+      outcome
+    end
+  end
+
+  defp maybe_auto_status(outcome, _node), do: outcome
+
   # Fan-in aware advancement: uses Router for routing,
   # but also detects implicit fan-out (multiple unconditional edges) and
   # queues sibling branches in pending. Before executing any node, checks
@@ -479,7 +526,7 @@ defmodule Arbor.Orchestrator.Engine do
       {:edge, edge} ->
         if Map.get(edge, :loop_restart, false) do
           emit(state.opts, Event.loop_restart(edge.from, edge.to))
-          finish_pipeline(outcome, updated_state)
+          restart_pipeline(edge.to, updated_state)
         else
           advance_to_target(edge.to, edge, outcome, updated_state)
         end
