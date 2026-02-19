@@ -13,8 +13,27 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Middleware.Token
 
+  @mandatory_enabled Application.compile_env(:arbor_orchestrator, :mandatory_middleware, false)
+
+  @mandatory_chain [
+    Arbor.Orchestrator.Middleware.CapabilityCheck,
+    Arbor.Orchestrator.Middleware.TaintCheck,
+    Arbor.Orchestrator.Middleware.Sanitization,
+    Arbor.Orchestrator.Middleware.SafeInput,
+    Arbor.Orchestrator.Middleware.CheckpointMiddleware,
+    Arbor.Orchestrator.Middleware.Budget,
+    Arbor.Orchestrator.Middleware.SignalEmit
+  ]
+
   @registry %{
-    "secret_scan" => Arbor.Orchestrator.Middleware.SecretScan
+    "secret_scan" => Arbor.Orchestrator.Middleware.SecretScan,
+    "capability_check" => Arbor.Orchestrator.Middleware.CapabilityCheck,
+    "taint_check" => Arbor.Orchestrator.Middleware.TaintCheck,
+    "sanitization" => Arbor.Orchestrator.Middleware.Sanitization,
+    "safe_input" => Arbor.Orchestrator.Middleware.SafeInput,
+    "checkpoint" => Arbor.Orchestrator.Middleware.CheckpointMiddleware,
+    "budget" => Arbor.Orchestrator.Middleware.Budget,
+    "signal_emit" => Arbor.Orchestrator.Middleware.SignalEmit
   }
 
   @doc "Registers a middleware module under the given name for runtime lookup."
@@ -31,11 +50,22 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
     :persistent_term.get({__MODULE__, :registry}, @registry)
   end
 
+  @doc "Returns the ordered list of mandatory middleware modules."
+  @spec default_mandatory_chain() :: [module()]
+  def default_mandatory_chain, do: @mandatory_chain
+
+  @doc "Returns whether mandatory middleware is enabled."
+  @spec mandatory_enabled?() :: boolean()
+  def mandatory_enabled?, do: @mandatory_enabled
+
   @doc """
   Builds an ordered list of middleware modules for a given node.
 
   Combines engine config, graph-level, and node-level middleware,
   then removes any listed in the node's skip_middleware attribute.
+
+  When mandatory middleware is enabled (via config), the mandatory chain
+  is prepended before all other middleware.
   """
   @spec build(keyword(), Arbor.Orchestrator.Graph.t(), Arbor.Orchestrator.Graph.Node.t() | nil) ::
           [module()]
@@ -51,7 +81,14 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
         {[], []}
       end
 
-    (engine_mw ++ graph_mw ++ node_mw)
+    mandatory =
+      if @mandatory_enabled do
+        @mandatory_chain
+      else
+        []
+      end
+
+    (mandatory ++ engine_mw ++ graph_mw ++ node_mw)
     |> Enum.uniq()
     |> Enum.reject(&(&1 in skip))
   end

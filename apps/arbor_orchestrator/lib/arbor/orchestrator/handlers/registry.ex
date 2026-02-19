@@ -1,12 +1,24 @@
 defmodule Arbor.Orchestrator.Handlers.Registry do
-  @moduledoc false
+  @moduledoc """
+  Handler registry mapping node type strings to handler modules.
+
+  Organized into three layers:
+    - **Core handlers** — 15 canonical primitives (start, exit, branch, etc.)
+    - **Compat handlers** — all existing type strings mapped to their current handler modules
+    - **Custom handlers** — runtime-registered handlers via `register/2`
+
+  Resolution order: custom > compat > core. Default: CodergenHandler.
+  """
 
   alias Arbor.Orchestrator.Graph.Node
 
   alias Arbor.Orchestrator.Handlers.{
     AccumulatorHandler,
     AdaptHandler,
+    BranchHandler,
     CodergenHandler,
+    ComposeHandler,
+    ComputeHandler,
     ConditionalHandler,
     ConsensusHandler,
     DriftDetectHandler,
@@ -15,10 +27,12 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     EvalPersistHandler,
     EvalReportHandler,
     EvalRunHandler,
+    ExecHandler,
     ExitHandler,
     FanInHandler,
     FeedbackLoopHandler,
     FileWriteHandler,
+    GateHandler,
     ManagerLoopHandler,
     MapHandler,
     MemoryHandler,
@@ -29,6 +43,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     PipelineRunHandler,
     PipelineValidateHandler,
     PromptAbTestHandler,
+    ReadHandler,
     RetryEscalateHandler,
     RoutingHandler,
     SessionHandler,
@@ -36,7 +51,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     StartHandler,
     SubgraphHandler,
     ToolHandler,
-    WaitHumanHandler
+    TransformHandler,
+    WaitHandler,
+    WaitHumanHandler,
+    WriteHandler
   }
 
   @shape_to_type %{
@@ -51,20 +69,47 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "octagon" => "graph.adapt"
   }
 
-  @handlers %{
+  # 15 canonical core handlers
+  @core_handlers %{
     "start" => StartHandler,
     "exit" => ExitHandler,
-    "conditional" => ConditionalHandler,
-    "tool" => ToolHandler,
-    "wait.human" => WaitHumanHandler,
+    "branch" => BranchHandler,
     "parallel" => ParallelHandler,
+    "fan_in" => FanInHandler,
+    "compute" => ComputeHandler,
+    "transform" => TransformHandler,
+    "exec" => ExecHandler,
+    "read" => ReadHandler,
+    "write" => WriteHandler,
+    "compose" => ComposeHandler,
+    "map" => MapHandler,
+    "adapt" => AdaptHandler,
+    "wait" => WaitHandler,
+    "gate" => GateHandler
+  }
+
+  # Compatibility layer — all existing type strings → their CURRENT handler modules.
+  # This preserves identical behavior for all existing DOT pipelines.
+  @compat_handlers %{
+    # Control flow
+    "conditional" => ConditionalHandler,
     "parallel.fan_in" => FanInHandler,
-    "stack.manager_loop" => ManagerLoopHandler,
+    # Computation
     "codergen" => CodergenHandler,
+    "routing.select" => RoutingHandler,
+    "prompt.ab_test" => PromptAbTestHandler,
+    "drift_detect" => DriftDetectHandler,
+    "retry.escalate" => RetryEscalateHandler,
+    # Execution
+    "tool" => ToolHandler,
+    "shell" => ShellHandler,
+    # File I/O
     "file.write" => FileWriteHandler,
+    # Validation
     "output.validate" => OutputValidateHandler,
     "pipeline.validate" => PipelineValidateHandler,
     "pipeline.run" => PipelineRunHandler,
+    # Eval
     "eval.dataset" => EvalDatasetHandler,
     "eval.run" => EvalRunHandler,
     "eval.aggregate" => EvalAggregateHandler,
@@ -86,25 +131,17 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     # Sub-graph composition
     "graph.invoke" => SubgraphHandler,
     "graph.compose" => SubgraphHandler,
-    # Graph adaptation (self-modifying pipelines)
     "graph.adapt" => AdaptHandler,
-    # Shell command execution
-    "shell" => ShellHandler,
     # Stateful accumulation
     "accumulator" => AccumulatorHandler,
-    # Model escalation
-    "retry.escalate" => RetryEscalateHandler,
-    # Iterative feedback loops
+    # Feedback and loops
     "feedback.loop" => FeedbackLoopHandler,
-    # Collection fan-out
-    "map" => MapHandler,
+    "stack.manager_loop" => ManagerLoopHandler,
     # Homelab-ported handlers
-    "drift_detect" => DriftDetectHandler,
-    "prompt.ab_test" => PromptAbTestHandler,
     "memory.recall_store" => MemoryRecallHandler,
     "memory.store_file" => MemoryStoreHandler,
-    # LLM routing
-    "routing.select" => RoutingHandler,
+    # Wait
+    "wait.human" => WaitHumanHandler,
     # Session-as-DOT node types
     "session.classify" => SessionHandler,
     "session.memory_recall" => SessionHandler,
@@ -124,7 +161,22 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "session.update_working_memory" => SessionHandler,
     "session.store_identity" => SessionHandler
   }
+
+  # Merged: core overridden by compat (preserves existing behavior)
+  @handlers Map.merge(@core_handlers, @compat_handlers)
   @custom_handlers_key {__MODULE__, :custom_handlers}
+
+  @doc "Returns the canonical core type for any type string."
+  @spec canonical_type(String.t()) :: String.t()
+  defdelegate canonical_type(type), to: Arbor.Orchestrator.Stdlib.Aliases
+
+  @doc "Returns the 15 core handler type → module map."
+  @spec core_handlers() :: map()
+  def core_handlers, do: @core_handlers
+
+  @doc "Returns the compatibility handler type → module map."
+  @spec compat_handlers() :: map()
+  def compat_handlers, do: @compat_handlers
 
   @spec node_type(Node.t()) :: String.t()
   def node_type(%Node{} = node) do
