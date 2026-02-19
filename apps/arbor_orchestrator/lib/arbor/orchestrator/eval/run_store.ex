@@ -82,20 +82,7 @@ defmodule Arbor.Orchestrator.Eval.RunStore do
         {:ok, files} ->
           files
           |> Enum.filter(&String.ends_with?(&1, ".json"))
-          |> Enum.flat_map(fn file ->
-            path = Path.join(dir, file)
-
-            case File.read(path) do
-              {:ok, content} ->
-                case Jason.decode(content) do
-                  {:ok, data} -> [data]
-                  _ -> []
-                end
-
-              _ ->
-                []
-            end
-          end)
+          |> Enum.flat_map(&read_run_file(Path.join(dir, &1)))
           |> maybe_filter(:model, model_filter)
           |> maybe_filter(:provider, provider_filter)
           |> Enum.sort_by(& &1["timestamp"], :desc)
@@ -105,6 +92,15 @@ defmodule Arbor.Orchestrator.Eval.RunStore do
       end
 
     {:ok, runs}
+  end
+
+  defp read_run_file(path) do
+    with {:ok, content} <- File.read(path),
+         {:ok, data} <- Jason.decode(content) do
+      [data]
+    else
+      _ -> []
+    end
   end
 
   @doc "Returns the most recent run matching optional filters."
