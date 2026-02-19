@@ -376,20 +376,42 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
   # --- consolidate ---
 
   describe "session.consolidate" do
-    test "calls adapter with agent_id" do
+    test "calls adapter with agent_id and surfaces metrics" do
       test_pid = self()
 
       adapters = %{
         consolidate: fn id ->
           send(test_pid, {:consolidated, id})
-          :ok
+          %{kg: {:ok, %{pruned: 3}}, identity: {:ok, %{proposals_created: 1}}}
         end
       }
 
       outcome = run("session.consolidate", %{"session.agent_id" => "a1"}, adapters)
       assert outcome.status == :success
       assert outcome.context_updates["session.consolidated"] == true
+      assert outcome.context_updates["session.consolidation_kg"] == %{pruned: 3}
+      assert outcome.context_updates["session.consolidation_identity"] == %{proposals_created: 1}
       assert_received {:consolidated, "a1"}
+    end
+
+    test "handles legacy :ok return from adapter" do
+      adapters = %{consolidate: fn _id -> :ok end}
+      outcome = run("session.consolidate", %{"session.agent_id" => "a1"}, adapters)
+      assert outcome.status == :success
+      assert outcome.context_updates["session.consolidated"] == true
+    end
+
+    test "surfaces error details from consolidation" do
+      adapters = %{
+        consolidate: fn _id ->
+          %{kg: {:error, :not_found}, identity: {:ok, %{}}}
+        end
+      }
+
+      outcome = run("session.consolidate", %{"session.agent_id" => "a1"}, adapters)
+      assert outcome.status == :success
+      assert outcome.context_updates["session.consolidated"] == true
+      assert outcome.context_updates["session.consolidation_kg"] == %{error: ":not_found"}
     end
 
     test "degrades gracefully when adapter missing" do

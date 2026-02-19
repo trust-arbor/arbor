@@ -16,18 +16,17 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
 
   describe "execute/4 - basic writes" do
     test "writes string content from context to file" do
-      path = Path.join(@test_dir, "output.txt")
-
       node = %Node{
         id: "w1",
-        attrs: %{"type" => "file.write", "content_key" => "data", "output" => path}
+        attrs: %{"type" => "file.write", "content_key" => "data", "output" => "output.txt"}
       }
 
-      context = Context.new(%{"data" => "hello world"})
+      context = Context.new(%{"data" => "hello world", "workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = FileWriteHandler.execute(node, context, graph, [])
 
+      path = Path.join(@test_dir, "output.txt")
       assert outcome.status == :success
       assert File.read!(path) == "hello world"
       assert outcome.context_updates["file.written.w1"] == path
@@ -35,23 +34,22 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
     end
 
     test "writes JSON-formatted content" do
-      path = Path.join(@test_dir, "output.json")
-
       node = %Node{
         id: "w1",
         attrs: %{
           "type" => "file.write",
           "content_key" => "data",
-          "output" => path,
+          "output" => "output.json",
           "format" => "json"
         }
       }
 
-      context = Context.new(%{"data" => %{"key" => "value", "num" => 42}})
+      context = Context.new(%{"data" => %{"key" => "value", "num" => 42}, "workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = FileWriteHandler.execute(node, context, graph, [])
 
+      path = Path.join(@test_dir, "output.json")
       assert outcome.status == :success
       parsed = Jason.decode!(File.read!(path))
       assert parsed["key"] == "value"
@@ -67,12 +65,12 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
         attrs: %{
           "type" => "file.write",
           "content_key" => "data",
-          "output" => path,
+          "output" => "append.txt",
           "append" => "true"
         }
       }
 
-      context = Context.new(%{"data" => "line2\n"})
+      context = Context.new(%{"data" => "line2\n", "workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = FileWriteHandler.execute(node, context, graph, [])
@@ -82,18 +80,17 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
     end
 
     test "creates parent directories automatically" do
-      path = Path.join(@test_dir, "sub/dir/file.txt")
-
       node = %Node{
         id: "w1",
-        attrs: %{"type" => "file.write", "content_key" => "data", "output" => path}
+        attrs: %{"type" => "file.write", "content_key" => "data", "output" => "sub/dir/file.txt"}
       }
 
-      context = Context.new(%{"data" => "nested content"})
+      context = Context.new(%{"data" => "nested content", "workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = FileWriteHandler.execute(node, context, graph, [])
 
+      path = Path.join(@test_dir, "sub/dir/file.txt")
       assert outcome.status == :success
       assert File.read!(path) == "nested content"
     end
@@ -130,7 +127,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
       assert File.read!(Path.join(@test_dir, "from_opts.txt")) == "opts content"
     end
 
-    test "resolves absolute paths directly" do
+    test "resolves absolute paths within workdir" do
       abs_path = Path.join(@test_dir, "absolute.txt")
 
       node = %Node{
@@ -138,13 +135,47 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
         attrs: %{"type" => "file.write", "content_key" => "data", "output" => abs_path}
       }
 
-      context = Context.new(%{"data" => "absolute content"})
+      context = Context.new(%{"data" => "absolute content", "workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = FileWriteHandler.execute(node, context, graph, [])
 
       assert outcome.status == :success
       assert File.read!(abs_path) == "absolute content"
+    end
+
+    test "rejects absolute paths outside workdir" do
+      node = %Node{
+        id: "w1",
+        attrs: %{"type" => "file.write", "content_key" => "data", "output" => "/etc/passwd"}
+      }
+
+      context = Context.new(%{"data" => "pwned", "workdir" => @test_dir})
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = FileWriteHandler.execute(node, context, graph, [])
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "path traversal blocked"
+    end
+
+    test "rejects path traversal via .." do
+      node = %Node{
+        id: "w1",
+        attrs: %{
+          "type" => "file.write",
+          "content_key" => "data",
+          "output" => "../../etc/passwd"
+        }
+      }
+
+      context = Context.new(%{"data" => "pwned", "workdir" => @test_dir})
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = FileWriteHandler.execute(node, context, graph, [])
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "path traversal blocked"
     end
   end
 
@@ -199,19 +230,18 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandlerTest do
 
   describe "end-to-end via Orchestrator.run" do
     test "file.write handler writes graph goal to file" do
-      path = Path.join(@test_dir, "e2e.txt")
-
       dot = """
       digraph FileWriteE2E {
         graph [goal="end-to-end works"]
         start [shape=Mdiamond]
-        write [type="file.write", content_key="graph.goal", output="#{path}"]
+        write [type="file.write", content_key="graph.goal", output="e2e.txt"]
         done [shape=Msquare]
         start -> write -> done
       }
       """
 
-      assert {:ok, result} = Arbor.Orchestrator.run(dot)
+      assert {:ok, result} = Arbor.Orchestrator.run(dot, workdir: @test_dir)
+      path = Path.join(@test_dir, "e2e.txt")
       assert result.context["file.written.write"] == path
       assert File.read!(path) == "end-to-end works"
     end

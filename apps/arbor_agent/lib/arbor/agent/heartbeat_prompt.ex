@@ -47,7 +47,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       {:self_knowledge, fn -> self_knowledge_section(state) end},
       {:conversation, fn -> conversation_section(state) end},
       {:goals, fn -> goals_section(state, mode) end},
-      {:tools, fn -> tools_section() end},
+      {:tools, fn -> tools_section(state) end},
       {:proposals, fn -> proposals_section(state) end},
       {:patterns, fn -> patterns_section(state) end},
       {:percepts, fn -> percepts_section(state) end},
@@ -269,12 +269,40 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     else
       percept_lines =
         percepts
-        |> Enum.map_join("\n", fn p ->
-          "- [#{p.outcome}] intent=#{p.intent_id || "?"}, duration=#{p.duration_ms || "?"}ms"
-        end)
+        |> Enum.map_join("\n", &format_percept/1)
 
       "## Recent Action Results\n#{percept_lines}"
     end
+  end
+
+  defp format_percept(p) do
+    base = "- [#{p.outcome}] #{p.type || "action"}"
+
+    base =
+      if p.intent_id,
+        do: base <> " (intent=#{p.intent_id})",
+        else: base
+
+    base =
+      if p.duration_ms,
+        do: base <> " #{p.duration_ms}ms",
+        else: base
+
+    data_str =
+      if p.data && p.data != %{} do
+        "\n  " <> inspect(p.data, limit: 200, printable_limit: 500)
+      else
+        ""
+      end
+
+    error_str =
+      if p.error do
+        "\n  error: #{inspect(p.error, limit: 100)}"
+      else
+        ""
+      end
+
+    base <> data_str <> error_str
   end
 
   defp conversation_section(%{context_window: nil}), do: nil
@@ -310,20 +338,82 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     end
   end
 
-  defp tools_section do
-    """
-    ## Available Actions
-    You can take these actions via the "actions" array in your response:
-    - `shell_execute` — Run a shell command. Params: {"command": "..."}
-    - `file_read` — Read a file. Params: {"path": "..."}
-    - `file_write` — Write to a file. Params: {"path": "...", "content": "..."}
-    - `ai_analyze` — Ask an AI to analyze something. Params: {"prompt": "..."}
-    - `memory_consolidate` — Trigger memory consolidation
-    - `memory_index` — Index new information into memory
-    - `think` — Extended internal reasoning (no external effect)
-    - `reflect` — Deeper reflection on a topic (no external effect)
-    """
+  defp tools_section(state) do
+    agent_id = state[:id] || state[:agent_id]
+
+    # Try to get the agent's actual tools from its session or capabilities
+    tools = load_agent_tools(agent_id)
+
+    if tools == [] do
+      # Fallback to static list if we can't determine available tools
+      """
+      ## Available Actions
+      You can take these actions via the "actions" array in your response:
+      - `shell_execute` — Run a shell command. Params: {"command": "..."}
+      - `file_read` — Read a file. Params: {"path": "..."}
+      - `file_write` — Write to a file. Params: {"path": "...", "content": "..."}
+      - `ai_analyze` — Ask an AI to analyze something. Params: {"prompt": "..."}
+      - `memory_consolidate` — Trigger memory consolidation
+      - `memory_index` — Index new information into memory
+      - `think` — Extended internal reasoning (no external effect)
+      - `reflect` — Deeper reflection on a topic (no external effect)
+      """
+    else
+      tool_lines =
+        tools
+        |> Enum.map_join("\n", fn tool ->
+          name = tool_name(tool)
+          desc = tool_description(tool)
+          "- `#{name}` — #{desc}"
+        end)
+
+      "## Available Actions\nYou can take these actions via the \"actions\" array in your response:\n#{tool_lines}"
+    end
   end
+
+  defp load_agent_tools(agent_id) when is_binary(agent_id) do
+    # Try to get tools from the agent's session via SessionManager
+    safe_call(fn ->
+      if Code.ensure_loaded?(Arbor.Agent.SessionManager) do
+        case apply(Arbor.Agent.SessionManager, :get_session, [agent_id]) do
+          {:ok, pid} ->
+            state = apply(Arbor.Orchestrator.Session, :get_state, [pid])
+            Map.get(state, :tools, [])
+
+          _ ->
+            []
+        end
+      else
+        []
+      end
+    end) || []
+  end
+
+  defp load_agent_tools(_), do: []
+
+  defp tool_name(tool) when is_atom(tool) do
+    if function_exported?(tool, :to_tool, 0) do
+      tool.to_tool().name
+    else
+      tool |> Module.split() |> List.last() |> Macro.underscore()
+    end
+  end
+
+  defp tool_name(%{name: name}), do: name
+  defp tool_name(%{"name" => name}), do: name
+  defp tool_name(other), do: inspect(other)
+
+  defp tool_description(tool) when is_atom(tool) do
+    if function_exported?(tool, :to_tool, 0) do
+      tool.to_tool().description || "No description"
+    else
+      "Action"
+    end
+  end
+
+  defp tool_description(%{description: desc}), do: desc || "No description"
+  defp tool_description(%{"description" => desc}), do: desc || "No description"
+  defp tool_description(_), do: "Action"
 
   defp directive_section(:goal_pursuit, _state) do
     """

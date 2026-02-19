@@ -347,8 +347,22 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
       agent_id = Context.get(ctx, "session.agent_id")
 
       try do
-        consolidate.(agent_id)
-        ok(%{"session.consolidated" => true})
+        result = consolidate.(agent_id)
+
+        updates =
+          case result do
+            %{kg: kg, identity: identity} ->
+              %{
+                "session.consolidated" => true,
+                "session.consolidation_kg" => format_consolidation_result(kg),
+                "session.consolidation_identity" => format_consolidation_result(identity)
+              }
+
+            _ ->
+              %{"session.consolidated" => true}
+          end
+
+        ok(updates)
       catch
         kind, reason -> fail("consolidate: #{inspect({kind, reason})}")
       end
@@ -432,6 +446,11 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   end
 
   # --- Helpers ---
+
+  defp format_consolidation_result({:ok, metrics}) when is_map(metrics), do: metrics
+  defp format_consolidation_result({:ok, other}), do: %{result: inspect(other)}
+  defp format_consolidation_result({:error, reason}), do: %{error: inspect(reason)}
+  defp format_consolidation_result(other), do: %{result: inspect(other)}
 
   defp with_adapter(adapters, key, fun) do
     case Map.get(adapters, key) do

@@ -65,15 +65,24 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
   def idempotency, do: :idempotent_with_key
 
   defp resolve_path(path, workdir) do
-    resolved =
+    expanded_workdir = Path.expand(workdir)
+
+    full_path =
       if Path.type(path) == :absolute do
         path
       else
-        Path.join(workdir, path)
+        Path.join(expanded_workdir, path)
       end
 
-    # Expand and normalize to prevent path traversal
-    Path.expand(resolved)
+    # Normalize to resolve .. sequences, then verify the result stays within workdir
+    normalized = Path.expand(full_path)
+
+    if String.starts_with?(normalized, expanded_workdir <> "/") or
+         normalized == expanded_workdir do
+      normalized
+    else
+      raise "path traversal blocked: #{path} escapes workdir #{workdir}"
+    end
   end
 
   defp format_content(value, "json") do

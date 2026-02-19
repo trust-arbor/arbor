@@ -9,7 +9,9 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
   defp make_node(id, attrs) do
-    %Node{id: id, attrs: Map.merge(%{"type" => "shell"}, attrs)}
+    # Tests run without Arbor.Shell — use sandbox="none" to allow direct execution.
+    # In production, sandbox defaults to "basic" and requires Arbor.Shell.
+    %Node{id: id, attrs: Map.merge(%{"type" => "shell", "sandbox" => "none"}, attrs)}
   end
 
   describe "execute/4" do

@@ -303,12 +303,20 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     {:ok, results}
   end
 
-  defp dispatch_single_tool(call, agent_id, trust_tier) do
+  defp dispatch_single_tool(call, agent_id, _trust_tier) do
     name = Map.get(call, "name") || Map.get(call, :name, "unknown")
     args = Map.get(call, "arguments") || Map.get(call, :arguments, %{})
-    bridge_args = [name, args, agent_id, [trust_tier: trust_tier]]
 
-    case bridge(Arbor.Agent.ToolBridge, :authorize_and_execute, bridge_args, nil) do
+    # Route through ArborActionsExecutor which handles:
+    # - name → action module resolution
+    # - string key → atom key conversion via schema allowlist
+    # - authorize_and_execute with full capability checks
+    case bridge(
+           Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor,
+           :execute,
+           [name, args, ".", [agent_id: agent_id]],
+           nil
+         ) do
       {:ok, result} when is_binary(result) -> result
       {:ok, result} -> inspect(result)
       {:error, reason} -> "error: #{inspect(reason)}"
@@ -549,18 +557,38 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp build_consolidate do
     fn agent_id ->
-      try do
-        # KG decay + prune
-        bridge(Arbor.Memory, :consolidate, [agent_id, []], :ok)
+      kg_result = safe_consolidate(Arbor.Memory, :consolidate, [agent_id, []])
+      identity_result = safe_consolidate_identity(agent_id)
 
-        # Identity consolidation (creates proposals, not direct apply)
-        bridge(Arbor.Memory.IdentityConsolidator, :consolidate, [agent_id, []], :ok)
-      rescue
-        _ -> :ok
-      end
-
-      :ok
+      %{kg: kg_result, identity: identity_result}
     end
+  end
+
+  defp safe_consolidate(module, function, args) do
+    case bridge(module, function, args, {:error, :unavailable}) do
+      {:ok, metrics} -> {:ok, metrics}
+      {:error, reason} -> {:error, reason}
+      :ok -> {:ok, %{}}
+      other -> {:ok, other}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp safe_consolidate_identity(agent_id) do
+    case bridge(
+           Arbor.Memory.IdentityConsolidator,
+           :consolidate,
+           [agent_id, []],
+           {:error, :unavailable}
+         ) do
+      {:ok, _sk, result} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+      :ok -> {:ok, %{}}
+      other -> {:ok, other}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   # ── Background Checks ──────────────────────────────────────────────
@@ -612,11 +640,20 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   defp build_recall_intents do
     fn agent_id ->
       case bridge(Arbor.Memory, :pending_intentions, [agent_id], []) do
-        {:ok, intents} -> {:ok, intents}
-        intents when is_list(intents) -> {:ok, intents}
+        {:ok, intents} -> {:ok, unwrap_intents(intents)}
+        intents when is_list(intents) -> {:ok, unwrap_intents(intents)}
         _ -> {:ok, []}
       end
     end
+  end
+
+  # IntentStore.pending_intentions/2 returns [{Intent.t(), status_map}] tuples.
+  # Consumers (mode_select, prompt builders) expect plain [Intent.t()] structs.
+  defp unwrap_intents(intents) do
+    Enum.map(intents, fn
+      {intent, _status} -> intent
+      intent -> intent
+    end)
   end
 
   # ── Recall Beliefs ──────────────────────────────────────────────────
