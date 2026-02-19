@@ -286,16 +286,16 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     case Jason.decode(raw) do
       {:ok, parsed} when is_map(parsed) ->
         ok(%{
-          "session.actions" => Map.get(parsed, "actions", []),
-          "session.goal_updates" => Map.get(parsed, "goal_updates", []),
-          "session.new_goals" => Map.get(parsed, "new_goals", []),
-          "session.memory_notes" => Map.get(parsed, "memory_notes", []),
-          "session.concerns" => Map.get(parsed, "concerns", []),
-          "session.curiosity" => Map.get(parsed, "curiosity", []),
-          "session.decompositions" => Map.get(parsed, "decompositions", []),
-          "session.new_intents" => Map.get(parsed, "new_intents", []),
-          "session.proposal_decisions" => Map.get(parsed, "proposal_decisions", []),
-          "session.identity_insights" => Map.get(parsed, "identity_insights", [])
+          "session.actions" => validated_list(parsed, "actions", &valid_action?/1),
+          "session.goal_updates" => validated_list(parsed, "goal_updates", &is_map/1),
+          "session.new_goals" => validated_list(parsed, "new_goals", &is_map/1),
+          "session.memory_notes" => validated_list(parsed, "memory_notes", &is_binary/1),
+          "session.concerns" => validated_list(parsed, "concerns", &is_binary/1),
+          "session.curiosity" => validated_list(parsed, "curiosity", &is_binary/1),
+          "session.decompositions" => validated_list(parsed, "decompositions", &is_map/1),
+          "session.new_intents" => validated_list(parsed, "new_intents", &is_map/1),
+          "session.proposal_decisions" => validated_list(parsed, "proposal_decisions", &valid_proposal_decision?/1),
+          "session.identity_insights" => validated_list(parsed, "identity_insights", &is_map/1)
         })
 
       _ ->
@@ -446,6 +446,24 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   end
 
   # --- Helpers ---
+
+  # Extracts a list from parsed JSON, filtering items that don't pass validation.
+  # Returns [] if the field is missing or not a list.
+  defp validated_list(parsed, key, validator) do
+    case Map.get(parsed, key) do
+      items when is_list(items) -> Enum.filter(items, validator)
+      _ -> []
+    end
+  end
+
+  defp valid_action?(%{"type" => type}) when is_binary(type), do: true
+  defp valid_action?(_), do: false
+
+  defp valid_proposal_decision?(%{"proposal_id" => id, "decision" => d})
+       when is_binary(id) and d in ["accept", "reject", "defer"],
+       do: true
+
+  defp valid_proposal_decision?(_), do: false
 
   defp format_consolidation_result({:ok, metrics}) when is_map(metrics), do: metrics
   defp format_consolidation_result({:ok, other}), do: %{result: inspect(other)}

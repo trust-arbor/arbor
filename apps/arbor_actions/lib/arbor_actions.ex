@@ -153,12 +153,10 @@ defmodule Arbor.Actions do
     end
   end
 
-  @doc """
-  Execute an action directly (unchecked).
-
-  Use for system-level callers that don't require authorization.
-  Emits started/completed/failed signals for observability.
-  """
+  @doc false
+  # Internal: Execute an action without authorization.
+  # Only for system-level callers (e.g., AgentSeed bootstrapping).
+  # External callers MUST use authorize_and_execute/4 instead.
   @spec execute_action(module(), map(), map()) :: {:ok, any()} | {:error, term()}
   def execute_action(action_module, params, context \\ %{}) do
     emit_started(action_module, params)

@@ -28,7 +28,7 @@ defmodule Arbor.Signals.Signal do
 
   alias Arbor.Identifiers
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, except: [:emitter_pid]}
   typedstruct enforce: true do
     @typedoc "A signal event"
 
@@ -41,6 +41,8 @@ defmodule Arbor.Signals.Signal do
     field(:cause_id, String.t(), enforce: false)
     field(:correlation_id, String.t(), enforce: false)
     field(:metadata, map(), default: %{})
+    # Set server-side by the signal system — cannot be spoofed by callers
+    field(:emitter_pid, pid(), enforce: false)
   end
 
   @doc """
