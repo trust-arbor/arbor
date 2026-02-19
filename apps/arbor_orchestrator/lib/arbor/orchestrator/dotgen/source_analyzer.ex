@@ -94,16 +94,10 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
         files = find_ex_files(dir_path, opts)
 
         results =
-          Enum.reduce(files, {:ok, []}, fn file, acc ->
-            case acc do
-              {:ok, infos} ->
-                case analyze_file(file) do
-                  {:ok, info} -> {:ok, [info | infos]}
-                  {:error, reason} -> {:error, "Failed to analyze #{file}: #{reason}"}
-                end
-
-              error ->
-                error
+          Enum.reduce_while(files, {:ok, []}, fn file, {:ok, infos} ->
+            case analyze_file(file) do
+              {:ok, info} -> {:cont, {:ok, [info | infos]}}
+              {:error, reason} -> {:halt, {:error, "Failed to analyze #{file}: #{reason}"}}
             end
           end)
 

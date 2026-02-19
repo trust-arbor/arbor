@@ -217,39 +217,16 @@ defmodule Arbor.Orchestrator.Engine do
               {:error, reason}
           end
         else
-          case Router.select_next_step(node, last_outcome, context, graph) do
-            nil ->
-              {:ok,
-               %{
-                 next_node_id: nil,
-                 context: context,
-                 completed_nodes: completed,
-                 retries: retries,
-                 outcomes: outcomes
-               }}
+          next_id = resolve_next_node_id(node, last_outcome, context, graph)
 
-            {:edge, edge} ->
-              next_id = if Map.get(edge, :loop_restart, false), do: nil, else: edge.to
-
-              {:ok,
-               %{
-                 next_node_id: next_id,
-                 context: context,
-                 completed_nodes: completed,
-                 retries: retries,
-                 outcomes: outcomes
-               }}
-
-            {:node_id, target} ->
-              {:ok,
-               %{
-                 next_node_id: target,
-                 context: context,
-                 completed_nodes: completed,
-                 retries: retries,
-                 outcomes: outcomes
-               }}
-          end
+          {:ok,
+           %{
+             next_node_id: next_id,
+             context: context,
+             completed_nodes: completed,
+             retries: retries,
+             outcomes: outcomes
+           }}
         end
     end
   end
@@ -850,6 +827,14 @@ defmodule Arbor.Orchestrator.Engine do
     with :ok <- File.mkdir_p(node_dir),
          {:ok, encoded} <- Jason.encode(payload, pretty: true) do
       File.write(status_path, encoded)
+    end
+  end
+
+  defp resolve_next_node_id(node, last_outcome, context, graph) do
+    case Router.select_next_step(node, last_outcome, context, graph) do
+      nil -> nil
+      {:edge, edge} -> if Map.get(edge, :loop_restart, false), do: nil, else: edge.to
+      {:node_id, target} -> target
     end
   end
 end

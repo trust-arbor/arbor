@@ -34,27 +34,16 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
     # Parse expected (should always work — it's our ground truth)
     case Arbor.Orchestrator.parse(expected_str) do
       {:ok, expected_graph} ->
-        # Try parsing actual output
-        case Arbor.Orchestrator.parse(actual_str) do
-          {:ok, actual_graph} ->
-            score_graphs(actual_graph, expected_graph, opts)
+        case parse_actual(actual_str) do
+          {:ok, actual_graph, extracted?} ->
+            result = score_graphs(actual_graph, expected_graph, opts)
 
-          {:error, _parse_reason} ->
-            # Try extracting DOT from markdown fences or thinking blocks
-            case extract_dot(actual_str) do
-              {:ok, extracted} ->
-                case Arbor.Orchestrator.parse(extracted) do
-                  {:ok, actual_graph} ->
-                    result = score_graphs(actual_graph, expected_graph, opts)
-                    %{result | detail: "[extracted from markdown] " <> result.detail}
+            if extracted?,
+              do: %{result | detail: "[extracted from markdown] " <> result.detail},
+              else: result
 
-                  {:error, _} ->
-                    parse_failure_result(actual_str)
-                end
-
-              :none ->
-                parse_failure_result(actual_str)
-            end
+          :parse_failure ->
+            parse_failure_result(actual_str)
         end
 
       {:error, reason} ->
@@ -100,6 +89,25 @@ defmodule Arbor.Orchestrator.Eval.Graders.DotDiff do
           expected_graph
         )
     }
+  end
+
+  defp parse_actual(actual_str) do
+    case Arbor.Orchestrator.parse(actual_str) do
+      {:ok, graph} ->
+        {:ok, graph, false}
+
+      {:error, _} ->
+        case extract_dot(actual_str) do
+          {:ok, extracted} ->
+            case Arbor.Orchestrator.parse(extracted) do
+              {:ok, graph} -> {:ok, graph, true}
+              {:error, _} -> :parse_failure
+            end
+
+          :none ->
+            :parse_failure
+        end
+    end
   end
 
   defp parse_failure_result(actual_str) do
