@@ -6,16 +6,36 @@ defmodule Arbor.Agent.Eval.TrialConfig do
   output routing, allowing measurement of each subsystem cluster's
   contribution to agent behavior.
 
+  ## Design Principles
+
+  - Conversation history is infrastructure, not a feature to ablate.
+    Every real agent has it, so it belongs in the baseline.
+  - Directive (agent purpose) is similarly foundational.
+  - Goals and self-knowledge are the two biggest behavioral levers,
+    so they get isolated tiers (T1-G, T1-S) for independent testing.
+  - T2 combines them to measure interaction effects.
+  - Higher tiers add operational (T3) and evolutionary (T4) features.
+
   ## Tiers
 
-  | Tier | Name         | Prompt Sections                | Outputs Stored       |
-  |------|-------------|-------------------------------|---------------------|
-  | 0    | stateless   | timing, tools, response_format | none                |
-  | 1    | minimal     | + goals, directive             | goals               |
-  | 2    | operational | + cognitive, percepts, pending  | + intents           |
-  | 3    | narrative   | + self_knowledge, conversation  | + notes, insights   |
-  | 4    | evolutionary| + proposals, patterns           | + proposal decisions|
-  | 5    | full        | all sections                   | all outputs         |
+  | Tier | Name         | Prompt Sections                              | Outputs Stored       |
+  |------|-------------|---------------------------------------------|---------------------|
+  | 0    | baseline    | timing, tools, format, conversation, directive| none                |
+  | 1    | goals       | + goals                                      | goals               |
+  | 2    | identity    | baseline + self_knowledge (no goals)         | identity_insights   |
+  | 3    | combined    | baseline + goals + self_knowledge            | goals, notes, insights |
+  | 4    | operational | + cognitive, percepts, pending               | + intents           |
+  | 5    | full        | all sections                                 | all outputs         |
+
+  ## Key Comparisons
+
+  - T1 vs T0: What do goals add to an agent with conversation context?
+  - T2 vs T0: What does self-knowledge add to an agent with conversation context?
+  - T1 vs T2: Which is more impactful — goals or self-knowledge?
+  - T3 vs T1: Does self-knowledge help a goal-focused agent? (resolves T3 confound)
+  - T3 vs T2: Do goals help an identity-aware agent?
+  - T4 vs T3: Do operational BDI features add measurable value?
+  - T5 vs T4: Do proposals/patterns add measurable value?
   """
 
   @type tier_config :: %{
@@ -25,25 +45,31 @@ defmodule Arbor.Agent.Eval.TrialConfig do
           outputs: :all | [atom()]
         }
 
-  @tier_0_sections [:timing, :tools, :response_format]
-  @tier_1_sections @tier_0_sections ++ [:goals, :directive]
-  @tier_2_sections @tier_1_sections ++ [:cognitive, :percepts, :pending]
-  @tier_3_sections @tier_2_sections ++ [:self_knowledge, :conversation]
-  @tier_4_sections @tier_3_sections ++ [:proposals, :patterns]
+  # Baseline: conversation + directive are infrastructure
+  @baseline_sections [:timing, :tools, :response_format, :conversation, :directive]
+
+  @tier_sections %{
+    0 => @baseline_sections,
+    1 => @baseline_sections ++ [:goals],
+    2 => @baseline_sections ++ [:self_knowledge],
+    3 => @baseline_sections ++ [:goals, :self_knowledge],
+    4 => @baseline_sections ++ [:goals, :self_knowledge, :cognitive, :percepts, :pending],
+    5 => :all
+  }
 
   @tiers %{
-    0 => %{name: :stateless, sections: @tier_0_sections, outputs: []},
-    1 => %{name: :minimal, sections: @tier_1_sections, outputs: [:goals]},
-    2 => %{name: :operational, sections: @tier_2_sections, outputs: [:goals, :intents]},
+    0 => %{name: :baseline, sections: @tier_sections[0], outputs: []},
+    1 => %{name: :goals, sections: @tier_sections[1], outputs: [:goals]},
+    2 => %{name: :identity, sections: @tier_sections[2], outputs: [:identity_insights]},
     3 => %{
-      name: :narrative,
-      sections: @tier_3_sections,
-      outputs: [:goals, :intents, :memory_notes, :identity_insights]
+      name: :combined,
+      sections: @tier_sections[3],
+      outputs: [:goals, :memory_notes, :identity_insights]
     },
     4 => %{
-      name: :evolutionary,
-      sections: @tier_4_sections,
-      outputs: [:goals, :intents, :memory_notes, :identity_insights, :proposal_decisions]
+      name: :operational,
+      sections: @tier_sections[4],
+      outputs: [:goals, :intents, :memory_notes, :identity_insights]
     },
     5 => %{name: :full, sections: :all, outputs: :all}
   }

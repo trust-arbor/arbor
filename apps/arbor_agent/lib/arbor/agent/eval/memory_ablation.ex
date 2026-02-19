@@ -46,10 +46,12 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
     heartbeats = Keyword.get(opts, :heartbeats, 10)
     model = Keyword.get(opts, :model, "google/gemini-3-flash-preview")
     provider = Keyword.get(opts, :provider, :openrouter)
+    tag = Keyword.get(opts, :tag)
 
     Logger.info(
       "[MemoryAblation] Starting study: tiers=#{inspect(tiers)}, " <>
-        "runs=#{runs_per_tier}, heartbeats=#{heartbeats}, model=#{model}"
+        "runs=#{runs_per_tier}, heartbeats=#{heartbeats}, model=#{model}" <>
+        if(tag, do: ", tag=#{tag}", else: "")
     )
 
     study_start = System.monotonic_time(:millisecond)
@@ -72,7 +74,7 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
         case TrialRunner.run(tier_config, trial_opts) do
           {:ok, trial_result} ->
             # Persist to eval infrastructure
-            persist_trial(trial_result, model, provider, run_num)
+            persist_trial(trial_result, model, provider, run_num, tag)
             trial_result
 
           {:error, reason} ->
@@ -94,7 +96,7 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
 
   # -- Persistence --
 
-  defp persist_trial(trial, model, provider, run_num) do
+  defp persist_trial(trial, model, provider, run_num, tag) do
     run_id = "ma_tier#{trial.tier}_run#{run_num}_#{:erlang.unique_integer([:positive])}"
 
     run_attrs = %{
@@ -114,6 +116,7 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
         "model" => model,
         "provider" => to_string(provider)
       },
+      metadata: build_run_metadata(tag),
       status: "completed"
     }
 
@@ -254,6 +257,9 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
       {key, Enum.sum(values) / n}
     end)
   end
+
+  defp build_run_metadata(nil), do: %{}
+  defp build_run_metadata(tag), do: %{"tag" => tag}
 
   # -- Persistence bridge --
 

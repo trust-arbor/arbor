@@ -136,13 +136,20 @@ defmodule Arbor.Agent.Eval.TrialRunner do
       background_suggestions: []
     }
 
-    # Load context window if narrative tier or above
+    # Load context window when conversation section is enabled (all tiers in v2)
     if tier_config.sections == :all or :conversation in tier_config.sections do
       # Build a simple context window from chat history
       chat = load_chat_history(agent_id)
 
       if chat != [] do
-        window = %{entries: Enum.map(chat, fn msg -> {:message, msg.content, msg.timestamp} end)}
+        window = %{
+          entries:
+            Enum.map(chat, fn msg ->
+              content = Map.get(msg, :content) || Map.get(msg, "content", "")
+              ts = Map.get(msg, :timestamp) || Map.get(msg, "timestamp")
+              {:message, content, ts}
+            end)
+        }
         Map.put(state, :context_window, window)
       else
         state
