@@ -35,9 +35,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
       {:error, {:already_started, _pid}} -> :ok
     end
 
-    for type <- @session_types do
-      Registry.register(type, SessionHandler)
-    end
+    # Session types resolved via alias path since Phase 4 — no custom registration needed.
 
     # Write DOT files for all tests
     tmp_dir =

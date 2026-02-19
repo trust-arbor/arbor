@@ -143,8 +143,10 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
             attrs: Map.merge(handler_attrs, %{"type" => handler_type})
           }
 
-          handler_module = Arbor.Orchestrator.Handlers.Registry.resolve(child_node)
-          handler_module.execute(child_node, child_context, graph, child_opts)
+          {handler_module, resolved_child} =
+            Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(child_node)
+
+          handler_module.execute(resolved_child, child_context, graph, child_opts)
         end
 
       true ->

@@ -83,7 +83,7 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
     test "resolves handler modules" do
       {:ok, typed} = Compiler.compile(simple_graph())
       assert typed.nodes["start"].handler_module == Arbor.Orchestrator.Handlers.StartHandler
-      assert typed.nodes["work"].handler_module == Arbor.Orchestrator.Handlers.CodergenHandler
+      assert typed.nodes["work"].handler_module == Arbor.Orchestrator.Handlers.ComputeHandler
       assert typed.nodes["done"].handler_module == Arbor.Orchestrator.Handlers.ExitHandler
     end
 

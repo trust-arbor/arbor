@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   @doc false
   def execute_with_retry(node, context, graph, retries, opts) do
-    handler = Registry.resolve(node)
+    {handler, node} = Registry.resolve_with_attrs(node)
     max_attempts = parse_max_attempts(node, graph)
     current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
 

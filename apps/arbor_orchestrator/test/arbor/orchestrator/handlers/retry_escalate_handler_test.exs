@@ -228,9 +228,18 @@ defmodule Arbor.Orchestrator.Handlers.RetryEscalateHandlerTest do
   end
 
   describe "registry" do
-    test "retry.escalate type resolves to RetryEscalateHandler" do
+    test "retry.escalate type resolves to ComputeHandler (Phase 4 delegation)" do
       node = make_node("reg", %{})
-      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) == RetryEscalateHandler
+
+      assert Arbor.Orchestrator.Handlers.Registry.resolve(node) ==
+               Arbor.Orchestrator.Handlers.ComputeHandler
+    end
+
+    test "retry.escalate type injects purpose attribute via resolve_with_attrs" do
+      node = make_node("reg", %{})
+      {handler, resolved_node} = Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(node)
+      assert handler == Arbor.Orchestrator.Handlers.ComputeHandler
+      assert resolved_node.attrs["purpose"] == "retry_escalate"
     end
   end
 end

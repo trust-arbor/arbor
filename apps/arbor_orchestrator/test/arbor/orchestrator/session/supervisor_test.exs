@@ -33,9 +33,8 @@ defmodule Arbor.Orchestrator.Session.SupervisorTest do
       Elixir.Registry.start_link(keys: :duplicate, name: Arbor.Orchestrator.EventRegistry)
     end)
 
-    for type <- @session_types do
-      Arbor.Orchestrator.Handlers.Registry.register(type, SessionHandler)
-    end
+    # Session types are resolved via alias path: session.* → ComposeHandler → SessionHandler
+    # No custom handler registration needed since Phase 4 wired aliases into the executor.
 
     :ok
   end

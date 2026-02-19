@@ -459,10 +459,19 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
     test "can register and resolve session handler" do
       alias Arbor.Orchestrator.Handlers.Registry
 
+      snapshot = Registry.snapshot_custom_handlers()
       Registry.register("session.classify", SessionHandler)
       node = %Node{id: "n1", attrs: %{"type" => "session.classify"}}
       assert Registry.resolve(node) == SessionHandler
-      # Don't unregister — persistent_term is global and other async tests depend on it
+      Registry.restore_custom_handlers(snapshot)
+    end
+
+    test "session types resolve via alias path to ComposeHandler" do
+      alias Arbor.Orchestrator.Handlers.Registry
+
+      node = %Node{id: "n1", attrs: %{"type" => "session.classify"}}
+      {handler, _} = Registry.resolve_with_attrs(node)
+      assert handler == Arbor.Orchestrator.Handlers.ComposeHandler
     end
   end
 end

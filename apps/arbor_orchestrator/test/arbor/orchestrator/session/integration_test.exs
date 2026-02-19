@@ -25,9 +25,8 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
       {:error, {:already_started, _pid}} -> :ok
     end
 
-    for type <- @session_types do
-      Arbor.Orchestrator.Handlers.Registry.register(type, SessionHandler)
-    end
+    # Session types are resolved via alias path: session.* → ComposeHandler → SessionHandler
+    # No custom handler registration needed since Phase 4 wired aliases into the executor.
 
     :ok
   end
