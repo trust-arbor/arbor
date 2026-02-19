@@ -625,6 +625,15 @@ defmodule Arbor.Security do
           :ok
         end
     end
+  catch
+    :exit, _ ->
+      # Identity.Registry GenServer not running (start_children: false in test/dev).
+      # Respect strict_identity_mode: fail closed in strict, allow in permissive.
+      if Config.strict_identity_mode?() do
+        {:error, {:unauthorized, :identity_registry_unavailable}}
+      else
+        :ok
+      end
   end
 
   # H1: When identity verification is enabled, verify the signed request AND

@@ -24,7 +24,11 @@ config :arbor_security,
   identity_verification: false,
   # P0-3: Permissive identity mode in tests — most tests don't register identities.
   # Production uses strict mode (unknown identities rejected).
-  strict_identity_mode: false
+  strict_identity_mode: false,
+  # Disable reflex checking in tests — reflex infrastructure (ETS tables, GenServers)
+  # isn't started when start_children: false. Without this, authorize/4 fails closed
+  # with {:reflex_check_failed, :exception} on every call.
+  reflex_checking_enabled: false
 
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false

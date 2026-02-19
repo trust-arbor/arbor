@@ -319,7 +319,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
          ) do
       {:ok, result} when is_binary(result) -> result
       {:ok, result} -> inspect(result)
-      {:error, reason} -> "error: #{inspect(reason)}"
+      {:error, reason} -> "error[#{name}]: #{inspect(reason)}"
       nil -> "tool_dispatch_unavailable: #{name} called with #{inspect(args)}"
     end
   end
