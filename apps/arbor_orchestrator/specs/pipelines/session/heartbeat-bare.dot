@@ -1,0 +1,63 @@
+// Heartbeat Variant: BARE — Nothing persists between heartbeats
+//
+// Same cognitive mode routing and LLM calls as the full heartbeat,
+// but the post-processing tail only routes actions. No goals, no
+// working memory, no identity, no decompositions persist.
+// Each heartbeat starts completely fresh — pure memoryless agent.
+//
+// Used by v3 memory ablation eval as the baseline.
+
+digraph HeartbeatBare {
+  graph [
+    goal="Execute one heartbeat with no memory persistence — actions only",
+    label="Heartbeat Bare (No Memory)"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Background checks (memory health, timing, etc.) ───────
+  bg_checks [type="session.background_checks"]
+
+  // ── Cognitive mode selection ──────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── Mode routing (conditional fan-out) ────────────────────
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ── Mode-specific LLM calls ──────────────────────────────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+
+  // ── Consolidation (skipped in bare but needed for routing) ─
+  consolidate [type="session.consolidate"]
+
+  // ── Result processing ────────────────────────────────────
+  process [type="session.process_results"]
+
+  // ── BARE: Actions only, nothing persists ──────────────────
+  route_actions [type="session.route_actions"]
+
+  // ── Exit ─────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  start -> bg_checks -> select_mode -> mode_router
+
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  llm_goal -> process
+  llm_reflect -> process
+  llm_plan -> process
+  consolidate -> process
+
+  // Bare tail: actions only
+  process -> route_actions -> done
+}

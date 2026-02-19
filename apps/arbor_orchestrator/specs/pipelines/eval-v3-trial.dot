@@ -1,0 +1,109 @@
+// V3 Memory Ablation Evaluation — Single Trial Pipeline
+//
+// Runs ONE trial: creates an agent with a real bug as its goal,
+// runs heartbeats using a specified heartbeat.dot variant until the
+// agent recommends a fix or hits max_heartbeats, then collects metrics.
+//
+// The outer loop (variants × runs) is handled by mix arbor.eval_v3.
+// This pipeline handles the inner trial lifecycle.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  CONTEXT INPUTS (set by runner before pipeline start)                  │
+// │                                                                        │
+// │  eval.variant_name      — which heartbeat variant (bare/goals/...)     │
+// │  eval.variant_dot       — path to heartbeat-<variant>.dot              │
+// │  eval.bug_id            — identifier for the bug being tested          │
+// │  eval.bug_description   — user-facing bug report (agent's goal)        │
+// │  eval.run_number        — which run (1..N) for this variant            │
+// │  eval.max_heartbeats    — cap before declaring failure (default: 30)   │
+// │  eval.agent_template    — template name for agent creation             │
+// │  eval.model             — constant LLM model across all variants       │
+// └─────────────────────────────────────────────────────────────────────────┘
+
+digraph EvalV3Trial {
+  graph [
+    goal="Run one v3 memory ablation trial: create agent, seed bug, heartbeat until fix or timeout, collect metrics",
+    label="V3 Memory Ablation — Single Trial"
+  ]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 1: Trial Setup
+  // ══════════════════════════════════════════════════════════════
+
+  start [shape=Mdiamond]
+
+  // Create agent from eval template, configure heartbeat variant
+  setup_trial [
+    type="eval_v3.setup",
+    label="Setup Trial"
+  ]
+
+  // Seed the bug description as the agent's initial goal
+  seed_bug [
+    type="eval_v3.seed_bug",
+    label="Seed Bug Goal"
+  ]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 2: Heartbeat Loop
+  // ══════════════════════════════════════════════════════════════
+
+  // Run one heartbeat cycle using the configured variant DOT.
+  // The variant controls which memory subsystems persist outputs.
+  run_heartbeat [
+    type="eval_v3.heartbeat",
+    label="Run Heartbeat"
+  ]
+
+  // Check trial status after each heartbeat:
+  //   "completed"      — agent recommended a fix
+  //   "max_heartbeats" — hit the cap without converging
+  //   "continue"       — keep going
+  check_status [
+    shape=diamond,
+    condition_key="eval.trial_status",
+    label="Done?"
+  ]
+
+  // ══════════════════════════════════════════════════════════════
+  // Phase 3: Metrics & Cleanup
+  // ══════════════════════════════════════════════════════════════
+
+  // Gather trial metrics from agent state and heartbeat history
+  collect_metrics [
+    type="eval_v3.metrics",
+    label="Collect Metrics"
+  ]
+
+  // Persist trial results to Postgres
+  persist [
+    type="eval.persist",
+    label="Persist Results"
+  ]
+
+  // Tear down agent and any worktree
+  cleanup [
+    type="eval_v3.cleanup",
+    label="Cleanup"
+  ]
+
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  // Setup
+  start -> setup_trial -> seed_bug
+
+  // Heartbeat loop
+  seed_bug -> run_heartbeat -> check_status
+  check_status -> run_heartbeat [condition="context.eval.trial_status=continue"]
+
+  // Exit conditions
+  check_status -> collect_metrics [condition="context.eval.trial_status=completed"]
+  check_status -> collect_metrics [condition="context.eval.trial_status=max_heartbeats"]
+
+  // Wrap up
+  collect_metrics -> persist -> cleanup -> done
+}

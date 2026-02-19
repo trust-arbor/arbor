@@ -1,0 +1,65 @@
+// Heartbeat Variant: FULL — Everything persists between heartbeats
+//
+// This is the production heartbeat pipeline (identical to heartbeat.dot).
+// All post-processing nodes are active: decompositions, proposals,
+// working memory, identity (via route_actions), and goals.
+//
+// The control variant for the v3 memory ablation eval.
+
+digraph HeartbeatFull {
+  graph [
+    goal="Execute one heartbeat with full memory persistence (all subsystems)",
+    label="Heartbeat Full"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Background checks ─────────────────────────────────────
+  bg_checks [type="session.background_checks"]
+
+  // ── Cognitive mode selection ──────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── Mode routing ──────────────────────────────────────────
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ── Mode-specific LLM calls ──────────────────────────────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+  consolidate [type="session.consolidate"]
+
+  // ── Result processing ────────────────────────────────────
+  process [type="session.process_results"]
+
+  // ── FULL: All post-processing nodes ───────────────────────
+  store_decompositions [type="session.store_decompositions"]
+  process_proposals [type="session.process_proposal_decisions"]
+  store_identity [type="session.store_identity"]
+  update_wm [type="session.update_working_memory"]
+  route_actions [type="session.route_actions"]
+  update_goals [type="session.update_goals"]
+
+  // ── Exit ─────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  start -> bg_checks -> select_mode -> mode_router
+
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  llm_goal -> process
+  llm_reflect -> process
+  llm_plan -> process
+  consolidate -> process
+
+  // Full tail: all post-processing
+  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> route_actions -> update_goals -> done
+}

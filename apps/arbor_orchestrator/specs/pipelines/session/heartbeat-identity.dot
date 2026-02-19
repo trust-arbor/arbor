@@ -1,0 +1,64 @@
+// Heartbeat Variant: IDENTITY — Goals + working memory + self-knowledge persist
+//
+// Adds store_identity on top of notes. Identity insights (capabilities,
+// traits, values) accumulate across heartbeats, feeding into the
+// self-knowledge section of the prompt.
+//
+// Tests: does self-knowledge on top of goals+notes help convergence?
+// (The v1/v2 eval found identity is where Haiku diverges from other models.)
+
+digraph HeartbeatIdentity {
+  graph [
+    goal="Execute one heartbeat with goal, working memory, and identity persistence",
+    label="Heartbeat Identity"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Background checks ─────────────────────────────────────
+  bg_checks [type="session.background_checks"]
+
+  // ── Cognitive mode selection ──────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── Mode routing ──────────────────────────────────────────
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ── Mode-specific LLM calls ──────────────────────────────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+  consolidate [type="session.consolidate"]
+
+  // ── Result processing ────────────────────────────────────
+  process [type="session.process_results"]
+
+  // ── IDENTITY: Actions + wm + identity + goals ─────────────
+  store_identity [type="session.store_identity"]
+  update_wm [type="session.update_working_memory"]
+  route_actions [type="session.route_actions"]
+  update_goals [type="session.update_goals"]
+
+  // ── Exit ─────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  start -> bg_checks -> select_mode -> mode_router
+
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  llm_goal -> process
+  llm_reflect -> process
+  llm_plan -> process
+  consolidate -> process
+
+  // Identity tail: identity + wm + actions + goals
+  process -> store_identity -> update_wm -> route_actions -> update_goals -> done
+}

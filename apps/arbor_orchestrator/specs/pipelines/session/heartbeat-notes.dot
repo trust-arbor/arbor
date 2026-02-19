@@ -1,0 +1,62 @@
+// Heartbeat Variant: NOTES — Goals + working memory persist
+//
+// Adds update_wm on top of goals. Working memory captures concerns,
+// curiosity, and memory notes across heartbeats. The agent can
+// remember what it investigated and what worried it.
+//
+// Tests: does working memory on top of goals help convergence?
+
+digraph HeartbeatNotes {
+  graph [
+    goal="Execute one heartbeat with goal and working memory persistence",
+    label="Heartbeat Notes"
+  ]
+
+  // ── Entry ──────────────────────────────────────────────────
+  start [shape=Mdiamond]
+
+  // ── Background checks ─────────────────────────────────────
+  bg_checks [type="session.background_checks"]
+
+  // ── Cognitive mode selection ──────────────────────────────
+  select_mode [type="session.mode_select"]
+
+  // ── Mode routing ──────────────────────────────────────────
+  mode_router [shape=diamond, condition_key="cognitive_mode"]
+
+  // ── Mode-specific LLM calls ──────────────────────────────
+  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+  consolidate [type="session.consolidate"]
+
+  // ── Result processing ────────────────────────────────────
+  process [type="session.process_results"]
+
+  // ── NOTES: Actions + working memory + goals ───────────────
+  update_wm [type="session.update_working_memory"]
+  route_actions [type="session.route_actions"]
+  update_goals [type="session.update_goals"]
+
+  // ── Exit ─────────────────────────────────────────────────
+  done [shape=Msquare]
+
+  // ══════════════════════════════════════════════════════════════
+  // Flow
+  // ══════════════════════════════════════════════════════════════
+
+  start -> bg_checks -> select_mode -> mode_router
+
+  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+
+  llm_goal -> process
+  llm_reflect -> process
+  llm_plan -> process
+  consolidate -> process
+
+  // Notes tail: working memory + actions + goals
+  process -> update_wm -> route_actions -> update_goals -> done
+}
