@@ -84,6 +84,7 @@ defmodule Arbor.Memory.SelfKnowledge do
   alias Arbor.Common.SafeAtom
 
   @max_version_history 10
+  @similarity_threshold 0.6
 
   # ============================================================================
   # Construction
@@ -137,20 +138,37 @@ defmodule Arbor.Memory.SelfKnowledge do
   def add_capability(%__MODULE__{} = sk, name, proficiency, evidence \\ nil) do
     proficiency = clamp_float(proficiency)
 
-    capability = %{
-      name: name,
-      proficiency: proficiency,
-      evidence: evidence,
-      added_at: DateTime.utc_now()
-    }
+    case find_similar(sk.capabilities, :name, name) do
+      {:similar, existing} ->
+        # Merge: keep existing name, take max proficiency, update if newer
+        capabilities =
+          Enum.map(sk.capabilities, fn cap ->
+            if cap == existing do
+              %{cap | proficiency: max(cap.proficiency, proficiency), added_at: DateTime.utc_now()}
+              |> maybe_update(:evidence, evidence)
+            else
+              cap
+            end
+          end)
 
-    # Replace existing capability with same name or add new
-    capabilities =
-      sk.capabilities
-      |> Enum.reject(&(&1.name == name))
-      |> List.insert_at(0, capability)
+        %{sk | capabilities: capabilities}
 
-    %{sk | capabilities: capabilities}
+      :none ->
+        capability = %{
+          name: name,
+          proficiency: proficiency,
+          evidence: evidence,
+          added_at: DateTime.utc_now()
+        }
+
+        # Replace existing capability with exact same name or add new
+        capabilities =
+          sk.capabilities
+          |> Enum.reject(&(&1.name == name))
+          |> List.insert_at(0, capability)
+
+        %{sk | capabilities: capabilities}
+    end
   end
 
   @doc """
@@ -222,20 +240,35 @@ defmodule Arbor.Memory.SelfKnowledge do
   def add_trait(%__MODULE__{} = sk, trait, strength, evidence \\ nil) do
     strength = clamp_float(strength)
 
-    entry = %{
-      trait: trait,
-      strength: strength,
-      evidence: evidence,
-      added_at: DateTime.utc_now()
-    }
+    case find_similar(sk.personality_traits, :trait, trait) do
+      {:similar, existing} ->
+        traits =
+          Enum.map(sk.personality_traits, fn t ->
+            if t == existing do
+              %{t | strength: max(t.strength, strength), added_at: DateTime.utc_now()}
+              |> maybe_update(:evidence, evidence)
+            else
+              t
+            end
+          end)
 
-    # Replace existing trait or add new
-    traits =
-      sk.personality_traits
-      |> Enum.reject(&(&1.trait == trait))
-      |> List.insert_at(0, entry)
+        %{sk | personality_traits: traits}
 
-    %{sk | personality_traits: traits}
+      :none ->
+        entry = %{
+          trait: trait,
+          strength: strength,
+          evidence: evidence,
+          added_at: DateTime.utc_now()
+        }
+
+        traits =
+          sk.personality_traits
+          |> Enum.reject(&(&1.trait == trait))
+          |> List.insert_at(0, entry)
+
+        %{sk | personality_traits: traits}
+    end
   end
 
   @doc """
@@ -252,20 +285,35 @@ defmodule Arbor.Memory.SelfKnowledge do
   def add_value(%__MODULE__{} = sk, value, importance, evidence \\ nil) do
     importance = clamp_float(importance)
 
-    entry = %{
-      value: value,
-      importance: importance,
-      evidence: evidence,
-      added_at: DateTime.utc_now()
-    }
+    case find_similar(sk.values, :value, value) do
+      {:similar, existing} ->
+        values =
+          Enum.map(sk.values, fn v ->
+            if v == existing do
+              %{v | importance: max(v.importance, importance), added_at: DateTime.utc_now()}
+              |> maybe_update(:evidence, evidence)
+            else
+              v
+            end
+          end)
 
-    # Replace existing value or add new
-    values =
-      sk.values
-      |> Enum.reject(&(&1.value == value))
-      |> List.insert_at(0, entry)
+        %{sk | values: values}
 
-    %{sk | values: values}
+      :none ->
+        entry = %{
+          value: value,
+          importance: importance,
+          evidence: evidence,
+          added_at: DateTime.utc_now()
+        }
+
+        values =
+          sk.values
+          |> Enum.reject(&(&1.value == value))
+          |> List.insert_at(0, entry)
+
+        %{sk | values: values}
+    end
   end
 
   @doc """
@@ -489,6 +537,59 @@ defmodule Arbor.Memory.SelfKnowledge do
             version_history: remaining_history
         }
     end
+  end
+
+  # ============================================================================
+  # Deduplication
+  # ============================================================================
+
+  @doc """
+  Remove semantically duplicate entries from all self-knowledge categories.
+
+  Uses Jaccard word-set similarity to merge near-duplicate traits, values,
+  and capabilities. Keeps the entry with the highest strength/proficiency/importance,
+  merges evidence from duplicates.
+
+  Useful for cleaning up accumulated duplicates from repeated heartbeat cycles.
+
+  ## Examples
+
+      sk = SelfKnowledge.deduplicate(sk)
+  """
+  @spec deduplicate(t()) :: t()
+  def deduplicate(%__MODULE__{} = sk) do
+    %{
+      sk
+      | capabilities: deduplicate_list(sk.capabilities, :name, :proficiency),
+        personality_traits: deduplicate_list(sk.personality_traits, :trait, :strength),
+        values: deduplicate_list(sk.values, :value, :importance)
+    }
+  end
+
+  defp deduplicate_list(entries, key_field, score_field) do
+    Enum.reduce(entries, [], fn entry, acc ->
+      entry_text = to_string(Map.get(entry, key_field))
+
+      case Enum.find_index(acc, fn existing ->
+             text_similarity(to_string(Map.get(existing, key_field)), entry_text) >=
+               @similarity_threshold
+           end) do
+        nil ->
+          acc ++ [entry]
+
+        idx ->
+          existing = Enum.at(acc, idx)
+
+          merged =
+            if Map.get(entry, score_field) > Map.get(existing, score_field) do
+              %{existing | score_field => Map.get(entry, score_field)}
+            else
+              existing
+            end
+
+          List.replace_at(acc, idx, merged)
+      end
+    end)
   end
 
   # ============================================================================
@@ -764,6 +865,64 @@ defmodule Arbor.Memory.SelfKnowledge do
   end
 
   defp safe_atom_or_new(atom) when is_atom(atom), do: atom
+
+  # ============================================================================
+  # Semantic Similarity
+  # ============================================================================
+
+  @doc """
+  Compute semantic similarity between two strings based on word tokens.
+
+  Uses the maximum of Jaccard similarity and containment similarity:
+  - Jaccard = |A ∩ B| / |A ∪ B| (overall word overlap)
+  - Containment = |A ∩ B| / min(|A|, |B|) (shorter phrase contained in longer)
+
+  Containment catches "same phrase plus extra words" that Jaccard misses.
+  Returns a float between 0.0 (no overlap) and 1.0 (identical/fully contained).
+
+  ## Examples
+
+      iex> SelfKnowledge.text_similarity("methodical approach to knowledge", "methodical approach to knowledge management")
+      0.8
+  """
+  @spec text_similarity(String.t(), String.t()) :: float()
+  def text_similarity(a, b) do
+    set_a = tokenize(a)
+    set_b = tokenize(b)
+
+    intersection_size = MapSet.intersection(set_a, set_b) |> MapSet.size()
+    union_size = MapSet.union(set_a, set_b) |> MapSet.size()
+    min_size = min(MapSet.size(set_a), MapSet.size(set_b))
+
+    jaccard = if union_size == 0, do: 1.0, else: intersection_size / union_size
+    containment = if min_size == 0, do: 1.0, else: intersection_size / min_size
+
+    max(jaccard, containment)
+  end
+
+  @stop_words MapSet.new(~w(a an the is are was were be been being in on at to for of and or but with by from as i my its))
+
+  defp tokenize(text) do
+    text
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, " ")
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.reject(&MapSet.member?(@stop_words, &1))
+    |> MapSet.new()
+  end
+
+  defp find_similar(entries, key_field, new_key) do
+    new_text = to_string(new_key)
+
+    Enum.find_value(entries, :none, fn entry ->
+      existing_text = to_string(Map.get(entry, key_field))
+
+      if text_similarity(existing_text, new_text) >= @similarity_threshold do
+        {:similar, entry}
+      end
+    end)
+  end
 
   defp parse_datetime(%DateTime{} = dt), do: dt
   defp parse_datetime(nil), do: DateTime.utc_now()
