@@ -160,17 +160,22 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
       messages = Context.get(ctx, "session.messages", [])
       mode = Context.get(ctx, "session.cognitive_mode", "reflection")
       agent_id = Context.get(ctx, "session.agent_id")
+      is_heartbeat = Context.get(ctx, "session.is_heartbeat", false)
       call_opts = %{mode: mode, agent_id: agent_id}
 
-      # Build heartbeat context message from engine context values.
-      # The adapter has the system prompt (identity), but the LLM also needs
-      # the volatile context: current goals, working memory, timing, and
-      # mode-specific instructions.
-      heartbeat_msg = build_heartbeat_context(ctx, mode)
-      messages_with_context = messages ++ [%{"role" => "user", "content" => heartbeat_msg}]
+      # Only inject heartbeat context for heartbeat calls, not user chat turns.
+      # The heartbeat needs volatile state (goals, WM, mode instructions, response format).
+      # Chat turns already have the user's message in session.messages.
+      final_messages =
+        if is_heartbeat do
+          heartbeat_msg = build_heartbeat_context(ctx, mode)
+          [%{"role" => "user", "content" => heartbeat_msg}]
+        else
+          messages
+        end
 
       try do
-        case llm_call.(messages_with_context, mode, call_opts) do
+        case llm_call.(final_messages, mode, call_opts) do
           {:ok, %{tool_calls: calls}} when is_list(calls) and calls != [] ->
             ok(%{"llm.response_type" => "tool_call", "llm.tool_calls" => calls})
 

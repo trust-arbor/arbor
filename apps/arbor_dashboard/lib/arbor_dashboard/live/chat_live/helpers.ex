@@ -27,7 +27,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
   def message_style(_, _, _), do: ""
 
   def role_label(:user), do: "You"
-  def role_label(:assistant), do: "Claude"
+  def role_label(:assistant), do: "Agent"
   def role_label(_), do: "System"
 
   def sender_color(hue) when is_integer(hue) do

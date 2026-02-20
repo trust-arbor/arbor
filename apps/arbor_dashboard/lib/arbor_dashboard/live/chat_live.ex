@@ -27,7 +27,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     {existing_agent, socket} =
       if connected?(socket) do
-        socket = SignalLive.subscribe_raw(socket, "agent.*")
         {Manager.find_first_agent(), socket}
       else
         {:not_found, socket}

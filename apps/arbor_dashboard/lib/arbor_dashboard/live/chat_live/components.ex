@@ -478,8 +478,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
                 {msg.sender_name}
               </strong>
             </div>
-            <%!-- Single-agent mode: show role label --%>
-            <strong :if={!@group_mode} style="font-size: 0.9em;">{H.role_label(msg.role)}</strong>
+            <%!-- Single-agent mode: show role label or agent display name --%>
+            <strong :if={!@group_mode} style="font-size: 0.9em;">
+              {if msg.role == :assistant && @display_name, do: @display_name, else: H.role_label(msg.role)}
+            </strong>
             <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
               {H.format_time(msg.timestamp)}
             </span>
