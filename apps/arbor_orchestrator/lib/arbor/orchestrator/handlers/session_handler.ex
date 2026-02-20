@@ -479,14 +479,22 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
   # Build heartbeat context from engine context values.
   # This gives the LLM the volatile state it needs: goals, working memory,
-  # cognitive mode instructions, and response format.
+  # knowledge graph, intents, proposals, recent thinking, and response format.
   defp build_heartbeat_context(ctx, mode) do
     goals = Context.get(ctx, "session.goals", [])
     wm = Context.get(ctx, "session.working_memory", %{})
+    kg = Context.get(ctx, "session.knowledge_graph", [])
+    proposals = Context.get(ctx, "session.pending_proposals", [])
+    intents = Context.get(ctx, "session.active_intents", [])
+    thoughts = Context.get(ctx, "session.recent_thinking", [])
     turn_count = Context.get(ctx, "session.turn_count", 0)
 
     goals_section = format_goals(goals)
     wm_section = format_working_memory(wm)
+    kg_section = format_knowledge_graph(kg)
+    proposals_section = format_proposals(proposals)
+    intents_section = format_intents(intents)
+    thinking_section = format_recent_thinking(thoughts)
     mode_instructions = mode_instructions(mode)
 
     """
@@ -496,7 +504,15 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
     #{goals_section}
 
+    #{intents_section}
+
     #{wm_section}
+
+    #{kg_section}
+
+    #{thinking_section}
+
+    #{proposals_section}
 
     Respond with valid JSON containing these fields:
     - "cognitive_mode": your current mode (string)
@@ -535,6 +551,63 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
       |> Enum.map_join("\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
 
     "## Working Memory\n#{parts}"
+  end
+
+  defp format_knowledge_graph([]), do: ""
+
+  defp format_knowledge_graph(nodes) do
+    items =
+      Enum.map_join(nodes, "\n", fn node ->
+        type = node["type"] || ""
+        content = node["content"] || ""
+        confidence = node["confidence"] || 0.5
+        "- [#{type}] #{content} (confidence: #{confidence})"
+      end)
+
+    "## Knowledge Graph (top #{length(nodes)} nodes)\n#{items}"
+  end
+
+  defp format_proposals([]), do: ""
+
+  defp format_proposals(proposals) do
+    items =
+      Enum.map_join(proposals, "\n", fn p ->
+        id = p["id"] || ""
+        type = p["type"] || ""
+        content = p["content"] || ""
+        "- [#{id}] (#{type}) #{content}"
+      end)
+
+    "## Pending Proposals\nReview and decide (accept/reject/defer):\n#{items}"
+  end
+
+  defp format_intents([]), do: ""
+
+  defp format_intents(intents) do
+    items =
+      Enum.map_join(intents, "\n", fn i ->
+        id = i["id"] || ""
+        action = i["action"] || ""
+        desc = i["description"] || ""
+        goal_id = i["goal_id"] || ""
+        status = i["status"] || ""
+        "- [#{id}] #{action}: #{desc} (goal: #{goal_id}, status: #{status})"
+      end)
+
+    "## Active Intents\n#{items}"
+  end
+
+  defp format_recent_thinking([]), do: ""
+
+  defp format_recent_thinking(thoughts) do
+    items =
+      Enum.map_join(thoughts, "\n", fn t ->
+        text = t["text"] || ""
+        marker = if t["significant"], do: " ★", else: ""
+        "- #{text}#{marker}"
+      end)
+
+    "## Recent Thinking\n#{items}"
   end
 
   defp mode_instructions("goal_pursuit") do
