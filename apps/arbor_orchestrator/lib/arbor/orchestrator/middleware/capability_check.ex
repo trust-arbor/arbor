@@ -5,6 +5,10 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   Bridges to `Arbor.Security.authorize/4` when available. Halts execution if the
   agent lacks the required capability for the node's operation.
 
+  When a compiled node has `capabilities_required` populated by the IR Compiler,
+  ALL listed capabilities are checked. Falls back to a single type-based URI
+  for uncompiled graphs.
+
   Skipped when `opts[:authorization] == false` or when Arbor.Security is
   not loaded (standalone orchestrator usage).
 
@@ -31,21 +35,44 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
         token
 
       true ->
-        check_capability(token)
+        check_capabilities(token)
     end
   end
 
-  defp check_capability(token) do
-    agent_id = Map.get(token.assigns, :agent_id, "agent_system")
-    node_type = Map.get(token.node.attrs, "type", "unknown")
-    resource = "arbor://orchestrator/execute/#{node_type}"
+  @doc """
+  Returns the list of capability URIs required for a node.
 
+  Uses `node.capabilities_required` if populated by IR Compiler,
+  otherwise falls back to a single URI derived from the node type.
+  """
+  @spec capability_resources(Arbor.Orchestrator.Graph.Node.t()) :: [String.t()]
+  def capability_resources(node) do
+    case node.capabilities_required do
+      caps when is_list(caps) and caps != [] ->
+        caps
+
+      _ ->
+        node_type = Map.get(node.attrs, "type", "unknown")
+        ["arbor://orchestrator/execute/#{node_type}"]
+    end
+  end
+
+  defp check_capabilities(token) do
+    agent_id = Map.get(token.assigns, :agent_id, "agent_system")
+    resources = capability_resources(token.node)
+
+    check_all_resources(token, agent_id, resources)
+  end
+
+  defp check_all_resources(token, _agent_id, []), do: token
+
+  defp check_all_resources(token, agent_id, [resource | rest]) do
     case apply(Arbor.Security, :authorize, [agent_id, resource, :execute]) do
       {:ok, :authorized} ->
-        token
+        check_all_resources(token, agent_id, rest)
 
       {:ok, :pending_approval, _} ->
-        token
+        check_all_resources(token, agent_id, rest)
 
       {:error, reason} ->
         Token.halt(
