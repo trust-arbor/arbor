@@ -103,11 +103,15 @@ defmodule Arbor.Agent.Manager do
   @spec resume_agent(String.t(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def resume_agent(agent_id, opts \\ []) do
     with {:ok, profile} <- Lifecycle.restore(agent_id) do
-      # Get model config from profile metadata or opts
+      # Prefer caller-provided model_config, fall back to persisted, then default
       model_config =
-        get_in(profile.metadata, [:last_model_config]) ||
+        Keyword.get(opts, :model_config) ||
+          get_in(profile.metadata, [:last_model_config]) ||
           get_in(profile.metadata, ["last_model_config"]) ||
-          Keyword.get(opts, :model_config, default_model_config())
+          default_model_config()
+
+      # Persisted configs have string keys — atomize for build_start_opts
+      model_config = atomize_model_config(model_config)
 
       display_name = profile.display_name || profile.character.name || "Agent"
       {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
@@ -392,6 +396,43 @@ defmodule Arbor.Agent.Manager do
 
   defp resolve_template(%{backend: :cli}), do: Arbor.Agent.Templates.ClaudeCode
   defp resolve_template(_), do: Arbor.Agent.Templates.ClaudeCode
+
+  defp atomize_model_config(config) when is_map(config) do
+    known_keys = ~w(id label provider backend module name start_opts)
+
+    config
+    |> Enum.map(fn
+      {k, v} when is_binary(k) ->
+        atom_key =
+          if k in known_keys do
+            String.to_existing_atom(k)
+          else
+            k
+          end
+
+        {atom_key, atomize_value(atom_key, v)}
+
+      {k, v} ->
+        {k, atomize_value(k, v)}
+    end)
+    |> Map.new()
+  end
+
+  defp atomize_model_config(config), do: config
+
+  defp atomize_value(key, value) when key in [:backend, :provider] and is_binary(value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> value
+  end
+
+  defp atomize_value(:module, value) when is_binary(value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> value
+  end
+
+  defp atomize_value(_key, value), do: value
 
   defp find_existing_profile(display_name, template) do
     case Lifecycle.list_agents() do
