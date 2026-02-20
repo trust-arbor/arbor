@@ -32,7 +32,8 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 
 # Memory — Postgres backend for durable memory persistence
 config :arbor_memory,
-  persistence_backend: Arbor.Persistence.QueryableStore.Postgres
+  persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
+  embedding_dedup_enabled: true
 
 # Actions — use Postgres backends for durable job tracking
 config :arbor_actions, :persistence,

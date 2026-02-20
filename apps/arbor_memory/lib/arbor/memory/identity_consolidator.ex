@@ -210,6 +210,9 @@ defmodule Arbor.Memory.IdentityConsolidator do
     Promotion.emit_deferred_signals(agent_id, deferred)
     Promotion.emit_blocked_signals(agent_id, blocked)
 
+    # Embedding-based dedup (if enabled and Ollama available)
+    maybe_embedding_dedup(agent_id)
+
     # Pattern analysis post-consolidation
     pattern_insights = Promotion.analyze_patterns_post_consolidation(agent_id, opts)
 
@@ -550,6 +553,28 @@ defmodule Arbor.Memory.IdentityConsolidator do
         Enum.filter(insights, fn i ->
           i.confidence >= min_confidence and i.category in [:personality, :capability, :value]
         end)
+    end
+  end
+
+  defp maybe_embedding_dedup(agent_id) do
+    enabled = Application.get_env(:arbor_memory, :embedding_dedup_enabled, false)
+
+    if enabled and SelfKnowledge.embeddings_available?() do
+      case get_self_knowledge(agent_id) do
+        nil ->
+          :ok
+
+        sk ->
+          deduped = SelfKnowledge.deduplicate(sk, mode: :embedding)
+
+          if deduped != sk do
+            save_self_knowledge(agent_id, deduped)
+          end
+
+          :ok
+      end
+    else
+      :ok
     end
   end
 
