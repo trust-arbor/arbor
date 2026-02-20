@@ -354,7 +354,13 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       Memory.context_to_prompt_text(window)
     else
       entries = Map.get(window, :entries, [])
-      Enum.map_join(entries, "\n", fn {_type, content, _ts} -> content end)
+
+      Enum.map_join(entries, "\n", fn {_type, content, ts} ->
+        case ts do
+          %DateTime{} -> "[#{Calendar.strftime(ts, "%H:%M")}] #{content}"
+          _ -> content
+        end
+      end)
     end
   end
 
@@ -364,9 +370,24 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     if pending == [] do
       nil
     else
-      "## Pending Messages\n#{length(pending)} message(s) waiting to be processed."
+      now = DateTime.utc_now()
+
+      lines =
+        Enum.map(pending, fn msg ->
+          ts = msg[:timestamp] || msg["timestamp"]
+          age = if ts, do: " (#{humanize_age(DateTime.diff(now, ts, :second))})", else: ""
+          content = msg[:content] || msg["content"] || "message"
+          preview = String.slice(to_string(content), 0, 80)
+          "- #{preview}#{age}"
+        end)
+
+      "## Pending Messages\n#{length(pending)} message(s) waiting to be processed:\n#{Enum.join(lines, "\n")}"
     end
   end
+
+  defp humanize_age(s) when s < 60, do: "#{s}s ago"
+  defp humanize_age(s) when s < 3600, do: "#{div(s, 60)}m ago"
+  defp humanize_age(s), do: "#{div(s, 3600)}h ago"
 
   defp tools_section(state) do
     agent_id = state[:id] || state[:agent_id]

@@ -152,6 +152,10 @@ defmodule Arbor.Memory.ContextWindow.Formatting do
     "[Previous Context Summary]\n#{content}"
   end
 
+  def format_entry({:message, content, %DateTime{} = ts}) do
+    "[#{Calendar.strftime(ts, "%H:%M")}] #{content}"
+  end
+
   def format_entry({:message, content, _timestamp}) do
     content
   end

@@ -20,6 +20,9 @@ defmodule Arbor.Agent.TimingContext do
     now = DateTime.utc_now()
 
     %{
+      now: now,
+      last_user_message_at: state[:last_user_message_at],
+      last_assistant_output_at: state[:last_assistant_output_at],
       seconds_since_user_message: diff_seconds(state[:last_user_message_at], now),
       seconds_since_last_output: diff_seconds(state[:last_assistant_output_at], now),
       responded_to_last_user_message: state[:responded_to_last_user_message] != false,
@@ -37,8 +40,9 @@ defmodule Arbor.Agent.TimingContext do
     lines =
       [
         "## Conversational Timing",
-        "- Last user message: #{format_duration(timing.seconds_since_user_message, format)}",
-        "- Your last output: #{format_duration(timing.seconds_since_last_output, format)}",
+        "- Current time: #{format_timestamp(timing[:now])}",
+        "- Last user message: #{format_duration(timing.seconds_since_user_message, format)}#{format_at(timing[:last_user_message_at])}",
+        "- Your last output: #{format_duration(timing.seconds_since_last_output, format)}#{format_at(timing[:last_assistant_output_at])}",
         "- Responded to last message: #{if timing.responded_to_last_user_message, do: "yes", else: "no"}"
       ] ++
         if timing.user_waiting do
@@ -84,6 +88,12 @@ defmodule Arbor.Agent.TimingContext do
       state[:last_user_message_at] != nil and
       DateTime.diff(now, state[:last_user_message_at], :millisecond) > threshold
   end
+
+  defp format_timestamp(nil), do: "unknown"
+  defp format_timestamp(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
+
+  defp format_at(nil), do: ""
+  defp format_at(%DateTime{} = dt), do: " (at #{Calendar.strftime(dt, "%H:%M:%S")})"
 
   defp format_duration(nil, _format), do: "never"
   defp format_duration(seconds, :human), do: humanize_duration(seconds)
