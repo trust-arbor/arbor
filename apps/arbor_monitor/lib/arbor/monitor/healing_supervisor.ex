@@ -125,18 +125,20 @@ defmodule Arbor.Monitor.HealingSupervisor do
     group_chat_mod = Arbor.Agent.GroupChat
     lifecycle_mod = Arbor.Agent.Lifecycle
     template_mod = Arbor.Agent.Templates.Diagnostician
+    api_agent_mod = Arbor.Agent.APIAgent
 
     with true <- Code.ensure_loaded?(manager_mod),
          true <- Code.ensure_loaded?(group_chat_mod),
-         true <- Code.ensure_loaded?(template_mod) do
+         true <- Code.ensure_loaded?(template_mod),
+         true <- Code.ensure_loaded?(api_agent_mod) do
       # Start or resume the diagnostician agent
       agent_result =
         try do
           apply(manager_mod, :start_or_resume, [
+            api_agent_mod,
             "diagnostician",
             [
               template: template_mod,
-              display_name: "diagnostician",
               start_host: true
             ]
           ])
@@ -154,6 +156,9 @@ defmodule Arbor.Monitor.HealingSupervisor do
         end
 
       case agent_result do
+        {:ok, agent_id, _pid} ->
+          create_ops_room(agent_id, group_chat_mod, lifecycle_mod, manager_mod)
+
         {:ok, agent_id} ->
           create_ops_room(agent_id, group_chat_mod, lifecycle_mod, manager_mod)
 
