@@ -279,6 +279,158 @@ defmodule Arbor.Memory.SelfKnowledgeTest do
     end
   end
 
+  describe "text_similarity/2" do
+    test "identical strings have similarity 1.0" do
+      assert SelfKnowledge.text_similarity("hello world", "hello world") == 1.0
+    end
+
+    test "completely different strings have similarity 0.0" do
+      assert SelfKnowledge.text_similarity("alpha beta", "gamma delta") == 0.0
+    end
+
+    test "partial overlap uses jaccard" do
+      sim = SelfKnowledge.text_similarity("systematic approach knowledge", "systematic diagnostic knowledge")
+      assert sim > 0.0 and sim < 1.0
+    end
+
+    test "containment catches subset phrases" do
+      # "structured approach" is fully contained in the longer phrase
+      sim = SelfKnowledge.text_similarity("structured approach", "structured approach knowledge management")
+      assert sim >= 0.8
+    end
+
+    test "stop words are filtered" do
+      # "a", "the", "is", "and" etc. should not count
+      sim = SelfKnowledge.text_similarity("the systematic approach", "a systematic approach")
+      assert sim == 1.0
+    end
+  end
+
+  describe "deduplicate/2 (word-set)" do
+    test "merges similar traits" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_trait(:methodical_approach_to_knowledge_management, 0.8)
+        |> SelfKnowledge.add_trait(:methodical_approach_to_knowledge_management_and_organization, 0.9)
+
+      deduped = SelfKnowledge.deduplicate(sk)
+      assert length(deduped.personality_traits) == 1
+      assert hd(deduped.personality_traits).strength == 0.9
+    end
+
+    test "keeps genuinely different entries" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_trait(:curious_and_exploratory, 0.8)
+        |> SelfKnowledge.add_trait(:systematic_investigation, 0.7)
+
+      deduped = SelfKnowledge.deduplicate(sk)
+      assert length(deduped.personality_traits) == 2
+    end
+
+    test "merges similar values" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_value(:safety_first_approach, 0.9)
+        |> SelfKnowledge.add_value(:safety_first_approach_in_operations, 0.8)
+
+      deduped = SelfKnowledge.deduplicate(sk)
+      assert length(deduped.values) == 1
+      assert hd(deduped.values).importance == 0.9
+    end
+
+    test "merges similar capabilities" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_capability("strong diagnostic abilities", 0.7)
+        |> SelfKnowledge.add_capability("strong diagnostic abilities for root cause analysis", 0.85)
+
+      deduped = SelfKnowledge.deduplicate(sk)
+      assert length(deduped.capabilities) == 1
+      assert hd(deduped.capabilities).proficiency == 0.85
+    end
+  end
+
+  describe "deduplicate/2 (embedding)" do
+    test "falls back to word-set when embeddings unavailable" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_trait(:methodical_approach_to_knowledge_management, 0.8)
+        |> SelfKnowledge.add_trait(:methodical_approach_to_knowledge_management_and_organization, 0.9)
+
+      # Even with invalid Ollama URL, should fall back gracefully
+      Application.put_env(:arbor_memory, :ollama_url, "http://localhost:99999")
+
+      deduped = SelfKnowledge.deduplicate(sk, mode: :embedding)
+      # Falls back to word-set, still merges the obvious duplicate
+      assert length(deduped.personality_traits) == 1
+
+      Application.delete_env(:arbor_memory, :ollama_url)
+    end
+
+    test "cosine_similarity returns correct values" do
+      # Identical vectors
+      assert SelfKnowledge.cosine_similarity([1.0, 0.0], [1.0, 0.0]) == 1.0
+
+      # Orthogonal vectors
+      assert SelfKnowledge.cosine_similarity([1.0, 0.0], [0.0, 1.0]) == 0.0
+
+      # Zero vector
+      assert SelfKnowledge.cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+    end
+
+    test "generate_embeddings returns vectors when Ollama available" do
+      case SelfKnowledge.generate_embeddings(["hello world"]) do
+        {:ok, [embedding]} ->
+          assert is_list(embedding)
+          assert embedding != []
+          assert Enum.all?(embedding, &is_float/1)
+
+        {:error, _} ->
+          # Ollama not running, skip
+          :ok
+      end
+    end
+
+    test "embeddings_available? returns boolean" do
+      result = SelfKnowledge.embeddings_available?()
+      assert is_boolean(result)
+    end
+  end
+
+  describe "insertion-time dedup" do
+    test "add_trait merges similar new entry instead of inserting" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_trait(:methodical_approach_to_analysis, 0.7)
+        # This is similar enough to merge (containment similarity > 0.6)
+        |> SelfKnowledge.add_trait(:methodical_approach_to_analysis_and_investigation, 0.9)
+
+      assert length(sk.personality_traits) == 1
+      assert hd(sk.personality_traits).strength == 0.9
+    end
+
+    test "add_value merges similar new entry instead of inserting" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_value(:evidence_based_conclusions, 0.8)
+        |> SelfKnowledge.add_value(:evidence_based_conclusions_before_action, 0.9)
+
+      assert length(sk.values) == 1
+      assert hd(sk.values).importance == 0.9
+    end
+
+    test "add_capability merges similar new entry instead of inserting" do
+      sk =
+        SelfKnowledge.new("agent_001")
+        |> SelfKnowledge.add_capability("systematic investigation", 0.7)
+        |> SelfKnowledge.add_capability("systematic investigation and evidence gathering", 0.85)
+
+      assert length(sk.capabilities) == 1
+      assert hd(sk.capabilities).proficiency == 0.85
+    end
+  end
+
   describe "serialization" do
     test "summarize produces readable text" do
       sk =

@@ -85,6 +85,7 @@ defmodule Arbor.Memory.SelfKnowledge do
 
   @max_version_history 10
   @similarity_threshold 0.6
+  @embedding_similarity_threshold 0.75
 
   # ============================================================================
   # Construction
@@ -552,18 +553,32 @@ defmodule Arbor.Memory.SelfKnowledge do
 
   Useful for cleaning up accumulated duplicates from repeated heartbeat cycles.
 
+  ## Options
+
+  - `:mode` - `:word_set` (default, fast) or `:embedding` (uses Ollama vectors)
+  - `:embedding_threshold` - Cosine similarity threshold for embedding mode (default 0.75)
+
   ## Examples
 
       sk = SelfKnowledge.deduplicate(sk)
+      sk = SelfKnowledge.deduplicate(sk, mode: :embedding)
   """
-  @spec deduplicate(t()) :: t()
-  def deduplicate(%__MODULE__{} = sk) do
-    %{
-      sk
-      | capabilities: deduplicate_list(sk.capabilities, :name, :proficiency),
-        personality_traits: deduplicate_list(sk.personality_traits, :trait, :strength),
-        values: deduplicate_list(sk.values, :value, :importance)
-    }
+  @spec deduplicate(t(), keyword()) :: t()
+  def deduplicate(%__MODULE__{} = sk, opts \\ []) do
+    mode = Keyword.get(opts, :mode, :word_set)
+
+    case mode do
+      :embedding ->
+        deduplicate_with_embeddings(sk, opts)
+
+      _ ->
+        %{
+          sk
+          | capabilities: deduplicate_list(sk.capabilities, :name, :proficiency),
+            personality_traits: deduplicate_list(sk.personality_traits, :trait, :strength),
+            values: deduplicate_list(sk.values, :value, :importance)
+        }
+    end
   end
 
   defp deduplicate_list(entries, key_field, score_field) do
@@ -590,6 +605,87 @@ defmodule Arbor.Memory.SelfKnowledge do
           List.replace_at(acc, idx, merged)
       end
     end)
+  end
+
+  defp deduplicate_with_embeddings(%__MODULE__{} = sk, opts) do
+    threshold = Keyword.get(opts, :embedding_threshold, @embedding_similarity_threshold)
+
+    case generate_embeddings_batch(sk) do
+      {:ok, %{trait_embs: trait_embs, value_embs: value_embs, cap_embs: cap_embs}} ->
+        %{
+          sk
+          | personality_traits:
+              deduplicate_list_with_embeddings(
+                sk.personality_traits,
+                trait_embs,
+                :trait,
+                :strength,
+                threshold
+              ),
+            values:
+              deduplicate_list_with_embeddings(
+                sk.values,
+                value_embs,
+                :value,
+                :importance,
+                threshold
+              ),
+            capabilities:
+              deduplicate_list_with_embeddings(
+                sk.capabilities,
+                cap_embs,
+                :name,
+                :proficiency,
+                threshold
+              )
+        }
+
+      {:error, _reason} ->
+        # Fall back to word-set dedup when embeddings unavailable
+        deduplicate(sk, mode: :word_set)
+    end
+  end
+
+  defp deduplicate_list_with_embeddings(entries, embeddings, key_field, score_field, threshold) do
+    entries_with_embs = Enum.zip(entries, embeddings)
+
+    {kept, _kept_embs} =
+      Enum.reduce(entries_with_embs, {[], []}, fn {entry, emb}, {acc_entries, acc_embs} ->
+        entry_text = to_string(Map.get(entry, key_field))
+
+        # Check word-set similarity first (free)
+        word_match_idx =
+          Enum.find_index(acc_entries, fn existing ->
+            text_similarity(to_string(Map.get(existing, key_field)), entry_text) >=
+              @similarity_threshold
+          end)
+
+        # Check embedding similarity if word-set didn't match
+        match_idx =
+          word_match_idx ||
+            Enum.find_index(acc_embs, fn kept_emb ->
+              cosine_similarity(kept_emb, emb) >= threshold
+            end)
+
+        case match_idx do
+          nil ->
+            {acc_entries ++ [entry], acc_embs ++ [emb]}
+
+          idx ->
+            existing = Enum.at(acc_entries, idx)
+
+            merged =
+              if Map.get(entry, score_field) > Map.get(existing, score_field) do
+                %{existing | score_field => Map.get(entry, score_field)}
+              else
+                existing
+              end
+
+            {List.replace_at(acc_entries, idx, merged), acc_embs}
+        end
+      end)
+
+    kept
   end
 
   # ============================================================================
@@ -932,5 +1028,132 @@ defmodule Arbor.Memory.SelfKnowledge do
       {:ok, dt, _offset} -> dt
       _ -> DateTime.utc_now()
     end
+  end
+
+  # ============================================================================
+  # Embedding-Based Similarity
+  # ============================================================================
+
+  @doc """
+  Check if embedding-based dedup is available.
+
+  Requires a running Ollama instance with an embedding model.
+  Uses the model configured in `:arbor_memory, :embedding_model`
+  or defaults to "nomic-embed-text:latest".
+
+  ## Examples
+
+      true = SelfKnowledge.embeddings_available?()
+  """
+  @spec embeddings_available?() :: boolean()
+  def embeddings_available? do
+    url = String.to_charlist(ollama_base_url() <> "/api/tags")
+    opts = [timeout: 3000, connect_timeout: 2000]
+
+    case :httpc.request(:get, {url, []}, opts, []) do
+      {:ok, {{_, 200, _}, _, _}} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  @doc """
+  Compute cosine similarity between two embedding vectors.
+
+  Returns a float between -1.0 (opposite) and 1.0 (identical).
+
+  ## Examples
+
+      sim = SelfKnowledge.cosine_similarity([0.1, 0.2], [0.1, 0.2])
+      # => 1.0
+  """
+  @spec cosine_similarity([float()], [float()]) :: float()
+  def cosine_similarity(vec_a, vec_b) do
+    dot = Enum.zip(vec_a, vec_b) |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+    norm_a = :math.sqrt(Enum.reduce(vec_a, 0.0, fn x, acc -> acc + x * x end))
+    norm_b = :math.sqrt(Enum.reduce(vec_b, 0.0, fn x, acc -> acc + x * x end))
+
+    if norm_a == 0.0 or norm_b == 0.0, do: 0.0, else: dot / (norm_a * norm_b)
+  end
+
+  @doc """
+  Generate embeddings for a list of texts via Ollama.
+
+  Returns `{:ok, [embedding]}` or `{:error, reason}`.
+
+  ## Examples
+
+      {:ok, embeddings} = SelfKnowledge.generate_embeddings(["hello", "world"])
+  """
+  @spec generate_embeddings([String.t()]) :: {:ok, [[float()]]} | {:error, term()}
+  def generate_embeddings([]), do: {:ok, []}
+
+  def generate_embeddings(texts) when is_list(texts) do
+    model = embedding_model()
+    url = ollama_embeddings_url()
+    body = Jason.encode!(%{model: model, input: texts})
+
+    case :httpc.request(
+           :post,
+           {String.to_charlist(url), [{~c"content-type", ~c"application/json"}], ~c"application/json", body},
+           [timeout: 30_000, connect_timeout: 5_000],
+           []
+         ) do
+      {:ok, {{_, 200, _}, _, resp_body}} ->
+        %{"data" => emb_data} = Jason.decode!(resp_body)
+        {:ok, Enum.map(emb_data, & &1["embedding"])}
+
+      {:ok, {{_, status, _}, _, resp_body}} ->
+        {:error, {:http_error, status, resp_body}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp generate_embeddings_batch(%__MODULE__{} = sk) do
+    trait_texts = Enum.map(sk.personality_traits, &to_string(&1.trait))
+    value_texts = Enum.map(sk.values, &to_string(&1.value))
+    cap_texts = Enum.map(sk.capabilities, &to_string(&1.name))
+
+    all_texts = trait_texts ++ value_texts ++ cap_texts
+
+    if all_texts == [] do
+      {:ok, %{trait_embs: [], value_embs: [], cap_embs: []}}
+    else
+      case generate_embeddings(all_texts) do
+        {:ok, all_embs} ->
+          trait_count = length(trait_texts)
+          value_count = length(value_texts)
+
+          trait_embs = Enum.slice(all_embs, 0, trait_count)
+          value_embs = Enum.slice(all_embs, trait_count, value_count)
+          cap_embs = Enum.slice(all_embs, trait_count + value_count, length(cap_texts))
+
+          {:ok, %{trait_embs: trait_embs, value_embs: value_embs, cap_embs: cap_embs}}
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp ollama_base_url do
+    Application.get_env(:arbor_memory, :ollama_url, "http://localhost:11434")
+  end
+
+  defp ollama_embeddings_url do
+    ollama_base_url() <> "/v1/embeddings"
+  end
+
+  defp embedding_model do
+    Application.get_env(:arbor_memory, :embedding_model, "nomic-embed-text:latest")
   end
 end
