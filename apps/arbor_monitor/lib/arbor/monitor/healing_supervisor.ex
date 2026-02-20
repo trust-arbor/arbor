@@ -139,7 +139,13 @@ defmodule Arbor.Monitor.HealingSupervisor do
             "diagnostician",
             [
               template: template_mod,
-              start_host: true
+              start_host: true,
+              model_config: %{
+                id: "arcee-ai/trinity-large-preview:free",
+                provider: :openrouter,
+                backend: :api,
+                module: api_agent_mod
+              }
             ]
           ])
         rescue
