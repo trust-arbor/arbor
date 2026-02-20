@@ -89,67 +89,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
 
     task =
       Task.async(fn ->
-        # Trap exits so GenServer crashes in eval'd code don't kill the task
         Process.flag(:trap_exit, true)
-
-        try do
-          # Run setup if present
-          bindings =
-            if setup != "" do
-              # Eval grader: runs test setup code from eval spec
-              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-              {_result, bindings} = Code.eval_string(setup)
-              bindings
-            else
-              []
-            end
-
-          # Eval grader: evaluates test call expression from eval spec
-          # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-          {actual, _} = Code.eval_string(call, bindings)
-
-          # Check result
-          cond do
-            match_pattern ->
-              pattern = rewrite_module_refs(match_pattern, module_map)
-              # Eval grader: evaluates match? pattern from eval spec
-              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-              {matches, _} = Code.eval_string("match?(#{pattern}, actual)", actual: actual)
-
-              if matches do
-                %{passed: true, call: call, detail: "matched #{match_pattern}"}
-              else
-                %{
-                  passed: false,
-                  call: call,
-                  detail: "expected match #{match_pattern}, got: #{inspect(actual)}"
-                }
-              end
-
-            expect ->
-              # Eval grader: evaluates expected value from eval spec
-              # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-              {expected_val, _} = Code.eval_string(expect)
-
-              if actual == expected_val do
-                %{passed: true, call: call, detail: "== #{expect}"}
-              else
-                %{
-                  passed: false,
-                  call: call,
-                  detail: "expected #{expect}, got: #{inspect(actual)}"
-                }
-              end
-
-            true ->
-              # No expectation — just check it doesn't crash
-              %{passed: true, call: call, detail: "no crash"}
-          end
-        rescue
-          e -> %{passed: false, call: call, detail: "error: #{Exception.message(e)}"}
-        catch
-          kind, reason -> %{passed: false, call: call, detail: "#{kind}: #{inspect(reason)}"}
-        end
+        execute_test_case(call, setup, expect, match_pattern, module_map)
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task) do
@@ -162,6 +103,65 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
       nil ->
         %{passed: false, call: call, detail: "timeout after #{timeout}ms"}
     end
+  end
+
+  defp execute_test_case(call, setup, expect, match_pattern, module_map) do
+    try do
+      bindings = run_setup(setup)
+
+      # Eval grader: evaluates test call expression from eval spec
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+      {actual, _} = Code.eval_string(call, bindings)
+
+      check_result(actual, call, expect, match_pattern, module_map)
+    rescue
+      e -> %{passed: false, call: call, detail: "error: #{Exception.message(e)}"}
+    catch
+      kind, reason -> %{passed: false, call: call, detail: "#{kind}: #{inspect(reason)}"}
+    end
+  end
+
+  defp run_setup(""), do: []
+
+  defp run_setup(setup) do
+    # Eval grader: runs test setup code from eval spec
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+    {_result, bindings} = Code.eval_string(setup)
+    bindings
+  end
+
+  defp check_result(actual, call, _expect, match_pattern, module_map)
+       when not is_nil(match_pattern) do
+    pattern = rewrite_module_refs(match_pattern, module_map)
+    # Eval grader: evaluates match? pattern from eval spec
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+    {matches, _} = Code.eval_string("match?(#{pattern}, actual)", actual: actual)
+
+    if matches do
+      %{passed: true, call: call, detail: "matched #{match_pattern}"}
+    else
+      %{
+        passed: false,
+        call: call,
+        detail: "expected match #{match_pattern}, got: #{inspect(actual)}"
+      }
+    end
+  end
+
+  defp check_result(actual, call, expect, _match_pattern, _module_map) when not is_nil(expect) do
+    # Eval grader: evaluates expected value from eval spec
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
+    {expected_val, _} = Code.eval_string(expect)
+
+    if actual == expected_val do
+      %{passed: true, call: call, detail: "== #{expect}"}
+    else
+      %{passed: false, call: call, detail: "expected #{expect}, got: #{inspect(actual)}"}
+    end
+  end
+
+  defp check_result(_actual, call, _expect, _match_pattern, _module_map) do
+    %{passed: true, call: call, detail: "no crash"}
   end
 
   defp munge_module_names(code, suffix) do

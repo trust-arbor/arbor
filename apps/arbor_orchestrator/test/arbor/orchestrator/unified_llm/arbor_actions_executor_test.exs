@@ -169,10 +169,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   describe "integration with CodingTools interface" do
     @tag :skip_unless_actions
     test "definitions format matches CodingTools.definitions format" do
-      unless @actions_available do
-        IO.puts("  [skipped] Arbor.Actions not available (standalone orchestrator)")
-        assert true
-      else
+      if @actions_available do
         arbor_defs = ArborActionsExecutor.definitions(["file_read"])
         coding_defs = CodingTools.definitions()
 
@@ -182,6 +179,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
 
         assert Map.keys(arbor_first) == Map.keys(coding_first)
         assert Map.keys(arbor_first["function"]) == Map.keys(coding_first["function"])
+      else
+        IO.puts("  [skipped] Arbor.Actions not available (standalone orchestrator)")
+        assert true
       end
     end
 

@@ -661,18 +661,23 @@ defmodule Arbor.Orchestrator.Engine do
         :ok
 
       store ->
-        # Store last_response as the primary artifact if present
-        if response = Map.get(outcome.context_updates || %{}, "last_response") do
-          ArtifactStore.store(store, node_id, "response.txt", to_string(response))
-        end
-
-        # Store notes if present
-        if outcome.notes do
-          ArtifactStore.store(store, node_id, "notes.txt", outcome.notes)
-        end
-
+        store_response_artifact(store, node_id, outcome)
+        store_notes_artifact(store, node_id, outcome)
         :ok
     end
+  end
+
+  defp store_response_artifact(store, node_id, outcome) do
+    case Map.get(outcome.context_updates || %{}, "last_response") do
+      nil -> :ok
+      response -> ArtifactStore.store(store, node_id, "response.txt", to_string(response))
+    end
+  end
+
+  defp store_notes_artifact(_store, _node_id, %Outcome{notes: nil}), do: :ok
+
+  defp store_notes_artifact(store, node_id, %Outcome{notes: notes}) do
+    ArtifactStore.store(store, node_id, "notes.txt", notes)
   end
 
   # Internal context keys that contain non-JSON-serializable values (e.g., %Graph{}).

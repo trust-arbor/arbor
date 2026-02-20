@@ -234,21 +234,25 @@ defmodule Arbor.Persistence.SkillSearch do
 
   defp skill_to_attrs(skill) when is_map(skill) do
     %{
-      name: Map.get(skill, :name) || Map.get(skill, "name"),
-      description: Map.get(skill, :description) || Map.get(skill, "description") || "",
-      body: Map.get(skill, :body) || Map.get(skill, "body") || "",
-      tags: Map.get(skill, :tags) || Map.get(skill, "tags") || [],
-      category: Map.get(skill, :category) || Map.get(skill, "category"),
-      source: to_string(Map.get(skill, :source) || Map.get(skill, "source") || "skill"),
-      path: Map.get(skill, :path) || Map.get(skill, "path"),
-      license: Map.get(skill, :license) || Map.get(skill, "license"),
-      compatibility: Map.get(skill, :compatibility) || Map.get(skill, "compatibility"),
-      allowed_tools: Map.get(skill, :allowed_tools) || Map.get(skill, "allowed_tools") || [],
-      content_hash: Map.get(skill, :content_hash) || Map.get(skill, "content_hash") || compute_hash(skill),
-      taint: to_string(Map.get(skill, :taint) || Map.get(skill, "taint") || "trusted"),
-      provenance: Map.get(skill, :provenance) || Map.get(skill, "provenance") || %{},
-      metadata: Map.get(skill, :metadata) || Map.get(skill, "metadata") || %{}
+      name: get_field(skill, :name),
+      description: get_field(skill, :description, ""),
+      body: get_field(skill, :body, ""),
+      tags: get_field(skill, :tags, []),
+      category: get_field(skill, :category),
+      source: to_string(get_field(skill, :source, "skill")),
+      path: get_field(skill, :path),
+      license: get_field(skill, :license),
+      compatibility: get_field(skill, :compatibility),
+      allowed_tools: get_field(skill, :allowed_tools, []),
+      content_hash: get_field(skill, :content_hash) || compute_hash(skill),
+      taint: to_string(get_field(skill, :taint, "trusted")),
+      provenance: get_field(skill, :provenance, %{}),
+      metadata: get_field(skill, :metadata, %{})
     }
+  end
+
+  defp get_field(skill, key, default \\ nil) do
+    Map.get(skill, key) || Map.get(skill, to_string(key)) || default
   end
 
   defp skill_record_to_map(%SkillRecord{} = record) do

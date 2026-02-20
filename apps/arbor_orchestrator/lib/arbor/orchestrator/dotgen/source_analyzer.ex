@@ -254,163 +254,210 @@ defmodule Arbor.Orchestrator.Dotgen.SourceAnalyzer do
   defp extract_statements(info, statements, source) do
     {info, _pending_doc, _pending_spec} =
       Enum.reduce(statements, {info, nil, nil}, fn stmt, {acc, pending_doc, pending_spec} ->
-        case stmt do
-          # @moduledoc
-          {:@, _meta, [{:moduledoc, _meta2, [doc]}]} ->
-            {Map.put(acc, :moduledoc, extract_doc_value(doc)), pending_doc, pending_spec}
-
-          # @doc
-          {:@, _meta, [{:doc, _meta2, [doc]}]} ->
-            {acc, extract_doc_value(doc), pending_spec}
-
-          # @doc false
-          {:@, _meta, [{:doc, _meta2, [false]}]} ->
-            {acc, false, pending_spec}
-
-          # @spec
-          {:@, _meta, [{:spec, _meta2, [spec_ast]}]} ->
-            spec_str = format_spec(spec_ast, source)
-            {acc, pending_doc, spec_str}
-
-          # @behaviour
-          {:@, _meta, [{:behaviour, _meta2, [mod_ast]}]} ->
-            behaviour = module_name_from_ast(mod_ast)
-            {Map.update!(acc, :behaviours, &(&1 ++ [behaviour])), pending_doc, pending_spec}
-
-          # @callback
-          {:@, _meta, [{:callback, _meta2, [callback_ast]}]} ->
-            callback_str = format_callback(callback_ast, source)
-            {Map.update!(acc, :callbacks, &(&1 ++ [callback_str])), pending_doc, pending_spec}
-
-          # @type / @typep / @opaque
-          {:@, _meta, [{type_kind, _meta2, [type_ast]}]}
-          when type_kind in [:type, :typep, :opaque] ->
-            type_str = format_type(type_kind, type_ast, source)
-            {Map.update!(acc, :types, &(&1 ++ [type_str])), pending_doc, pending_spec}
-
-          # @impl
-          {:@, _meta, [{:impl, _meta2, _args}]} ->
-            {acc, pending_doc, pending_spec}
-
-          # Other module attributes
-          {:@, _meta, [{attr_name, _meta2, [value]}]}
-          when attr_name not in [
-                 :moduledoc,
-                 :doc,
-                 :spec,
-                 :behaviour,
-                 :callback,
-                 :type,
-                 :typep,
-                 :opaque,
-                 :impl,
-                 :derive,
-                 :enforce_keys,
-                 :before_compile,
-                 :after_compile,
-                 :compile,
-                 :on_definition,
-                 :external_resource
-               ] ->
-            attr = %{name: attr_name, value: format_value(value)}
-            {Map.update!(acc, :module_attributes, &(&1 ++ [attr])), pending_doc, pending_spec}
-
-          # defstruct
-          {:defstruct, _meta, [fields]} ->
-            struct_fields = extract_struct_fields(fields)
-            {Map.put(acc, :struct_fields, struct_fields), pending_doc, pending_spec}
-
-          # def
-          {:def, meta, _args} = def_ast ->
-            clause = extract_clause_info(def_ast, source)
-            {name, arity} = function_head(def_ast)
-            existing = acc.public_functions
-
-            acc =
-              if Enum.any?(existing, fn f -> f.name == name and f.arity == arity end) do
-                # Multiple clauses — append clause info and merge branches
-                new_branches = extract_case_branches(def_ast)
-
-                updated =
-                  Enum.map(existing, fn f ->
-                    if f.name == name and f.arity == arity do
-                      f
-                      |> Map.update!(:clauses, &(&1 ++ [clause]))
-                      |> Map.update(:case_branches, new_branches, &(&1 ++ new_branches))
-                    else
-                      f
-                    end
-                  end)
-
-                %{acc | public_functions: updated}
-              else
-                # First clause — create new function entry with clause info
-                func = extract_function(def_ast, meta, pending_doc, pending_spec, source)
-
-                func =
-                  Map.merge(func, %{
-                    clauses: [clause],
-                    case_branches: extract_case_branches(def_ast)
-                  })
-
-                Map.update!(acc, :public_functions, &(&1 ++ [func]))
-              end
-
-            {acc, nil, nil}
-
-          # defp
-          {:defp, meta, _args} = def_ast ->
-            clause = extract_clause_info(def_ast, source)
-            {name, arity} = function_head(def_ast)
-            existing = acc.private_functions
-
-            acc =
-              if Enum.any?(existing, fn f -> f.name == name and f.arity == arity end) do
-                new_branches = extract_case_branches(def_ast)
-
-                updated =
-                  Enum.map(existing, fn f ->
-                    if f.name == name and f.arity == arity do
-                      f
-                      |> Map.update!(:clauses, &(&1 ++ [clause]))
-                      |> Map.update(:case_branches, new_branches, &(&1 ++ new_branches))
-                    else
-                      f
-                    end
-                  end)
-
-                %{acc | private_functions: updated}
-              else
-                func = extract_private_function(def_ast, meta, source)
-
-                func =
-                  Map.merge(func, %{
-                    clauses: [clause],
-                    case_branches: extract_case_branches(def_ast)
-                  })
-
-                Map.update!(acc, :private_functions, &(&1 ++ [func]))
-              end
-
-            {acc, nil, nil}
-
-          # alias
-          {:alias, _meta, [alias_ast | _rest]} ->
-            alias_str = module_name_from_ast(alias_ast)
-            {Map.update!(acc, :aliases, &(&1 ++ [alias_str])), pending_doc, pending_spec}
-
-          # use
-          {:use, _meta, [mod_ast | _rest]} ->
-            use_str = module_name_from_ast(mod_ast)
-            {Map.update!(acc, :uses, &(&1 ++ [use_str])), pending_doc, pending_spec}
-
-          # Anything else (require, import, etc.) — skip
-          _ ->
-            {acc, pending_doc, pending_spec}
-        end
+        extract_statement(stmt, acc, pending_doc, pending_spec, source)
       end)
 
     info
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:moduledoc, _meta2, [doc]}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       ) do
+    {Map.put(acc, :moduledoc, extract_doc_value(doc)), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:doc, _meta2, [false]}]},
+         acc,
+         _pending_doc,
+         pending_spec,
+         _source
+       ) do
+    {acc, false, pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:doc, _meta2, [doc]}]},
+         acc,
+         _pending_doc,
+         pending_spec,
+         _source
+       ) do
+    {acc, extract_doc_value(doc), pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:spec, _meta2, [spec_ast]}]},
+         acc,
+         pending_doc,
+         _pending_spec,
+         source
+       ) do
+    spec_str = format_spec(spec_ast, source)
+    {acc, pending_doc, spec_str}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:behaviour, _meta2, [mod_ast]}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       ) do
+    behaviour = module_name_from_ast(mod_ast)
+    {Map.update!(acc, :behaviours, &(&1 ++ [behaviour])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:callback, _meta2, [callback_ast]}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         source
+       ) do
+    callback_str = format_callback(callback_ast, source)
+    {Map.update!(acc, :callbacks, &(&1 ++ [callback_str])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{type_kind, _meta2, [type_ast]}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         source
+       )
+       when type_kind in [:type, :typep, :opaque] do
+    type_str = format_type(type_kind, type_ast, source)
+    {Map.update!(acc, :types, &(&1 ++ [type_str])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(
+         {:@, _meta, [{:impl, _meta2, _args}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       ) do
+    {acc, pending_doc, pending_spec}
+  end
+
+  @skipped_attrs ~w(moduledoc doc spec behaviour callback type typep opaque impl derive enforce_keys before_compile after_compile compile on_definition external_resource)a
+
+  defp extract_statement(
+         {:@, _meta, [{attr_name, _meta2, [value]}]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       )
+       when attr_name not in @skipped_attrs do
+    attr = %{name: attr_name, value: format_value(value)}
+    {Map.update!(acc, :module_attributes, &(&1 ++ [attr])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement({:defstruct, _meta, [fields]}, acc, pending_doc, pending_spec, _source) do
+    struct_fields = extract_struct_fields(fields)
+    {Map.put(acc, :struct_fields, struct_fields), pending_doc, pending_spec}
+  end
+
+  defp extract_statement({:def, meta, _args} = def_ast, acc, pending_doc, pending_spec, source) do
+    clause = extract_clause_info(def_ast, source)
+    {name, arity} = function_head(def_ast)
+
+    acc =
+      merge_or_add_function(
+        acc,
+        :public_functions,
+        name,
+        arity,
+        clause,
+        def_ast,
+        source,
+        fn -> extract_function(def_ast, meta, pending_doc, pending_spec, source) end
+      )
+
+    {acc, nil, nil}
+  end
+
+  defp extract_statement({:defp, meta, _args} = def_ast, acc, _pending_doc, _pending_spec, source) do
+    clause = extract_clause_info(def_ast, source)
+    {name, arity} = function_head(def_ast)
+
+    acc =
+      merge_or_add_function(
+        acc,
+        :private_functions,
+        name,
+        arity,
+        clause,
+        def_ast,
+        source,
+        fn -> extract_private_function(def_ast, meta, source) end
+      )
+
+    {acc, nil, nil}
+  end
+
+  defp extract_statement(
+         {:alias, _meta, [alias_ast | _rest]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       ) do
+    alias_str = module_name_from_ast(alias_ast)
+    {Map.update!(acc, :aliases, &(&1 ++ [alias_str])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(
+         {:use, _meta, [mod_ast | _rest]},
+         acc,
+         pending_doc,
+         pending_spec,
+         _source
+       ) do
+    use_str = module_name_from_ast(mod_ast)
+    {Map.update!(acc, :uses, &(&1 ++ [use_str])), pending_doc, pending_spec}
+  end
+
+  defp extract_statement(_other, acc, pending_doc, pending_spec, _source) do
+    {acc, pending_doc, pending_spec}
+  end
+
+  defp merge_or_add_function(acc, field, name, arity, clause, def_ast, _source, new_func_fn) do
+    existing = Map.get(acc, field)
+
+    if Enum.any?(existing, fn f -> f.name == name and f.arity == arity end) do
+      new_branches = extract_case_branches(def_ast)
+      updated = merge_clause_into(existing, name, arity, clause, new_branches)
+      Map.put(acc, field, updated)
+    else
+      func = new_func_fn.()
+
+      func =
+        Map.merge(func, %{
+          clauses: [clause],
+          case_branches: extract_case_branches(def_ast)
+        })
+
+      Map.update!(acc, field, &(&1 ++ [func]))
+    end
+  end
+
+  defp merge_clause_into(functions, name, arity, clause, new_branches) do
+    Enum.map(functions, fn f ->
+      if f.name == name and f.arity == arity do
+        f
+        |> Map.update!(:clauses, &(&1 ++ [clause]))
+        |> Map.update(:case_branches, new_branches, &(&1 ++ new_branches))
+      else
+        f
+      end
+    end)
   end
 
   # ── Module Name Extraction ─────────────────────────────────────────

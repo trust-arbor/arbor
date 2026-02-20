@@ -48,49 +48,49 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
         Process.sleep(40)
       end
 
-      if request.model == "json-stream-model" do
-        [
-          %StreamEvent{type: :start, data: %{}},
-          %StreamEvent{type: :delta, data: %{"text" => "{\"ok\":"}},
-          %StreamEvent{type: :delta, data: %{"text" => "true}"}},
-          %StreamEvent{type: :finish, data: %{"reason" => :stop}}
-        ]
-      else
-        if request.model == "bad-json-stream-model" do
+      cond do
+        request.model == "json-stream-model" ->
+          [
+            %StreamEvent{type: :start, data: %{}},
+            %StreamEvent{type: :delta, data: %{"text" => "{\"ok\":"}},
+            %StreamEvent{type: :delta, data: %{"text" => "true}"}},
+            %StreamEvent{type: :finish, data: %{"reason" => :stop}}
+          ]
+
+        request.model == "bad-json-stream-model" ->
           [
             %StreamEvent{type: :start, data: %{}},
             %StreamEvent{type: :delta, data: %{"text" => "{\"ok\":"}},
             %StreamEvent{type: :finish, data: %{"reason" => :stop}}
           ]
-        else
-          if request.model == "slow-event-stream" do
-            Stream.resource(
-              fn -> 0 end,
-              fn
-                0 ->
-                  {[%StreamEvent{type: :start, data: %{}}], 1}
 
-                1 ->
-                  Process.sleep(40)
-                  {[%StreamEvent{type: :delta, data: %{"text" => "hi"}}], 2}
+        request.model == "slow-event-stream" ->
+          Stream.resource(
+            fn -> 0 end,
+            fn
+              0 ->
+                {[%StreamEvent{type: :start, data: %{}}], 1}
 
-                2 ->
-                  Process.sleep(40)
-                  {[%StreamEvent{type: :finish, data: %{"reason" => :stop}}], 3}
+              1 ->
+                Process.sleep(40)
+                {[%StreamEvent{type: :delta, data: %{"text" => "hi"}}], 2}
 
-                _ ->
-                  {:halt, 3}
-              end,
-              fn _ -> :ok end
-            )
-          else
-            [
-              %StreamEvent{type: :start, data: %{}},
-              %StreamEvent{type: :delta, data: %{"text" => "hi"}},
-              %StreamEvent{type: :finish, data: %{"reason" => :stop}}
-            ]
-          end
-        end
+              2 ->
+                Process.sleep(40)
+                {[%StreamEvent{type: :finish, data: %{"reason" => :stop}}], 3}
+
+              _ ->
+                {:halt, 3}
+            end,
+            fn _ -> :ok end
+          )
+
+        true ->
+          [
+            %StreamEvent{type: :start, data: %{}},
+            %StreamEvent{type: :delta, data: %{"text" => "hi"}},
+            %StreamEvent{type: :finish, data: %{"reason" => :stop}}
+          ]
       end
     end
   end

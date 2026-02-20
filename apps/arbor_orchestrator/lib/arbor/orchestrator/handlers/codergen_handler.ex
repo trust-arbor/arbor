@@ -135,6 +135,28 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     client = Keyword.get(opts, :llm_client) || Client.default_client()
     nonce = @prompt_sanitizer.generate_nonce()
 
+    {system_content, user_content} = build_llm_messages(prompt, node, graph, nonce)
+    request = build_llm_request(node, system_content, user_content)
+    call_opts = build_call_opts(node, opts)
+    on_stream = Keyword.get(opts, :on_stream)
+
+    call_opts =
+      if on_stream do
+        Keyword.put(call_opts, :stream_callback, on_stream)
+      else
+        call_opts
+      end
+
+    use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
+
+    if use_tools do
+      call_llm_with_tools(client, request, node, context, on_stream, opts)
+    else
+      call_llm_direct(client, request, call_opts)
+    end
+  end
+
+  defp build_llm_messages(prompt, node, graph, nonce) do
     previous_outcome =
       case Map.get(node.attrs, "context.previous_outcome") do
         nil -> ""
@@ -153,13 +175,14 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       end
 
     system_content = @prompt_sanitizer.preamble(nonce) <> "\n\n" <> system_content
-
-    # In decision mode with a perspective, prepend vote format instructions
     system_content = maybe_prepend_vote_format(system_content, node.attrs, graph.attrs)
-
     user_content = prompt <> previous_outcome
 
-    request = %Request{
+    {system_content, user_content}
+  end
+
+  defp build_llm_request(node, system_content, user_content) do
+    %Request{
       provider: Map.get(node.attrs, "llm_provider") || Map.get(node.attrs, "handler"),
       model: Map.get(node.attrs, "llm_model") || Map.get(node.attrs, "model"),
       messages: [
@@ -170,68 +193,59 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
       provider_options: Map.get(node.attrs, "provider_options", %{})
     }
+  end
 
-    call_opts =
-      case parse_int(Map.get(node.attrs, "timeout"), nil) do
-        nil -> opts
-        timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
-      end
+  defp build_call_opts(node, opts) do
+    case parse_int(Map.get(node.attrs, "timeout"), nil) do
+      nil -> opts
+      timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
+    end
+  end
 
-    # Thread streaming callback through to the transport layer
-    on_stream = Keyword.get(opts, :on_stream)
+  defp call_llm_with_tools(client, request, node, context, on_stream, opts) do
+    workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
+    max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
 
-    call_opts =
-      if on_stream do
-        Keyword.put(call_opts, :stream_callback, on_stream)
-      else
-        call_opts
-      end
+    {tool_defs, executor} = resolve_tools(node, opts)
 
-    use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
+    agent_id =
+      Map.get(node.attrs, "agent_id") ||
+        Context.get(context, "session.agent_id", "system")
 
-    if use_tools do
-      workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
-      max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
+    # Extract signer from context — allows cryptographic identity verification
+    # for every tool call executed within the pipeline
+    signer =
+      Keyword.get(opts, :signer) ||
+        Context.get(context, "session.signer")
 
-      {tool_defs, executor} = resolve_tools(node, opts)
+    tool_loop_opts =
+      [
+        workdir: workdir,
+        max_turns: max_turns,
+        tools: tool_defs,
+        tool_executor: executor,
+        agent_id: agent_id,
+        signer: signer,
+        on_tool_call: build_tool_callback(opts, node.id)
+      ]
+      |> maybe_add_stream_callback(on_stream)
 
-      agent_id =
-        Map.get(node.attrs, "agent_id") ||
-          Context.get(context, "session.agent_id", "system")
+    case ToolLoop.run(client, request, tool_loop_opts) do
+      {:ok, result} ->
+        {:ok, result.text}
 
-      # Extract signer from context — allows cryptographic identity verification
-      # for every tool call executed within the pipeline
-      signer =
-        Keyword.get(opts, :signer) ||
-          Context.get(context, "session.signer")
+      {:error, {:max_turns_reached, turns, _}} ->
+        {:error, "Tool loop hit #{turns} turn limit without completing"}
 
-      tool_loop_opts =
-        [
-          workdir: workdir,
-          max_turns: max_turns,
-          tools: tool_defs,
-          tool_executor: executor,
-          agent_id: agent_id,
-          signer: signer,
-          on_tool_call: build_tool_callback(opts, node.id)
-        ]
-        |> maybe_add_stream_callback(on_stream)
+      {:error, _} = error ->
+        error
+    end
+  end
 
-      case ToolLoop.run(client, request, tool_loop_opts) do
-        {:ok, result} ->
-          {:ok, result.text}
-
-        {:error, {:max_turns_reached, turns, _}} ->
-          {:error, "Tool loop hit #{turns} turn limit without completing"}
-
-        {:error, _} = error ->
-          error
-      end
-    else
-      case Client.complete(client, request, call_opts) do
-        {:ok, response} -> {:ok, response.text}
-        {:error, _} = error -> error
-      end
+  defp call_llm_direct(client, request, call_opts) do
+    case Client.complete(client, request, call_opts) do
+      {:ok, response} -> {:ok, response.text}
+      {:error, _} = error -> error
     end
   end
 

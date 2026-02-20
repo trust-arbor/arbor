@@ -698,40 +698,54 @@ defmodule Arbor.Agent.Investigation do
         _ -> nil
       end
 
-    cond do
-      investigation.suggested_action in [
-        :suppress_fingerprint,
-        :reset_baseline,
-        :kill_process,
-        :force_gc,
-        :stop_supervisor
-      ] ->
-        :runtime_remediation
+    classify_by_action(investigation.suggested_action) ||
+      classify_by_error_type(error_type, root_cause) ||
+      classify_by_root_cause(root_cause)
+  end
 
-      error_type in [:runtime_match] || String.contains?(root_cause, ["pattern", "match"]) ->
+  @runtime_actions [
+    :suppress_fingerprint,
+    :reset_baseline,
+    :kill_process,
+    :force_gc,
+    :stop_supervisor
+  ]
+
+  defp classify_by_action(action) when action in @runtime_actions, do: :runtime_remediation
+  defp classify_by_action(_), do: nil
+
+  defp classify_by_error_type(:runtime_match, _), do: :pattern_fix
+  defp classify_by_error_type(:runtime_argument, _), do: :type_safety
+  defp classify_by_error_type(:compile_error, _), do: :logic_refactor
+
+  defp classify_by_error_type(et, _) when et in [:runtime_timeout, :performance],
+    do: :performance_optimization
+
+  defp classify_by_error_type(_, root_cause) do
+    cond do
+      String.contains?(root_cause, ["pattern", "match"]) ->
         :pattern_fix
 
-      error_type in [:runtime_argument] || String.contains?(root_cause, ["type", "argument"]) ->
+      String.contains?(root_cause, ["type", "argument"]) ->
         :type_safety
 
-      error_type in [:compile_error] || String.contains?(root_cause, ["logic", "algorithm"]) ->
+      String.contains?(root_cause, ["logic", "algorithm"]) ->
         :logic_refactor
 
-      error_type in [:runtime_timeout, :performance] ||
-          String.contains?(root_cause, ["timeout", "performance", "slow"]) ->
+      String.contains?(root_cause, ["timeout", "performance", "slow"]) ->
         :performance_optimization
-
-      String.contains?(root_cause, ["config", "configuration", "env"]) ->
-        :configuration_change
-
-      String.contains?(root_cause, ["race", "concurrency", "deadlock"]) ->
-        :concurrency_fix
-
-      String.contains?(root_cause, ["memory", "leak", "heap"]) ->
-        :memory_management
 
       true ->
         nil
+    end
+  end
+
+  defp classify_by_root_cause(root_cause) do
+    cond do
+      String.contains?(root_cause, ["config", "configuration", "env"]) -> :configuration_change
+      String.contains?(root_cause, ["race", "concurrency", "deadlock"]) -> :concurrency_fix
+      String.contains?(root_cause, ["memory", "leak", "heap"]) -> :memory_management
+      true -> nil
     end
   end
 

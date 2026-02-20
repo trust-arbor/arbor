@@ -314,29 +314,33 @@ defmodule Arbor.Orchestrator.Dotgen.ManifestGenerator do
 
       {handler_files, groups} ->
         if map_size(categories) == 0 do
-          # No categories specified — keep handlers as-is
           Map.put(groups, "handlers", handler_files)
         else
-          # Split by category prefixes, remainder stays as "core_handlers"
-          {categorized, remaining} =
-            Enum.reduce(categories, {%{}, handler_files}, fn {cat_name, prefixes}, {cats, rest} ->
-              {matched, unmatched} =
-                Enum.split_with(rest, fn %{module: m} ->
-                  last = m |> String.split(".") |> List.last()
-                  Enum.any?(prefixes, fn prefix -> String.starts_with?(last, prefix) end)
-                end)
-
-              {Map.put(cats, cat_name, matched), unmatched}
-            end)
-
-          groups =
-            Enum.reduce(categorized, groups, fn {cat_name, files}, acc ->
-              merge_into(acc, cat_name, files)
-            end)
-
-          merge_into(groups, "core_handlers", remaining)
+          categorize_handlers(groups, handler_files, categories)
         end
     end
+  end
+
+  defp categorize_handlers(groups, handler_files, categories) do
+    {categorized, remaining} =
+      Enum.reduce(categories, {%{}, handler_files}, fn {cat_name, prefixes}, {cats, rest} ->
+        {matched, unmatched} = split_by_prefixes(rest, prefixes)
+        {Map.put(cats, cat_name, matched), unmatched}
+      end)
+
+    groups =
+      Enum.reduce(categorized, groups, fn {cat_name, files}, acc ->
+        merge_into(acc, cat_name, files)
+      end)
+
+    merge_into(groups, "core_handlers", remaining)
+  end
+
+  defp split_by_prefixes(files, prefixes) do
+    Enum.split_with(files, fn %{module: m} ->
+      last = m |> String.split(".") |> List.last()
+      Enum.any?(prefixes, fn prefix -> String.starts_with?(last, prefix) end)
+    end)
   end
 
   # ── Group Merging ───────────────────────────────────────────────────
