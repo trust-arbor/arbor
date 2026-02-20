@@ -188,10 +188,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
       agent_id: state.agent_id,
       session_id: state.session_id,
       cognitive_mode: cognitive_mode,
-      actions_taken: length(List.wrap(actions)),
+      llm_actions: length(List.wrap(actions)),
       goal_updates_count: length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
       memory_notes_count: length(List.wrap(memory_notes)),
-      agent_output: Map.get(result_ctx, "llm.content"),
+      agent_thinking: Map.get(result_ctx, "llm.content"),
       completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
     })
   end
