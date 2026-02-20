@@ -441,6 +441,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       <%!-- Agent controls --%>
       <.chat_controls
         agent={@agent}
+        display_name={@display_name}
         available_models={@available_models}
         current_model={@current_model}
         chat_backend={@chat_backend}

@@ -101,7 +101,7 @@ defmodule Arbor.Actions.Monitor.ReadDiagnostics do
       else
         # Fallback using recon if available
         try do
-          :recon.proc_count(sort_by, limit)
+          apply(:recon, :proc_count, [sort_by, limit])
           |> Enum.flat_map(fn
             {pid, value, info} when is_list(info) ->
               name =
