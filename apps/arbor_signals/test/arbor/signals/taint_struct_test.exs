@@ -322,6 +322,76 @@ defmodule Arbor.Signals.TaintStructTest do
     end
   end
 
+  # ── Data Hash ─────────────────────────────────────────────────────
+
+  describe "data_hash/1" do
+    test "produces deterministic hash for same data" do
+      data = %{"key" => "value", "number" => 42}
+      hash1 = Taint.data_hash(data)
+      hash2 = Taint.data_hash(data)
+      assert hash1 == hash2
+    end
+
+    test "produces different hash for different data" do
+      hash1 = Taint.data_hash(%{"a" => 1})
+      hash2 = Taint.data_hash(%{"a" => 2})
+      assert hash1 != hash2
+    end
+
+    test "returns lowercase hex string" do
+      hash = Taint.data_hash("test")
+      assert Regex.match?(~r/^[0-9a-f]{64}$/, hash)
+    end
+
+    test "works with various data types" do
+      assert is_binary(Taint.data_hash("string"))
+      assert is_binary(Taint.data_hash(42))
+      assert is_binary(Taint.data_hash([1, 2, 3]))
+      assert is_binary(Taint.data_hash(%{nested: %{key: "val"}}))
+    end
+  end
+
+  describe "verify_data_hash/2" do
+    test "returns :ok for matching hash" do
+      data = %{"key" => "value"}
+      hash = Taint.data_hash(data)
+      assert :ok = Taint.verify_data_hash(data, hash)
+    end
+
+    test "returns error for mismatched hash" do
+      data = %{"key" => "value"}
+      assert {:error, :hash_mismatch} = Taint.verify_data_hash(data, "wrong_hash")
+    end
+
+    test "detects modification after hashing" do
+      original = %{"key" => "value"}
+      hash = Taint.data_hash(original)
+      modified = %{"key" => "tampered"}
+      assert {:error, :hash_mismatch} = Taint.verify_data_hash(modified, hash)
+    end
+  end
+
+  describe "to_persistable/2 with data_hash" do
+    test "includes taint_data_hash when provided" do
+      taint = %TaintStruct{level: :trusted, sensitivity: :public}
+      result = Taint.to_persistable(taint, data_hash: "abc123")
+      assert result["taint_data_hash"] == "abc123"
+    end
+
+    test "excludes taint_data_hash when not provided" do
+      taint = %TaintStruct{level: :trusted, sensitivity: :public}
+      result = Taint.to_persistable(taint)
+      refute Map.has_key?(result, "taint_data_hash")
+    end
+
+    test "backward compatible — no opts is same as empty opts" do
+      taint = %TaintStruct{level: :trusted, sensitivity: :public}
+      result1 = Taint.to_persistable(taint)
+      result2 = Taint.to_persistable(taint, [])
+      assert result1 == result2
+    end
+  end
+
   # ── Bridge ──────────────────────────────────────────────────────────
 
   describe "from_level/1" do

@@ -13,11 +13,13 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   Design: generic attrs at parse → enriched Graph at compile → validate on compiled Graph → execute
   """
 
+  import Bitwise
+
   alias Arbor.Orchestrator.Dot.Duration
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
-  alias Arbor.Orchestrator.IR.HandlerSchema
+  alias Arbor.Orchestrator.IR.{HandlerSchema, TaintProfile}
 
   @doc "Compile an untyped graph into an enriched graph with typed IR fields."
   @spec compile(Graph.t()) :: {:ok, Graph.t()} | {:error, term()}
@@ -94,7 +96,8 @@ defmodule Arbor.Orchestrator.IR.Compiler do
         capabilities_required: ["graph_mutation"],
         data_classification: :secret,
         idempotency: :side_effecting,
-        schema_errors: schema_errors
+        schema_errors: schema_errors,
+        taint_profile: TaintProfile.pessimistic()
     }
   end
 
@@ -105,6 +108,7 @@ defmodule Arbor.Orchestrator.IR.Compiler do
     idempotency = Handler.idempotency_of(handler_module)
     data_class = resolve_data_classification(prepared_node, schema)
     capabilities = resolve_capabilities(prepared_node, schema)
+    taint_profile = resolve_taint_profile(prepared_node, schema)
     _resource_bounds = extract_resource_bounds(prepared_node)
 
     %Node{
@@ -114,7 +118,8 @@ defmodule Arbor.Orchestrator.IR.Compiler do
         capabilities_required: capabilities,
         data_classification: data_class,
         idempotency: idempotency,
-        schema_errors: schema_errors
+        schema_errors: schema_errors,
+        taint_profile: taint_profile
     }
   end
 
@@ -172,6 +177,97 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   end
 
   defp parse_int(_), do: nil
+
+  # --- Taint profile resolution ---
+
+  defp resolve_taint_profile(%Node{} = node, %HandlerSchema{} = schema) do
+    # 1. Start from schema defaults
+    base_required = schema.required_sanitizations
+    base_output = schema.output_sanitizations
+    base_wipes = schema.wipes_sanitizations
+    base_confidence = schema.min_confidence
+    base_sensitivity = schema.sensitivity
+    base_constraint = schema.provider_constraint
+
+    # 2. Apply refinements: match {attr_name, attr_value} tuples against node attrs
+    {req, out, wipes, conf, sens, constraint} =
+      Enum.reduce(
+        schema.refinements,
+        {base_required, base_output, base_wipes, base_confidence, base_sensitivity,
+         base_constraint},
+        fn {{attr_name, attr_value}, overrides}, {r, o, w, c, s, p} ->
+          if Map.get(node.attrs, attr_name) == attr_value do
+            {
+              Map.get(overrides, :required_sanitizations, r),
+              Map.get(overrides, :output_sanitizations, o),
+              Map.get(overrides, :wipes_sanitizations, w),
+              Map.get(overrides, :min_confidence, c),
+              Map.get(overrides, :sensitivity, s),
+              Map.get(overrides, :provider_constraint, p)
+            }
+          else
+            {r, o, w, c, s, p}
+          end
+        end
+      )
+
+    # 3. Parse optional taint_requires DOT attr → OR into bitmask
+    req = bor(req, TaintProfile.parse_sanitization_names(Map.get(node.attrs, "taint_requires")))
+
+    # 4. Parse optional sensitivity DOT attr override
+    sens = parse_sensitivity_attr(Map.get(node.attrs, "sensitivity"), sens)
+
+    # 5. If no explicit sensitivity, derive from data classification
+    sens =
+      if Map.has_key?(node.attrs, "sensitivity") do
+        sens
+      else
+        case resolve_data_classification(node, schema) do
+          class when class != schema.default_classification ->
+            classification_to_sensitivity(class)
+
+          _ ->
+            sens
+        end
+      end
+
+    # 6. Derive provider_constraint from sensitivity if not explicitly set
+    constraint = constraint || sensitivity_to_constraint(sens)
+
+    %TaintProfile{
+      sensitivity: sens,
+      required_sanitizations: req,
+      output_sanitizations: out,
+      wipes_sanitizations: wipes,
+      min_confidence: conf,
+      provider_constraint: constraint
+    }
+  end
+
+  @sensitivity_map %{
+    "public" => :public,
+    "internal" => :internal,
+    "confidential" => :confidential,
+    "restricted" => :restricted
+  }
+
+  defp parse_sensitivity_attr(nil, default), do: default
+
+  defp parse_sensitivity_attr(val, default) when is_binary(val) do
+    Map.get(@sensitivity_map, val, default)
+  end
+
+  defp parse_sensitivity_attr(_, default), do: default
+
+  defp classification_to_sensitivity(:public), do: :public
+  defp classification_to_sensitivity(:internal), do: :internal
+  defp classification_to_sensitivity(:sensitive), do: :confidential
+  defp classification_to_sensitivity(:secret), do: :restricted
+  defp classification_to_sensitivity(_), do: :public
+
+  defp sensitivity_to_constraint(:restricted), do: :can_see_restricted
+  defp sensitivity_to_constraint(:confidential), do: :can_see_confidential
+  defp sensitivity_to_constraint(_), do: nil
 
   # --- Edge compilation ---
 

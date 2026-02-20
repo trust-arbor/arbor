@@ -446,16 +446,52 @@ defmodule Arbor.Signals.Taint do
     end)
   end
 
+  # ── Data Hash Binding ──────────────────────────────────────────────
+
+  @doc """
+  Compute a SHA-256 hash of arbitrary data for integrity binding.
+
+  Used alongside taint metadata to detect if data has been tampered with
+  after taint classification was applied.
+  """
+  @spec data_hash(term()) :: String.t()
+  def data_hash(data) do
+    data
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc """
+  Verify a stored data hash against recomputed hash.
+
+  Returns `:ok` if hashes match, `{:error, :hash_mismatch}` if they differ.
+  """
+  @spec verify_data_hash(term(), String.t()) :: :ok | {:error, :hash_mismatch}
+  def verify_data_hash(data, stored_hash) when is_binary(stored_hash) do
+    if data_hash(data) == stored_hash do
+      :ok
+    else
+      {:error, :hash_mismatch}
+    end
+  end
+
   # ── Serialization (JSONB persistence) ────────────────────────────────
 
   @doc """
   Convert a Taint struct to a string-keyed map suitable for JSONB storage.
 
   Atom fields are converted to strings for safe JSON round-tripping.
+
+  ## Options
+
+  - `:data_hash` - When provided, includes a `"taint_data_hash"` key in the output.
   """
-  @spec to_persistable(struct()) :: map()
-  def to_persistable(%{__struct__: @taint_struct} = taint) do
-    %{
+  @spec to_persistable(struct(), keyword()) :: map()
+  def to_persistable(taint, opts \\ [])
+
+  def to_persistable(%{__struct__: @taint_struct} = taint, opts) do
+    base = %{
       "taint_level" => to_string(taint.level),
       "taint_sensitivity" => to_string(taint.sensitivity),
       "taint_sanitizations" => taint.sanitizations,
@@ -463,6 +499,11 @@ defmodule Arbor.Signals.Taint do
       "taint_source" => taint.source,
       "taint_chain" => taint.chain
     }
+
+    case Keyword.get(opts, :data_hash) do
+      nil -> base
+      hash when is_binary(hash) -> Map.put(base, "taint_data_hash", hash)
+    end
   end
 
   @doc """
