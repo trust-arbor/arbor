@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.DotCache do
   @default_max_entries 100
 
   # Increment when IR format changes to invalidate stale compiled graphs
-  @ir_version 1
+  @ir_version 2
 
   # ── Public API ──
 

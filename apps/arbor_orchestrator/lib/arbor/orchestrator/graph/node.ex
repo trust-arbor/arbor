@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.Graph.Node do
   @moduledoc false
 
-  alias Arbor.Orchestrator.IR.HandlerSchema
+  alias Arbor.Orchestrator.IR.{HandlerSchema, TaintProfile}
 
   @type data_class :: :public | :internal | :sensitive | :secret
 
@@ -34,7 +34,8 @@ defmodule Arbor.Orchestrator.Graph.Node do
           capabilities_required: [String.t()],
           data_classification: data_class() | nil,
           idempotency: atom() | nil,
-          schema_errors: [{:error | :warning, String.t()}]
+          schema_errors: [{:error | :warning, String.t()}],
+          taint_profile: TaintProfile.t() | nil
         }
 
   defstruct id: "",
@@ -63,7 +64,8 @@ defmodule Arbor.Orchestrator.Graph.Node do
             capabilities_required: [],
             data_classification: nil,
             idempotency: nil,
-            schema_errors: []
+            schema_errors: [],
+            taint_profile: nil
 
   @known_attrs ~w(shape type prompt label goal_gate max_retries retry_target
     fallback_retry_target timeout llm_model llm_provider reasoning_effort

@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.IR.Validator do
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
+  alias Arbor.Orchestrator.IR.TaintProfile
   alias Arbor.Orchestrator.Validation.Diagnostic
 
   @doc "Run all typed validation passes. Returns list of diagnostics."
@@ -28,6 +29,8 @@ defmodule Arbor.Orchestrator.IR.Validator do
     |> add_schema_errors(graph)
     |> add_capability_info(graph)
     |> add_taint_errors(graph)
+    |> add_sanitization_warnings(graph)
+    |> add_confidence_warnings(graph)
     |> add_loop_warnings(graph)
     |> add_resource_warnings(graph)
     |> add_condition_completeness_warnings(graph)
@@ -142,7 +145,120 @@ defmodule Arbor.Orchestrator.IR.Validator do
     Map.has_key?(attrs, "data_class")
   end
 
-  # --- Pass 4: Loop detection ---
+  # --- Pass 4: Sanitization flow ---
+
+  defp add_sanitization_warnings(diags, %Graph{} = graph) do
+    sanitization_diags =
+      graph.edges
+      |> Enum.flat_map(fn edge ->
+        source_node = Map.get(graph.nodes, edge.from)
+        target_node = Map.get(graph.nodes, edge.to)
+
+        if source_node && target_node do
+          check_sanitization_flow(source_node, target_node)
+        else
+          []
+        end
+      end)
+
+    sanitization_diags ++ diags
+  end
+
+  defp check_sanitization_flow(%Node{} = source, %Node{} = target) do
+    source_profile = source.taint_profile
+    target_profile = target.taint_profile
+
+    # Skip if either node lacks a taint profile (backward compat with uncompiled nodes)
+    if is_nil(source_profile) or is_nil(target_profile) or
+         target_profile.required_sanitizations == 0 do
+      []
+    else
+      cond do
+        source_profile.wipes_sanitizations ->
+          [
+            Diagnostic.warning(
+              "sanitization_wiped",
+              "LLM node '#{source.id}' wipes all sanitizations before '#{target.id}' " <>
+                "which requires #{format_missing(TaintProfile.missing_sanitizations(0, target_profile.required_sanitizations))}",
+              edge: {source.id, target.id},
+              fix: "Insert a sanitizer node between '#{source.id}' and '#{target.id}'"
+            )
+          ]
+
+        not TaintProfile.satisfies?(
+          source_profile.output_sanitizations,
+          target_profile.required_sanitizations
+        ) ->
+          missing =
+            TaintProfile.missing_sanitizations(
+              source_profile.output_sanitizations,
+              target_profile.required_sanitizations
+            )
+
+          [
+            Diagnostic.warning(
+              "missing_sanitization",
+              "Node '#{source.id}' does not provide sanitizations " <>
+                "required by '#{target.id}': #{format_missing(missing)}",
+              edge: {source.id, target.id},
+              fix: "Insert sanitizer nodes for #{format_missing(missing)} before '#{target.id}'"
+            )
+          ]
+
+        true ->
+          []
+      end
+    end
+  end
+
+  defp format_missing(names), do: Enum.join(names, ", ")
+
+  # --- Pass 5: Confidence flow ---
+
+  defp add_confidence_warnings(diags, %Graph{} = graph) do
+    confidence_diags =
+      graph.edges
+      |> Enum.flat_map(fn edge ->
+        source_node = Map.get(graph.nodes, edge.from)
+        target_node = Map.get(graph.nodes, edge.to)
+
+        if source_node && target_node do
+          check_confidence_flow(source_node, target_node)
+        else
+          []
+        end
+      end)
+
+    confidence_diags ++ diags
+  end
+
+  defp check_confidence_flow(%Node{} = source, %Node{} = target) do
+    source_profile = source.taint_profile
+    target_profile = target.taint_profile
+
+    if is_nil(source_profile) or is_nil(target_profile) do
+      []
+    else
+      source_rank = TaintProfile.confidence_rank(source_profile.min_confidence)
+      target_rank = TaintProfile.confidence_rank(target_profile.min_confidence)
+
+      if target_rank > source_rank do
+        [
+          Diagnostic.warning(
+            "confidence_gap",
+            "Node '#{target.id}' requires #{target_profile.min_confidence} confidence " <>
+              "but source '#{source.id}' only provides #{source_profile.min_confidence}",
+            edge: {source.id, target.id},
+            fix: "Add a verification step between '#{source.id}' and '#{target.id}'"
+          )
+        ]
+      else
+        []
+      end
+    end
+  end
+
+  # --- Pass 6: Loop detection ---
 
   defp add_loop_warnings(diags, %Graph{} = graph) do
     cycles = detect_cycles(graph)

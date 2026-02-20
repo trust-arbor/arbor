@@ -20,16 +20,20 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
       assert schema.capabilities == []
     end
 
-    test "covers all 17 handler types" do
+    test "covers all 29 handler types (15 canonical + 14 legacy)" do
       types = HandlerSchema.known_types()
-      assert length(types) == 17
+      assert length(types) == 29
 
-      assert "start" in types
-      assert "exit" in types
+      # 15 canonical types
+      for canonical <- ~w(start exit branch parallel fan_in compute transform exec
+                          read write compose map adapt wait gate) do
+        assert canonical in types, "Missing canonical type: #{canonical}"
+      end
+
+      # Legacy aliases
       assert "conditional" in types
       assert "tool" in types
       assert "wait.human" in types
-      assert "parallel" in types
       assert "parallel.fan_in" in types
       assert "stack.manager_loop" in types
       assert "codergen" in types
