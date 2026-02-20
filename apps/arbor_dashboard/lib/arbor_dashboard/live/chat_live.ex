@@ -381,6 +381,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("show-join-groups" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("join-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("confirm-create-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
