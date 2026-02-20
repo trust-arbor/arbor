@@ -245,17 +245,70 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         </div>
       </div>
       <div :if={@show_llm_panel} style="flex: 1; overflow-y: auto; min-height: 0;">
-        <%!-- Last heartbeat thinking --%>
+        <%!-- Last heartbeat structured data --%>
         <div
           :if={@last_llm_thinking}
           style="padding: 0.4rem; border-bottom: 1px solid var(--aw-border, #333);"
         >
-          <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem;">
+          <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.3rem;">
             Last heartbeat ({@last_llm_mode || "unknown"} mode):
           </div>
-          <p style="color: var(--aw-text, #ccc); font-size: 0.8em; white-space: pre-wrap; margin: 0;">
-            {WebHelpers.truncate(@last_llm_thinking, 500)}
-          </p>
+          <%!-- Memory Notes --%>
+          <div
+            :if={@last_memory_notes != []}
+            style="margin-bottom: 0.3rem;"
+          >
+            <div style="font-size: 0.7em; color: #ab47bc; font-weight: bold; margin-bottom: 0.1rem;">
+              Memory Notes ({length(@last_memory_notes)})
+            </div>
+            <ul style="margin: 0; padding-left: 1rem; font-size: 0.75em; color: var(--aw-text, #ccc);">
+              <li :for={note <- @last_memory_notes} style="margin-bottom: 0.1rem;">
+                {WebHelpers.truncate(to_string(note), 120)}
+              </li>
+            </ul>
+          </div>
+          <%!-- Concerns --%>
+          <div
+            :if={@last_concerns != []}
+            style="margin-bottom: 0.3rem;"
+          >
+            <div style="font-size: 0.7em; color: #ffa726; font-weight: bold; margin-bottom: 0.1rem;">
+              Concerns ({length(@last_concerns)})
+            </div>
+            <ul style="margin: 0; padding-left: 1rem; font-size: 0.75em; color: var(--aw-text, #ccc);">
+              <li :for={concern <- @last_concerns} style="margin-bottom: 0.1rem;">
+                {WebHelpers.truncate(to_string(concern), 120)}
+              </li>
+            </ul>
+          </div>
+          <%!-- Curiosity --%>
+          <div
+            :if={@last_curiosity != []}
+            style="margin-bottom: 0.3rem;"
+          >
+            <div style="font-size: 0.7em; color: #4a9eff; font-weight: bold; margin-bottom: 0.1rem;">
+              Curiosity ({length(@last_curiosity)})
+            </div>
+            <ul style="margin: 0; padding-left: 1rem; font-size: 0.75em; color: var(--aw-text, #ccc);">
+              <li :for={q <- @last_curiosity} style="margin-bottom: 0.1rem;">
+                {WebHelpers.truncate(to_string(q), 120)}
+              </li>
+            </ul>
+          </div>
+          <%!-- Identity Insights --%>
+          <div
+            :if={@last_identity_insights != []}
+            style="margin-bottom: 0.3rem;"
+          >
+            <div style="font-size: 0.7em; color: #22c55e; font-weight: bold; margin-bottom: 0.1rem;">
+              Identity Insights ({length(@last_identity_insights)})
+            </div>
+            <ul style="margin: 0; padding-left: 1rem; font-size: 0.75em; color: var(--aw-text, #ccc);">
+              <li :for={insight <- @last_identity_insights} style="margin-bottom: 0.1rem;">
+                {format_insight(insight)}
+              </li>
+            </ul>
+          </div>
         </div>
         <%!-- LLM interaction stream --%>
         <div
@@ -1124,4 +1177,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
     </div>
     """
   end
+
+  defp format_insight(insight) when is_map(insight) do
+    category = insight["category"] || Map.get(insight, :category, "")
+    content = insight["content"] || Map.get(insight, :content, "")
+    "[#{category}] #{content}"
+  end
+
+  defp format_insight(insight), do: to_string(insight)
 end

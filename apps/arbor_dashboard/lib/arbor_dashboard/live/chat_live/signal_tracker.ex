@@ -284,6 +284,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       thinking: flex_get(data, :agent_thinking),
       llm_actions: flex_get(data, :llm_actions) || 0,
       notes_count: flex_get(data, :memory_notes_count) || 0,
+      memory_notes: flex_get(data, :memory_notes) || [],
+      concerns: flex_get(data, :concerns) || [],
+      curiosity: flex_get(data, :curiosity) || [],
+      identity_insights: flex_get(data, :identity_insights) || [],
       hb_in: flex_get(usage, :input_tokens) || 0,
       hb_out: flex_get(usage, :output_tokens) || 0,
       hb_cached: flex_get(usage, :cache_read_input_tokens) || 0
@@ -295,6 +299,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       heartbeat_count: socket.assigns.heartbeat_count + 1,
       last_llm_mode: hb.mode,
       last_llm_thinking: hb.thinking,
+      last_memory_notes: hb.memory_notes,
+      last_concerns: hb.concerns,
+      last_curiosity: hb.curiosity,
+      last_identity_insights: hb.identity_insights,
       memory_notes_total: socket.assigns.memory_notes_total + hb.notes_count,
       hb_input_tokens: socket.assigns.hb_input_tokens + hb.hb_in,
       hb_output_tokens: socket.assigns.hb_output_tokens + hb.hb_out,
@@ -310,6 +318,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
         thinking: hb.thinking,
         actions: hb.llm_actions,
         notes: hb.notes_count,
+        memory_notes: hb.memory_notes,
+        concerns: hb.concerns,
+        curiosity: hb.curiosity,
+        identity_insights: hb.identity_insights,
         timestamp: timestamp
       }
 
