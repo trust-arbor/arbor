@@ -313,10 +313,18 @@ defmodule Arbor.Agent.Lifecycle do
             else: []
         end)
 
+      # Build the stable system prompt for this agent (identity, character, tools)
+      # so the Session's LLM adapter has proper context for heartbeat calls.
+      system_prompt =
+        Keyword.get_lazy(opts, :system_prompt, fn ->
+          build_session_system_prompt(agent_id, profile, opts)
+        end)
+
       session_opts =
         Keyword.merge(opts,
           trust_tier: profile.trust_tier,
           tools: tools,
+          system_prompt: system_prompt,
           start_heartbeat: true
         )
 
@@ -331,6 +339,37 @@ defmodule Arbor.Agent.Lifecycle do
           )
       end
     end
+  end
+
+  # Build a system prompt for Session LLM calls via Arbor.AI runtime bridge.
+  # Falls back to template/character-based prompt if Arbor.AI is unavailable.
+  defp build_session_system_prompt(agent_id, profile, opts) do
+    prompt_opts = [
+      state: %{id: agent_id},
+      model: Keyword.get(opts, :model),
+      provider: Keyword.get(opts, :provider)
+    ]
+
+    cond do
+      Code.ensure_loaded?(Arbor.AI) and
+          function_exported?(Arbor.AI, :build_stable_system_prompt, 2) ->
+        try do
+          apply(Arbor.AI, :build_stable_system_prompt, [agent_id, prompt_opts])
+        rescue
+          _ -> fallback_system_prompt(profile)
+        catch
+          :exit, _ -> fallback_system_prompt(profile)
+        end
+
+      true ->
+        fallback_system_prompt(profile)
+    end
+  end
+
+  defp fallback_system_prompt(profile) do
+    name = profile.display_name || profile.character.name || "Agent"
+    desc = profile.character.description || ""
+    "You are #{name}. #{desc}"
   end
 
   defp maybe_start_api_agent(agent_id, profile, opts) do

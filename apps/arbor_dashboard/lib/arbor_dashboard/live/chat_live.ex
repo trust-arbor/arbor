@@ -382,10 +382,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("show-join-groups" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("join-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("join-group" = e, p, s) do
+    {:noreply, socket} = GroupChat.handle_event(e, p, s)
+    {:noreply, maybe_connect_group_agent(socket)}
+  end
   def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("confirm-create-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("confirm-create-group" = e, p, s) do
+    {:noreply, socket} = GroupChat.handle_event(e, p, s)
+    {:noreply, maybe_connect_group_agent(socket)}
+  end
   def handle_event("cancel-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
   def handle_event("leave-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
 
@@ -743,6 +749,32 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       :not_found ->
         assign(socket, error: "Agent reported running but not found")
+    end
+  end
+
+  # When joining/creating a group, connect to the first agent participant
+  # so side panels (heartbeat, thoughts, memories, goals) show agent data.
+  defp maybe_connect_group_agent(socket) do
+    if socket.assigns.group_mode do
+      agent_participant =
+        Enum.find(socket.assigns.group_participants, fn p -> p.type == :agent end)
+
+      case agent_participant do
+        nil ->
+          socket
+
+        %{id: agent_id} ->
+          case Lifecycle.get_host(agent_id) do
+            {:ok, pid} ->
+              metadata = get_agent_metadata(agent_id)
+              reconnect_to_agent(socket, agent_id, pid, metadata)
+
+            _ ->
+              assign(socket, agent_id: agent_id, display_name: agent_participant[:name])
+          end
+      end
+    else
+      socket
     end
   end
 

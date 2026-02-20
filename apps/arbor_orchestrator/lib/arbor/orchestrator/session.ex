@@ -394,6 +394,14 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:heartbeat_result, {:ok, result}}, state) do
+    completed = Map.get(result.context, "__completed_nodes__", [])
+    llm_content = Map.get(result.context, "llm.content")
+
+    Logger.info(
+      "[Session] Heartbeat completed for #{state.agent_id}: " <>
+        "#{length(completed)} nodes, content=#{if llm_content, do: "#{String.length(to_string(llm_content))} chars", else: "nil"}"
+    )
+
     new_state =
       state
       |> Map.put(:heartbeat_in_flight, false)
@@ -404,6 +412,8 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:heartbeat_result, {:error, reason}}, state) do
+    Logger.warning("[Session] Heartbeat failed for #{state.agent_id}: #{inspect(reason)}")
+
     # Heartbeat failures are non-fatal — continue with current state
     new_state =
       state

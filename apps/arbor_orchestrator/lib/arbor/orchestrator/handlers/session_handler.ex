@@ -159,10 +159,18 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     with_adapter(adapters, :llm_call, fn llm_call ->
       messages = Context.get(ctx, "session.messages", [])
       mode = Context.get(ctx, "session.cognitive_mode", "reflection")
-      call_opts = %{mode: mode, agent_id: Context.get(ctx, "session.agent_id")}
+      agent_id = Context.get(ctx, "session.agent_id")
+      call_opts = %{mode: mode, agent_id: agent_id}
+
+      # Build heartbeat context message from engine context values.
+      # The adapter has the system prompt (identity), but the LLM also needs
+      # the volatile context: current goals, working memory, timing, and
+      # mode-specific instructions.
+      heartbeat_msg = build_heartbeat_context(ctx, mode)
+      messages_with_context = messages ++ [%{"role" => "user", "content" => heartbeat_msg}]
 
       try do
-        case llm_call.(messages, mode, call_opts) do
+        case llm_call.(messages_with_context, mode, call_opts) do
           {:ok, %{tool_calls: calls}} when is_list(calls) and calls != [] ->
             ok(%{"llm.response_type" => "tool_call", "llm.tool_calls" => calls})
 
@@ -463,6 +471,99 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   defp format_consolidation_result({:ok, other}), do: %{result: inspect(other)}
   defp format_consolidation_result({:error, reason}), do: %{error: inspect(reason)}
   defp format_consolidation_result(other), do: %{result: inspect(other)}
+
+  # Build heartbeat context from engine context values.
+  # This gives the LLM the volatile state it needs: goals, working memory,
+  # cognitive mode instructions, and response format.
+  defp build_heartbeat_context(ctx, mode) do
+    goals = Context.get(ctx, "session.goals", [])
+    wm = Context.get(ctx, "session.working_memory", %{})
+    turn_count = Context.get(ctx, "session.turn_count", 0)
+
+    goals_section = format_goals(goals)
+    wm_section = format_working_memory(wm)
+    mode_instructions = mode_instructions(mode)
+
+    """
+    ## Heartbeat Cycle (turn #{turn_count})
+
+    #{mode_instructions}
+
+    #{goals_section}
+
+    #{wm_section}
+
+    Respond with valid JSON containing these fields:
+    - "cognitive_mode": your current mode (string)
+    - "memory_notes": list of strings — observations worth remembering
+    - "goal_updates": list of {id, progress, status} for existing goals
+    - "new_goals": list of {description, priority} for goals you want to create
+    - "actions": list of {type, params} for actions to take
+    - "decompositions": list of {goal_id, intentions: [{action, description}]}
+    - "concerns": list of current concerns (strings)
+    - "curiosity": list of things you're curious about (strings)
+    - "identity_insights": list of {category, content, confidence} self-discoveries
+    - "proposal_decisions": list of {proposal_id, decision} where decision is accept/reject/defer
+    """
+  end
+
+  defp format_goals([]), do: "## Goals\nNo active goals."
+
+  defp format_goals(goals) do
+    items =
+      goals
+      |> Enum.map(fn goal ->
+        id = goal["id"] || Map.get(goal, :id, "?")
+        desc = goal["description"] || Map.get(goal, :description, "")
+        progress = goal["progress"] || Map.get(goal, :progress, 0)
+        "- [#{id}] #{desc} (progress: #{progress})"
+      end)
+      |> Enum.join("\n")
+
+    "## Goals\n#{items}"
+  end
+
+  defp format_working_memory(wm) when map_size(wm) == 0, do: ""
+
+  defp format_working_memory(wm) do
+    parts =
+      wm
+      |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
+      |> Enum.join("\n")
+
+    "## Working Memory\n#{parts}"
+  end
+
+  defp mode_instructions("goal_pursuit") do
+    """
+    Mode: GOAL PURSUIT
+    Focus on advancing your active goals. Use tools if needed. Report progress.
+    """
+  end
+
+  defp mode_instructions("plan_execution") do
+    """
+    Mode: PLAN EXECUTION
+    Decompose your goals into concrete intentions (action steps).
+    Each intention should be a single, executable action.
+    """
+  end
+
+  defp mode_instructions("consolidation") do
+    """
+    Mode: CONSOLIDATION
+    Review and organize your memory. Decay stale entries, prune redundancies.
+    Reflect on identity insights. No new actions — maintenance only.
+    """
+  end
+
+  defp mode_instructions(_reflection) do
+    """
+    Mode: REFLECTION
+    Reflect on recent activity. What have you learned? What patterns emerge?
+    Generate memory notes and identity insights.
+    """
+  end
 
   defp with_adapter(adapters, key, fun) do
     case Map.get(adapters, key) do
