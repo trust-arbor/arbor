@@ -168,7 +168,8 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
       node: node,
       context: context,
       graph: graph,
-      logs_root: Keyword.get(opts, :logs_root, "")
+      logs_root: Keyword.get(opts, :logs_root, ""),
+      assigns: build_assigns(context, opts)
     }
 
     # Run before_node middleware
@@ -198,6 +199,22 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
       Arbor.Orchestrator.Handlers.Handler.execute_three_phase(handler, node, context, graph, opts)
     else
       handler.execute(node, context, graph, opts)
+    end
+  end
+
+  defp build_assigns(context, opts) do
+    assigns = %{}
+
+    assigns =
+      case Context.get(context, "session.agent_id") do
+        nil -> assigns
+        agent_id -> Map.put(assigns, :agent_id, agent_id)
+      end
+
+    if Keyword.get(opts, :authorization) == false do
+      Map.put(assigns, :skip_capability_check, true)
+    else
+      assigns
     end
   end
 end

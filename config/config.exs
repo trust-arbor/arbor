@@ -44,6 +44,9 @@ config :arbor_comms, :handler,
   conversation_window: 20,
   dedup_window_seconds: 300
 
+# Phase 3: Enable mandatory middleware (capability, taint, sanitization checks)
+config :arbor_orchestrator, mandatory_middleware: true
+
 # P0-1: Default taint enforcement policy for authorize_and_execute.
 # :audit_only logs violations without blocking. Use :strict to block.
 config :arbor_actions, default_taint_policy: :audit_only

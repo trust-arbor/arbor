@@ -5,6 +5,10 @@ defmodule Arbor.Orchestrator.Middleware.Budget do
   Bridges to `Arbor.Orchestrator.BudgetTracker` when available. Checks budget
   before node execution and records token usage after.
 
+  When a compiled node has `llm_model`, `timeout_ms`, or `type` fields populated
+  by the IR Compiler, these are included in the usage record for per-model cost
+  estimation and budget category breakdowns.
+
   No-op when no budget tracker is configured.
 
   ## Token Assigns
@@ -45,6 +49,39 @@ defmodule Arbor.Orchestrator.Middleware.Budget do
     end
   end
 
+  @doc """
+  Builds a cost hint map from compiled node metadata.
+
+  Returns a map with `:model`, `:timeout_ms`, and `:handler_type` when
+  the node has been enriched by the IR Compiler (non-nil values only).
+  """
+  @spec build_cost_hint(Arbor.Orchestrator.Graph.Node.t()) :: map()
+  def build_cost_hint(node) do
+    hint = %{}
+
+    hint =
+      if node.llm_model do
+        Map.put(hint, :model, node.llm_model)
+      else
+        hint
+      end
+
+    hint =
+      if node.timeout_ms do
+        Map.put(hint, :timeout_ms, node.timeout_ms)
+      else
+        hint
+      end
+
+    node_type = node.type || Map.get(node.attrs, "type")
+
+    if node_type do
+      Map.put(hint, :handler_type, node_type)
+    else
+      hint
+    end
+  end
+
   defp check_budget(token) do
     tracker = Map.get(token.assigns, :budget_tracker)
 
@@ -72,14 +109,16 @@ defmodule Arbor.Orchestrator.Middleware.Budget do
     tracker = Map.get(token.assigns, :budget_tracker)
 
     if token.outcome && budget_tracker_available?(tracker) do
-      # Extract token usage from context updates if available
       updates = token.outcome.context_updates || %{}
+      cost_hint = build_cost_hint(token.node)
 
-      usage = %{
-        node_id: token.node.id,
-        tokens: Map.get(updates, "llm.tokens_used"),
-        cost: Map.get(updates, "llm.cost")
-      }
+      usage =
+        %{
+          node_id: token.node.id,
+          tokens: Map.get(updates, "llm.tokens_used"),
+          cost: Map.get(updates, "llm.cost")
+        }
+        |> Map.merge(cost_hint)
 
       try do
         apply_tracker(tracker, :record_usage, [usage])
