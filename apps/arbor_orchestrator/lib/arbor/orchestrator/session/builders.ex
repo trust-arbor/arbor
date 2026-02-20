@@ -32,7 +32,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @spec build_heartbeat_values(Arbor.Orchestrator.Session.t()) :: map()
   def build_heartbeat_values(state) do
     base = session_base_values(state)
-    Map.put(base, "session.messages", get_messages(state))
+
+    base
+    |> Map.put("session.messages", [])
+    |> Map.put("session.is_heartbeat", true)
   end
 
   @doc false
