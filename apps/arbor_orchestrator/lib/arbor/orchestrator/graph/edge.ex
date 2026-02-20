@@ -103,6 +103,21 @@ defmodule Arbor.Orchestrator.Graph.Edge do
   def parse_condition(condition) when is_binary(condition) do
     condition = String.trim(condition)
 
+    if String.contains?(condition, "&&") do
+      clauses =
+        condition
+        |> String.split("&&")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.map(&parse_single_clause/1)
+
+      {:and, clauses}
+    else
+      parse_single_clause(condition)
+    end
+  end
+
+  defp parse_single_clause(condition) do
     cond do
       String.contains?(condition, "!=") ->
         [field, value] = String.split(condition, "!=", parts: 2)

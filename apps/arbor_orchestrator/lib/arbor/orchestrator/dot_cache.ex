@@ -14,13 +14,17 @@ defmodule Arbor.Orchestrator.DotCache do
   @table :arbor_orchestrator_dot_cache
   @default_max_entries 100
 
+  # Increment when IR format changes to invalidate stale compiled graphs
+  @ir_version 1
+
   # ── Public API ──
 
   @doc "Look up a cached graph by source hash."
-  @spec get(String.t()) :: {:ok, Arbor.Orchestrator.Graph.t()} | :miss
+  @spec get(String.t()) :: {:ok, Arbor.Orchestrator.Graph.t()} | :miss | :stale
   def get(source_hash) do
     case :ets.lookup(@table, source_hash) do
-      [{^source_hash, graph, _inserted_at}] -> {:ok, graph}
+      [{^source_hash, graph, @ir_version, _inserted_at}] -> {:ok, graph}
+      [{^source_hash, _graph, _old_version, _inserted_at}] -> :stale
       [] -> :miss
     end
   end
@@ -45,12 +49,20 @@ defmodule Arbor.Orchestrator.DotCache do
     :ok
   end
 
+  @doc "Clear all cached entries (alias for `clear/0`)."
+  @spec invalidate_all() :: :ok
+  def invalidate_all, do: clear()
+
   @doc "Return cache statistics."
   @spec stats() :: %{size: non_neg_integer(), max: non_neg_integer()}
   def stats do
     max = Application.get_env(:arbor_orchestrator, :dot_cache_max_entries, @default_max_entries)
     %{size: :ets.info(@table, :size), max: max}
   end
+
+  @doc "Return the current IR format version."
+  @spec ir_version() :: pos_integer()
+  def ir_version, do: @ir_version
 
   @doc "Compute the cache key for a DOT source string."
   @spec cache_key(String.t()) :: String.t()
@@ -81,7 +93,7 @@ defmodule Arbor.Orchestrator.DotCache do
   @impl true
   def handle_call({:put, source_hash, graph}, _from, state) do
     now = System.monotonic_time(:millisecond)
-    :ets.insert(@table, {source_hash, graph, now})
+    :ets.insert(@table, {source_hash, graph, @ir_version, now})
     maybe_evict(state.max_entries)
     {:reply, :ok, state}
   end
@@ -95,7 +107,7 @@ defmodule Arbor.Orchestrator.DotCache do
       # Find and delete the oldest entry
       oldest =
         :ets.foldl(
-          fn {key, _graph, inserted_at}, acc ->
+          fn {key, _graph, _ir_version, inserted_at}, acc ->
             case acc do
               nil -> {key, inserted_at}
               {_k, t} when inserted_at < t -> {key, inserted_at}

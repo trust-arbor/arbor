@@ -71,16 +71,44 @@ defmodule Arbor.Orchestrator.IR.Compiler do
 
   defp compile_node(%Node{} = node) do
     handler_type = Registry.node_type(node)
+
+    if handler_type == "adapt" do
+      compile_adapt_node(node, handler_type)
+    else
+      compile_standard_node(node, handler_type)
+    end
+  end
+
+  # Adapt nodes get pessimistic (maximally restrictive) enrichment.
+  # They can self-modify pipeline topology at runtime, so we treat them
+  # as side-effecting, restricted, and requiring graph_mutation capability.
+  defp compile_adapt_node(%Node{} = node, handler_type) do
     handler_module = resolve_handler_module(node)
     schema = HandlerSchema.for_type(handler_type)
     schema_errors = HandlerSchema.validate_attrs(handler_type, node.attrs)
-    idempotency = Handler.idempotency_of(handler_module)
-    data_class = resolve_data_classification(node, schema)
-    capabilities = resolve_capabilities(node, schema)
-    _resource_bounds = extract_resource_bounds(node)
 
     %Node{
       node
+      | handler_module: handler_module,
+        handler_schema: schema,
+        capabilities_required: ["graph_mutation"],
+        data_classification: :secret,
+        idempotency: :side_effecting,
+        schema_errors: schema_errors
+    }
+  end
+
+  defp compile_standard_node(%Node{} = node, handler_type) do
+    {handler_module, %Node{} = prepared_node} = resolve_handler_with_attrs(node)
+    schema = HandlerSchema.for_type(handler_type)
+    schema_errors = HandlerSchema.validate_attrs(handler_type, prepared_node.attrs)
+    idempotency = Handler.idempotency_of(handler_module)
+    data_class = resolve_data_classification(prepared_node, schema)
+    capabilities = resolve_capabilities(prepared_node, schema)
+    _resource_bounds = extract_resource_bounds(prepared_node)
+
+    %Node{
+      prepared_node
       | handler_module: handler_module,
         handler_schema: schema,
         capabilities_required: capabilities,
@@ -88,6 +116,12 @@ defmodule Arbor.Orchestrator.IR.Compiler do
         idempotency: idempotency,
         schema_errors: schema_errors
     }
+  end
+
+  # Use resolve_with_attrs to get BOTH the handler module AND alias-injected attrs.
+  # This ensures compiled nodes carry the same attrs they'd get at runtime.
+  defp resolve_handler_with_attrs(%Node{} = node) do
+    Registry.resolve_with_attrs(node)
   end
 
   defp resolve_handler_module(%Node{} = node) do
@@ -163,11 +197,12 @@ defmodule Arbor.Orchestrator.IR.Compiler do
 
   # --- Aggregation ---
 
+  # Use group_by to preserve edge ordering from the parser.
+  # The parser stores edges in reverse-DOT order (prepend on insert),
+  # and outgoing_edges/2 reverses to recover DOT order. We must maintain
+  # that same ordering — group_by preserves iteration order within groups.
   defp build_adjacency(edges, direction_key) do
-    Enum.reduce(edges, %{}, fn edge, acc ->
-      key = Map.get(edge, direction_key)
-      Map.update(acc, key, [edge], &[edge | &1])
-    end)
+    Enum.group_by(edges, &Map.get(&1, direction_key))
   end
 
   defp aggregate_capabilities(enriched_nodes) do
