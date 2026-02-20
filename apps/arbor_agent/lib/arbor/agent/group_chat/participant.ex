@@ -10,7 +10,7 @@ defmodule Arbor.Agent.GroupChat.Participant do
   For humans, messages are broadcast via PubSub and received by their LiveView process.
   """
 
-  @type participant_type :: :human | :agent
+  @type participant_type :: :human | :agent | :system
 
   @type t :: %__MODULE__{
           id: String.t(),

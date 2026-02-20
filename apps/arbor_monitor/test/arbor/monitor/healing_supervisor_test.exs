@@ -1,11 +1,20 @@
 defmodule Arbor.Monitor.HealingSupervisorTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, Fingerprint, HealingSupervisor, RejectionTracker}
+  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, Fingerprint, HealingSupervisor,
+    RejectionTracker}
 
   setup do
+    # Disable ops room startup in tests (needs full agent infrastructure)
+    Application.put_env(:arbor_monitor, :start_ops_room, false)
+
     # Start the HealingSupervisor for tests
     start_supervised!(HealingSupervisor)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_monitor, :start_ops_room)
+    end)
+
     :ok
   end
 
@@ -36,11 +45,16 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     end
 
     @tag :fast
+    test "AnomalyForwarder is running" do
+      assert Process.whereis(Arbor.Monitor.AnomalyForwarder) != nil
+    end
+
+    @tag :fast
     test "all core children are started" do
       children = Supervisor.which_children(HealingSupervisor)
-      # 5 core children + optional DebugAgent if arbor_agent is loaded
-      assert length(children) >= 5
-      assert length(children) <= 6
+      # 6 children: AnomalyQueue, CascadeDetector, RejectionTracker,
+      # Verification, HealingWorkers, AnomalyForwarder
+      assert length(children) == 6
     end
   end
 

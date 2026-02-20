@@ -8,12 +8,17 @@ defmodule Arbor.Monitor.HealingSupervisor do
   - RejectionTracker — tracks proposal rejections for three-strike escalation
   - Verification — tracks fix verification during soak periods
   - HealingWorkers — DynamicSupervisor for healing agent workers
+  - AnomalyForwarder — bridges anomaly signals to the ops chat room
 
-  ## Placement
+  ## Ops Room Architecture
 
-  The HealingSupervisor starts ABOVE the monitoring components in the
-  supervision tree. This ensures the healing infrastructure survives
-  restarts of the components it heals.
+  Instead of running a custom DebugAgent GenServer, the healing system creates
+  an ops chat room (GroupChat) with a standard diagnostician agent. The
+  AnomalyForwarder subscribes to monitor signals and posts them as messages
+  to the ops room. Humans and other agents can join the room to collaborate.
+
+  The diagnostician agent is started via `Manager.start_or_resume` (runtime bridge)
+  using a deferred Task to wait for agent infrastructure to be available.
 
   ## Configuration
 
@@ -24,9 +29,13 @@ defmodule Arbor.Monitor.HealingSupervisor do
         cascade_detector: [cascade_threshold: 5],
         rejection_tracker: [max_rejections: 3],
         verification: [soak_cycles: 5]
+
+      config :arbor_monitor, :start_ops_room, true
   """
 
   use Supervisor
+
+  alias Arbor.Monitor.AnomalyForwarder
 
   require Logger
 
@@ -50,10 +59,15 @@ defmodule Arbor.Monitor.HealingSupervisor do
         {Arbor.Monitor.RejectionTracker, Keyword.get(healing_config, :rejection_tracker, [])},
         {Arbor.Monitor.Verification, Keyword.get(healing_config, :verification, [])},
         # DynamicSupervisor for healing worker processes
-        {DynamicSupervisor, name: Arbor.Monitor.HealingWorkers, strategy: :one_for_one}
-      ] ++ maybe_debug_agent_child(healing_config)
+        {DynamicSupervisor, name: Arbor.Monitor.HealingWorkers, strategy: :one_for_one},
+        # Forwards anomaly signals to the ops chat room
+        {AnomalyForwarder, []}
+      ]
 
     Logger.info("[HealingSupervisor] Starting healing infrastructure")
+
+    # Schedule deferred ops room setup after children start
+    maybe_schedule_ops_room()
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -92,28 +106,103 @@ defmodule Arbor.Monitor.HealingSupervisor do
     DynamicSupervisor.count_children(Arbor.Monitor.HealingWorkers).active
   end
 
-  # Runtime bridge: start DebugAgent if arbor_agent is loaded and enabled.
-  # arbor_monitor is standalone (zero in-umbrella deps), so we use
-  # Code.ensure_loaded? to avoid a compile-time dependency on arbor_agent.
-  # Disable via: config :arbor_monitor, start_debug_agent: false
-  defp maybe_debug_agent_child(healing_config) do
-    enabled = Application.get_env(:arbor_monitor, :start_debug_agent, true)
-    debug_agent_mod = Arbor.Agent.DebugAgent
+  # Deferred ops room setup — waits for agent infrastructure then creates
+  # the diagnostician agent and ops room GroupChat.
+  defp maybe_schedule_ops_room do
+    enabled = Application.get_env(:arbor_monitor, :start_ops_room, true)
 
-    if enabled && Code.ensure_loaded?(debug_agent_mod) do
-      opts = Keyword.get(healing_config, :debug_agent, [])
-      opts = Keyword.put_new(opts, :display_name, "debug-agent")
+    if enabled do
+      Task.start(fn ->
+        # Wait for agent infrastructure to be available
+        Process.sleep(5_000)
+        setup_ops_room()
+      end)
+    end
+  end
 
-      Logger.info("[HealingSupervisor] Starting DebugAgent (arbor_agent available)")
-      [{debug_agent_mod, opts}]
+  defp setup_ops_room do
+    manager_mod = Arbor.Agent.Manager
+    group_chat_mod = Arbor.Agent.GroupChat
+    lifecycle_mod = Arbor.Agent.Lifecycle
+    template_mod = Arbor.Agent.Templates.Diagnostician
+
+    with true <- Code.ensure_loaded?(manager_mod),
+         true <- Code.ensure_loaded?(group_chat_mod),
+         true <- Code.ensure_loaded?(template_mod) do
+      # Start or resume the diagnostician agent
+      agent_result =
+        try do
+          apply(manager_mod, :start_or_resume, [
+            "diagnostician",
+            [
+              template: template_mod,
+              display_name: "diagnostician",
+              start_host: true
+            ]
+          ])
+        rescue
+          error ->
+            Logger.warning("[HealingSupervisor] Failed to start diagnostician: #{inspect(error)}")
+            {:error, error}
+        catch
+          :exit, reason ->
+            Logger.warning(
+              "[HealingSupervisor] Failed to start diagnostician (exit): #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+
+      case agent_result do
+        {:ok, agent_id} ->
+          create_ops_room(agent_id, group_chat_mod, lifecycle_mod, manager_mod)
+
+        {:error, reason} ->
+          Logger.warning("[HealingSupervisor] Could not start diagnostician: #{inspect(reason)}")
+      end
     else
-      if enabled do
-        Logger.debug("[HealingSupervisor] DebugAgent not available (arbor_agent not loaded)")
-      else
-        Logger.debug("[HealingSupervisor] DebugAgent disabled via config")
+      false ->
+        Logger.debug(
+          "[HealingSupervisor] Agent infrastructure not available, ops room disabled"
+        )
+    end
+  end
+
+  defp create_ops_room(agent_id, group_chat_mod, lifecycle_mod, _manager_mod) do
+    # Look up the host process for the agent
+    host_pid =
+      try do
+        case apply(lifecycle_mod, :get_host, [agent_id]) do
+          {:ok, pid} -> pid
+          _ -> nil
+        end
+      rescue
+        _ -> nil
+      catch
+        :exit, _ -> nil
       end
 
-      []
+    participants = [
+      %{id: agent_id, name: "Diagnostician", type: :agent, host_pid: host_pid}
+    ]
+
+    case apply(group_chat_mod, :create, ["ops-room", [participants: participants]]) do
+      {:ok, group_pid} ->
+        # Wire the forwarder to the new group
+        try do
+          AnomalyForwarder.set_group(group_pid)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
+
+        Logger.info(
+          "[HealingSupervisor] Ops room created with diagnostician agent #{agent_id}"
+        )
+
+      {:error, reason} ->
+        Logger.warning("[HealingSupervisor] Failed to create ops room: #{inspect(reason)}")
     end
   end
 end

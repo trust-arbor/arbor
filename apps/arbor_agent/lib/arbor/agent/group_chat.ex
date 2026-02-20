@@ -17,14 +17,15 @@ defmodule Arbor.Agent.GroupChat do
   ## Auto-relay behavior
 
   When a message arrives:
-  - If from a **human**: All agents respond in parallel (or sequential if configured)
+  - If from a **human** or **system**: All agents respond in parallel (or sequential if configured)
   - If from an **agent**: Broadcast only, no relay (prevents infinite loops)
 
   ## Loop prevention
 
-  Simple and reliable: only human messages trigger agent responses. Agent responses
-  are added to history and broadcast to subscribers, but do not trigger additional
-  agent queries. This prevents agent-to-agent feedback loops.
+  Human and system messages trigger agent responses. Agent responses are added to
+  history and broadcast to subscribers, but do not trigger additional agent queries.
+  This prevents agent-to-agent feedback loops while allowing automated systems
+  (like the AnomalyForwarder) to initiate conversations.
   """
 
   use GenServer
@@ -254,8 +255,8 @@ defmodule Arbor.Agent.GroupChat do
   # Internal Helpers
 
   defp relay_to_agents(message, state) do
-    # Only relay human messages (prevents infinite agent-to-agent loops)
-    if message.sender_type != :agent do
+    # Relay human and system messages (prevents infinite agent-to-agent loops)
+    if message.sender_type in [:human, :system] do
       # Get all online agent participants except the sender
       agent_participants =
         state.participants
