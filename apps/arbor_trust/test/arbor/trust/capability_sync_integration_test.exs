@@ -110,7 +110,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       if caps != [] do
         cap = hd(caps)
-        assert Security.can?(agent_id, cap.resource_uri)
+        assert {:ok, :authorized} = Security.authorize(agent_id, cap.resource_uri)
       end
     end
   end

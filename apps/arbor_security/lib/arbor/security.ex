@@ -13,15 +13,10 @@ defmodule Arbor.Security do
 
   ## Quick Start
 
-      # Check authorization
+      # Check authorization (with audit logging)
       case Arbor.Security.authorize("agent_001", "arbor://fs/read/docs", :read) do
         {:ok, :authorized} -> proceed()
         {:error, reason} -> handle_denial(reason)
-      end
-
-      # Fast boolean check
-      if Arbor.Security.can?("agent_001", "arbor://fs/read/docs", :read) do
-        # proceed
       end
 
   ## Capability Model
@@ -92,13 +87,6 @@ defmodule Arbor.Security do
         action,
         opts
       )
-
-  @doc """
-  Fast capability-only boolean check.
-  """
-  @spec can?(String.t(), String.t(), atom()) :: boolean()
-  def can?(principal_id, resource_uri, action \\ nil),
-    do: check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, action)
 
   @doc """
   Grant a capability to an agent.
@@ -329,24 +317,6 @@ defmodule Arbor.Security do
       {:error, reason} = error ->
         Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
         error
-    end
-  end
-
-  # WARNING: This function ONLY checks capability existence.
-  # It does NOT verify identity, enforce constraints, check rate limits,
-  # evaluate escalation, or run reflexes. Use authorize/4 for actual
-  # security decisions. This is suitable ONLY for UI hints (e.g., showing
-  # or hiding buttons) where a false positive is acceptable.
-  @impl Arbor.Contracts.API.Security
-  def check_if_principal_can_perform_operation_on_resource(principal_id, resource_uri, _action) do
-    Logger.warning(
-      "can?/3 called for #{principal_id} on #{resource_uri} — " <>
-        "this skips identity, constraints, and reflexes. Use authorize/4 for security decisions."
-    )
-
-    case CapabilityStore.find_authorizing(principal_id, resource_uri) do
-      {:ok, _cap} -> true
-      {:error, _} -> false
     end
   end
 

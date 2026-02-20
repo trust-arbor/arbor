@@ -70,6 +70,8 @@ defmodule Arbor.Agent.Templates.Monitor do
   @impl true
   def required_capabilities do
     [
+      # Orchestrator session execution
+      %{resource: "arbor://orchestrator/execute"},
       # Read monitor metrics and anomalies
       %{resource: "arbor://monitor/read/**"},
       # Query collected metrics

@@ -33,9 +33,9 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       assert {:error, _reason} = result
     end
 
-    test "can?/2 returns boolean for quick checks", %{agent_id: agent_id} do
-      assert Arbor.Security.can?(agent_id, "arbor://ai/request/auto") == true
-      assert Arbor.Security.can?(agent_id, "arbor://fs/delete/everything") == false
+    test "authorize/2 checks capability presence", %{agent_id: agent_id} do
+      assert {:ok, :authorized} = Arbor.Security.authorize(agent_id, "arbor://ai/request/auto")
+      assert {:error, _} = Arbor.Security.authorize(agent_id, "arbor://fs/delete/everything")
     end
 
     test "expired capability is not authorized" do
@@ -84,11 +84,12 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
           resource: "arbor://test/behavioral/revoke"
         )
 
-      assert Arbor.Security.can?(agent_id, "arbor://test/behavioral/revoke") == true
+      assert {:ok, :authorized} =
+               Arbor.Security.authorize(agent_id, "arbor://test/behavioral/revoke")
 
       :ok = Arbor.Security.revoke(cap.id)
 
-      assert Arbor.Security.can?(agent_id, "arbor://test/behavioral/revoke") == false
+      assert {:error, _} = Arbor.Security.authorize(agent_id, "arbor://test/behavioral/revoke")
     end
   end
 

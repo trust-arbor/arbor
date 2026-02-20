@@ -84,6 +84,8 @@ defmodule Arbor.Agent.Templates.ClaudeCode do
   @impl true
   def required_capabilities do
     [
+      # Orchestrator session execution
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"},
       # File system access — read/write/execute scoped
       %{resource: "arbor://fs/read/**", description: "Read project files"},
       %{resource: "arbor://fs/write/**", description: "Write project files"},

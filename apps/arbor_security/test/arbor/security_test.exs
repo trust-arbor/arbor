@@ -31,19 +31,19 @@ defmodule Arbor.SecurityTest do
     end
   end
 
-  describe "can?/2" do
-    test "returns false without capability", %{agent_id: agent_id} do
-      refute Security.can?(agent_id, "arbor://fs/read/docs")
+  describe "authorize/2 boolean-style checks" do
+    test "returns error without capability", %{agent_id: agent_id} do
+      assert {:error, _} = Security.authorize(agent_id, "arbor://fs/read/docs")
     end
 
-    test "returns true with valid capability", %{agent_id: agent_id} do
+    test "returns ok with valid capability", %{agent_id: agent_id} do
       {:ok, _cap} =
         Security.grant(
           principal: agent_id,
           resource: "arbor://fs/read/docs"
         )
 
-      assert Security.can?(agent_id, "arbor://fs/read/docs")
+      assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/docs")
     end
   end
 
@@ -66,11 +66,11 @@ defmodule Arbor.SecurityTest do
           resource: "arbor://fs/write/temp"
         )
 
-      assert Security.can?(agent_id, "arbor://fs/write/temp")
+      assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/write/temp")
 
       :ok = Security.revoke(cap.id)
 
-      refute Security.can?(agent_id, "arbor://fs/write/temp")
+      assert {:error, _} = Security.authorize(agent_id, "arbor://fs/write/temp")
     end
   end
 
@@ -402,9 +402,6 @@ defmodule Arbor.SecurityTest do
 
       assert {:error, {:constraint_violated, :rate_limit, _}} =
                Security.authorize(agent_id, resource)
-
-      # can? should still return true (no constraint enforcement)
-      assert Security.can?(agent_id, resource)
     end
   end
 

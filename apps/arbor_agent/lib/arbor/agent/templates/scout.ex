@@ -38,6 +38,7 @@ defmodule Arbor.Agent.Templates.Scout do
   @impl true
   def required_capabilities do
     [
+      %{resource: "arbor://orchestrator/execute"},
       %{resource: "arbor://fs/read/**"}
     ]
   end

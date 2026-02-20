@@ -331,6 +331,16 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_call({:send_message, message}, _from, state) do
+    case authorize_orchestrator(state) do
+      :ok ->
+        do_send_message(message, state)
+
+      {:error, reason} ->
+        {:reply, {:error, {:unauthorized, reason}}, state}
+    end
+  end
+
+  defp do_send_message(message, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
     values = Builders.build_turn_values(state, message)
     engine_opts = Builders.build_engine_opts(state, values)
@@ -428,39 +438,79 @@ defmodule Arbor.Orchestrator.Session do
       # Don't stack heartbeats — skip if one is already running
       state
     else
-      session_pid = self()
-      values = Builders.build_heartbeat_values(state)
-      engine_opts = Builders.build_engine_opts(state, values)
-      heartbeat_graph = state.heartbeat_graph
+      case authorize_orchestrator(state) do
+        :ok ->
+          do_start_heartbeat_task(state)
 
-      task_sup = Arbor.Orchestrator.Session.TaskSupervisor
-
-      task_fn = fn ->
-        result =
-          try do
-            Engine.run(heartbeat_graph, engine_opts)
-          rescue
-            e -> {:error, {:engine_crash, Exception.message(e)}}
-          end
-
-        send(session_pid, {:heartbeat_result, result})
+        {:error, reason} ->
+          Logger.warning("[Session] Heartbeat blocked: unauthorized (#{inspect(reason)})")
+          state
       end
+    end
+  end
 
-      {:ok, _pid} =
-        if Process.whereis(task_sup) do
-          Task.Supervisor.start_child(task_sup, task_fn)
-        else
-          Task.start(task_fn)
+  defp do_start_heartbeat_task(state) do
+    session_pid = self()
+    values = Builders.build_heartbeat_values(state)
+    engine_opts = Builders.build_engine_opts(state, values)
+    heartbeat_graph = state.heartbeat_graph
+
+    task_sup = Arbor.Orchestrator.Session.TaskSupervisor
+
+    task_fn = fn ->
+      result =
+        try do
+          Engine.run(heartbeat_graph, engine_opts)
+        rescue
+          e -> {:error, {:engine_crash, Exception.message(e)}}
         end
 
-      %{state | heartbeat_in_flight: true}
+      send(session_pid, {:heartbeat_result, result})
     end
+
+    {:ok, _pid} =
+      if Process.whereis(task_sup) do
+        Task.Supervisor.start_child(task_sup, task_fn)
+      else
+        Task.start(task_fn)
+      end
+
+    %{state | heartbeat_in_flight: true}
   end
 
   defp schedule_heartbeat(state) do
     if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
     ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
     %{state | heartbeat_ref: ref}
+  end
+
+  # ── Gate-level orchestrator authorization ────────────────────────────
+  #
+  # Checks arbor://orchestrator/execute once per turn/heartbeat rather than
+  # per-node. Council decision 2026-02-20: gate auth + action-level auth
+  # provides defense-in-depth without O(N) per-node overhead.
+
+  @orchestrator_resource "arbor://orchestrator/execute"
+
+  defp authorize_orchestrator(state) do
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :authorize, 3) and
+         Process.whereis(Arbor.Security.CapabilityStore) != nil do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(Arbor.Security, :authorize, [state.agent_id, @orchestrator_resource, :execute]) do
+        {:ok, :authorized} -> :ok
+        {:error, _reason} -> {:error, :orchestrator_not_authorized}
+      end
+    else
+      # Security module not available (standalone orchestrator without security app).
+      # In test env, CapabilityStore is started by test_helper.exs, so tests
+      # always take the authorize path above.
+      :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ── Contract-aware state mutation ───────────────────────────────────

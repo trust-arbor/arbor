@@ -123,21 +123,6 @@ defmodule Arbor.Contracts.API.Security do
               {:ok, [capability()]} | {:error, term()}
 
   # ===========================================================================
-  # Fast Authorization
-  # ===========================================================================
-
-  @doc """
-  Check if a principal can perform an operation on a resource.
-
-  Fast boolean check — capability only, does not verify trust status.
-  """
-  @callback check_if_principal_can_perform_operation_on_resource(
-              principal_id(),
-              resource_uri :: String.t(),
-              operation :: atom()
-            ) :: boolean()
-
-  # ===========================================================================
   # Lifecycle
   # ===========================================================================
 
@@ -152,7 +137,6 @@ defmodule Arbor.Contracts.API.Security do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    check_if_principal_can_perform_operation_on_resource: 3,
     delegate_capability_from_principal_to_principal: 3
   ]
 end

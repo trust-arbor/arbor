@@ -97,6 +97,8 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   @impl true
   def required_capabilities do
     [
+      # Orchestrator session execution
+      %{resource: "arbor://orchestrator/execute"},
       # Read and write project files for code analysis and changes
       %{resource: "arbor://actions/execute/file.read"},
       %{resource: "arbor://actions/execute/file.write"},
