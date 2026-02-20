@@ -39,21 +39,35 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
     end
   end
 
+  @orchestrator_uri_prefix "arbor://orchestrator/execute/"
+
   @doc """
   Returns the list of capability URIs required for a node.
 
   Uses `node.capabilities_required` if populated by IR Compiler,
   otherwise falls back to a single URI derived from the node type.
+
+  Bare capability names (e.g. `"llm_query"`) are normalized to full
+  URIs (`"arbor://orchestrator/execute/llm_query"`) so they can be
+  matched against wildcard grants like `"arbor://orchestrator/execute/**"`.
   """
   @spec capability_resources(Arbor.Orchestrator.Graph.Node.t()) :: [String.t()]
   def capability_resources(node) do
     case node.capabilities_required do
       caps when is_list(caps) and caps != [] ->
-        caps
+        Enum.map(caps, &normalize_capability_uri/1)
 
       _ ->
         node_type = Map.get(node.attrs, "type", "unknown")
-        ["arbor://orchestrator/execute/#{node_type}"]
+        [@orchestrator_uri_prefix <> node_type]
+    end
+  end
+
+  defp normalize_capability_uri(cap) when is_binary(cap) do
+    if String.starts_with?(cap, "arbor://") do
+      cap
+    else
+      @orchestrator_uri_prefix <> cap
     end
   end
 
