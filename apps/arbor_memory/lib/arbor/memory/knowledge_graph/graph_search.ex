@@ -287,26 +287,26 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
 
     nodes_by_type =
       node_values
-      |> Enum.group_by(& &1.type)
+      |> Enum.group_by(&flexible_get(&1, :type))
       |> Map.new(fn {type, nodes} -> {type, length(nodes)} end)
 
     tokens_by_type =
       node_values
-      |> Enum.group_by(& &1.type)
+      |> Enum.group_by(&flexible_get(&1, :type))
       |> Map.new(fn {type, nodes} ->
-        {type, Enum.reduce(nodes, 0, fn n, acc -> acc + (n[:cached_tokens] || 0) end)}
+        {type, Enum.reduce(nodes, 0, fn n, acc -> acc + (flexible_get(n, :cached_tokens) || 0) end)}
       end)
 
     edges_by_relationship =
       graph.edges
       |> Map.values()
       |> List.flatten()
-      |> Enum.group_by(& &1.relationship)
+      |> Enum.group_by(&flexible_get(&1, :relationship))
       |> Map.new(fn {rel, edges} -> {rel, length(edges)} end)
 
     avg_relevance =
       if map_size(graph.nodes) > 0 do
-        total = Enum.sum(Enum.map(node_values, & &1.relevance))
+        total = Enum.sum(Enum.map(node_values, &(flexible_get(&1, :relevance) || 0.0)))
         total / map_size(graph.nodes)
       else
         0.0
@@ -594,6 +594,14 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       matching / length(query_terms)
     else
       0.0
+    end
+  end
+
+  # Handles maps with mixed atom/string keys (e.g., after Postgres deserialization)
+  defp flexible_get(map, key) when is_atom(key) do
+    case Map.get(map, key) do
+      nil -> Map.get(map, Atom.to_string(key))
+      val -> val
     end
   end
 end

@@ -41,11 +41,10 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     test "shows tab bar with all tabs", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/memory/test-agent-123")
 
-      assert html =~ "Overview"
+      assert html =~ "Working Memory"
       assert html =~ "Identity"
       assert html =~ "Goals"
       assert html =~ "Knowledge"
-      assert html =~ "Working Memory"
       assert html =~ "Preferences"
       assert html =~ "Proposals"
       assert html =~ "Code"
@@ -118,11 +117,11 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     end
 
     @tag :fast
-    test "change-tab back to overview", %{conn: conn} do
+    test "change-tab back to working_memory", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/memory/test-agent-123")
 
       render_click(view, "change-tab", %{"tab" => "identity"})
-      html = render_click(view, "change-tab", %{"tab" => "overview"})
+      html = render_click(view, "change-tab", %{"tab" => "working_memory"})
       assert is_binary(html)
     end
   end

@@ -2,8 +2,8 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   @moduledoc """
   Memory Viewer — tabbed inspection of agent memory state.
 
-  Provides 8 tabs: Overview, Identity, Goals, Knowledge Graph,
-  Working Memory, Preferences, Proposals, and Code.
+  Provides 7 tabs: Working Memory, Identity, Goals, Knowledge Graph,
+  Preferences, Proposals, and Code.
   """
 
   use Phoenix.LiveView
@@ -16,7 +16,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   alias Arbor.Web.Helpers
 
   @refresh_interval 10_000
-  @tabs ~w(overview identity goals knowledge working_memory preferences proposals code)
+  @tabs ~w(working_memory identity goals knowledge preferences proposals code)
   @expandable_sections ~w(thoughts concerns curiosity goals proposals kg)a
 
   @impl true
@@ -28,12 +28,12 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       |> assign(
         page_title: "Memory — #{agent_id}",
         agent_id: agent_id,
-        active_tab: "overview",
+        active_tab: "working_memory",
         expanded_section: nil,
         tab_data: %{},
         error: nil
       )
-      |> load_tab_data("overview", agent_id)
+      |> load_tab_data("working_memory", agent_id)
 
     socket =
       if connected?(socket) do
@@ -224,7 +224,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   # ── Tab Renderers ─────────────────────────────────────────────────
 
-  defp render_tab(%{active_tab: "overview"} = assigns) do
+  defp render_tab(%{active_tab: "working_memory"} = assigns) do
     ~H"""
     <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem;">
       <.clickable_stat_card
@@ -406,97 +406,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
         icon="🕸️"
         title="No near-threshold nodes"
         hint=""
-      />
-    </div>
-    """
-  end
-
-  defp render_tab(%{active_tab: "working_memory"} = assigns) do
-    ~H"""
-    <div>
-      <div :if={@tab_data[:working_memory]}>
-        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;">
-          <.stat_card
-            label="Engagement"
-            value={format_pct(Map.get(@tab_data[:working_memory], :engagement_level, 0.5))}
-          />
-          <.stat_card
-            label="Thoughts"
-            value={length(Map.get(@tab_data[:working_memory], :recent_thoughts, []))}
-          />
-          <.stat_card
-            label="Concerns"
-            value={length(Map.get(@tab_data[:working_memory], :concerns, []))}
-          />
-          <.stat_card
-            label="Curiosity"
-            value={length(Map.get(@tab_data[:working_memory], :curiosity, []))}
-          />
-        </div>
-
-        <h3 style="font-size: 0.95em; margin-bottom: 0.5rem;">Recent Thoughts</h3>
-        <div
-          :for={thought <- Enum.take(Map.get(@tab_data[:working_memory], :recent_thoughts, []), 10)}
-          style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.85em;"
-        >
-          <span>💭</span>
-          <span style="color: var(--aw-text-muted, #888);">
-            {Helpers.truncate(thought[:content] || to_string(thought), 200)}
-          </span>
-        </div>
-
-        <h3
-          :if={Map.get(@tab_data[:working_memory], :concerns, []) != []}
-          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
-        >
-          Concerns
-        </h3>
-        <div
-          :for={concern <- Map.get(@tab_data[:working_memory], :concerns, [])}
-          style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(255, 74, 74, 0.1); font-size: 0.85em;"
-        >
-          <span>⚠️</span>
-          <span style="color: var(--aw-text-muted, #888);">
-            {Helpers.truncate(concern[:content] || to_string(concern), 150)}
-          </span>
-        </div>
-
-        <h3
-          :if={Map.get(@tab_data[:working_memory], :curiosity, []) != []}
-          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
-        >
-          Curiosity
-        </h3>
-        <div
-          :for={item <- Map.get(@tab_data[:working_memory], :curiosity, [])}
-          style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(74, 158, 255, 0.1); font-size: 0.85em;"
-        >
-          <span>🔍</span>
-          <span style="color: var(--aw-text-muted, #888);">
-            {Helpers.truncate(item[:content] || to_string(item), 150)}
-          </span>
-        </div>
-
-        <h3
-          :if={Map.get(@tab_data[:working_memory], :conversation_context, nil)}
-          style="font-size: 0.95em; margin-top: 0.75rem; margin-bottom: 0.5rem;"
-        >
-          Conversation Context
-        </h3>
-        <div
-          :if={ctx = Map.get(@tab_data[:working_memory], :conversation_context, nil)}
-          style="padding: 0.4rem; border-radius: 4px; background: rgba(128,128,128,0.1); font-size: 0.85em;"
-        >
-          <span style="color: var(--aw-text-muted, #888);">
-            {Helpers.truncate(inspect(ctx), 300)}
-          </span>
-        </div>
-      </div>
-      <.empty_state
-        :if={@tab_data[:working_memory] == nil}
-        icon="💭"
-        title="No working memory"
-        hint="Agent needs to be active"
       />
     </div>
     """
@@ -698,10 +607,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     >
       <span style="margin-right: 0.3rem;">💭</span>
       <span style="color: var(--aw-text, #ccc);">
-        {thought[:content] || to_string(thought)}
+        {extract_text(thought)}
       </span>
       <div
-        :if={thought[:timestamp]}
+        :if={is_map(thought) && thought[:timestamp]}
         style="font-size: 0.75em; color: var(--aw-text-muted, #888); margin-top: 0.15rem;"
       >
         {Helpers.format_relative_time(thought[:timestamp])}
@@ -728,7 +637,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     >
       <span style="margin-right: 0.3rem;">⚠️</span>
       <span style="color: var(--aw-text, #ccc);">
-        {concern[:content] || to_string(concern)}
+        {extract_text(concern)}
       </span>
     </div>
     <.empty_state
@@ -752,7 +661,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     >
       <span style="margin-right: 0.3rem;">🔍</span>
       <span style="color: var(--aw-text, #ccc);">
-        {item[:content] || to_string(item)}
+        {extract_text(item)}
       </span>
     </div>
     <.empty_state
@@ -906,7 +815,7 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   # ── Data Loading ──────────────────────────────────────────────────
 
-  defp load_tab_data(socket, "overview", agent_id) do
+  defp load_tab_data(socket, "working_memory", agent_id) do
     data =
       case safe_call(fn -> Arbor.Memory.read_self(agent_id, :all) end) do
         {:ok, result} when is_map(result) ->
@@ -951,11 +860,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     stats = unwrap_map(safe_call(fn -> Arbor.Memory.knowledge_stats(agent_id) end)) || %{}
     near = unwrap_list(safe_call(fn -> Arbor.Memory.near_threshold_nodes(agent_id, 10) end))
     assign(socket, tab_data: %{stats: stats, near_threshold: near})
-  end
-
-  defp load_tab_data(socket, "working_memory", agent_id) do
-    wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
-    assign(socket, tab_data: %{working_memory: wm})
   end
 
   defp load_tab_data(socket, "preferences", agent_id) do
@@ -1052,11 +956,10 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp tabs, do: @tabs
 
-  defp tab_label("overview"), do: "📊 Overview"
+  defp tab_label("working_memory"), do: "💭 Working Memory"
   defp tab_label("identity"), do: "🪞 Identity"
   defp tab_label("goals"), do: "🎯 Goals"
   defp tab_label("knowledge"), do: "🕸️ Knowledge"
-  defp tab_label("working_memory"), do: "💭 Working Memory"
   defp tab_label("preferences"), do: "⚙️ Preferences"
   defp tab_label("proposals"), do: "📋 Proposals"
   defp tab_label("code"), do: "💻 Code"
@@ -1151,4 +1054,11 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       _ -> nil
     end
   end
+
+  # Extract display text from items that may be plain strings or maps with :content key.
+  # WorkingMemory concerns/curiosity are plain strings; thoughts may be maps.
+  defp extract_text(item) when is_binary(item), do: item
+  defp extract_text(%{content: content}), do: to_string(content)
+  defp extract_text(item) when is_map(item), do: Map.get(item, "content", inspect(item))
+  defp extract_text(item), do: to_string(item)
 end

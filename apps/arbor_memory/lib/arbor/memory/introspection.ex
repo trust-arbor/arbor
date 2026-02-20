@@ -100,12 +100,12 @@ defmodule Arbor.Memory.Introspection do
       if sk do
         %{
           traits:
-            Enum.map(sk.personality_traits, fn {trait, strength, _, _} ->
-              %{trait: trait, strength: strength}
+            Enum.map(sk.personality_traits, fn entry ->
+              %{trait: entry.trait, strength: entry.strength}
             end),
           values:
-            Enum.map(sk.values, fn {value, importance, _, _} ->
-              %{value: value, importance: importance}
+            Enum.map(sk.values, fn entry ->
+              %{value: entry.value, importance: entry.importance}
             end),
           capability_count: length(sk.capabilities),
           version: sk.version
@@ -129,8 +129,8 @@ defmodule Arbor.Memory.Introspection do
 
     capabilities =
       if sk do
-        Enum.map(sk.capabilities, fn {name, proficiency, evidence, _added_at} ->
-          %{name: name, proficiency: proficiency, evidence: evidence}
+        Enum.map(sk.capabilities, fn entry ->
+          %{name: entry.name, proficiency: entry.proficiency, evidence: entry[:evidence]}
         end)
       else
         []
