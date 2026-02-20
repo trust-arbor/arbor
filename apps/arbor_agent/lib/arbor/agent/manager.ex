@@ -68,6 +68,21 @@ defmodule Arbor.Agent.Manager do
              }
            ) do
         {:ok, pid} ->
+          # Start lifecycle (executor, session, host) for the new agent
+          try do
+            Lifecycle.start(
+              agent_id,
+              Keyword.merge(opts,
+                model: model_config[:id] || model_config["id"],
+                provider: model_config[:provider] || model_config["provider"]
+              )
+            )
+          rescue
+            _ -> :ok
+          catch
+            :exit, _ -> :ok
+          end
+
           safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
