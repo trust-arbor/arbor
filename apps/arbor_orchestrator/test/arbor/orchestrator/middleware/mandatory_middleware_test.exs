@@ -107,7 +107,23 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
 
     test "capability_resources/1 uses capabilities_required when populated" do
       node = make_compiled_node(%{capabilities_required: ["cap:a", "cap:b"]})
-      assert CapabilityCheck.capability_resources(node) == ["cap:a", "cap:b"]
+
+      assert CapabilityCheck.capability_resources(node) == [
+               "arbor://orchestrator/execute/cap:a",
+               "arbor://orchestrator/execute/cap:b"
+             ]
+    end
+
+    test "capability_resources/1 preserves already-qualified URIs" do
+      node =
+        make_compiled_node(%{
+          capabilities_required: ["arbor://custom/execute/foo", "bare_name"]
+        })
+
+      assert CapabilityCheck.capability_resources(node) == [
+               "arbor://custom/execute/foo",
+               "arbor://orchestrator/execute/bare_name"
+             ]
     end
 
     test "capability_resources/1 falls back to type-based URI for empty list" do

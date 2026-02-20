@@ -169,7 +169,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
       context: context,
       graph: graph,
       logs_root: Keyword.get(opts, :logs_root, ""),
-      assigns: build_assigns(context, opts)
+      assigns: build_assigns(context, opts, node)
     }
 
     # Run before_node middleware
@@ -202,7 +202,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     end
   end
 
-  defp build_assigns(context, opts) do
+  defp build_assigns(context, opts, node) do
     assigns = %{}
 
     assigns =
@@ -211,7 +211,9 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
         agent_id -> Map.put(assigns, :agent_id, agent_id)
       end
 
-    if Keyword.get(opts, :authorization) == false do
+    node_type = Registry.node_type(node)
+
+    if Keyword.get(opts, :authorization) == false or node_type in @always_authorized do
       Map.put(assigns, :skip_capability_check, true)
     else
       assigns
