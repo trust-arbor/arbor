@@ -189,6 +189,12 @@ defmodule Arbor.Agent.Lifecycle do
             Arbor.Signals.emit(:agent, :started, %{agent_id: agent_id})
             {:ok, pid}
 
+          {:error, {:already_started, pid}} ->
+            # Executor already running — still ensure session and host are started
+            maybe_start_session(agent_id, profile, opts)
+            maybe_start_api_agent(agent_id, profile, opts)
+            {:ok, pid}
+
           {:error, reason} ->
             {:error, reason}
         end
