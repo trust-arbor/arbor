@@ -477,7 +477,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp load_working_memory_from_memory(agent_id) do
     if memory_available?(:get_working_memory, 1) do
       case apply(Arbor.Memory, :get_working_memory, [agent_id]) do
-        wm when is_map(wm) and map_size(wm) > 0 -> wm
+        wm when is_map(wm) and map_size(wm) > 0 -> sanitize_working_memory(wm)
         _ -> nil
       end
     end
@@ -486,6 +486,38 @@ defmodule Arbor.Orchestrator.Session.Builders do
   catch
     :exit, _ -> nil
   end
+
+  # Convert WorkingMemory struct (or any map) to a plain JSON-serializable map.
+  # The engine checkpoint serializes context values via Jason — structs without
+  # Jason.Encoder will crash.
+  @wm_internal_keys ~w(agent_id max_tokens model __struct__)a
+  defp sanitize_working_memory(%{__struct__: _} = wm) do
+    wm
+    |> Map.from_struct()
+    |> Map.drop(@wm_internal_keys)
+    |> stringify_datetimes()
+  end
+
+  defp sanitize_working_memory(wm) when is_map(wm), do: wm
+
+  defp stringify_datetimes(map) when is_map(map) do
+    Map.new(map, fn
+      {k, %DateTime{} = dt} -> {k, DateTime.to_iso8601(dt)}
+      {k, items} when is_list(items) -> {k, Enum.map(items, &stringify_value/1)}
+      {k, v} -> {k, v}
+    end)
+  end
+
+  defp stringify_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp stringify_value(%{} = map) do
+    Map.new(map, fn
+      {k, %DateTime{} = dt} -> {k, DateTime.to_iso8601(dt)}
+      {k, v} -> {k, v}
+    end)
+  end
+
+  defp stringify_value(v), do: v
 
   defp load_knowledge_graph(agent_id) do
     if memory_available?(:export_knowledge_graph, 1) do
