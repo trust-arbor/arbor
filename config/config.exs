@@ -221,7 +221,10 @@ config :arbor_memory,
   preconscious_enabled: true,
   preconscious_threshold: 0.4,
   preconscious_max_per_check: 3,
-  preconscious_lookback_turns: 5
+  preconscious_lookback_turns: 5,
+  # Embedding-based dedup: uses Ollama to catch semantic duplicates in self-knowledge
+  # that word-set similarity misses (different vocabulary, same concept)
+  embedding_dedup_enabled: false
 
 # pgvector embedding configuration
 config :arbor_persistence,
