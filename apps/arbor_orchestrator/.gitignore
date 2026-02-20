@@ -28,4 +28,5 @@ arbor_orchestrator-*.tar
 /specs/*
 !/specs/pipelines/
 !/specs/attractor/
+!/specs/arbor/
 
