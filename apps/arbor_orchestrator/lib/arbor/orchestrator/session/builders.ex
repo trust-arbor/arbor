@@ -33,9 +33,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
   def build_heartbeat_values(state) do
     base = session_base_values(state)
 
+    # Load fresh goals and working memory from the memory store (source of truth),
+    # since the Session state may not have them (not populated at session creation).
+    goals = load_goals_from_memory(state.agent_id) || Map.get(base, "session.goals", [])
+    wm = load_working_memory_from_memory(state.agent_id) || Map.get(base, "session.working_memory", %{})
+
     base
     |> Map.put("session.messages", [])
     |> Map.put("session.is_heartbeat", true)
+    |> Map.put("session.goals", goals)
+    |> Map.put("session.working_memory", wm)
   end
 
   @doc false
@@ -428,5 +435,47 @@ defmodule Arbor.Orchestrator.Session.Builders do
           _ -> nil
         end
     end
+  end
+
+  # ── Memory store runtime bridge ──────────────────────────────────
+
+  defp load_goals_from_memory(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory) and
+         function_exported?(Arbor.Memory, :get_active_goals, 1) do
+      case apply(Arbor.Memory, :get_active_goals, [agent_id]) do
+        goals when is_list(goals) and goals != [] ->
+          Enum.map(goals, fn goal ->
+            %{
+              "id" => to_string(Map.get(goal, :id, "")),
+              "description" => to_string(Map.get(goal, :description, "")),
+              "progress" => Map.get(goal, :progress, 0.0),
+              "status" => to_string(Map.get(goal, :status, :active)),
+              "priority" => Map.get(goal, :priority, 50),
+              "type" => to_string(Map.get(goal, :type, :achieve))
+            }
+          end)
+
+        _ ->
+          nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp load_working_memory_from_memory(agent_id) do
+    if Code.ensure_loaded?(Arbor.Memory) and
+         function_exported?(Arbor.Memory, :get_working_memory, 1) do
+      case apply(Arbor.Memory, :get_working_memory, [agent_id]) do
+        wm when is_map(wm) and map_size(wm) > 0 -> wm
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 end
