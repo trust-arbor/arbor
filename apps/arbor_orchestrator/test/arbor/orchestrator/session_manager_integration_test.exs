@@ -36,7 +36,8 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
           :ok
       end
 
-      agent_id = "int-test-agent-#{:erlang.unique_integer([:positive])}"
+      agent_id = "agent_int_#{:erlang.unique_integer([:positive])}"
+      Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
 
       on_exit(fn ->
         try do

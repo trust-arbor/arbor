@@ -1,17 +1,14 @@
 defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
   @moduledoc """
-  Capability-based subscription authorizer using fast ETS lookups.
+  Capability-based subscription authorizer.
 
   Checks whether a principal has a capability granting access to the
-  `arbor://signals/subscribe/{topic}` resource via `Arbor.Security.can?/3`.
-  Unlike `SecurityAuthorizer` (which calls `authorize/4` for the full pipeline
-  including identity verification, constraints, reflexes, and escalation), this
-  authorizer uses the lightweight `can?/3` check — a pure ETS lookup that only
-  verifies capability existence.
+  `arbor://signals/subscribe/{topic}` resource via `Arbor.Security.authorize/3`.
+  Uses the full authorization pipeline (identity verification, constraints,
+  reflexes, escalation, and audit logging) for all topics.
 
   This is the recommended authorizer for dev/prod environments where the
-  security kernel is running, since signal subscription authorization should
-  be fast and non-blocking (no GenServer calls in the hot path).
+  security kernel is running.
 
   ## Runtime Bridge Pattern
 
@@ -43,52 +40,13 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
     security_module = security_module()
     resource_uri = "arbor://signals/subscribe/#{topic}"
 
-    # H4: Use full authorize/4 pipeline for restricted topics (identity verification,
-    # constraints, reflexes, escalation). Use fast can?/3 for non-restricted topics.
-    restricted_topics = restricted_topics()
-
-    if topic_is_restricted?(topic, restricted_topics) do
-      authorize_full(security_module, principal_id, resource_uri)
-    else
-      authorize_fast(security_module, principal_id, resource_uri)
-    end
-  rescue
-    error ->
-      Logger.error(
-        "CapabilityAuthorizer: error checking capability for #{inspect(principal_id)} " <>
-          "on topic #{inspect(topic)}: #{inspect(error)}"
-      )
-
-      {:error, :no_capability}
-  end
-
-  # Full authorize/4 pipeline for restricted topics
-  defp authorize_full(security_module, principal_id, resource_uri) do
     if Code.ensure_loaded?(security_module) and
-         function_exported?(security_module, :authorize, 4) do
+         function_exported?(security_module, :authorize, 3) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, []]) do
+      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe]) do
         {:ok, :authorized} -> {:ok, :authorized}
         {:ok, :pending_approval, _} -> {:error, :pending_approval}
         {:error, _reason} -> {:error, :no_capability}
-      end
-    else
-      Logger.warning(
-        "CapabilityAuthorizer: security module #{inspect(security_module)} not loaded for restricted topic"
-      )
-
-      {:error, :no_capability}
-    end
-  end
-
-  # Fast ETS-only check for non-restricted topics
-  defp authorize_fast(security_module, principal_id, resource_uri) do
-    if Code.ensure_loaded?(security_module) and
-         function_exported?(security_module, :can?, 3) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(security_module, :can?, [principal_id, resource_uri, :subscribe]) do
-        true -> {:ok, :authorized}
-        false -> {:error, :no_capability}
       end
     else
       Logger.warning(
@@ -98,25 +56,14 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
 
       {:error, :no_capability}
     end
-  end
+  rescue
+    error ->
+      Logger.error(
+        "CapabilityAuthorizer: error checking capability for #{inspect(principal_id)} " <>
+          "on topic #{inspect(topic)}: #{inspect(error)}"
+      )
 
-  defp topic_is_restricted?(topic, restricted_topics) do
-    topic_atom =
-      if is_atom(topic) do
-        topic
-      else
-        try do
-          String.to_existing_atom(to_string(topic))
-        rescue
-          _ -> nil
-        end
-      end
-
-    topic_atom in restricted_topics
-  end
-
-  defp restricted_topics do
-    Application.get_env(:arbor_signals, :restricted_topics, [:security, :identity])
+      {:error, :no_capability}
   end
 
   @doc false

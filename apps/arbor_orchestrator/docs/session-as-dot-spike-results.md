@@ -185,7 +185,7 @@ These should be defined as typespecs in a contract module:
 
 1. **Authorization gate**: `check_auth` diamond in `turn.dot` currently classifies input type but doesn't check trust tier. Phase 1 needs a `session.authorize` node type that reads `session.trust_tier` and checks against capability requirements.
 
-2. **Tool filtering**: The `tool_dispatch` adapter needs trust-tier-aware tool filtering. Currently, tool authorization happens in the Executor — the adapter should delegate to `Arbor.Security.can?/3` before dispatching.
+2. **Tool filtering**: The `tool_dispatch` adapter needs trust-tier-aware tool filtering. Currently, tool authorization happens in the Executor — the adapter should delegate to `Arbor.Security.authorize/3` before dispatching.
 
 3. **Heartbeat interval**: Trust tier should influence heartbeat frequency. Lower tiers might have longer intervals or no heartbeat at all.
 

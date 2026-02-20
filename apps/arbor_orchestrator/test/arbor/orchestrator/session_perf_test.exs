@@ -85,6 +85,8 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
   end
 
   defp start_session(ctx, id, opts \\ []) do
+    agent_id = "agent_perf_#{id}"
+    Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
     simulated_latency = Keyword.get(opts, :simulated_latency, 0)
     counter = :counters.new(1, [:atomics])
 
@@ -107,7 +109,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
     {:ok, pid} =
       Session.start_link(
         session_id: "perf-#{id}-#{:erlang.unique_integer([:positive])}",
-        agent_id: "agent_perf_#{id}",
+        agent_id: agent_id,
         trust_tier: :established,
         turn_dot: ctx.turn_path,
         heartbeat_dot: ctx.heartbeat_path,

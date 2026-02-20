@@ -46,6 +46,7 @@ defmodule Arbor.Agent.Templates.CodeReviewer do
   @impl true
   def required_capabilities do
     [
+      %{resource: "arbor://orchestrator/execute"},
       %{resource: "arbor://fs/read/**"},
       %{resource: "arbor://shell/safe"},
       %{resource: "arbor://memory/**"}

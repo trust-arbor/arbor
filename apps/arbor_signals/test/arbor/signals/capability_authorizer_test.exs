@@ -6,8 +6,7 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
   alias Arbor.Signals.Adapters.CapabilityAuthorizer
 
   describe "authorize_subscription/2" do
-    test "returns :authorized when security module reports capability exists" do
-      # Configure a mock security module that says "yes"
+    test "returns :authorized when security module grants access" do
       Application.put_env(:arbor_signals, :security_module, __MODULE__.MockSecurityAllows)
       on_exit(fn -> Application.delete_env(:arbor_signals, :security_module) end)
 
@@ -15,7 +14,7 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
                CapabilityAuthorizer.authorize_subscription("agent_abc", :security)
     end
 
-    test "returns :no_capability when security module reports no capability" do
+    test "returns :no_capability when security module denies access" do
       Application.put_env(:arbor_signals, :security_module, __MODULE__.MockSecurityDenies)
       on_exit(fn -> Application.delete_env(:arbor_signals, :security_module) end)
 
@@ -29,8 +28,8 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
       CapabilityAuthorizer.authorize_subscription("agent_xyz", :identity)
 
-      # :identity is a restricted topic (H4), so it uses authorize/4 not can?/3
-      assert_received {:authorize_check, "agent_xyz", "arbor://signals/subscribe/identity", :subscribe}
+      assert_received {:authorize_check, "agent_xyz",
+                       "arbor://signals/subscribe/identity", :subscribe}
     end
 
     test "returns :no_capability when security module is not loaded" do
@@ -41,9 +40,8 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
                CapabilityAuthorizer.authorize_subscription("agent_abc", :security)
     end
 
-    test "returns :no_capability when security module lacks can?/3" do
-      # A module that exists but doesn't have can?/3
-      Application.put_env(:arbor_signals, :security_module, __MODULE__.MockSecurityNoCan)
+    test "returns :no_capability when security module lacks authorize/3" do
+      Application.put_env(:arbor_signals, :security_module, __MODULE__.MockSecurityNoAuthorize)
       on_exit(fn -> Application.delete_env(:arbor_signals, :security_module) end)
 
       assert {:error, :no_capability} =
@@ -70,41 +68,35 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
 
       CapabilityAuthorizer.authorize_subscription("agent_test", :consensus)
 
-      assert_received {:can_check, "agent_test", "arbor://signals/subscribe/consensus", :subscribe}
+      assert_received {:authorize_check, "agent_test",
+                       "arbor://signals/subscribe/consensus", :subscribe}
     end
   end
 
   # Mock modules for testing
 
   defmodule MockSecurityAllows do
-    def can?(_principal, _resource, _action), do: true
-    def authorize(_principal, _resource, _action, _opts), do: {:ok, :authorized}
+    def authorize(_principal, _resource, _action), do: {:ok, :authorized}
   end
 
   defmodule MockSecurityDenies do
-    def can?(_principal, _resource, _action), do: false
-    def authorize(_principal, _resource, _action, _opts), do: {:error, :denied}
+    def authorize(_principal, _resource, _action), do: {:error, :denied}
   end
 
   defmodule MockSecurityCapture do
-    def can?(principal, resource, action) do
-      send(self(), {:can_check, principal, resource, action})
-      true
-    end
-
-    def authorize(principal, resource, action, _opts) do
+    def authorize(principal, resource, action) do
       send(self(), {:authorize_check, principal, resource, action})
       {:ok, :authorized}
     end
   end
 
-  defmodule MockSecurityNoCan do
-    # Intentionally does not implement can?/3
-    def authorize(_principal, _resource, _action), do: {:ok, :authorized}
+  defmodule MockSecurityNoAuthorize do
+    # Intentionally does not implement authorize/3
+    def some_other_function, do: :ok
   end
 
   defmodule MockSecurityRaises do
-    def can?(_principal, _resource, _action) do
+    def authorize(_principal, _resource, _action) do
       raise "security module error"
     end
   end

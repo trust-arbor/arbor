@@ -12,10 +12,9 @@ defmodule Arbor.Consensus.Authorizer do
 
         @impl true
         def authorize_proposal(proposal) do
-          if Arbor.Security.can?(proposal.proposer, "arbor://consensus/propose", :write) do
-            :ok
-          else
-            {:error, :unauthorized}
+          case Arbor.Security.authorize(proposal.proposer, "arbor://consensus/propose", :write) do
+            {:ok, :authorized} -> :ok
+            {:error, _reason} -> {:error, :unauthorized}
           end
         end
 
