@@ -56,9 +56,9 @@ defmodule Arbor.Actions.CliAgentTest do
       assert roles.agent == :control
     end
 
-    test "prompt is control" do
+    test "prompt requires prompt_injection sanitization" do
       roles = Execute.taint_roles()
-      assert roles.prompt == :control
+      assert roles.prompt == {:control, requires: [:prompt_injection]}
     end
 
     test "model is control" do
@@ -66,14 +66,14 @@ defmodule Arbor.Actions.CliAgentTest do
       assert roles.model == :control
     end
 
-    test "system_prompt is control" do
+    test "system_prompt requires prompt_injection sanitization" do
       roles = Execute.taint_roles()
-      assert roles.system_prompt == :control
+      assert roles.system_prompt == {:control, requires: [:prompt_injection]}
     end
 
-    test "working_dir is control" do
+    test "working_dir requires path_traversal sanitization" do
       roles = Execute.taint_roles()
-      assert roles.working_dir == :control
+      assert roles.working_dir == {:control, requires: [:path_traversal]}
     end
 
     test "timeout is data" do

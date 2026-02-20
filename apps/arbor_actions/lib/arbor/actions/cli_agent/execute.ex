@@ -89,14 +89,14 @@ defmodule Arbor.Actions.CliAgent.Execute do
   alias Arbor.Actions
   alias Arbor.Actions.CliAgent.Adapters
 
-  @spec taint_roles() :: %{atom() => :control | :data}
+  @spec taint_roles() :: %{atom() => Arbor.Actions.Taint.role()}
   def taint_roles do
     %{
       agent: :control,
-      prompt: :control,
+      prompt: {:control, requires: [:prompt_injection]},
       model: :control,
-      system_prompt: :control,
-      working_dir: :control,
+      system_prompt: {:control, requires: [:prompt_injection]},
+      working_dir: {:control, requires: [:path_traversal]},
       timeout: :data,
       max_thinking_tokens: :data,
       session_id: :control,

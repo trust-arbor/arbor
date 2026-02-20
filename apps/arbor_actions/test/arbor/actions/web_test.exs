@@ -90,7 +90,7 @@ defmodule Arbor.Actions.WebTest do
 
     test "declares taint roles" do
       roles = Browse.taint_roles()
-      assert roles.url == :control
+      assert roles.url == {:control, requires: [:ssrf]}
       assert roles.selector == :control
       assert roles.format == :data
     end
@@ -144,7 +144,7 @@ defmodule Arbor.Actions.WebTest do
 
     test "declares taint roles" do
       roles = Snapshot.taint_roles()
-      assert roles.url == :control
+      assert roles.url == {:control, requires: [:ssrf]}
       assert roles.selector == :control
       assert roles.include_links == :data
     end
