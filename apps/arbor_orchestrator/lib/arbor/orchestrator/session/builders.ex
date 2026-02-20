@@ -66,7 +66,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
       session_adapters: state.adapters,
       logs_root: logs_root,
       max_steps: 100,
-      initial_values: initial_values
+      initial_values: initial_values,
+      authorization: false
     ]
   end
 

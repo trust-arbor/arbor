@@ -583,7 +583,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           <%= if @current_model && @current_model[:label] do %>
             Chat with {@current_model.label} ({@current_model[:provider]})
           <% else %>
-            Chat with Claude
+            Chat with {@display_name || "Agent"}
           <% end %>
         </span>
         <div style="flex: 1;"></div>
@@ -624,6 +624,14 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           title="Create multi-agent group chat"
         >
           👥 Group
+        </button>
+        <button
+          :if={!@group_mode}
+          phx-click="show-join-groups"
+          style="padding: 0.4rem 0.75rem; background: var(--aw-info, #3b82f6); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
+          title="Join an existing group chat"
+        >
+          Join Room
         </button>
         <button
           :if={@group_mode}
@@ -1017,8 +1025,34 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         phx-click="noop"
       >
         <h3 style="margin: 0 0 1rem 0; color: var(--aw-text, #e0e0e0);">
-          👥 Create Group Chat
+          <%= if @existing_groups != [] do %>
+            Join or Create Group Chat
+          <% else %>
+            👥 Create Group Chat
+          <% end %>
         </h3>
+
+        <%= if @existing_groups != [] do %>
+          <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--aw-border, #333);">
+            <label style="display: block; margin-bottom: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.9em;">
+              Active Rooms
+            </label>
+            <%= for {group_id, _pid} <- @existing_groups do %>
+              <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.25rem; background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3);">
+                <span style="color: var(--aw-text, #e0e0e0); flex: 1;">
+                  {group_id}
+                </span>
+                <button
+                  phx-click="join-group"
+                  phx-value-group-id={group_id}
+                  style="padding: 0.3rem 0.75rem; background: var(--aw-info, #3b82f6); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.85em;"
+                >
+                  Join
+                </button>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
 
         <div style="margin-bottom: 1rem;">
           <label style="display: block; margin-bottom: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.9em;">

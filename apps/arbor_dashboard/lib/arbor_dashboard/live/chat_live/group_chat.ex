@@ -24,7 +24,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
       show_group_modal: false,
       available_for_group: [],
       group_selection: %{},
-      group_name_input: "Group Chat"
+      group_name_input: "Group Chat",
+      existing_groups: []
     }
   end
 
@@ -105,7 +106,64 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   end
 
   def handle_event("cancel-group-modal", _params, socket) do
-    {:noreply, assign(socket, show_group_modal: false)}
+    {:noreply, assign(socket, show_group_modal: false, existing_groups: [])}
+  end
+
+  def handle_event("show-join-groups", _params, socket) do
+    groups = Manager.list_groups()
+    {:noreply, assign(socket, existing_groups: groups, show_group_modal: true)}
+  end
+
+  def handle_event("join-group", %{"group-id" => group_id}, socket) do
+    groups = Manager.list_groups()
+
+    case Enum.find(groups, fn {id, _pid} -> id == group_id end) do
+      {^group_id, group_pid} ->
+        # Add human as participant
+        Arbor.Agent.GroupChat.add_participant(group_pid, %{
+          id: "human_primary",
+          name: "User",
+          type: :human,
+          host_pid: nil
+        })
+
+        # Subscribe to group messages
+        try do
+          Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "group_chat:#{group_id}")
+        rescue
+          _ -> :ok
+        end
+
+        # Get current participants
+        participants =
+          try do
+            Arbor.Agent.GroupChat.get_participants(group_pid)
+            |> Enum.map(fn p ->
+              %{id: p.id, name: p.name, type: p.type, color: sender_color_hue(p.id)}
+            end)
+          rescue
+            _ -> []
+          catch
+            :exit, _ -> []
+          end
+
+        socket =
+          socket
+          |> assign(
+            group_pid: group_pid,
+            group_id: group_id,
+            group_participants: participants,
+            group_mode: true,
+            show_group_modal: false,
+            existing_groups: []
+          )
+          |> stream(:messages, [], reset: true)
+
+        {:noreply, socket}
+
+      nil ->
+        {:noreply, assign(socket, error: "Group not found")}
+    end
   end
 
   def handle_event("leave-group", _params, socket) do
