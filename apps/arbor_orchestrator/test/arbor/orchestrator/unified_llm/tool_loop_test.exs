@@ -193,7 +193,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
           tool_executor: MockTools
         )
 
-      assert result.text == "File contains: world"
+      # Tool results are wrapped in <data_NONCE> tags for prompt injection defense.
+      # The mock adapter echoes content verbatim, so tags appear in output.
+      assert result.text =~ ~r/File contains: <data_[0-9a-f]{16}>world<\/data_[0-9a-f]{16}>/
       assert result.turns == 2
       assert result.finish_reason == :stop
     end
@@ -208,7 +210,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
           tool_executor: MockTools
         )
 
-      assert result.text == "Verified: hello world"
+      # Tool results are wrapped in <data_NONCE> tags for prompt injection defense.
+      assert result.text =~ ~r/Verified: <data_[0-9a-f]{16}>hello world<\/data_[0-9a-f]{16}>/
       assert result.turns == 3
 
       # Verify file was actually written

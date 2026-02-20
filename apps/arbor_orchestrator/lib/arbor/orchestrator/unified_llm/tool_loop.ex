@@ -28,6 +28,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
   alias Arbor.Orchestrator.UnifiedLLM.{Client, CodingTools, ContentPart, Message, Request}
 
+  @prompt_sanitizer Arbor.Common.PromptSanitizer
+
   @default_max_turns 15
 
   @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -163,11 +165,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp build_tool_messages(tool_results) do
+    nonce = @prompt_sanitizer.generate_nonce()
+
     Enum.map(tool_results, fn {call_id, name, result} ->
       {content, is_error} =
         case result do
-          {:ok, text} -> {truncate(text, 30_000), false}
-          {:error, reason} -> {"Error: #{reason}", true}
+          {:ok, text} ->
+            {@prompt_sanitizer.wrap(truncate(text, 30_000), nonce), false}
+
+          {:error, reason} ->
+            {"Error: #{reason}", true}
         end
 
       Message.new(:tool, content, %{
