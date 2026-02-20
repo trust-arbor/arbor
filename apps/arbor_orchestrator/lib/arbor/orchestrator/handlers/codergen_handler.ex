@@ -16,6 +16,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   import Arbor.Orchestrator.Handlers.Helpers
 
+  @prompt_sanitizer Arbor.Common.PromptSanitizer
+
   @impl true
   def execute(node, context, graph, opts) do
     goal = Map.get(graph.attrs, "goal", "")
@@ -131,20 +133,26 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   defp call_llm(prompt, node, context, graph, opts) do
     client = Keyword.get(opts, :llm_client) || Client.default_client()
+    nonce = @prompt_sanitizer.generate_nonce()
 
     previous_outcome =
       case Map.get(node.attrs, "context.previous_outcome") do
         nil -> ""
-        outcome -> "\n\nPrevious stage outcome: #{outcome}"
+        outcome -> "\n\nPrevious stage outcome: #{@prompt_sanitizer.wrap(outcome, nonce)}"
       end
 
     goal = Map.get(graph.attrs, "goal", "")
 
     system_content =
       case Map.get(node.attrs, "system_prompt") do
-        nil -> "You are a coding agent working on the following goal: #{goal}"
-        sys -> sys
+        nil ->
+          "You are a coding agent working on the following goal: #{@prompt_sanitizer.wrap(goal, nonce)}"
+
+        sys ->
+          sys
       end
+
+    system_content = @prompt_sanitizer.preamble(nonce) <> "\n\n" <> system_content
 
     # In decision mode with a perspective, prepend vote format instructions
     system_content = maybe_prepend_vote_format(system_content, node.attrs, graph.attrs)

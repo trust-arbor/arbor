@@ -62,6 +62,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @behaviour Arbor.Contracts.Consensus.Evaluator
 
+  alias Arbor.Common.PromptSanitizer
   alias Arbor.Consensus.Config
   alias Arbor.Consensus.ConsultationLog
   alias Arbor.Consensus.LLMBridge
@@ -643,10 +644,12 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # ============================================================================
 
   defp format_proposal(proposal, perspective, doc_paths) do
+    nonce = PromptSanitizer.generate_nonce()
+
     context_section =
       case format_context(proposal.context) do
         "" -> ""
-        formatted -> "\n### Context\n#{formatted}\n"
+        formatted -> "\n### Context\n#{PromptSanitizer.wrap(formatted, nonce)}\n"
       end
 
     new_code = Map.get(proposal.context, :new_code)
@@ -655,10 +658,12 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     doc_section = format_doc_paths(doc_paths)
 
     """
+    #{PromptSanitizer.preamble(nonce)}
+
     ## Advisory Request (#{perspective})
 
     ### Question/Description
-    #{proposal.description}
+    #{PromptSanitizer.wrap(proposal.description, nonce)}
     #{context_section}
     ### Topic
     #{proposal.topic}
@@ -666,8 +671,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     ### Target Layer
     #{proposal.target_layer}
 
-    #{doc_section}#{if new_code, do: "### Proposed Code\n```elixir\n#{new_code}\n```\n", else: ""}
-    #{if code_diff, do: "### Code Diff\n```\n#{code_diff}\n```\n", else: ""}
+    #{doc_section}#{if new_code, do: "### Proposed Code\n```elixir\n#{PromptSanitizer.wrap(new_code, nonce)}\n```\n", else: ""}
+    #{if code_diff, do: "### Code Diff\n```\n#{PromptSanitizer.wrap(code_diff, nonce)}\n```\n", else: ""}
     """
   end
 

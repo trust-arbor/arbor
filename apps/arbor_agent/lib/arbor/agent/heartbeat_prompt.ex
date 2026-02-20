@@ -8,6 +8,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   """
 
   alias Arbor.Agent.{CognitivePrompts, TimingContext}
+  alias Arbor.Common.PromptSanitizer
   alias Arbor.Memory
 
   @prompt_sections [
@@ -40,35 +41,58 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   def build_prompt(state) do
     mode = Map.get(state, :cognitive_mode, :consolidation)
     enabled = Map.get(state, :enabled_prompt_sections, :all)
+    nonce = PromptSanitizer.generate_nonce()
 
+    # Sections tagged :wrap contain untrusted data and get nonce-wrapped.
+    # Sections tagged :raw are static instructions and stay unwrapped.
     [
-      {:timing, fn -> timing_section(state) end},
-      {:cognitive, fn -> cognitive_section(mode) end},
-      {:self_knowledge, fn -> self_knowledge_section(state) end},
-      {:conversation, fn -> conversation_section(state) end},
-      {:goals, fn -> goals_section(state, mode) end},
-      {:tools, fn -> tools_section(state) end},
-      {:proposals, fn -> proposals_section(state) end},
-      {:patterns, fn -> patterns_section(state) end},
-      {:percepts, fn -> percepts_section(state) end},
-      {:pending, fn -> pending_section(state) end},
-      {:directive, fn -> directive_section(mode, state) end},
-      {:response_format, fn -> response_format_section() end}
+      {:timing, :raw, fn -> timing_section(state) end},
+      {:cognitive, :raw, fn -> cognitive_section(mode) end},
+      {:self_knowledge, :wrap, fn -> self_knowledge_section(state) end},
+      {:conversation, :wrap, fn -> conversation_section(state) end},
+      {:goals, :wrap, fn -> goals_section(state, mode) end},
+      {:tools, :raw, fn -> tools_section(state) end},
+      {:proposals, :wrap, fn -> proposals_section(state) end},
+      {:patterns, :wrap, fn -> patterns_section(state) end},
+      {:percepts, :wrap, fn -> percepts_section(state) end},
+      {:pending, :raw, fn -> pending_section(state) end},
+      {:directive, :raw, fn -> directive_section(mode, state) end},
+      {:response_format, :raw, fn -> response_format_section() end}
     ]
-    |> Enum.filter(fn {name, _} -> enabled == :all or name in enabled end)
-    |> Enum.map(fn {_name, builder} -> builder.() end)
+    |> Enum.filter(fn {name, _, _} -> enabled == :all or name in enabled end)
+    |> Enum.map(fn {_name, mode, builder} ->
+      content = builder.()
+
+      case mode do
+        :wrap -> wrap_section(content, nonce)
+        :raw -> content
+      end
+    end)
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n")
   end
 
   @doc """
   Build a system prompt with JSON response format instructions.
+
+  Accepts an optional `:nonce` key in state to include the data-tag
+  preamble. When present, the LLM is instructed to treat `<data_NONCE>`
+  sections as untrusted data.
   """
   @spec system_prompt(map()) :: String.t()
-  def system_prompt(_state) do
+  def system_prompt(state) do
+    nonce = Map.get(state, :nonce)
+
+    preamble =
+      if nonce do
+        "\n\n" <> PromptSanitizer.preamble(nonce) <> "\n"
+      else
+        ""
+      end
+
     """
     You are an autonomous AI agent running a heartbeat cycle. You have access to
-    goals, recent action results, and conversational context.
+    goals, recent action results, and conversational context.#{preamble}
 
     You MUST respond with valid JSON only (no markdown, no code blocks, no explanation outside JSON).
     Use this exact format:
@@ -121,6 +145,12 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     (capability, trait, or value), content describing it, and confidence (0.0-1.0).
     """
   end
+
+  # -- Nonce wrapping --
+
+  defp wrap_section(nil, _nonce), do: nil
+  defp wrap_section("", _nonce), do: ""
+  defp wrap_section(content, nonce), do: PromptSanitizer.wrap(content, nonce)
 
   # -- Private sections --
 

@@ -8,7 +8,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   if the data isn't available.
   """
 
-  alias Arbor.Common.LazyLoader
+  alias Arbor.Common.{LazyLoader, PromptSanitizer}
 
   # Per-section token budgets. {:fixed, N} for static sections,
   # {:min_max, min, max, pct} for dynamic sections sized to context window.
@@ -43,10 +43,15 @@ defmodule Arbor.AI.SystemPromptBuilder do
   @spec build_stable_system_prompt(String.t(), keyword()) :: String.t()
   def build_stable_system_prompt(agent_id, opts \\ []) do
     budgets = resolve_section_budgets(opts)
+    nonce = Keyword.get(opts, :nonce)
 
     sections = [
       truncate_section(build_identity_section(), budgets.identity),
-      truncate_section(build_self_knowledge_section(agent_id), budgets.self_knowledge),
+      if(nonce, do: PromptSanitizer.preamble(nonce)),
+      truncate_section(
+        wrap_section(build_self_knowledge_section(agent_id), nonce),
+        budgets.self_knowledge
+      ),
       truncate_section(build_tool_guidance_section(), budgets.tool_guidance)
     ]
 
@@ -70,12 +75,19 @@ defmodule Arbor.AI.SystemPromptBuilder do
   @spec build_volatile_context(String.t(), keyword()) :: String.t()
   def build_volatile_context(agent_id, opts \\ []) do
     budgets = resolve_section_budgets(opts)
+    nonce = Keyword.get(opts, :nonce)
 
     sections = [
-      truncate_section(build_goals_section(agent_id), budgets.goals),
-      truncate_section(build_working_memory_section(agent_id), budgets.working_memory),
+      truncate_section(wrap_section(build_goals_section(agent_id), nonce), budgets.goals),
+      truncate_section(
+        wrap_section(build_working_memory_section(agent_id), nonce),
+        budgets.working_memory
+      ),
       truncate_section(build_active_skills_section(agent_id), budgets.active_skills),
-      truncate_section(build_knowledge_graph_section(agent_id), budgets.knowledge_graph),
+      truncate_section(
+        wrap_section(build_knowledge_graph_section(agent_id), nonce),
+        budgets.knowledge_graph
+      ),
       truncate_section(build_timing_section(opts), budgets.timing)
     ]
 
@@ -98,6 +110,9 @@ defmodule Arbor.AI.SystemPromptBuilder do
   """
   @spec build_rich_system_prompt(String.t(), keyword()) :: String.t()
   def build_rich_system_prompt(agent_id, opts \\ []) do
+    nonce = Keyword.get_lazy(opts, :nonce, &PromptSanitizer.generate_nonce/0)
+    opts = Keyword.put(opts, :nonce, nonce)
+
     stable = build_stable_system_prompt(agent_id, opts)
     volatile = build_volatile_context(agent_id, opts)
 
@@ -157,6 +172,13 @@ defmodule Arbor.AI.SystemPromptBuilder do
     truncated <>
       "\n\n[System prompt truncated — #{byte_size(prompt)} chars exceeded #{max_chars} limit]"
   end
+
+  # ── Nonce Wrapping ──────────────────────────────────────────────
+
+  defp wrap_section(nil, _nonce), do: nil
+  defp wrap_section("", _nonce), do: ""
+  defp wrap_section(content, nil), do: content
+  defp wrap_section(content, nonce), do: PromptSanitizer.wrap(content, nonce)
 
   # ── Section Builders ──────────────────────────────────────────────
 

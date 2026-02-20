@@ -7,10 +7,14 @@ defmodule Arbor.Memory.Reflection.PromptBuilder do
   template assembly.
   """
 
+  alias Arbor.Common.PromptSanitizer
+
   @doc """
   Build the full reflection prompt from a deep context map.
   """
   def build_reflection_prompt(context) do
+    nonce = PromptSanitizer.generate_nonce()
+
     """
     You are performing a deep reflection on recent experiences. Your PRIMARY PURPOSE is to:
     1. **EVALUATE PROGRESS ON ACTIVE GOALS** - This is your most important task
@@ -19,23 +23,25 @@ defmodule Arbor.Memory.Reflection.PromptBuilder do
     4. Consolidate learnings
     5. Discover knowledge graph relationships
 
+    #{PromptSanitizer.preamble(nonce)}
+
     ## Current Identity Context
-    #{context.self_knowledge_text}
+    #{PromptSanitizer.wrap(context.self_knowledge_text, nonce)}
 
     ## ACTIVE GOALS - EVALUATE EACH ONE
-    #{context.goals_text}
+    #{PromptSanitizer.wrap(context.goals_text, nonce)}
 
     ## Current Knowledge Graph
-    #{context.knowledge_graph_text}
+    #{PromptSanitizer.wrap(context.knowledge_graph_text, nonce)}
 
     ## Working Memory
-    #{context.working_memory_text}
+    #{PromptSanitizer.wrap(context.working_memory_text, nonce)}
 
     ## Recent Thinking
-    #{context.recent_thinking_text}
+    #{PromptSanitizer.wrap(context.recent_thinking_text, nonce)}
 
     ## Recent Activity
-    #{context.recent_activity_text}
+    #{PromptSanitizer.wrap(context.recent_activity_text, nonce)}
 
     ## Instructions
 
