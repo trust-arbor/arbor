@@ -97,6 +97,16 @@ defmodule Arbor.Actions.AI do
     alias Arbor.Actions
     alias Arbor.Common.SafeAtom
 
+    def taint_roles do
+      %{
+        prompt: {:control, requires: [:prompt_injection]},
+        system_prompt: {:control, requires: [:prompt_injection]},
+        provider: :control,
+        max_tokens: :data,
+        temperature: :data
+      }
+    end
+
     @allowed_providers [
       :anthropic,
       :openai,
@@ -222,6 +232,16 @@ defmodule Arbor.Actions.AI do
 
     alias Arbor.Actions
     alias Arbor.Common.SafeAtom
+
+    def taint_roles do
+      %{
+        code: {:control, requires: [:prompt_injection]},
+        question: {:control, requires: [:prompt_injection]},
+        language: :data,
+        provider: :control,
+        max_tokens: :data
+      }
+    end
 
     @allowed_providers [
       :anthropic,

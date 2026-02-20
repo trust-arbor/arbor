@@ -101,6 +101,18 @@ defmodule Arbor.Actions.Historian do
     alias Arbor.Actions
     alias Arbor.Common.SafeAtom
 
+    def taint_roles do
+      %{
+        stream: :control,
+        category: :control,
+        type: :control,
+        source: :control,
+        from: :data,
+        to: :data,
+        limit: :data
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, _context) do
@@ -209,6 +221,10 @@ defmodule Arbor.Actions.Historian do
 
     alias Arbor.Actions
 
+    def taint_roles do
+      %{event_id: :control, max_depth: :data}
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{event_id: event_id} = params, _context) do
@@ -300,6 +316,10 @@ defmodule Arbor.Actions.Historian do
       ]
 
     alias Arbor.Actions
+
+    def taint_roles do
+      %{stream: :control, as_of: :data, include_events: :data}
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -453,6 +473,17 @@ defmodule Arbor.Actions.Historian do
       ]
 
     alias Arbor.Actions
+
+    def taint_roles do
+      %{
+        query_type: :control,
+        signal_id: :control,
+        agent_id: :control,
+        taint_level: :control,
+        event_type: :control,
+        limit: :data
+      }
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}

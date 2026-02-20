@@ -51,6 +51,10 @@ defmodule Arbor.Actions.Monitor do
     @monitor_mod Arbor.Monitor
     @known_skills [:beam, :memory, :ets, :processes, :supervisor, :system]
 
+    def taint_roles do
+      %{query: :control, skill: :data}
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{query: query} = params, _context) do

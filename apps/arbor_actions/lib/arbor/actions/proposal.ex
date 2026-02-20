@@ -116,6 +116,17 @@ defmodule Arbor.Actions.Proposal do
     alias Arbor.Actions
     alias Arbor.Common.SafeAtom
 
+    def taint_roles do
+      %{
+        title: :data,
+        description: :data,
+        branch: {:control, requires: [:command_injection]},
+        evidence: :data,
+        urgency: :control,
+        change_type: :control
+      }
+    end
+
     @allowed_urgencies [:low, :normal, :high, :critical]
     @allowed_change_types [
       :code_modification,
@@ -246,6 +257,14 @@ defmodule Arbor.Actions.Proposal do
       ]
 
     alias Arbor.Actions
+
+    def taint_roles do
+      %{
+        proposal_id: :control,
+        notes: :data,
+        branch: {:control, requires: [:command_injection]}
+      }
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
