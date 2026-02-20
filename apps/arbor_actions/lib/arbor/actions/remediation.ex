@@ -61,6 +61,10 @@ defmodule Arbor.Actions.Remediation do
         ]
       ]
 
+    def taint_roles do
+      %{pid: :control, reason: :control}
+    end
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
@@ -142,6 +146,10 @@ defmodule Arbor.Actions.Remediation do
           doc: "Shutdown timeout in milliseconds"
         ]
       ]
+
+    def taint_roles do
+      %{pid: :control, reason: :control, timeout: :data}
+    end
 
     @impl true
     def run(params, _context) do
@@ -230,6 +238,10 @@ defmodule Arbor.Actions.Remediation do
         ]
       ]
 
+    def taint_roles do
+      %{supervisor_pid: :control, child_id: :control}
+    end
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
@@ -295,6 +307,10 @@ defmodule Arbor.Actions.Remediation do
           doc: "PID in string format"
         ]
       ]
+
+    def taint_roles do
+      %{pid: :control}
+    end
 
     @impl true
     def run(params, _context) do
@@ -383,6 +399,10 @@ defmodule Arbor.Actions.Remediation do
           doc: "Maximum messages to drain"
         ]
       ]
+
+    def taint_roles do
+      %{pid: :control, batch_size: :data, max_messages: :data}
+    end
 
     @impl true
     def run(params, _context) do

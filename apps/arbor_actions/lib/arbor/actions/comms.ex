@@ -56,6 +56,18 @@ defmodule Arbor.Actions.Comms do
         format: [type: :boolean, default: true, doc: "Format message for channel constraints"]
       ]
 
+    def taint_roles do
+      %{
+        channel: :control,
+        to: :control,
+        message: :data,
+        subject: :data,
+        attachments: {:control, requires: [:path_traversal]},
+        from: :control,
+        format: :data
+      }
+    end
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
@@ -142,6 +154,13 @@ defmodule Arbor.Actions.Comms do
           doc: "Maximum number of messages to return"
         ]
       ]
+
+    def taint_roles do
+      %{
+        channel: :control,
+        max_messages: :data
+      }
+    end
 
     @impl true
     def run(params, _context) do

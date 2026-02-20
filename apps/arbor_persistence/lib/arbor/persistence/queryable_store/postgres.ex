@@ -256,7 +256,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     do: where(query, [r], r.key in ^values)
 
   defp apply_condition(query, :key, :contains, value),
-    do: where(query, [r], ilike(r.key, ^"%#{value}%"))
+    do: where(query, [r], ilike(r.key, ^"%#{escape_like(value)}%"))
 
   # Timestamp fields — direct columns
   defp apply_condition(query, :inserted_at, op, value),
@@ -299,11 +299,12 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
   defp apply_condition(query, field, :contains, value) do
     field_str = to_string(field)
+    escaped = "%#{escape_like(value)}%"
 
     where(
       query,
       [r],
-      fragment("?->>? ILIKE ?", r.data, ^field_str, ^"%#{value}%")
+      fragment("?->>? ILIKE ?", r.data, ^field_str, ^escaped)
     )
   end
 
@@ -410,5 +411,20 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     repo.one(
       select(query, [r], fragment("MAX((?->>?)::numeric)", r.data, ^field_str))
     )
+  end
+
+  # ---------------------------------------------------------------------------
+  # LIKE Injection Prevention
+  #
+  # Escapes LIKE metacharacters (%, _, \) so user input is matched literally
+  # when used in ILIKE patterns. Without this, a user passing "%" as a filter
+  # value would match every row (full table scan + information disclosure).
+  # ---------------------------------------------------------------------------
+
+  defp escape_like(value) when is_binary(value) do
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("%", "\\%")
+    |> String.replace("_", "\\_")
   end
 end

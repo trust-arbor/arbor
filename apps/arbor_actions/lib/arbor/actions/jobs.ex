@@ -83,6 +83,10 @@ defmodule Arbor.Actions.Jobs do
         tags: [type: {:list, :string}, default: [], doc: "Categorization tags"]
       ]
 
+    def taint_roles do
+      %{title: :data, description: :data, priority: :data, tags: :data}
+    end
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
@@ -160,6 +164,10 @@ defmodule Arbor.Actions.Jobs do
         limit: [type: :integer, default: 20, doc: "Maximum results"]
       ]
 
+    def taint_roles do
+      %{status: :control, tag: :control, limit: :data}
+    end
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
@@ -224,6 +232,10 @@ defmodule Arbor.Actions.Jobs do
         job_id: [type: :string, required: true, doc: "Job ID"],
         include_history: [type: :boolean, default: false, doc: "Include event history"]
       ]
+
+    def taint_roles do
+      %{job_id: :control, include_history: :data}
+    end
 
     @impl true
     def run(params, _context) do
@@ -311,6 +323,10 @@ defmodule Arbor.Actions.Jobs do
       ]
 
     @valid_statuses ~w(active completed failed cancelled)
+
+    def taint_roles do
+      %{job_id: :control, status: :control, notes: :data}
+    end
 
     @impl true
     def run(params, _context) do

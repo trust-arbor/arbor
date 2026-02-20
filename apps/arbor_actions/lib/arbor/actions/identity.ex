@@ -70,6 +70,10 @@ defmodule Arbor.Actions.Identity do
 
     alias Arbor.Actions
 
+    def taint_roles do
+      %{agent_id: :control, target: :control}
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(params, _context) do
@@ -205,6 +209,10 @@ defmodule Arbor.Actions.Identity do
 
     alias Arbor.Actions
     alias Arbor.Security.Crypto
+
+    def taint_roles do
+      %{signer_id: :control, target_id: :control, note: :data}
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}

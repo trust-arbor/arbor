@@ -87,6 +87,10 @@ defmodule Arbor.Actions.Git do
     alias Arbor.Actions
     alias Arbor.Actions.Git
 
+    def taint_roles do
+      %{path: {:control, requires: [:path_traversal]}}
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, _context) do
@@ -246,6 +250,16 @@ defmodule Arbor.Actions.Git do
     alias Arbor.Actions
     alias Arbor.Actions.Git
 
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        ref: {:control, requires: [:command_injection]},
+        file: {:control, requires: [:path_traversal]},
+        staged: :control,
+        stat_only: :control
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, _context) do
@@ -399,6 +413,16 @@ defmodule Arbor.Actions.Git do
     alias Arbor.Actions.Git
     alias Arbor.Common.ShellEscape
 
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        message: {:control, requires: [:command_injection]},
+        files: {:control, requires: [:path_traversal]},
+        all: :control,
+        allow_empty: :control
+      }
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, message: message} = params, _context) do
@@ -533,6 +557,16 @@ defmodule Arbor.Actions.Git do
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        ref: {:control, requires: [:command_injection]},
+        file: {:control, requires: [:path_traversal]},
+        limit: :data,
+        oneline: :control
+      }
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
