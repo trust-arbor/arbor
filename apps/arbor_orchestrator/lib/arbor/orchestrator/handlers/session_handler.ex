@@ -512,13 +512,12 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   defp format_goals(goals) do
     items =
       goals
-      |> Enum.map(fn goal ->
+      |> Enum.map_join("\n", fn goal ->
         id = goal["id"] || Map.get(goal, :id, "?")
         desc = goal["description"] || Map.get(goal, :description, "")
         progress = goal["progress"] || Map.get(goal, :progress, 0)
         "- [#{id}] #{desc} (progress: #{progress})"
       end)
-      |> Enum.join("\n")
 
     "## Goals\n#{items}"
   end
@@ -528,8 +527,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   defp format_working_memory(wm) do
     parts =
       wm
-      |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
 
     "## Working Memory\n#{parts}"
   end

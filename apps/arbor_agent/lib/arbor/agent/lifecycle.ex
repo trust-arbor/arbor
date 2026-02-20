@@ -350,19 +350,17 @@ defmodule Arbor.Agent.Lifecycle do
       provider: Keyword.get(opts, :provider)
     ]
 
-    cond do
-      Code.ensure_loaded?(Arbor.AI) and
-          function_exported?(Arbor.AI, :build_stable_system_prompt, 2) ->
-        try do
-          apply(Arbor.AI, :build_stable_system_prompt, [agent_id, prompt_opts])
-        rescue
-          _ -> fallback_system_prompt(profile)
-        catch
-          :exit, _ -> fallback_system_prompt(profile)
-        end
-
-      true ->
-        fallback_system_prompt(profile)
+    if Code.ensure_loaded?(Arbor.AI) and
+         function_exported?(Arbor.AI, :build_stable_system_prompt, 2) do
+      try do
+        apply(Arbor.AI, :build_stable_system_prompt, [agent_id, prompt_opts])
+      rescue
+        _ -> fallback_system_prompt(profile)
+      catch
+        :exit, _ -> fallback_system_prompt(profile)
+      end
+    else
+      fallback_system_prompt(profile)
     end
   end
 
