@@ -112,11 +112,11 @@ defmodule Arbor.Actions.Shell do
     - `env` - Environment variables are passed through
     - `timeout` - Numeric timeout doesn't affect security
     """
-    @spec taint_roles() :: %{atom() => :control | :data}
+    @spec taint_roles() :: %{atom() => Arbor.Actions.Taint.role()}
     def taint_roles do
       %{
-        command: :control,
-        cwd: :control,
+        command: {:control, requires: [:command_injection]},
+        cwd: {:control, requires: [:path_traversal]},
         sandbox: :control,
         env: :data,
         timeout: :data

@@ -137,7 +137,7 @@ defmodule Arbor.Actions.Web do
 
     @doc false
     def taint_roles do
-      %{url: :control, selector: :control, format: :data}
+      %{url: {:control, requires: [:ssrf]}, selector: :control, format: :data}
     end
 
     @impl true
@@ -361,7 +361,7 @@ defmodule Arbor.Actions.Web do
     @doc false
     def taint_roles do
       %{
-        url: :control,
+        url: {:control, requires: [:ssrf]},
         selector: :control,
         include_links: :data,
         include_forms: :data,

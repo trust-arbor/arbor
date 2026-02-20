@@ -94,10 +94,10 @@ defmodule Arbor.Actions.File do
     Data parameters:
     - `encoding` - Just affects how content is decoded
     """
-    @spec taint_roles() :: %{atom() => :control | :data}
+    @spec taint_roles() :: %{atom() => Arbor.Actions.Taint.role()}
     def taint_roles do
       %{
-        path: :control,
+        path: {:control, requires: [:path_traversal]},
         encoding: :data
       }
     end
@@ -206,10 +206,10 @@ defmodule Arbor.Actions.File do
     - `content` - Just the data being written
     - `create_dirs` - Boolean flag, doesn't affect security
     """
-    @spec taint_roles() :: %{atom() => :control | :data}
+    @spec taint_roles() :: %{atom() => Arbor.Actions.Taint.role()}
     def taint_roles do
       %{
-        path: :control,
+        path: {:control, requires: [:path_traversal]},
         mode: :control,
         content: :data,
         create_dirs: :data

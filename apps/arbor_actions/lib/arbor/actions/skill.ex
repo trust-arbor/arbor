@@ -462,7 +462,7 @@ defmodule Arbor.Actions.Skill do
 
     alias Arbor.Actions
 
-    def taint_roles, do: %{path: :control, approve: :data}
+    def taint_roles, do: %{path: {:control, requires: [:path_traversal]}, approve: :data}
 
     @impl true
     def run(params, _context) do
