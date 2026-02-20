@@ -63,13 +63,14 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
       assert "supervision" in categories
     end
 
-    test "instructions emphasize evidence-based diagnosis" do
+    test "instructions emphasize ops room operation and evidence-based diagnosis" do
       char = Diagnostician.character()
       assert length(char.instructions) >= 4
 
       instructions_text = Enum.join(char.instructions, " ")
-      assert instructions_text =~ "Monitor"
-      assert instructions_text =~ "governance"
+      assert instructions_text =~ "ops chat room"
+      assert instructions_text =~ "monitor_claim_anomaly"
+      assert instructions_text =~ "evidence"
     end
 
     test "renders to valid system prompt" do
@@ -110,7 +111,7 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
       assert Enum.any?(descriptions, &(&1 =~ "health" or &1 =~ "Monitor"))
     end
 
-    test "includes achieve goals for diagnosis and proposals" do
+    test "includes achieve goals for diagnosis and remediation" do
       goals = Diagnostician.initial_goals()
       achieve_goals = Enum.filter(goals, &(&1.type == :achieve))
       # Need at least 2 achieve goals
@@ -118,7 +119,7 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
 
       descriptions = Enum.map(achieve_goals, & &1.description)
       assert Enum.any?(descriptions, &(&1 =~ "Diagnose" or &1 =~ "root cause"))
-      assert Enum.any?(descriptions, &(&1 =~ "Propose" or &1 =~ "governance"))
+      assert Enum.any?(descriptions, &(&1 =~ "Resolve" or &1 =~ "remediation"))
     end
   end
 

@@ -1,211 +1,108 @@
-defmodule Arbor.Agent.DebugAgentTest do
-  use ExUnit.Case
+defmodule Arbor.Agent.DiagnosticianTemplateTest do
+  use ExUnit.Case, async: true
 
-  alias Arbor.Agent.DebugAgent
+  alias Arbor.Agent.Templates.Diagnostician
 
-  @moduletag :slow
-
-  # These tests require the full app ecosystem to be running.
-  # Mark them as :integration to skip during fast test runs.
-  # Run with: mix test --include integration
-
-  # Clean up after each test
-  setup do
-    on_exit(fn ->
-      # Clean up any leftover agents
-      try do
-        DebugAgent.stop("test-debug-agent")
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-
-      try do
-        DebugAgent.stop("debug-agent")
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end)
-
-    :ok
-  end
-
-  describe "start/1" do
-    @tag :integration
-    test "starts a debug agent with default ID" do
-      assert {:ok, agent_id} = DebugAgent.start()
-      assert agent_id == "debug-agent"
-      assert :ok = DebugAgent.stop(agent_id)
+  describe "template callbacks" do
+    test "character returns valid Character struct" do
+      char = Diagnostician.character()
+      assert char.name == "Diagnostician"
+      assert char.role == "BEAM SRE / Runtime Diagnostician"
+      assert is_list(char.traits)
+      assert is_list(char.values)
+      assert is_list(char.instructions)
+      assert length(char.instructions) >= 5
     end
 
-    @tag :integration
-    test "starts with custom agent ID" do
-      assert {:ok, agent_id} = DebugAgent.start(agent_id: "test-debug-agent")
-      assert agent_id == "test-debug-agent"
-      assert :ok = DebugAgent.stop(agent_id)
+    test "trust_tier is :established" do
+      assert Diagnostician.trust_tier() == :established
     end
 
-    @tag :integration
-    test "accepts callback options" do
-      proposals = :ets.new(:test_proposals, [:set, :public])
-
-      on_proposal = fn proposal ->
-        :ets.insert(proposals, {:proposal, proposal})
-        :ok
-      end
-
-      on_decision = fn decision ->
-        :ets.insert(proposals, {:decision, decision})
-        :ok
-      end
-
-      assert {:ok, agent_id} =
-               DebugAgent.start(
-                 agent_id: "test-debug-agent",
-                 on_proposal: on_proposal,
-                 on_decision: on_decision
-               )
-
-      assert :ok = DebugAgent.stop(agent_id)
-      :ets.delete(proposals)
+    test "initial_goals are well-defined" do
+      goals = Diagnostician.initial_goals()
+      assert length(goals) == 3
+      assert Enum.all?(goals, &is_map/1)
+      assert Enum.all?(goals, &Map.has_key?(&1, :type))
+      assert Enum.all?(goals, &Map.has_key?(&1, :description))
     end
 
-    @tag :integration
-    test "accepts custom cycles option" do
-      assert {:ok, agent_id} = DebugAgent.start(agent_id: "test-debug-agent", cycles: 5)
-      assert :ok = DebugAgent.stop(agent_id)
-    end
-  end
+    test "required_capabilities include monitor actions" do
+      caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
 
-  describe "stop/1" do
-    @tag :integration
-    test "stops a running agent" do
-      {:ok, agent_id} = DebugAgent.start(agent_id: "test-debug-agent")
-      assert :ok = DebugAgent.stop(agent_id)
-    end
-
-    @tag :integration
-    test "is idempotent" do
-      {:ok, agent_id} = DebugAgent.start(agent_id: "test-debug-agent")
-      assert :ok = DebugAgent.stop(agent_id)
-      assert :ok = DebugAgent.stop(agent_id)
+      # Monitor actions
+      assert "arbor://actions/execute/monitor.read" in resources
+      assert "arbor://actions/execute/monitor.claim_anomaly" in resources
+      assert "arbor://actions/execute/monitor.complete_anomaly" in resources
+      assert "arbor://actions/execute/monitor.suppress_fingerprint" in resources
+      assert "arbor://actions/execute/monitor.reset_baseline" in resources
+      assert "arbor://actions/execute/monitor.read_diagnostics" in resources
     end
 
-    test "is safe when agent doesn't exist" do
-      # Stop is always safe and doesn't fail
-      assert :ok = DebugAgent.stop("nonexistent-agent")
-    end
-  end
+    test "required_capabilities include remediation actions" do
+      caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
 
-  describe "get_state/1" do
-    test "returns error when agent not started" do
-      assert {:error, :not_found} = DebugAgent.get_state("nonexistent-agent")
-    end
-  end
-
-  describe "module structure" do
-    test "exports expected functions" do
-      Code.ensure_loaded!(DebugAgent)
-      assert function_exported?(DebugAgent, :start_managed, 0)
-      assert function_exported?(DebugAgent, :start_managed, 1)
-      assert function_exported?(DebugAgent, :start_link, 0)
-      assert function_exported?(DebugAgent, :start_link, 1)
-      assert function_exported?(DebugAgent, :stop, 1)
-      assert function_exported?(DebugAgent, :run_bounded, 2)
-      assert function_exported?(DebugAgent, :get_state, 1)
+      assert "arbor://actions/execute/remediation.force_gc" in resources
+      assert "arbor://actions/execute/remediation.kill_process" in resources
+      assert "arbor://actions/execute/remediation.stop_supervisor" in resources
+      assert "arbor://actions/execute/remediation.restart_child" in resources
     end
 
-    test "has correct typespecs" do
-      # The module should compile without warnings
-      # This test ensures the typespecs are valid
-      {:ok, specs} = Code.Typespec.fetch_specs(DebugAgent)
-      assert specs != []
+    test "dangerous actions require approval" do
+      caps = Diagnostician.required_capabilities()
 
-      spec_names = Enum.map(specs, fn {{name, _arity}, _} -> name end)
-      assert :start_managed in spec_names
-      assert :stop in spec_names
-      assert :run_bounded in spec_names
-    end
-  end
+      kill_cap =
+        Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.kill_process"))
 
-  describe "think function phases" do
-    # These tests verify the internal state machine logic
-    # without running the full reasoning loop
+      stop_cap =
+        Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.stop_supervisor"))
 
-    test "initial state is :check_anomalies phase" do
-      # Manually test state initialization
-      state = %{
-        phase: :check_anomalies,
-        current_anomaly: nil,
-        current_proposal: nil,
-        proposals_submitted: 0,
-        proposals_approved: 0,
-        proposals_rejected: 0,
-        anomalies_detected: 0,
-        last_check: nil,
-        started_at: DateTime.utc_now()
-      }
-
-      assert state.phase == :check_anomalies
-      assert state.current_anomaly == nil
+      assert kill_cap[:requires_approval] == true
+      assert stop_cap[:requires_approval] == true
     end
 
-    test "state transitions are well-defined" do
-      # Verify the phase transitions are valid
-      valid_phases = [:check_anomalies, :await_analysis, :await_decision, :complete]
-      assert Enum.all?(valid_phases, &is_atom/1)
+    test "safe actions do not require approval" do
+      caps = Diagnostician.required_capabilities()
+
+      gc_cap = Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.force_gc"))
+
+      suppress_cap =
+        Enum.find(caps, &(&1.resource == "arbor://actions/execute/monitor.suppress_fingerprint"))
+
+      assert gc_cap[:requires_approval] != true
+      assert suppress_cap[:requires_approval] != true
     end
-  end
 
-  describe "proposal building" do
-    test "builds proposal from anomaly and analysis data" do
-      # Test the proposal structure that would be built
-      anomaly = %{
-        id: 123,
-        skill: :beam,
-        severity: :warning,
-        details: %{reductions: 1_000_000},
-        timestamp: System.monotonic_time(:millisecond)
-      }
-
-      analysis_data = %{
-        target_module: MyApp.Worker,
-        suggested_fix: "def fix, do: :ok",
-        root_cause: "High reduction count in worker",
-        confidence: 0.8
-      }
-
-      # Expected proposal structure
-      expected_keys = [:topic, :description, :target_module, :fix_code, :root_cause, :confidence]
-      proposal = build_test_proposal(anomaly, analysis_data)
-
-      Enum.each(expected_keys, fn key ->
-        assert Map.has_key?(proposal, key), "Missing key: #{key}"
-      end)
-
-      assert proposal.topic == :runtime_fix
-      assert proposal.target_module == MyApp.Worker
-      assert proposal.confidence == 0.8
+    test "domain_context includes remediation playbook" do
+      context = Diagnostician.domain_context()
+      assert is_binary(context)
+      assert context =~ "Remediation Playbook"
+      assert context =~ "Message Queue Flood"
+      assert context =~ "Memory Leak"
+      assert context =~ "Supervisor Restart Storm"
+      assert context =~ "EWMA Noise"
+      assert context =~ "EWMA Drift"
+      assert context =~ "Safety Rules"
     end
-  end
 
-  # Helper to simulate proposal building for testing
-  defp build_test_proposal(anomaly, analysis_data) do
-    %{
-      topic: :runtime_fix,
-      description: "Fix for #{anomaly.skill} #{anomaly.severity} anomaly",
-      target_module: analysis_data[:target_module],
-      fix_code: analysis_data[:suggested_fix] || "",
-      root_cause: analysis_data[:root_cause] || "Unknown",
-      confidence: analysis_data[:confidence] || 0.5,
-      anomaly_id: anomaly.id,
-      context: %{
-        anomaly: anomaly,
-        analysis: analysis_data
-      }
-    }
+    test "metadata includes ops_room flag" do
+      meta = Diagnostician.metadata()
+      assert meta.ops_room == true
+      assert meta.version == "2.0.0"
+    end
+
+    test "description mentions ops chat room" do
+      desc = Diagnostician.description()
+      assert desc =~ "ops chat room"
+    end
+
+    test "instructions mention ops room operation" do
+      char = Diagnostician.character()
+      instructions = Enum.join(char.instructions, " ")
+      assert instructions =~ "ops chat room"
+      assert instructions =~ "monitor_claim_anomaly"
+      assert instructions =~ "monitor_complete_anomaly"
+    end
   end
 end

@@ -6,7 +6,7 @@ defmodule Arbor.Agent.GroupChat.Message do
   APIAgent GenServer). Each message is timestamped and includes sender information.
   """
 
-  @type sender_type :: :human | :agent
+  @type sender_type :: :human | :agent | :system
 
   @type t :: %__MODULE__{
           id: String.t(),
