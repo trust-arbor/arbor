@@ -32,17 +32,26 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @spec build_heartbeat_values(Arbor.Orchestrator.Session.t()) :: map()
   def build_heartbeat_values(state) do
     base = session_base_values(state)
+    agent_id = state.agent_id
 
-    # Load fresh goals and working memory from the memory store (source of truth),
+    # Load fresh data from the memory store (source of truth),
     # since the Session state may not have them (not populated at session creation).
-    goals = load_goals_from_memory(state.agent_id) || Map.get(base, "session.goals", [])
-    wm = load_working_memory_from_memory(state.agent_id) || Map.get(base, "session.working_memory", %{})
+    goals = load_goals_from_memory(agent_id) || Map.get(base, "session.goals", [])
+    wm = load_working_memory_from_memory(agent_id) || Map.get(base, "session.working_memory", %{})
+    knowledge_graph = load_knowledge_graph(agent_id)
+    pending_proposals = load_pending_proposals(agent_id)
+    active_intents = load_active_intents(agent_id)
+    recent_thoughts = load_recent_thinking(agent_id)
 
     base
     |> Map.put("session.messages", [])
     |> Map.put("session.is_heartbeat", true)
     |> Map.put("session.goals", goals)
     |> Map.put("session.working_memory", wm)
+    |> Map.put("session.knowledge_graph", knowledge_graph)
+    |> Map.put("session.pending_proposals", pending_proposals)
+    |> Map.put("session.active_intents", active_intents)
+    |> Map.put("session.recent_thinking", recent_thoughts)
   end
 
   @doc false
@@ -466,8 +475,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   end
 
   defp load_working_memory_from_memory(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory) and
-         function_exported?(Arbor.Memory, :get_working_memory, 1) do
+    if memory_available?(:get_working_memory, 1) do
       case apply(Arbor.Memory, :get_working_memory, [agent_id]) do
         wm when is_map(wm) and map_size(wm) > 0 -> wm
         _ -> nil
@@ -477,5 +485,112 @@ defmodule Arbor.Orchestrator.Session.Builders do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp load_knowledge_graph(agent_id) do
+    if memory_available?(:export_knowledge_graph, 1) do
+      case apply(Arbor.Memory, :export_knowledge_graph, [agent_id]) do
+        {:ok, %{nodes: nodes}} when is_map(nodes) and map_size(nodes) > 0 ->
+          nodes
+          |> Enum.take(20)
+          |> Enum.map(fn {_id, node} ->
+            %{
+              "content" => node["content"] || Map.get(node, :content, ""),
+              "type" => node["type"] || to_string(Map.get(node, :type, "")),
+              "confidence" => node["confidence"] || Map.get(node, :confidence, 0.5)
+            }
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp load_pending_proposals(agent_id) do
+    if memory_available?(:get_proposals, 1) do
+      case apply(Arbor.Memory, :get_proposals, [agent_id]) do
+        {:ok, proposals} when is_list(proposals) ->
+          Enum.map(proposals, fn p ->
+            %{
+              "id" => to_string(Map.get(p, :id, "")),
+              "type" => to_string(Map.get(p, :type, "")),
+              "content" => to_string(Map.get(p, :content, Map.get(p, :description, ""))),
+              "source" => to_string(Map.get(p, :source, ""))
+            }
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp load_active_intents(agent_id) do
+    if memory_available?(:pending_intentions, 1) do
+      case apply(Arbor.Memory, :pending_intentions, [agent_id]) do
+        intents when is_list(intents) ->
+          Enum.map(intents, fn i ->
+            %{
+              "id" => to_string(Map.get(i, :id, "")),
+              "action" => to_string(Map.get(i, :action, "")),
+              "description" => to_string(Map.get(i, :description, "")),
+              "goal_id" => to_string(Map.get(i, :goal_id, "")),
+              "status" => to_string(Map.get(i, :status, ""))
+            }
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp load_recent_thinking(agent_id) do
+    if memory_available?(:recent_thinking, 1) do
+      case apply(Arbor.Memory, :recent_thinking, [agent_id]) do
+        thoughts when is_list(thoughts) ->
+          thoughts
+          |> Enum.take(5)
+          |> Enum.map(fn t ->
+            %{
+              "text" => to_string(Map.get(t, :text, "")),
+              "significant" => Map.get(t, :significant, false)
+            }
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp memory_available?(function, arity) do
+    Code.ensure_loaded?(Arbor.Memory) and
+      function_exported?(Arbor.Memory, function, arity)
   end
 end
