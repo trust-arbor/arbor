@@ -61,9 +61,18 @@ defmodule Arbor.Orchestrator.Engine.Router do
 
     fail_edges =
       Enum.filter(edges, fn edge ->
-        case Map.get(edge.attrs, "condition", "") do
-          cond when is_binary(cond) and cond != "" -> Condition.eval(cond, outcome, context)
-          _ -> false
+        case edge.parsed_condition do
+          nil ->
+            case Map.get(edge.attrs, "condition", "") do
+              cond_str when is_binary(cond_str) and cond_str != "" ->
+                Condition.eval(cond_str, outcome, context)
+
+              _ ->
+                false
+            end
+
+          parsed ->
+            Condition.eval_parsed(parsed, outcome, context)
         end
       end)
 
@@ -116,12 +125,19 @@ defmodule Arbor.Orchestrator.Engine.Router do
   defp unconditional_or_all(unconditional, _edges), do: unconditional
 
   defp edge_condition_matches?(edge, outcome, context) do
-    condition = Map.get(edge.attrs, "condition", "")
+    case edge.parsed_condition do
+      nil ->
+        # Uncompiled edge — fall back to string-based eval
+        condition = Map.get(edge.attrs, "condition", "")
 
-    if condition in [nil, ""] do
-      false
-    else
-      Condition.eval(condition, outcome, context)
+        if condition in [nil, ""] do
+          false
+        else
+          Condition.eval(condition, outcome, context)
+        end
+
+      parsed ->
+        Condition.eval_parsed(parsed, outcome, context)
     end
   end
 

@@ -103,14 +103,23 @@ defmodule Arbor.Orchestrator do
   @spec conformance_matrix() :: map()
   def conformance_matrix, do: Conformance.Matrix.summary()
 
-  defp ensure_graph(%Graph{} = graph, opts), do: apply_transforms(graph, opts)
+  # Already compiled — just apply transforms
+  defp ensure_graph(%Graph{compiled: true} = graph, opts), do: apply_transforms(graph, opts)
+
+  # Uncompiled Graph struct — compile then apply transforms
+  defp ensure_graph(%Graph{} = graph, opts) do
+    with {:ok, compiled} <- IR.Compiler.compile(graph) do
+      apply_transforms(compiled, opts)
+    end
+  end
 
   defp ensure_graph(source, opts) when is_binary(source) do
     if Keyword.get(opts, :cache, true) do
       ensure_graph_cached(source, opts)
     else
-      with {:ok, graph} <- Parser.parse(source) do
-        apply_transforms(graph, opts)
+      with {:ok, graph} <- Parser.parse(source),
+           {:ok, compiled} <- IR.Compiler.compile(graph) do
+        apply_transforms(compiled, opts)
       end
     end
   end
@@ -126,17 +135,19 @@ defmodule Arbor.Orchestrator do
       {:ok, graph} ->
         apply_transforms(graph, opts)
 
-      :miss ->
-        with {:ok, graph} <- Parser.parse(source) do
-          DotCache.put(cache_key, graph)
-          apply_transforms(graph, opts)
+      miss_or_stale when miss_or_stale in [:miss, :stale] ->
+        with {:ok, graph} <- Parser.parse(source),
+             {:ok, compiled} <- IR.Compiler.compile(graph) do
+          DotCache.put(cache_key, compiled)
+          apply_transforms(compiled, opts)
         end
     end
   rescue
     # Cache unavailable (GenServer not started) — fall back to uncached
     ArgumentError ->
-      with {:ok, graph} <- Parser.parse(source) do
-        apply_transforms(graph, opts)
+      with {:ok, graph} <- Parser.parse(source),
+           {:ok, compiled} <- IR.Compiler.compile(graph) do
+        apply_transforms(compiled, opts)
       end
   end
 

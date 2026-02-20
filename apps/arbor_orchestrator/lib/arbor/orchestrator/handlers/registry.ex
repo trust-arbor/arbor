@@ -171,6 +171,12 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     put_custom_handlers(handlers)
   end
 
+  @doc "Returns the custom handler for a type, or nil if none registered."
+  @spec custom_handler_for(String.t()) :: module() | nil
+  def custom_handler_for(type) when is_binary(type) do
+    Map.get(custom_handlers(), type)
+  end
+
   defp custom_handlers do
     :persistent_term.get(@custom_handlers_key, %{})
   end

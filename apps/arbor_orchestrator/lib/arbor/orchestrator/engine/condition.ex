@@ -48,6 +48,63 @@ defmodule Arbor.Orchestrator.Engine.Condition do
     |> String.trim_trailing("\"")
   end
 
+  @doc """
+  Evaluate a pre-parsed condition tuple against outcome and context.
+
+  Used by the Router when edges have been compiled with `Edge.parse_condition/1`.
+  Falls back to string-based `eval/3` on `:parse_error`.
+  """
+  @spec eval_parsed(term(), Outcome.t(), Context.t()) :: boolean()
+  def eval_parsed(nil, _outcome, _context), do: true
+  def eval_parsed({:always, true}, _outcome, _context), do: true
+
+  def eval_parsed({:eq, field, value}, outcome, context) do
+    resolve(field, outcome, context) == parse_literal(value)
+  end
+
+  def eval_parsed({:neq, field, value}, outcome, context) do
+    resolve(field, outcome, context) != parse_literal(value)
+  end
+
+  def eval_parsed({:gt, field, value}, outcome, context) do
+    to_number(resolve(field, outcome, context)) > to_number(parse_literal(value))
+  end
+
+  def eval_parsed({:gte, field, value}, outcome, context) do
+    to_number(resolve(field, outcome, context)) >= to_number(parse_literal(value))
+  end
+
+  def eval_parsed({:lt, field, value}, outcome, context) do
+    to_number(resolve(field, outcome, context)) < to_number(parse_literal(value))
+  end
+
+  def eval_parsed({:lte, field, value}, outcome, context) do
+    to_number(resolve(field, outcome, context)) <= to_number(parse_literal(value))
+  end
+
+  def eval_parsed({:contains, field, value}, outcome, context) do
+    String.contains?(to_string(resolve(field, outcome, context)), parse_literal(value))
+  end
+
+  def eval_parsed({:and, clauses}, outcome, context) do
+    Enum.all?(clauses, &eval_parsed(&1, outcome, context))
+  end
+
+  def eval_parsed({:parse_error, raw}, outcome, context) do
+    eval(raw, outcome, context)
+  end
+
+  defp to_number(val) when is_number(val), do: val
+
+  defp to_number(val) when is_binary(val) do
+    case Float.parse(val) do
+      {n, _} -> n
+      :error -> 0
+    end
+  end
+
+  defp to_number(_), do: 0
+
   @spec valid_syntax?(String.t()) :: boolean()
   def valid_syntax?(condition) when condition in [nil, ""], do: true
 

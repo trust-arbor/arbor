@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   @doc false
   def execute_with_retry(node, context, graph, retries, opts) do
-    {handler, node} = Registry.resolve_with_attrs(node)
+    {handler, node} = resolve_handler(node)
     max_attempts = parse_max_attempts(node, graph)
     current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
 
@@ -142,6 +142,20 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         {outcome, retries}
       end
   end
+
+  # Fast path: use pre-resolved handler module from IR compilation.
+  # Always check custom handlers first — they override compiled modules at runtime.
+  defp resolve_handler(%{handler_module: mod} = node) when not is_nil(mod) do
+    raw_type = Registry.node_type(node)
+
+    case Registry.custom_handler_for(raw_type) do
+      nil -> {mod, node}
+      custom -> {custom, node}
+    end
+  end
+
+  # Fallback: resolve via Registry for uncompiled graphs
+  defp resolve_handler(node), do: Registry.resolve_with_attrs(node)
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
     duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
