@@ -455,7 +455,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     do: GroupChat.handle_info(msg, socket)
 
   # Signal: agent lifecycle events (started, stopped, chat_message)
-  def handle_info({:signal_received, %{category: :agent} = signal}, socket) do
+  def handle_info({:signal_received, %{category: :agent, type: type} = signal}, socket)
+      when type in [:started, :stopped, :chat_message] do
     handle_agent_signal(signal, socket)
   end
 
