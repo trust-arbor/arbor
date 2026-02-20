@@ -340,6 +340,18 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
+  end
+
+  def handle_call(:execution_mode, _from, state) do
+    {:reply, state.execution_mode, state}
+  end
+
+  def handle_call({:restore_checkpoint, checkpoint}, _from, state) do
+    {:reply, :ok, Builders.apply_checkpoint(state, checkpoint)}
+  end
+
   defp do_send_message(message, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
     values = Builders.build_turn_values(state, message)
@@ -366,18 +378,6 @@ defmodule Arbor.Orchestrator.Session do
         new_state = transition_phase(state, :processing, :complete, :idle)
         {:reply, {:error, {:engine_crash, Exception.message(e)}}, new_state}
     end
-  end
-
-  def handle_call(:get_state, _from, state) do
-    {:reply, state, state}
-  end
-
-  def handle_call(:execution_mode, _from, state) do
-    {:reply, state.execution_mode, state}
-  end
-
-  def handle_call({:restore_checkpoint, checkpoint}, _from, state) do
-    {:reply, :ok, Builders.apply_checkpoint(state, checkpoint)}
   end
 
   @impl true

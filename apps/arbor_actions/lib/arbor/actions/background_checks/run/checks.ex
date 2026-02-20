@@ -647,23 +647,7 @@ defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
           case File.stat(path, time: :posix) do
             {:ok, %{mtime: mtime}} ->
               hours = hours_since_posix(mtime, now)
-
-              if hours > threshold_hours do
-                severity = if type == :stale_wip, do: :warning, else: :info
-
-                add_warning(
-                  acc,
-                  type,
-                  "#{label} '#{file}' untouched for #{Float.round(hours / 24, 1)} days",
-                  severity,
-                  %{
-                    file: file,
-                    hours: Float.round(hours, 1)
-                  }
-                )
-              else
-                acc
-              end
+              maybe_add_stale_warning(acc, hours, threshold_hours, type, label, file)
 
             {:error, _} ->
               acc
@@ -672,6 +656,25 @@ defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
 
       {:error, _} ->
         result
+    end
+  end
+
+  defp maybe_add_stale_warning(acc, hours, threshold_hours, type, label, file) do
+    if hours > threshold_hours do
+      severity = if type == :stale_wip, do: :warning, else: :info
+
+      add_warning(
+        acc,
+        type,
+        "#{label} '#{file}' untouched for #{Float.round(hours / 24, 1)} days",
+        severity,
+        %{
+          file: file,
+          hours: Float.round(hours, 1)
+        }
+      )
+    else
+      acc
     end
   end
 

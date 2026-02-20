@@ -93,23 +93,18 @@ defmodule Arbor.Orchestrator.Handlers.PromptAbTestHandler do
       }
 
       # Persistence: append to JSONL log, compute cumulative stats
-      updates =
-        if persistence do
-          entry = build_log_entry(node.id, winner, score_a, score_b, variant_a, variant_b)
-          append_to_log(persistence, entry)
-          {a_wins, b_wins} = compute_cumulative(persistence)
-          promoted = check_promotion(auto_promote, a_wins, b_wins, min_samples, significance)
+      test_result = %{
+        winner: winner,
+        score_a: score_a,
+        score_b: score_b,
+        variant_a: variant_a,
+        variant_b: variant_b,
+        auto_promote: auto_promote,
+        min_samples: min_samples,
+        significance: significance
+      }
 
-          updates
-          |> Map.put("prompt_ab.#{node.id}.history_file", persistence)
-          |> Map.put("prompt_ab.#{node.id}.cumulative_a_wins", a_wins)
-          |> Map.put("prompt_ab.#{node.id}.cumulative_b_wins", b_wins)
-          |> then(fn u ->
-            if promoted, do: Map.put(u, "prompt_ab.#{node.id}.promoted", promoted), else: u
-          end)
-        else
-          updates
-        end
+      updates = maybe_persist_results(updates, persistence, node.id, test_result)
 
       notes = "AB Test: variant #{winner} wins (A=#{score_a}, B=#{score_b})"
 
@@ -136,6 +131,40 @@ defmodule Arbor.Orchestrator.Handlers.PromptAbTestHandler do
 
   @impl true
   def idempotency, do: :side_effecting
+
+  defp maybe_persist_results(updates, nil, _node_id, _test_result), do: updates
+
+  defp maybe_persist_results(updates, persistence, node_id, result) do
+    entry =
+      build_log_entry(
+        node_id,
+        result.winner,
+        result.score_a,
+        result.score_b,
+        result.variant_a,
+        result.variant_b
+      )
+
+    append_to_log(persistence, entry)
+    {a_wins, b_wins} = compute_cumulative(persistence)
+
+    promoted =
+      check_promotion(
+        result.auto_promote,
+        a_wins,
+        b_wins,
+        result.min_samples,
+        result.significance
+      )
+
+    updates
+    |> Map.put("prompt_ab.#{node_id}.history_file", persistence)
+    |> Map.put("prompt_ab.#{node_id}.cumulative_a_wins", a_wins)
+    |> Map.put("prompt_ab.#{node_id}.cumulative_b_wins", b_wins)
+    |> then(fn u ->
+      if promoted, do: Map.put(u, "prompt_ab.#{node_id}.promoted", promoted), else: u
+    end)
+  end
 
   defp resolve_backend(node) do
     case Map.get(node.attrs, "backend") do

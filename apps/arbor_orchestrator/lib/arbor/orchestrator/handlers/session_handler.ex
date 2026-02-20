@@ -99,61 +99,26 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     case recall_type do
       "goals" ->
         with_adapter(adapters, :recall_goals, fn recall ->
-          try do
-            case recall.(agent_id) do
-              {:ok, goals} -> ok(%{"session.goals" => goals})
-              {:error, reason} -> fail("recall_goals: #{inspect(reason)}")
-              goals when is_list(goals) -> ok(%{"session.goals" => goals})
-              other -> ok(%{"session.goals" => other})
-            end
-          catch
-            kind, reason -> fail("recall_goals: #{inspect({kind, reason})}")
-          end
+          safe_recall("recall_goals", "session.goals", fn -> recall.(agent_id) end)
         end)
 
       "intents" ->
         with_adapter(adapters, :recall_intents, fn recall ->
-          try do
-            case recall.(agent_id) do
-              {:ok, intents} -> ok(%{"session.intents" => intents})
-              {:error, reason} -> fail("recall_intents: #{inspect(reason)}")
-              intents when is_list(intents) -> ok(%{"session.intents" => intents})
-              other -> ok(%{"session.intents" => other})
-            end
-          catch
-            kind, reason -> fail("recall_intents: #{inspect({kind, reason})}")
-          end
+          safe_recall("recall_intents", "session.intents", fn -> recall.(agent_id) end)
         end)
 
       "beliefs" ->
         with_adapter(adapters, :recall_beliefs, fn recall ->
-          try do
-            case recall.(agent_id) do
-              {:ok, beliefs} -> ok(%{"session.beliefs" => beliefs})
-              {:error, reason} -> fail("recall_beliefs: #{inspect(reason)}")
-              beliefs when is_map(beliefs) -> ok(%{"session.beliefs" => beliefs})
-              other -> ok(%{"session.beliefs" => other})
-            end
-          catch
-            kind, reason -> fail("recall_beliefs: #{inspect({kind, reason})}")
-          end
+          safe_recall("recall_beliefs", "session.beliefs", fn -> recall.(agent_id) end)
         end)
 
       _ ->
-        # default behavior - existing memory_recall
         with_adapter(adapters, :memory_recall, fn recall ->
           query = Context.get(ctx, "session.input", "")
 
-          try do
-            case recall.(agent_id, query) do
-              {:ok, memories} -> ok(%{"session.recalled_memories" => memories})
-              {:error, reason} -> fail("memory_recall: #{inspect(reason)}")
-              memories when is_list(memories) -> ok(%{"session.recalled_memories" => memories})
-              other -> ok(%{"session.recalled_memories" => other})
-            end
-          catch
-            kind, reason -> fail("memory_recall: #{inspect({kind, reason})}")
-          end
+          safe_recall("memory_recall", "session.recalled_memories", fn ->
+            recall.(agent_id, query)
+          end)
         end)
     end
   end
@@ -462,6 +427,19 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   end
 
   # --- Helpers ---
+
+  defp safe_recall(label, context_key, recall_fn) do
+    try do
+      case recall_fn.() do
+        {:ok, data} -> ok(%{context_key => data})
+        {:error, reason} -> fail("#{label}: #{inspect(reason)}")
+        data when is_list(data) or is_map(data) -> ok(%{context_key => data})
+        other -> ok(%{context_key => other})
+      end
+    catch
+      kind, reason -> fail("#{label}: #{inspect({kind, reason})}")
+    end
+  end
 
   # Extracts a list from parsed JSON, filtering items that don't pass validation.
   # Returns [] if the field is missing or not a list.

@@ -203,73 +203,83 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
 
   defp format_single_node(%Node{} = node) do
     handler_type = HandlerRegistry.node_type(node)
-    prompt = Node.attr(node, "prompt", "")
-    label = Node.attr(node, "label", "")
-    prompt_summary = summarize_prompt(prompt)
-
-    description =
-      cond do
-        prompt_summary != nil -> prompt_summary
-        label != "" and label != node.id -> label
-        true -> nil
-      end
-
-    # Collect notable attributes
-    shape = Node.attr(node, "shape", "box")
-    max_retries = Node.attr(node, "max_retries", "0")
-    goal_gate = Node.attr(node, "goal_gate", "")
-    retry_target = Node.attr(node, "retry_target", "")
-    fallback_retry_target = Node.attr(node, "fallback_retry_target", "")
-    fidelity = Node.attr(node, "fidelity", "")
-    thread_id = Node.attr(node, "thread_id", "")
-    class = Node.attr(node, "class", "")
-    timeout = Node.attr(node, "timeout")
-    llm_model = Node.attr(node, "llm_model", "")
-    llm_provider = Node.attr(node, "llm_provider", "")
-    reasoning_effort = Node.attr(node, "reasoning_effort", "high")
-    auto_status = Node.attr(node, "auto_status", "")
-    allow_partial = Node.attr(node, "allow_partial", "")
-    fan_out = Node.attr(node, "fan_out", "")
-    simulate = Node.attr(node, "simulate", "")
-
-    attrs =
-      [
-        if(shape != "box", do: {"shape", shape}),
-        if(max_retries != "0" and max_retries != 0, do: {"max_retries", "#{max_retries}"}),
-        if(goal_gate not in ["", nil, "false"], do: {"goal_gate", "true"}),
-        if(retry_target != "", do: {"retry_target", retry_target}),
-        if(fallback_retry_target != "", do: {"fallback_retry_target", fallback_retry_target}),
-        if(fidelity != "", do: {"fidelity", fidelity}),
-        if(thread_id != "", do: {"thread_id", thread_id}),
-        if(class != "", do: {"class", class}),
-        if(timeout not in [nil, ""], do: {"timeout", "#{timeout}ms"}),
-        if(llm_model != "", do: {"llm_model", llm_model}),
-        if(llm_provider != "", do: {"llm_provider", llm_provider}),
-        if(reasoning_effort != "high", do: {"reasoning_effort", reasoning_effort}),
-        if(auto_status not in ["", nil, "false"], do: {"auto_status", "true"}),
-        if(allow_partial not in ["", nil, "false"], do: {"allow_partial", "true"}),
-        if(fan_out not in ["", nil, "false"], do: {"fan_out", "true"}),
-        if(simulate not in ["", nil, "false"], do: {"simulate", simulate})
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.concat(custom_attrs(node))
-
-    attrs_table =
-      if attrs != [] do
-        header = "| Attribute | Value |\n|-----------|-------|\n"
-
-        rows =
-          attrs
-          |> Enum.map_join("\n", fn {k, v} -> "| #{k} | #{v} |" end)
-
-        "\n" <> header <> rows <> "\n"
-      else
-        ""
-      end
-
+    description = node_description(node)
+    attrs = collect_notable_attrs(node) ++ custom_attrs(node)
+    attrs_table = format_attrs_table(attrs)
     desc_line = if description, do: "\n#{description}\n", else: ""
 
     "### `#{node.id}` (#{handler_type})\n#{desc_line}#{attrs_table}"
+  end
+
+  defp node_description(node) do
+    prompt_summary = summarize_prompt(Node.attr(node, "prompt", ""))
+    label = Node.attr(node, "label", "")
+
+    cond do
+      prompt_summary != nil -> prompt_summary
+      label != "" and label != node.id -> label
+      true -> nil
+    end
+  end
+
+  defp collect_notable_attrs(node) do
+    [
+      notable_attr(node, "shape", "box", "shape", & &1),
+      notable_attr_nonzero(node, "max_retries", "0"),
+      notable_attr_flag(node, "goal_gate"),
+      notable_attr_present(node, "retry_target"),
+      notable_attr_present(node, "fallback_retry_target"),
+      notable_attr_present(node, "fidelity"),
+      notable_attr_present(node, "thread_id"),
+      notable_attr_present(node, "class"),
+      notable_attr_with_suffix(node, "timeout", "ms"),
+      notable_attr_present(node, "llm_model"),
+      notable_attr_present(node, "llm_provider"),
+      notable_attr(node, "reasoning_effort", "high", "reasoning_effort", & &1),
+      notable_attr_flag(node, "auto_status"),
+      notable_attr_flag(node, "allow_partial"),
+      notable_attr_flag(node, "fan_out"),
+      notable_attr_flag_with_value(node, "simulate")
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp notable_attr(node, key, default, label, formatter) do
+    val = Node.attr(node, key, default)
+    if val != default, do: {label, formatter.(val)}
+  end
+
+  defp notable_attr_nonzero(node, key, default) do
+    val = Node.attr(node, key, default)
+    if val != default and val != 0, do: {key, "#{val}"}
+  end
+
+  defp notable_attr_flag(node, key) do
+    val = Node.attr(node, key, "")
+    if val not in ["", nil, "false"], do: {key, "true"}
+  end
+
+  defp notable_attr_flag_with_value(node, key) do
+    val = Node.attr(node, key, "")
+    if val not in ["", nil, "false"], do: {key, val}
+  end
+
+  defp notable_attr_present(node, key) do
+    val = Node.attr(node, key, "")
+    if val != "", do: {key, val}
+  end
+
+  defp notable_attr_with_suffix(node, key, suffix) do
+    val = Node.attr(node, key)
+    if val not in [nil, ""], do: {key, "#{val}#{suffix}"}
+  end
+
+  defp format_attrs_table([]), do: ""
+
+  defp format_attrs_table(attrs) do
+    header = "| Attribute | Value |\n|-----------|-------|\n"
+    rows = Enum.map_join(attrs, "\n", fn {k, v} -> "| #{k} | #{v} |" end)
+    "\n" <> header <> rows <> "\n"
   end
 
   defp custom_attrs(%Node{attrs: attrs}) do
@@ -287,50 +297,7 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
       sorted_ids
       |> Enum.with_index(1)
       |> Enum.map(fn {id, idx} ->
-        node = Map.get(graph.nodes, id)
-
-        if node == nil do
-          nil
-        else
-          handler_type = HandlerRegistry.node_type(node)
-          outgoing = Graph.outgoing_edges(graph, id)
-
-          conditional_edges =
-            Enum.filter(outgoing, fn e -> Edge.attr(e, "condition", "") != "" end)
-
-          parallel = Node.attr(node, "shape") == "component"
-
-          cond do
-            start_node != nil and node.id == start_node.id ->
-              "#{idx}. Pipeline begins at `#{id}` node."
-
-            Graph.terminal?(graph, node) ->
-              "#{idx}. Pipeline completes at `#{id}` node."
-
-            parallel ->
-              targets =
-                outgoing
-                |> Enum.map_join("\n", fn e -> "   - `#{e.to}`" end)
-
-              "#{idx}. At `#{id}`, execution splits into parallel branches:\n#{targets}"
-
-            conditional_edges != [] ->
-              branches =
-                conditional_edges
-                |> Enum.map_join("\n", fn e ->
-                  label = Edge.attr(e, "label", "")
-                  label_part = if label != "", do: " (#{label})", else: ""
-                  condition = Edge.attr(e, "condition", "")
-                  "   - On `#{condition}`#{label_part}: proceeds to `#{e.to}`"
-                end)
-
-              "#{idx}. At `#{id}` (#{handler_type}), the pipeline branches:\n#{branches}"
-
-            true ->
-              desc = describe_node_action(node, handler_type)
-              "#{idx}. Proceeds to `#{id}` (#{handler_type})#{desc}."
-          end
-        end
+        format_flow_step(Map.get(graph.nodes, id), id, idx, start_node, graph)
       end)
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -342,6 +309,44 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGenerator do
       ""
     ]
     |> Enum.join("\n")
+  end
+
+  defp format_flow_step(nil, _id, _idx, _start_node, _graph), do: nil
+
+  defp format_flow_step(node, id, idx, start_node, graph) do
+    handler_type = HandlerRegistry.node_type(node)
+    outgoing = Graph.outgoing_edges(graph, id)
+    conditional_edges = Enum.filter(outgoing, fn e -> Edge.attr(e, "condition", "") != "" end)
+    parallel = Node.attr(node, "shape") == "component"
+
+    cond do
+      start_node != nil and node.id == start_node.id ->
+        "#{idx}. Pipeline begins at `#{id}` node."
+
+      Graph.terminal?(graph, node) ->
+        "#{idx}. Pipeline completes at `#{id}` node."
+
+      parallel ->
+        targets = Enum.map_join(outgoing, "\n", fn e -> "   - `#{e.to}`" end)
+        "#{idx}. At `#{id}`, execution splits into parallel branches:\n#{targets}"
+
+      conditional_edges != [] ->
+        branches = format_conditional_branches(conditional_edges)
+        "#{idx}. At `#{id}` (#{handler_type}), the pipeline branches:\n#{branches}"
+
+      true ->
+        desc = describe_node_action(node, handler_type)
+        "#{idx}. Proceeds to `#{id}` (#{handler_type})#{desc}."
+    end
+  end
+
+  defp format_conditional_branches(edges) do
+    Enum.map_join(edges, "\n", fn e ->
+      label = Edge.attr(e, "label", "")
+      label_part = if label != "", do: " (#{label})", else: ""
+      condition = Edge.attr(e, "condition", "")
+      "   - On `#{condition}`#{label_part}: proceeds to `#{e.to}`"
+    end)
   end
 
   defp describe_node_action(%Node{} = node, _handler_type) do

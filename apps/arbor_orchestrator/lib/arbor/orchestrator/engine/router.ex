@@ -111,14 +111,19 @@ defmodule Arbor.Orchestrator.Engine.Router do
           end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
 
         outcome.suggested_next_ids != [] ->
-          Enum.find_value(outcome.suggested_next_ids, fn suggested_id ->
-            Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
-          end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+          find_suggested_edge(unconditional, outcome.suggested_next_ids) ||
+            best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
 
         true ->
           best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
       end
     end
+  end
+
+  defp find_suggested_edge(unconditional, suggested_ids) do
+    Enum.find_value(suggested_ids, fn suggested_id ->
+      Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
+    end)
   end
 
   defp unconditional_or_all([], edges), do: edges
