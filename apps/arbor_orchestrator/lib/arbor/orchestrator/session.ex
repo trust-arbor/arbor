@@ -368,6 +368,10 @@ defmodule Arbor.Orchestrator.Session do
 
           response = Map.get(result.context, "session.response", "")
           Builders.emit_turn_signal(new_state, result)
+
+          # Phase 3: notify ActionCycleServer of chat percept
+          maybe_enqueue_chat_percept(state.agent_id, message)
+
           {:reply, {:ok, response}, new_state}
 
         {:error, reason} ->
@@ -570,6 +574,27 @@ defmodule Arbor.Orchestrator.Session do
     update_session_state(state, fn ss ->
       %{ss | phase: to_phase}
     end)
+  end
+
+  # ── Phase 3: percept forwarding ──────────────────────────────────
+
+  defp maybe_enqueue_chat_percept(agent_id, message) do
+    action_cycle_sup = Arbor.Agent.ActionCycleSupervisor
+
+    if Code.ensure_loaded?(action_cycle_sup) do
+      case apply(action_cycle_sup, :lookup, [agent_id]) do
+        {:ok, pid} ->
+          content = Builders.normalize_message(message)
+          send(pid, {:percept, %{type: :chat, content: content, agent_id: agent_id}})
+
+        :error ->
+          :ok
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp validate_transition(nil, _from, _event), do: :ok

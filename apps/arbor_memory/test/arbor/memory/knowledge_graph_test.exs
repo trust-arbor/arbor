@@ -48,7 +48,8 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
     test "adds nodes of different types" do
       graph = KnowledgeGraph.new("agent_001")
 
-      for type <- [:fact, :experience, :skill, :insight, :relationship] do
+      for type <- [:fact, :experience, :skill, :insight, :relationship,
+                   :goal, :observation, :trait, :intention] do
         {:ok, graph, node_id} =
           KnowledgeGraph.add_node(graph, %{
             type: type,
@@ -72,6 +73,13 @@ defmodule Arbor.Memory.KnowledgeGraphTest do
 
       assert {:error, {:invalid_type, :invalid}} =
                KnowledgeGraph.add_node(graph, %{type: :invalid, content: "test"})
+    end
+
+    test "rejects deprecated :custom node type" do
+      graph = KnowledgeGraph.new("agent_001")
+
+      assert {:error, {:invalid_type, :custom}} =
+               KnowledgeGraph.add_node(graph, %{type: :custom, content: "test"})
     end
 
     test "respects quota limits" do
