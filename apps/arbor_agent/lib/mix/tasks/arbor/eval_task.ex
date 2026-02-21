@@ -150,7 +150,7 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
       Mix.shell().info("\n── Comparison Table ──")
 
       header =
-        "  #{"Metric"  |> String.pad_trailing(22)}" <>
+        "  #{"Metric" |> String.pad_trailing(22)}" <>
           Enum.map_join(Enum.sort(variants), "", fn {v, _} ->
             to_string(v) |> String.pad_trailing(12)
           end)
