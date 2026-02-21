@@ -111,7 +111,8 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       update_working_memory: build_update_working_memory(),
       consolidate: build_consolidate(),
       background_checks: build_background_checks(),
-      trust_tier_resolver: build_trust_tier_resolver()
+      trust_tier_resolver: build_trust_tier_resolver(),
+      checkpoint_save: build_checkpoint_save()
     }
   end
 
@@ -796,6 +797,34 @@ defmodule Arbor.Orchestrator.Session.Adapters do
         [agent_id],
         :ok
       )
+
+      :ok
+    end
+  end
+
+  # ── Checkpoint Save ─────────────────────────────────────────────────
+  #
+  # Session calls: checkpoint_save.(session_id, data)
+  # Persists session state for crash recovery.
+  # Returns: :ok
+
+  defp build_checkpoint_save do
+    fn session_id, data ->
+      if Code.ensure_loaded?(Arbor.Persistence.Checkpoint) and
+           function_exported?(Arbor.Persistence.Checkpoint, :save, 4) do
+        store =
+          Application.get_env(
+            :arbor_persistence,
+            :checkpoint_store,
+            Arbor.Persistence.Checkpoint.Store.ETS
+          )
+
+        try do
+          apply(Arbor.Persistence.Checkpoint, :save, [session_id, data, store])
+        catch
+          :exit, _ -> :ok
+        end
+      end
 
       :ok
     end

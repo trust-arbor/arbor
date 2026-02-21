@@ -158,6 +158,101 @@ defmodule Arbor.Contracts.Memory.IntentTest do
     end
   end
 
+  describe "capability_intent/4" do
+    test "creates a capability-described intent" do
+      intent = Intent.capability_intent("fs", :read, "/etc/hosts")
+
+      assert intent.type == :act
+      assert intent.capability == "fs"
+      assert intent.op == :read
+      assert intent.target == "/etc/hosts"
+      assert intent.action == :read
+      assert intent.params.target == "/etc/hosts"
+    end
+
+    test "accepts reasoning and other options" do
+      intent =
+        Intent.capability_intent("shell", :execute, "mix test",
+          reasoning: "Need to run tests",
+          goal_id: "goal_123",
+          urgency: 80
+        )
+
+      assert intent.capability == "shell"
+      assert intent.op == :execute
+      assert intent.target == "mix test"
+      assert intent.reasoning == "Need to run tests"
+      assert intent.goal_id == "goal_123"
+      assert intent.urgency == 80
+    end
+
+    test "merges params with target" do
+      intent =
+        Intent.capability_intent("fs", :write, "/tmp/test.txt",
+          params: %{content: "hello"}
+        )
+
+      assert intent.params == %{content: "hello", target: "/tmp/test.txt"}
+    end
+  end
+
+  describe "capability fields in new/2" do
+    test "accepts capability, op, target" do
+      intent = Intent.new(:act, capability: "memory", op: :recall, target: "recent")
+
+      assert intent.capability == "memory"
+      assert intent.op == :recall
+      assert intent.target == "recent"
+    end
+
+    test "defaults to nil" do
+      intent = Intent.new(:think)
+
+      assert intent.capability == nil
+      assert intent.op == nil
+      assert intent.target == nil
+    end
+  end
+
+  describe "capability fields in from_map/1" do
+    test "parses capability fields from atom keys" do
+      intent = Intent.from_map(%{type: :act, capability: "fs", op: :read, target: "/tmp/x"})
+
+      assert intent.capability == "fs"
+      assert intent.op == :read
+      assert intent.target == "/tmp/x"
+    end
+
+    test "parses capability fields from string keys" do
+      intent =
+        Intent.from_map(%{
+          "type" => "act",
+          "capability" => "shell",
+          "op" => "execute",
+          "target" => "ls -la"
+        })
+
+      assert intent.capability == "shell"
+      assert intent.op == :execute
+      assert intent.target == "ls -la"
+    end
+  end
+
+  describe "capability intent round-trip" do
+    test "Intent → JSON → from_map preserves capability fields" do
+      original = Intent.capability_intent("fs", :read, "/etc/hosts", reasoning: "check hosts")
+      json = Jason.encode!(original)
+      decoded = Jason.decode!(json)
+      restored = Intent.from_map(decoded)
+
+      assert restored.capability == "fs"
+      assert restored.op == :read
+      assert restored.target == "/etc/hosts"
+      assert restored.reasoning == "check hosts"
+      assert restored.type == :act
+    end
+  end
+
   describe "Jason encoding" do
     test "encodes intent to JSON" do
       intent = Intent.action(:shell_execute, %{command: "ls"}, urgency: 60)

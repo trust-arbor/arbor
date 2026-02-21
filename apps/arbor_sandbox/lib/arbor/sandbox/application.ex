@@ -7,7 +7,11 @@ defmodule Arbor.Sandbox.Application do
   def start(_type, _args) do
     children =
       if Application.get_env(:arbor_sandbox, :start_children, true) do
-        [Arbor.Sandbox.Registry]
+        [
+          {Registry, keys: :unique, name: Arbor.Sandbox.ExecRegistry},
+          Arbor.Sandbox.Registry,
+          Arbor.Sandbox.ExecSupervisor
+        ]
       else
         []
       end

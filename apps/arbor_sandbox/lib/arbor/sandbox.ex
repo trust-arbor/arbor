@@ -45,7 +45,7 @@ defmodule Arbor.Sandbox do
   """
 
   alias Arbor.Contracts.Security.TrustBounds
-  alias Arbor.Sandbox.{Code, Filesystem, Registry, Virtual}
+  alias Arbor.Sandbox.{Code, ExecSession, ExecSupervisor, Filesystem, Registry, Virtual}
   alias Arbor.Signals
 
   @type sandbox_id :: String.t()
@@ -354,6 +354,50 @@ defmodule Arbor.Sandbox do
   @spec healthy?() :: boolean()
   def healthy? do
     Process.whereis(Registry) != nil
+  end
+
+  # ── Code Execution Sessions ──
+
+  @doc """
+  Create (or retrieve) a persistent code execution session for an agent.
+
+  Returns the pid of the ExecSession GenServer, which wraps a `Dune.Session`
+  for safe stateful code evaluation.
+
+  ## Options
+
+  - `:timeout` — per-eval timeout in ms (default: 5000)
+  - `:max_reductions` — CPU limit per eval (default: 100_000)
+  - `:max_heap_size` — memory limit per eval (default: 100_000)
+  """
+  @spec create_exec_session(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def create_exec_session(agent_id, opts \\ []) do
+    ExecSupervisor.get_or_start_session(agent_id, opts)
+  end
+
+  @doc """
+  Evaluate code in an agent's exec session.
+
+  Variable bindings persist across calls. Returns the inspected result.
+
+  ## Examples
+
+      {:ok, pid} = Arbor.Sandbox.create_exec_session("agent_001")
+      {:ok, "42"} = Arbor.Sandbox.eval_code(pid, "x = 42")
+      {:ok, "43"} = Arbor.Sandbox.eval_code(pid, "x + 1")
+  """
+  @spec eval_code(pid(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:ok, String.t(), String.t()} | {:error, String.t()}
+  def eval_code(pid, code, opts \\ []) do
+    ExecSession.eval(pid, code, opts)
+  end
+
+  @doc """
+  Reset an agent's exec session, clearing all bindings.
+  """
+  @spec reset_exec_session(pid()) :: :ok
+  def reset_exec_session(pid) do
+    ExecSession.reset(pid)
   end
 
   # Private functions

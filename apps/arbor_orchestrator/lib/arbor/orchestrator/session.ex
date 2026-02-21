@@ -364,6 +364,7 @@ defmodule Arbor.Orchestrator.Session do
             state
             |> transition_phase(:processing, :complete, :idle)
             |> Builders.apply_turn_result(message, result)
+            |> Builders.maybe_checkpoint()
 
           response = Map.get(result.context, "session.response", "")
           Builders.emit_turn_signal(new_state, result)
@@ -406,6 +407,7 @@ defmodule Arbor.Orchestrator.Session do
       state
       |> Map.put(:heartbeat_in_flight, false)
       |> Builders.apply_heartbeat_result(result)
+      |> Builders.maybe_checkpoint()
 
     Builders.emit_heartbeat_signal(new_state, result)
     {:noreply, new_state}

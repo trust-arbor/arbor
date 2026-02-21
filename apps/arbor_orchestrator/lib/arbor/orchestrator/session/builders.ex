@@ -287,6 +287,44 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end)
   end
 
+  # ── Session checkpoint persistence ──────────────────────────────────
+
+  @doc false
+  def maybe_checkpoint(state) do
+    checkpoint_fn = get_in(state, [Access.key(:adapters), Access.key(:checkpoint_save)])
+
+    if is_function(checkpoint_fn, 2) and should_checkpoint?(state) do
+      data = extract_checkpoint_data(state)
+
+      Task.start(fn ->
+        try do
+          checkpoint_fn.(state.session_id, data)
+        rescue
+          e -> Logger.warning("[Session] Checkpoint save failed: #{Exception.message(e)}")
+        end
+      end)
+    end
+
+    state
+  end
+
+  @doc false
+  def extract_checkpoint_data(state) do
+    %{
+      "messages" => get_messages(state),
+      "working_memory" => get_working_memory(state),
+      "goals" => get_goals(state),
+      "turn_count" => get_turn_count(state),
+      "cognitive_mode" => to_string(get_cognitive_mode(state)),
+      "checkpoint_at" => DateTime.to_iso8601(DateTime.utc_now())
+    }
+  end
+
+  defp should_checkpoint?(state) do
+    interval = get_in(state, [Access.key(:config), Access.key(:checkpoint_interval)]) || 1
+    rem(get_turn_count(state), max(interval, 1)) == 0
+  end
+
   # ── Trust tier verification ─────────────────────────────────────────
 
   @doc false

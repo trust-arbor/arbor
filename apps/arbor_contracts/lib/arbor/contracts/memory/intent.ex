@@ -54,6 +54,11 @@ defmodule Arbor.Contracts.Memory.Intent do
     field :urgency, integer(), default: 50
     field :created_at, DateTime.t()
     field :metadata, map(), default: %{}
+
+    # Capability-intent fields (Phase 0 cognitive loop redesign)
+    field :capability, String.t() | nil, default: nil
+    field :op, atom() | nil, default: nil
+    field :target, String.t() | nil, default: nil
   end
 
   @doc """
@@ -71,7 +76,10 @@ defmodule Arbor.Contracts.Memory.Intent do
       confidence: opts[:confidence] || 0.5,
       urgency: opts[:urgency] || 50,
       created_at: opts[:created_at] || DateTime.utc_now(),
-      metadata: opts[:metadata] || %{}
+      metadata: opts[:metadata] || %{},
+      capability: opts[:capability],
+      op: opts[:op],
+      target: opts[:target]
     }
   end
 
@@ -108,6 +116,33 @@ defmodule Arbor.Contracts.Memory.Intent do
   end
 
   @doc """
+  Creates a capability-described intent for the cognitive loop.
+
+  This is the primary constructor for the Mind/Host architecture.
+  The Mind specifies *what* it wants (`capability`, `op`, `target`),
+  and the Host dispatches to the correct action module.
+
+  ## Examples
+
+      Intent.capability_intent("fs", :read, "/etc/hosts",
+        reasoning: "Need to check host configuration",
+        goal_id: "goal_123"
+      )
+  """
+  @spec capability_intent(String.t(), atom(), String.t(), keyword()) :: t()
+  def capability_intent(capability, op, target, opts \\ []) do
+    new(:act, [
+      {:capability, capability},
+      {:op, op},
+      {:target, target},
+      {:action, op},
+      {:params, Map.put(opts[:params] || %{}, :target, target)},
+      {:reasoning, opts[:reasoning]}
+      | Keyword.drop(opts, [:params, :reasoning])
+    ])
+  end
+
+  @doc """
   Returns true if this is an actionable intent (requires Body execution).
   """
   @spec actionable?(t()) :: boolean()
@@ -141,7 +176,10 @@ defmodule Arbor.Contracts.Memory.Intent do
       confidence: parse_float(map_get(map, :confidence)) || 0.5,
       urgency: map_get(map, :urgency) || 50,
       created_at: parse_datetime(map_get(map, :created_at)) || DateTime.utc_now(),
-      metadata: map_get(map, :metadata) || %{}
+      metadata: map_get(map, :metadata) || %{},
+      capability: map_get(map, :capability),
+      op: atomize(map_get(map, :op)),
+      target: map_get(map, :target)
     }
   end
 
@@ -183,6 +221,7 @@ defimpl Jason.Encoder, for: Arbor.Contracts.Memory.Intent do
     |> Map.from_struct()
     |> Map.update(:created_at, nil, &datetime_to_string/1)
     |> Map.update(:action, nil, &atom_to_string/1)
+    |> Map.update(:op, nil, &atom_to_string/1)
     |> Jason.Encode.map(opts)
   end
 
