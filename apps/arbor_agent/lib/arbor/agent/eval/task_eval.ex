@@ -452,26 +452,30 @@ defmodule Arbor.Agent.Eval.TaskEval do
   end
 
   defp file_read_action?(action) when is_map(action) do
-    name = Map.get(action, :name, "") || Map.get(action, "name", "")
+    name = Map.get(action, :name) || Map.get(action, "name") || ""
+    type = Map.get(action, :type) || Map.get(action, "type") || ""
+    id = to_string(name) <> " " <> to_string(type)
 
-    String.contains?(to_string(name), "file_read") or
-      String.contains?(to_string(name), "file.read")
+    String.contains?(id, "file_read") or
+      String.contains?(id, "file.read")
   end
 
   defp file_read_action?(_), do: false
 
   defp proposal_action?(action) when is_map(action) do
-    name = Map.get(action, :name, "") || Map.get(action, "name", "")
+    name = Map.get(action, :name) || Map.get(action, "name") || ""
+    type = Map.get(action, :type) || Map.get(action, "type") || ""
+    id = to_string(name) <> " " <> to_string(type)
 
-    String.contains?(to_string(name), "proposal") or
-      String.contains?(to_string(name), "submit")
+    String.contains?(id, "proposal") or
+      String.contains?(id, "submit")
   end
 
   defp proposal_action?(_), do: false
 
   defp extract_file_path(action) when is_map(action) do
-    params = Map.get(action, :params, %{}) || Map.get(action, "params", %{})
-    Map.get(params, :path, "") || Map.get(params, "path", "unknown")
+    params = Map.get(action, :params) || Map.get(action, "params") || %{}
+    Map.get(params, :path) || Map.get(params, "path") || "unknown"
   end
 
   defp extract_file_path(_), do: "unknown"
