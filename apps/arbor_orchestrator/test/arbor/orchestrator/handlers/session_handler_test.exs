@@ -83,7 +83,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandlerTest do
       outcome =
         run("session.mode_select", %{
           "session.goals" => [%{id: "g1"}],
-          "session.intents" => [%{id: "i1"}]
+          "session.active_intents" => [%{id: "i1"}]
         })
 
       assert outcome.context_updates["session.cognitive_mode"] == "goal_pursuit"

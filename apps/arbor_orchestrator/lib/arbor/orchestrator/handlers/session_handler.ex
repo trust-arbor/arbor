@@ -72,7 +72,10 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     handle_type(type, context, adapters, {node, graph, opts})
   rescue
     e ->
-      Logger.warning("[SessionHandler] #{Map.get(node.attrs, "type")} crashed: #{Exception.message(e)}")
+      Logger.warning(
+        "[SessionHandler] #{Map.get(node.attrs, "type")} crashed: #{Exception.message(e)}"
+      )
+
       fail("#{Map.get(node.attrs, "type")}: #{Exception.message(e)}")
   end
 
@@ -108,7 +111,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
       "intents" ->
         with_adapter(adapters, :recall_intents, fn recall ->
-          safe_recall("recall_intents", "session.intents", fn -> recall.(agent_id) end)
+          safe_recall("recall_intents", "session.active_intents", fn -> recall.(agent_id) end)
         end)
 
       "beliefs" ->
@@ -129,7 +132,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
   defp handle_type("session.mode_select", ctx, _adapters, _meta) do
     goals = Context.get(ctx, "session.goals", [])
-    intents = Context.get(ctx, "session.intents", [])
+    intents = Context.get(ctx, "session.active_intents", [])
     turn = Context.get(ctx, "session.turn_count", 0)
     user_waiting = Context.get(ctx, "session.user_waiting", false)
 
@@ -156,7 +159,10 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "reflection"
       end
 
-    Logger.info("[SessionHandler] mode_select: goals=#{length(List.wrap(goals))}, intents=#{length(List.wrap(intents))}, turn=#{turn} → #{mode}")
+    Logger.info(
+      "[SessionHandler] mode_select: goals=#{length(List.wrap(goals))}, intents=#{length(List.wrap(intents))}, turn=#{turn} → #{mode}"
+    )
+
     ok(%{"session.cognitive_mode" => mode})
   end
 
@@ -627,7 +633,11 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   defp mode_instructions("goal_pursuit") do
     """
     Mode: GOAL PURSUIT
-    Focus on advancing your active goals. Use tools if needed. Report progress.
+    You have active goals with pending intentions. Focus on making concrete progress
+    toward the highest priority goal. Choose ONE action from the "actions" array that
+    advances a goal. Populate the "actions" field with at least one action — for example,
+    use file_read to examine source code, or shell_execute to run diagnostics.
+    Do not just think — act. Report progress via goal_updates.
     """
   end
 

@@ -67,7 +67,12 @@ defmodule Arbor.Agent.Eval.TaskEval do
               "max_hb=#{max_heartbeats}"
           )
 
-          case run_trial(bug, variant, worktree_path, Keyword.merge(opts, max_heartbeats: max_heartbeats)) do
+          case run_trial(
+                 bug,
+                 variant,
+                 worktree_path,
+                 Keyword.merge(opts, max_heartbeats: max_heartbeats)
+               ) do
             {:ok, trial_result} ->
               persist_trial(trial_result, variant, rep, tag, opts)
               trial_result
@@ -268,8 +273,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
       |> Enum.count(fn {_path, count} -> count > 1 end)
 
     %{
-      heartbeats_to_proposal:
-        if(proposal_submitted, do: state.heartbeat_count, else: nil),
+      heartbeats_to_proposal: if(proposal_submitted, do: state.heartbeat_count, else: nil),
       proposal_submitted: proposal_submitted,
       proposal_text: proposal_text,
       proposal_quality: proposal_quality || ProposalScorer.score("", bug),
@@ -389,9 +393,14 @@ defmodule Arbor.Agent.Eval.TaskEval do
     cwd = File.cwd!()
 
     cond do
-      File.exists?(Path.join(cwd, "apps")) -> cwd
-      File.exists?(Path.join([cwd, "..", "apps"]) |> Path.expand()) -> Path.expand(Path.join([cwd, ".."]))
-      true -> cwd
+      File.exists?(Path.join(cwd, "apps")) ->
+        cwd
+
+      File.exists?(Path.join([cwd, "..", "apps"]) |> Path.expand()) ->
+        Path.expand(Path.join([cwd, ".."]))
+
+      true ->
+        cwd
     end
   end
 
@@ -444,7 +453,9 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   defp file_read_action?(action) when is_map(action) do
     name = Map.get(action, :name, "") || Map.get(action, "name", "")
-    String.contains?(to_string(name), "file_read") or String.contains?(to_string(name), "file.read")
+
+    String.contains?(to_string(name), "file_read") or
+      String.contains?(to_string(name), "file.read")
   end
 
   defp file_read_action?(_), do: false
