@@ -25,6 +25,10 @@ defmodule Arbor.Memory.KnowledgeGraph do
   - `:skill` - Learned capabilities
   - `:insight` - Self-reflective insights
   - `:relationship` - Information about relationships
+  - `:goal` - References to GoalStore entries
+  - `:observation` - Thoughts, concerns, curiosity (abstract)
+  - `:trait` - Identity/self-knowledge entries
+  - `:intention` - Planned actions (IntentStore references)
 
   ## Decay and Reinforcement
 
@@ -69,7 +73,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @type node_id :: String.t()
   @type edge_id :: String.t()
 
-  @type node_type :: :fact | :experience | :skill | :insight | :relationship | :custom
+  @type node_type ::
+          :fact | :experience | :skill | :insight | :relationship |
+          :goal | :observation | :trait | :intention
 
   @type knowledge_node :: %{
           id: node_id(),
@@ -136,7 +142,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
     last_decay_at: nil
   ]
 
-  @allowed_node_types [:fact, :experience, :skill, :insight, :relationship, :custom]
+  @allowed_node_types [:fact, :experience, :skill, :insight, :relationship,
+                       :goal, :observation, :trait, :intention]
   @default_decay_rate 0.10
   @default_reinforce_amount 0.15
   @default_max_nodes_per_type 500

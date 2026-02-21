@@ -140,28 +140,19 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @spec apply_heartbeat_result(Arbor.Orchestrator.Session.t(), Engine.run_result()) ::
           Arbor.Orchestrator.Session.t()
   def apply_heartbeat_result(state, %{context: result_ctx}) do
-    cognitive_mode =
-      case Map.get(result_ctx, "session.cognitive_mode") do
-        mode when is_binary(mode) and mode != "" ->
-          safe_to_atom(mode, get_cognitive_mode(state))
+    agent_id = state.agent_id
 
-        _ ->
-          get_cognitive_mode(state)
-      end
+    # Phase 3: heartbeat becomes read-only — generate proposals instead of
+    # directly mutating state. The ActionCycleServer reviews proposals.
+    proposals = generate_heartbeat_proposals(agent_id, state, result_ctx)
+    created = create_proposals(agent_id, proposals)
 
-    goal_updates = Map.get(result_ctx, "session.goal_updates", [])
-    new_goals = Map.get(result_ctx, "session.new_goals", [])
-    current_goals = get_goals(state)
-    goals = apply_goal_changes(current_goals, goal_updates, new_goals)
+    if created > 0 do
+      emit_notification_percept(agent_id, created, proposals)
+    end
 
-    state = %{state | cognitive_mode: cognitive_mode, goals: goals}
-
-    update_session_state(state, fn ss ->
-      ss
-      |> Map.put(:cognitive_mode, cognitive_mode)
-      |> Map.put(:goals, goals)
-      |> maybe_call_touch()
-    end)
+    # Return state UNMODIFIED — action cycle will review proposals
+    state
   end
 
   @doc false
@@ -433,14 +424,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end
   end
 
-  defp maybe_call_touch(ss) do
-    if contracts_available?() do
-      apply(state_module(), :touch, [ss])
-    else
-      ss
-    end
-  end
-
   # Module references via functions to avoid compile-time warnings
   defp config_module, do: Arbor.Contracts.Session.Config
   defp state_module, do: Arbor.Contracts.Session.State
@@ -499,6 +482,208 @@ defmodule Arbor.Orchestrator.Session.Builders do
           _ -> nil
         end
     end
+  end
+
+  # ── Heartbeat proposal generation (Phase 3) ─────────────────────
+
+  defp generate_heartbeat_proposals(agent_id, state, result_ctx) do
+    []
+    |> maybe_add_cognitive_mode_proposal(state, result_ctx)
+    |> maybe_add_goal_proposals(result_ctx)
+    |> maybe_add_goal_update_proposals(result_ctx)
+    |> maybe_add_wm_proposals(result_ctx)
+    |> maybe_add_decomposition_proposals(result_ctx)
+    |> maybe_add_identity_proposals(agent_id, result_ctx)
+  end
+
+  defp maybe_add_cognitive_mode_proposal(proposals, state, result_ctx) do
+    case Map.get(result_ctx, "session.cognitive_mode") do
+      mode when is_binary(mode) and mode != "" ->
+        current = to_string(get_cognitive_mode(state))
+
+        if mode != current do
+          [
+            %{
+              type: :cognitive_mode,
+              content: "Switch to #{mode} mode",
+              metadata: %{from: current, to: mode}
+            }
+            | proposals
+          ]
+        else
+          proposals
+        end
+
+      _ ->
+        proposals
+    end
+  end
+
+  defp maybe_add_goal_proposals(proposals, result_ctx) do
+    case Map.get(result_ctx, "session.new_goals", []) do
+      goals when is_list(goals) and goals != [] ->
+        goal_proposals =
+          Enum.map(goals, fn goal ->
+            %{
+              type: :goal,
+              content: Map.get(goal, "description", "New goal"),
+              metadata: %{goal_data: goal}
+            }
+          end)
+
+        goal_proposals ++ proposals
+
+      _ ->
+        proposals
+    end
+  end
+
+  defp maybe_add_goal_update_proposals(proposals, result_ctx) do
+    case Map.get(result_ctx, "session.goal_updates", []) do
+      updates when is_list(updates) and updates != [] ->
+        update_proposals =
+          Enum.map(updates, fn update ->
+            %{
+              type: :goal_update,
+              content: "Update goal #{Map.get(update, "id", "?")}",
+              metadata: %{update_data: update}
+            }
+          end)
+
+        update_proposals ++ proposals
+
+      _ ->
+        proposals
+    end
+  end
+
+  defp maybe_add_wm_proposals(proposals, result_ctx) do
+    thoughts = Map.get(result_ctx, "session.memory_notes", [])
+    concerns = Map.get(result_ctx, "session.concerns", [])
+    curiosities = Map.get(result_ctx, "session.curiosity", [])
+
+    thought_props =
+      Enum.map(List.wrap(thoughts), fn t ->
+        text = if is_binary(t), do: t, else: Map.get(t, "text", inspect(t))
+        %{type: :thought, content: text, metadata: %{}}
+      end)
+
+    concern_props =
+      Enum.map(List.wrap(concerns), fn c ->
+        text = if is_binary(c), do: c, else: Map.get(c, "text", inspect(c))
+        %{type: :concern, content: text, metadata: %{}}
+      end)
+
+    curiosity_props =
+      Enum.map(List.wrap(curiosities), fn c ->
+        text = if is_binary(c), do: c, else: Map.get(c, "text", inspect(c))
+        %{type: :curiosity, content: text, metadata: %{}}
+      end)
+
+    thought_props ++ concern_props ++ curiosity_props ++ proposals
+  end
+
+  defp maybe_add_decomposition_proposals(proposals, result_ctx) do
+    case Map.get(result_ctx, "session.decompositions", []) do
+      decomps when is_list(decomps) and decomps != [] ->
+        intent_proposals =
+          Enum.map(decomps, fn d ->
+            %{
+              type: :intent,
+              content: Map.get(d, "description", "Decomposed intent"),
+              metadata: %{decomposition: d}
+            }
+          end)
+
+        intent_proposals ++ proposals
+
+      _ ->
+        proposals
+    end
+  end
+
+  defp maybe_add_identity_proposals(proposals, _agent_id, result_ctx) do
+    case Map.get(result_ctx, "session.identity_insights", []) do
+      insights when is_list(insights) and insights != [] ->
+        identity_proposals =
+          Enum.map(insights, fn insight ->
+            text =
+              if is_binary(insight), do: insight, else: Map.get(insight, "text", inspect(insight))
+
+            %{type: :identity, content: text, metadata: %{source: "heartbeat"}}
+          end)
+
+        identity_proposals ++ proposals
+
+      _ ->
+        proposals
+    end
+  end
+
+  defp create_proposals(agent_id, proposals) do
+    proposal_module = Arbor.Memory.Proposal
+
+    if Code.ensure_loaded?(proposal_module) and
+         function_exported?(proposal_module, :create, 3) do
+      Enum.count(proposals, fn prop ->
+        case apply(proposal_module, :create, [
+               agent_id,
+               prop.type,
+               %{
+                 content: prop.content,
+                 source: "heartbeat",
+                 metadata: prop.metadata,
+                 confidence: 0.7
+               }
+             ]) do
+          {:ok, _} -> true
+          {:error, _} -> false
+        end
+      end)
+    else
+      0
+    end
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
+  end
+
+  defp emit_notification_percept(agent_id, count, proposals) do
+    by_type = Enum.group_by(proposals, & &1.type)
+
+    summary_parts =
+      Enum.map(by_type, fn {type, items} ->
+        "#{length(items)} #{type}"
+      end)
+
+    summary = "#{count} proposals waiting: #{Enum.join(summary_parts, ", ")}"
+
+    # Enqueue notification to ActionCycleServer via runtime bridge
+    action_cycle_sup = Arbor.Agent.ActionCycleSupervisor
+
+    if Code.ensure_loaded?(action_cycle_sup) do
+      case apply(action_cycle_sup, :lookup, [agent_id]) do
+        {:ok, pid} ->
+          send(
+            pid,
+            {:percept,
+             %{
+               type: :notification,
+               summary: summary,
+               proposal_count: count,
+               by_type: Map.new(by_type, fn {k, v} -> {k, length(v)} end)
+             }}
+          )
+
+        :error ->
+          :ok
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ── Memory store runtime bridge ──────────────────────────────────

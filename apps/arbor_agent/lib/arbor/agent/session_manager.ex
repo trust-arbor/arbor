@@ -127,6 +127,10 @@ defmodule Arbor.Agent.SessionManager do
           ref = Process.monitor(pid)
           :ets.insert(@table, {agent_id, pid})
           new_state = %{state | monitors: Map.put(state.monitors, agent_id, ref)}
+
+          # Start companion servers (Phase 3: three-loop architecture)
+          start_companion_servers(agent_id, opts)
+
           {:reply, {:ok, pid}, new_state}
 
         {:error, reason} ->
@@ -174,6 +178,9 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp do_stop_session(agent_id, state) do
+    # Stop companion servers first (Phase 3)
+    stop_companion_servers(agent_id)
+
     case :ets.lookup(@table, agent_id) do
       [{^agent_id, pid}] ->
         # Demonitor before stopping to avoid race
@@ -195,6 +202,54 @@ defmodule Arbor.Agent.SessionManager do
 
       _ ->
         state
+    end
+  end
+
+  # ── Companion server lifecycle (Phase 3) ─────────────────────────
+
+  defp start_companion_servers(agent_id, opts) do
+    # Action Cycle Server
+    if Code.ensure_loaded?(Arbor.Agent.ActionCycleSupervisor) do
+      try do
+        apply(Arbor.Agent.ActionCycleSupervisor, :start_server, [agent_id, opts])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    # Maintenance Server
+    if Code.ensure_loaded?(Arbor.Agent.MaintenanceSupervisor) do
+      try do
+        apply(Arbor.Agent.MaintenanceSupervisor, :start_server, [agent_id, opts])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  defp stop_companion_servers(agent_id) do
+    if Code.ensure_loaded?(Arbor.Agent.ActionCycleSupervisor) do
+      try do
+        apply(Arbor.Agent.ActionCycleSupervisor, :stop_server, [agent_id])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    if Code.ensure_loaded?(Arbor.Agent.MaintenanceSupervisor) do
+      try do
+        apply(Arbor.Agent.MaintenanceSupervisor, :stop_server, [agent_id])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
     end
   end
 

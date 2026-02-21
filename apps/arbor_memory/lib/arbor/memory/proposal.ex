@@ -13,6 +13,14 @@ defmodule Arbor.Memory.Proposal do
   - `:learning` - Tool usage patterns and workflow learnings
   - `:pattern` - Recurring sequences detected in action history
   - `:preconscious` - Anticipatory memories surfaced from current context
+  - `:goal` - New goal proposed by heartbeat
+  - `:goal_update` - Modification to existing goal
+  - `:thought` - Thinking observation from heartbeat
+  - `:concern` - Concern raised during heartbeat
+  - `:curiosity` - Curiosity expression from heartbeat
+  - `:identity` - Identity insight proposed by heartbeat
+  - `:intent` - Decomposed intent from heartbeat
+  - `:cognitive_mode` - Cognitive mode change proposed by heartbeat
 
   ## Lifecycle
 
@@ -54,7 +62,21 @@ defmodule Arbor.Memory.Proposal do
 
   alias Arbor.Memory.{Events, KnowledgeGraph, Signals}
 
-  @type proposal_type :: :fact | :insight | :learning | :pattern | :preconscious
+  @type proposal_type ::
+          :fact
+          | :insight
+          | :learning
+          | :pattern
+          | :preconscious
+          # Phase 3: heartbeat proposal types
+          | :goal
+          | :goal_update
+          | :thought
+          | :concern
+          | :curiosity
+          | :identity
+          | :intent
+          | :cognitive_mode
   @type proposal_status :: :pending | :accepted | :rejected | :deferred
 
   @type t :: %__MODULE__{
@@ -96,7 +118,22 @@ defmodule Arbor.Memory.Proposal do
   # Similarity threshold for content dedup (Jaro-Winkler distance)
   @content_similarity_threshold 0.85
 
-  @allowed_types [:fact, :insight, :learning, :pattern, :preconscious]
+  @allowed_types [
+    :fact,
+    :insight,
+    :learning,
+    :pattern,
+    :preconscious,
+    # Phase 3: heartbeat proposal types
+    :goal,
+    :goal_update,
+    :thought,
+    :concern,
+    :curiosity,
+    :identity,
+    :intent,
+    :cognitive_mode
+  ]
 
   # ============================================================================
   # Construction
@@ -259,21 +296,40 @@ defmodule Arbor.Memory.Proposal do
   @spec accept(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def accept(agent_id, proposal_id) do
     with {:ok, proposal} <- get(agent_id, proposal_id),
-         :ok <- validate_status(proposal, :pending),
-         {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node_id} <- add_to_graph(graph, proposal) do
-      # Save updated graph
-      save_graph(agent_id, new_graph)
+         :ok <- validate_status(proposal, :pending) do
+      result =
+        case route_for_type(proposal.type) do
+          :kg_only ->
+            # Original behavior: add directly to KG
+            with {:ok, graph} <- get_graph(agent_id),
+                 {:ok, new_graph, node_id} <- add_to_graph(graph, proposal) do
+              save_graph(agent_id, new_graph)
+              {:ok, node_id}
+            end
 
-      # Update proposal status and remove from queue
-      updated_proposal = %{proposal | status: :accepted}
-      :ets.insert(@proposals_ets, {{agent_id, proposal_id}, updated_proposal})
+          {:domain_store, store_fn} ->
+            # Write to domain store, then create KG reference
+            with {:ok, domain_key} <- store_fn.(agent_id, proposal),
+                 {:ok, graph} <- get_graph(agent_id),
+                 {:ok, new_graph, node_id} <- add_reference_node(graph, proposal, domain_key) do
+              save_graph(agent_id, new_graph)
+              {:ok, node_id}
+            end
+        end
 
-      # Emit events
-      Events.record_proposal_accepted(agent_id, proposal_id, node_id, proposal.type)
-      Signals.emit_proposal_accepted(agent_id, proposal_id, node_id)
+      case result do
+        {:ok, node_id} ->
+          updated_proposal = %{proposal | status: :accepted}
+          :ets.insert(@proposals_ets, {{agent_id, proposal_id}, updated_proposal})
 
-      {:ok, node_id}
+          Events.record_proposal_accepted(agent_id, proposal_id, node_id, proposal.type)
+          Signals.emit_proposal_accepted(agent_id, proposal_id, node_id)
+
+          {:ok, node_id}
+
+        error ->
+          error
+      end
     end
   end
 
@@ -612,9 +668,130 @@ defmodule Arbor.Memory.Proposal do
     KnowledgeGraph.add_node(graph, node_data)
   end
 
+  # ============================================================================
+  # Domain-Store Routing
+  # ============================================================================
+
+  defp route_for_type(type) when type in [:fact, :insight, :learning, :pattern, :preconscious],
+    do: :kg_only
+
+  defp route_for_type(:goal), do: {:domain_store, &store_goal/2}
+  defp route_for_type(:goal_update), do: {:domain_store, &store_goal_update/2}
+  defp route_for_type(:identity), do: {:domain_store, &store_identity/2}
+  defp route_for_type(:intent), do: {:domain_store, &store_intent/2}
+  # Observations and cognitive_mode go directly to KG
+  defp route_for_type(_type), do: :kg_only
+
+  # Domain store writers (all runtime bridges)
+  defp store_goal(agent_id, proposal) do
+    goal_data = Map.get(proposal.metadata, :goal_data, %{})
+
+    if Code.ensure_loaded?(Arbor.Memory.GoalStore) do
+      case apply(Arbor.Memory.GoalStore, :add_goal, [
+             agent_id,
+             proposal.content,
+             [priority: Map.get(goal_data, "priority", :medium)]
+           ]) do
+        {:ok, goal} -> {:ok, Map.get(goal, :id, generate_id())}
+        error -> error
+      end
+    else
+      {:ok, "goal_" <> generate_id()}
+    end
+  end
+
+  defp store_goal_update(agent_id, proposal) do
+    update_data = Map.get(proposal.metadata, :update_data, %{})
+    goal_id = Map.get(update_data, "id")
+
+    if goal_id && Code.ensure_loaded?(Arbor.Memory.GoalStore) do
+      progress = Map.get(update_data, "progress")
+
+      if progress do
+        apply(Arbor.Memory.GoalStore, :update_goal_progress, [agent_id, goal_id, progress])
+      end
+
+      {:ok, goal_id}
+    else
+      {:ok, "goal_update_" <> generate_id()}
+    end
+  end
+
+  defp store_identity(_agent_id, _proposal) do
+    # SelfKnowledge is a struct without a GenServer store API.
+    # Create KG :trait reference. Full SelfKnowledge wiring
+    # requires a proper store API — tracked separately.
+    {:ok, "identity_" <> generate_id()}
+  end
+
+  defp store_intent(agent_id, proposal) do
+    decomp = Map.get(proposal.metadata, :decomposition, %{})
+
+    if Code.ensure_loaded?(Arbor.Memory.IntentStore) &&
+         Code.ensure_loaded?(Arbor.Contracts.Intent) do
+      intent =
+        apply(Arbor.Contracts.Intent, :capability_intent, [
+          Map.get(decomp, "capability", "unknown"),
+          Map.get(decomp, "op", "unknown"),
+          Map.get(decomp, "target"),
+          [description: proposal.content]
+        ])
+
+      case apply(Arbor.Memory.IntentStore, :record_intent, [agent_id, intent]) do
+        {:ok, recorded} -> {:ok, Map.get(recorded, :id, intent.id)}
+        error -> error
+      end
+    else
+      {:ok, "intent_" <> generate_id()}
+    end
+  end
+
+  # Reference node — pointer to domain store, not full data
+  defp add_reference_node(graph, proposal, domain_key) do
+    node_type = proposal_type_to_node_type(proposal.type)
+    boosted_confidence = min(1.0, proposal.confidence + @acceptance_boost)
+
+    node_data = %{
+      type: node_type,
+      content: truncate_content(proposal.content, 200),
+      relevance: boosted_confidence,
+      metadata:
+        Map.merge(proposal.metadata, %{
+          proposal_id: proposal.id,
+          source: proposal.source,
+          domain_store: domain_store_name(proposal.type),
+          domain_key: domain_key,
+          reference_only: true
+        })
+    }
+
+    KnowledgeGraph.add_node(graph, node_data)
+  end
+
+  defp domain_store_name(t) when t in [:goal, :goal_update], do: "goals"
+  defp domain_store_name(:identity), do: "self_knowledge"
+  defp domain_store_name(:intent), do: "intents"
+
+  defp truncate_content(content, max) do
+    if String.length(content) > max do
+      String.slice(content, 0, max) <> "..."
+    else
+      content
+    end
+  end
+
   defp proposal_type_to_node_type(:fact), do: :fact
   defp proposal_type_to_node_type(:insight), do: :insight
   defp proposal_type_to_node_type(:learning), do: :skill
   defp proposal_type_to_node_type(:pattern), do: :experience
   defp proposal_type_to_node_type(:preconscious), do: :experience
+  # Phase 3 types — semantically precise KG node types
+  defp proposal_type_to_node_type(:goal), do: :goal
+  defp proposal_type_to_node_type(:goal_update), do: :goal
+  defp proposal_type_to_node_type(:thought), do: :observation
+  defp proposal_type_to_node_type(:concern), do: :observation
+  defp proposal_type_to_node_type(:curiosity), do: :observation
+  defp proposal_type_to_node_type(:identity), do: :trait
+  defp proposal_type_to_node_type(:intent), do: :intention
+  defp proposal_type_to_node_type(:cognitive_mode), do: :observation
 end

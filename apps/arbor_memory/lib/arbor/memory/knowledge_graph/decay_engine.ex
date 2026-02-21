@@ -16,7 +16,8 @@ defmodule Arbor.Memory.KnowledgeGraph.DecayEngine do
   @default_prune_threshold 0.1
   @default_max_nodes_per_type 500
   @min_relevance 0.01
-  @allowed_node_types [:fact, :experience, :skill, :insight, :relationship, :custom]
+  @allowed_node_types [:fact, :experience, :skill, :insight, :relationship,
+                       :goal, :observation, :trait, :intention]
 
   # ============================================================================
   # Decay
