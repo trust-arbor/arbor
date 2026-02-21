@@ -11,7 +11,7 @@ defmodule Arbor.AI.Backends.OllamaEmbeddingTest do
 
   alias Arbor.AI.Backends.OllamaEmbedding
 
-  @moduletag :external
+  @moduletag :llm_local
 
   describe "embed/2" do
     test "generates embedding for a single text" do

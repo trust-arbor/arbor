@@ -8,4 +8,4 @@ for child <- [
   Supervisor.start_child(Arbor.Signals.Supervisor, child)
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

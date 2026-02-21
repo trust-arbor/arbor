@@ -11,9 +11,9 @@ end
 
 exclude =
   cond do
-    is_watch -> [:integration, :distributed, :chaos, :slow]
-    is_ci -> [:distributed, :chaos]
-    true -> [:integration, :distributed, :chaos]
+    is_watch -> [:integration, :distributed, :chaos, :slow, :llm, :llm_local]
+    is_ci -> [:distributed, :chaos, :llm, :llm_local]
+    true -> [:integration, :distributed, :chaos, :llm, :llm_local]
   end
 
 ExUnit.start(exclude: exclude, async: !is_ci)

@@ -1,4 +1,4 @@
-ExUnit.start(exclude: [:live_local])
+ExUnit.start(exclude: [:llm, :llm_local])
 
 # Start CapabilityStore and insert a wildcard capability for "agent_system".
 # This is the default principal used by CapabilityCheck middleware when no

@@ -5,14 +5,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   - Ollama (nomic-embed-text) for semantic embeddings
 
   These tests hit real local inference servers and are excluded by default.
-  Run with: mix test --only live_local
+  Run with: mix test --only llm_local
   """
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{LMStudio, Ollama}
   alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
 
-  @moduletag :live_local
+  @moduletag :llm_local
   @moduletag timeout: 120_000
 
   # -- Config --
@@ -119,7 +119,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   # ══════════════════════════════════════════════════════════════════
 
   describe "GenServer coding challenge" do
-    @tag :live_local
+    @tag :llm_local
     test "writes a working key-value store GenServer", %{lm_studio: lm} do
       unless lm, do: flunk("LM Studio not available")
 
@@ -240,7 +240,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   # ══════════════════════════════════════════════════════════════════
 
   describe "bug finding challenge" do
-    @tag :live_local
+    @tag :llm_local
     test "identifies and fixes a subtle Elixir bug", %{lm_studio: lm} do
       unless lm, do: flunk("LM Studio not available")
 
@@ -323,7 +323,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   # ══════════════════════════════════════════════════════════════════
 
   describe "semantic embeddings" do
-    @tag :live_local
+    @tag :llm_local
     test "nomic-embed-text produces meaningful code embeddings", %{ollama: ol} do
       unless ol, do: flunk("Ollama not available")
 
@@ -405,7 +405,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
              "Math code should be closer to math concept than to OTP concept"
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "embeddings cluster related Elixir concepts", %{ollama: ol} do
       unless ol, do: flunk("Ollama not available")
 
@@ -455,7 +455,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   # ══════════════════════════════════════════════════════════════════
 
   describe "code generation with semantic verification" do
-    @tag :live_local
+    @tag :llm_local
     test "generated code is semantically close to its specification", ctx do
       unless ctx.lm_studio and ctx.ollama do
         flunk("Both LM Studio and Ollama required")
@@ -509,7 +509,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   # ══════════════════════════════════════════════════════════════════
 
   describe "Elixir pattern completion" do
-    @tag :live_local
+    @tag :llm_local
     test "completes an Elixir pipeline correctly", %{lm_studio: lm} do
       unless lm, do: flunk("LM Studio not available")
 
@@ -540,7 +540,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
              "Should take top N results"
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "writes a proper with statement", %{lm_studio: lm} do
       unless lm, do: flunk("LM Studio not available")
 

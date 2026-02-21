@@ -36,4 +36,4 @@ for child <- [
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

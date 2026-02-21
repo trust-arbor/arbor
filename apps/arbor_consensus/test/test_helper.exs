@@ -63,4 +63,4 @@ for agent <- ["admin", "admin_1"] do
   Arbor.Security.CapabilityStore.put(cap)
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

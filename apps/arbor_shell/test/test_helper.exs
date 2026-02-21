@@ -6,4 +6,4 @@ Supervisor.start_child(
   {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
 )
 
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

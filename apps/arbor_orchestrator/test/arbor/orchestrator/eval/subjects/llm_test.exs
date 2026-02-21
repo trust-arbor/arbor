@@ -11,7 +11,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
       assert msg =~ "unknown provider"
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "returns error when LM Studio is not available" do
       result = LLM.run("hello", provider: "lm_studio", timeout: 1_000)
 
@@ -21,27 +21,27 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
       end
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "accepts string input" do
       result = LLM.run("test prompt", provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "accepts map input with prompt and system keys" do
       input = %{"prompt" => "Hello", "system" => "You are helpful"}
       result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "accepts atom-keyed map input" do
       input = %{prompt: "Hello", system: "Be helpful"}
       result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
-    @tag :live_local
+    @tag :llm_local
     test "supports CLI provider names" do
       for provider <- ~w(claude_cli codex_cli gemini_cli opencode_cli qwen_cli) do
         result = LLM.run("hello", provider: provider, timeout: 1_000)
@@ -51,7 +51,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
   end
 
   describe "run/2 with live local models" do
-    @describetag :live_local
+    @describetag :llm_local
 
     test "generates text via LM Studio" do
       result =
