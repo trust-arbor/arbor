@@ -22,6 +22,30 @@ defmodule Arbor.Orchestrator.Engine.Condition do
         [left, right] = String.split(clause, "!=", parts: 2)
         resolve(String.trim(left), outcome, context) != parse_literal(String.trim(right))
 
+      String.contains?(clause, ">=") ->
+        [left, right] = String.split(clause, ">=", parts: 2)
+
+        to_number(resolve(String.trim(left), outcome, context)) >=
+          to_number(parse_literal(String.trim(right)))
+
+      String.contains?(clause, "<=") ->
+        [left, right] = String.split(clause, "<=", parts: 2)
+
+        to_number(resolve(String.trim(left), outcome, context)) <=
+          to_number(parse_literal(String.trim(right)))
+
+      String.contains?(clause, ">") ->
+        [left, right] = String.split(clause, ">", parts: 2)
+
+        to_number(resolve(String.trim(left), outcome, context)) >
+          to_number(parse_literal(String.trim(right)))
+
+      String.contains?(clause, "<") ->
+        [left, right] = String.split(clause, "<", parts: 2)
+
+        to_number(resolve(String.trim(left), outcome, context)) <
+          to_number(parse_literal(String.trim(right)))
+
       String.contains?(clause, "=") ->
         [left, right] = String.split(clause, "=", parts: 2)
         resolve(String.trim(left), outcome, context) == parse_literal(String.trim(right))
@@ -118,19 +142,32 @@ defmodule Arbor.Orchestrator.Engine.Condition do
 
   def valid_syntax?(_), do: false
 
+  # Supported operators in order of precedence (multi-char before single-char).
+  @operators ["!=", ">=", "<=", ">", "<", "="]
+
   defp valid_clause?(clause) do
-    cond do
-      String.contains?(clause, "!=") ->
-        [left, right] = String.split(clause, "!=", parts: 2)
-        valid_key?(String.trim(left)) and String.trim(right) != ""
+    case find_operator(clause) do
+      {op, left, right} ->
+        valid_key?(String.trim(left)) and valid_rhs?(String.trim(right), op)
 
-      String.contains?(clause, "=") ->
-        [left, right] = String.split(clause, "=", parts: 2)
-        valid_key?(String.trim(left)) and String.trim(right) != ""
-
-      true ->
+      nil ->
         false
     end
+  end
+
+  defp find_operator(clause) do
+    Enum.find_value(@operators, fn op ->
+      if String.contains?(clause, op) do
+        [left, right] = String.split(clause, op, parts: 2)
+        {op, left, right}
+      end
+    end)
+  end
+
+  # Right-hand side must be non-empty and not start with an operator character
+  # (prevents "outcome>>success" from validating via ">" split)
+  defp valid_rhs?(rhs, _op) do
+    rhs != "" and not String.starts_with?(rhs, [">", "<", "=", "!"])
   end
 
   defp valid_key?(key) when key in @allowed_simple_keys, do: true

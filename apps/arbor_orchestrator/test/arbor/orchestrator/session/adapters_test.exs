@@ -44,7 +44,8 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :consolidate,
         :update_working_memory,
         :background_checks,
-        :trust_tier_resolver
+        :trust_tier_resolver,
+        :execute_actions
       ]
 
       for key <- expected_keys do

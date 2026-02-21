@@ -5,6 +5,16 @@
 // working memory, identity (via route_actions), and goals.
 //
 // The control variant for the v3 memory ablation eval.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  TOOL LOOP: execute_actions -> check_loop -> llm_followup -> process   │
+// │                                                                        │
+// │  After the initial LLM call, actions are executed and results fed      │
+// │  back to the LLM for another turn. The loop continues until the LLM   │
+// │  returns no actions, or 10 tool turns are exhausted.                   │
+// │  Each loop iteration processes ALL outputs (decompositions, goals,     │
+// │  memory, identity) before checking for more actions.                   │
+// └─────────────────────────────────────────────────────────────────────────┘
 
 digraph HeartbeatFull {
   graph [
@@ -30,7 +40,7 @@ digraph HeartbeatFull {
   llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
   consolidate [type="session.consolidate"]
 
-  // ── Result processing ────────────────────────────────────
+  // ── Result processing (re-entered on tool loop cycles) ─────
   process [type="session.process_results"]
 
   // ── FULL: All post-processing nodes ───────────────────────
@@ -38,8 +48,12 @@ digraph HeartbeatFull {
   process_proposals [type="session.process_proposal_decisions"]
   store_identity [type="session.store_identity"]
   update_wm [type="session.update_working_memory"]
-  route_actions [type="session.route_actions"]
+  execute_actions [type="session.execute_actions"]
   update_goals [type="session.update_goals"]
+
+  // ── Tool loop control ──────────────────────────────────────
+  check_loop [shape=diamond, condition_key="session.has_action_results"]
+  llm_followup [type="session.llm_tool_followup"]
 
   // ── Exit ─────────────────────────────────────────────────
   done [shape=Msquare]
@@ -60,6 +74,14 @@ digraph HeartbeatFull {
   llm_plan -> process
   consolidate -> process
 
-  // Full tail: all post-processing
-  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> route_actions -> update_goals -> done
+  // Full tail: all post-processing, then tool loop check
+  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> check_loop
+
+  // Tool loop: if actions produced results AND under 10 turns, follow up
+  check_loop -> llm_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
+  check_loop -> done
+
+  // ── THE CYCLE ──────────────────────────────────────────────
+  // LLM sees action results, produces new response, re-enters process
+  llm_followup -> process
 }

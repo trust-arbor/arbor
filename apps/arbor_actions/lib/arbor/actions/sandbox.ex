@@ -115,24 +115,27 @@ defmodule Arbor.Actions.Sandbox do
     def run(%{agent_id: agent_id} = params, _context) do
       Actions.emit_started(__MODULE__, %{agent_id: agent_id})
 
-      opts = build_opts(params)
+      with {:ok, opts} <- build_opts(params),
+           {:ok, sandbox} <- Arbor.Sandbox.create(agent_id, opts) do
+        result = %{
+          sandbox_id: sandbox.id,
+          agent_id: sandbox.agent_id,
+          level: sandbox.level,
+          status: "created"
+        }
 
-      {:ok, sandbox} = Arbor.Sandbox.create(agent_id, opts)
+        Actions.emit_completed(__MODULE__, %{
+          sandbox_id: sandbox.id,
+          agent_id: agent_id,
+          level: sandbox.level
+        })
 
-      result = %{
-        sandbox_id: sandbox.id,
-        agent_id: sandbox.agent_id,
-        level: sandbox.level,
-        status: "created"
-      }
-
-      Actions.emit_completed(__MODULE__, %{
-        sandbox_id: sandbox.id,
-        agent_id: agent_id,
-        level: sandbox.level
-      })
-
-      {:ok, result}
+        {:ok, result}
+      else
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
+      end
     rescue
       e ->
         reason = Exception.message(e)
@@ -141,27 +144,43 @@ defmodule Arbor.Actions.Sandbox do
     end
 
     defp build_opts(params) do
-      []
-      |> maybe_add(:level, normalize_level(params[:level]))
-      |> maybe_add(:base_path, params[:base_path])
-      |> maybe_add(:timeout, params[:timeout])
-    end
+      with {:ok, level} <- normalize_level(params[:level]) do
+        opts =
+          []
+          |> maybe_add(:level, level)
+          |> maybe_add(:base_path, params[:base_path])
+          |> maybe_add(:timeout, params[:timeout])
 
-    defp normalize_level(nil), do: nil
-
-    defp normalize_level(level) when is_binary(level) do
-      case SafeAtom.to_allowed(level, @allowed_levels) do
-        {:ok, atom} -> atom
-        {:error, _} -> nil
+        {:ok, opts}
       end
     end
 
-    defp normalize_level(level) when is_atom(level), do: level
+    defp normalize_level(nil), do: {:ok, nil}
+
+    defp normalize_level(level) when is_binary(level) do
+      case SafeAtom.to_allowed(level, @allowed_levels) do
+        {:ok, atom} ->
+          {:ok, atom}
+
+        {:error, _} ->
+          {:error,
+           "Invalid sandbox level '#{level}'. Valid levels: pure, limited, full, container"}
+      end
+    end
+
+    defp normalize_level(level) when is_atom(level) and level in @allowed_levels,
+      do: {:ok, level}
+
+    defp normalize_level(level),
+      do:
+        {:error,
+         "Invalid sandbox level '#{inspect(level)}'. Valid levels: pure, limited, full, container"}
 
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
 
     defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
+    defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Sandbox creation failed: #{inspect(reason)}"
   end
 

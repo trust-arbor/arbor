@@ -1,11 +1,16 @@
 // Heartbeat Variant: BARE — Nothing persists between heartbeats
 //
 // Same cognitive mode routing and LLM calls as the full heartbeat,
-// but the post-processing tail only routes actions. No goals, no
+// but the post-processing tail only executes actions. No goals, no
 // working memory, no identity, no decompositions persist.
 // Each heartbeat starts completely fresh — pure memoryless agent.
 //
 // Used by v3 memory ablation eval as the baseline.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  TOOL LOOP: execute_actions -> check_loop -> llm_followup -> process   │
+// │  Same cycle as full variant — even bare agents get action feedback.    │
+// └─────────────────────────────────────────────────────────────────────────┘
 
 digraph HeartbeatBare {
   graph [
@@ -33,11 +38,15 @@ digraph HeartbeatBare {
   // ── Consolidation (skipped in bare but needed for routing) ─
   consolidate [type="session.consolidate"]
 
-  // ── Result processing ────────────────────────────────────
+  // ── Result processing (re-entered on tool loop cycles) ─────
   process [type="session.process_results"]
 
   // ── BARE: Actions only, nothing persists ──────────────────
-  route_actions [type="session.route_actions"]
+  execute_actions [type="session.execute_actions"]
+
+  // ── Tool loop control ──────────────────────────────────────
+  check_loop [shape=diamond, condition_key="session.has_action_results"]
+  llm_followup [type="session.llm_tool_followup"]
 
   // ── Exit ─────────────────────────────────────────────────
   done [shape=Msquare]
@@ -58,6 +67,13 @@ digraph HeartbeatBare {
   llm_plan -> process
   consolidate -> process
 
-  // Bare tail: actions only
-  process -> route_actions -> done
+  // Bare tail: actions only, then tool loop check
+  process -> execute_actions -> check_loop
+
+  // Tool loop
+  check_loop -> llm_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
+  check_loop -> done
+
+  // ── THE CYCLE ──────────────────────────────────────────────
+  llm_followup -> process
 }

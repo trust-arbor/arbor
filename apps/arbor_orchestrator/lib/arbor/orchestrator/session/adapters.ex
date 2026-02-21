@@ -102,6 +102,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       memory_update: build_memory_update(),
       checkpoint: build_checkpoint(),
       route_actions: build_route_actions(),
+      execute_actions: build_execute_actions(agent_id),
       route_intents: build_route_intents(),
       update_goals: build_update_goals(),
       apply_identity_insights: build_apply_identity_insights(),
@@ -386,6 +387,119 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
       :ok
     end
+  end
+
+  # ── Execute Actions (with percept feedback) ──────────────────────────
+  #
+  # SessionHandler calls: execute_actions.(actions, agent_id)
+  # Returns: {:ok, percepts} where percepts is a list of plain maps (JSON-safe)
+  # Each action is executed via authorize_and_execute, and a Percept is created
+  # and recorded for each result.
+
+  defp build_execute_actions(agent_id) do
+    fn actions, call_agent_id ->
+      effective_agent_id = call_agent_id || agent_id
+
+      results =
+        bridge(
+          Arbor.Actions,
+          :execute_batch,
+          [actions, [agent_id: effective_agent_id]],
+          []
+        )
+
+      # Results is [{spec, {:ok, result} | {:error, reason}}]
+      # Create percepts and record them
+      percepts =
+        Enum.map(List.wrap(results), fn {spec, result} ->
+          action_type = Map.get(spec, "type") || Map.get(spec, :type, "unknown")
+          percept = result_to_percept(action_type, result)
+
+          # Record percept in memory store
+          bridge(Arbor.Memory, :record_percept, [effective_agent_id, percept], :ok)
+
+          # Return as plain map for JSON-safe context storage
+          percept_to_map(percept)
+        end)
+
+      {:ok, percepts}
+    end
+  end
+
+  defp result_to_percept(action_type, {:ok, result}) do
+    data = %{action_type: action_type, result: truncate_result(result)}
+
+    bridge(
+      Arbor.Contracts.Memory.Percept,
+      :success,
+      [nil, data],
+      %{id: generate_percept_id(), type: :action_result, outcome: :success, data: data}
+    )
+  end
+
+  defp result_to_percept(action_type, {:error, :unauthorized}) do
+    bridge(
+      Arbor.Contracts.Memory.Percept,
+      :blocked,
+      [nil, "unauthorized: #{action_type}"],
+      %{
+        id: generate_percept_id(),
+        type: :action_result,
+        outcome: :blocked,
+        data: %{action_type: action_type}
+      }
+    )
+  end
+
+  defp result_to_percept(action_type, {:error, reason}) do
+    bridge(
+      Arbor.Contracts.Memory.Percept,
+      :failure,
+      [nil, reason],
+      %{
+        id: generate_percept_id(),
+        type: :action_result,
+        outcome: :failure,
+        error: reason,
+        data: %{action_type: action_type}
+      }
+    )
+  end
+
+  defp percept_to_map(%{__struct__: _} = percept) do
+    percept
+    |> Map.from_struct()
+    |> Map.update(:created_at, nil, fn
+      %DateTime{} = dt -> DateTime.to_iso8601(dt)
+      other -> other
+    end)
+    |> Map.update(:error, nil, fn
+      nil -> nil
+      err when is_binary(err) -> err
+      err -> inspect(err)
+    end)
+  end
+
+  defp percept_to_map(map) when is_map(map), do: map
+
+  defp truncate_result(result) when is_binary(result) and byte_size(result) > 4000 do
+    String.slice(result, 0, 3997) <> "..."
+  end
+
+  defp truncate_result(result) when is_map(result) do
+    Map.new(result, fn
+      {k, v} when is_binary(v) and byte_size(v) > 4000 ->
+        {k, String.slice(v, 0, 3997) <> "..."}
+
+      {k, v} ->
+        {k, v}
+    end)
+  end
+
+  defp truncate_result(result), do: result
+
+  defp generate_percept_id do
+    "prc_" <> Base.encode32(:crypto.strong_rand_bytes(8), case: :lower, padding: false)
   end
 
   # ── Update Goals ────────────────────────────────────────────────────

@@ -122,9 +122,12 @@ defmodule Arbor.Actions.Memory do
         Actions.emit_completed(__MODULE__, %{node_id: node_id})
         {:ok, %{node_id: node_id, type: type_atom, stored: true, linked_count: linked}}
       else
+        {:error, :missing_agent_id} = err ->
+          err
+
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, "Failed to store knowledge: #{inspect(reason)}"}
       end
     end
 
@@ -230,12 +233,15 @@ defmodule Arbor.Actions.Memory do
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
-            {:error, reason}
+            {:error, "Failed to recall knowledge: #{inspect(reason)}"}
         end
       else
+        {:error, :missing_agent_id} = err ->
+          err
+
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, "Failed to recall knowledge: #{inspect(reason)}"}
       end
     end
 
@@ -384,7 +390,7 @@ defmodule Arbor.Actions.Memory do
           if params[:include_stats] != false do
             case Arbor.Memory.knowledge_stats(agent_id) do
               {:ok, stats} -> Map.put(result, :stats, stats)
-              _ -> result
+              reason -> Map.put(result, :stats_error, inspect(reason))
             end
           else
             result
@@ -395,7 +401,7 @@ defmodule Arbor.Actions.Memory do
           if params[:prompt] do
             case Arbor.Memory.reflect(agent_id, params.prompt) do
               {:ok, reflection} -> Map.put(result, :reflection, reflection)
-              {:error, _} -> result
+              {:error, reason} -> Map.put(result, :reflection_error, inspect(reason))
             end
           else
             result
