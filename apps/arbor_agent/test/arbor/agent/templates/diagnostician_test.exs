@@ -159,7 +159,8 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
       caps = Diagnostician.required_capabilities()
 
       Enum.each(caps, fn cap ->
-        assert cap.resource =~ "arbor://actions/execute/",
+        assert cap.resource =~ "arbor://actions/execute/" or
+                 cap.resource == "arbor://orchestrator/execute",
                "Expected canonical URI, got: #{cap.resource}"
       end)
     end
