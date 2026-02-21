@@ -15,7 +15,7 @@ defmodule Arbor.Persistence.Ecto.EventStore do
         schema_prefix: "trust_arbor",
         column_data_type: "jsonb",
         username: "postgres",
-        password: "postgres",
+        password: System.get_env("DB_PASSWORD", "postgres"),
         database: "arbor_eventstore",
         hostname: "localhost",
         pool_size: 10
