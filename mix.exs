@@ -46,6 +46,9 @@ defmodule Arbor.MixProject do
       quality: ["format --check-formatted", "credo --strict"],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": ["test --only fast"],
+      "test.all": [
+        "test --include llm --include llm_local --include integration --include external --include database"
+      ],
       "test.unified_llm_conformance": [
         "cmd env MIX_ENV=test mix test apps/arbor_orchestrator/test/arbor/orchestrator/unified_llm apps/arbor_orchestrator/test/arbor/orchestrator/unified_llm_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/conformance/provider_doc_verification_test.exs"
       ]

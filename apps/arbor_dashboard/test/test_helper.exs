@@ -1,3 +1,3 @@
 Application.ensure_all_started(:arbor_dashboard)
 {:ok, _} = Arbor.Dashboard.Endpoint.start_link()
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

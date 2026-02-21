@@ -57,4 +57,4 @@ for child <- [
   end
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:llm, :llm_local])

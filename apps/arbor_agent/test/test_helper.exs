@@ -11,4 +11,4 @@ for child <- children do
   Supervisor.start_child(Arbor.Agent.AppSupervisor, child)
 end
 
-ExUnit.start(exclude: [:skip, :integration, :external])
+ExUnit.start(exclude: [:skip, :integration, :external, :llm, :llm_local])

@@ -30,5 +30,5 @@ end
 
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database
-ExUnit.configure(exclude: [:database])
+ExUnit.configure(exclude: [:database, :llm, :llm_local])
 ExUnit.start()
