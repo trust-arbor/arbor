@@ -218,10 +218,11 @@ defmodule Arbor.Actions.Code do
             tests_passed: false,
             test_output: inspect(reason),
             warnings: warnings,
-            errors: []
+            errors: [inspect(reason)],
+            execution_failed: true
           }
 
-          Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
+          Actions.emit_failed(__MODULE__, "Test execution failed: #{inspect(reason)}")
           {:ok, result}
       end
     end

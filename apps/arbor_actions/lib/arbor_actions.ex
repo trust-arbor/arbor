@@ -326,6 +326,85 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Resolve an action name string to its module.
+
+  Handles both dot-separated names (e.g. `"file.read"`) and underscore-separated
+  names (e.g. `"file_read"`) by normalizing underscores to dots when no dots are present.
+
+  ## Examples
+
+      iex> Arbor.Actions.name_to_module("file.read")
+      {:ok, Arbor.Actions.File.Read}
+
+      iex> Arbor.Actions.name_to_module("shell_execute")
+      {:ok, Arbor.Actions.Shell.Execute}
+
+      iex> Arbor.Actions.name_to_module("nonexistent")
+      {:error, :unknown_action}
+  """
+  @spec name_to_module(String.t()) :: {:ok, module()} | {:error, :unknown_action}
+  def name_to_module(name) when is_binary(name) do
+    # Normalize: if no dots, replace underscores with dots
+    normalized =
+      if String.contains?(name, ".") do
+        name
+      else
+        String.replace(name, "_", ".")
+      end
+
+    case Map.get(name_to_module_map(), normalized) do
+      nil -> {:error, :unknown_action}
+      module -> {:ok, module}
+    end
+  end
+
+  # Build a reverse lookup map from action name -> module.
+  # Uses action_module_to_name/1 for each module in all_actions().
+  defp name_to_module_map do
+    all_actions()
+    |> Map.new(fn module -> {action_module_to_name(module), module} end)
+  end
+
+  @doc """
+  Execute a batch of action specs with authorization.
+
+  Each spec should be a map with `"type"` (action name) and `"params"` keys.
+  Returns a list of `{spec, result}` tuples where result is `{:ok, value}` or `{:error, reason}`.
+
+  ## Options
+
+    * `:agent_id` (required) — the agent executing the actions
+
+  ## Examples
+
+      results = Arbor.Actions.execute_batch(
+        [%{"type" => "file.read", "params" => %{"path" => "/tmp/test.txt"}}],
+        agent_id: "agent_abc"
+      )
+      # => [{spec, {:ok, %{content: "..."}}}]
+  """
+  @spec execute_batch([map()], keyword()) :: [{map(), {:ok, any()} | {:error, term()}}]
+  def execute_batch(action_specs, opts \\ []) do
+    agent_id = Keyword.fetch!(opts, :agent_id)
+
+    Enum.map(List.wrap(action_specs), fn spec ->
+      type = Map.get(spec, "type") || Map.get(spec, :type, "")
+      params = Map.get(spec, "params") || Map.get(spec, :params, %{})
+
+      result =
+        case name_to_module(type) do
+          {:ok, module} ->
+            authorize_and_execute(agent_id, module, params)
+
+          {:error, :unknown_action} ->
+            {:error, {:unknown_action, type}}
+        end
+
+      {spec, result}
+    end)
+  end
+
+  @doc """
   Get tools for a specific category.
   """
   @spec tools_for_category(atom()) :: [map()]

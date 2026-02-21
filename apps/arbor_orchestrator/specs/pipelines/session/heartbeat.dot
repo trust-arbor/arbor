@@ -25,6 +25,16 @@
 // │  The post-processing tail stores decompositions as intents, applies    │
 // │  proposal decisions, routes actions, updates goals, then finishes.     │
 // └─────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  TOOL LOOP: execute_actions -> check_loop -> llm_followup -> process   │
+// │                                                                        │
+// │  After the initial LLM call, actions are executed and results fed      │
+// │  back to the LLM for another turn. The loop continues until the LLM   │
+// │  returns no actions, or 10 tool turns are exhausted.                   │
+// │  Each loop iteration processes ALL outputs (decompositions, goals,     │
+// │  memory) before checking for more actions.                             │
+// └─────────────────────────────────────────────────────────────────────────┘
 
 digraph Heartbeat {
   graph [
@@ -52,7 +62,7 @@ digraph Heartbeat {
   // ── Consolidation (KG decay/prune + identity consolidation) ─
   consolidate [type="session.consolidate"]
 
-  // ── Result processing ────────────────────────────────────
+  // ── Result processing (re-entered on tool loop cycles) ─────
   process [type="session.process_results"]
 
   // ── Post-processing: store decompositions as intents ─────
@@ -64,9 +74,13 @@ digraph Heartbeat {
   // ── Post-processing: update working memory (concerns, curiosity) ─
   update_wm [type="session.update_working_memory"]
 
-  // ── Action routing and goal updates ──────────────────────
-  route_actions [type="session.route_actions"]
+  // ── Action execution and goal updates ──────────────────────
+  execute_actions [type="session.execute_actions"]
   update_goals [type="session.update_goals"]
+
+  // ── Tool loop control ──────────────────────────────────────
+  check_loop [shape=diamond, condition_key="session.has_action_results"]
+  llm_followup [type="session.llm_tool_followup"]
 
   // ── Exit ─────────────────────────────────────────────────
   done [shape=Msquare]
@@ -90,6 +104,14 @@ digraph Heartbeat {
   llm_plan -> process
   consolidate -> process
 
-  // Shared post-processing tail
-  process -> store_decompositions -> process_proposals -> update_wm -> route_actions -> update_goals -> done
+  // Shared post-processing tail, then tool loop check
+  process -> store_decompositions -> process_proposals -> update_wm -> execute_actions -> update_goals -> check_loop
+
+  // Tool loop: if actions produced results AND under 10 turns, follow up
+  check_loop -> llm_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
+  check_loop -> done
+
+  // ── THE CYCLE ──────────────────────────────────────────────
+  // LLM sees action results, produces new response, re-enters process
+  llm_followup -> process
 }

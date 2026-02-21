@@ -61,7 +61,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
                      session.checkpoint session.route_actions session.update_goals
                      session.store_decompositions session.process_proposal_decisions
                      session.consolidate session.update_working_memory
-                     session.store_identity)
+                     session.store_identity session.execute_actions
+                     session.llm_tool_followup)
 
   # --- Behaviour callbacks ---
 
@@ -193,7 +194,29 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
             ok(%{"llm.response_type" => "tool_call", "llm.tool_calls" => calls})
 
           {:ok, %{content: content}} ->
-            ok(%{"llm.response_type" => "text", "llm.content" => content})
+            base_updates = %{
+              "llm.response_type" => "text",
+              "llm.content" => content
+            }
+
+            # Only store conversation history + tool_turn for heartbeat calls.
+            # The heartbeat tool loop (llm_followup) needs the conversation
+            # history to build on. Turn calls use apply_turn_result for messages.
+            updates =
+              if is_heartbeat do
+                updated_messages =
+                  final_messages ++
+                    [%{"role" => "assistant", "content" => content}]
+
+                Map.merge(base_updates, %{
+                  "session.messages" => updated_messages,
+                  "session.tool_turn" => 0
+                })
+              else
+                base_updates
+              end
+
+            ok(updates)
 
           {:error, reason} ->
             Logger.warning("[SessionHandler] LLM call failed: #{inspect(reason)}")
@@ -440,6 +463,84 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     end)
   end
 
+  defp handle_type("session.execute_actions", ctx, adapters, _meta) do
+    actions = Context.get(ctx, "session.actions", [])
+
+    if actions == [] do
+      ok(%{"session.has_action_results" => "false", "session.percepts" => []})
+    else
+      with_adapter(adapters, :execute_actions, fn execute ->
+        agent_id = Context.get(ctx, "session.agent_id")
+        tool_turn = Context.get(ctx, "session.tool_turn", 0)
+
+        try do
+          case execute.(actions, agent_id) do
+            {:ok, percepts} ->
+              Logger.info(
+                "[SessionHandler] execute_actions: #{length(actions)} actions, #{length(percepts)} percepts"
+              )
+
+              ok(%{
+                "session.has_action_results" => "true",
+                "session.percepts" => percepts,
+                "session.tool_turn" => tool_turn + 1
+              })
+
+            {:error, reason} ->
+              fail("execute_actions: #{inspect(reason)}")
+          end
+        catch
+          kind, reason -> fail("execute_actions: #{inspect({kind, reason})}")
+        end
+      end)
+    end
+  end
+
+  defp handle_type("session.llm_tool_followup", ctx, adapters, _meta) do
+    with_adapter(adapters, :llm_call, fn llm_call ->
+      percepts = Context.get(ctx, "session.percepts", [])
+      messages = Context.get(ctx, "session.messages", [])
+      mode = Context.get(ctx, "session.cognitive_mode", "reflection")
+      agent_id = Context.get(ctx, "session.agent_id")
+      call_opts = %{mode: mode, agent_id: agent_id}
+
+      # Format percepts as a user message and append to conversation
+      percept_msg = format_percepts(percepts)
+
+      followup_messages =
+        messages ++ [%{"role" => "user", "content" => percept_msg}]
+
+      Logger.info("[SessionHandler] llm_tool_followup: sending #{length(percepts)} percepts")
+
+      try do
+        result = llm_call.(followup_messages, mode, call_opts)
+
+        case result do
+          {:ok, %{content: content}} ->
+            updated_messages =
+              followup_messages ++ [%{"role" => "assistant", "content" => content}]
+
+            ok(%{
+              "llm.content" => content,
+              "session.messages" => updated_messages
+            })
+
+          {:error, reason} ->
+            Logger.warning("[SessionHandler] llm_tool_followup failed: #{inspect(reason)}")
+            fail("llm_tool_followup: #{inspect(reason)}")
+
+          other ->
+            Logger.warning("[SessionHandler] llm_tool_followup unexpected: #{inspect(other)}")
+            fail("llm_tool_followup: unexpected result")
+        end
+      catch
+        kind, reason ->
+          Logger.warning("[SessionHandler] llm_tool_followup crashed: #{inspect({kind, reason})}")
+          fail("llm_tool_followup: #{inspect({kind, reason})}")
+      end
+    end)
+  end
+
   defp handle_type("session.update_goals", ctx, adapters, _meta) do
     with_adapter(adapters, :update_goals, fn update ->
       goal_updates = Context.get(ctx, "session.goal_updates", [])
@@ -509,12 +610,15 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     thoughts = Context.get(ctx, "session.recent_thinking", [])
     turn_count = Context.get(ctx, "session.turn_count", 0)
 
+    recent_percepts = Context.get(ctx, "session.recent_percepts", [])
+
     goals_section = format_goals(goals)
     wm_section = format_working_memory(wm)
     kg_section = format_knowledge_graph(kg)
     proposals_section = format_proposals(proposals)
     intents_section = format_intents(intents)
     thinking_section = format_recent_thinking(thoughts)
+    percepts_section = format_recent_percepts(recent_percepts)
     mode_instructions = mode_instructions(mode)
 
     """
@@ -533,6 +637,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     #{thinking_section}
 
     #{proposals_section}
+
+    #{percepts_section}
 
     Respond with valid JSON containing these fields:
     - "cognitive_mode": your current mode (string)
@@ -630,6 +736,21 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     "## Recent Thinking\n#{items}"
   end
 
+  defp format_recent_percepts([]), do: ""
+
+  defp format_recent_percepts(percepts) do
+    items =
+      Enum.map_join(percepts, "\n", fn p ->
+        action_type =
+          get_in_map(p, [:data, :action_type]) || get_in_map(p, ["data", "action_type"]) || "?"
+
+        outcome = Map.get(p, :outcome) || Map.get(p, "outcome", "?")
+        "- #{action_type}: #{outcome}"
+      end)
+
+    "## Recent Action Results (from previous heartbeats)\n#{items}"
+  end
+
   defp mode_instructions("goal_pursuit") do
     """
     Mode: GOAL PURSUIT
@@ -666,6 +787,60 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     Generate memory notes and identity insights.
     """
   end
+
+  defp format_percepts([]), do: "No action results."
+
+  defp format_percepts(percepts) do
+    items =
+      percepts
+      |> Enum.map_join("\n\n", fn p ->
+        action_type =
+          get_in_map(p, [:data, :action_type]) || get_in_map(p, ["data", "action_type"]) ||
+            "unknown"
+
+        outcome = Map.get(p, :outcome) || Map.get(p, "outcome", "unknown")
+
+        case to_string(outcome) do
+          "success" ->
+            result = get_in_map(p, [:data, :result]) || get_in_map(p, ["data", "result"]) || ""
+            result_str = truncate_for_prompt(inspect(result))
+            "### Action: #{action_type}\nStatus: SUCCESS\nResult:\n```\n#{result_str}\n```"
+
+          "blocked" ->
+            reason = Map.get(p, :error) || Map.get(p, "error", "unauthorized")
+            "### Action: #{action_type}\nStatus: BLOCKED\nReason: #{reason}"
+
+          _failure ->
+            error = Map.get(p, :error) || Map.get(p, "error", "unknown error")
+            "### Action: #{action_type}\nStatus: FAILED\nError: #{inspect(error)}"
+        end
+      end)
+
+    """
+    ## Action Results
+
+    #{items}
+
+    Continue working toward your goal. Use the "actions" array for more actions, or return empty actions if done.
+    """
+  end
+
+  defp get_in_map(map, [key | rest]) when is_map(map) do
+    case Map.get(map, key) do
+      nil -> nil
+      value when rest == [] -> value
+      value when is_map(value) -> get_in_map(value, rest)
+      _ -> nil
+    end
+  end
+
+  defp get_in_map(_, _), do: nil
+
+  defp truncate_for_prompt(text) when is_binary(text) and byte_size(text) > 4000 do
+    String.slice(text, 0, 3997) <> "..."
+  end
+
+  defp truncate_for_prompt(text), do: text
 
   defp with_adapter(adapters, key, fun) do
     case Map.get(adapters, key) do

@@ -143,10 +143,10 @@ defmodule Arbor.Actions.Web do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{url: url} = params, _context) do
-      with :ok <- Web.validate_url(url) do
+      with :ok <- Web.validate_url(url),
+           {:ok, format} <- normalize_format(params[:format]) do
         Actions.emit_started(__MODULE__, %{url: url})
 
-        format = normalize_format(params[:format])
         selector = Map.get(params, :selector, "body")
 
         case ReadPage.run(
@@ -168,17 +168,23 @@ defmodule Arbor.Actions.Web do
       end
     end
 
-    defp normalize_format(nil), do: :markdown
-    defp normalize_format(format) when is_atom(format) and format in @allowed_formats, do: format
+    defp normalize_format(nil), do: {:ok, :markdown}
+
+    defp normalize_format(format) when is_atom(format) and format in @allowed_formats,
+      do: {:ok, format}
 
     defp normalize_format(format) when is_binary(format) do
       case SafeAtom.to_allowed(format, @allowed_formats) do
-        {:ok, atom} -> atom
-        {:error, _} -> :markdown
+        {:ok, atom} ->
+          {:ok, atom}
+
+        {:error, _} ->
+          {:error, "Invalid format '#{format}'. Valid formats: markdown, text, html"}
       end
     end
 
-    defp normalize_format(_), do: :markdown
+    defp normalize_format(format),
+      do: {:error, "Invalid format '#{inspect(format)}'. Valid formats: markdown, text, html"}
 
     defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Web browse failed: #{inspect(reason)}"

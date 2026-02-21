@@ -5,6 +5,10 @@
 // remember what it investigated and what worried it.
 //
 // Tests: does working memory on top of goals help convergence?
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │  TOOL LOOP: execute_actions -> update_goals -> check_loop -> cycle     │
+// └─────────────────────────────────────────────────────────────────────────┘
 
 digraph HeartbeatNotes {
   graph [
@@ -30,13 +34,17 @@ digraph HeartbeatNotes {
   llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
   consolidate [type="session.consolidate"]
 
-  // ── Result processing ────────────────────────────────────
+  // ── Result processing (re-entered on tool loop cycles) ─────
   process [type="session.process_results"]
 
   // ── NOTES: Actions + working memory + goals ───────────────
   update_wm [type="session.update_working_memory"]
-  route_actions [type="session.route_actions"]
+  execute_actions [type="session.execute_actions"]
   update_goals [type="session.update_goals"]
+
+  // ── Tool loop control ──────────────────────────────────────
+  check_loop [shape=diamond, condition_key="session.has_action_results"]
+  llm_followup [type="session.llm_tool_followup"]
 
   // ── Exit ─────────────────────────────────────────────────
   done [shape=Msquare]
@@ -57,6 +65,13 @@ digraph HeartbeatNotes {
   llm_plan -> process
   consolidate -> process
 
-  // Notes tail: working memory + actions + goals
-  process -> update_wm -> route_actions -> update_goals -> done
+  // Notes tail: working memory + actions + goals, then tool loop check
+  process -> update_wm -> execute_actions -> update_goals -> check_loop
+
+  // Tool loop
+  check_loop -> llm_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
+  check_loop -> done
+
+  // ── THE CYCLE ──────────────────────────────────────────────
+  llm_followup -> process
 }

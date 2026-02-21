@@ -43,6 +43,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
     active_intents = load_active_intents(agent_id)
     recent_thoughts = load_recent_thinking(agent_id)
 
+    recent_percepts = load_recent_percepts(agent_id)
+
     base
     |> Map.put("session.messages", [])
     |> Map.put("session.is_heartbeat", true)
@@ -52,6 +54,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     |> Map.put("session.pending_proposals", pending_proposals)
     |> Map.put("session.active_intents", active_intents)
     |> Map.put("session.recent_thinking", recent_thoughts)
+    |> Map.put("session.recent_percepts", recent_percepts)
   end
 
   @doc false
@@ -643,6 +646,37 @@ defmodule Arbor.Orchestrator.Session.Builders do
     _ -> []
   catch
     :exit, _ -> []
+  end
+
+  defp load_recent_percepts(agent_id) do
+    if memory_available?(:recent_percepts, 1) do
+      case apply(Arbor.Memory, :recent_percepts, [agent_id, [limit: 5]]) do
+        percepts when is_list(percepts) ->
+          Enum.map(percepts, fn p ->
+            %{
+              "action_type" => get_percept_action_type(p),
+              "outcome" => to_string(Map.get(p, :outcome, "")),
+              "data" => Map.get(p, :data, %{})
+            }
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp get_percept_action_type(p) do
+    data = Map.get(p, :data, %{})
+
+    Map.get(data, :action_type) ||
+      Map.get(data, "action_type", "unknown")
   end
 
   defp memory_available?(function, arity) do
