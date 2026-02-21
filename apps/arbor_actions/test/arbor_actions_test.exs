@@ -93,15 +93,6 @@ defmodule Arbor.ActionsTest do
       assert "comms_poll_messages" in tool_names
     end
 
-    test "returns tools for jobs category" do
-      tools = Actions.tools_for_category(:jobs)
-
-      assert is_list(tools)
-      tool_names = Enum.map(tools, & &1[:name])
-      assert "jobs_create" in tool_names
-      assert "jobs_list" in tool_names
-    end
-
     test "returns empty list for unknown category" do
       tools = Actions.tools_for_category(:unknown)
       assert tools == []

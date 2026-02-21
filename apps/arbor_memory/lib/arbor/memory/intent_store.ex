@@ -599,7 +599,10 @@ defmodule Arbor.Memory.IntentStore do
       "confidence" => intent.confidence,
       "urgency" => intent.urgency,
       "created_at" => DateTime.to_iso8601(intent.created_at),
-      "metadata" => intent.metadata
+      "metadata" => intent.metadata,
+      "capability" => intent.capability,
+      "op" => if(intent.op, do: to_string(intent.op)),
+      "target" => intent.target
     }
   end
 
@@ -613,7 +616,8 @@ defmodule Arbor.Memory.IntentStore do
       "error" => if(percept.error, do: inspect(percept.error)),
       "duration_ms" => percept.duration_ms,
       "created_at" => DateTime.to_iso8601(percept.created_at),
-      "metadata" => percept.metadata
+      "metadata" => percept.metadata,
+      "summary" => percept.summary
     }
   end
 
@@ -655,7 +659,10 @@ defmodule Arbor.Memory.IntentStore do
       confidence: map["confidence"] || 0.5,
       urgency: map["urgency"] || 50,
       created_at: parse_datetime(map["created_at"]),
-      metadata: map["metadata"] || %{}
+      metadata: map["metadata"] || %{},
+      capability: map["capability"],
+      op: safe_atom(map["op"]),
+      target: map["target"]
     }
   end
 
@@ -669,7 +676,8 @@ defmodule Arbor.Memory.IntentStore do
       error: map["error"],
       duration_ms: map["duration_ms"],
       created_at: parse_datetime(map["created_at"]),
-      metadata: map["metadata"] || %{}
+      metadata: map["metadata"] || %{},
+      summary: map["summary"]
     }
   end
 

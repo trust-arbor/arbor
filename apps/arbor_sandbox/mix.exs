@@ -31,6 +31,7 @@ defmodule Arbor.Sandbox.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:dune, "~> 0.3.15"},
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

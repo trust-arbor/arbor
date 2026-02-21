@@ -143,43 +143,6 @@ defmodule Arbor.Actions.Schemas.ActionSchemasTest do
     end
   end
 
-  describe "Jobs schemas" do
-    test "create_params validates required title" do
-      schema = Schemas.Jobs.create_params()
-
-      assert {:error, _} = Schemas.Jobs.validate(schema, %{})
-      assert {:ok, validated} = Schemas.Jobs.validate(schema, %{"title" => "My Task"})
-      assert validated["title"] == "My Task"
-    end
-
-    test "create_params validates priority enum" do
-      schema = Schemas.Jobs.create_params()
-
-      for priority <- ["low", "normal", "high", "critical"] do
-        assert {:ok, validated} =
-                 Schemas.Jobs.validate(schema, %{"title" => "test", "priority" => priority})
-
-        assert validated["priority"] == priority
-      end
-
-      assert {:error, _} =
-               Schemas.Jobs.validate(schema, %{"title" => "test", "priority" => "urgent"})
-    end
-
-    test "update_params validates status transitions" do
-      schema = Schemas.Jobs.update_params()
-
-      for status <- ["active", "completed", "failed", "cancelled"] do
-        assert {:ok, _} =
-                 Schemas.Jobs.validate(schema, %{"job_id" => "job_123", "status" => status})
-      end
-
-      # 'created' is not a valid target status for updates
-      assert {:error, _} =
-               Schemas.Jobs.validate(schema, %{"job_id" => "job_123", "status" => "created"})
-    end
-  end
-
   describe "Historian schemas" do
     test "query_events_params accepts all optional fields" do
       schema = Schemas.Historian.query_events_params()

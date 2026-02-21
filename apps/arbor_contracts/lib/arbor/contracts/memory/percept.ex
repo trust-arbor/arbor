@@ -55,6 +55,9 @@ defmodule Arbor.Contracts.Memory.Percept do
     field :duration_ms, integer() | nil, default: nil
     field :created_at, DateTime.t()
     field :metadata, map(), default: %{}
+
+    # Human-readable summary for Mind context (cognitive loop redesign)
+    field :summary, String.t() | nil, default: nil
   end
 
   @doc """
@@ -71,7 +74,8 @@ defmodule Arbor.Contracts.Memory.Percept do
       error: opts[:error],
       duration_ms: opts[:duration_ms],
       created_at: opts[:created_at] || DateTime.utc_now(),
-      metadata: opts[:metadata] || %{}
+      metadata: opts[:metadata] || %{},
+      summary: opts[:summary]
     }
   end
 
@@ -147,7 +151,8 @@ defmodule Arbor.Contracts.Memory.Percept do
       error: map_get(map, :error),
       duration_ms: map_get(map, :duration_ms),
       created_at: parse_datetime(map_get(map, :created_at)) || DateTime.utc_now(),
-      metadata: map_get(map, :metadata) || %{}
+      metadata: map_get(map, :metadata) || %{},
+      summary: map_get(map, :summary)
     }
   end
 

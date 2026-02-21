@@ -14,7 +14,6 @@ defmodule Arbor.Actions do
   | File | `Arbor.Actions.File` | File system operations |
   | Git | `Arbor.Actions.Git` | Git repository operations |
   | Comms | `Arbor.Actions.Comms` | Channel messaging |
-  | Jobs | `Arbor.Actions.Jobs` | Persistent task tracking |
   | AI | `Arbor.Actions.AI` | AI/LLM text generation and code analysis |
   | Sandbox | `Arbor.Actions.Sandbox` | Docker sandbox environment management |
   | Historian | `Arbor.Actions.Historian` | Event log querying and causality tracing |
@@ -206,12 +205,6 @@ defmodule Arbor.Actions do
       comms: [
         Arbor.Actions.Comms.SendMessage,
         Arbor.Actions.Comms.PollMessages
-      ],
-      jobs: [
-        Arbor.Actions.Jobs.CreateJob,
-        Arbor.Actions.Jobs.ListJobs,
-        Arbor.Actions.Jobs.GetJob,
-        Arbor.Actions.Jobs.UpdateJob
       ],
       ai: [
         Arbor.Actions.AI.GenerateText,

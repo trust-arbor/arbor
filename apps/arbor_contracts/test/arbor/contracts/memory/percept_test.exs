@@ -140,6 +140,41 @@ defmodule Arbor.Contracts.Memory.PerceptTest do
     end
   end
 
+  describe "summary field" do
+    test "accepts summary in new/3" do
+      percept = Percept.new(:action_result, :success, summary: "read 42 lines from /etc/hosts")
+
+      assert percept.summary == "read 42 lines from /etc/hosts"
+    end
+
+    test "accepts summary in success/3" do
+      percept = Percept.success("int_abc", %{lines: 42}, summary: "read 42 lines")
+
+      assert percept.summary == "read 42 lines"
+    end
+
+    test "defaults to nil" do
+      percept = Percept.success()
+
+      assert percept.summary == nil
+    end
+
+    test "from_map extracts summary" do
+      percept = Percept.from_map(%{"type" => "action_result", "outcome" => "success", "summary" => "done"})
+
+      assert percept.summary == "done"
+    end
+
+    test "round-trip preserves summary" do
+      original = Percept.success("int_1", %{}, summary: "compiled 5 modules")
+      json = Jason.encode!(original)
+      decoded = Jason.decode!(json)
+      restored = Percept.from_map(decoded)
+
+      assert restored.summary == "compiled 5 modules"
+    end
+  end
+
   describe "Jason encoding" do
     test "encodes percept to JSON" do
       percept = Percept.success("int_test", %{value: 123}, duration_ms: 500)

@@ -35,6 +35,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
         :recall_beliefs,
         :memory_update,
         :checkpoint,
+        :checkpoint_save,
         :route_actions,
         :route_intents,
         :update_goals,
@@ -334,6 +335,18 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
     end
   end
 
+  describe "checkpoint_save adapter" do
+    test "returns :ok without crashing" do
+      adapters = Adapters.build(agent_id: "test-agent")
+      assert :ok = adapters.checkpoint_save.("session-1", %{"turn_count" => 1})
+    end
+
+    test "has arity 2" do
+      adapters = Adapters.build(agent_id: "test-agent")
+      assert is_function(adapters.checkpoint_save, 2)
+    end
+  end
+
   describe "trust_tier_resolver adapter" do
     test "returns {:ok, tier_atom}" do
       adapters = Adapters.build(agent_id: "test-agent")
@@ -597,6 +610,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       # New adapters — should return :ok without crashing
       assert :ok = adapters.store_decompositions.([], "int-agent")
       assert :ok = adapters.process_proposal_decisions.([], "int-agent")
+      assert :ok = adapters.checkpoint_save.("int-session", %{"turn_count" => 1})
 
       # Consolidate returns metrics map (errors captured, not raised)
       result = adapters.consolidate.("int-agent")
@@ -620,6 +634,7 @@ defmodule Arbor.Orchestrator.Session.AdaptersTest do
       # New adapters — should return :ok without crashing
       assert :ok = adapters.store_decompositions.([], "min-agent")
       assert :ok = adapters.process_proposal_decisions.([], "min-agent")
+      assert :ok = adapters.checkpoint_save.("min-session", %{"turn_count" => 0})
 
       # Consolidate returns metrics map (errors captured, not raised)
       result = adapters.consolidate.("min-agent")
