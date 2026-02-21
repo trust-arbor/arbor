@@ -185,9 +185,11 @@ defmodule Arbor.Agent.Eval.TaskEval do
         hb_data = signal.data || %{}
         hb_num = state.heartbeat_count + 1
 
+        actions = extract_actions(hb_data)
+
         Logger.info(
           "[TaskEval] Heartbeat #{hb_num}/#{max} — " <>
-            "actions=#{length(List.wrap(hb_data[:llm_actions] || hb_data["llm_actions"] || []))}"
+            "actions=#{length(actions)}, mode=#{hb_data[:cognitive_mode]}"
         )
 
         # Accumulate metrics from this heartbeat
