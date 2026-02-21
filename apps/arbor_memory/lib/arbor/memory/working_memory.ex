@@ -260,8 +260,11 @@ defmodule Arbor.Memory.WorkingMemory do
         progress: 0
       })
   """
-  @spec add_goal(t(), String.t() | map(), keyword()) :: t()
-  def add_goal(wm, goal, opts \\ []) do
+  @spec add_goal(t(), String.t() | map() | nil, keyword()) :: t()
+  def add_goal(wm, goal, opts \\ [])
+  def add_goal(wm, nil, _opts), do: wm
+
+  def add_goal(wm, goal, opts) do
     max = Keyword.get(opts, :max_goals, @default_max_goals)
     goal_record = normalize_goal(goal)
 
@@ -814,6 +817,8 @@ defmodule Arbor.Memory.WorkingMemory do
     }
   end
 
+  defp normalize_goal(nil), do: nil
+
   defp normalize_goal(goal) when is_binary(goal) do
     %{
       id: generate_id(),
@@ -1164,7 +1169,12 @@ defmodule Arbor.Memory.WorkingMemory do
   defp apply_goal_event(data, wm) do
     goal = data[:goal] || data["goal"]
     event_type = data[:event_type] || data["event_type"]
-    apply_goal_by_event_type(event_type, goal, wm)
+
+    if goal do
+      apply_goal_by_event_type(event_type, goal, wm)
+    else
+      wm
+    end
   end
 
   defp apply_goal_by_event_type(et, goal, wm) when et in [:added, "added"],
