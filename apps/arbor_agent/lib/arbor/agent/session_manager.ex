@@ -142,7 +142,7 @@ defmodule Arbor.Agent.SessionManager do
     adapters = build_adapters(agent_id, trust_tier, opts)
 
     turn = turn_dot_path()
-    hb = heartbeat_dot_path()
+    hb = Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path())
 
     [
       session_id: "agent-session-#{agent_id}",

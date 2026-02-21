@@ -53,6 +53,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  require Logger
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @side_effecting ~w(session.llm_call session.tool_dispatch session.memory_update
@@ -69,7 +71,9 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     adapters = Keyword.get(opts, :session_adapters, %{})
     handle_type(type, context, adapters, {node, graph, opts})
   rescue
-    e -> fail("#{Map.get(node.attrs, "type")}: #{Exception.message(e)}")
+    e ->
+      Logger.warning("[SessionHandler] #{Map.get(node.attrs, "type")} crashed: #{Exception.message(e)}")
+      fail("#{Map.get(node.attrs, "type")}: #{Exception.message(e)}")
   end
 
   @impl true
@@ -152,6 +156,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "reflection"
       end
 
+    Logger.info("[SessionHandler] mode_select: goals=#{length(List.wrap(goals))}, intents=#{length(List.wrap(intents))}, turn=#{turn} → #{mode}")
     ok(%{"session.cognitive_mode" => mode})
   end
 
@@ -175,7 +180,9 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
         end
 
       try do
-        case llm_call.(final_messages, mode, call_opts) do
+        result = llm_call.(final_messages, mode, call_opts)
+
+        case result do
           {:ok, %{tool_calls: calls}} when is_list(calls) and calls != [] ->
             ok(%{"llm.response_type" => "tool_call", "llm.tool_calls" => calls})
 
@@ -183,10 +190,17 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
             ok(%{"llm.response_type" => "text", "llm.content" => content})
 
           {:error, reason} ->
+            Logger.warning("[SessionHandler] LLM call failed: #{inspect(reason)}")
             fail("llm_call: #{inspect(reason)}")
+
+          other ->
+            Logger.warning("[SessionHandler] LLM call unexpected result: #{inspect(other)}")
+            fail("llm_call: unexpected result")
         end
       catch
-        kind, reason -> fail("llm_call: #{inspect({kind, reason})}")
+        kind, reason ->
+          Logger.warning("[SessionHandler] LLM call crashed: #{inspect({kind, reason})}")
+          fail("llm_call: #{inspect({kind, reason})}")
       end
     end)
   end
