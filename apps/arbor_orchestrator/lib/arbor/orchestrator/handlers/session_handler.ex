@@ -646,6 +646,8 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
     Mode: PLAN EXECUTION
     Decompose your goals into concrete intentions (action steps).
     Each intention should be a single, executable action.
+    If you can already identify a concrete action to take (e.g. file_read to
+    examine a file), include it in the "actions" array alongside your decompositions.
     """
   end
 

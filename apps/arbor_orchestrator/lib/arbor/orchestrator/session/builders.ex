@@ -588,14 +588,24 @@ defmodule Arbor.Orchestrator.Session.Builders do
     if memory_available?(:pending_intentions, 1) do
       case apply(Arbor.Memory, :pending_intentions, [agent_id]) do
         intents when is_list(intents) ->
-          Enum.map(intents, fn i ->
-            %{
-              "id" => to_string(Map.get(i, :id, "")),
-              "action" => to_string(Map.get(i, :action, "")),
-              "description" => to_string(Map.get(i, :description, "")),
-              "goal_id" => to_string(Map.get(i, :goal_id, "")),
-              "status" => to_string(Map.get(i, :status, ""))
-            }
+          Enum.map(intents, fn
+            {intent, status} when is_map(intent) ->
+              %{
+                "id" => to_string(Map.get(intent, :id, "")),
+                "action" => to_string(Map.get(intent, :action, "")),
+                "description" => to_string(Map.get(intent, :description, "")),
+                "goal_id" => to_string(Map.get(intent, :goal_id, "")),
+                "status" => to_string(Map.get(status, :status, "pending"))
+              }
+
+            intent when is_map(intent) ->
+              %{
+                "id" => to_string(Map.get(intent, :id, "")),
+                "action" => to_string(Map.get(intent, :action, "")),
+                "description" => to_string(Map.get(intent, :description, "")),
+                "goal_id" => to_string(Map.get(intent, :goal_id, "")),
+                "status" => to_string(Map.get(intent, :status, ""))
+              }
           end)
 
         _ ->
