@@ -354,7 +354,14 @@ defmodule Arbor.Agent.Manager do
   # ── Private ─────────────────────────────────────────────────────────
 
   defp default_model_config do
-    %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli}
+    %{
+      id: "arcee-ai/trinity-large-preview:free",
+      label: "Trinity Large",
+      provider: :openrouter,
+      backend: :api,
+      module: Arbor.Agent.APIAgent,
+      start_opts: []
+    }
   end
 
   defp build_start_opts(agent_id, display_name, %{module: module} = config) do

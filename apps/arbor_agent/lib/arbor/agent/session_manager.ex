@@ -311,7 +311,8 @@ defmodule Arbor.Agent.SessionManager do
 
           if entries != [] do
             messages = entries_to_messages(entries)
-            {:ok, %{"messages" => messages}}
+            user_count = Enum.count(entries, fn e -> e.role == "user" end)
+            {:ok, %{"messages" => messages, "turn_count" => user_count}}
           else
             :none
           end
