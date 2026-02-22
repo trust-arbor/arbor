@@ -302,23 +302,8 @@ defmodule Arbor.Agent.SessionManager do
   defp load_session_entries(session_id) do
     if session_store_available?() do
       case apply(@session_store, :get_session, [session_id]) do
-        {:ok, session} ->
-          entries =
-            apply(@session_store, :load_entries, [
-              session.id,
-              [entry_types: ["user", "assistant"]]
-            ])
-
-          if entries != [] do
-            messages = entries_to_messages(entries)
-            user_count = Enum.count(entries, fn e -> e.role == "user" end)
-            {:ok, %{"messages" => messages, "turn_count" => user_count}}
-          else
-            :none
-          end
-
-        {:error, _} ->
-          :none
+        {:ok, session} -> build_checkpoint_from_entries(session)
+        {:error, _} -> :none
       end
     else
       :none
@@ -327,6 +312,22 @@ defmodule Arbor.Agent.SessionManager do
     _ -> :none
   catch
     :exit, _ -> :none
+  end
+
+  defp build_checkpoint_from_entries(session) do
+    entries =
+      apply(@session_store, :load_entries, [
+        session.id,
+        [entry_types: ["user", "assistant"]]
+      ])
+
+    if entries != [] do
+      messages = entries_to_messages(entries)
+      user_count = Enum.count(entries, fn e -> e.role == "user" end)
+      {:ok, %{"messages" => messages, "turn_count" => user_count}}
+    else
+      :none
+    end
   end
 
   defp entries_to_messages(entries) do
