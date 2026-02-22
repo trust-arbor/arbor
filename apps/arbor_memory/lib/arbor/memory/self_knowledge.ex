@@ -85,6 +85,8 @@ defmodule Arbor.Memory.SelfKnowledge do
 
   @max_version_history 10
   @similarity_threshold 0.6
+  @max_entries_per_category 15
+  @max_concept_words 4
   @embedding_similarity_threshold 0.75
 
   # ============================================================================
@@ -138,14 +140,20 @@ defmodule Arbor.Memory.SelfKnowledge do
   @spec add_capability(t(), String.t(), float(), String.t() | nil) :: t()
   def add_capability(%__MODULE__{} = sk, name, proficiency, evidence \\ nil) do
     proficiency = clamp_float(proficiency)
+    {normalized, original_as_evidence} = normalize_entry_name(name)
+    evidence = evidence || original_as_evidence
 
-    case find_similar(sk.capabilities, :name, name) do
+    case find_similar(sk.capabilities, :name, normalized) do
       {:similar, existing} ->
         # Merge: keep existing name, take max proficiency, update if newer
         capabilities =
           Enum.map(sk.capabilities, fn cap ->
             if cap == existing do
-              %{cap | proficiency: max(cap.proficiency, proficiency), added_at: DateTime.utc_now()}
+              %{
+                cap
+                | proficiency: max(cap.proficiency, proficiency),
+                  added_at: DateTime.utc_now()
+              }
               |> maybe_update(:evidence, evidence)
             else
               cap
@@ -156,7 +164,7 @@ defmodule Arbor.Memory.SelfKnowledge do
 
       :none ->
         capability = %{
-          name: name,
+          name: normalized,
           proficiency: proficiency,
           evidence: evidence,
           added_at: DateTime.utc_now()
@@ -165,8 +173,9 @@ defmodule Arbor.Memory.SelfKnowledge do
         # Replace existing capability with exact same name or add new
         capabilities =
           sk.capabilities
-          |> Enum.reject(&(&1.name == name))
+          |> Enum.reject(&(&1.name == normalized))
           |> List.insert_at(0, capability)
+          |> enforce_cap(:proficiency)
 
         %{sk | capabilities: capabilities}
     end
@@ -240,8 +249,10 @@ defmodule Arbor.Memory.SelfKnowledge do
   @spec add_trait(t(), atom(), float(), String.t() | nil) :: t()
   def add_trait(%__MODULE__{} = sk, trait, strength, evidence \\ nil) do
     strength = clamp_float(strength)
+    {normalized, original_as_evidence} = normalize_entry_name(trait)
+    evidence = evidence || original_as_evidence
 
-    case find_similar(sk.personality_traits, :trait, trait) do
+    case find_similar(sk.personality_traits, :trait, normalized) do
       {:similar, existing} ->
         traits =
           Enum.map(sk.personality_traits, fn t ->
@@ -257,7 +268,7 @@ defmodule Arbor.Memory.SelfKnowledge do
 
       :none ->
         entry = %{
-          trait: trait,
+          trait: normalized,
           strength: strength,
           evidence: evidence,
           added_at: DateTime.utc_now()
@@ -265,8 +276,9 @@ defmodule Arbor.Memory.SelfKnowledge do
 
         traits =
           sk.personality_traits
-          |> Enum.reject(&(&1.trait == trait))
+          |> Enum.reject(&(&1.trait == normalized))
           |> List.insert_at(0, entry)
+          |> enforce_cap(:strength)
 
         %{sk | personality_traits: traits}
     end
@@ -285,8 +297,10 @@ defmodule Arbor.Memory.SelfKnowledge do
   @spec add_value(t(), atom(), float(), String.t() | nil) :: t()
   def add_value(%__MODULE__{} = sk, value, importance, evidence \\ nil) do
     importance = clamp_float(importance)
+    {normalized, original_as_evidence} = normalize_entry_name(value)
+    evidence = evidence || original_as_evidence
 
-    case find_similar(sk.values, :value, value) do
+    case find_similar(sk.values, :value, normalized) do
       {:similar, existing} ->
         values =
           Enum.map(sk.values, fn v ->
@@ -302,7 +316,7 @@ defmodule Arbor.Memory.SelfKnowledge do
 
       :none ->
         entry = %{
-          value: value,
+          value: normalized,
           importance: importance,
           evidence: evidence,
           added_at: DateTime.utc_now()
@@ -310,8 +324,9 @@ defmodule Arbor.Memory.SelfKnowledge do
 
         values =
           sk.values
-          |> Enum.reject(&(&1.value == value))
+          |> Enum.reject(&(&1.value == normalized))
           |> List.insert_at(0, entry)
+          |> enforce_cap(:importance)
 
         %{sk | values: values}
     end
@@ -584,11 +599,9 @@ defmodule Arbor.Memory.SelfKnowledge do
   defp deduplicate_list(entries, key_field, score_field) do
     Enum.reduce(entries, [], fn entry, acc ->
       entry_text = to_string(Map.get(entry, key_field))
+      entry_stemmed = tokenize_stemmed(entry_text)
 
-      case Enum.find_index(acc, fn existing ->
-             text_similarity(to_string(Map.get(existing, key_field)), entry_text) >=
-               @similarity_threshold
-           end) do
+      case find_dedup_match(acc, key_field, entry_text, entry_stemmed) do
         nil ->
           acc ++ [entry]
 
@@ -605,6 +618,23 @@ defmodule Arbor.Memory.SelfKnowledge do
           List.replace_at(acc, idx, merged)
       end
     end)
+  end
+
+  defp find_dedup_match(acc, key_field, entry_text, entry_stemmed) do
+    Enum.find_index(acc, fn existing ->
+      existing_text = to_string(Map.get(existing, key_field))
+      existing_stemmed = tokenize_stemmed(existing_text)
+      entries_similar?(existing_text, entry_text, existing_stemmed, entry_stemmed)
+    end)
+  end
+
+  defp entries_similar?(existing_text, new_text, existing_stemmed, new_stemmed) do
+    raw_sim = text_similarity(existing_text, new_text)
+    stem_sim = stemmed_similarity(existing_stemmed, new_stemmed)
+    both_short = MapSet.size(existing_stemmed) <= 6 and MapSet.size(new_stemmed) <= 6
+    stem_threshold = if both_short, do: 0.5, else: @similarity_threshold
+
+    raw_sim >= @similarity_threshold or stem_sim >= stem_threshold
   end
 
   defp deduplicate_with_embeddings(%__MODULE__{} = sk, opts) do
@@ -832,7 +862,8 @@ defmodule Arbor.Memory.SelfKnowledge do
     %__MODULE__{
       agent_id: get_field(data, "agent_id", nil),
       capabilities: deserialize_capabilities(get_field(data, "capabilities", [])),
-      personality_traits: deserialize_personality_traits(get_field(data, "personality_traits", [])),
+      personality_traits:
+        deserialize_personality_traits(get_field(data, "personality_traits", [])),
       values: deserialize_values(get_field(data, "values", [])),
       preferences: deserialize_preferences_list(get_field(data, "preferences", [])),
       growth_log: deserialize_growth_log(get_field(data, "growth_log", [])),
@@ -996,7 +1027,9 @@ defmodule Arbor.Memory.SelfKnowledge do
     max(jaccard, containment)
   end
 
-  @stop_words MapSet.new(~w(a an the is are was were be been being in on at to for of and or but with by from as i my its))
+  @stop_words MapSet.new(
+                ~w(a an the is are was were be been being in on at to for of and or but with by from as i my its)
+              )
 
   defp tokenize(text) do
     text
@@ -1010,14 +1043,125 @@ defmodule Arbor.Memory.SelfKnowledge do
 
   defp find_similar(entries, key_field, new_key) do
     new_text = to_string(new_key)
+    new_stemmed = tokenize_stemmed(new_text)
 
     Enum.find_value(entries, :none, fn entry ->
       existing_text = to_string(Map.get(entry, key_field))
 
-      if text_similarity(existing_text, new_text) >= @similarity_threshold do
+      # Standard word-bag similarity (original tokenizer)
+      raw_sim = text_similarity(existing_text, new_text)
+
+      # Stemmed + filler-stripped similarity for verbose trait names.
+      # Use a lower threshold for short concept keys (≤6 tokens) because
+      # sharing 2 of 4 concept words (0.5) is strong evidence of duplication.
+      existing_stemmed = tokenize_stemmed(existing_text)
+      stemmed_sim = stemmed_similarity(existing_stemmed, new_stemmed)
+
+      both_short = MapSet.size(existing_stemmed) <= 6 and MapSet.size(new_stemmed) <= 6
+      stemmed_threshold = if both_short, do: 0.5, else: @similarity_threshold
+
+      if raw_sim >= @similarity_threshold or stemmed_sim >= stemmed_threshold do
         {:similar, entry}
       end
     end)
+  end
+
+  defp stemmed_similarity(set_a, set_b) do
+    intersection_size = MapSet.intersection(set_a, set_b) |> MapSet.size()
+    union_size = MapSet.union(set_a, set_b) |> MapSet.size()
+    min_size = min(MapSet.size(set_a), MapSet.size(set_b))
+
+    jaccard = if union_size == 0, do: 1.0, else: intersection_size / union_size
+    containment = if min_size == 0, do: 1.0, else: intersection_size / min_size
+    max(jaccard, containment)
+  end
+
+  # Normalize verbose entry names to short concept keys (max @max_concept_words).
+  # LLMs generate trait names like "prioritizes_systematic_investigation_over_quick_fixes"
+  # which defeat Jaccard dedup. This extracts core concepts and stores the full
+  # description as evidence.
+  #
+  # Returns {normalized_name, original_as_evidence_or_nil}
+  @entry_filler_words MapSet.new(~w(
+    approach approaches demonstrates demonstrate demonstrating shown shows show
+    strong strongly maintaining maintains maintain currently constraints constrained
+    despite apparent faced working memory system systems operations operational
+    issues issue potential workflows workflow processes process during
+    establishing established establishing establish exhibited exhibiting
+    even particularly especially also
+  ))
+
+  defp normalize_entry_name(name) when is_atom(name) do
+    str = Atom.to_string(name)
+    {normalized, evidence} = normalize_entry_name(str)
+
+    case SafeAtom.to_existing(normalized) do
+      {:ok, atom} -> {atom, evidence}
+      {:error, _} -> {normalized, evidence}
+    end
+  end
+
+  defp normalize_entry_name(name) when is_binary(name) do
+    words =
+      name
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9\s]/, " ")
+      |> String.split(~r/\s+/, trim: true)
+      |> Enum.reject(fn w ->
+        String.length(w) < 3 or MapSet.member?(@stop_words, w) or
+          MapSet.member?(@entry_filler_words, w)
+      end)
+
+    if length(words) <= @max_concept_words do
+      # Already short enough, no normalization needed
+      {name, nil}
+    else
+      normalized = words |> Enum.take(@max_concept_words) |> Enum.join("_")
+      {normalized, "Original: #{name}"}
+    end
+  end
+
+  # Naive English stemmer used for similarity comparison (not stored names).
+  # Applies suffixes recursively until stable:
+  # "proactively" -> "proactive" -> "proact"
+  # "identifies" -> "identifi" -> applies again -> "identif"
+  @stem_suffixes ~w(ation tion sion ment ness ity ies tics ting sing zing ing ates izes ence ance ous ive ful les es ed ly al er or en s)
+  defp naive_stem(word), do: naive_stem_pass(word, word)
+
+  defp naive_stem_pass(word, _prev) do
+    result =
+      Enum.reduce_while(@stem_suffixes, word, fn suffix, acc ->
+        base = String.replace_suffix(acc, suffix, "")
+        if base != acc and String.length(base) >= 3, do: {:halt, base}, else: {:cont, acc}
+      end)
+
+    if result == word, do: word, else: naive_stem_pass(result, word)
+  end
+
+  # Tokenize with stemming for similarity comparison
+  defp tokenize_stemmed(text) do
+    text
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, " ")
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.reject(fn w ->
+      MapSet.member?(@stop_words, w) or MapSet.member?(@entry_filler_words, w)
+    end)
+    |> Enum.map(&naive_stem/1)
+    |> Enum.reject(fn w -> String.length(w) < 3 end)
+    |> MapSet.new()
+  end
+
+  # Enforce max entries per category. Keeps the highest-scored entries.
+  defp enforce_cap(entries, score_field) do
+    if length(entries) > @max_entries_per_category do
+      entries
+      |> Enum.sort_by(&(Map.get(&1, score_field) || 0), :desc)
+      |> Enum.take(@max_entries_per_category)
+    else
+      entries
+    end
   end
 
   defp parse_datetime(%DateTime{} = dt), do: dt
@@ -1098,7 +1242,8 @@ defmodule Arbor.Memory.SelfKnowledge do
 
     case :httpc.request(
            :post,
-           {String.to_charlist(url), [{~c"content-type", ~c"application/json"}], ~c"application/json", body},
+           {String.to_charlist(url), [{~c"content-type", ~c"application/json"}],
+            ~c"application/json", body},
            [timeout: 30_000, connect_timeout: 5_000],
            []
          ) do
