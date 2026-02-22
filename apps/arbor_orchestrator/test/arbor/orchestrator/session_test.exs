@@ -1350,7 +1350,6 @@ defmodule Arbor.Orchestrator.SessionTest do
 
     @tag :spike
     test "heartbeat fires during long turn" do
-
       adapters = %{
         llm_call: fn _messages, _mode, _opts ->
           # Slow LLM — 600ms to give heartbeat time to fire
