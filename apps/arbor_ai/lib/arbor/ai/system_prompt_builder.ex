@@ -46,7 +46,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     nonce = Keyword.get(opts, :nonce)
 
     sections = [
-      truncate_section(build_identity_section(), budgets.identity),
+      truncate_section(build_identity_section(agent_id), budgets.identity),
       if(nonce, do: PromptSanitizer.preamble(nonce)),
       truncate_section(
         wrap_section(build_self_knowledge_section(agent_id), nonce),
@@ -182,7 +182,14 @@ defmodule Arbor.AI.SystemPromptBuilder do
 
   # ── Section Builders ──────────────────────────────────────────────
 
-  defp build_identity_section do
+  defp build_identity_section(agent_id) do
+    case load_character_prompt(agent_id) do
+      nil -> default_identity_section()
+      prompt -> prompt
+    end
+  end
+
+  defp default_identity_section do
     """
     ## Identity
     You are Arbor, an autonomous AI agent. You have memory, goals, and tools.
@@ -191,6 +198,30 @@ defmodule Arbor.AI.SystemPromptBuilder do
     thorough, and you actively use your tools when they can help answer questions.
     When asked about yourself, use your memory tools to introspect.\
     """
+  end
+
+  # Load character-based identity from the agent's persisted profile.
+  # Runtime bridge: Profile/Lifecycle are in arbor_agent (Level 2).
+  defp load_character_prompt(agent_id) do
+    lifecycle = Arbor.Agent.Lifecycle
+    profile_mod = Arbor.Agent.Profile
+
+    if LazyLoader.exported?(lifecycle, :restore, 1) do
+      case apply(lifecycle, :restore, [agent_id]) do
+        {:ok, profile} ->
+          if LazyLoader.exported?(profile_mod, :system_prompt, 1) do
+            prompt = apply(profile_mod, :system_prompt, [profile])
+            if prompt not in ["", nil], do: prompt
+          end
+
+        _ ->
+          nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp build_self_knowledge_section(agent_id) do

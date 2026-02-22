@@ -593,9 +593,9 @@ defmodule Arbor.Agent.ContextCompactor do
   defp build_narrative_prompt(messages) do
     formatted =
       Enum.map_join(messages, "\n", fn msg ->
-        role = Map.get(msg, :role, :unknown)
-        content = Map.get(msg, :content, "") |> String.slice(0, 300)
-        name = Map.get(msg, :name)
+        role = Map.get(msg, :role) || Map.get(msg, "role", :unknown)
+        content = (Map.get(msg, :content) || Map.get(msg, "content", "")) |> String.slice(0, 300)
+        name = Map.get(msg, :name) || Map.get(msg, "name")
 
         if name do
           "  [#{role}:#{name}] #{content}"
@@ -629,8 +629,18 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── File Index ─────────────────────────────────────────────────
 
-  defp maybe_update_file_index(compactor, %{role: :tool, name: name, content: content} = _msg)
-       when is_binary(name) and is_binary(content) do
+  defp maybe_update_file_index(compactor, msg) when is_map(msg) do
+    role = Map.get(msg, :role) || Map.get(msg, "role")
+    name = Map.get(msg, :name) || Map.get(msg, "name")
+    content = Map.get(msg, :content) || Map.get(msg, "content")
+
+    maybe_update_file_index_inner(compactor, role, name, content)
+  end
+
+  defp maybe_update_file_index(compactor, _msg), do: compactor
+
+  defp maybe_update_file_index_inner(compactor, role, name, content)
+       when role in [:tool, "tool"] and is_binary(name) and is_binary(content) do
     cond do
       name in @file_read_tools ->
         update_file_index_for_read(compactor, content)
@@ -647,7 +657,7 @@ defmodule Arbor.Agent.ContextCompactor do
     end
   end
 
-  defp maybe_update_file_index(compactor, _msg), do: compactor
+  defp maybe_update_file_index_inner(compactor, _role, _name, _content), do: compactor
 
   defp update_file_index_for_read(compactor, content) do
     case extract_path_from_content(content) do
@@ -700,9 +710,13 @@ defmodule Arbor.Agent.ContextCompactor do
     %{compactor | file_index: Map.delete(compactor.file_index, path)}
   end
 
-  defp maybe_deduplicate_file_read(compactor, %{role: :tool, name: name, content: content} = msg)
-       when is_binary(name) and is_binary(content) do
-    if name in @file_read_tools do
+  defp maybe_deduplicate_file_read(compactor, msg) when is_map(msg) do
+    role = Map.get(msg, :role) || Map.get(msg, "role")
+    name = Map.get(msg, :name) || Map.get(msg, "name")
+    content = Map.get(msg, :content) || Map.get(msg, "content")
+
+    if role in [:tool, "tool"] and is_binary(name) and is_binary(content) and
+         name in @file_read_tools do
       case extract_path_from_content(content) do
         nil -> msg
         path -> check_file_dedup(compactor, msg, path, content)
@@ -718,12 +732,13 @@ defmodule Arbor.Agent.ContextCompactor do
     case Map.get(compactor.file_index, path) do
       %{content_hash: prev_hash, last_seen_turn: seen_turn, line_count: lines} ->
         if content_hash(extract_file_body(content)) == prev_hash do
-          %{
-            msg
-            | content:
-                "Content unchanged since turn #{seen_turn} " <>
-                  "(#{lines} lines, file: #{path}). Use file_read to see content again."
-          }
+          stub =
+            "Content unchanged since turn #{seen_turn} " <>
+              "(#{lines} lines, file: #{path}). Use file_read to see content again."
+
+          # Support both atom-keyed and string-keyed messages
+          content_key = if Map.has_key?(msg, :content), do: :content, else: "content"
+          Map.put(msg, content_key, stub)
         else
           msg
         end
@@ -841,9 +856,13 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Memory Index ──────────────────────────────────────────────
 
-  defp maybe_update_memory_index(compactor, %{role: :tool, name: name, content: content})
-       when is_binary(name) and is_binary(content) do
-    if name in @memory_read_tools or name in @memory_write_tools do
+  defp maybe_update_memory_index(compactor, msg) when is_map(msg) do
+    role = Map.get(msg, :role) || Map.get(msg, "role")
+    name = Map.get(msg, :name) || Map.get(msg, "name")
+    content = Map.get(msg, :content) || Map.get(msg, "content")
+
+    if role in [:tool, "tool"] and is_binary(name) and is_binary(content) and
+         (name in @memory_read_tools or name in @memory_write_tools) do
       update_memory_index_entry(compactor, name, content)
     else
       compactor
@@ -880,10 +899,11 @@ defmodule Arbor.Agent.ContextCompactor do
     messages
     |> Enum.with_index()
     |> Enum.flat_map(fn {msg, idx} ->
-      name = to_string(Map.get(msg, :name, ""))
-      content = Map.get(msg, :content, "")
+      name = to_string(Map.get(msg, :name) || Map.get(msg, "name", ""))
+      content = Map.get(msg, :content) || Map.get(msg, "content", "")
+      role = Map.get(msg, :role) || Map.get(msg, "role")
 
-      if msg.role == :tool and is_binary(content) and name in @memory_read_tools do
+      if role in [:tool, "tool"] and is_binary(content) and name in @memory_read_tools do
         maybe_memory_index_entry(content, idx)
       else
         []
@@ -1033,7 +1053,8 @@ defmodule Arbor.Agent.ContextCompactor do
   # ── Token Estimation ───────────────────────────────────────────
 
   defp estimate_tokens(message) when is_map(message) do
-    content = Map.get(message, :content, "")
+    # Support both atom-keyed (SimpleAgent) and string-keyed (Session) messages
+    content = Map.get(message, :content) || Map.get(message, "content", "")
 
     text =
       cond do
@@ -1043,7 +1064,9 @@ defmodule Arbor.Agent.ContextCompactor do
       end
 
     # Add overhead for tool calls in assistant messages
-    tool_calls = Map.get(message, :tool_calls, [])
+    tool_calls =
+      Map.get(message, :tool_calls) || Map.get(message, "tool_calls", [])
+
     tool_overhead = length(tool_calls) * 50
 
     max(1, div(String.length(text), @chars_per_token) + tool_overhead)
