@@ -303,6 +303,67 @@ defmodule Arbor.Memory.GoalStore do
     :ok
   end
 
+  # ============================================================================
+  # Temporal / Deadline-Aware Retrieval
+  # ============================================================================
+
+  @doc """
+  Get active goals sorted by urgency (highest first).
+
+  Uses `Goal.urgency/1` which factors in both priority and deadline proximity.
+  Overdue goals sort highest, then deadline proximity, then raw priority.
+  """
+  @spec goals_by_urgency(String.t()) :: [Goal.t()]
+  def goals_by_urgency(agent_id) do
+    get_active_goals(agent_id)
+    |> Enum.sort_by(&Goal.urgency/1, :desc)
+  end
+
+  @doc """
+  Get active goals that are past their deadline.
+  """
+  @spec overdue_goals(String.t()) :: [Goal.t()]
+  def overdue_goals(agent_id) do
+    get_active_goals(agent_id)
+    |> Enum.filter(&Goal.overdue?/1)
+    |> Enum.sort_by(&Goal.urgency/1, :desc)
+  end
+
+  @doc """
+  Get active goals with a deadline within the given window from now.
+
+  ## Options (one required)
+
+  - `:hours` — deadline within N hours
+  - `:days` — deadline within N days
+  """
+  @spec goals_due_within(String.t(), keyword()) :: [Goal.t()]
+  def goals_due_within(agent_id, opts) do
+    cutoff = compute_deadline_cutoff(opts)
+
+    get_active_goals(agent_id)
+    |> Enum.filter(fn goal ->
+      case goal.deadline do
+        nil -> false
+        deadline -> DateTime.compare(deadline, cutoff) in [:eq, :lt]
+      end
+    end)
+    |> Enum.sort_by(&Goal.urgency/1, :desc)
+  end
+
+  defp compute_deadline_cutoff(opts) do
+    cond do
+      hours = Keyword.get(opts, :hours) ->
+        DateTime.add(DateTime.utc_now(), hours * 3600, :second)
+
+      days = Keyword.get(opts, :days) ->
+        DateTime.add(DateTime.utc_now(), days * 86_400, :second)
+
+      true ->
+        DateTime.utc_now()
+    end
+  end
+
   @doc """
   Reload goals for a specific agent from Postgres into ETS.
 
@@ -402,21 +463,25 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp safe_atom(val, _default) when is_atom(val), do: val
+
   defp safe_atom(val, default) when is_binary(val) do
     String.to_existing_atom(val)
   rescue
     ArgumentError -> default
   end
+
   defp safe_atom(_, default), do: default
 
   defp parse_datetime(nil), do: nil
   defp parse_datetime(%DateTime{} = dt), do: dt
+
   defp parse_datetime(str) when is_binary(str) do
     case DateTime.from_iso8601(str) do
       {:ok, dt, _} -> dt
       _ -> nil
     end
   end
+
   defp parse_datetime(_), do: nil
 
   # ============================================================================

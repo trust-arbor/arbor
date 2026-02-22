@@ -836,6 +836,173 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   end
 
   # ============================================================================
+  # Temporal Retrieval
+  # ============================================================================
+
+  describe "thoughts_for_period/3" do
+    test "filters by referenced_date when set" do
+      feb15 = ~U[2026-02-15 12:00:00Z]
+      feb16 = ~U[2026-02-16 12:00:00Z]
+      feb17 = ~U[2026-02-17 12:00:00Z]
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "Feb 15 event",
+          timestamp: DateTime.utc_now(),
+          cached_tokens: 5,
+          referenced_date: feb15
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Feb 16 event",
+          timestamp: DateTime.utc_now(),
+          cached_tokens: 5,
+          referenced_date: feb16
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Feb 17 event",
+          timestamp: DateTime.utc_now(),
+          cached_tokens: 5,
+          referenced_date: feb17
+        })
+
+      results = WorkingMemory.thoughts_for_period(wm, ~D[2026-02-15], ~D[2026-02-16])
+
+      contents = Enum.map(results, & &1.content)
+      assert "Feb 15 event" in contents
+      assert "Feb 16 event" in contents
+      refute "Feb 17 event" in contents
+    end
+
+    test "falls back to timestamp when no referenced_date" do
+      ts_in_range = ~U[2026-02-15 12:00:00Z]
+      ts_out_of_range = ~U[2026-02-20 12:00:00Z]
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "In range",
+          timestamp: ts_in_range,
+          cached_tokens: 5
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Out of range",
+          timestamp: ts_out_of_range,
+          cached_tokens: 5
+        })
+
+      results = WorkingMemory.thoughts_for_period(wm, ~D[2026-02-14], ~D[2026-02-16])
+
+      contents = Enum.map(results, & &1.content)
+      assert "In range" in contents
+      refute "Out of range" in contents
+    end
+
+    test "returns empty list when no matches" do
+      wm = WorkingMemory.new("agent_001", rebuild_from_signals: false)
+      assert WorkingMemory.thoughts_for_period(wm, ~D[2026-01-01], ~D[2026-01-31]) == []
+    end
+
+    test "accepts DateTime boundaries" do
+      ts = ~U[2026-02-15 14:00:00Z]
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{content: "Match", timestamp: ts, cached_tokens: 5})
+
+      results =
+        WorkingMemory.thoughts_for_period(wm, ~U[2026-02-15 00:00:00Z], ~U[2026-02-15 23:59:59Z])
+
+      assert length(results) == 1
+    end
+
+    test "returns newest first" do
+      feb15 = ~U[2026-02-15 12:00:00Z]
+      feb16 = ~U[2026-02-16 12:00:00Z]
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{content: "Earlier", timestamp: feb15, cached_tokens: 5})
+        |> WorkingMemory.add_thought(%{content: "Later", timestamp: feb16, cached_tokens: 5})
+
+      results = WorkingMemory.thoughts_for_period(wm, ~D[2026-02-14], ~D[2026-02-17])
+      contents = Enum.map(results, & &1.content)
+      assert contents == ["Later", "Earlier"]
+    end
+  end
+
+  describe "thoughts_today/1" do
+    test "returns only today's thoughts" do
+      now = DateTime.utc_now()
+      yesterday = DateTime.add(now, -86_400, :second)
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{content: "Today's", timestamp: now, cached_tokens: 5})
+        |> WorkingMemory.add_thought(%{
+          content: "Yesterday's",
+          timestamp: yesterday,
+          cached_tokens: 5
+        })
+
+      results = WorkingMemory.thoughts_today(wm)
+      contents = Enum.map(results, & &1.content)
+      assert "Today's" in contents
+      refute "Yesterday's" in contents
+    end
+  end
+
+  describe "thoughts_since/2" do
+    test "filters by hours_ago" do
+      now = DateTime.utc_now()
+      two_hours_ago = DateTime.add(now, -2 * 3600, :second)
+      ten_hours_ago = DateTime.add(now, -10 * 3600, :second)
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "Recent",
+          timestamp: two_hours_ago,
+          cached_tokens: 5
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Old",
+          timestamp: ten_hours_ago,
+          cached_tokens: 5
+        })
+
+      results = WorkingMemory.thoughts_since(wm, hours_ago: 4)
+      contents = Enum.map(results, & &1.content)
+      assert "Recent" in contents
+      refute "Old" in contents
+    end
+
+    test "filters by days_ago" do
+      now = DateTime.utc_now()
+      one_day_ago = DateTime.add(now, -1 * 86_400, :second)
+      five_days_ago = DateTime.add(now, -5 * 86_400, :second)
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "Recent",
+          timestamp: one_day_ago,
+          cached_tokens: 5
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Old",
+          timestamp: five_days_ago,
+          cached_tokens: 5
+        })
+
+      results = WorkingMemory.thoughts_since(wm, days_ago: 3)
+      contents = Enum.map(results, & &1.content)
+      assert "Recent" in contents
+      refute "Old" in contents
+    end
+  end
+
+  # ============================================================================
   # Clear Thoughts
   # ============================================================================
 

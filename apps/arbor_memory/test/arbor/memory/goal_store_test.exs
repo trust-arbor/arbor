@@ -192,10 +192,12 @@ defmodule Arbor.Memory.GoalStoreTest do
     end
 
     test "exports and imports success_criteria and notes", %{agent_id: agent_id} do
-      goal = Goal.new("Rich goal",
-        success_criteria: "All tests pass",
-        notes: ["note1", "note2"]
-      )
+      goal =
+        Goal.new("Rich goal",
+          success_criteria: "All tests pass",
+          notes: ["note1", "note2"]
+        )
+
       {:ok, _} = GoalStore.add_goal(agent_id, goal)
 
       exported = GoalStore.export_all_goals(agent_id)
@@ -271,6 +273,90 @@ defmodule Arbor.Memory.GoalStoreTest do
 
       assert :ok = GoalStore.delete_goal(agent_id, goal.id)
       assert {:error, :not_found} = GoalStore.get_goal(agent_id, goal.id)
+    end
+  end
+
+  # ============================================================================
+  # Temporal / Deadline-Aware Retrieval
+  # ============================================================================
+
+  describe "goals_by_urgency/1" do
+    test "returns overdue goals first, then by deadline proximity", %{agent_id: agent_id} do
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+      soon = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Overdue", deadline: past, priority: 50))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Due soon", deadline: soon, priority: 50))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("No deadline", priority: 50))
+
+      results = GoalStore.goals_by_urgency(agent_id)
+      descriptions = Enum.map(results, & &1.description)
+
+      # Overdue (2.0x) > Due soon (1.8x) > No deadline (1.0x)
+      assert hd(descriptions) == "Overdue"
+      assert Enum.at(descriptions, 1) == "Due soon"
+      assert List.last(descriptions) == "No deadline"
+    end
+
+    test "returns empty list when no goals", %{agent_id: agent_id} do
+      assert GoalStore.goals_by_urgency(agent_id) == []
+    end
+  end
+
+  describe "overdue_goals/1" do
+    test "returns only goals past their deadline", %{agent_id: agent_id} do
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Overdue", deadline: past))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Not due", deadline: future))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("No deadline"))
+
+      results = GoalStore.overdue_goals(agent_id)
+      assert length(results) == 1
+      assert hd(results).description == "Overdue"
+    end
+
+    test "returns empty when no overdue goals", %{agent_id: agent_id} do
+      future = DateTime.add(DateTime.utc_now(), 86_400, :second)
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Future", deadline: future))
+
+      assert GoalStore.overdue_goals(agent_id) == []
+    end
+  end
+
+  describe "goals_due_within/2" do
+    test "with :hours option returns goals due within N hours", %{agent_id: agent_id} do
+      two_hours = DateTime.add(DateTime.utc_now(), 2 * 3600, :second)
+      ten_hours = DateTime.add(DateTime.utc_now(), 10 * 3600, :second)
+
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Soon", deadline: two_hours))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Later", deadline: ten_hours))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("No deadline"))
+
+      results = GoalStore.goals_due_within(agent_id, hours: 4)
+      descriptions = Enum.map(results, & &1.description)
+      assert "Soon" in descriptions
+      refute "Later" in descriptions
+      refute "No deadline" in descriptions
+    end
+
+    test "with :days option returns goals due within N days", %{agent_id: agent_id} do
+      one_day = DateTime.add(DateTime.utc_now(), 86_400, :second)
+      ten_days = DateTime.add(DateTime.utc_now(), 10 * 86_400, :second)
+
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Tomorrow", deadline: one_day))
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Next week+", deadline: ten_days))
+
+      results = GoalStore.goals_due_within(agent_id, days: 3)
+      assert length(results) == 1
+      assert hd(results).description == "Tomorrow"
+    end
+
+    test "returns empty when no goals have deadlines", %{agent_id: agent_id} do
+      {:ok, _} = GoalStore.add_goal(agent_id, Goal.new("Open ended"))
+
+      assert GoalStore.goals_due_within(agent_id, hours: 24) == []
     end
   end
 
