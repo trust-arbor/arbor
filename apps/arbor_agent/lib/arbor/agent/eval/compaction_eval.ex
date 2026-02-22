@@ -219,6 +219,63 @@ defmodule Arbor.Agent.Eval.CompactionEval do
     # Final summary text (what the agent concluded)
     summary_text = transcript["text"] || ""
 
+    # ── Relational ground truth ──────────────────────────────
+    memory_tools = ~w(memory_recall memory_read_self memory_reflect
+      memory_introspect memory_remember memory_add_insight memory_connect)
+    relationship_tools = ~w(relationship_get relationship_browse
+      relationship_summarize relationship_save relationship_moment)
+
+    relational_calls =
+      Enum.filter(tool_calls, &(&1["name"] in (memory_tools ++ relationship_tools)))
+
+    # Person names from relationship tool args and results
+    all_person_names =
+      relational_calls
+      |> Enum.flat_map(fn tc ->
+        names_from_args =
+          case get_in(tc, ["args", "name"]) do
+            name when is_binary(name) -> [name]
+            _ -> []
+          end
+
+        names_from_result = extract_person_names_from_text(tc["result"] || "")
+        names_from_args ++ names_from_result
+      end)
+      |> Enum.uniq()
+
+    # Emotional markers from results
+    all_emotional_markers =
+      relational_calls
+      |> Enum.flat_map(fn tc ->
+        extract_emotional_markers_from_text(tc["result"] || "")
+      end)
+      |> Enum.uniq()
+
+    # Relationship dynamics from results
+    all_relationship_dynamics =
+      relational_calls
+      |> Enum.flat_map(fn tc ->
+        extract_dynamics_from_text(tc["result"] || "")
+      end)
+      |> Enum.uniq()
+
+    # Values from args and results
+    all_values =
+      relational_calls
+      |> Enum.flat_map(fn tc ->
+        # Check both the result text and any values in args
+        from_result = extract_values_from_text(tc["result"] || "")
+
+        from_args =
+          case get_in(tc, ["args", "values"]) do
+            vals when is_list(vals) -> vals
+            _ -> []
+          end
+
+        from_result ++ from_args
+      end)
+      |> Enum.uniq()
+
     %{
       files_read: files_read,
       dirs_listed: dirs_listed,
@@ -226,6 +283,11 @@ defmodule Arbor.Agent.Eval.CompactionEval do
       all_modules: all_modules,
       total_tool_calls: length(tool_calls),
       summary_text: summary_text,
+      # Relational ground truth
+      all_person_names: all_person_names,
+      all_emotional_markers: all_emotional_markers,
+      all_relationship_dynamics: all_relationship_dynamics,
+      all_values: all_values,
       # Key facts that should survive compaction
       key_facts: extract_key_facts(files_read, summary_text)
     }
@@ -255,6 +317,67 @@ defmodule Arbor.Agent.Eval.CompactionEval do
   end
 
   defp extract_entries_from_listing(_), do: []
+
+  # ── Relational Text Extraction ──────────────────────────────
+
+  defp extract_person_names_from_text(text) when is_binary(text) do
+    json_names =
+      Regex.scan(~r/"name"\s*:\s*"([^"]+)"/, text)
+      |> Enum.map(fn [_, n] -> n end)
+
+    text_names =
+      Regex.scan(
+        ~r/(?:Collaborator|Person|Partner|Friend|User):\s*(\w[\w\s]*?)(?:\.|,|\n|$)/i,
+        text
+      )
+      |> Enum.map(fn [_, n] -> String.trim(n) end)
+
+    (json_names ++ text_names) |> Enum.uniq()
+  end
+
+  defp extract_person_names_from_text(_), do: []
+
+  @emotional_vocab ~w(
+    trust joy insight connection gratitude warmth concern hope curiosity
+    vulnerability frustration pride wonder compassion empathy satisfaction
+    excitement nervousness sadness relief amusement surprise contentment
+    meaningful philosophical collaborative supportive creative
+  )
+
+  defp extract_emotional_markers_from_text(text) when is_binary(text) do
+    text_lower = String.downcase(text)
+    Enum.filter(@emotional_vocab, &String.contains?(text_lower, &1))
+  end
+
+  defp extract_emotional_markers_from_text(_), do: []
+
+  defp extract_dynamics_from_text(text) when is_binary(text) do
+    json_dynamics =
+      Regex.scan(~r/"relationship_dynamic"\s*:\s*"([^"]+)"/, text)
+      |> Enum.map(fn [_, d] -> d end)
+
+    text_dynamics =
+      Regex.scan(~r/(?:Dynamic|Relationship):\s*(.+?)(?:\n|$)/i, text)
+      |> Enum.map(fn [_, d] -> String.trim(d) end)
+      |> Enum.reject(&(String.length(&1) > 100))
+
+    (json_dynamics ++ text_dynamics) |> Enum.uniq()
+  end
+
+  defp extract_dynamics_from_text(_), do: []
+
+  defp extract_values_from_text(text) when is_binary(text) do
+    case Regex.run(~r/"values"\s*:\s*\[([^\]]+)\]/, text) do
+      [_, list_str] ->
+        Regex.scan(~r/"([^"]+)"/, list_str)
+        |> Enum.map(fn [_, v] -> v end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp extract_values_from_text(_), do: []
 
   defp extract_key_facts(files_read, summary_text) do
     # Key facts = module names + file paths + concepts from summary
@@ -439,10 +562,63 @@ defmodule Arbor.Agent.Eval.CompactionEval do
     llm_count = length(llm_view)
     message_survival = if full_count > 0, do: llm_count / full_count, else: 1.0
 
+    # ── Relational retention metrics ──────────────────────────
+    person_name_retention =
+      retention_fraction(
+        Map.get(ground_truth, :all_person_names, []),
+        llm_text
+      )
+
+    emotional_retention =
+      retention_fraction(
+        Map.get(ground_truth, :all_emotional_markers, []),
+        String.downcase(llm_text)
+      )
+
+    dynamic_retention =
+      retention_fraction(
+        Map.get(ground_truth, :all_relationship_dynamics, []),
+        llm_text
+      )
+
+    value_retention =
+      retention_fraction(
+        Map.get(ground_truth, :all_values, []),
+        String.downcase(llm_text)
+      )
+
+    # Adaptive retention score — different weights for relational vs coding sessions
+    has_relational = has_relational_data?(ground_truth)
+
+    retention_score =
+      if has_relational do
+        # Relational weighting
+        Float.round(
+          person_name_retention * 0.25 +
+            emotional_retention * 0.15 +
+            dynamic_retention * 0.15 +
+            value_retention * 0.15 +
+            concept_retention * 0.15 +
+            path_retention * 0.075 +
+            module_retention * 0.075,
+          3
+        )
+      else
+        # Coding weighting (unchanged)
+        Float.round(
+          path_retention * 0.3 + module_retention * 0.3 + concept_retention * 0.4,
+          3
+        )
+      end
+
     %{
       path_retention: Float.round(path_retention, 3),
       module_retention: Float.round(module_retention, 3),
       concept_retention: Float.round(concept_retention, 3),
+      person_name_retention: Float.round(person_name_retention, 3),
+      emotional_retention: Float.round(emotional_retention, 3),
+      dynamic_retention: Float.round(dynamic_retention, 3),
+      value_retention: Float.round(value_retention, 3),
       compression_ratio: Float.round(compression_ratio, 3),
       message_survival: Float.round(message_survival, 3),
       token_usage: token_usage,
@@ -451,14 +627,22 @@ defmodule Arbor.Agent.Eval.CompactionEval do
       full_message_count: full_count,
       compressions: stats.compression_count,
       squashes: stats.squash_count,
-      # Composite score: weighted average of retention metrics
-      # Higher = better (more information retained)
-      retention_score:
-        Float.round(
-          path_retention * 0.3 + module_retention * 0.3 + concept_retention * 0.4,
-          3
-        )
+      has_relational_data: has_relational,
+      retention_score: retention_score
     }
+  end
+
+  defp retention_fraction([], _text), do: 1.0
+
+  defp retention_fraction(items, text) do
+    retained = Enum.count(items, &String.contains?(text, &1))
+    retained / length(items)
+  end
+
+  defp has_relational_data?(ground_truth) do
+    Map.get(ground_truth, :all_person_names, []) != [] or
+      Map.get(ground_truth, :all_emotional_markers, []) != [] or
+      Map.get(ground_truth, :all_relationship_dynamics, []) != []
   end
 
   defp messages_to_text(messages) do
@@ -480,6 +664,8 @@ defmodule Arbor.Agent.Eval.CompactionEval do
   # ── Summary ────────────────────────────────────────────────────
 
   defp build_summary(results, ground_truth) do
+    has_relational = has_relational_data?(ground_truth)
+
     IO.puts("\n=== Compaction Eval Summary ===")
 
     IO.puts(
@@ -488,34 +674,73 @@ defmodule Arbor.Agent.Eval.CompactionEval do
         "#{length(ground_truth.key_facts)} key facts"
     )
 
+    if has_relational do
+      IO.puts(
+        "Relational: #{length(Map.get(ground_truth, :all_person_names, []))} people, " <>
+          "#{length(Map.get(ground_truth, :all_emotional_markers, []))} emotions, " <>
+          "#{length(Map.get(ground_truth, :all_relationship_dynamics, []))} dynamics, " <>
+          "#{length(Map.get(ground_truth, :all_values, []))} values"
+      )
+    end
+
     IO.puts("")
 
-    # Header
-    IO.puts(
-      String.pad_trailing("Strategy", 20) <>
-        String.pad_trailing("Checkpoint", 12) <>
-        String.pad_trailing("Paths", 8) <>
-        String.pad_trailing("Modules", 10) <>
-        String.pad_trailing("Concepts", 10) <>
-        String.pad_trailing("Score", 8) <>
-        String.pad_trailing("Compress", 10) <>
-        String.pad_trailing("Tokens", 8)
-    )
+    # Header — include relational columns if applicable
+    if has_relational do
+      IO.puts(
+        String.pad_trailing("Strategy", 20) <>
+          String.pad_trailing("Chk", 6) <>
+          String.pad_trailing("People", 8) <>
+          String.pad_trailing("Emot", 7) <>
+          String.pad_trailing("Dyn", 7) <>
+          String.pad_trailing("Val", 7) <>
+          String.pad_trailing("Score", 8) <>
+          String.pad_trailing("Comp%", 8) <>
+          String.pad_trailing("Tokens", 8)
+      )
 
-    IO.puts(String.duplicate("-", 86))
+      IO.puts(String.duplicate("-", 79))
+    else
+      IO.puts(
+        String.pad_trailing("Strategy", 20) <>
+          String.pad_trailing("Checkpoint", 12) <>
+          String.pad_trailing("Paths", 8) <>
+          String.pad_trailing("Modules", 10) <>
+          String.pad_trailing("Concepts", 10) <>
+          String.pad_trailing("Score", 8) <>
+          String.pad_trailing("Compress", 10) <>
+          String.pad_trailing("Tokens", 8)
+      )
+
+      IO.puts(String.duplicate("-", 86))
+    end
 
     for result <- results do
-      for {pct, measurement} <- Enum.sort(result.checkpoints) do
-        IO.puts(
-          String.pad_trailing(result.label, 20) <>
-            String.pad_trailing("#{trunc(pct * 100)}%", 12) <>
-            String.pad_trailing("#{trunc(measurement.path_retention * 100)}%", 8) <>
-            String.pad_trailing("#{trunc(measurement.module_retention * 100)}%", 10) <>
-            String.pad_trailing("#{trunc(measurement.concept_retention * 100)}%", 10) <>
-            String.pad_trailing("#{measurement.retention_score}", 8) <>
-            String.pad_trailing("#{trunc(measurement.compression_ratio * 100)}%", 10) <>
-            String.pad_trailing("#{measurement.token_usage}", 8)
-        )
+      for {pct, m} <- Enum.sort(result.checkpoints) do
+        if has_relational do
+          IO.puts(
+            String.pad_trailing(result.label, 20) <>
+              String.pad_trailing("#{trunc(pct * 100)}%", 6) <>
+              String.pad_trailing("#{trunc(m.person_name_retention * 100)}%", 8) <>
+              String.pad_trailing("#{trunc(m.emotional_retention * 100)}%", 7) <>
+              String.pad_trailing("#{trunc(m.dynamic_retention * 100)}%", 7) <>
+              String.pad_trailing("#{trunc(m.value_retention * 100)}%", 7) <>
+              String.pad_trailing("#{m.retention_score}", 8) <>
+              String.pad_trailing("#{trunc(m.compression_ratio * 100)}%", 8) <>
+              String.pad_trailing("#{m.token_usage}", 8)
+          )
+        else
+          IO.puts(
+            String.pad_trailing(result.label, 20) <>
+              String.pad_trailing("#{trunc(pct * 100)}%", 12) <>
+              String.pad_trailing("#{trunc(m.path_retention * 100)}%", 8) <>
+              String.pad_trailing("#{trunc(m.module_retention * 100)}%", 10) <>
+              String.pad_trailing("#{trunc(m.concept_retention * 100)}%", 10) <>
+              String.pad_trailing("#{m.retention_score}", 8) <>
+              String.pad_trailing("#{trunc(m.compression_ratio * 100)}%", 10) <>
+              String.pad_trailing("#{m.token_usage}", 8)
+          )
+        end
       end
     end
 
@@ -526,7 +751,11 @@ defmodule Arbor.Agent.Eval.CompactionEval do
       ground_truth_size: %{
         files: length(ground_truth.all_paths),
         modules: length(ground_truth.all_modules),
-        key_facts: length(ground_truth.key_facts)
+        key_facts: length(ground_truth.key_facts),
+        person_names: length(Map.get(ground_truth, :all_person_names, [])),
+        emotional_markers: length(Map.get(ground_truth, :all_emotional_markers, [])),
+        relationship_dynamics: length(Map.get(ground_truth, :all_relationship_dynamics, [])),
+        values: length(Map.get(ground_truth, :all_values, []))
       },
       results:
         Enum.map(results, fn r ->

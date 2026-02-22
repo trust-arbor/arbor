@@ -286,6 +286,13 @@ defmodule Arbor.Actions do
         Arbor.Actions.Eval.ListRuns,
         Arbor.Actions.Eval.GetRun
       ],
+      relationship: [
+        Arbor.Actions.Relationship.Get,
+        Arbor.Actions.Relationship.Save,
+        Arbor.Actions.Relationship.Moment,
+        Arbor.Actions.Relationship.Browse,
+        Arbor.Actions.Relationship.Summarize
+      ],
       skill: [
         Arbor.Actions.Skill.Search,
         Arbor.Actions.Skill.Activate,

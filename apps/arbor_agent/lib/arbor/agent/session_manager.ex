@@ -148,7 +148,7 @@ defmodule Arbor.Agent.SessionManager do
     turn = turn_dot_path()
     hb = Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path())
 
-    [
+    base = [
       session_id: "agent-session-#{agent_id}",
       agent_id: agent_id,
       trust_tier: trust_tier,
@@ -158,6 +158,28 @@ defmodule Arbor.Agent.SessionManager do
       start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
       execution_mode: :session
     ]
+
+    # Add compactor config if context management is enabled
+    case build_compactor_config(opts) do
+      nil -> base
+      config -> Keyword.put(base, :compactor, config)
+    end
+  end
+
+  defp build_compactor_config(opts) do
+    context_management = Keyword.get(opts, :context_management, :none)
+
+    if context_management != :none do
+      compactor_module = Arbor.Agent.ContextCompactor
+
+      compactor_opts = [
+        effective_window: Keyword.get(opts, :effective_window, 75_000),
+        model: Keyword.get(opts, :model),
+        enable_llm_compaction: context_management == :full
+      ]
+
+      {compactor_module, compactor_opts}
+    end
   end
 
   defp build_adapters(agent_id, trust_tier, opts) do

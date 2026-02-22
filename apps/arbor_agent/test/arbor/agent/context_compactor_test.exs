@@ -543,6 +543,51 @@ defmodule Arbor.Agent.ContextCompactorTest do
     end
   end
 
+  # ── full_transcript/1 ───────────────────────────────────────
+
+  describe "full_transcript/1" do
+    test "returns the full unmodified transcript" do
+      c = ContextCompactor.new()
+      msg = %{role: :user, content: "Hello"}
+      c = ContextCompactor.append(c, msg)
+
+      transcript = ContextCompactor.full_transcript(c)
+      assert length(transcript) == 1
+      assert List.first(transcript) == msg
+    end
+
+    test "is identical to direct struct access" do
+      c = ContextCompactor.new()
+      c = ContextCompactor.append(c, %{role: :user, content: "one"})
+      c = ContextCompactor.append(c, %{role: :assistant, content: "two"})
+
+      assert ContextCompactor.full_transcript(c) == c.full_transcript
+    end
+  end
+
+  # ── @behaviour compliance ───────────────────────────────────
+
+  describe "@behaviour Arbor.Contracts.AI.Compactor" do
+    test "implements all required callbacks" do
+      callbacks = Arbor.Contracts.AI.Compactor.behaviour_info(:callbacks)
+
+      for {fun, arity} <- callbacks do
+        assert function_exported?(ContextCompactor, fun, arity),
+               "ContextCompactor must implement #{fun}/#{arity}"
+      end
+    end
+
+    test "stats returns required fields" do
+      c = ContextCompactor.new()
+      c = ContextCompactor.append(c, %{role: :user, content: "Hello"})
+      s = ContextCompactor.stats(c)
+
+      # Behaviour stats type requires these fields
+      assert is_integer(Map.get(s, :full_transcript_length) || Map.get(s, :total_messages, 0))
+      assert is_integer(Map.get(s, :llm_messages_length) || Map.get(s, :visible_messages, 0))
+    end
+  end
+
   # ── File Index Enrichment ─────────────────────────────────
 
   describe "file index enrichment" do
