@@ -35,9 +35,11 @@ defmodule Arbor.Memory.Proposal do
 
   When creating a proposal, the system checks for existing pending/deferred
   proposals of the same type with similar content. If a match is found
-  (exact case-insensitive match, or Jaro-Winkler similarity >= 0.85 for
-  content >= 30 chars), the existing proposal's confidence is boosted instead
-  of creating a duplicate. A cap of 20 pending proposals per agent is enforced.
+  (exact case-insensitive match, or Jaccard word-set similarity >= 0.6),
+  the existing proposal's confidence is boosted instead of creating a duplicate.
+  Additionally, proposals are checked against existing KG nodes of the same type
+  to prevent cross-heartbeat duplicates. A cap of 20 pending proposals per agent
+  is enforced.
 
   ## Storage
 
@@ -60,7 +62,7 @@ defmodule Arbor.Memory.Proposal do
       {:ok, node_id} = Arbor.Memory.Proposal.accept("agent_001", proposal.id)
   """
 
-  alias Arbor.Memory.{Events, KnowledgeGraph, Signals}
+  alias Arbor.Memory.{Events, KnowledgeGraph, SelfKnowledge, Signals}
 
   @type proposal_type ::
           :fact
@@ -115,8 +117,8 @@ defmodule Arbor.Memory.Proposal do
   # Maximum pending proposals per agent before oldest are pruned
   @max_pending 20
 
-  # Similarity threshold for content dedup (Jaro-Winkler distance)
-  @content_similarity_threshold 0.85
+  # Similarity threshold for content dedup (Jaccard + containment)
+  @content_similarity_threshold 0.6
 
   @allowed_types [
     :fact,
@@ -178,29 +180,37 @@ defmodule Arbor.Memory.Proposal do
           {:ok, existing}
 
         :no_duplicate ->
-          proposal = %__MODULE__{
-            id: generate_id(),
-            agent_id: agent_id,
-            type: type,
-            content: content,
-            confidence: Map.get(data, :confidence, 0.5),
-            source: Map.get(data, :source),
-            evidence: Map.get(data, :evidence, []),
-            metadata: Map.get(data, :metadata, %{}),
-            created_at: DateTime.utc_now(),
-            status: :pending
-          }
+          # Cross-check against existing KG nodes to prevent cross-heartbeat duplication
+          case find_similar_in_graph(agent_id, type, content) do
+            {:duplicate, node_id} ->
+              boost_existing_node(agent_id, node_id)
+              {:ok, :reinforced}
 
-          # Enforce pending queue cap — prune oldest low-confidence proposals
-          enforce_pending_cap(agent_id)
+            :new ->
+              proposal = %__MODULE__{
+                id: generate_id(),
+                agent_id: agent_id,
+                type: type,
+                content: content,
+                confidence: Map.get(data, :confidence, 0.5),
+                source: Map.get(data, :source),
+                evidence: Map.get(data, :evidence, []),
+                metadata: Map.get(data, :metadata, %{}),
+                created_at: DateTime.utc_now(),
+                status: :pending
+              }
 
-          # Store in ETS
-          :ets.insert(@proposals_ets, {{agent_id, proposal.id}, proposal})
+              # Enforce pending queue cap — prune oldest low-confidence proposals
+              enforce_pending_cap(agent_id)
 
-          # Emit signal
-          Signals.emit_proposal_created(agent_id, proposal)
+              # Store in ETS
+              :ets.insert(@proposals_ets, {{agent_id, proposal.id}, proposal})
 
-          {:ok, proposal}
+              # Emit signal
+              Signals.emit_proposal_created(agent_id, proposal)
+
+              {:ok, proposal}
+          end
       end
     end
   end
@@ -585,35 +595,76 @@ defmodule Arbor.Memory.Proposal do
 
     content_lower = String.downcase(content)
 
-    # Check exact match first
+    # Check exact match first (fast path)
     exact =
       Enum.find(candidates, fn p ->
         String.downcase(p.content) == content_lower
       end)
 
     case exact do
-      nil -> fuzzy_match_duplicate(content_lower, candidates)
+      nil -> fuzzy_match_duplicate(content, candidates)
       p -> {:duplicate, p}
     end
   end
 
-  # Fuzzy match using Jaro-Winkler distance
-  # Only apply to content >= 30 chars (short strings have inflated similarity)
-  defp fuzzy_match_duplicate(content_lower, candidates) do
-    if String.length(content_lower) < 30 do
-      :no_duplicate
-    else
-      similar =
-        Enum.find(candidates, fn p ->
-          String.jaro_distance(content_lower, String.downcase(p.content)) >=
-            @content_similarity_threshold
-        end)
+  # Fuzzy match using word-set Jaccard + containment similarity
+  # More robust than Jaro-Winkler for natural language (catches rewording)
+  defp fuzzy_match_duplicate(content, candidates) do
+    similar =
+      Enum.find(candidates, fn p ->
+        SelfKnowledge.text_similarity(content, p.content) >=
+          @content_similarity_threshold
+      end)
 
-      case similar do
-        nil -> :no_duplicate
-        p -> {:duplicate, p}
-      end
+    case similar do
+      nil -> :no_duplicate
+      p -> {:duplicate, p}
     end
+  end
+
+  # Cross-check against existing KG nodes to prevent cross-heartbeat duplication.
+  # After the pending queue is cleared (proposals accepted), the next heartbeat
+  # may rediscover the same facts with slightly different wording.
+  defp find_similar_in_graph(agent_id, type, content) do
+    node_type = proposal_type_to_node_type(type)
+
+    case get_graph(agent_id) do
+      {:ok, graph} ->
+        existing_nodes =
+          graph.nodes
+          |> Map.values()
+          |> Enum.filter(&(Map.get(&1, :type) == node_type))
+
+        similar =
+          Enum.find(existing_nodes, fn node ->
+            node_content = Map.get(node, :content, "")
+            SelfKnowledge.text_similarity(content, node_content) >= @content_similarity_threshold
+          end)
+
+        case similar do
+          nil -> :new
+          node -> {:duplicate, Map.get(node, :id)}
+        end
+
+      {:error, _} ->
+        :new
+    end
+  rescue
+    # ETS table may not exist in test environments
+    ArgumentError -> :new
+  end
+
+  defp boost_existing_node(agent_id, node_id) do
+    case get_graph(agent_id) do
+      {:ok, graph} ->
+        updated = KnowledgeGraph.boost_node(graph, node_id, 0.1)
+        save_graph(agent_id, updated)
+
+      {:error, _} ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
   end
 
   defp enforce_pending_cap(agent_id) do

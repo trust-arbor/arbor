@@ -593,16 +593,36 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end
   end
 
+  # Maximum observation proposals per heartbeat to prevent volume explosion
+  @max_observations_per_heartbeat 5
+
+  # Internal monologue prefixes — these are self-instructions, not observations
+  @intention_prefixes [
+    "Should ",
+    "Need to ",
+    "Want to ",
+    "Must ",
+    "Have to ",
+    "I should ",
+    "I need to ",
+    "I want to ",
+    "I must ",
+    "I have to "
+  ]
+
   defp maybe_add_wm_proposals(proposals, result_ctx) do
     thoughts = Map.get(result_ctx, "session.memory_notes", [])
     concerns = Map.get(result_ctx, "session.concerns", [])
     curiosities = Map.get(result_ctx, "session.curiosity", [])
 
     thought_props =
-      Enum.map(List.wrap(thoughts), fn t ->
+      thoughts
+      |> List.wrap()
+      |> Enum.map(fn t ->
         text = if is_binary(t), do: t, else: Map.get(t, "text", inspect(t))
         %{type: :thought, content: text, metadata: %{}}
       end)
+      |> Enum.reject(&internal_monologue?/1)
 
     concern_props =
       Enum.map(List.wrap(concerns), fn c ->
@@ -616,7 +636,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
         %{type: :curiosity, content: text, metadata: %{}}
       end)
 
-    thought_props ++ concern_props ++ curiosity_props ++ proposals
+    wm_proposals = thought_props ++ concern_props ++ curiosity_props
+
+    # Cap total observations per heartbeat — LLM puts most important first
+    capped = Enum.take(wm_proposals, @max_observations_per_heartbeat)
+
+    capped ++ proposals
+  end
+
+  defp internal_monologue?(%{content: text}) do
+    Enum.any?(@intention_prefixes, &String.starts_with?(text, &1))
   end
 
   defp maybe_add_decomposition_proposals(proposals, result_ctx) do
