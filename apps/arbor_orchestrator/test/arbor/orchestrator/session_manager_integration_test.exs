@@ -73,8 +73,8 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
           )
 
         result = Session.send_message(pid, "Hello from integration test")
-        assert {:ok, response} = result
-        assert is_binary(response)
+        assert {:ok, %{text: text}} = result
+        assert is_binary(text)
       end
 
       test "session state accumulates across turns", %{agent_id: agent_id} do

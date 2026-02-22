@@ -142,7 +142,7 @@ defmodule Arbor.Orchestrator.Session.SupervisorTest do
     test "started session responds to send_message", ctx do
       opts = session_opts(ctx)
       assert {:ok, pid} = SessionSupervisor.start_session(opts)
-      assert {:ok, "test response"} = Session.send_message(pid, "hello")
+      assert {:ok, %{text: "test response"}} = Session.send_message(pid, "hello")
     end
 
     test "rejects duplicate session_id", ctx do
