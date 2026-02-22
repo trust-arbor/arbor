@@ -222,6 +222,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         base =
           "- [#{progress_pct}%] #{goal.description} (id: #{goal.id}, priority: #{goal.priority})"
 
+        base = append_goal_date_annotations(base, goal)
+
         # In goal_pursuit mode, show richer context
         if mode == :goal_pursuit do
           extras =
@@ -242,6 +244,48 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     "## Active Goals\n#{goal_lines}"
   end
+
+  defp append_goal_date_annotations(line, goal) do
+    deadline = Map.get(goal, :deadline)
+    ref_date = Map.get(goal, :referenced_date)
+
+    annotations =
+      [
+        if(deadline, do: "deadline: #{format_goal_date(deadline)}"),
+        if(ref_date && !same_day_as_today?(ref_date),
+          do: "ref: #{format_goal_date(ref_date)}"
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    if annotations == [] do
+      line
+    else
+      "#{line} [#{Enum.join(annotations, ", ")}]"
+    end
+  end
+
+  defp format_goal_date(dt) do
+    if Code.ensure_loaded?(Arbor.Common.Time) do
+      Arbor.Common.Time.month_day(dt)
+    else
+      case dt do
+        %DateTime{} -> Calendar.strftime(dt, "%b %-d")
+        %Date{} -> Calendar.strftime(dt, "%b %-d")
+        _ -> to_string(dt)
+      end
+    end
+  end
+
+  defp same_day_as_today?(%DateTime{} = dt) do
+    Date.compare(DateTime.to_date(dt), Date.utc_today()) == :eq
+  end
+
+  defp same_day_as_today?(%Date{} = d) do
+    Date.compare(d, Date.utc_today()) == :eq
+  end
+
+  defp same_day_as_today?(_), do: false
 
   defp find_decomposition_target(goals, agent_id) do
     # Find highest-priority goal that has no pending intentions
