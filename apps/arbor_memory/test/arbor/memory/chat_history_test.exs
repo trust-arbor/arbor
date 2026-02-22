@@ -91,6 +91,108 @@ defmodule Arbor.Memory.ChatHistoryTest do
     end
   end
 
+  describe "load_recent/2" do
+    setup do
+      agent_id = "test_agent_recent"
+      ChatHistory.clear(agent_id)
+      t0 = DateTime.utc_now()
+
+      # Insert 10 messages with 1-second gaps
+      ids =
+        for i <- 1..10 do
+          id = "msg_#{i}"
+
+          ChatHistory.append(agent_id, %{
+            id: id,
+            role: "user",
+            content: "Message #{i}",
+            timestamp: DateTime.add(t0, i, :second)
+          })
+
+          id
+        end
+
+      on_exit(fn -> ChatHistory.clear(agent_id) end)
+      %{agent_id: agent_id, ids: ids}
+    end
+
+    test "returns the most recent N messages with default limit", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id)
+      # Default limit is 50, we only have 10
+      assert length(messages) == 10
+    end
+
+    test "respects custom limit", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id, limit: 3)
+      assert length(messages) == 3
+      # Should be the last 3 messages (8, 9, 10)
+      assert Enum.at(messages, 0).content == "Message 8"
+      assert Enum.at(messages, 1).content == "Message 9"
+      assert Enum.at(messages, 2).content == "Message 10"
+    end
+
+    test "returns messages in ascending order (oldest first)", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id, limit: 5)
+      contents = Enum.map(messages, & &1.content)
+      assert contents == ["Message 6", "Message 7", "Message 8", "Message 9", "Message 10"]
+    end
+
+    test "with :before cursor returns messages older than cursor", %{agent_id: agent_id} do
+      # Cursor = msg_8, so we should get messages before msg_8's timestamp
+      messages = ChatHistory.load_recent(agent_id, limit: 3, before: "msg_8")
+      assert length(messages) == 3
+      # Should be messages 5, 6, 7 (last 3 before msg_8)
+      assert Enum.at(messages, 0).content == "Message 5"
+      assert Enum.at(messages, 1).content == "Message 6"
+      assert Enum.at(messages, 2).content == "Message 7"
+    end
+
+    test "with :before cursor and small limit", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id, limit: 2, before: "msg_5")
+      assert length(messages) == 2
+      assert Enum.at(messages, 0).content == "Message 3"
+      assert Enum.at(messages, 1).content == "Message 4"
+    end
+
+    test "with :before cursor pointing to first message returns empty", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id, limit: 5, before: "msg_1")
+      assert messages == []
+    end
+
+    test "with :before cursor for unknown id ignores the filter", %{agent_id: agent_id} do
+      messages = ChatHistory.load_recent(agent_id, limit: 3, before: "nonexistent")
+      assert length(messages) == 3
+    end
+
+    test "returns empty for unknown agent" do
+      assert [] = ChatHistory.load_recent("unknown_agent_recent")
+    end
+  end
+
+  describe "count/1" do
+    test "returns 0 for unknown agent" do
+      assert ChatHistory.count("unknown_agent_count") == 0
+    end
+
+    test "returns correct count after appending" do
+      agent_id = "test_agent_count"
+      ChatHistory.clear(agent_id)
+
+      assert ChatHistory.count(agent_id) == 0
+
+      for i <- 1..5 do
+        ChatHistory.append(agent_id, %{
+          role: "user",
+          content: "Msg #{i}",
+          timestamp: DateTime.utc_now()
+        })
+      end
+
+      assert ChatHistory.count(agent_id) == 5
+      ChatHistory.clear(agent_id)
+    end
+  end
+
   describe "message cap" do
     test "trims messages when exceeding 500" do
       agent_id = "test_agent_cap"

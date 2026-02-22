@@ -513,8 +513,15 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       <div
         id="messages-container"
         phx-update="stream"
+        phx-hook="InfiniteScrollUp"
         style="flex: 1; overflow-y: auto; padding: 0.75rem; min-height: 0;"
       >
+        <div
+          :if={@chat_has_more}
+          style="text-align: center; padding: 0.5rem; color: var(--aw-text-muted, #888); font-size: 0.8em;"
+        >
+          ↑ Scroll up to load older messages
+        </div>
         <div
           :for={{dom_id, msg} <- @streams.messages}
           id={dom_id}

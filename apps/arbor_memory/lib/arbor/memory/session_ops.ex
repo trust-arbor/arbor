@@ -521,6 +521,12 @@ defmodule Arbor.Memory.SessionOps do
   @doc "Load chat history for an agent, sorted chronologically."
   defdelegate load_chat_history(agent_id), to: ChatHistory, as: :load
 
+  @doc "Load recent chat history with pagination support."
+  defdelegate load_recent_chat_history(agent_id, opts \\ []), to: ChatHistory, as: :load_recent
+
+  @doc "Count total chat messages for an agent."
+  defdelegate chat_history_count(agent_id), to: ChatHistory, as: :count
+
   @doc "Clear all chat history for an agent."
   defdelegate clear_chat_history(agent_id), to: ChatHistory, as: :clear
 

@@ -102,6 +102,45 @@ ArborWebHooks.ResizablePanel = {
 };
 
 /**
+ * InfiniteScrollUp - Load older messages when scrolling to top.
+ * Pushes "load-more-messages" event when scrollTop < 100px.
+ * Handles "messages-loaded" event to maintain scroll position.
+ *
+ * Usage: <div id="messages-container" phx-hook="InfiniteScrollUp">...</div>
+ */
+ArborWebHooks.InfiniteScrollUp = {
+  mounted() {
+    this.loading = false;
+    this.el.addEventListener("scroll", () => this.onScroll());
+    this.handleEvent("messages-loaded", (payload) => {
+      this.loading = false;
+    });
+  },
+  updated() {
+    // After DOM update from stream_insert at: 0, restore scroll position
+    if (this._savedScrollHeight) {
+      const newScrollHeight = this.el.scrollHeight;
+      const delta = newScrollHeight - this._savedScrollHeight;
+      if (delta > 0) {
+        this.el.scrollTop = this._savedScrollTop + delta;
+      }
+      this._savedScrollHeight = null;
+      this._savedScrollTop = null;
+    }
+  },
+  onScroll() {
+    if (this.loading) return;
+    if (this.el.scrollTop < 100) {
+      this.loading = true;
+      // Save current scroll state before new items are prepended
+      this._savedScrollHeight = this.el.scrollHeight;
+      this._savedScrollTop = this.el.scrollTop;
+      this.pushEvent("load-more-messages", {});
+    }
+  }
+};
+
+/**
  * NodeHexagon - Animate hexagon node cards on update.
  * Adds a brief 'updated' class for CSS transitions.
  *
