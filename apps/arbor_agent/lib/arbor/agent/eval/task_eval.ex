@@ -48,6 +48,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
     * `:provider` — LLM provider atom (default: :openrouter)
     * `:council` — enable council evaluation (default: false)
     * `:tag` — persistence tag (default: nil)
+    * `:context_management` — context management mode for SimpleAgent trials:
+      `:none`, `:heuristic`, `:full` (default: `:none`)
   """
   def run(opts \\ []) do
     bug_id = Keyword.get(opts, :bug, :glob_wildcard)
@@ -254,8 +256,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
       if state.proposal_submitted do
         {true, state.proposal_text, state.proposal_quality}
       else
-        # Check if agent created any proposals in memory
-        case get_pending_proposals(state[:agent_id]) do
+        # Check if agent created any fix proposals in memory (exclude heartbeat types)
+        case get_fix_proposals(state[:agent_id]) do
           [] ->
             {false, nil, ProposalScorer.score("", bug)}
 
@@ -406,20 +408,29 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   # -- Proposal Detection --
 
-  defp proposal_submitted?(agent_id, hb_data) do
-    # Check 1: heartbeat actions include proposal.submit
+  # Heartbeat proposal types that are NOT bug fix proposals
+  @heartbeat_proposal_types [
+    :thought,
+    :concern,
+    :curiosity,
+    :identity,
+    :intent,
+    :cognitive_mode,
+    :goal,
+    :goal_update
+  ]
+
+  defp proposal_submitted?(_agent_id, hb_data) do
+    # Only check for explicit proposal.submit tool call actions.
+    # Do NOT check pending proposals — heartbeat creates :thought/:goal/etc.
+    # proposals on every cycle, which are not bug fix submissions.
     actions = extract_actions(hb_data)
-    has_proposal_action = Enum.any?(actions, &proposal_action?/1)
-
-    # Check 2: pending proposals exist in memory
-    has_pending = get_pending_proposals(agent_id) != []
-
-    has_proposal_action or has_pending
+    Enum.any?(actions, &proposal_action?/1)
   end
 
   defp extract_proposal_text(agent_id, hb_data) do
-    # Try to get from pending proposals first
-    case get_pending_proposals(agent_id) do
+    # Try bug-fix proposals from memory (exclude heartbeat types)
+    case get_fix_proposals(agent_id) do
       [proposal | _] ->
         Map.get(proposal, :content, "")
 
@@ -437,6 +448,15 @@ defmodule Arbor.Agent.Eval.TaskEval do
       {:ok, proposals} -> proposals
       _ -> []
     end
+  end
+
+  # Get only non-heartbeat proposals (potential bug fix submissions)
+  defp get_fix_proposals(agent_id) do
+    agent_id
+    |> get_pending_proposals()
+    |> Enum.reject(fn p ->
+      Map.get(p, :type) in @heartbeat_proposal_types
+    end)
   end
 
   # -- Action Helpers --
@@ -538,7 +558,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
         "variant" => to_string(variant),
         "max_heartbeats" => Keyword.get(opts, :max_heartbeats, @default_max_heartbeats),
         "model" => model,
-        "provider" => to_string(provider)
+        "provider" => to_string(provider),
+        "context_management" => to_string(Keyword.get(opts, :context_management, :none))
       },
       metadata: if(tag, do: %{"tag" => tag}, else: %{}),
       status: "completed"

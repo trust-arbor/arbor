@@ -35,6 +35,8 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   use GenServer
 
+  alias Arbor.Agent.MindPrompt
+
   require Logger
 
   @default_max_consecutive 10
@@ -111,6 +113,8 @@ defmodule Arbor.Agent.ActionCycleServer do
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
 
+    llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
+
     state = %{
       agent_id: agent_id,
       queue: :queue.new(),
@@ -118,7 +122,7 @@ defmodule Arbor.Agent.ActionCycleServer do
       cycle_count: 0,
       consecutive_cycles: 0,
       config: build_config(opts),
-      llm_fn: Keyword.get(opts, :llm_fn)
+      llm_fn: llm_fn
     }
 
     {:ok, state}
@@ -402,6 +406,91 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   defp config_val(state, key, default) do
     Map.get(state.config, key, default)
+  end
+
+  # ── LLM Function Factory ──────────────────────────────────────
+
+  @doc """
+  Build a default LLM function for the Mind's action cycle.
+
+  Creates a closure that calls `Arbor.AI.generate_text/2` with the
+  agent's model/provider config, builds a prompt via MindPrompt,
+  and parses the JSON response into a map.
+
+  The function signature matches CycleController's expectation:
+  `(context_map) -> {:ok, response_map} | {:error, term()}`
+  """
+  def make_default_llm_fn(_agent_id, opts) do
+    model = Keyword.get(opts, :model) || mind_model()
+    provider = Keyword.get(opts, :provider) || mind_provider()
+
+    fn context ->
+      system_prompt = MindPrompt.build(Map.to_list(context))
+
+      user_msg =
+        MindPrompt.build_iteration(
+          iteration: Map.get(context, :iteration, 0),
+          recent_percepts: Map.get(context, :recent_percepts, [])
+        )
+
+      ai_opts = [
+        model: model,
+        provider: provider,
+        max_tokens: 2000,
+        backend: :api,
+        system_prompt: system_prompt
+      ]
+
+      if ai_available?() do
+        case apply(Arbor.AI, :generate_text, [user_msg, ai_opts]) do
+          {:ok, %{text: text}} ->
+            parse_json_response(text)
+
+          {:ok, response} when is_map(response) ->
+            text = response[:text] || Map.get(response, "text", "")
+            parse_json_response(text)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      else
+        {:error, :ai_unavailable}
+      end
+    end
+  end
+
+  defp parse_json_response(text) when is_binary(text) do
+    # Strip markdown code fences if present
+    cleaned =
+      text
+      |> String.trim()
+      |> String.replace(~r/^```(?:json)?\s*/i, "")
+      |> String.replace(~r/\s*```$/, "")
+      |> String.trim()
+
+    case Jason.decode(cleaned) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, _} -> {:error, {:invalid_json, String.slice(text, 0, 200)}}
+    end
+  end
+
+  defp parse_json_response(_), do: {:error, :empty_response}
+
+  defp ai_available? do
+    Code.ensure_loaded?(Arbor.AI) and
+      function_exported?(Arbor.AI, :generate_text, 2)
+  end
+
+  defp mind_model do
+    Application.get_env(:arbor_agent, :mind_model) ||
+      Application.get_env(:arbor_agent, :heartbeat_model) ||
+      "arcee-ai/trinity-large-preview:free"
+  end
+
+  defp mind_provider do
+    Application.get_env(:arbor_agent, :mind_provider) ||
+      Application.get_env(:arbor_agent, :heartbeat_provider) ||
+      :openrouter
   end
 
   # ── Helpers ─────────────────────────────────────────────────────

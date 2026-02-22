@@ -290,6 +290,9 @@ defmodule Arbor.Agent.Executor do
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
 
+    # Forward percept to ActionCycleServer for Mind processing
+    forward_percept_to_action_cycle(state.agent_id, percept)
+
     safe_emit(:agent, :intent_executed, %{
       agent_id: state.agent_id,
       intent_id: intent.id,
@@ -308,6 +311,9 @@ defmodule Arbor.Agent.Executor do
 
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
+
+    # Forward blocked percept to ActionCycleServer for Mind awareness
+    forward_percept_to_action_cycle(state.agent_id, percept)
 
     safe_emit(:agent, :intent_blocked, %{
       agent_id: state.agent_id,
@@ -457,6 +463,34 @@ defmodule Arbor.Agent.Executor do
     :exit, reason ->
       Logger.debug("Executor safe_call caught exit: #{inspect(reason)}")
       nil
+  end
+
+  # Forward execution results to ActionCycleServer so the Mind can process them.
+  # Converts Percept struct to a plain map (ActionCycleServer expects maps).
+  defp forward_percept_to_action_cycle(agent_id, %Percept{} = percept) do
+    action_cycle = Arbor.Agent.ActionCycleSupervisor
+
+    if Code.ensure_loaded?(action_cycle) do
+      case apply(action_cycle, :lookup, [agent_id]) do
+        {:ok, pid} ->
+          percept_map =
+            percept
+            |> Map.from_struct()
+            |> Map.update(:created_at, nil, fn
+              %DateTime{} = dt -> DateTime.to_iso8601(dt)
+              other -> other
+            end)
+
+          send(pid, {:percept, percept_map})
+
+        :error ->
+          :ok
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp via(agent_id) do
