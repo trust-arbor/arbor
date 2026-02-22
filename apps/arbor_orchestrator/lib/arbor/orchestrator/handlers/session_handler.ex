@@ -881,15 +881,18 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   defp truncate_tool_result(result), do: inspect(result, limit: 50, printable_limit: 500)
 
   # Inject timestamps into message content for LLM temporal awareness.
-  # Prepends "[HH:MM:SS] " to content for messages that carry a timestamp field,
-  # then strips the timestamp key so LLM adapters don't choke on unknown fields.
+  # Only prepends "[HH:MM:SS] " to user messages that carry a timestamp field.
+  # Assistant messages are skipped because the LLM may mimic the timestamp format
+  # in its response, and on subsequent turns inject_timestamps would prepend another
+  # timestamp to the already-timestamped content, causing chaining like
+  # "[16:28:56] [16:28:56] [16:28:43] I'm testing...".
   defp inject_timestamps(messages) do
     Enum.map(messages, fn msg ->
       case msg do
-        %{"timestamp" => ts, "content" => content}
-        when is_binary(ts) and is_binary(content) and content != "" ->
+        %{"timestamp" => ts, "content" => content, "role" => role}
+        when is_binary(ts) and is_binary(content) and content != "" and role != "assistant" ->
           time_str = format_message_timestamp(ts)
-          %{"role" => msg["role"], "content" => "[#{time_str}] #{content}"}
+          %{"role" => role, "content" => "[#{time_str}] #{content}"}
 
         %{"timestamp" => _} ->
           Map.delete(msg, "timestamp")
