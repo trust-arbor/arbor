@@ -53,7 +53,7 @@ defmodule Arbor.Contracts.AI.CompactorTest do
           total_messages: length(c.transcript),
           visible_messages: length(c.messages),
           compression_ratio:
-            if(length(c.transcript) > 0,
+            if(c.transcript != [],
               do: length(c.messages) / length(c.transcript),
               else: 1.0
             ),
