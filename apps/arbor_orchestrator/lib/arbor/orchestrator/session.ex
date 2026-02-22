@@ -38,14 +38,16 @@ defmodule Arbor.Orchestrator.Session do
 
   ## Turn vs Heartbeat execution
 
-  **Turns** run synchronously via `GenServer.call` — the caller blocks until the
-  engine completes and the response is ready. This is correct for query-response
-  semantics.
+  **Turns** run in a spawned `Task` — the caller blocks on `GenServer.call` but
+  the GenServer itself is free to handle heartbeats. When the Task completes,
+  the result is sent back as `{:turn_result, message, result}` and
+  `GenServer.reply/2` unblocks the original caller. Only one turn can be
+  in-flight at a time (concurrent turns get `{:error, :turn_in_progress}`).
 
-  **Heartbeats** run in a spawned `Task` to avoid blocking the GenServer. The
-  heartbeat result is sent back as `{:heartbeat_result, result}` and applied
-  asynchronously. This means the GenServer remains responsive to `send_message/2`
-  calls while a heartbeat is in-flight.
+  **Heartbeats** also run in a spawned `Task` — the heartbeat result is sent
+  back as `{:heartbeat_result, result}` and applied asynchronously. Both a
+  turn and a heartbeat can overlap safely since adapters are stateless and
+  memory stores are ETS-backed GenServers.
 
   ## Example
 
@@ -111,7 +113,11 @@ defmodule Arbor.Orchestrator.Session do
     adapters: %{},
     heartbeat_interval: @default_heartbeat_interval,
     heartbeat_ref: nil,
-    heartbeat_in_flight: false
+    heartbeat_in_flight: false,
+    # Async turn execution state
+    turn_in_flight: false,
+    turn_from: nil,
+    turn_task_ref: nil
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -140,6 +146,9 @@ defmodule Arbor.Orchestrator.Session do
           heartbeat_interval: pos_integer(),
           heartbeat_ref: reference() | nil,
           heartbeat_in_flight: boolean(),
+          turn_in_flight: boolean(),
+          turn_from: GenServer.from() | nil,
+          turn_task_ref: reference() | nil,
           compactor: struct() | nil,
           session_config: struct() | nil,
           session_state: struct() | nil,
@@ -191,7 +200,8 @@ defmodule Arbor.Orchestrator.Session do
   and the response is returned.
   """
   @spec send_message(GenServer.server(), String.t() | map()) ::
-          {:ok, String.t()} | {:error, term()}
+          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          | {:error, term()}
   def send_message(session, message) do
     GenServer.call(session, {:send_message, message}, :infinity)
   end
@@ -338,10 +348,14 @@ defmodule Arbor.Orchestrator.Session do
     {:reply, {:error, :legacy_mode}, state}
   end
 
-  def handle_call({:send_message, message}, _from, state) do
+  def handle_call({:send_message, _message}, _from, %{turn_in_flight: true} = state) do
+    {:reply, {:error, :turn_in_progress}, state}
+  end
+
+  def handle_call({:send_message, message}, from, state) do
     case authorize_orchestrator(state) do
       :ok ->
-        do_send_message(message, state)
+        do_send_message_async(message, from, state)
 
       {:error, reason} ->
         {:reply, {:error, {:unauthorized, reason}}, state}
@@ -360,37 +374,40 @@ defmodule Arbor.Orchestrator.Session do
     {:reply, :ok, Builders.apply_checkpoint(state, checkpoint)}
   end
 
-  defp do_send_message(message, state) do
+  defp do_send_message_async(message, from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
     values = Builders.build_turn_values(state, message)
     engine_opts = Builders.build_engine_opts(state, values)
 
-    try do
-      case Engine.run(state.turn_graph, engine_opts) do
-        {:ok, result} ->
-          new_state =
-            state
-            |> transition_phase(:processing, :complete, :idle)
-            |> Builders.apply_turn_result(message, result)
-            |> Builders.maybe_checkpoint()
+    session_pid = self()
+    turn_graph = state.turn_graph
 
-          response = Map.get(result.context, "session.response", "")
-          Builders.emit_turn_signal(new_state, result)
+    task_fn = fn ->
+      result =
+        try do
+          Engine.run(turn_graph, engine_opts)
+        rescue
+          e -> {:error, {:engine_crash, Exception.message(e)}}
+        end
 
-          # Phase 3: notify ActionCycleServer of chat percept
-          maybe_enqueue_chat_percept(state.agent_id, message)
-
-          {:reply, {:ok, response}, new_state}
-
-        {:error, reason} ->
-          new_state = transition_phase(state, :processing, :complete, :idle)
-          {:reply, {:error, reason}, new_state}
-      end
-    rescue
-      e ->
-        new_state = transition_phase(state, :processing, :complete, :idle)
-        {:reply, {:error, {:engine_crash, Exception.message(e)}}, new_state}
+      send(session_pid, {:turn_result, message, result})
     end
+
+    task_sup = Arbor.Orchestrator.Session.TaskSupervisor
+
+    {_task_pid, task_ref} =
+      if Process.whereis(task_sup) do
+        {:ok, pid} = Task.Supervisor.start_child(task_sup, task_fn)
+        ref = Process.monitor(pid)
+        {pid, ref}
+      else
+        {:ok, pid} = Task.start(task_fn)
+        ref = Process.monitor(pid)
+        {pid, ref}
+      end
+
+    new_state = %{state | turn_in_flight: true, turn_from: from, turn_task_ref: task_ref}
+    {:noreply, new_state}
   end
 
   @impl true
@@ -404,6 +421,37 @@ defmodule Arbor.Orchestrator.Session do
     state = start_heartbeat_task(state)
     state = schedule_heartbeat(state)
     {:noreply, state}
+  end
+
+  def handle_info({:turn_result, message, {:ok, result}}, state) do
+    new_state =
+      state
+      |> transition_phase(:processing, :complete, :idle)
+      |> Builders.apply_turn_result(message, result)
+      |> Builders.maybe_checkpoint()
+
+    response = Map.get(result.context, "session.response", "")
+    tool_history = Map.get(result.context, "session.tool_history", [])
+    tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
+    Builders.emit_turn_signal(new_state, result)
+
+    # Phase 3: notify ActionCycleServer of chat percept
+    maybe_enqueue_chat_percept(state.agent_id, message)
+
+    reply = {:ok, %{text: response, tool_history: tool_history, tool_rounds: tool_rounds}}
+    safe_reply(state.turn_from, reply)
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
+  end
+
+  def handle_info({:turn_result, _message, {:error, reason}}, state) do
+    new_state = transition_phase(state, :processing, :complete, :idle)
+
+    safe_reply(state.turn_from, {:error, reason})
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
   end
 
   def handle_info({:heartbeat_result, {:ok, result}}, state) do
@@ -443,19 +491,40 @@ defmodule Arbor.Orchestrator.Session do
     {:noreply, new_state}
   end
 
-  # Handle Task DOWN messages (normal exits from heartbeat Tasks)
-  def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
-    {:noreply, state}
+  # Handle Task DOWN messages
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
+    # Clean up turn_task_ref if it matches
+    if ref == state.turn_task_ref do
+      {:noreply, %{state | turn_task_ref: nil}}
+    else
+      {:noreply, state}
+    end
   end
 
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
-    # Heartbeat task crashed — reset in_flight flag
-    {:noreply, %{state | heartbeat_in_flight: false}}
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    if ref == state.turn_task_ref do
+      # Turn task crashed — reply to caller and reset
+      new_state = transition_phase(state, :processing, :complete, :idle)
+      safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
+      {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
+    else
+      # Heartbeat task crashed — reset in_flight flag
+      {:noreply, %{state | heartbeat_in_flight: false}}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  # Reply to a caller safely — the caller may have timed out and died
+  defp safe_reply(nil, _reply), do: :ok
+
+  defp safe_reply(from, reply) do
+    GenServer.reply(from, reply)
+  catch
+    _, _ -> :ok
+  end
 
   defp start_heartbeat_task(state) do
     if state.heartbeat_in_flight do

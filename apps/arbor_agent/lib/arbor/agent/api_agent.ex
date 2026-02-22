@@ -235,7 +235,32 @@ defmodule Arbor.Agent.APIAgent do
     recalled = if recall, do: recalled, else: []
 
     case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
-      {:ok, text} ->
+      {:ok, %{text: text, tool_history: tool_history, tool_rounds: tool_rounds}} ->
+        new_state =
+          if index do
+            finalize_query(prompt, text, state)
+          else
+            state
+          end
+
+        response = %{
+          text: text,
+          thinking: nil,
+          usage: %{},
+          model: to_string(state.model),
+          provider: to_string(state.provider),
+          tool_calls: tool_history,
+          tool_rounds: tool_rounds,
+          recalled_memories: recalled,
+          session_id: state.id,
+          type: :session
+        }
+
+        new_state = %{new_state | recalled_memories: recalled, query_count: state.query_count + 1}
+        {:reply, {:ok, response}, new_state}
+
+      {:ok, text} when is_binary(text) ->
+        # Backward compatibility for old Session return format
         new_state =
           if index do
             finalize_query(prompt, text, state)

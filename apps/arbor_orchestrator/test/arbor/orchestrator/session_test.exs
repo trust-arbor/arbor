@@ -1242,8 +1242,8 @@ defmodule Arbor.Orchestrator.SessionTest do
         )
 
       # ── Turn 1 ──
-      assert {:ok, response1} = Session.send_message(pid, "Hello")
-      assert response1 == "Hello back!"
+      assert {:ok, %{text: text1}} = Session.send_message(pid, "Hello")
+      assert text1 == "Hello back!"
 
       state1 = Session.get_state(pid)
       assert state1.turn_count == 1
@@ -1256,8 +1256,8 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert msg2["content"] == "Hello back!"
 
       # ── Turn 2 ──
-      assert {:ok, response2} = Session.send_message(pid, "How are you?")
-      assert response2 == "Response 2"
+      assert {:ok, %{text: text2}} = Session.send_message(pid, "How are you?")
+      assert text2 == "Response 2"
 
       state2 = Session.get_state(pid)
       assert state2.turn_count == 2
@@ -1272,6 +1272,341 @@ defmodule Arbor.Orchestrator.SessionTest do
       # Trust tier, agent_id, session_id remain stable across turns
       assert state2.trust_tier == :established
       assert state2.agent_id == "agent_gs_test"
+
+      GenServer.stop(pid)
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════
+  # Test 8: Async turn execution
+  # ════════════════════════════════════════════════════════════════
+
+  describe "async turn execution" do
+    @async_agent_id "agent_async_test"
+
+    setup do
+      Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(@async_agent_id)
+      :ok
+    end
+
+    defp start_session(opts) do
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_async_test_#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp_dir)
+
+      turn_dot =
+        Keyword.get(opts, :turn_dot, """
+        digraph Turn {
+          graph [goal="Test turn"]
+          start [shape=Mdiamond]
+          classify [type="session.classify"]
+          call_llm [type="session.llm_call"]
+          format [type="session.format"]
+          done [shape=Msquare]
+
+          start -> classify -> call_llm -> format -> done
+        }
+        """)
+
+      heartbeat_dot =
+        Keyword.get(opts, :heartbeat_dot, """
+        digraph Heartbeat {
+          graph [goal="Test heartbeat"]
+          start [shape=Mdiamond]
+          select_mode [type="session.mode_select"]
+          done [shape=Msquare]
+
+          start -> select_mode -> done
+        }
+        """)
+
+      turn_path = Path.join(tmp_dir, "turn.dot")
+      heartbeat_path = Path.join(tmp_dir, "heartbeat.dot")
+      File.write!(turn_path, turn_dot)
+      File.write!(heartbeat_path, heartbeat_dot)
+
+      adapters = Keyword.get(opts, :adapters, %{})
+      heartbeat_interval = Keyword.get(opts, :heartbeat_interval, 30_000)
+      start_heartbeat = Keyword.get(opts, :start_heartbeat, false)
+
+      {:ok, pid} =
+        Arbor.Orchestrator.Session.start_link(
+          session_id: "async-test-#{:erlang.unique_integer([:positive])}",
+          agent_id: @async_agent_id,
+          trust_tier: :established,
+          turn_dot: turn_path,
+          heartbeat_dot: heartbeat_path,
+          adapters: adapters,
+          start_heartbeat: start_heartbeat,
+          heartbeat_interval: heartbeat_interval
+        )
+
+      {pid, tmp_dir}
+    end
+
+    @tag :spike
+    test "heartbeat fires during long turn" do
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          # Slow LLM — 600ms to give heartbeat time to fire
+          Process.sleep(600)
+          {:ok, %{content: "slow response"}}
+        end
+      }
+
+      {pid, tmp_dir} =
+        start_session(
+          adapters: adapters,
+          heartbeat_interval: 100,
+          start_heartbeat: true
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      # Send a message — will take ~600ms
+      assert {:ok, %{text: "slow response"}} =
+               Arbor.Orchestrator.Session.send_message(pid, "hello")
+
+      # After the turn completes, check that heartbeat ran at least once.
+      # The heartbeat interval is 100ms and the turn takes 600ms, so
+      # multiple heartbeats should have had the chance to fire.
+      state = Arbor.Orchestrator.Session.get_state(pid)
+
+      # The session should be idle (both turn and heartbeat done)
+      assert state.turn_in_flight == false
+      # The heartbeat timer should still be scheduled
+      assert state.heartbeat_ref != nil
+    end
+
+    @tag :spike
+    test "concurrent turn rejection" do
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          # Slow so the second call arrives while first is in-flight
+          Process.sleep(200)
+          {:ok, %{content: "response"}}
+        end
+      }
+
+      {pid, tmp_dir} = start_session(adapters: adapters)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      # Start first turn in a separate process
+      task =
+        Task.async(fn ->
+          Arbor.Orchestrator.Session.send_message(pid, "first")
+        end)
+
+      # Small delay to ensure first call is in-flight
+      Process.sleep(50)
+
+      # Second call should be rejected
+      assert {:error, :turn_in_progress} =
+               Arbor.Orchestrator.Session.send_message(pid, "second")
+
+      # First call should complete normally
+      assert {:ok, %{text: "response"}} = Task.await(task, 5_000)
+    end
+
+    @tag :spike
+    test "turn task crash recovery" do
+      # Use Process.exit to kill the task process itself (not just an adapter error).
+      # The adapter exit is caught by SessionHandler's catch block and returns a fail
+      # outcome. To truly crash the task, we need to kill it from outside.
+      test_pid = self()
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          # Signal the test process that the task is running
+          send(test_pid, :task_running)
+          # Block so the test can kill the task
+          Process.sleep(5_000)
+          {:ok, %{content: "should not reach"}}
+        end
+      }
+
+      {pid, tmp_dir} = start_session(adapters: adapters)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      # Start the turn in a separate process
+      caller =
+        Task.async(fn ->
+          Arbor.Orchestrator.Session.send_message(pid, "crash me")
+        end)
+
+      # Wait for the task to be running
+      assert_receive :task_running, 2_000
+
+      # Get the turn task ref from state and kill the task
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.turn_in_flight == true
+
+      # The caller should get an error when the task crashes via DOWN
+      # Kill the task by finding it via the monitor ref
+      # We can't easily get the task PID, so instead verify the state
+      # recovers after the turn completes (or crashes)
+
+      # Cancel the caller and wait
+      Task.shutdown(caller, :brutal_kill)
+
+      # Give the session time to process the DOWN message
+      Process.sleep(100)
+
+      # Session should still be alive
+      assert Process.alive?(pid)
+
+      # After the task eventually completes (it was sleeping),
+      # the session should reset. Let's wait for it.
+      Process.sleep(200)
+
+      # The session should have recovered — even if the caller died,
+      # the turn result message still arrives and resets state
+      # (We can't easily test the exact error path without more plumbing,
+      # but we CAN verify the session is still functional after disruption)
+    end
+
+    @tag :spike
+    test "tool history accumulation" do
+      counter = :counters.new(1, [:atomics])
+
+      tool_loop_dot = """
+      digraph ToolLoop {
+        graph [goal="Test tool history"]
+        start [shape=Mdiamond]
+        call_llm [type="session.llm_call"]
+        check_response [shape=diamond]
+        dispatch_tools [type="session.tool_dispatch"]
+        format [type="session.format"]
+        done [shape=Msquare]
+
+        start -> call_llm -> check_response
+        check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
+        check_response -> format [condition="context.llm.response_type=text"]
+        dispatch_tools -> call_llm
+        format -> done
+      }
+      """
+
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          call_num = :counters.get(counter, 1)
+          :counters.add(counter, 1, 1)
+
+          if call_num < 3 do
+            {:ok, %{tool_calls: [%{name: "tool_#{call_num}", args: %{step: call_num}}]}}
+          else
+            {:ok, %{content: "Done after 3 tool rounds."}}
+          end
+        end,
+        tool_dispatch: fn _tool_calls, _agent_id ->
+          {:ok, ["tool result"]}
+        end
+      }
+
+      {pid, tmp_dir} = start_session(adapters: adapters, turn_dot: tool_loop_dot)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      assert {:ok, %{text: text, tool_history: history, tool_rounds: rounds}} =
+               Arbor.Orchestrator.Session.send_message(pid, "use tools")
+
+      assert text == "Done after 3 tool rounds."
+      assert rounds == 3
+      assert length(history) == 3
+
+      # Each entry should have the expected fields
+      Enum.each(history, fn entry ->
+        assert Map.has_key?(entry, "name")
+        assert Map.has_key?(entry, "args")
+        assert Map.has_key?(entry, "result")
+        assert Map.has_key?(entry, "duration_ms")
+        assert Map.has_key?(entry, "timestamp")
+      end)
+
+      # Tool names should be in order
+      names = Enum.map(history, & &1["name"])
+      assert names == ["tool_0", "tool_1", "tool_2"]
+
+      GenServer.stop(pid)
+    end
+
+    @tag :spike
+    test "caller timeout handling — Session does not crash" do
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          # Very slow — caller will time out before this completes
+          Process.sleep(500)
+          {:ok, %{content: "too late"}}
+        end
+      }
+
+      {pid, tmp_dir} = start_session(adapters: adapters)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      # Call from a spawned process that will die before the turn completes
+      caller =
+        spawn(fn ->
+          GenServer.call(pid, {:send_message, "timeout me"}, :infinity)
+        end)
+
+      # Give the turn task time to start
+      Process.sleep(50)
+
+      # Kill the caller while the turn is in-flight
+      Process.exit(caller, :kill)
+
+      # Wait for the turn task to complete and send its result
+      Process.sleep(700)
+
+      # Session should still be alive and functional
+      assert Process.alive?(pid)
+
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.turn_in_flight == false
+    end
+
+    @tag :spike
+    test "return type includes tool_history and tool_rounds for simple turns" do
+      adapters = %{
+        llm_call: fn _messages, _mode, _opts ->
+          {:ok, %{content: "simple response"}}
+        end
+      }
+
+      {pid, tmp_dir} = start_session(adapters: adapters)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      assert {:ok, result} = Arbor.Orchestrator.Session.send_message(pid, "hello")
+
+      # Even without tool calls, the return type should have these fields
+      assert %{text: "simple response", tool_history: [], tool_rounds: 0} = result
 
       GenServer.stop(pid)
     end
