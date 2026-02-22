@@ -32,7 +32,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @doc false
   @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map()) :: map()
   def build_turn_values(state, message) do
-    user_msg = %{"role" => "user", "content" => normalize_message(message)}
+    user_msg = %{
+      "role" => "user",
+      "content" => normalize_message(message),
+      "timestamp" => DateTime.to_iso8601(DateTime.utc_now())
+    }
 
     # Use compactor's projected view if available, otherwise all messages
     messages = compactor_llm_messages(state)
@@ -118,9 +122,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
           Arbor.Orchestrator.Session.t()
   def apply_turn_result(state, message, %{context: result_ctx}) do
     response = Map.get(result_ctx, "session.response", "")
+    now = DateTime.to_iso8601(DateTime.utc_now())
 
-    user_msg = %{"role" => "user", "content" => normalize_message(message)}
-    assistant_msg = %{"role" => "assistant", "content" => response}
+    user_msg = %{"role" => "user", "content" => normalize_message(message), "timestamp" => now}
+    assistant_msg = %{"role" => "assistant", "content" => response, "timestamp" => now}
 
     updated_messages =
       case Map.get(result_ctx, "session.messages") do
