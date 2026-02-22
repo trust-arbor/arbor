@@ -135,11 +135,13 @@ defmodule Arbor.AITest do
   end
 
   describe "generate_text/2" do
-    @tag :external
-    @tag :skip
+    @tag :llm
     test "returns structured response with text" do
-      # This test requires a valid API key and makes real API calls
-      {:ok, result} = AI.generate_text("Say 'hello' and nothing else")
+      {:ok, result} =
+        AI.generate_text("Say 'hello' and nothing else",
+          provider: :openrouter,
+          model: "arcee-ai/trinity-large-preview:free"
+        )
 
       assert is_binary(result.text)
       assert is_map(result.usage)

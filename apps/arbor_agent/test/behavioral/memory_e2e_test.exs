@@ -734,7 +734,7 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
 
     {:ok, response} =
       Arbor.AI.generate_text(prompt,
-        model: "google/gemini-3-flash-preview",
+        model: "arcee-ai/trinity-large-preview:free",
         provider: :openrouter,
         max_tokens: 1500,
         backend: :api,
