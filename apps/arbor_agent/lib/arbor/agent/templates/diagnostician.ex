@@ -99,15 +99,27 @@ defmodule Arbor.Agent.Templates.Diagnostician do
     [
       # Orchestrator session execution
       %{resource: "arbor://orchestrator/execute"},
-      # Read and write project files for code analysis and changes
+      # File operations for code analysis and investigation
       %{resource: "arbor://actions/execute/file.read"},
       %{resource: "arbor://actions/execute/file.write"},
+      %{resource: "arbor://actions/execute/file.exists"},
+      %{resource: "arbor://actions/execute/file.glob"},
+      %{resource: "arbor://actions/execute/file.search"},
+      %{resource: "arbor://actions/execute/file.list"},
       # AI analysis for root cause diagnosis
       %{resource: "arbor://actions/execute/ai.analyze"},
+      # Memory for tracking patterns and past incidents
+      %{resource: "arbor://actions/execute/memory.recall"},
+      %{resource: "arbor://actions/execute/memory.remember"},
+      %{resource: "arbor://actions/execute/memory.reflect"},
+      %{resource: "arbor://actions/execute/memory_identity.read_self"},
+      %{resource: "arbor://actions/execute/memory_identity.add_insight"},
+      # Communication for ops room collaboration
+      %{resource: "arbor://actions/execute/comms.send_message"},
+      %{resource: "arbor://actions/execute/comms.poll_messages"},
       # Governance proposals
       %{resource: "arbor://actions/execute/proposal.submit"},
       %{resource: "arbor://actions/execute/proposal.revise"},
-      %{resource: "arbor://actions/execute/proposal.status"},
       # Hot reload (requires council approval)
       %{resource: "arbor://actions/execute/code.hot_load"},
       # Monitor read operations
