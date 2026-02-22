@@ -150,7 +150,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
 
             _ ->
-              {:noreply, assign(socket, error: "Agent running but host not found")}
+              # Host crashed but executor survived — auto-recover
+              case recover_host(agent_id) do
+                {:ok, pid, metadata} ->
+                  {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
+
+                {:error, reason} ->
+                  {:noreply, assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")}
+              end
           end
 
         false ->
@@ -778,7 +785,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
               reconnect_to_agent(socket, agent_id, pid, metadata)
 
             _ ->
-              assign(socket, agent_id: agent_id, display_name: agent_participant[:name])
+              # Host missing — try auto-recovery
+              case recover_host(agent_id) do
+                {:ok, pid, metadata} ->
+                  reconnect_to_agent(socket, agent_id, pid, metadata)
+
+                {:error, _reason} ->
+                  assign(socket, agent_id: agent_id, display_name: agent_participant[:name])
+              end
           end
       end
     else
@@ -790,6 +804,30 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     case Arbor.Agent.Registry.lookup(agent_id) do
       {:ok, entry} -> entry.metadata || %{}
       _ -> %{}
+    end
+  end
+
+  # Auto-recover a crashed host by calling Lifecycle.start (idempotent).
+  # Extracts model/provider from Registry metadata so the host restarts
+  # with the same configuration it was originally created with.
+  defp recover_host(agent_id) do
+    metadata = get_agent_metadata(agent_id)
+    model_config = metadata[:model_config] || %{}
+
+    recovery_opts = [
+      model: model_config[:id] || model_config["id"],
+      provider: model_config[:provider] || model_config["provider"]
+    ]
+
+    case Lifecycle.start(agent_id, recovery_opts) do
+      {:ok, _executor_pid} ->
+        case Lifecycle.get_host(agent_id) do
+          {:ok, host_pid} -> {:ok, host_pid, metadata}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
