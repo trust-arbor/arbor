@@ -87,7 +87,7 @@ defmodule Arbor.Agent.PerceptFormatter do
   @doc """
   Create a Percept for a mental action result (store-backed operations).
   """
-  @spec from_mental_result(map(), {:ok, any()} | {:error, any()}) :: Percept.t()
+  @spec from_mental_result(map(), {:ok, any()} | {:error, any()} | any()) :: Percept.t()
   def from_mental_result(intent, {:ok, result}) do
     data = truncate_data(normalize_data(result))
 
@@ -98,6 +98,13 @@ defmodule Arbor.Agent.PerceptFormatter do
     Percept.failure(intent_id(intent), sanitize_error(reason),
       summary: failure_summary(intent, reason)
     )
+  end
+
+  # Catch-all for bare results (not wrapped in {:ok, _} or {:error, _})
+  def from_mental_result(intent, result) do
+    data = truncate_data(normalize_data(result))
+
+    Percept.success(intent_id(intent), data, summary: success_summary(intent, result))
   end
 
   # ── Summaries ──────────────────────────────────────────────────────

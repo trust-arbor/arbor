@@ -310,17 +310,17 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     name = Map.get(call, "name") || Map.get(call, :name, "unknown")
     args = Map.get(call, "arguments") || Map.get(call, :arguments, %{})
 
-    # Sign the tool call if a signer function is available.
-    # Each tool call gets a fresh SignedRequest (unique nonce + timestamp).
-    signed_request = sign_tool_call(signer, name)
-
+    # Pass the signer function to ArborActionsExecutor so it can sign
+    # AFTER resolving the module — this ensures the signed resource URI
+    # matches the module-derived URI that authorize_and_execute expects.
     exec_opts =
       [agent_id: agent_id]
-      |> maybe_add_signed_request(signed_request)
+      |> maybe_add_signer(signer)
 
     # Route through ArborActionsExecutor which handles:
     # - name → action module resolution
     # - string key → atom key conversion via schema allowlist
+    # - signing with correct module-derived resource URI
     # - authorize_and_execute with full capability checks
     case bridge(
            Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor,
@@ -335,24 +335,8 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     end
   end
 
-  # Sign a tool call with the resource URI as the payload.
-  # Returns a SignedRequest struct or nil if no signer is available.
-  # Mirrors the pattern in UnifiedLLM.ToolLoop.
-  defp sign_tool_call(nil, _tool_name), do: nil
-
-  defp sign_tool_call(signer, tool_name) when is_function(signer, 1) do
-    resource = "arbor://actions/execute/#{tool_name}"
-
-    case signer.(resource) do
-      {:ok, signed_request} -> signed_request
-      {:error, _} -> nil
-    end
-  end
-
-  defp maybe_add_signed_request(opts, nil), do: opts
-
-  defp maybe_add_signed_request(opts, signed_request),
-    do: [{:signed_request, signed_request} | opts]
+  defp maybe_add_signer(opts, nil), do: opts
+  defp maybe_add_signer(opts, signer), do: [{:signer, signer} | opts]
 
   # ── Memory Recall ───────────────────────────────────────────────────
   #

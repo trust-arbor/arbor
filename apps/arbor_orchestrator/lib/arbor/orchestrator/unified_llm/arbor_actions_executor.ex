@@ -76,6 +76,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   def execute(name, args, workdir, opts \\ []) do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
+    signer = Keyword.get(opts, :signer)
 
     with_actions_module(fn ->
       action_map = build_action_map()
@@ -89,6 +90,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
             args
             |> atomize_known_keys(action_module)
             |> maybe_inject_workdir(workdir)
+
+          # Sign with the canonical module-derived resource URI.
+          # This ensures the signed resource matches what authorize_and_execute
+          # derives from the module name (dots, not underscores).
+          signed_request = signed_request || sign_for_module(signer, action_module)
 
           # Pass signed_request in context for identity verification.
           # authorize_and_execute extracts it and passes to Security.authorize.
@@ -230,6 +236,24 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   end
 
   defp format_result(result), do: inspect(result, pretty: true)
+
+  # Sign a tool call using the canonical module-derived resource URI.
+  # This avoids the underscore/dot mismatch between Jido tool names
+  # and module-derived names used by authorize_and_execute.
+  defp sign_for_module(nil, _action_module), do: nil
+
+  defp sign_for_module(signer, action_module) when is_function(signer, 1) do
+    # Derive the canonical name from the module (e.g. Monitor.ReadDiagnostics -> "monitor.read_diagnostics")
+    canonical_name = apply(@actions_mod, :action_module_to_name, [action_module])
+    resource = "arbor://actions/execute/#{canonical_name}"
+
+    case signer.(resource) do
+      {:ok, signed_request} -> signed_request
+      {:error, _} -> nil
+    end
+  end
+
+  defp sign_for_module(_, _), do: nil
 
   # Runtime bridge — don't crash if arbor_actions isn't loaded
   defp with_actions_module(fun) do

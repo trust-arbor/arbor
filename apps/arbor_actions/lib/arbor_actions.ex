@@ -303,6 +303,21 @@ defmodule Arbor.Actions do
         Arbor.Actions.Skill.ListActive,
         Arbor.Actions.Skill.Import,
         Arbor.Actions.Skill.Compile
+      ],
+      monitor: [
+        Arbor.Actions.Monitor.Read,
+        Arbor.Actions.Monitor.ClaimAnomaly,
+        Arbor.Actions.Monitor.CompleteAnomaly,
+        Arbor.Actions.Monitor.SuppressFingerprint,
+        Arbor.Actions.Monitor.ResetBaseline,
+        Arbor.Actions.Monitor.ReadDiagnostics
+      ],
+      remediation: [
+        Arbor.Actions.Remediation.KillProcess,
+        Arbor.Actions.Remediation.StopSupervisor,
+        Arbor.Actions.Remediation.RestartChild,
+        Arbor.Actions.Remediation.ForceGC,
+        Arbor.Actions.Remediation.DrainQueue
       ]
     }
   end
@@ -487,8 +502,19 @@ defmodule Arbor.Actions do
 
   defp maybe_inject_taint_policy(context), do: context
 
-  # Convert an action module to its snake_case name for capability URIs
-  defp action_module_to_name(module) do
+  @doc """
+  Convert an action module to its canonical dot-separated name for capability URIs.
+
+  ## Examples
+
+      iex> Arbor.Actions.action_module_to_name(Arbor.Actions.Monitor.Read)
+      "monitor.read"
+
+      iex> Arbor.Actions.action_module_to_name(Arbor.Actions.Monitor.ReadDiagnostics)
+      "monitor.read_diagnostics"
+  """
+  @spec action_module_to_name(module()) :: String.t()
+  def action_module_to_name(module) do
     module
     |> Module.split()
     |> Enum.drop_while(&(&1 != "Actions"))

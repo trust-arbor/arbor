@@ -484,21 +484,36 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:query_result, :api, {:ok, response}}, socket) do
     model_config = socket.assigns.current_model || %{}
 
+    # Session path uses tool_history, legacy uses tool_calls
+    tool_uses = response[:tool_history] || response[:tool_calls] || []
+
     assistant_msg = %{
       id: "msg-#{System.unique_integer([:positive])}",
       role: :assistant,
       content: response[:text] || response.text || "",
-      tool_uses: response[:tool_calls] || [],
+      tool_uses: tool_uses,
       timestamp: DateTime.utc_now(),
       model: "#{model_config[:provider]}:#{model_config[:id]}",
       session_id: nil,
       memory_count: length(response[:recalled_memories] || [])
     }
 
+    # Persist to chat history
+    try do
+      agent_id = socket.assigns[:agent_id]
+
+      if agent_id do
+        Arbor.Memory.append_chat_message(agent_id, assistant_msg)
+      end
+    rescue
+      _ -> :ok
+    end
+
     socket =
       socket
       |> stream_insert(:messages, assistant_msg)
       |> assign(loading: false, query_count: socket.assigns.query_count + 1)
+      |> add_tool_use_actions(tool_uses)
       |> maybe_extract_api_usage(response)
       |> maybe_add_recalled_memories_api(response)
 
@@ -715,7 +730,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         name: name,
         outcome: tool_use_outcome(tool),
         timestamp: DateTime.utc_now(),
-        input: tool[:input] || tool[:arguments] || tool["input"] || tool["arguments"] || %{},
+        input:
+          tool[:input] || tool[:arguments] || tool[:args] ||
+            tool["input"] || tool["arguments"] || tool["args"] || %{},
         result: tool[:result] || tool["result"]
       }
 

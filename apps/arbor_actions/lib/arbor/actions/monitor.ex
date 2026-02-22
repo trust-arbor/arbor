@@ -122,7 +122,7 @@ defmodule Arbor.Actions.Monitor do
 
     defp monitor_available? do
       Code.ensure_loaded?(@monitor_mod) and
-        Process.whereis(Arbor.Monitor.Server) != nil
+        Process.whereis(Arbor.Monitor.Supervisor) != nil
     end
   end
 end
