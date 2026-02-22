@@ -15,17 +15,17 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
     "background: rgba(74, 158, 255, 0.05); border-left: 3px solid rgba(74, 158, 255, 0.3);"
   end
 
-  # Single-agent mode: use role-based styling
-  def message_style(:user, _sender_type, false),
+  # Single-agent mode: use role-based styling (accept both atom and string roles)
+  def message_style(role, _sender_type, false) when role in [:user, "user"],
     do: "background: rgba(74, 158, 255, 0.1); margin-left: 2rem;"
 
-  def message_style(:assistant, _sender_type, false),
+  def message_style(role, _sender_type, false) when role in [:assistant, "assistant"],
     do: "background: rgba(74, 255, 158, 0.1); margin-right: 2rem;"
 
   def message_style(_, _, _), do: ""
 
-  def role_label(:user), do: "You"
-  def role_label(:assistant), do: "Agent"
+  def role_label(role) when role in [:user, "user"], do: "You"
+  def role_label(role) when role in [:assistant, "assistant"], do: "Agent"
   def role_label(_), do: "System"
 
   def sender_color(hue) when is_integer(hue) do

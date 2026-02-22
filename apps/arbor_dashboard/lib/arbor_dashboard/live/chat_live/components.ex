@@ -199,11 +199,17 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
             </div>
           </summary>
           <div style="padding: 0.35rem; border-top: 1px solid var(--aw-border, #333);">
-            <div style="margin-bottom: 0.3rem;">
+            <div :if={action[:input]} style="margin-bottom: 0.3rem;">
               <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
                 Input:
               </strong>
-              <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{H.format_tool_input(action.input)}</pre>
+              <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{H.format_tool_input(action[:input])}</pre>
+            </div>
+            <div :if={action[:details] && !action[:input]} style="margin-bottom: 0.3rem;">
+              <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+                Details:
+              </strong>
+              <pre style="margin: 0.2rem 0; padding: 0.3rem; background: rgba(0,0,0,0.3); border-radius: 3px; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; max-height: 15vh; overflow-y: auto;">{H.format_tool_input(action[:details])}</pre>
             </div>
             <div :if={action[:result]}>
               <strong style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
@@ -263,7 +269,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
             </div>
             <ul style="margin: 0; padding-left: 1rem; font-size: 0.75em; color: var(--aw-text, #ccc);">
               <li :for={note <- @last_memory_notes} style="margin-bottom: 0.1rem;">
-                {WebHelpers.truncate(to_string(note), 120)}
+                {WebHelpers.truncate(extract_note_text(note), 120)}
               </li>
             </ul>
           </div>
@@ -540,7 +546,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
             </div>
             <%!-- Single-agent mode: show role label or agent display name --%>
             <strong :if={!@group_mode} style="font-size: 0.9em;">
-              {if msg.role == :assistant && @display_name,
+              {if msg.role in [:assistant, "assistant"] && @display_name,
                 do: @display_name,
                 else: H.role_label(msg.role)}
             </strong>
@@ -1195,4 +1201,14 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   end
 
   defp format_insight(insight), do: to_string(insight)
+
+  # Extract text from memory notes that may be strings or maps
+  # Phase 2 temporal model sends {"text": "...", "referenced_date": "YYYY-MM-DD"}
+  defp extract_note_text(note) when is_binary(note), do: note
+
+  defp extract_note_text(note) when is_map(note) do
+    note["text"] || Map.get(note, :text) || inspect(note)
+  end
+
+  defp extract_note_text(note), do: to_string(note)
 end
