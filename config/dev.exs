@@ -40,10 +40,11 @@ config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres
 
-# Security — disable identity verification in dev until agents wire signed requests
-# into query/heartbeat paths. Without this, authorize/4 rejects all tool calls
-# with :missing_signed_request, filtering out every tool.
-config :arbor_security, identity_verification: false
+# Security — identity verification and capability signing enabled.
+# Session tool dispatch now wires signed requests via Lifecycle.build_signer.
+config :arbor_security,
+  identity_verification: true,
+  capability_signing_required: true
 
 # Signals — allow OpenAuthorizer in dev (production requires CapabilityAuthorizer)
 config :arbor_signals, allow_open_authorizer: true
