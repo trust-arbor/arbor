@@ -772,6 +772,102 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   # ============================================================================
+  # Temporal Retrieval
+  # ============================================================================
+
+  @doc """
+  Filter thoughts where the effective date falls within `[start_date, end_date]`.
+
+  The effective date is `referenced_date` when set, otherwise `timestamp`.
+  Returns newest-first. Accepts both `Date` and `DateTime` for boundaries.
+  """
+  @spec thoughts_for_period(t(), Date.t() | DateTime.t(), Date.t() | DateTime.t()) :: [thought()]
+  def thoughts_for_period(%__MODULE__{recent_thoughts: thoughts}, start_date, end_date) do
+    start_d = to_date(start_date)
+    end_d = to_date(end_date)
+
+    thoughts
+    |> Enum.filter(fn thought ->
+      case thought_effective_date(thought) do
+        nil ->
+          false
+
+        date ->
+          Date.compare(date, start_d) in [:eq, :gt] and Date.compare(date, end_d) in [:eq, :lt]
+      end
+    end)
+    |> Enum.sort_by(&thought_effective_date/1, {:desc, Date})
+  end
+
+  @doc """
+  Return only today's thoughts (by effective date).
+  """
+  @spec thoughts_today(t()) :: [thought()]
+  def thoughts_today(%__MODULE__{} = wm) do
+    today = Date.utc_today()
+    thoughts_for_period(wm, today, today)
+  end
+
+  @doc """
+  Return thoughts since a relative time ago.
+
+  ## Options
+
+  - `:hours_ago` — thoughts from the last N hours
+  - `:days_ago` — thoughts from the last N days
+  """
+  @spec thoughts_since(t(), keyword()) :: [thought()]
+  def thoughts_since(%__MODULE__{recent_thoughts: thoughts}, opts) do
+    cutoff = compute_cutoff(opts)
+
+    thoughts
+    |> Enum.filter(fn thought ->
+      case thought_effective_datetime(thought) do
+        nil -> false
+        dt -> DateTime.compare(dt, cutoff) in [:eq, :gt]
+      end
+    end)
+    |> Enum.sort_by(&thought_effective_datetime/1, {:desc, DateTime})
+  end
+
+  defp thought_effective_date(thought) do
+    case Map.get(thought, :referenced_date) do
+      nil -> datetime_to_date(Map.get(thought, :timestamp))
+      %Date{} = d -> d
+      %DateTime{} = dt -> DateTime.to_date(dt)
+      _ -> datetime_to_date(Map.get(thought, :timestamp))
+    end
+  end
+
+  defp thought_effective_datetime(thought) do
+    case Map.get(thought, :referenced_date) do
+      %DateTime{} = dt -> dt
+      _ -> Map.get(thought, :timestamp)
+    end
+  end
+
+  defp datetime_to_date(nil), do: nil
+  defp datetime_to_date(%DateTime{} = dt), do: DateTime.to_date(dt)
+  defp datetime_to_date(%Date{} = d), do: d
+  defp datetime_to_date(_), do: nil
+
+  defp to_date(%Date{} = d), do: d
+  defp to_date(%DateTime{} = dt), do: DateTime.to_date(dt)
+
+  defp compute_cutoff(opts) do
+    cond do
+      hours = Keyword.get(opts, :hours_ago) ->
+        DateTime.add(DateTime.utc_now(), -hours * 3600, :second)
+
+      days = Keyword.get(opts, :days_ago) ->
+        DateTime.add(DateTime.utc_now(), -days * 86_400, :second)
+
+      true ->
+        DateTime.utc_now()
+    end
+  end
+
+  # ============================================================================
   # Statistics
   # ============================================================================
 

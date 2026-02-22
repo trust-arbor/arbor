@@ -396,6 +396,145 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   end
 
   # ============================================================================
+  # Temporal Retrieval
+  # ============================================================================
+
+  @doc """
+  Filter nodes by date range.
+
+  ## Options
+
+  - `:start` — start date boundary (Date or DateTime)
+  - `:end` — end date boundary (Date or DateTime)
+  - `:date_field` — which date to check: `:referenced_date`, `:created_at`,
+    or `:any` (default; checks `referenced_date` first, falls back to `created_at`)
+  - `:types` — optional node type filter (list of atoms)
+  - `:limit` — max results (default 50)
+  """
+  @spec nodes_for_period(KnowledgeGraph.t(), keyword()) :: [KnowledgeGraph.knowledge_node()]
+  def nodes_for_period(graph, opts \\ []) do
+    start_date = Keyword.get(opts, :start)
+    end_date = Keyword.get(opts, :end)
+    date_field = Keyword.get(opts, :date_field, :any)
+    types = Keyword.get(opts, :types)
+    limit = Keyword.get(opts, :limit, 50)
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      type_ok = is_nil(types) or node.type in types
+      date = node_effective_date(node, date_field)
+
+      date_ok =
+        case date do
+          nil ->
+            false
+
+          d ->
+            start_ok = is_nil(start_date) or Date.compare(d, to_date(start_date)) in [:eq, :gt]
+            end_ok = is_nil(end_date) or Date.compare(d, to_date(end_date)) in [:eq, :lt]
+            start_ok and end_ok
+        end
+
+      type_ok and date_ok
+    end)
+    |> Enum.sort_by(&node_effective_date(&1, date_field), {:desc, Date})
+    |> Enum.take(limit)
+  end
+
+  @doc """
+  Return all nodes that have a non-nil `referenced_date`.
+
+  Useful for timeline views. Sorted by referenced_date, newest-first.
+
+  ## Options
+
+  - `:types` — optional node type filter
+  - `:limit` — max results (default 50)
+  """
+  @spec nodes_with_referenced_date(KnowledgeGraph.t(), keyword()) :: [
+          KnowledgeGraph.knowledge_node()
+        ]
+  def nodes_with_referenced_date(graph, opts \\ []) do
+    types = Keyword.get(opts, :types)
+    limit = Keyword.get(opts, :limit, 50)
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      has_ref = not is_nil(flexible_get(node, :referenced_date))
+      type_ok = is_nil(types) or node.type in types
+      has_ref and type_ok
+    end)
+    |> Enum.sort_by(&to_date(flexible_get(&1, :referenced_date)), {:desc, Date})
+    |> Enum.take(limit)
+  end
+
+  @doc """
+  Return nodes with `referenced_date` in the future.
+
+  ## Options
+
+  - `:types` — optional node type filter
+  - `:limit` — max results (default 50)
+  """
+  @spec upcoming_nodes(KnowledgeGraph.t(), keyword()) :: [KnowledgeGraph.knowledge_node()]
+  def upcoming_nodes(graph, opts \\ []) do
+    types = Keyword.get(opts, :types)
+    limit = Keyword.get(opts, :limit, 50)
+    today = Date.utc_today()
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(fn node ->
+      ref = flexible_get(node, :referenced_date)
+      type_ok = is_nil(types) or node.type in types
+
+      future =
+        case ref do
+          nil -> false
+          dt -> Date.compare(to_date(dt), today) == :gt
+        end
+
+      type_ok and future
+    end)
+    |> Enum.sort_by(&to_date(flexible_get(&1, :referenced_date)), Date)
+    |> Enum.take(limit)
+  end
+
+  # Picks the effective date for a node based on the date_field option
+  defp node_effective_date(node, :referenced_date) do
+    case flexible_get(node, :referenced_date) do
+      nil -> nil
+      dt -> to_date(dt)
+    end
+  end
+
+  defp node_effective_date(node, :created_at) do
+    case flexible_get(node, :created_at) || flexible_get(node, :inserted_at) do
+      nil -> nil
+      dt -> to_date(dt)
+    end
+  end
+
+  defp node_effective_date(node, :any) do
+    case flexible_get(node, :referenced_date) do
+      nil ->
+        case flexible_get(node, :created_at) || flexible_get(node, :inserted_at) do
+          nil -> nil
+          dt -> to_date(dt)
+        end
+
+      dt ->
+        to_date(dt)
+    end
+  end
+
+  defp to_date(%Date{} = d), do: d
+  defp to_date(%DateTime{} = dt), do: DateTime.to_date(dt)
+  defp to_date(_), do: nil
+
+  # ============================================================================
   # Token Budget Selection
   # ============================================================================
 
