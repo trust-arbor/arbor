@@ -1133,13 +1133,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
         fun
 
       _ ->
-        if session_store_available?() do
-          # Resolve session UUID lazily
-          case get_session_uuid(state.session_id) do
-            nil -> nil
-            uuid -> fn attrs -> apply(@session_store, :append_entry, [uuid, attrs]) end
-          end
-        end
+        build_persist_fn_from_store(state)
+    end
+  end
+
+  defp build_persist_fn_from_store(state) do
+    if session_store_available?() do
+      case get_session_uuid(state.session_id) do
+        nil -> nil
+        uuid -> fn attrs -> apply(@session_store, :append_entry, [uuid, attrs]) end
+      end
     end
   end
 
