@@ -98,6 +98,73 @@ defmodule Arbor.Memory.ChatHistory do
   end
 
   @doc """
+  Load the most recent messages for an agent, sorted by timestamp ascending.
+
+  Returns at most `:limit` messages (default 50). When `:before` is given
+  (a message ID), returns only messages with timestamps strictly before
+  that message's timestamp.
+
+  ## Options
+
+  - `:limit` — maximum messages to return (default: 50)
+  - `:before` — message ID cursor; only return messages older than this one
+
+  ## Examples
+
+      # Load the 50 most recent messages
+      ChatHistory.load_recent("agent_001")
+
+      # Load 20 messages before a cursor
+      ChatHistory.load_recent("agent_001", limit: 20, before: "chatmsg_abc123")
+  """
+  @spec load_recent(String.t(), keyword()) :: [map()]
+  def load_recent(agent_id, opts \\ []) when is_binary(agent_id) do
+    limit = Keyword.get(opts, :limit, 50)
+    before_id = Keyword.get(opts, :before)
+
+    all_messages =
+      case :ets.match_object(@ets_table, {{agent_id, :_}, :_}) do
+        [] -> load_messages_from_postgres(agent_id)
+        entries -> Enum.map(entries, fn {_key, msg} -> msg end)
+      end
+
+    sorted_desc =
+      Enum.sort(all_messages, fn a, b ->
+        case {a[:timestamp], b[:timestamp]} do
+          {%DateTime{} = ta, %DateTime{} = tb} -> DateTime.compare(ta, tb) == :gt
+          _ -> true
+        end
+      end)
+
+    filtered =
+      if before_id do
+        cursor_msg = Enum.find(all_messages, fn msg -> msg[:id] == before_id end)
+        filter_before_cursor(sorted_desc, cursor_msg)
+      else
+        sorted_desc
+      end
+
+    # Take limit, then reverse so oldest-first for display
+    filtered
+    |> Enum.take(limit)
+    |> Enum.reverse()
+  end
+
+  @doc """
+  Return the total number of messages stored for an agent.
+
+  ## Examples
+
+      ChatHistory.count("agent_001")
+      #=> 142
+  """
+  @spec count(String.t()) :: non_neg_integer()
+  def count(agent_id) when is_binary(agent_id) do
+    :ets.match_object(@ets_table, {{agent_id, :_}, :_})
+    |> length()
+  end
+
+  @doc """
   Clear all messages for an agent.
 
   Removes from both ETS and durable storage.
@@ -125,6 +192,17 @@ defmodule Arbor.Memory.ChatHistory do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp filter_before_cursor(messages, nil), do: messages
+  defp filter_before_cursor(messages, %{timestamp: %DateTime{} = cursor_ts}) do
+    Enum.filter(messages, fn msg ->
+      case msg[:timestamp] do
+        %DateTime{} = ts -> DateTime.compare(ts, cursor_ts) == :lt
+        _ -> false
+      end
+    end)
+  end
+  defp filter_before_cursor(messages, _), do: messages
 
   defp ensure_ets_table do
     if :ets.whereis(@ets_table) == :undefined do

@@ -21,6 +21,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   alias Arbor.Dashboard.Live.ChatLive.Helpers, as: ChatHelpers
   alias Arbor.Web.SignalLive
 
+  @chat_page_size 50
+
   @impl true
   def mount(_params, _session, socket) do
     ChatState.init()
@@ -102,7 +104,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         proposals: [],
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
-        selected_heartbeat_model: nil
+        selected_heartbeat_model: nil,
+        # Chat history pagination
+        chat_history_cursor: nil,
+        chat_has_more: false
       )
       |> assign(GroupChat.init_assigns())
       |> stream(:messages, [])
@@ -156,7 +161,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
                   {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
 
                 {:error, reason} ->
-                  {:noreply, assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")}
+                  {:noreply,
+                   assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")}
               end
           end
 
@@ -354,6 +360,49 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_event("toggle-proposals", _params, socket) do
     {:noreply, assign(socket, show_proposals: !socket.assigns.show_proposals)}
+  end
+
+  def handle_event("load-more-messages", _params, socket) do
+    agent_id = socket.assigns.agent_id
+    cursor = socket.assigns[:chat_history_cursor]
+
+    if agent_id && cursor do
+      try do
+        older =
+          Arbor.Memory.load_recent_chat_history(agent_id,
+            limit: @chat_page_size,
+            before: cursor
+          )
+
+        older_with_ids =
+          Enum.map(older, fn msg ->
+            Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
+          end)
+
+        new_cursor =
+          case older_with_ids do
+            [first | _] -> first[:id]
+            [] -> cursor
+          end
+
+        socket =
+          older_with_ids
+          |> Enum.reduce(socket, fn msg, acc ->
+            stream_insert(acc, :messages, msg, at: 0)
+          end)
+          |> assign(
+            chat_history_cursor: new_cursor,
+            chat_has_more: older_with_ids != []
+          )
+
+        {:noreply, push_event(socket, "messages-loaded", %{count: length(older_with_ids)})}
+      rescue
+        _ ->
+          {:noreply, push_event(socket, "messages-loaded", %{count: 0})}
+      end
+    else
+      {:noreply, push_event(socket, "messages-loaded", %{count: 0})}
+    end
   end
 
   def handle_event("accept-proposal", %{"id" => proposal_id}, socket) do
@@ -888,20 +937,35 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       selected_heartbeat_model: nil
     )
     |> then(fn socket ->
-      # Load chat history from persistence
+      # Load recent chat history with pagination
       try do
-        history = Arbor.Memory.load_chat_history(agent_id)
+        history = Arbor.Memory.load_recent_chat_history(agent_id, limit: @chat_page_size)
+        total = Arbor.Memory.chat_history_count(agent_id)
+
         # Ensure each message has an :id field for streaming
         history_with_ids =
           Enum.map(history, fn msg ->
             Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
           end)
 
-        stream(socket, :messages, history_with_ids, reset: true)
+        oldest_id =
+          case history_with_ids do
+            [first | _] -> first[:id]
+            [] -> nil
+          end
+
+        socket
+        |> assign(
+          chat_history_cursor: oldest_id,
+          chat_has_more: total > length(history_with_ids)
+        )
+        |> stream(:messages, history_with_ids, reset: true)
       rescue
         _ ->
           # Fallback to empty if history unavailable
-          stream(socket, :messages, [], reset: true)
+          socket
+          |> assign(chat_history_cursor: nil, chat_has_more: false)
+          |> stream(:messages, [], reset: true)
       end
     end)
     |> stream(:signals, [], reset: true)

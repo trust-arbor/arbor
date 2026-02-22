@@ -310,6 +310,8 @@ defmodule Arbor.Memory do
   defdelegate configure_preconscious(agent_id, opts), to: SessionOps
   defdelegate append_chat_message(agent_id, msg), to: SessionOps
   defdelegate load_chat_history(agent_id), to: SessionOps
+  defdelegate load_recent_chat_history(agent_id, opts \\ []), to: SessionOps
+  defdelegate chat_history_count(agent_id), to: SessionOps
   defdelegate clear_chat_history(agent_id), to: SessionOps
   defdelegate read_self(agent_id, aspect \\ :all, opts \\ []), to: SessionOps
   defdelegate record_thinking(agent_id, text, opts \\ []), to: SessionOps
