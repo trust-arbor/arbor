@@ -83,7 +83,7 @@ defmodule Arbor.AI do
   # All calls use Code.ensure_loaded?/apply to avoid compile-time dependency.
 
   alias Jido.AI.Actions.ToolCalling.CallWithTools
-  alias Jido.AI.Executor
+  alias Jido.AI.ToolAdapter
 
   require Logger
 
@@ -287,7 +287,7 @@ defmodule Arbor.AI do
       if Code.ensure_loaded?(Arbor.Actions), do: apply(Arbor.Actions, :all_actions, []), else: []
 
     action_modules = Keyword.get(opts, :tools, default_tools)
-    tools_map = Executor.build_tools_map(action_modules)
+    tools_map = ToolAdapter.to_action_map(action_modules)
 
     # SECURITY: Filter tools map to only include tools the agent is authorized
     # to execute. This prevents the confused deputy attack where the LLM acting

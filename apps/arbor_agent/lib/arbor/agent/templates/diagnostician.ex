@@ -114,6 +114,7 @@ defmodule Arbor.Agent.Templates.Diagnostician do
       %{resource: "arbor://actions/execute/memory.reflect"},
       %{resource: "arbor://actions/execute/memory_identity.read_self"},
       %{resource: "arbor://actions/execute/memory_identity.add_insight"},
+      %{resource: "arbor://actions/execute/memory_identity.introspect_memory"},
       # Communication for ops room collaboration
       %{resource: "arbor://actions/execute/comms.send_message"},
       %{resource: "arbor://actions/execute/comms.poll_messages"},
