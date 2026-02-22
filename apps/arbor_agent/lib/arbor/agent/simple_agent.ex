@@ -30,7 +30,7 @@ defmodule Arbor.Agent.SimpleAgent do
   @default_max_turns 25
   @max_result_length 4000
 
-  @default_tools [
+  @coding_tools [
     Arbor.Actions.File.Read,
     Arbor.Actions.File.Write,
     Arbor.Actions.File.Edit,
@@ -44,6 +44,28 @@ defmodule Arbor.Agent.SimpleAgent do
     Arbor.Actions.Git.Log,
     Arbor.Actions.Git.Commit
   ]
+
+  @memory_tools [
+    Arbor.Actions.Memory.Remember,
+    Arbor.Actions.Memory.Recall,
+    Arbor.Actions.Memory.Connect,
+    Arbor.Actions.Memory.Reflect,
+    Arbor.Actions.MemoryIdentity.AddInsight,
+    Arbor.Actions.MemoryIdentity.ReadSelf,
+    Arbor.Actions.MemoryIdentity.IntrospectMemory
+  ]
+
+  @relationship_tools [
+    Arbor.Actions.Relationship.Get,
+    Arbor.Actions.Relationship.Save,
+    Arbor.Actions.Relationship.Moment,
+    Arbor.Actions.Relationship.Browse,
+    Arbor.Actions.Relationship.Summarize
+  ]
+
+  @relational_tools @memory_tools ++ @relationship_tools
+
+  @default_tools @coding_tools
 
   @type tool_entry :: %{
           turn: pos_integer(),
@@ -71,6 +93,7 @@ defmodule Arbor.Agent.SimpleAgent do
     * `:provider` - Provider atom (default: `:openrouter`)
     * `:max_turns` - Maximum LLM round-trips (default: 25)
     * `:tools` - List of action modules (default: 12 coding tools)
+    * `:tool_preset` - Preset tool set: `:coding`, `:memory`, `:relational`, `:all` (overrides `:tools`)
     * `:system_prompt` - Override system prompt
     * `:working_dir` - Working directory for file/shell operations
     * `:agent_id` - Agent identity for authorization (default: `"system"`)
@@ -85,7 +108,17 @@ defmodule Arbor.Agent.SimpleAgent do
     max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
     working_dir = Keyword.get(opts, :working_dir, File.cwd!())
     agent_id = Keyword.get(opts, :agent_id, "system")
-    action_modules = Keyword.get(opts, :tools, @default_tools)
+
+    action_modules =
+      case Keyword.get(opts, :tool_preset) do
+        :coding -> @coding_tools
+        :memory -> @memory_tools
+        :relational -> @relational_tools
+        :all -> @coding_tools ++ @relational_tools
+        nil -> Keyword.get(opts, :tools, @default_tools)
+        _other -> Keyword.get(opts, :tools, @default_tools)
+      end
+
     context_mode = Keyword.get(opts, :context_management, :none)
 
     system_prompt =

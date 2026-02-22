@@ -11,13 +11,31 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   alias Arbor.Orchestrator.Engine
 
+  # ── Compactor initialization ─────────────────────────────────────────
+
+  @doc false
+  def init_compactor(nil), do: nil
+
+  def init_compactor({module, compactor_opts}) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :new, 1) do
+      apply(module, :new, [compactor_opts])
+    else
+      Logger.warning("[Session] Compactor module #{inspect(module)} not available, disabling")
+      nil
+    end
+  end
+
+  def init_compactor(_), do: nil
+
   # ── Context value builders ───────────────────────────────────────────
 
   @doc false
   @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map()) :: map()
   def build_turn_values(state, message) do
     user_msg = %{"role" => "user", "content" => normalize_message(message)}
-    messages = get_messages(state)
+
+    # Use compactor's projected view if available, otherwise all messages
+    messages = compactor_llm_messages(state)
     messages_with_input = messages ++ [user_msg]
 
     base = session_base_values(state)
@@ -121,11 +139,15 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     new_turn_count = get_turn_count(state) + 1
 
+    # Append messages to compactor and run compaction
+    compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
+
     state = %{
       state
       | messages: updated_messages,
         working_memory: updated_wm,
-        turn_count: new_turn_count
+        turn_count: new_turn_count,
+        compactor: compactor
     }
 
     update_session_state(state, fn ss ->
@@ -684,6 +706,30 @@ defmodule Arbor.Orchestrator.Session.Builders do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # ── Compactor helpers ────────────────────────────────────────────
+
+  # Use compactor's projected view if available, otherwise all messages
+  defp compactor_llm_messages(%{compactor: nil} = state), do: get_messages(state)
+
+  defp compactor_llm_messages(%{compactor: compactor}) do
+    apply_compactor(compactor, :llm_messages, [])
+  end
+
+  # Append user + assistant messages and run compaction
+  defp append_to_compactor(nil, _user_msg, _assistant_msg), do: nil
+
+  defp append_to_compactor(compactor, user_msg, assistant_msg) do
+    compactor
+    |> apply_compactor(:append, [user_msg])
+    |> apply_compactor(:append, [assistant_msg])
+    |> apply_compactor(:maybe_compact, [])
+  end
+
+  # Runtime bridge: the compactor struct carries its own module via __struct__
+  defp apply_compactor(%{__struct__: module} = compactor, fun, args) do
+    apply(module, fun, [compactor | args])
   end
 
   # ── Memory store runtime bridge ──────────────────────────────────

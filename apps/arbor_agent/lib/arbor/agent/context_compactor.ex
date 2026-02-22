@@ -32,6 +32,8 @@ defmodule Arbor.Agent.ContextCompactor do
       messages = ContextCompactor.llm_messages(compactor)
   """
 
+  @behaviour Arbor.Contracts.AI.Compactor
+
   require Logger
 
   @chars_per_token 4
@@ -42,12 +44,20 @@ defmodule Arbor.Agent.ContextCompactor do
   @file_read_tools ~w(file_read file.read)
   @file_write_tools ~w(file_write file.write file_edit file.edit)
 
+  # Tool names for memory/relationship operations
+  @memory_read_tools ~w(memory_recall memory_read_self memory_reflect
+    memory_introspect relationship_get relationship_browse relationship_summarize)
+
+  @memory_write_tools ~w(memory_remember memory_add_insight memory_connect
+    relationship_save relationship_moment)
+
   defstruct [
     :effective_window,
     :config,
     full_transcript: [],
     llm_messages: [],
     file_index: %{},
+    memory_index: %{},
     token_count: 0,
     peak_tokens: 0,
     turn: 0,
@@ -65,6 +75,17 @@ defmodule Arbor.Agent.ContextCompactor do
           key_functions: [String.t()]
         }
 
+  @type memory_entry :: %{
+          content_hash: String.t(),
+          last_seen_turn: non_neg_integer(),
+          person_names: [String.t()],
+          emotional_markers: [String.t()],
+          relationship_dynamics: [String.t()],
+          values: [String.t()],
+          self_knowledge_categories: %{String.t() => non_neg_integer()},
+          query: String.t() | nil
+        }
+
   @type config :: %{
           effective_window: non_neg_integer(),
           compaction_model: String.t() | nil,
@@ -76,6 +97,7 @@ defmodule Arbor.Agent.ContextCompactor do
           full_transcript: [map()],
           llm_messages: [map()],
           file_index: %{String.t() => file_entry()},
+          memory_index: %{String.t() => memory_entry()},
           token_count: non_neg_integer(),
           peak_tokens: non_neg_integer(),
           effective_window: non_neg_integer(),
@@ -99,6 +121,7 @@ defmodule Arbor.Agent.ContextCompactor do
     * `:compaction_model` - Model for narrative summaries
     * `:compaction_provider` - Provider for narrative summaries
   """
+  @impl Arbor.Contracts.AI.Compactor
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     model = Keyword.get(opts, :model)
@@ -129,13 +152,17 @@ defmodule Arbor.Agent.ContextCompactor do
 
   Updates incremental token count and file index for tool results.
   """
+  @impl Arbor.Contracts.AI.Compactor
   @spec append(t(), map()) :: t()
   def append(%__MODULE__{} = compactor, message) do
     # Dedup check BEFORE updating index — otherwise the new content
     # overwrites the index and always matches itself
     message = maybe_deduplicate_file_read(compactor, message)
 
-    compactor = maybe_update_file_index(compactor, message)
+    compactor =
+      compactor
+      |> maybe_update_file_index(message)
+      |> maybe_update_memory_index(message)
 
     msg_tokens = estimate_tokens(message)
     new_token_count = compactor.token_count + msg_tokens
@@ -157,6 +184,7 @@ defmodule Arbor.Agent.ContextCompactor do
   Returns the compactor unchanged if below threshold. Compaction modifies
   ONLY `llm_messages` — `full_transcript` is never touched.
   """
+  @impl Arbor.Contracts.AI.Compactor
   @spec maybe_compact(t()) :: t()
   def maybe_compact(%__MODULE__{} = compactor) do
     if needs_compaction?(compactor) do
@@ -169,12 +197,21 @@ defmodule Arbor.Agent.ContextCompactor do
   @doc """
   Returns the projected message view for LLM calls.
   """
+  @impl Arbor.Contracts.AI.Compactor
   @spec llm_messages(t()) :: [map()]
   def llm_messages(%__MODULE__{llm_messages: msgs}), do: msgs
 
   @doc """
+  Returns the full, unmodified transcript.
+  """
+  @impl Arbor.Contracts.AI.Compactor
+  @spec full_transcript(t()) :: [map()]
+  def full_transcript(%__MODULE__{full_transcript: transcript}), do: transcript
+
+  @doc """
   Returns compaction statistics.
   """
+  @impl Arbor.Contracts.AI.Compactor
   @spec stats(t()) :: map()
   def stats(%__MODULE__{} = c) do
     total_turns = length(c.full_transcript)
@@ -190,6 +227,7 @@ defmodule Arbor.Agent.ContextCompactor do
       squash_count: c.squash_count,
       narrative_count: c.narrative_count,
       file_index_size: map_size(c.file_index),
+      memory_index_size: map_size(c.memory_index),
       turn: c.turn,
       token_roi: token_roi(reasoning_tokens, c.compression_count)
     }
@@ -227,11 +265,12 @@ defmodule Arbor.Agent.ContextCompactor do
   defp run_compaction_pipeline(messages, total, compactor) do
     stats = %{compressions: 0, squashes: 0, narratives: 0}
 
-    # Step 1: Semantic squashing — find superseded tool calls
-    {messages, stats} = semantic_squash(messages, total, stats)
+    # Step 1: Semantic squashing — find superseded tool calls (file + memory)
+    {messages, stats} = semantic_squash(messages, total, stats, compactor.memory_index)
 
-    # Step 2-3: Apply detail-level-based compression (enriched with file index)
-    {messages, stats} = apply_detail_decay(messages, total, stats, compactor.file_index)
+    # Step 2-3: Apply detail-level-based compression (enriched with file + memory index)
+    {messages, stats} =
+      apply_detail_decay(messages, total, stats, compactor.file_index, compactor.memory_index)
 
     # Step 4: Optional LLM narrative for very old turns
     {messages, stats} =
@@ -246,24 +285,27 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Step 1: Semantic Squashing ─────────────────────────────────
 
-  defp semantic_squash(messages, _total, stats) do
+  defp semantic_squash(messages, _total, stats, memory_index) do
     # Find file reads where the same file was read again later.
     # The earlier read is superseded and can be compressed.
     file_read_indices = find_file_read_indices(messages)
 
-    # Group by file path — keep only the latest read per file
+    # Find memory reads where the same person/query was looked up again later
+    # with identical content (same content_hash in memory_index)
+    memory_read_indices = find_memory_read_indices(messages, memory_index)
+
+    # Group by key (path for files, person/query for memory) — keep only the latest
     superseded =
-      file_read_indices
-      |> Enum.group_by(fn {_idx, path} -> path end)
-      |> Enum.flat_map(fn {_path, entries} ->
+      (file_read_indices ++ memory_read_indices)
+      |> Enum.group_by(fn {_idx, key} -> key end)
+      |> Enum.flat_map(fn {_key, entries} ->
         if length(entries) > 1 do
-          # All but the last are superseded
           entries |> Enum.sort_by(fn {idx, _} -> idx end) |> Enum.drop(-1)
         else
           []
         end
       end)
-      |> Enum.map(fn {idx, _path} -> idx end)
+      |> Enum.map(fn {idx, _key} -> idx end)
       |> MapSet.new()
 
     if MapSet.size(superseded) == 0 do
@@ -361,7 +403,7 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Step 2-3: Detail Level Decay ───────────────────────────────
 
-  defp apply_detail_decay(messages, total, stats, file_index) do
+  defp apply_detail_decay(messages, total, stats, file_index, memory_index) do
     # Don't compress system/first-user messages (indices 0, 1)
     # Don't compress the most recent 25% of messages
     protected_tail = max(2, div(total, 4))
@@ -377,7 +419,10 @@ defmodule Arbor.Agent.ContextCompactor do
         |> Enum.map_reduce(0, fn {msg, idx}, acc ->
           if idx in compressible_range do
             detail = detail_level(idx, total)
-            {compressed_msg, did_compress} = compress_by_detail(msg, detail, file_index)
+
+            {compressed_msg, did_compress} =
+              compress_by_detail(msg, detail, file_index, memory_index)
+
             {compressed_msg, acc + if(did_compress, do: 1, else: 0)}
           else
             {msg, acc}
@@ -395,12 +440,13 @@ defmodule Arbor.Agent.ContextCompactor do
 
   def detail_level(_index, _total), do: 1.0
 
-  defp compress_by_detail(msg, detail, _file_index) when detail >= 0.8 do
+  defp compress_by_detail(msg, detail, _file_index, _memory_index) when detail >= 0.8 do
     # Full fidelity
     {msg, false}
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, detail, file_index) when detail >= 0.5 do
+  defp compress_by_detail(%{role: :tool} = msg, detail, file_index, memory_index)
+       when detail >= 0.5 do
     # Omission with pointer — keep tool name + summary, suggest re-read
     content = Map.get(msg, :content, "")
     name = Map.get(msg, :name, "tool")
@@ -413,14 +459,15 @@ defmodule Arbor.Agent.ContextCompactor do
         "#{name}: #{line_count} lines. Summary: #{first_line}... " <>
           "(detail_level=#{Float.round(detail, 2)}, use tool to re-read if needed)"
 
-      new_content = enrich_with_file_index(stub, file_index, content)
+      new_content = enrich_stub(stub, name, file_index, memory_index, content)
       {%{msg | content: new_content}, true}
     else
       {msg, false}
     end
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, detail, file_index) when detail >= 0.2 do
+  defp compress_by_detail(%{role: :tool} = msg, detail, file_index, memory_index)
+       when detail >= 0.2 do
     # Heuristic one-liner
     name = Map.get(msg, :name, "tool")
     content = Map.get(msg, :content, "")
@@ -435,22 +482,23 @@ defmodule Arbor.Agent.ContextCompactor do
       |> String.slice(0, 80)
 
     stub = "[#{status}] #{name}: #{first_line}"
-    new_content = enrich_with_file_index(stub, file_index, content)
+    new_content = enrich_stub(stub, name, file_index, memory_index, content)
     {%{msg | content: new_content}, true}
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, _detail, file_index) do
-    # Very old — minimal stub, but still enriched with module names
+  defp compress_by_detail(%{role: :tool} = msg, _detail, file_index, memory_index) do
+    # Very old — minimal stub, but still enriched with index metadata
     name = Map.get(msg, :name, "tool")
     content = Map.get(msg, :content, "")
     success = not String.starts_with?(content, "ERROR")
     status = if success, do: "ok", else: "FAILED"
     stub = "[#{status}] #{name}"
-    new_content = enrich_with_file_index(stub, file_index, content)
+    new_content = enrich_stub(stub, name, file_index, memory_index, content)
     {%{msg | content: new_content}, true}
   end
 
-  defp compress_by_detail(%{role: :assistant} = msg, detail, _file_index) when detail < 0.5 do
+  defp compress_by_detail(%{role: :assistant} = msg, detail, _file_index, _memory_index)
+       when detail < 0.5 do
     # Compress long assistant messages
     content = Map.get(msg, :content, "")
 
@@ -464,7 +512,7 @@ defmodule Arbor.Agent.ContextCompactor do
     end
   end
 
-  defp compress_by_detail(msg, _detail, _file_index), do: {msg, false}
+  defp compress_by_detail(msg, _detail, _file_index, _memory_index), do: {msg, false}
 
   # ── Step 4: LLM Narrative Summary ─────────────────────────────
 
@@ -705,6 +753,15 @@ defmodule Arbor.Agent.ContextCompactor do
 
   defp extract_key_functions(_), do: []
 
+  # Route enrichment to file index or memory index based on tool name
+  defp enrich_stub(stub, name, file_index, memory_index, content) do
+    if name in @memory_read_tools or name in @memory_write_tools do
+      enrich_with_memory_index(stub, memory_index, content)
+    else
+      enrich_with_file_index(stub, file_index, content)
+    end
+  end
+
   # Enrich a compressed stub with file index metadata
   defp enrich_with_file_index(stub, file_index, content) do
     case extract_path_from_content(content) do
@@ -724,6 +781,252 @@ defmodule Arbor.Agent.ContextCompactor do
           _ ->
             stub
         end
+    end
+  end
+
+  # Enrich a compressed stub with memory index metadata
+  defp enrich_with_memory_index(stub, memory_index, content) do
+    # Find the best matching memory index entry for this content
+    key = extract_memory_key(content)
+
+    case key && Map.get(memory_index, key) do
+      %{} = entry ->
+        parts = []
+
+        parts =
+          if entry.person_names != [],
+            do: parts ++ ["People: #{Enum.join(entry.person_names, ", ")}"],
+            else: parts
+
+        parts =
+          if entry.relationship_dynamics != [],
+            do: parts ++ ["Dynamic: #{Enum.join(entry.relationship_dynamics, ", ")}"],
+            else: parts
+
+        parts =
+          if entry.emotional_markers != [],
+            do: parts ++ ["Emotions: #{Enum.join(entry.emotional_markers, ", ")}"],
+            else: parts
+
+        parts =
+          if entry.values != [],
+            do: parts ++ ["Values: #{Enum.join(Enum.take(entry.values, 5), ", ")}"],
+            else: parts
+
+        parts =
+          if entry.self_knowledge_categories != %{} do
+            cats =
+              Enum.map_join(entry.self_knowledge_categories, ", ", fn {cat, count} ->
+                "#{cat} (#{count})"
+              end)
+
+            parts ++ ["Self-knowledge: #{cats}"]
+          else
+            parts
+          end
+
+        parts =
+          if entry.query, do: parts ++ ["Query: \"#{entry.query}\""], else: parts
+
+        if parts != [] do
+          "#{stub} [#{Enum.join(parts, ". ")}]"
+        else
+          stub
+        end
+
+      _ ->
+        stub
+    end
+  end
+
+  # ── Memory Index ──────────────────────────────────────────────
+
+  defp maybe_update_memory_index(compactor, %{role: :tool, name: name, content: content})
+       when is_binary(name) and is_binary(content) do
+    if name in @memory_read_tools or name in @memory_write_tools do
+      update_memory_index_entry(compactor, name, content)
+    else
+      compactor
+    end
+  end
+
+  defp maybe_update_memory_index(compactor, _msg), do: compactor
+
+  defp update_memory_index_entry(compactor, name, content) do
+    key = extract_memory_key(content) || "turn_#{compactor.turn}_#{name}"
+
+    person_names = extract_person_names(content)
+    emotional_markers = extract_emotional_markers(content)
+    dynamics = extract_relationship_dynamics(content)
+    values = extract_values_from_content(content)
+    sk_categories = extract_self_knowledge_categories(content)
+    query = extract_memory_query(name, content)
+
+    entry = %{
+      content_hash: content_hash(content),
+      last_seen_turn: compactor.turn,
+      person_names: person_names,
+      emotional_markers: emotional_markers,
+      relationship_dynamics: dynamics,
+      values: values,
+      self_knowledge_categories: sk_categories,
+      query: query
+    }
+
+    %{compactor | memory_index: Map.put(compactor.memory_index, key, entry)}
+  end
+
+  defp find_memory_read_indices(messages, _memory_index) do
+    messages
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {msg, idx} ->
+      name = to_string(Map.get(msg, :name, ""))
+      content = Map.get(msg, :content, "")
+
+      if msg.role == :tool and is_binary(content) and name in @memory_read_tools do
+        maybe_memory_index_entry(content, idx)
+      else
+        []
+      end
+    end)
+  end
+
+  defp maybe_memory_index_entry(content, idx) do
+    case extract_memory_key(content) do
+      nil -> []
+      key -> [{idx, "memory:#{key}"}]
+    end
+  end
+
+  # Extract a key for memory index lookups — person name or query string
+  defp extract_memory_key(content) when is_binary(content) do
+    cond do
+      # JSON format with name field (relationship tools)
+      match = Regex.run(~r/"name"\s*:\s*"([^"]+)"/, content) ->
+        "person:#{Enum.at(match, 1)}"
+
+      # Person name from text patterns
+      match = Regex.run(~r/(?:Relationship|Person|Name):\s*(\w[\w\s]*)/i, content) ->
+        "person:#{String.trim(Enum.at(match, 1))}"
+
+      # Query from recall results
+      match = Regex.run(~r/"query"\s*:\s*"([^"]+)"/, content) ->
+        "query:#{Enum.at(match, 1)}"
+
+      # Self-knowledge / identity
+      String.contains?(content, "self_knowledge") or String.contains?(content, "identity") ->
+        "self"
+
+      true ->
+        nil
+    end
+  end
+
+  defp extract_memory_key(_), do: nil
+
+  # ── Memory Metadata Extraction ──────────────────────────────
+
+  defp extract_person_names(content) when is_binary(content) do
+    names =
+      Regex.scan(~r/"name"\s*:\s*"([^"]+)"/, content)
+      |> Enum.map(fn [_, name] -> name end)
+
+    # Also match "Primary Collaborator: Name" or "Person: Name" patterns
+    text_names =
+      Regex.scan(
+        ~r/(?:Collaborator|Person|Partner|Friend|User):\s*(\w[\w\s]*?)(?:\.|,|\n|$)/i,
+        content
+      )
+      |> Enum.map(fn [_, name] -> String.trim(name) end)
+
+    (names ++ text_names) |> Enum.uniq()
+  end
+
+  defp extract_person_names(_), do: []
+
+  @known_emotional_markers ~w(
+    trust joy insight connection gratitude warmth concern hope curiosity
+    vulnerability frustration pride wonder compassion empathy satisfaction
+    excitement nervousness sadness relief amusement surprise contentment
+    meaningful philosophical collaborative supportive creative
+  )
+
+  defp extract_emotional_markers(content) when is_binary(content) do
+    content_lower = String.downcase(content)
+
+    @known_emotional_markers
+    |> Enum.filter(&String.contains?(content_lower, &1))
+  end
+
+  defp extract_emotional_markers(_), do: []
+
+  defp extract_relationship_dynamics(content) when is_binary(content) do
+    dynamics =
+      Regex.scan(~r/"relationship_dynamic"\s*:\s*"([^"]+)"/, content)
+      |> Enum.map(fn [_, d] -> d end)
+
+    text_dynamics =
+      Regex.scan(~r/(?:Relationship|Dynamic):\s*(.+?)(?:\n|$)/i, content)
+      |> Enum.map(fn [_, d] -> String.trim(d) end)
+      |> Enum.reject(&(String.length(&1) > 100))
+
+    (dynamics ++ text_dynamics) |> Enum.uniq()
+  end
+
+  defp extract_relationship_dynamics(_), do: []
+
+  defp extract_values_from_content(content) when is_binary(content) do
+    # JSON array: "values": ["a", "b"]
+    json_values =
+      case Regex.run(~r/"values"\s*:\s*\[([^\]]+)\]/, content) do
+        [_, list_str] ->
+          Regex.scan(~r/"([^"]+)"/, list_str)
+          |> Enum.map(fn [_, v] -> v end)
+
+        _ ->
+          []
+      end
+
+    # Text pattern: "Values: honesty, empathy, ..."
+    text_values =
+      case Regex.run(~r/Values?:\s*(.+?)(?:\n|$)/i, content) do
+        [_, vals] ->
+          vals |> String.split(~r/[,;]/) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+        _ ->
+          []
+      end
+
+    (json_values ++ text_values) |> Enum.uniq() |> Enum.take(10)
+  end
+
+  defp extract_values_from_content(_), do: []
+
+  @self_knowledge_categories ~w(capability trait value preference personality)
+
+  defp extract_self_knowledge_categories(content) when is_binary(content) do
+    content_lower = String.downcase(content)
+
+    @self_knowledge_categories
+    |> Enum.reduce(%{}, fn category, acc ->
+      count =
+        Regex.scan(~r/#{category}/i, content_lower)
+        |> length()
+
+      if count > 0, do: Map.put(acc, category, count), else: acc
+    end)
+  end
+
+  defp extract_self_knowledge_categories(_), do: %{}
+
+  defp extract_memory_query(name, content) do
+    if name in ~w(memory_recall) do
+      case Regex.run(~r/"query"\s*:\s*"([^"]+)"/, content) do
+        [_, query] -> query
+        _ -> nil
+      end
+    else
+      nil
     end
   end
 

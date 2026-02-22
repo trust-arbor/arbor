@@ -97,6 +97,8 @@ defmodule Arbor.Orchestrator.Session do
     :session_config,
     :session_state,
     :behavior,
+    # Context compactor for progressive forgetting (nil = disabled)
+    :compactor,
     phase: :idle,
     session_type: :primary,
     execution_mode: :session,
@@ -138,6 +140,7 @@ defmodule Arbor.Orchestrator.Session do
           heartbeat_interval: pos_integer(),
           heartbeat_ref: reference() | nil,
           heartbeat_in_flight: boolean(),
+          compactor: struct() | nil,
           session_config: struct() | nil,
           session_state: struct() | nil,
           behavior: struct() | nil
@@ -171,6 +174,7 @@ defmodule Arbor.Orchestrator.Session do
     * `:signal_topic`       — dedicated signal topic for this session's observability
     * `:trace_id`           — distributed tracing correlation ID
     * `:checkpoint`         — map of checkpoint data to restore on init (crash recovery)
+    * `:compactor`          — `{module, opts}` tuple for context compaction (e.g. `{ContextCompactor, [effective_window: 75_000]}`)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -271,6 +275,9 @@ defmodule Arbor.Orchestrator.Session do
     # Without a resolver, we trust the caller — but log a warning.
     trust_tier = Builders.verify_trust_tier(trust_tier, agent_id, adapters)
 
+    # Initialize compactor if configured (runtime bridge — module lives in arbor_agent)
+    compactor = Builders.init_compactor(Keyword.get(opts, :compactor))
+
     with {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path),
          {:ok, heartbeat_graph} <- Builders.parse_dot_file(heartbeat_dot_path) do
       # Build contract structs if available (runtime bridge)
@@ -291,6 +298,7 @@ defmodule Arbor.Orchestrator.Session do
         trust_tier: trust_tier,
         turn_graph: turn_graph,
         heartbeat_graph: heartbeat_graph,
+        compactor: compactor,
         adapters: adapters,
         heartbeat_interval: heartbeat_interval,
         session_type: session_type,
