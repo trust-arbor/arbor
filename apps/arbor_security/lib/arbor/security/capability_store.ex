@@ -144,11 +144,16 @@ defmodule Arbor.Security.CapabilityStore do
   def handle_call({:put, cap}, _from, state) do
     case check_quotas(state, cap) do
       :ok ->
+        # Deduplicate: if a capability with the same principal+resource already exists,
+        # replace it instead of appending (prevents unbounded growth from re-grants)
+        {state, replaced_id} = maybe_replace_existing(state, cap)
+
         state =
           state
           |> put_in([:by_id, cap.id], cap)
           |> update_in([:by_principal, cap.principal_id], fn
             nil -> [cap.id]
+            ids when replaced_id != nil -> [cap.id | ids]
             ids -> [cap.id | ids]
           end)
           |> index_by_issuer(cap)
@@ -471,6 +476,36 @@ defmodule Arbor.Security.CapabilityStore do
   # ===========================================================================
   # Quota Enforcement (Phase 7)
   # ===========================================================================
+
+  # If a capability with the same principal_id + resource_uri already exists,
+  # remove the old one so re-grants don't cause unbounded growth.
+  # Returns {updated_state, replaced_cap_id | nil}.
+  defp maybe_replace_existing(state, cap) do
+    cap_ids = Map.get(state.by_principal, cap.principal_id, [])
+
+    existing_id =
+      Enum.find(cap_ids, fn id ->
+        case Map.get(state.by_id, id) do
+          %{resource_uri: uri} -> uri == cap.resource_uri
+          _ -> false
+        end
+      end)
+
+    case existing_id do
+      nil ->
+        {state, nil}
+
+      id ->
+        state =
+          state
+          |> update_in([:by_id], &Map.delete(&1, id))
+          |> update_in([:by_principal, cap.principal_id], fn ids ->
+            Enum.reject(ids, &(&1 == id))
+          end)
+
+        {state, id}
+    end
+  end
 
   defp check_quotas(state, cap) do
     if Config.quota_enforcement_enabled?() do
