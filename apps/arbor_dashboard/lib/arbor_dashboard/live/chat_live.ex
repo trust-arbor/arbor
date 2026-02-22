@@ -294,10 +294,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           |> stream_insert(:messages, user_msg)
           |> assign(input: "", loading: true, error: nil)
 
-        # Persist to chat history
+        # Persist to chat history (agent_id is the string ID, not the PID)
         try do
-          if socket.assigns.agent do
-            Arbor.Memory.append_chat_message(socket.assigns.agent, user_msg)
+          if socket.assigns.agent_id do
+            Arbor.Memory.append_chat_message(socket.assigns.agent_id, user_msg)
           end
         rescue
           _ -> :ok
@@ -625,10 +625,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp process_query_response(socket, agent, response) do
     assistant_msg = build_assistant_message(response)
 
-    # Persist to chat history
+    # Persist to chat history (use agent_id string, not the PID)
     try do
-      if agent do
-        Arbor.Memory.append_chat_message(agent, assistant_msg)
+      agent_id = socket.assigns[:agent_id]
+
+      if agent_id do
+        Arbor.Memory.append_chat_message(agent_id, assistant_msg)
       end
     rescue
       _ -> :ok
