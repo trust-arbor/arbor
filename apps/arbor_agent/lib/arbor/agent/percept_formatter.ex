@@ -181,6 +181,7 @@ defmodule Arbor.Agent.PerceptFormatter do
 
   # ── Data Processing ────────────────────────────────────────────────
 
+  defp normalize_data(%_{} = data), do: Map.from_struct(data)
   defp normalize_data(data) when is_map(data), do: data
   defp normalize_data(data) when is_binary(data), do: %{text: data}
   defp normalize_data(data) when is_list(data), do: %{items: data}
