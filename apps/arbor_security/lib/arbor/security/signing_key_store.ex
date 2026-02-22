@@ -19,6 +19,7 @@ defmodule Arbor.Security.SigningKeyStore do
   the configured security backend (JSONFile by default).
   """
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Security.Crypto
 
   require Logger
@@ -40,12 +41,15 @@ defmodule Arbor.Security.SigningKeyStore do
     with {:ok, enc_key} <- get_encryption_key() do
       {ciphertext, iv, tag} = Crypto.encrypt(private_key, enc_key)
 
-      record = %{
+      data = %{
         "v" => 1,
         "ct" => Base.encode64(ciphertext),
         "iv" => Base.encode64(iv),
         "tag" => Base.encode64(tag)
       }
+
+      # Wrap in Record so JSONFile backend can persist (it pattern-matches on %Record{})
+      record = %Record{id: agent_id, key: agent_id, data: data, metadata: %{}}
 
       if available?() do
         apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])
@@ -64,15 +68,21 @@ defmodule Arbor.Security.SigningKeyStore do
   @spec get(String.t()) :: {:ok, binary()} | {:error, term()}
   def get(agent_id) when is_binary(agent_id) do
     with {:ok, enc_key} <- get_encryption_key(),
-         {:ok, record} <- get_record(agent_id),
-         {:ok, ciphertext} <- Base.decode64(record["ct"]),
-         {:ok, iv} <- Base.decode64(record["iv"]),
-         {:ok, tag} <- Base.decode64(record["tag"]) do
-      Crypto.decrypt(ciphertext, enc_key, iv, tag)
+         {:ok, raw} <- get_record(agent_id) do
+      # Unwrap Record struct (from disk) or use plain map (legacy ETS)
+      data = unwrap_record(raw)
+
+      with {:ok, ciphertext} <- Base.decode64(data["ct"]),
+           {:ok, iv} <- Base.decode64(data["iv"]),
+           {:ok, tag} <- Base.decode64(data["tag"]) do
+        Crypto.decrypt(ciphertext, enc_key, iv, tag)
+      else
+        :error -> {:error, :invalid_key_record}
+        {:error, reason} -> {:error, reason}
+      end
     else
       {:error, :not_found} -> {:error, :no_signing_key}
       {:error, reason} -> {:error, reason}
-      :error -> {:error, :invalid_key_record}
     end
   end
 
@@ -98,6 +108,11 @@ defmodule Arbor.Security.SigningKeyStore do
   end
 
   # -- Private --
+
+  # Record struct from JSONFile backend (loaded from disk after restart)
+  defp unwrap_record(%Record{data: data}), do: data
+  # Plain map from ETS (stored during current session)
+  defp unwrap_record(%{"ct" => _} = data), do: data
 
   defp get_record(agent_id) do
     if available?() do

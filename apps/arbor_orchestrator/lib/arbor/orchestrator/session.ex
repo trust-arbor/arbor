@@ -117,7 +117,9 @@ defmodule Arbor.Orchestrator.Session do
     # Async turn execution state
     turn_in_flight: false,
     turn_from: nil,
-    turn_task_ref: nil
+    turn_task_ref: nil,
+    # Signer function for identity verification (fn resource -> {:ok, signed_request})
+    signer: nil
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -280,6 +282,7 @@ defmodule Arbor.Orchestrator.Session do
     signal_topic = Keyword.get(opts, :signal_topic, "session:#{session_id}")
     trace_id = Keyword.get(opts, :trace_id)
     checkpoint = Keyword.get(opts, :checkpoint)
+    signer = Keyword.get(opts, :signer)
 
     # Verify trust_tier if a resolver is available (hierarchy constraint bridge).
     # Without a resolver, we trust the caller — but log a warning.
@@ -319,7 +322,8 @@ defmodule Arbor.Orchestrator.Session do
         trace_id: trace_id,
         session_config: session_config,
         session_state: session_state,
-        behavior: behavior
+        behavior: behavior,
+        signer: signer
       }
 
       # Restore from checkpoint if provided (crash recovery)
@@ -587,10 +591,18 @@ defmodule Arbor.Orchestrator.Session do
 
   defp authorize_orchestrator(state) do
     if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 3) and
+         function_exported?(Arbor.Security, :authorize, 4) and
          Process.whereis(Arbor.Security.CapabilityStore) != nil do
+      # Sign the orchestrator resource if a signer is available
+      auth_opts = sign_gate_request(state.signer, @orchestrator_resource)
+
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(Arbor.Security, :authorize, [state.agent_id, @orchestrator_resource, :execute]) do
+      case apply(Arbor.Security, :authorize, [
+             state.agent_id,
+             @orchestrator_resource,
+             :execute,
+             auth_opts
+           ]) do
         {:ok, :authorized} -> :ok
         {:error, _reason} -> {:error, :orchestrator_not_authorized}
       end
@@ -605,6 +617,17 @@ defmodule Arbor.Orchestrator.Session do
   catch
     :exit, _ -> :ok
   end
+
+  defp sign_gate_request(nil, _resource), do: []
+
+  defp sign_gate_request(signer, resource) when is_function(signer, 1) do
+    case signer.(resource) do
+      {:ok, signed_request} -> [signed_request: signed_request]
+      {:error, _} -> []
+    end
+  end
+
+  defp sign_gate_request(_, _), do: []
 
   # ── Contract-aware state mutation ───────────────────────────────────
 

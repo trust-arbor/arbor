@@ -576,10 +576,17 @@ defmodule Arbor.Orchestrator.Session.Builders do
     case Map.get(result_ctx, "session.new_goals", []) do
       goals when is_list(goals) and goals != [] ->
         goal_proposals =
-          Enum.map(goals, fn goal ->
+          goals
+          |> Enum.map(fn goal ->
+            desc = Map.get(goal, "description", "")
+            desc = if is_binary(desc), do: String.trim(desc), else: ""
+            {desc, goal}
+          end)
+          |> Enum.reject(fn {desc, _goal} -> desc == "" end)
+          |> Enum.map(fn {desc, goal} ->
             %{
               type: :goal,
-              content: Map.get(goal, "description", "New goal"),
+              content: desc,
               metadata: %{goal_data: goal}
             }
           end)

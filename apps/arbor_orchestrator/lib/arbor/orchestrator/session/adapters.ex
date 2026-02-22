@@ -525,11 +525,32 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       goal_store = Arbor.Memory.GoalStore
 
       Enum.each(List.wrap(goal_updates), fn update ->
-        bridge(goal_store, :update_goal, [agent_id, update], :ok)
+        goal_id = update["id"] || update[:id]
+        progress = update["progress"] || update[:progress]
+
+        if goal_id && progress do
+          bridge(goal_store, :update_goal_progress, [agent_id, goal_id, progress], :ok)
+        end
       end)
 
       Enum.each(List.wrap(new_goals), fn goal_desc ->
-        bridge(goal_store, :add_goal, [agent_id, goal_desc, []], :ok)
+        description =
+          cond do
+            is_binary(goal_desc) ->
+              String.trim(goal_desc)
+
+            is_map(goal_desc) ->
+              (goal_desc["description"] || goal_desc[:description] || "")
+              |> to_string()
+              |> String.trim()
+
+            true ->
+              ""
+          end
+
+        if description != "" do
+          bridge(goal_store, :add_goal, [agent_id, description, []], :ok)
+        end
       end)
 
       :ok
@@ -597,13 +618,24 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   defp store_intent(intent_data, goal_id, agent_id) do
     action = intent_data["action"] || intent_data[:action] || "unknown"
+    params = intent_data["params"] || intent_data[:params] || %{}
+    # Ensure params is a map — LLM sometimes sends a string description instead
+    params = if is_map(params), do: params, else: %{}
+    reasoning = intent_data["reasoning"] || intent_data[:reasoning]
+    target = intent_data["target"] || intent_data[:target]
     description = intent_data["description"] || intent_data[:description] || action
+
+    opts = [
+      goal_id: goal_id,
+      reasoning: reasoning || description,
+      target: target
+    ]
 
     intent =
       bridge(
         Arbor.Contracts.Memory.Intent,
         :action,
-        [action, description, [goal_id: goal_id]],
+        [action, params, opts],
         nil
       )
 

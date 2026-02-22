@@ -66,13 +66,19 @@ defmodule Arbor.Security.SigningKeyStoreTest do
              name: :arbor_security_signing_keys
            ) do
         {:ok, record} ->
-          # Record should be a map with encrypted fields
-          assert is_map(record)
-          assert Map.has_key?(record, "ct")
-          assert Map.has_key?(record, "iv")
-          assert Map.has_key?(record, "tag")
+          # Record is a %Record{} struct with encrypted data inside
+          data =
+            case record do
+              %Arbor.Contracts.Persistence.Record{data: d} -> d
+              %{} -> record
+            end
+
+          assert is_map(data)
+          assert Map.has_key?(data, "ct")
+          assert Map.has_key?(data, "iv")
+          assert Map.has_key?(data, "tag")
           # The ciphertext should NOT be the raw private key
-          {:ok, ct} = Base.decode64(record["ct"])
+          {:ok, ct} = Base.decode64(data["ct"])
           refute ct == priv
 
         {:error, _} ->
