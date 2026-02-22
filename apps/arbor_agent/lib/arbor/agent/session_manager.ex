@@ -128,6 +128,9 @@ defmodule Arbor.Agent.SessionManager do
           :ets.insert(@table, {agent_id, pid})
           new_state = %{state | monitors: Map.put(state.monitors, agent_id, ref)}
 
+          # Create Postgres session record for durable persistence
+          ensure_persistent_session(agent_id, opts)
+
           # Start companion servers (Phase 3: three-loop architecture)
           start_companion_servers(agent_id, opts)
 
@@ -168,10 +171,11 @@ defmodule Arbor.Agent.SessionManager do
         config -> Keyword.put(base, :compactor, config)
       end
 
-    # Load saved checkpoint for session recovery (restores messages, goals, etc.)
-    case load_checkpoint(session_id) do
-      nil -> base
-      checkpoint -> Keyword.put(base, :checkpoint, checkpoint)
+    # Load saved session entries for recovery (restores messages from Postgres)
+    # Falls back to checkpoint-based recovery if session store unavailable
+    case load_session_entries(session_id) do
+      {:ok, checkpoint} -> Keyword.put(base, :checkpoint, checkpoint)
+      :none -> load_checkpoint_fallback(base, session_id)
     end
   end
 
@@ -293,6 +297,72 @@ defmodule Arbor.Agent.SessionManager do
     :ets.delete(@table, agent_id)
   end
 
+  @session_store Arbor.Persistence.SessionStore
+
+  defp load_session_entries(session_id) do
+    if session_store_available?() do
+      case apply(@session_store, :get_session, [session_id]) do
+        {:ok, session} ->
+          entries =
+            apply(@session_store, :load_entries, [
+              session.id,
+              [entry_types: ["user", "assistant"]]
+            ])
+
+          if entries != [] do
+            messages = entries_to_messages(entries)
+            {:ok, %{"messages" => messages}}
+          else
+            :none
+          end
+
+        {:error, _} ->
+          :none
+      end
+    else
+      :none
+    end
+  rescue
+    _ -> :none
+  catch
+    :exit, _ -> :none
+  end
+
+  defp entries_to_messages(entries) do
+    Enum.map(entries, fn entry ->
+      content =
+        case entry.content do
+          items when is_list(items) ->
+            # Extract text from content array
+            items
+            |> Enum.filter(fn item -> item["type"] == "text" end)
+            |> Enum.map_join("\n", fn item -> item["text"] || "" end)
+
+          text when is_binary(text) ->
+            text
+
+          _ ->
+            ""
+        end
+
+      %{
+        "role" => entry.role || entry.entry_type,
+        "content" => content,
+        "timestamp" => format_timestamp(entry.timestamp)
+      }
+    end)
+  end
+
+  defp format_timestamp(nil), do: nil
+  defp format_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp load_checkpoint_fallback(base, session_id) do
+    case load_checkpoint(session_id) do
+      nil -> base
+      checkpoint -> Keyword.put(base, :checkpoint, checkpoint)
+    end
+  end
+
   defp load_checkpoint(session_id) do
     checkpoint_mod = Arbor.Persistence.Checkpoint
 
@@ -314,6 +384,48 @@ defmodule Arbor.Agent.SessionManager do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp ensure_persistent_session(agent_id, opts) do
+    if session_store_available?() do
+      session_id = "agent-session-#{agent_id}"
+
+      Task.start(fn ->
+        try do
+          case apply(@session_store, :get_session, [session_id]) do
+            {:ok, _} ->
+              :ok
+
+            {:error, :not_found} ->
+              apply(@session_store, :create_session, [
+                agent_id,
+                [
+                  session_id: session_id,
+                  model: Keyword.get(opts, :model),
+                  metadata: %{
+                    "trust_tier" => to_string(Keyword.get(opts, :trust_tier, :established))
+                  }
+                ]
+              ])
+          end
+        rescue
+          e ->
+            Logger.warning(
+              "[SessionManager] Persistent session creation failed: #{Exception.message(e)}"
+            )
+        end
+      end)
+    end
+  end
+
+  defp session_store_available? do
+    Code.ensure_loaded?(@session_store) and
+      function_exported?(@session_store, :available?, 0) and
+      apply(@session_store, :available?, [])
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp orchestrator_available? do
