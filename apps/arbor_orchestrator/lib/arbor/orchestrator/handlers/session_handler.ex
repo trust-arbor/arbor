@@ -183,7 +183,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           heartbeat_msg = build_heartbeat_context(ctx, mode)
           [%{"role" => "user", "content" => heartbeat_msg}]
         else
-          messages
+          inject_timestamps(messages)
         end
 
       try do
@@ -841,6 +841,33 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   end
 
   defp truncate_for_prompt(text), do: text
+
+  # Inject timestamps into message content for LLM temporal awareness.
+  # Prepends "[HH:MM:SS] " to content for messages that carry a timestamp field,
+  # then strips the timestamp key so LLM adapters don't choke on unknown fields.
+  defp inject_timestamps(messages) do
+    Enum.map(messages, fn msg ->
+      case msg do
+        %{"timestamp" => ts, "content" => content}
+        when is_binary(ts) and is_binary(content) and content != "" ->
+          time_str = format_message_timestamp(ts)
+          %{"role" => msg["role"], "content" => "[#{time_str}] #{content}"}
+
+        %{"timestamp" => _} ->
+          Map.delete(msg, "timestamp")
+
+        _ ->
+          msg
+      end
+    end)
+  end
+
+  defp format_message_timestamp(iso_string) do
+    case DateTime.from_iso8601(iso_string) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M:%S")
+      _ -> ""
+    end
+  end
 
   defp with_adapter(adapters, key, fun) do
     case Map.get(adapters, key) do
