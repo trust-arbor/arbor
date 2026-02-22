@@ -120,4 +120,37 @@ defmodule Arbor.Common.TimeTest do
       assert Time.duration_ms("invalid") == "-"
     end
   end
+
+  describe "prompt_annotation/2" do
+    test "returns [HH:MM] for same-day timestamps" do
+      now = ~U[2026-02-22 14:30:00Z]
+      dt = ~U[2026-02-22 09:15:00Z]
+      assert Time.prompt_annotation(dt, now) == "[09:15]"
+    end
+
+    test "returns [Mon DD HH:MM] for different-day timestamps" do
+      now = ~U[2026-02-22 14:30:00Z]
+      dt = ~U[2026-02-18 16:45:00Z]
+      assert Time.prompt_annotation(dt, now) == "[Feb 18 16:45]"
+    end
+
+    test "returns empty string for nil" do
+      assert Time.prompt_annotation(nil, DateTime.utc_now()) == ""
+    end
+  end
+
+  describe "month_day/1" do
+    test "formats DateTime as short month-day" do
+      assert Time.month_day(~U[2026-02-18 14:30:00Z]) == "Feb 18"
+      assert Time.month_day(~U[2026-01-05 00:00:00Z]) == "Jan 5"
+    end
+
+    test "formats Date as short month-day" do
+      assert Time.month_day(~D[2026-03-01]) == "Mar 1"
+    end
+
+    test "returns empty string for nil" do
+      assert Time.month_day(nil) == ""
+    end
+  end
 end

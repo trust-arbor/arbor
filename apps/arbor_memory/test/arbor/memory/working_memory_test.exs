@@ -41,7 +41,12 @@ defmodule Arbor.Memory.WorkingMemoryTest do
     end
 
     test "accepts max_tokens and model options" do
-      wm = WorkingMemory.new("agent_001", max_tokens: 5000, model: "anthropic:claude-sonnet-4-5-20250929")
+      wm =
+        WorkingMemory.new("agent_001",
+          max_tokens: 5000,
+          model: "anthropic:claude-sonnet-4-5-20250929"
+        )
+
       assert wm.max_tokens == 5000
       assert wm.model == "anthropic:claude-sonnet-4-5-20250929"
     end
@@ -104,6 +109,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   describe "add_thought/3 with maps" do
     test "accepts structured thought map" do
       ts = DateTime.utc_now()
+
       wm =
         WorkingMemory.new("agent_001")
         |> WorkingMemory.add_thought(%{content: "Map thought", timestamp: ts, cached_tokens: 42})
@@ -202,7 +208,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
       assert length(wm.active_goals) == 2
       ids = Enum.map(wm.active_goals, & &1.id)
-      assert Enum.uniq(ids) == ids  # all unique
+      # all unique
+      assert Enum.uniq(ids) == ids
       assert Enum.all?(wm.active_goals, &(&1.type == :general))
       assert Enum.all?(wm.active_goals, &(&1.priority == :normal))
       assert Enum.all?(wm.active_goals, &(&1.progress == 0))
@@ -748,6 +755,87 @@ defmodule Arbor.Memory.WorkingMemoryTest do
   end
 
   # ============================================================================
+  # Temporal Thought Formatting
+  # ============================================================================
+
+  describe "temporal thought formatting" do
+    test "thoughts are grouped by time when temporal_grouping: true" do
+      now = DateTime.utc_now()
+      yesterday = DateTime.add(now, -86_400, :second)
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "Today thought",
+          timestamp: now,
+          cached_tokens: 5
+        })
+        |> WorkingMemory.add_thought(%{
+          content: "Yesterday thought",
+          timestamp: yesterday,
+          cached_tokens: 5
+        })
+
+      text = WorkingMemory.to_prompt_text(wm, temporal_grouping: true, include_identity: false)
+
+      assert text =~ "### Today"
+      assert text =~ "### Yesterday"
+      assert text =~ "Today thought"
+      assert text =~ "Yesterday thought"
+    end
+
+    test "thoughts shown as flat list when temporal_grouping: false" do
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought("First thought")
+        |> WorkingMemory.add_thought("Second thought")
+
+      text = WorkingMemory.to_prompt_text(wm, temporal_grouping: false, include_identity: false)
+
+      refute text =~ "### Today"
+      assert text =~ "- Second thought"
+      assert text =~ "- First thought"
+    end
+
+    test "thoughts with referenced_date show reference annotation" do
+      now = DateTime.utc_now()
+      ref = DateTime.add(now, -2 * 86_400, :second)
+
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought(%{
+          content: "Deploy happened two days ago",
+          timestamp: now,
+          cached_tokens: 10,
+          referenced_date: ref
+        })
+
+      text = WorkingMemory.to_prompt_text(wm, temporal_grouping: true, include_identity: false)
+
+      assert text =~ "refers to"
+      assert text =~ "Deploy happened two days ago"
+    end
+
+    test "empty thoughts list produces no section" do
+      wm = WorkingMemory.new("agent_001", rebuild_from_signals: false)
+      text = WorkingMemory.to_prompt_text(wm, include_identity: false)
+
+      refute text =~ "Recent Thoughts"
+    end
+
+    test "temporal grouping is the default behavior" do
+      wm =
+        WorkingMemory.new("agent_001", rebuild_from_signals: false)
+        |> WorkingMemory.add_thought("A thought")
+
+      text = WorkingMemory.to_prompt_text(wm, include_identity: false)
+
+      # Default should include temporal headers
+      assert text =~ "### Today"
+    end
+  end
+
+  # ============================================================================
   # Clear Thoughts
   # ============================================================================
 
@@ -814,7 +902,11 @@ defmodule Arbor.Memory.WorkingMemoryTest do
     end
 
     test "applies relationship event", %{wm: wm} do
-      signal = %{type: :relationship_changed, data: %{human_name: "Alice", context: "Collaborator"}}
+      signal = %{
+        type: :relationship_changed,
+        data: %{human_name: "Alice", context: "Collaborator"}
+      }
+
       result = WorkingMemory.apply_memory_event(signal, wm)
       assert result.current_human == "Alice"
       assert result.relationship_context == "Collaborator"
@@ -853,7 +945,12 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
     test "applies curiosity satisfied event", %{wm: wm} do
       wm = WorkingMemory.add_curiosity(wm, "Quantum computing")
-      signal = %{type: :curiosity_satisfied, data: %{item: "Quantum computing", action: :satisfied}}
+
+      signal = %{
+        type: :curiosity_satisfied,
+        data: %{item: "Quantum computing", action: :satisfied}
+      }
+
       result = WorkingMemory.apply_memory_event(signal, wm)
       assert result.curiosity == []
     end

@@ -286,13 +286,18 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec complete_goal(t(), String.t()) :: t()
   def complete_goal(wm, goal_or_id) do
-    goal = Enum.find(wm.active_goals, fn g ->
-      g.id == goal_or_id or g.description == goal_or_id
-    end)
+    goal =
+      Enum.find(wm.active_goals, fn g ->
+        g.id == goal_or_id or g.description == goal_or_id
+      end)
 
-    wm = %{wm | active_goals: Enum.reject(wm.active_goals, fn g ->
-      g.id == goal_or_id or g.description == goal_or_id
-    end)}
+    wm = %{
+      wm
+      | active_goals:
+          Enum.reject(wm.active_goals, fn g ->
+            g.id == goal_or_id or g.description == goal_or_id
+          end)
+    }
 
     if goal do
       add_thought(wm, "Completed goal: #{goal.description}")
@@ -532,6 +537,7 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec uptime(t()) :: non_neg_integer()
   def uptime(%__MODULE__{started_at: nil}), do: 0
+
   def uptime(%__MODULE__{started_at: started_at}) do
     DateTime.diff(DateTime.utc_now(), started_at, :second)
   end
@@ -582,7 +588,12 @@ defmodule Arbor.Memory.WorkingMemory do
 
     []
     |> maybe_add_identity(opts, wm)
-    |> maybe_add_section(opts, :include_relationship, wm.relationship_context, &format_relationship/1)
+    |> maybe_add_section(
+      opts,
+      :include_relationship,
+      wm.relationship_context,
+      &format_relationship/1
+    )
     |> maybe_add_section(opts, :include_goals, wm.active_goals, &format_goals/1)
     |> maybe_add_thoughts(opts, wm.recent_thoughts, max_thoughts)
     |> maybe_add_section(opts, :include_concerns, wm.concerns, &format_concerns/1)
@@ -602,7 +613,8 @@ defmodule Arbor.Memory.WorkingMemory do
       agent_id: wm.agent_id,
       name: wm.name,
       current_human: wm.current_human,
-      recent_thoughts: wm.recent_thoughts |> Enum.take(max_thoughts) |> Enum.map(&thought_content/1),
+      recent_thoughts:
+        wm.recent_thoughts |> Enum.take(max_thoughts) |> Enum.map(&thought_content/1),
       active_goals: Enum.map(wm.active_goals, &goal_description/1),
       relationship_context: wm.relationship_context,
       concerns: wm.concerns,
@@ -805,11 +817,14 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp normalize_thought(%{content: _} = thought) do
-    Map.merge(%{
-      timestamp: DateTime.utc_now(),
-      cached_tokens: TokenBudget.estimate_tokens(thought[:content] || ""),
-      referenced_date: nil
-    }, thought)
+    Map.merge(
+      %{
+        timestamp: DateTime.utc_now(),
+        cached_tokens: TokenBudget.estimate_tokens(thought[:content] || ""),
+        referenced_date: nil
+      },
+      thought
+    )
   end
 
   defp normalize_thought(%{"content" => content} = thought) do
@@ -835,13 +850,16 @@ defmodule Arbor.Memory.WorkingMemory do
   end
 
   defp normalize_goal(%{description: _} = goal) do
-    Map.merge(%{
-      id: generate_id(),
-      type: :general,
-      priority: :normal,
-      progress: 0,
-      added_at: DateTime.utc_now()
-    }, goal)
+    Map.merge(
+      %{
+        id: generate_id(),
+        type: :general,
+        priority: :normal,
+        progress: 0,
+        added_at: DateTime.utc_now()
+      },
+      goal
+    )
   end
 
   defp normalize_goal(%{"description" => desc} = goal) do
@@ -930,7 +948,9 @@ defmodule Arbor.Memory.WorkingMemory do
 
   defp maybe_add_thoughts(sections, opts, thoughts, max_thoughts) do
     if Keyword.get(opts, :include_thoughts, true) and thoughts != [] do
-      [format_thoughts(Enum.take(thoughts, max_thoughts)) | sections]
+      taken = Enum.take(thoughts, max_thoughts)
+      temporal = Keyword.get(opts, :temporal_grouping, true)
+      [format_thoughts(taken, temporal: temporal) | sections]
     else
       sections
     end
@@ -950,9 +970,48 @@ defmodule Arbor.Memory.WorkingMemory do
     "## Active Goals\n\n#{goal_list}" |> String.trim()
   end
 
-  defp format_thoughts(thoughts) do
+  defp format_thoughts(thoughts, opts) do
+    temporal = Keyword.get(opts, :temporal, true)
+
+    if temporal and Code.ensure_loaded?(Arbor.Common.TemporalGrouping) do
+      format_thoughts_temporal(thoughts)
+    else
+      format_thoughts_flat(thoughts)
+    end
+  end
+
+  defp format_thoughts_flat(thoughts) do
     thought_list = Enum.map_join(thoughts, "\n", fn t -> "- #{thought_content(t)}" end)
     "## Recent Thoughts\n\n#{thought_list}" |> String.trim()
+  end
+
+  defp format_thoughts_temporal(thoughts) do
+    alias Arbor.Common.TemporalGrouping
+
+    extract_fn = fn thought ->
+      obs_dt = Map.get(thought, :timestamp)
+      ref_dt = Map.get(thought, :referenced_date)
+      {obs_dt, ref_dt}
+    end
+
+    format_fn = fn thought, annotation ->
+      content = thought_content(thought)
+
+      if annotation == "" do
+        "- #{content}"
+      else
+        "- #{annotation} #{content}"
+      end
+    end
+
+    grouped = TemporalGrouping.group_by_time(thoughts, extract_fn)
+
+    if grouped == [] do
+      format_thoughts_flat(thoughts)
+    else
+      body = TemporalGrouping.format_grouped(grouped, extract_fn, format_fn)
+      "## Recent Thoughts\n\n#{body}" |> String.trim()
+    end
   end
 
   defp format_concerns(concerns) do
@@ -1004,7 +1063,14 @@ defmodule Arbor.Memory.WorkingMemory do
     %{"content" => str, "timestamp" => nil, "cached_tokens" => 0}
   end
 
-  defp serialize_goal(%{id: id, description: desc, type: type, priority: priority, progress: progress, added_at: added_at}) do
+  defp serialize_goal(%{
+         id: id,
+         description: desc,
+         type: type,
+         priority: priority,
+         progress: progress,
+         added_at: added_at
+       }) do
     %{
       "id" => id,
       "description" => desc,
@@ -1089,14 +1155,20 @@ defmodule Arbor.Memory.WorkingMemory do
   defp serialize_token_spec(n) when is_integer(n), do: n
   defp serialize_token_spec({:percentage, pct}), do: %{"type" => "percentage", "value" => pct}
   defp serialize_token_spec({:fixed, n}), do: %{"type" => "fixed", "value" => n}
-  defp serialize_token_spec({:min_max, min, max, pct}), do: %{"type" => "min_max", "min" => min, "max" => max, "value" => pct}
+
+  defp serialize_token_spec({:min_max, min, max, pct}),
+    do: %{"type" => "min_max", "min" => min, "max" => max, "value" => pct}
+
   defp serialize_token_spec(other), do: other
 
   defp deserialize_token_spec(nil), do: nil
   defp deserialize_token_spec(n) when is_integer(n), do: n
   defp deserialize_token_spec(%{"type" => "percentage", "value" => pct}), do: {:percentage, pct}
   defp deserialize_token_spec(%{"type" => "fixed", "value" => n}), do: {:fixed, n}
-  defp deserialize_token_spec(%{"type" => "min_max", "min" => min, "max" => max, "value" => pct}), do: {:min_max, min, max, pct}
+
+  defp deserialize_token_spec(%{"type" => "min_max", "min" => min, "max" => max, "value" => pct}),
+    do: {:min_max, min, max, pct}
+
   defp deserialize_token_spec(other), do: other
 
   defp serialize_datetime(nil), do: nil
@@ -1104,16 +1176,19 @@ defmodule Arbor.Memory.WorkingMemory do
 
   defp parse_datetime(nil), do: nil
   defp parse_datetime(%DateTime{} = dt), do: dt
+
   defp parse_datetime(iso_string) when is_binary(iso_string) do
     case DateTime.from_iso8601(iso_string) do
       {:ok, dt, _offset} -> dt
       _ -> nil
     end
   end
+
   defp parse_datetime(_), do: nil
 
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
+
   defp atomize(s) when is_binary(s) do
     case SafeAtom.to_existing(s) do
       {:ok, atom} -> atom
@@ -1191,14 +1266,17 @@ defmodule Arbor.Memory.WorkingMemory do
   defp apply_goal_by_event_type(et, goal, wm) when et in [:added, "added"],
     do: add_goal(wm, goal)
 
-  defp apply_goal_by_event_type(et, goal, wm) when et in [:achieved, "achieved", :failed, "failed"],
-    do: remove_goal(wm, goal[:id] || goal["id"])
+  defp apply_goal_by_event_type(et, goal, wm)
+       when et in [:achieved, "achieved", :failed, "failed"],
+       do: remove_goal(wm, goal[:id] || goal["id"])
 
   defp apply_goal_by_event_type(_et, goal, wm),
     do: add_goal(wm, goal)
 
   defp apply_thought_event(data, wm) do
-    content = data[:content] || data["content"] || data[:thought_preview] || data["thought_preview"]
+    content =
+      data[:content] || data["content"] || data[:thought_preview] || data["thought_preview"]
+
     if content, do: add_thought(wm, content), else: wm
   end
 

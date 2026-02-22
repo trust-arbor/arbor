@@ -143,4 +143,40 @@ defmodule Arbor.Common.Time do
   end
 
   def duration_ms(_), do: "-"
+
+  @doc """
+  Format a datetime as a prompt annotation.
+
+  For today: `[HH:MM]`
+  For other days: `[Feb 18 14:30]`
+
+  ## Examples
+
+      iex> today = DateTime.utc_now()
+      iex> Arbor.Common.Time.prompt_annotation(today, today)
+      "[" <> Calendar.strftime(today, "%H:%M") <> "]"
+  """
+  @spec prompt_annotation(DateTime.t() | nil, DateTime.t()) :: String.t()
+  def prompt_annotation(nil, _now), do: ""
+
+  def prompt_annotation(%DateTime{} = dt, %DateTime{} = now) do
+    if Date.compare(DateTime.to_date(dt), DateTime.to_date(now)) == :eq do
+      "[#{Calendar.strftime(dt, "%H:%M")}]"
+    else
+      "[#{month_day(dt)} #{Calendar.strftime(dt, "%H:%M")}]"
+    end
+  end
+
+  @doc """
+  Format a datetime as short month-day string.
+
+  ## Examples
+
+      iex> Arbor.Common.Time.month_day(~U[2026-02-18 14:30:00Z])
+      "Feb 18"
+  """
+  @spec month_day(DateTime.t() | Date.t() | nil) :: String.t()
+  def month_day(nil), do: ""
+  def month_day(%DateTime{} = dt), do: Calendar.strftime(dt, "%b %-d")
+  def month_day(%Date{} = d), do: Calendar.strftime(d, "%b %-d")
 end

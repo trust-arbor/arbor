@@ -27,7 +27,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   - `:min_relevance` - Minimum relevance threshold
   - `:limit` - Maximum results
   """
-  @spec recall(KnowledgeGraph.t(), String.t(), keyword()) :: {:ok, [KnowledgeGraph.knowledge_node()]}
+  @spec recall(KnowledgeGraph.t(), String.t(), keyword()) ::
+          {:ok, [KnowledgeGraph.knowledge_node()]}
   def recall(graph, query, opts \\ []) do
     type_filter = get_type_filter(opts)
     min_relevance = Keyword.get(opts, :min_relevance, 0.0)
@@ -51,7 +52,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   @doc """
   Find a node by its content (exact match, case-insensitive).
   """
-  @spec find_by_name(KnowledgeGraph.t(), String.t()) :: {:ok, KnowledgeGraph.node_id()} | {:error, :not_found}
+  @spec find_by_name(KnowledgeGraph.t(), String.t()) ::
+          {:ok, KnowledgeGraph.node_id()} | {:error, :not_found}
   def find_by_name(graph, name) do
     name_lower = String.downcase(name)
 
@@ -96,7 +98,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   - `:types` - Filter by node types (list of atoms)
   - `:min_relevance` - Minimum node relevance threshold (default 0.0)
   """
-  @spec semantic_search(KnowledgeGraph.t(), String.t(), keyword()) :: {:ok, [KnowledgeGraph.knowledge_node()]}
+  @spec semantic_search(KnowledgeGraph.t(), String.t(), keyword()) ::
+          {:ok, [KnowledgeGraph.knowledge_node()]}
   def semantic_search(graph, query, opts \\ []) do
     limit = Keyword.get(opts, :limit, 10)
     types = Keyword.get(opts, :types)
@@ -142,7 +145,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   - `:min_boost` - Stop spreading when boost falls below this (default 0.05)
   - `:decay_factor` - Multiplier for boost at each hop (default 0.5)
   """
-  @spec cascade_recall(KnowledgeGraph.t(), KnowledgeGraph.node_id(), float(), keyword()) :: KnowledgeGraph.t()
+  @spec cascade_recall(KnowledgeGraph.t(), KnowledgeGraph.node_id(), float(), keyword()) ::
+          KnowledgeGraph.t()
   def cascade_recall(graph, node_id, boost_amount, opts \\ [])
       when is_number(boost_amount) do
     boost_amount = boost_amount / 1
@@ -150,7 +154,15 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
     min_boost = Keyword.get(opts, :min_boost, 0.05)
     decay_factor = Keyword.get(opts, :decay_factor, 0.5)
 
-    spread_activation(graph, [node_id], boost_amount, max_depth, min_boost, decay_factor, MapSet.new())
+    spread_activation(
+      graph,
+      [node_id],
+      boost_amount,
+      max_depth,
+      min_boost,
+      decay_factor,
+      MapSet.new()
+    )
   end
 
   # ============================================================================
@@ -192,7 +204,9 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   @doc """
   Alias for `list_by_type/2` (API compatibility).
   """
-  @spec find_by_type(KnowledgeGraph.t(), KnowledgeGraph.node_type()) :: [KnowledgeGraph.knowledge_node()]
+  @spec find_by_type(KnowledgeGraph.t(), KnowledgeGraph.node_type()) :: [
+          KnowledgeGraph.knowledge_node()
+        ]
   def find_by_type(graph, type), do: list_by_type(graph, type)
 
   @doc """
@@ -294,7 +308,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       node_values
       |> Enum.group_by(&flexible_get(&1, :type))
       |> Map.new(fn {type, nodes} ->
-        {type, Enum.reduce(nodes, 0, fn n, acc -> acc + (flexible_get(n, :cached_tokens) || 0) end)}
+        {type,
+         Enum.reduce(nodes, 0, fn n, acc -> acc + (flexible_get(n, :cached_tokens) || 0) end)}
       end)
 
     edges_by_relationship =
@@ -341,7 +356,9 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   @doc """
   List all nodes of a specific type.
   """
-  @spec list_by_type(KnowledgeGraph.t(), KnowledgeGraph.node_type()) :: [KnowledgeGraph.knowledge_node()]
+  @spec list_by_type(KnowledgeGraph.t(), KnowledgeGraph.node_type()) :: [
+          KnowledgeGraph.knowledge_node()
+        ]
   def list_by_type(graph, type) do
     graph.nodes
     |> Map.values()
@@ -352,7 +369,9 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   @doc """
   Get nodes with lowest relevance (candidates for pruning).
   """
-  @spec lowest_relevance(KnowledgeGraph.t(), non_neg_integer()) :: [KnowledgeGraph.knowledge_node()]
+  @spec lowest_relevance(KnowledgeGraph.t(), non_neg_integer()) :: [
+          KnowledgeGraph.knowledge_node()
+        ]
   def lowest_relevance(graph, count \\ 10) do
     graph.nodes
     |> Map.values()
@@ -410,7 +429,15 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
         if new_total > max_tokens do
           {acc, total_used, type_used}
         else
-          maybe_add_within_type_budget(node, tokens, type_limits, acc, total_used, new_total, type_used)
+          maybe_add_within_type_budget(
+            node,
+            tokens,
+            type_limits,
+            acc,
+            total_used,
+            new_total,
+            type_used
+          )
         end
       end)
 
@@ -433,7 +460,15 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   defp matches_type?(node, {:single, type}), do: node.type == type
   defp matches_type?(node, {:multiple, types}), do: node.type in types
 
-  defp maybe_add_within_type_budget(node, tokens, type_limits, acc, total_used, new_total, type_used) do
+  defp maybe_add_within_type_budget(
+         node,
+         tokens,
+         type_limits,
+         acc,
+         total_used,
+         new_total,
+         type_used
+       ) do
     type_budget = Map.get(type_limits, node.type)
     current_type_used = Map.get(type_used, node.type, 0)
 
@@ -459,7 +494,16 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
         end)
 
       new_visited = Enum.reduce(frontier, visited, &MapSet.put(&2, &1))
-      spread_activation(graph, Enum.uniq(next_frontier), boost * decay_factor, depth - 1, min_boost, decay_factor, new_visited)
+
+      spread_activation(
+        graph,
+        Enum.uniq(next_frontier),
+        boost * decay_factor,
+        depth - 1,
+        min_boost,
+        decay_factor,
+        new_visited
+      )
     end
   end
 
@@ -494,6 +538,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   defp format_node_prompt_line(graph, node, include_rels) do
     pct = round(node.relevance * 100)
     line = "    - [#{node.type}] #{node.content} (#{pct}% relevance)"
+    line = maybe_append_date_annotation(line, node)
 
     if include_rels do
       append_relationships(graph, node.id, line)
@@ -501,6 +546,58 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       line
     end
   end
+
+  # Append a date tag for nodes older than today. Skip [Today] noise.
+  # Shows referenced_date when available and different from inserted_at date.
+  defp maybe_append_date_annotation(line, node) do
+    inserted_at = flexible_get(node, :inserted_at) || flexible_get(node, :created_at)
+    referenced_date = flexible_get(node, :referenced_date)
+
+    cond do
+      is_nil(inserted_at) ->
+        line
+
+      same_day_as_today?(inserted_at) and is_nil(referenced_date) ->
+        line
+
+      not is_nil(referenced_date) ->
+        ref_str = format_date_short(referenced_date)
+        ins_str = format_date_short(inserted_at)
+
+        if ref_str != ins_str and ref_str != "" do
+          "#{line} [#{ins_str}, ref: #{ref_str}]"
+        else
+          "#{line} [#{ins_str}]"
+        end
+
+      true ->
+        "#{line} [#{format_date_short(inserted_at)}]"
+    end
+  end
+
+  defp same_day_as_today?(%DateTime{} = dt) do
+    Date.compare(DateTime.to_date(dt), Date.utc_today()) == :eq
+  end
+
+  defp same_day_as_today?(_), do: false
+
+  defp format_date_short(%DateTime{} = dt) do
+    if Code.ensure_loaded?(Arbor.Common.Time) do
+      Arbor.Common.Time.month_day(dt)
+    else
+      Calendar.strftime(dt, "%b %-d")
+    end
+  end
+
+  defp format_date_short(%Date{} = d) do
+    if Code.ensure_loaded?(Arbor.Common.Time) do
+      Arbor.Common.Time.month_day(d)
+    else
+      Calendar.strftime(d, "%b %-d")
+    end
+  end
+
+  defp format_date_short(_), do: ""
 
   defp append_relationships(graph, node_id, line) do
     rels = format_node_relationships(graph, node_id)
