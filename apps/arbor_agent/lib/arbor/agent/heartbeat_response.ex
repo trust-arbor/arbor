@@ -14,7 +14,7 @@ defmodule Arbor.Agent.HeartbeatResponse do
   @type parsed :: %{
           thinking: String.t(),
           actions: [map()],
-          memory_notes: [String.t()],
+          memory_notes: [String.t() | map()],
           concerns: [String.t()],
           curiosity: [String.t()],
           goal_updates: [map()],
@@ -131,7 +131,28 @@ defmodule Arbor.Agent.HeartbeatResponse do
     end
   end
 
-  defp parse_memory_notes(data), do: parse_string_list(data, "memory_notes")
+  defp parse_memory_notes(data) do
+    case Map.get(data, "memory_notes") do
+      items when is_list(items) ->
+        items |> Enum.map(&normalize_memory_note/1) |> Enum.reject(&is_nil/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp normalize_memory_note(note) when is_binary(note) and note != "", do: note
+
+  defp normalize_memory_note(%{"text" => text} = note)
+       when is_binary(text) and text != "" do
+    case Map.get(note, "referenced_date") do
+      nil -> text
+      date_str when is_binary(date_str) -> %{"text" => text, "referenced_date" => date_str}
+      _ -> text
+    end
+  end
+
+  defp normalize_memory_note(_), do: nil
 
   defp parse_string_list(data, key) do
     case Map.get(data, key) do

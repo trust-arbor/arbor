@@ -624,21 +624,21 @@ defmodule Arbor.Orchestrator.Session.Builders do
       thoughts
       |> List.wrap()
       |> Enum.map(fn t ->
-        text = if is_binary(t), do: t, else: Map.get(t, "text", inspect(t))
-        %{type: :thought, content: text, metadata: %{}}
+        {text, metadata} = extract_note_with_metadata(t)
+        %{type: :thought, content: text, metadata: metadata}
       end)
       |> Enum.reject(&internal_monologue?/1)
 
     concern_props =
       Enum.map(List.wrap(concerns), fn c ->
-        text = if is_binary(c), do: c, else: Map.get(c, "text", inspect(c))
-        %{type: :concern, content: text, metadata: %{}}
+        {text, metadata} = extract_note_with_metadata(c)
+        %{type: :concern, content: text, metadata: metadata}
       end)
 
     curiosity_props =
       Enum.map(List.wrap(curiosities), fn c ->
-        text = if is_binary(c), do: c, else: Map.get(c, "text", inspect(c))
-        %{type: :curiosity, content: text, metadata: %{}}
+        {text, metadata} = extract_note_with_metadata(c)
+        %{type: :curiosity, content: text, metadata: metadata}
       end)
 
     wm_proposals = thought_props ++ concern_props ++ curiosity_props
@@ -652,6 +652,20 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp internal_monologue?(%{content: text}) do
     Enum.any?(@intention_prefixes, &String.starts_with?(text, &1))
   end
+
+  defp extract_note_with_metadata(note) when is_binary(note), do: {note, %{}}
+
+  defp extract_note_with_metadata(%{"text" => text} = note) when is_binary(text) do
+    metadata =
+      case Map.get(note, "referenced_date") do
+        date_str when is_binary(date_str) -> %{referenced_date: date_str}
+        _ -> %{}
+      end
+
+    {text, metadata}
+  end
+
+  defp extract_note_with_metadata(other), do: {inspect(other), %{}}
 
   defp maybe_add_decomposition_proposals(proposals, result_ctx) do
     case Map.get(result_ctx, "session.decompositions", []) do

@@ -102,7 +102,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         {"type": "action_name", "params": {}, "reasoning": "why this action"}
       ],
       "memory_notes": [
-        "observations or facts worth remembering"
+        "observations or facts worth remembering",
+        {"text": "the deploy happened yesterday", "referenced_date": "2026-02-20"}
       ],
       "concerns": [
         "things that worry you or seem problematic"
@@ -135,6 +136,10 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     Use new_goals to suggest goals you want to pursue. Each needs a description, priority, and success criteria.
     Use concerns to flag things that worry you — risks, blockers, uncertainties, or problems you've noticed.
     Use curiosity to note questions you want to explore or things that intrigue you about your situation.
+
+    When a memory note refers to a specific past or future date (not "right now"),
+    use the object form {"text": "...", "referenced_date": "YYYY-MM-DD"} to preserve
+    temporal context. Plain strings are fine for current observations.
 
     When pending proposals are shown, review them and decide whether to accept (integrate into
     your knowledge), reject (not accurate or useful), or defer (revisit later). Only include
