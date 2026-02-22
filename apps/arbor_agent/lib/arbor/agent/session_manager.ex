@@ -204,7 +204,8 @@ defmodule Arbor.Agent.SessionManager do
           llm_provider: Keyword.get(opts, :provider),
           llm_model: Keyword.get(opts, :model),
           system_prompt: Keyword.get(opts, :system_prompt),
-          tools: Keyword.get(opts, :tools, [])
+          tools: Keyword.get(opts, :tools, []),
+          signer: Keyword.get(opts, :signer)
         ]
       ])
     else

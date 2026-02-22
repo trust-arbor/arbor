@@ -85,6 +85,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     llm_model = Keyword.get(opts, :llm_model)
     tools = Keyword.get(opts, :tools, [])
     system_prompt = Keyword.get(opts, :system_prompt)
+    signer = Keyword.get(opts, :signer)
     config = Keyword.get(opts, :config, %{})
 
     # Resolve LLM client at build time so misconfiguration is caught early.
@@ -94,7 +95,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
     %{
       llm_call: build_llm_call(client, llm_provider, llm_model, tools, system_prompt, config),
-      tool_dispatch: build_tool_dispatch(agent_id, trust_tier),
+      tool_dispatch: build_tool_dispatch(agent_id, trust_tier, signer),
       memory_recall: build_memory_recall(),
       recall_goals: build_recall_goals(),
       recall_intents: build_recall_intents(),
@@ -288,26 +289,34 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   # SessionHandler calls: tool_dispatch.(tool_calls, agent_id)
   # Returns: {:ok, results} where results is a list of result strings.
 
-  defp build_tool_dispatch(agent_id, trust_tier) do
+  defp build_tool_dispatch(agent_id, trust_tier, signer) do
     fn tool_calls, call_agent_id ->
       effective_agent_id = call_agent_id || agent_id
 
       try do
-        dispatch_tools(tool_calls, effective_agent_id, trust_tier)
+        dispatch_tools(tool_calls, effective_agent_id, trust_tier, signer)
       catch
         :exit, reason -> {:error, {:tool_dispatch_exit, reason}}
       end
     end
   end
 
-  defp dispatch_tools(tool_calls, agent_id, trust_tier) do
-    results = Enum.map(tool_calls, &dispatch_single_tool(&1, agent_id, trust_tier))
+  defp dispatch_tools(tool_calls, agent_id, trust_tier, signer) do
+    results = Enum.map(tool_calls, &dispatch_single_tool(&1, agent_id, trust_tier, signer))
     {:ok, results}
   end
 
-  defp dispatch_single_tool(call, agent_id, _trust_tier) do
+  defp dispatch_single_tool(call, agent_id, _trust_tier, signer) do
     name = Map.get(call, "name") || Map.get(call, :name, "unknown")
     args = Map.get(call, "arguments") || Map.get(call, :arguments, %{})
+
+    # Sign the tool call if a signer function is available.
+    # Each tool call gets a fresh SignedRequest (unique nonce + timestamp).
+    signed_request = sign_tool_call(signer, name)
+
+    exec_opts =
+      [agent_id: agent_id]
+      |> maybe_add_signed_request(signed_request)
 
     # Route through ArborActionsExecutor which handles:
     # - name → action module resolution
@@ -316,7 +325,7 @@ defmodule Arbor.Orchestrator.Session.Adapters do
     case bridge(
            Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor,
            :execute,
-           [name, args, ".", [agent_id: agent_id]],
+           [name, args, ".", exec_opts],
            nil
          ) do
       {:ok, result} when is_binary(result) -> result
@@ -325,6 +334,25 @@ defmodule Arbor.Orchestrator.Session.Adapters do
       nil -> "tool_dispatch_unavailable: #{name} called with #{inspect(args)}"
     end
   end
+
+  # Sign a tool call with the resource URI as the payload.
+  # Returns a SignedRequest struct or nil if no signer is available.
+  # Mirrors the pattern in UnifiedLLM.ToolLoop.
+  defp sign_tool_call(nil, _tool_name), do: nil
+
+  defp sign_tool_call(signer, tool_name) when is_function(signer, 1) do
+    resource = "arbor://actions/execute/#{tool_name}"
+
+    case signer.(resource) do
+      {:ok, signed_request} -> signed_request
+      {:error, _} -> nil
+    end
+  end
+
+  defp maybe_add_signed_request(opts, nil), do: opts
+
+  defp maybe_add_signed_request(opts, signed_request),
+    do: [{:signed_request, signed_request} | opts]
 
   # ── Memory Recall ───────────────────────────────────────────────────
   #

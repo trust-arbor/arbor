@@ -323,12 +323,21 @@ defmodule Arbor.Agent.Lifecycle do
       # Extract context_management from template metadata if available
       template_meta = extract_template_metadata(profile)
 
+      # Build signer function for identity-verified tool calls.
+      # The signer produces fresh SignedRequests for each tool invocation.
+      signer =
+        case build_signer(agent_id) do
+          {:ok, signer_fn} -> signer_fn
+          {:error, _} -> nil
+        end
+
       session_opts =
         Keyword.merge(opts,
           trust_tier: profile.trust_tier,
           tools: tools,
           system_prompt: system_prompt,
-          start_heartbeat: true
+          start_heartbeat: true,
+          signer: signer
         )
 
       # Merge template-derived options (context_management, model, provider)
