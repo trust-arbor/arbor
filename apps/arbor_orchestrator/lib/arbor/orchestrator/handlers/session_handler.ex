@@ -239,12 +239,39 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
       tool_calls = Context.get(ctx, "llm.tool_calls", [])
       agent_id = Context.get(ctx, "session.agent_id")
 
+      start_time = System.monotonic_time(:millisecond)
+
       try do
         case tool_dispatch.(tool_calls, agent_id) do
           {:ok, results} ->
+            duration_ms = System.monotonic_time(:millisecond) - start_time
             messages = Context.get(ctx, "session.messages", [])
             updated = messages ++ Enum.map(results, &%{"role" => "tool", "content" => &1})
-            ok(%{"session.tool_results" => results, "session.messages" => updated})
+
+            # Accumulate tool history across loop iterations
+            existing_history = Context.get(ctx, "session.tool_history", [])
+            round_count = Context.get(ctx, "session.tool_round_count", 0)
+            now = DateTime.to_iso8601(DateTime.utc_now())
+
+            new_entries =
+              tool_calls
+              |> Enum.zip(List.wrap(results))
+              |> Enum.map(fn {call, result} ->
+                %{
+                  "name" => Map.get(call, :name) || Map.get(call, "name", "unknown"),
+                  "args" => Map.get(call, :args) || Map.get(call, "args", %{}),
+                  "result" => truncate_tool_result(result),
+                  "duration_ms" => duration_ms,
+                  "timestamp" => now
+                }
+              end)
+
+            ok(%{
+              "session.tool_results" => results,
+              "session.messages" => updated,
+              "session.tool_history" => existing_history ++ new_entries,
+              "session.tool_round_count" => round_count + 1
+            })
 
           {:error, reason} ->
             fail("tool_dispatch: #{inspect(reason)}")
@@ -845,6 +872,13 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
   end
 
   defp truncate_for_prompt(text), do: text
+
+  defp truncate_tool_result(result) when is_binary(result) and byte_size(result) > 500 do
+    String.slice(result, 0, 497) <> "..."
+  end
+
+  defp truncate_tool_result(result) when is_binary(result), do: result
+  defp truncate_tool_result(result), do: inspect(result, limit: 50, printable_limit: 500)
 
   # Inject timestamps into message content for LLM temporal awareness.
   # Prepends "[HH:MM:SS] " to content for messages that carry a timestamp field,
