@@ -58,6 +58,7 @@ defmodule Arbor.Contracts.Memory.Goal do
     field :notes, [String.t()], default: []
     field :assigned_by, atom() | nil, default: nil
     field :metadata, map(), default: %{}
+    field :referenced_date, DateTime.t() | nil, default: nil
   end
 
   @doc """
@@ -79,7 +80,8 @@ defmodule Arbor.Contracts.Memory.Goal do
       success_criteria: opts[:success_criteria],
       notes: opts[:notes] || [],
       assigned_by: opts[:assigned_by],
-      metadata: opts[:metadata] || %{}
+      metadata: opts[:metadata] || %{},
+      referenced_date: opts[:referenced_date]
     }
   end
 
@@ -219,6 +221,7 @@ defimpl Jason.Encoder, for: Arbor.Contracts.Memory.Goal do
     |> Map.update(:created_at, nil, &datetime_to_string/1)
     |> Map.update(:achieved_at, nil, &datetime_to_string/1)
     |> Map.update(:deadline, nil, &datetime_to_string/1)
+    |> Map.update(:referenced_date, nil, &datetime_to_string/1)
     |> Jason.Encode.map(opts)
   end
 

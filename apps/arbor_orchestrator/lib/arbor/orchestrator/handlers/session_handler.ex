@@ -311,7 +311,7 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
           "session.actions" => validated_list(parsed, "actions", &valid_action?/1),
           "session.goal_updates" => validated_list(parsed, "goal_updates", &is_map/1),
           "session.new_goals" => validated_list(parsed, "new_goals", &is_map/1),
-          "session.memory_notes" => validated_list(parsed, "memory_notes", &is_binary/1),
+          "session.memory_notes" => validated_list(parsed, "memory_notes", &valid_memory_note?/1),
           "session.concerns" => validated_list(parsed, "concerns", &is_binary/1),
           "session.curiosity" => validated_list(parsed, "curiosity", &is_binary/1),
           "session.decompositions" => validated_list(parsed, "decompositions", &is_map/1),
@@ -586,6 +586,10 @@ defmodule Arbor.Orchestrator.Handlers.SessionHandler do
 
   defp valid_action?(%{"type" => type}) when is_binary(type), do: true
   defp valid_action?(_), do: false
+
+  defp valid_memory_note?(note) when is_binary(note), do: true
+  defp valid_memory_note?(%{"text" => text}) when is_binary(text), do: true
+  defp valid_memory_note?(_), do: false
 
   defp valid_proposal_decision?(%{"proposal_id" => id, "decision" => d})
        when is_binary(id) and d in ["accept", "reject", "defer"],

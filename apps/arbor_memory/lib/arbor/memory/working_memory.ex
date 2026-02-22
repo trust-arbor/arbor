@@ -70,7 +70,8 @@ defmodule Arbor.Memory.WorkingMemory do
   @type thought :: %{
           content: String.t(),
           timestamp: DateTime.t(),
-          cached_tokens: non_neg_integer()
+          cached_tokens: non_neg_integer(),
+          referenced_date: DateTime.t() | nil
         }
 
   @type goal :: %{
@@ -798,14 +799,16 @@ defmodule Arbor.Memory.WorkingMemory do
     %{
       content: thought,
       timestamp: DateTime.utc_now(),
-      cached_tokens: TokenBudget.estimate_tokens(thought)
+      cached_tokens: TokenBudget.estimate_tokens(thought),
+      referenced_date: nil
     }
   end
 
   defp normalize_thought(%{content: _} = thought) do
     Map.merge(%{
       timestamp: DateTime.utc_now(),
-      cached_tokens: TokenBudget.estimate_tokens(thought[:content] || "")
+      cached_tokens: TokenBudget.estimate_tokens(thought[:content] || ""),
+      referenced_date: nil
     }, thought)
   end
 
@@ -813,7 +816,8 @@ defmodule Arbor.Memory.WorkingMemory do
     %{
       content: content,
       timestamp: parse_datetime(thought["timestamp"]) || DateTime.utc_now(),
-      cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(content)
+      cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(content),
+      referenced_date: parse_datetime(thought["referenced_date"])
     }
   end
 
@@ -983,12 +987,17 @@ defmodule Arbor.Memory.WorkingMemory do
   # Private Helpers — Serialization
   # ============================================================================
 
-  defp serialize_thought(%{content: content, timestamp: ts, cached_tokens: tokens}) do
-    %{
+  defp serialize_thought(%{content: content, timestamp: ts, cached_tokens: tokens} = thought) do
+    base = %{
       "content" => content,
       "timestamp" => serialize_datetime(ts),
       "cached_tokens" => tokens
     }
+
+    case Map.get(thought, :referenced_date) do
+      nil -> base
+      rd -> Map.put(base, "referenced_date", serialize_datetime(rd))
+    end
   end
 
   defp serialize_thought(str) when is_binary(str) do
@@ -1015,7 +1024,8 @@ defmodule Arbor.Memory.WorkingMemory do
     %{
       content: str,
       timestamp: DateTime.utc_now(),
-      cached_tokens: TokenBudget.estimate_tokens(str)
+      cached_tokens: TokenBudget.estimate_tokens(str),
+      referenced_date: nil
     }
   end
 
@@ -1023,7 +1033,8 @@ defmodule Arbor.Memory.WorkingMemory do
     %{
       content: content,
       timestamp: parse_datetime(data["timestamp"]) || DateTime.utc_now(),
-      cached_tokens: data["cached_tokens"] || TokenBudget.estimate_tokens(content)
+      cached_tokens: data["cached_tokens"] || TokenBudget.estimate_tokens(content),
+      referenced_date: parse_datetime(data["referenced_date"])
     }
   end
 

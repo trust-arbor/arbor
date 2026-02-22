@@ -89,7 +89,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
           metadata: map(),
           pinned: boolean(),
           embedding: [float()] | nil,
-          cached_tokens: non_neg_integer()
+          cached_tokens: non_neg_integer(),
+          referenced_date: DateTime.t() | nil
         }
 
   @type edge :: %{
@@ -272,7 +273,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
             metadata: metadata,
             pinned: Map.get(node_data, :pinned, false),
             embedding: embedding,
-            cached_tokens: TokenBudget.estimate_tokens(text)
+            cached_tokens: TokenBudget.estimate_tokens(text),
+            referenced_date: Map.get(node_data, :referenced_date)
           }
 
           new_graph =
@@ -1020,6 +1022,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
     |> Map.put_new(:pinned, false)
     |> Map.put_new(:access_count, 0)
     |> Map.put_new(:metadata, %{})
+    |> Map.put_new(:referenced_date, nil)
   end
 
   # Ensure deserialized edges have all fields with defaults
