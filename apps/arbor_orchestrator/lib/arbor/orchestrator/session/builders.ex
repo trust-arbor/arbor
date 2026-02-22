@@ -122,10 +122,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
           Arbor.Orchestrator.Session.t()
   def apply_turn_result(state, message, %{context: result_ctx}) do
     response = Map.get(result_ctx, "session.response", "")
-    now = DateTime.to_iso8601(DateTime.utc_now())
+    now = DateTime.utc_now()
+    now_iso = DateTime.to_iso8601(now)
 
-    user_msg = %{"role" => "user", "content" => normalize_message(message), "timestamp" => now}
-    assistant_msg = %{"role" => "assistant", "content" => response, "timestamp" => now}
+    user_msg = %{
+      "role" => "user",
+      "content" => normalize_message(message),
+      "timestamp" => now_iso
+    }
+
+    assistant_msg = %{"role" => "assistant", "content" => response, "timestamp" => now_iso}
 
     updated_messages =
       case Map.get(result_ctx, "session.messages") do
@@ -146,6 +152,9 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     # Append messages to compactor and run compaction
     compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
+
+    # Persist turn entries to session store (async)
+    persist_turn_entries(state, now, user_msg, assistant_msg, result_ctx)
 
     state = %{
       state
@@ -177,6 +186,9 @@ defmodule Arbor.Orchestrator.Session.Builders do
     if created > 0 do
       emit_notification_percept(agent_id, created, proposals)
     end
+
+    # Persist heartbeat entry to session store (async)
+    persist_heartbeat_entry(state, result_ctx)
 
     # Return state UNMODIFIED — action cycle will review proposals
     state
@@ -1034,4 +1046,141 @@ defmodule Arbor.Orchestrator.Session.Builders do
     Code.ensure_loaded?(Arbor.Memory) and
       function_exported?(Arbor.Memory, function, arity)
   end
+
+  # ── Session entry persistence (runtime bridge) ─────────────────────
+
+  @session_store Arbor.Persistence.SessionStore
+
+  defp persist_turn_entries(state, timestamp, user_msg, assistant_msg, result_ctx) do
+    persist_entry = get_persist_entry_fn(state)
+
+    if persist_entry do
+      Task.start(fn ->
+        try do
+          # Persist user message entry
+          persist_entry.(%{
+            entry_type: "user",
+            role: "user",
+            content: wrap_content(user_msg["content"]),
+            timestamp: timestamp
+          })
+
+          # Build assistant content array (may include tool_use blocks)
+          tool_calls = Map.get(result_ctx, "session.tool_calls", [])
+
+          assistant_content =
+            build_assistant_content(assistant_msg["content"], tool_calls)
+
+          persist_entry.(%{
+            entry_type: "assistant",
+            role: "assistant",
+            content: assistant_content,
+            model: Map.get(result_ctx, "llm.model"),
+            stop_reason: Map.get(result_ctx, "llm.stop_reason"),
+            token_usage: Map.get(result_ctx, "llm.usage"),
+            timestamp: timestamp,
+            metadata: %{
+              "turn_count" => get_turn_count(state) + 1
+            }
+          })
+        rescue
+          e -> Logger.warning("[Session] Turn entry persistence failed: #{Exception.message(e)}")
+        end
+      end)
+    end
+  end
+
+  defp persist_heartbeat_entry(state, result_ctx) do
+    persist_entry = get_persist_entry_fn(state)
+
+    if persist_entry do
+      Task.start(fn ->
+        try do
+          cognitive_mode = Map.get(result_ctx, "session.cognitive_mode", "reflection")
+          memory_notes = Map.get(result_ctx, "session.memory_notes", [])
+          goal_updates = Map.get(result_ctx, "session.goal_updates", [])
+          new_goals = Map.get(result_ctx, "session.new_goals", [])
+          actions = Map.get(result_ctx, "session.actions", [])
+
+          persist_entry.(%{
+            entry_type: "heartbeat",
+            role: "assistant",
+            content: wrap_content(Map.get(result_ctx, "llm.content", "")),
+            model: Map.get(result_ctx, "llm.model"),
+            timestamp: DateTime.utc_now(),
+            metadata: %{
+              "cognitive_mode" => cognitive_mode,
+              "memory_notes_count" => length(List.wrap(memory_notes)),
+              "goal_updates_count" =>
+                length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
+              "actions_count" => length(List.wrap(actions))
+            }
+          })
+        rescue
+          e ->
+            Logger.warning(
+              "[Session] Heartbeat entry persistence failed: #{Exception.message(e)}"
+            )
+        end
+      end)
+    end
+  end
+
+  defp get_persist_entry_fn(state) do
+    # Check adapter first, then fall back to runtime bridge
+    case get_in(state, [Access.key(:adapters), Access.key(:persist_entry)]) do
+      fun when is_function(fun, 1) ->
+        fun
+
+      _ ->
+        if session_store_available?() do
+          # Resolve session UUID lazily
+          case get_session_uuid(state.session_id) do
+            nil -> nil
+            uuid -> fn attrs -> apply(@session_store, :append_entry, [uuid, attrs]) end
+          end
+        end
+    end
+  end
+
+  defp get_session_uuid(session_id) do
+    case apply(@session_store, :get_session, [session_id]) do
+      {:ok, session} -> session.id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp session_store_available? do
+    Code.ensure_loaded?(@session_store) and
+      function_exported?(@session_store, :available?, 0) and
+      apply(@session_store, :available?, [])
+  end
+
+  # Wrap a text string into a structured content array
+  defp wrap_content(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
+  defp wrap_content(content) when is_list(content), do: content
+  defp wrap_content(_), do: []
+
+  # Build assistant content array with optional tool_use blocks
+  defp build_assistant_content(text, tool_calls) when is_list(tool_calls) and tool_calls != [] do
+    text_block = if text && text != "", do: [%{"type" => "text", "text" => text}], else: []
+
+    tool_blocks =
+      Enum.map(tool_calls, fn tc ->
+        %{
+          "type" => "tool_use",
+          "id" => Map.get(tc, "id", Map.get(tc, :id)),
+          "name" => Map.get(tc, "name", Map.get(tc, :name)),
+          "input" => Map.get(tc, "input", Map.get(tc, :input, %{}))
+        }
+      end)
+
+    text_block ++ tool_blocks
+  end
+
+  defp build_assistant_content(text, _), do: wrap_content(text)
 end

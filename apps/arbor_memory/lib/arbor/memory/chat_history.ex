@@ -2,21 +2,22 @@ defmodule Arbor.Memory.ChatHistory do
   @moduledoc """
   GenServer-based storage for chat message history per agent.
 
-  Provides append-only message storage with automatic persistence and
-  configurable message limits. Messages are stored in ETS for fast access
-  and automatically persisted to durable storage.
+  Provides append-only message storage with ETS caching and durable persistence
+  via ChannelStore (Postgres). Each agent gets a DM channel for their chat history.
 
   ## Storage
 
   Messages are kept in a named ETS table (`:arbor_chat_history`) keyed by
-  `{agent_id, message_id}`. This allows efficient per-agent queries while
-  maintaining O(1) lookups by ID.
+  `{agent_id, message_id}` for fast reads. Writes go to both ETS and the
+  ChannelStore backend (Postgres `channel_messages` table).
+
+  On init, messages are loaded from ChannelStore into ETS. Falls back to
+  the legacy MemoryStore (`records` table) for backwards compatibility.
 
   ## Message Cap
 
   Each agent's history is capped at 500 messages. When the limit is exceeded,
-  the oldest messages (by timestamp) are automatically removed from both ETS
-  and durable storage.
+  the oldest messages (by timestamp) are automatically removed from ETS.
 
   ## Signals
 
@@ -33,6 +34,7 @@ defmodule Arbor.Memory.ChatHistory do
 
   @ets_table :arbor_chat_history
   @max_messages 500
+  @channel_store Arbor.Persistence.ChannelStore
 
   # ============================================================================
   # Client API
@@ -50,7 +52,7 @@ defmodule Arbor.Memory.ChatHistory do
   Append a message to an agent's chat history.
 
   The message must be a map and will be assigned a unique ID if not present.
-  Automatically persists to durable storage and trims if over the message limit.
+  Automatically persists to ChannelStore and trims if over the message limit.
 
   ## Examples
 
@@ -64,7 +66,8 @@ defmodule Arbor.Memory.ChatHistory do
   def append(agent_id, message) when is_binary(agent_id) and is_map(message) do
     msg = Map.put_new(message, :id, generate_id())
     :ets.insert(@ets_table, {{agent_id, msg.id}, msg})
-    persist_message_async(agent_id, msg)
+
+    persist_to_channel_async(agent_id, msg)
 
     Signals.emit_chat_message_added(agent_id, msg.id)
     Logger.debug("Chat message added for #{agent_id}: #{msg.id}")
@@ -76,24 +79,18 @@ defmodule Arbor.Memory.ChatHistory do
   @doc """
   Load all messages for an agent, sorted by timestamp ascending.
 
-  Returns an empty list if no messages are found in ETS. Will attempt to
-  load from durable storage if ETS is empty.
+  Returns from ETS cache first, falling back to ChannelStore then legacy MemoryStore.
   """
   @spec load(String.t()) :: [map()]
   def load(agent_id) when is_binary(agent_id) do
     case :ets.match_object(@ets_table, {{agent_id, :_}, :_}) do
       [] ->
-        load_messages_from_postgres(agent_id)
+        load_from_durable(agent_id)
 
       entries ->
         entries
         |> Enum.map(fn {_key, msg} -> msg end)
-        |> Enum.sort(fn a, b ->
-          case {a[:timestamp], b[:timestamp]} do
-            {%DateTime{} = ta, %DateTime{} = tb} -> DateTime.compare(ta, tb) != :gt
-            _ -> true
-          end
-        end)
+        |> sort_by_timestamp()
     end
   end
 
@@ -124,7 +121,7 @@ defmodule Arbor.Memory.ChatHistory do
 
     all_messages =
       case :ets.match_object(@ets_table, {{agent_id, :_}, :_}) do
-        [] -> load_messages_from_postgres(agent_id)
+        [] -> load_from_durable(agent_id)
         entries -> Enum.map(entries, fn {_key, msg} -> msg end)
       end
 
@@ -167,7 +164,7 @@ defmodule Arbor.Memory.ChatHistory do
   @doc """
   Clear all messages for an agent.
 
-  Removes from both ETS and durable storage.
+  Removes from both ETS and legacy durable storage.
   """
   @spec clear(String.t()) :: :ok
   def clear(agent_id) when is_binary(agent_id) do
@@ -185,7 +182,7 @@ defmodule Arbor.Memory.ChatHistory do
   @impl true
   def init(_opts) do
     ensure_ets_table()
-    load_all_messages_from_postgres()
+    load_all_on_startup()
     {:ok, %{}}
   end
 
@@ -194,6 +191,7 @@ defmodule Arbor.Memory.ChatHistory do
   # ============================================================================
 
   defp filter_before_cursor(messages, nil), do: messages
+
   defp filter_before_cursor(messages, %{timestamp: %DateTime{} = cursor_ts}) do
     Enum.filter(messages, fn msg ->
       case msg[:timestamp] do
@@ -202,6 +200,7 @@ defmodule Arbor.Memory.ChatHistory do
       end
     end)
   end
+
   defp filter_before_cursor(messages, _), do: messages
 
   defp ensure_ets_table do
@@ -212,7 +211,119 @@ defmodule Arbor.Memory.ChatHistory do
     ArgumentError -> :ok
   end
 
-  defp persist_message_async(agent_id, msg) do
+  # ── ChannelStore persistence ──────────────────────────────────────
+
+  defp persist_to_channel_async(agent_id, msg) do
+    if channel_store_available?() do
+      Task.start(fn ->
+        try do
+          channel_id = agent_channel_id(agent_id)
+          apply(@channel_store, :ensure_channel, [channel_id, [type: "dm", owner_id: agent_id]])
+
+          role = msg[:role] || msg["role"] || "unknown"
+          content = msg[:content] || msg["content"] || ""
+          display_name = msg[:display_name] || msg["display_name"]
+          ts = msg[:timestamp] || DateTime.utc_now()
+
+          apply(@channel_store, :append_message, [
+            channel_id,
+            %{
+              sender_id: agent_id,
+              sender_name: display_name,
+              sender_type: sender_type_from_role(role),
+              content: to_string(content),
+              timestamp: ts,
+              metadata: %{"message_id" => msg[:id] || msg["id"], "role" => to_string(role)}
+            }
+          ])
+        rescue
+          e -> Logger.debug("ChatHistory: channel persist failed: #{Exception.message(e)}")
+        end
+      end)
+    else
+      # Fall back to legacy MemoryStore
+      persist_message_legacy(agent_id, msg)
+    end
+  end
+
+  defp sender_type_from_role("user"), do: "human"
+  defp sender_type_from_role("human"), do: "human"
+  defp sender_type_from_role("assistant"), do: "agent"
+  defp sender_type_from_role("system"), do: "system"
+  defp sender_type_from_role(_), do: "agent"
+
+  defp agent_channel_id(agent_id), do: "dm:#{agent_id}"
+
+  defp channel_store_available? do
+    Code.ensure_loaded?(@channel_store) and
+      function_exported?(@channel_store, :available?, 0) and
+      apply(@channel_store, :available?, [])
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # ── Durable loading ───────────────────────────────────────────────
+
+  defp load_from_durable(agent_id) do
+    # Try ChannelStore first, fall back to legacy MemoryStore
+    case load_from_channel_store(agent_id) do
+      messages when is_list(messages) and messages != [] ->
+        # Cache in ETS
+        Enum.each(messages, fn msg ->
+          msg_id = msg[:id] || msg["id"] || generate_id()
+          msg = Map.put_new(msg, :id, msg_id)
+          :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
+        end)
+
+        messages
+
+      _ ->
+        load_from_legacy(agent_id)
+    end
+  end
+
+  defp load_from_channel_store(agent_id) do
+    if channel_store_available?() do
+      channel_id = agent_channel_id(agent_id)
+
+      case apply(@channel_store, :load_messages, [channel_id, [limit: @max_messages]]) do
+        messages when is_list(messages) and messages != [] ->
+          Enum.map(messages, &channel_message_to_chat_msg/1)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp channel_message_to_chat_msg(cm) do
+    role = get_in(cm, [Access.key(:metadata), "role"]) || sender_type_to_role(cm.sender_type)
+
+    %{
+      id: get_in(cm, [Access.key(:metadata), "message_id"]) || cm.id,
+      role: role,
+      content: cm.content,
+      timestamp: cm.timestamp,
+      display_name: cm.sender_name
+    }
+  end
+
+  defp sender_type_to_role("human"), do: "user"
+  defp sender_type_to_role("agent"), do: "assistant"
+  defp sender_type_to_role("system"), do: "system"
+  defp sender_type_to_role(_), do: "assistant"
+
+  # ── Legacy MemoryStore persistence ────────────────────────────────
+
+  defp persist_message_legacy(agent_id, msg) do
     key = "#{agent_id}:#{msg.id}"
 
     msg_map =
@@ -222,7 +333,7 @@ defmodule Arbor.Memory.ChatHistory do
     MemoryStore.persist_async("chat_history", key, msg_map)
   end
 
-  defp load_messages_from_postgres(agent_id) do
+  defp load_from_legacy(agent_id) do
     if MemoryStore.available?() do
       case MemoryStore.load_by_prefix("chat_history", agent_id) do
         {:ok, pairs} ->
@@ -262,12 +373,64 @@ defmodule Arbor.Memory.ChatHistory do
     end)
   end
 
-  defp load_all_messages_from_postgres do
+  # ── Startup loading ───────────────────────────────────────────────
+
+  defp load_all_on_startup do
+    # Try ChannelStore first for all DM channels
+    loaded_from_channels = load_all_from_channel_store()
+
+    # Fall back to legacy MemoryStore for any remaining messages
+    unless loaded_from_channels do
+      load_all_from_legacy()
+    end
+  end
+
+  defp load_all_from_channel_store do
+    if channel_store_available?() do
+      channels = apply(@channel_store, :list_channels, [[type: "dm"]])
+
+      if channels != [] do
+        Enum.each(channels, &load_channel_messages_to_ets/1)
+        Logger.info("ChatHistory: loaded messages from ChannelStore")
+        true
+      else
+        false
+      end
+    else
+      false
+    end
+  rescue
+    e ->
+      Logger.warning("ChatHistory: failed to load from ChannelStore: #{inspect(e)}")
+      false
+  catch
+    :exit, _ -> false
+  end
+
+  defp load_channel_messages_to_ets(channel) do
+    agent_id = channel.owner_id
+    if not is_nil(agent_id) do
+      messages =
+        apply(@channel_store, :load_messages, [
+          channel.channel_id,
+          [limit: @max_messages]
+        ])
+
+      Enum.each(messages, fn cm ->
+        msg = channel_message_to_chat_msg(cm)
+        msg_id = msg[:id] || generate_id()
+        msg = Map.put_new(msg, :id, msg_id)
+        :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
+      end)
+    end
+  end
+
+  defp load_all_from_legacy do
     if MemoryStore.available?() do
       case MemoryStore.load_all("chat_history") do
         {:ok, pairs} ->
           Enum.each(pairs, &restore_message_from_pair/1)
-          Logger.info("ChatHistory: loaded #{length(pairs)} messages from Postgres")
+          Logger.info("ChatHistory: loaded #{length(pairs)} messages from legacy store")
 
         _ ->
           :ok
@@ -275,7 +438,7 @@ defmodule Arbor.Memory.ChatHistory do
     end
   rescue
     e ->
-      Logger.warning("ChatHistory: failed to load from Postgres: #{inspect(e)}")
+      Logger.warning("ChatHistory: failed to load from legacy store: #{inspect(e)}")
   end
 
   defp restore_message_from_pair({key, msg_map}) do
@@ -285,7 +448,7 @@ defmodule Arbor.Memory.ChatHistory do
         :ets.insert(@ets_table, {{agent_id, msg_id}, msg})
 
       _ ->
-        Logger.warning("ChatHistory: invalid key format from Postgres: #{key}")
+        Logger.warning("ChatHistory: invalid key format from legacy store: #{key}")
     end
   end
 
@@ -318,11 +481,11 @@ defmodule Arbor.Memory.ChatHistory do
             _ -> true
           end
         end)
+
       to_remove = Enum.take(sorted, length(entries) - @max_messages)
 
       Enum.each(to_remove, fn {{aid, mid}, _msg} ->
         :ets.delete(@ets_table, {aid, mid})
-        MemoryStore.delete("chat_history", "#{aid}:#{mid}")
       end)
 
       Logger.debug(
