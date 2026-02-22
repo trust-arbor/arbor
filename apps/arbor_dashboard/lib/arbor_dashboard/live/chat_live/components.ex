@@ -166,7 +166,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Actions panel with collapsible tool call details."
   def actions_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; flex: #{if @show_actions, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-actions"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -231,7 +231,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "LLM heartbeat interaction panel."
   def heartbeat_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_llm_panel, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-llm-panel"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -365,7 +365,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Code modules panel."
   def code_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_code, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-code"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -411,7 +411,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Proposals panel with accept/reject/defer actions."
   def proposals_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_proposals, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-proposals"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -742,7 +742,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Goals tracking panel with progress bars."
   def goals_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_goals, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-goals"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -809,7 +809,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Extended thinking blocks panel."
   def thinking_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; flex: 1; min-height: 0;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; flex: #{if @show_thinking, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-thinking"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;"
@@ -858,7 +858,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Working memory thoughts panel."
   def thoughts_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_thoughts, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-thoughts"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -894,7 +894,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Recalled memory notes panel."
   def memories_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_memories, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-memories"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -945,7 +945,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Identity evolution panel with self-insights and changes."
   def identity_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_identity, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-identity"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
@@ -1032,7 +1032,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   @doc "Cognitive preferences and adjustments panel."
   def cognitive_panel(assigns) do
     ~H"""
-    <div style="border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_cognitive, do: "1", else: "0 0 auto"};"}>
       <div
         phx-click="toggle-cognitive"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"

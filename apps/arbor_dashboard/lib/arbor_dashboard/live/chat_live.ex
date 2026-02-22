@@ -51,18 +51,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         available_models: available_models,
         current_model: nil,
         chat_backend: nil,
-        # Panel visibility toggles
+        # Panel visibility toggles — only key panels expanded by default
+        # to avoid cramming 6+ panels into tiny vertical slivers
         show_thinking: true,
-        show_memories: true,
+        show_memories: false,
         show_actions: true,
         show_thoughts: true,
         show_goals: true,
         show_completed_goals: false,
-        show_llm_panel: true,
-        show_identity: true,
-        show_cognitive: true,
-        show_code: true,
-        show_proposals: true,
+        show_llm_panel: false,
+        show_identity: false,
+        show_cognitive: false,
+        show_code: false,
+        show_proposals: false,
         # Memory state
         memory_stats: nil,
         # Working memory thoughts
