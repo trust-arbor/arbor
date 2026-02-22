@@ -65,12 +65,10 @@ defmodule Arbor.Actions.AITest do
     # These tests would call the real AI service - marked as :llm for filtering
     @describetag :llm
 
-    @tag :skip
     test "generates text with real provider" do
-      # This would make a real API call - skip by default
       assert {:ok, result} =
                AI.GenerateText.run(
-                 %{prompt: "Say hello in one word", max_tokens: 10},
+                 %{prompt: "Say hello in one word", max_tokens: 10, provider: "openrouter"},
                  %{}
                )
 
@@ -82,9 +80,7 @@ defmodule Arbor.Actions.AITest do
   describe "AnalyzeCode integration" do
     @describetag :llm
 
-    @tag :skip
     test "analyzes code with real provider" do
-      # This would make a real API call - skip by default
       code = """
       def factorial(0), do: 1
       def factorial(n), do: n * factorial(n - 1)
@@ -95,7 +91,8 @@ defmodule Arbor.Actions.AITest do
                  %{
                    code: code,
                    question: "What does this function compute?",
-                   language: "elixir"
+                   language: "elixir",
+                   provider: "openrouter"
                  },
                  %{}
                )
