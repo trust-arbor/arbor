@@ -204,24 +204,26 @@ defmodule Arbor.AI.SystemPromptBuilder do
   # Runtime bridge: Profile/Lifecycle are in arbor_agent (Level 2).
   defp load_character_prompt(agent_id) do
     lifecycle = Arbor.Agent.Lifecycle
-    profile_mod = Arbor.Agent.Profile
 
     if LazyLoader.exported?(lifecycle, :restore, 1) do
       case apply(lifecycle, :restore, [agent_id]) do
-        {:ok, profile} ->
-          if LazyLoader.exported?(profile_mod, :system_prompt, 1) do
-            prompt = apply(profile_mod, :system_prompt, [profile])
-            if prompt not in ["", nil], do: prompt
-          end
-
-        _ ->
-          nil
+        {:ok, profile} -> extract_system_prompt(profile)
+        _ -> nil
       end
     end
   rescue
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  defp extract_system_prompt(profile) do
+    profile_mod = Arbor.Agent.Profile
+
+    if LazyLoader.exported?(profile_mod, :system_prompt, 1) do
+      prompt = apply(profile_mod, :system_prompt, [profile])
+      if prompt not in ["", nil], do: prompt
+    end
   end
 
   defp build_self_knowledge_section(agent_id) do

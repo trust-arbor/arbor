@@ -337,29 +337,22 @@ defmodule Arbor.Agent.ContextCompactor do
     end)
   end
 
-  defp extract_tool_file_path(%{role: :tool, name: name, content: content})
-       when is_binary(name) do
-    if name in @file_read_tools do
-      # Try to extract file path from content or the message itself
-      path = extract_path_from_content(content)
-      if path, do: {:read, path}, else: nil
+  defp extract_tool_file_path(msg) do
+    role = msg_role(msg)
+
+    if role in [:tool, "tool"] do
+      name = to_string(Map.get(msg, :name) || Map.get(msg, "name", ""))
+
+      if name in @file_read_tools do
+        path = extract_path_from_content(msg_content(msg))
+        if path, do: {:read, path}, else: nil
+      else
+        nil
+      end
     else
       nil
     end
   end
-
-  defp extract_tool_file_path(%{role: :tool} = msg) do
-    name = to_string(Map.get(msg, :name, ""))
-
-    if name in @file_read_tools do
-      path = extract_path_from_content(Map.get(msg, :content, ""))
-      if path, do: {:read, path}, else: nil
-    else
-      nil
-    end
-  end
-
-  defp extract_tool_file_path(_), do: nil
 
   defp extract_path_from_content(content) when is_binary(content) do
     cond do
@@ -440,16 +433,30 @@ defmodule Arbor.Agent.ContextCompactor do
 
   def detail_level(_index, _total), do: 1.0
 
-  defp compress_by_detail(msg, detail, _file_index, _memory_index) when detail >= 0.8 do
-    # Full fidelity
-    {msg, false}
+  defp compress_by_detail(msg, detail, file_index, memory_index) when detail >= 0.8 do
+    # Full fidelity — but still check for very large messages even at high detail
+    role = msg_role(msg)
+
+    if role in [:tool, "tool"] and detail >= 0.9 do
+      {msg, false}
+    else
+      compress_by_role(msg, role, detail, file_index, memory_index)
+    end
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, detail, file_index, memory_index)
-       when detail >= 0.5 do
-    # Omission with pointer — keep tool name + summary, suggest re-read
-    content = Map.get(msg, :content, "")
-    name = Map.get(msg, :name, "tool")
+  defp compress_by_detail(msg, detail, file_index, memory_index) do
+    role = msg_role(msg)
+    compress_by_role(msg, role, detail, file_index, memory_index)
+  end
+
+  # Full fidelity for high detail levels (non-tool)
+  defp compress_by_role(msg, _role, detail, _fi, _mi) when detail >= 0.8, do: {msg, false}
+
+  # Tool messages at medium detail — omission with pointer
+  defp compress_by_role(msg, role, detail, file_index, memory_index)
+       when role in [:tool, "tool"] and detail >= 0.5 do
+    content = msg_content(msg)
+    name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
 
     if String.length(content) > 200 do
       line_count = content |> String.split("\n") |> length()
@@ -460,17 +467,17 @@ defmodule Arbor.Agent.ContextCompactor do
           "(detail_level=#{Float.round(detail, 2)}, use tool to re-read if needed)"
 
       new_content = enrich_stub(stub, name, file_index, memory_index, content)
-      {%{msg | content: new_content}, true}
+      {put_content(msg, new_content), true}
     else
       {msg, false}
     end
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, detail, file_index, memory_index)
-       when detail >= 0.2 do
-    # Heuristic one-liner
-    name = Map.get(msg, :name, "tool")
-    content = Map.get(msg, :content, "")
+  # Tool messages at low detail — heuristic one-liner
+  defp compress_by_role(msg, role, detail, file_index, memory_index)
+       when role in [:tool, "tool"] and detail >= 0.2 do
+    name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
+    content = msg_content(msg)
 
     success = not String.starts_with?(content, "ERROR")
     status = if success, do: "ok", else: "FAILED"
@@ -483,36 +490,66 @@ defmodule Arbor.Agent.ContextCompactor do
 
     stub = "[#{status}] #{name}: #{first_line}"
     new_content = enrich_stub(stub, name, file_index, memory_index, content)
-    {%{msg | content: new_content}, true}
+    {put_content(msg, new_content), true}
   end
 
-  defp compress_by_detail(%{role: :tool} = msg, _detail, file_index, memory_index) do
-    # Very old — minimal stub, but still enriched with index metadata
-    name = Map.get(msg, :name, "tool")
-    content = Map.get(msg, :content, "")
+  # Tool messages at very low detail — minimal stub
+  defp compress_by_role(msg, role, _detail, file_index, memory_index)
+       when role in [:tool, "tool"] do
+    name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
+    content = msg_content(msg)
     success = not String.starts_with?(content, "ERROR")
     status = if success, do: "ok", else: "FAILED"
     stub = "[#{status}] #{name}"
     new_content = enrich_stub(stub, name, file_index, memory_index, content)
-    {%{msg | content: new_content}, true}
+    {put_content(msg, new_content), true}
   end
 
-  defp compress_by_detail(%{role: :assistant} = msg, detail, _file_index, _memory_index)
-       when detail < 0.5 do
-    # Compress long assistant messages
-    content = Map.get(msg, :content, "")
+  # Assistant messages at low detail — truncate long responses
+  defp compress_by_role(msg, role, detail, _fi, _mi)
+       when role in [:assistant, "assistant"] and detail < 0.5 do
+    content = msg_content(msg)
 
     if is_binary(content) and String.length(content) > 300 do
       truncated =
         String.slice(content, 0, 200) <> "... (truncated, detail=#{Float.round(detail, 2)})"
 
-      {%{msg | content: truncated}, true}
+      {put_content(msg, truncated), true}
     else
       {msg, false}
     end
   end
 
-  defp compress_by_detail(msg, _detail, _file_index, _memory_index), do: {msg, false}
+  # User messages at low detail — truncate long inputs
+  defp compress_by_role(msg, role, detail, _fi, _mi)
+       when role in [:user, "user"] and detail < 0.5 do
+    content = msg_content(msg)
+
+    if is_binary(content) and String.length(content) > 400 do
+      truncated =
+        String.slice(content, 0, 250) <> "... (truncated, detail=#{Float.round(detail, 2)})"
+
+      {put_content(msg, truncated), true}
+    else
+      {msg, false}
+    end
+  end
+
+  # Catch-all — no compression
+  defp compress_by_role(msg, _role, _detail, _fi, _mi), do: {msg, false}
+
+  # ── Dual-key helpers for string/atom message maps ────────────
+
+  defp msg_role(msg), do: Map.get(msg, :role) || Map.get(msg, "role")
+  defp msg_content(msg), do: Map.get(msg, :content) || Map.get(msg, "content", "")
+
+  defp put_content(msg, content) do
+    cond do
+      Map.has_key?(msg, :content) -> %{msg | content: content}
+      Map.has_key?(msg, "content") -> %{msg | "content" => content}
+      true -> Map.put(msg, "content", content)
+    end
+  end
 
   # ── Step 4: LLM Narrative Summary ─────────────────────────────
 

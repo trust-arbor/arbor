@@ -264,13 +264,27 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   @doc false
   def apply_checkpoint(state, checkpoint) when is_map(checkpoint) do
+    # Unwrap Checkpoint.save wrapper if present (stores data under :data key)
+    data =
+      case Map.get(checkpoint, :data) do
+        inner when is_map(inner) -> inner
+        _ -> checkpoint
+      end
+
+    # Support both prefixed ("session.messages") and unprefixed ("messages") keys
     state
-    |> maybe_restore(:messages, Map.get(checkpoint, "session.messages"))
-    |> maybe_restore(:working_memory, Map.get(checkpoint, "session.working_memory"))
-    |> maybe_restore(:goals, Map.get(checkpoint, "session.goals"))
-    |> maybe_restore(:turn_count, Map.get(checkpoint, "session.turn_count"))
-    |> maybe_restore_cognitive_mode(Map.get(checkpoint, "session.cognitive_mode"))
+    |> maybe_restore(:messages, cp_get(data, "messages"))
+    |> maybe_restore(:working_memory, cp_get(data, "working_memory"))
+    |> maybe_restore(:goals, cp_get(data, "goals"))
+    |> maybe_restore(:turn_count, cp_get(data, "turn_count"))
+    |> maybe_restore_cognitive_mode(cp_get(data, "cognitive_mode"))
+    |> seed_compactor_from_checkpoint()
     |> sync_checkpoint_to_session_state()
+  end
+
+  # Fetch checkpoint value supporting both "session.X" and "X" key formats
+  defp cp_get(data, field) do
+    Map.get(data, "session.#{field}") || Map.get(data, field)
   end
 
   @doc false
@@ -709,6 +723,23 @@ defmodule Arbor.Orchestrator.Session.Builders do
   end
 
   # ── Compactor helpers ────────────────────────────────────────────
+
+  # Seed compactor with restored checkpoint messages so it can track them.
+  # Without this, a restored session would have messages in state but an
+  # empty compactor — it would never compact because it thinks it has 0 tokens.
+  defp seed_compactor_from_checkpoint(%{compactor: nil} = state), do: state
+
+  defp seed_compactor_from_checkpoint(%{compactor: compactor, messages: messages} = state)
+       when is_list(messages) and messages != [] do
+    seeded =
+      Enum.reduce(messages, compactor, fn msg, acc ->
+        apply_compactor(acc, :append, [msg])
+      end)
+
+    %{state | compactor: seeded}
+  end
+
+  defp seed_compactor_from_checkpoint(state), do: state
 
   # Use compactor's projected view if available, otherwise all messages
   defp compactor_llm_messages(%{compactor: nil} = state), do: get_messages(state)

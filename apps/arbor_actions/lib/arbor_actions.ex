@@ -113,6 +113,9 @@ defmodule Arbor.Actions do
     # Extract signing data from context (if present) before passing to action
     {signed_request, clean_context} = Map.pop(context, :signed_request)
 
+    # Ensure agent_id is available in context for actions that need it
+    clean_context = Map.put_new(clean_context, :agent_id, agent_id)
+
     # P0-1: Inject default taint policy from config if not already set in context.
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
     clean_context = maybe_inject_taint_policy(clean_context)

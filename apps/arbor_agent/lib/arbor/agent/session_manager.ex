@@ -148,8 +148,10 @@ defmodule Arbor.Agent.SessionManager do
     turn = turn_dot_path()
     hb = Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path())
 
+    session_id = "agent-session-#{agent_id}"
+
     base = [
-      session_id: "agent-session-#{agent_id}",
+      session_id: session_id,
       agent_id: agent_id,
       trust_tier: trust_tier,
       adapters: adapters,
@@ -160,9 +162,16 @@ defmodule Arbor.Agent.SessionManager do
     ]
 
     # Add compactor config if context management is enabled
-    case build_compactor_config(opts) do
+    base =
+      case build_compactor_config(opts) do
+        nil -> base
+        config -> Keyword.put(base, :compactor, config)
+      end
+
+    # Load saved checkpoint for session recovery (restores messages, goals, etc.)
+    case load_checkpoint(session_id) do
       nil -> base
-      config -> Keyword.put(base, :compactor, config)
+      checkpoint -> Keyword.put(base, :checkpoint, checkpoint)
     end
   end
 
@@ -282,6 +291,29 @@ defmodule Arbor.Agent.SessionManager do
     end
 
     :ets.delete(@table, agent_id)
+  end
+
+  defp load_checkpoint(session_id) do
+    checkpoint_mod = Arbor.Persistence.Checkpoint
+
+    if Code.ensure_loaded?(checkpoint_mod) and
+         function_exported?(checkpoint_mod, :load, 2) do
+      store =
+        Application.get_env(
+          :arbor_persistence,
+          :checkpoint_store,
+          Arbor.Persistence.Checkpoint.Store.ETS
+        )
+
+      case apply(checkpoint_mod, :load, [session_id, store]) do
+        {:ok, checkpoint} when is_map(checkpoint) -> checkpoint
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp orchestrator_available? do
