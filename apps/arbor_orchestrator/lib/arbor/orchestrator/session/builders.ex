@@ -713,9 +713,12 @@ defmodule Arbor.Orchestrator.Session.Builders do
   # Use compactor's projected view if available, otherwise all messages
   defp compactor_llm_messages(%{compactor: nil} = state), do: get_messages(state)
 
-  defp compactor_llm_messages(%{compactor: compactor}) do
+  defp compactor_llm_messages(%{compactor: compactor}) when not is_nil(compactor) do
     apply_compactor(compactor, :llm_messages, [])
   end
+
+  # Catch-all for sessions started before compactor field existed
+  defp compactor_llm_messages(state), do: get_messages(state)
 
   # Append user + assistant messages and run compaction
   defp append_to_compactor(nil, _user_msg, _assistant_msg), do: nil

@@ -320,6 +320,9 @@ defmodule Arbor.Agent.Lifecycle do
           build_session_system_prompt(agent_id, profile, opts)
         end)
 
+      # Extract context_management from template metadata if available
+      template_meta = extract_template_metadata(profile)
+
       session_opts =
         Keyword.merge(opts,
           trust_tier: profile.trust_tier,
@@ -327,6 +330,10 @@ defmodule Arbor.Agent.Lifecycle do
           system_prompt: system_prompt,
           start_heartbeat: true
         )
+
+      # Merge template-derived options (context_management, model, provider)
+      # without overriding explicitly provided opts
+      session_opts = merge_template_opts(session_opts, template_meta, opts)
 
       case SessionManager.ensure_session(agent_id, session_opts) do
         {:ok, _pid} ->
@@ -368,6 +375,47 @@ defmodule Arbor.Agent.Lifecycle do
     name = profile.display_name || profile.character.name || "Agent"
     desc = profile.character.description || ""
     "You are #{name}. #{desc}"
+  end
+
+  # Extract metadata from the template module (if available).
+  # Template metadata may include :context_management, :model, :provider.
+  defp extract_template_metadata(profile) do
+    case profile.template do
+      nil ->
+        %{}
+
+      module when is_atom(module) ->
+        if Code.ensure_loaded?(module) and function_exported?(module, :metadata, 0) do
+          try do
+            module.metadata()
+          rescue
+            _ -> %{}
+          end
+        else
+          %{}
+        end
+    end
+  end
+
+  # Merge template-derived options into session_opts.
+  # Explicit caller opts take precedence over template defaults.
+  defp merge_template_opts(session_opts, template_meta, caller_opts) do
+    template_keys = [
+      {:context_management, :context_management},
+      {:model, :model},
+      {:provider, :provider}
+    ]
+
+    Enum.reduce(template_keys, session_opts, fn {meta_key, opt_key}, acc ->
+      if Keyword.has_key?(caller_opts, opt_key) do
+        acc
+      else
+        case Map.get(template_meta, meta_key) do
+          nil -> acc
+          value -> Keyword.put_new(acc, opt_key, value)
+        end
+      end
+    end)
   end
 
   defp maybe_start_api_agent(agent_id, profile, opts) do
