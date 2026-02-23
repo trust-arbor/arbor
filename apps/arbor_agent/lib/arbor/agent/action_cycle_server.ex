@@ -428,9 +428,7 @@ defmodule Arbor.Agent.ActionCycleServer do
       system_prompt = MindPrompt.build(Map.to_list(context))
 
       user_msg =
-        MindPrompt.build_iteration(
-          recent_percepts: Map.get(context, :recent_percepts, [])
-        )
+        MindPrompt.build_iteration(recent_percepts: Map.get(context, :recent_percepts, []))
 
       ai_opts = [
         model: model,
