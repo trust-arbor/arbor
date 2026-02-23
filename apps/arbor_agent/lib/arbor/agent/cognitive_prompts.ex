@@ -48,7 +48,7 @@ defmodule Arbor.Agent.CognitivePrompts do
 
     Your job is to decompose this goal into concrete intentions (max 3).
     Each intention must:
-    - Map to a known action type (shell_execute, file_read, file_write, ai_analyze, etc.)
+    - Map to a capability/op pair (e.g., fs/read, shell/execute, compute/run)
     - Have clear params that the executor can run immediately
     - Include reasoning for why this step advances the goal
     - Include preconditions (what must be true before this step)

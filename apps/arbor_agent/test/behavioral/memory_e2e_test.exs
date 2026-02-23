@@ -446,11 +446,11 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
                   "success_criteria" => "Got file contents"
                 },
                 %{
-                  "action" => "ai_analyze",
-                  "params" => %{"prompt" => "Analyze test coverage"},
-                  "reasoning" => "Need coverage data",
+                  "action" => "think",
+                  "params" => %{"topic" => "test coverage analysis"},
+                  "reasoning" => "Need to reason about coverage data",
                   "preconditions" => "None",
-                  "success_criteria" => "Got analysis"
+                  "success_criteria" => "Formed analysis"
                 }
               ],
               "contingency" => "Try manual inspection if analysis fails"
@@ -467,7 +467,7 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
 
       actions = Enum.map(goal_intents, & &1.action)
       assert :file_read in actions
-      assert :ai_analyze in actions
+      assert :think in actions
     end
 
     test "five consecutive heartbeats maintain coherent state", %{
@@ -962,11 +962,11 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
               "success_criteria" => "Understood helper structure"
             },
             %{
-              "action" => "ai_analyze",
-              "params" => %{"prompt" => "Analyze test isolation approaches"},
-              "reasoning" => "Get expert analysis",
+              "action" => "think",
+              "params" => %{"topic" => "test isolation approaches"},
+              "reasoning" => "Reason about isolation patterns",
               "preconditions" => "None",
-              "success_criteria" => "Got analysis"
+              "success_criteria" => "Formed approach"
             }
           ],
           "contingency" => "Read ExUnit docs directly"

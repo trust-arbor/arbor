@@ -32,7 +32,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   def canonical_action_name(action) when is_atom(action) do
     # Check hardcoded dispatch mappings first (compound names like
     # :background_checks_run that find_action_module can't discover,
-    # and inline-handled actions like :ai_analyze), then fall back
+    # and inline-handled actions like :proposal_status), then fall back
     # to naming convention discovery.
     case hardcoded_canonical_name(action) do
       {:ok, _} = result ->
@@ -80,21 +80,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @spec dispatch(atom() | term(), map()) :: {:ok, map()} | {:error, term()}
   def dispatch(action, params)
 
-  # AI analysis — construct prompt from anomaly context and call LLM
-  def dispatch(:ai_analyze, params) do
-    anomaly = params[:anomaly] || params["anomaly"]
-    context = params[:context] || params["context"] || %{}
-
-    prompt = build_analysis_prompt(anomaly, context)
-    ai_opts = build_ai_opts()
-
-    Logger.debug("[ActionDispatch] AI analyze with opts: #{inspect(ai_opts)}")
-
-    prompt
-    |> call_ai_generate(ai_opts)
-    |> normalize_ai_result()
-  end
-
   # Proposal submission — map to Proposal.Submit action (runtime call to avoid Level 2 cycle)
   def dispatch(:proposal_submit, params) do
     proposal = params[:proposal] || params["proposal"] || %{}
@@ -135,89 +120,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # ── AI Analysis Helpers ──
-
-  defp build_ai_opts do
-    if demo_mode?() do
-      demo_ai_opts()
-    else
-      [max_tokens: 2000]
-    end
-  end
-
-  defp demo_ai_opts do
-    case get_demo_llm_config() do
-      %{provider: provider, model: model} ->
-        [max_tokens: 2000, backend: :api, provider: provider, model: model]
-
-      _ ->
-        [max_tokens: 2000]
-    end
-  end
-
-  defp call_ai_generate(prompt, ai_opts) do
-    safe_call(fn -> Arbor.AI.generate_text(prompt, ai_opts) end)
-  end
-
-  defp normalize_ai_result({:ok, %{text: text}}) do
-    {:ok, %{analysis: text, raw_response: text}}
-  end
-
-  defp normalize_ai_result({:ok, response}) when is_map(response) do
-    text = response[:text] || response["text"] || inspect(response)
-    {:ok, %{analysis: text, raw_response: response}}
-  end
-
-  defp normalize_ai_result({:error, reason}) do
-    {:error, {:ai_analysis_failed, reason}}
-  end
-
-  defp normalize_ai_result(nil) do
-    {:error, :ai_service_unavailable}
-  end
-
-  defp build_analysis_prompt(anomaly, context) do
-    """
-    You are a BEAM runtime diagnostic expert. Analyze this anomaly and suggest a fix.
-
-    ## Anomaly Details
-    #{format_anomaly(anomaly)}
-
-    ## System Context
-    #{format_context(context)}
-
-    ## Your Task
-    1. Identify the root cause of this anomaly
-    2. Suggest a specific code fix
-    3. Explain why this fix will resolve the issue
-
-    Respond with:
-    - ROOT_CAUSE: <one sentence>
-    - FIX_MODULE: <module name to modify>
-    - FIX_CODE: <the actual code change>
-    - EXPLANATION: <why this works>
-    """
-  end
-
-  defp format_anomaly(nil), do: "No anomaly data"
-
-  defp format_anomaly(anomaly) when is_map(anomaly) do
-    """
-    - Skill: #{anomaly[:skill] || "unknown"}
-    - Severity: #{anomaly[:severity] || "unknown"}
-    - Metric: #{anomaly[:metric] || "unknown"}
-    - Value: #{anomaly[:value] || "unknown"}
-    - Threshold: #{anomaly[:threshold] || "unknown"}
-    - Details: #{inspect(anomaly[:details] || %{})}
-    """
-  end
-
-  defp format_anomaly(anomaly), do: inspect(anomaly)
-
-  defp format_context(context) when is_map(context) do
-    Enum.map_join(context, "\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
-  end
-
-  defp format_context(_), do: "No additional context"
 
   # ── Proposal / Hot-load Helpers ──
 
@@ -287,11 +189,11 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # Map actions with hardcoded dispatch clauses to canonical dotted names.
   # Covers compound namespace modules (BackgroundChecks.Run) and inline-handled
-  # actions (ai_analyze, proposal_status) that find_action_module can't discover.
+  # actions (proposal_status) that find_action_module can't discover.
   defp hardcoded_canonical_name(:background_checks_run), do: {:ok, "background_checks.run"}
   defp hardcoded_canonical_name(:proposal_submit), do: {:ok, "proposal.submit"}
   defp hardcoded_canonical_name(:code_hot_load), do: {:ok, "code.hot_load"}
-  defp hardcoded_canonical_name(:ai_analyze), do: {:ok, "ai.analyze"}
+
   defp hardcoded_canonical_name(:proposal_status), do: {:ok, "proposal.status"}
   defp hardcoded_canonical_name(_), do: :error
 
@@ -361,13 +263,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # ── Config ──
 
-  defp get_demo_llm_config do
-    Application.get_env(:arbor_demo, :evaluator_llm_config, %{})
-  end
-
-  defp demo_mode? do
-    Application.get_env(:arbor_demo, :demo_mode, false)
-  end
 
   # ── Safety ──
 

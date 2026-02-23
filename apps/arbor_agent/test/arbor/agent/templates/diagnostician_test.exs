@@ -130,12 +130,6 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
       assert Enum.any?(resources, &(&1 =~ "monitor.read"))
     end
 
-    test "includes AI analysis capability" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "ai.analyze"))
-    end
-
     test "includes proposal submission capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
