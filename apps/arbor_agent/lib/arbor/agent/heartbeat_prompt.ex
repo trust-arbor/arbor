@@ -449,14 +449,15 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       """
       ## Available Actions
       You can take these actions via the "actions" array in your response:
-      - `shell_execute` — Run a shell command. Params: {"command": "..."}
-      - `file_read` — Read a file. Params: {"path": "..."}
-      - `file_write` — Write to a file. Params: {"path": "...", "content": "..."}
-      - `ai_analyze` — Ask an AI to analyze something. Params: {"prompt": "..."}
-      - `memory_consolidate` — Trigger memory consolidation
-      - `memory_index` — Index new information into memory
       - `think` — Extended internal reasoning (no external effect)
       - `reflect` — Deeper reflection on a topic (no external effect)
+      - `introspect` — Examine your own state, beliefs, or reasoning
+      - `consolidate` — Trigger memory consolidation
+      - `memory_index` — Index new information into memory
+      - `check_health` — Run system health checks
+
+      If you need a physical action (file read/write, shell command, code change),
+      express it as an intent in the "decompositions" array instead.
       """
     else
       tool_lines =
