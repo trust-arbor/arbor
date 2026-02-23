@@ -64,6 +64,8 @@ defmodule Arbor.Memory.Proposal do
 
   alias Arbor.Memory.{Events, KnowledgeGraph, SelfKnowledge, Signals}
 
+  require Logger
+
   @type proposal_type ::
           :fact
           | :insight
@@ -735,19 +737,26 @@ defmodule Arbor.Memory.Proposal do
 
   # Domain store writers (all runtime bridges)
   defp store_goal(agent_id, proposal) do
-    goal_data = Map.get(proposal.metadata, :goal_data, %{})
+    content = proposal.content || ""
 
-    if Code.ensure_loaded?(Arbor.Memory.GoalStore) do
-      case apply(Arbor.Memory.GoalStore, :add_goal, [
-             agent_id,
-             proposal.content,
-             [priority: Map.get(goal_data, "priority", :medium)]
-           ]) do
-        {:ok, goal} -> {:ok, Map.get(goal, :id, generate_id())}
-        error -> error
-      end
+    if String.trim(content) == "" do
+      Logger.warning("Skipping blank goal proposal for #{agent_id}")
+      {:error, :empty_description}
     else
-      {:ok, "goal_" <> generate_id()}
+      goal_data = Map.get(proposal.metadata, :goal_data, %{})
+
+      if Code.ensure_loaded?(Arbor.Memory.GoalStore) do
+        case apply(Arbor.Memory.GoalStore, :add_goal, [
+               agent_id,
+               content,
+               [priority: Map.get(goal_data, "priority", :medium)]
+             ]) do
+          {:ok, goal} -> {:ok, Map.get(goal, :id, generate_id())}
+          error -> error
+        end
+      else
+        {:ok, "goal_" <> generate_id()}
+      end
     end
   end
 

@@ -65,10 +65,14 @@ defmodule Arbor.Memory.GoalStore do
     {:ok, goal}
   end
 
-  @spec add_goal(String.t(), String.t(), keyword()) :: {:ok, Goal.t()}
+  @spec add_goal(String.t(), String.t(), keyword()) :: {:ok, Goal.t()} | {:error, :empty_description}
   def add_goal(agent_id, description, opts \\ []) when is_binary(description) do
-    goal = Goal.new(description, opts)
-    add_goal(agent_id, goal)
+    if String.trim(description) == "" do
+      {:error, :empty_description}
+    else
+      goal = Goal.new(description, opts)
+      add_goal(agent_id, goal)
+    end
   end
 
   @doc """

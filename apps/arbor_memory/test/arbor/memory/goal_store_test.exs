@@ -24,6 +24,12 @@ defmodule Arbor.Memory.GoalStoreTest do
       assert goal.type == :learn
       assert goal.status == :active
     end
+
+    test "rejects empty description", %{agent_id: agent_id} do
+      assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "")
+      assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "   ")
+      assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "\n\t")
+    end
   end
 
   describe "get_goal/2" do
