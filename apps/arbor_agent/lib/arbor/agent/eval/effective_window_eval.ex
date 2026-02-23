@@ -80,9 +80,7 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
 
         fill_results =
           Enum.map(fill_levels, fn fill ->
-            run_single(provider, model, fill, facts, context_window,
-              timeout: timeout
-            )
+            run_single(provider, model, fill, facts, context_window, timeout: timeout)
           end)
 
         effective = find_effective_window(fill_results, threshold)

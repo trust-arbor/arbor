@@ -129,6 +129,7 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
     provider = Keyword.get(opts, :provider, @default_provider)
     target_tokens = Keyword.get(opts, :target_tokens, @default_target_tokens)
     concurrency = Keyword.get(opts, :concurrency, @default_concurrency)
+
     default_output =
       Path.join(to_string(:code.priv_dir(:arbor_agent)), "eval_data/padding_corpus.jsonl")
 
@@ -143,15 +144,17 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
 
     if existing_tokens >= target_tokens do
       Logger.info("[CorpusGenerator] Corpus already has ~#{existing_tokens} tokens, skipping")
-      {:ok, %{
-        total_messages: count_existing_lines(output_path),
-        total_tokens: existing_tokens,
-        file_size_bytes: File.stat!(output_path).size,
-        duration_ms: 0,
-        output_path: output_path,
-        model: model,
-        provider: provider
-      }}
+
+      {:ok,
+       %{
+         total_messages: count_existing_lines(output_path),
+         total_tokens: existing_tokens,
+         file_size_bytes: File.stat!(output_path).size,
+         duration_ms: 0,
+         output_path: output_path,
+         model: model,
+         provider: provider
+       }}
     else
       remaining_tokens = target_tokens - existing_tokens
       num_calls = ceil(remaining_tokens / @max_tokens_per_call)
@@ -162,13 +165,31 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
           "generating ~#{remaining_tokens} more (#{num_calls} calls)"
       )
 
-      do_generate(output_path, batches, num_calls, provider, model, concurrency,
-        target_tokens, existing_tokens, progress_fn)
+      do_generate(
+        output_path,
+        batches,
+        num_calls,
+        provider,
+        model,
+        concurrency,
+        target_tokens,
+        existing_tokens,
+        progress_fn
+      )
     end
   end
 
-  defp do_generate(output_path, batches, num_calls, provider, model, concurrency,
-                   _target_tokens, existing_tokens, progress_fn) do
+  defp do_generate(
+         output_path,
+         batches,
+         num_calls,
+         provider,
+         model,
+         concurrency,
+         _target_tokens,
+         existing_tokens,
+         progress_fn
+       ) do
     # Append to existing file
     file = File.open!(output_path, [:append, :utf8])
     start_time = System.monotonic_time(:millisecond)
@@ -254,8 +275,14 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
 
   # ── Session Sampling ──────────────────────────────────────────
 
-  defp do_sample_sessions(session_dir, output_path, remaining_tokens, existing_tokens,
-                          max_files, shuffle_seed) do
+  defp do_sample_sessions(
+         session_dir,
+         output_path,
+         remaining_tokens,
+         existing_tokens,
+         max_files,
+         shuffle_seed
+       ) do
     start_time = System.monotonic_time(:millisecond)
 
     # Find session JSONL files, sorted by size (biggest first for most content)
@@ -360,7 +387,9 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
     parts
     |> Enum.flat_map(fn
       %{"type" => "tool_result", "content" => content} when is_binary(content) ->
-        if usable_content?(content), do: [%{"role" => "tool", "content" => truncate(content)}], else: []
+        if usable_content?(content),
+          do: [%{"role" => "tool", "content" => truncate(content)}],
+          else: []
 
       _ ->
         []
@@ -372,7 +401,9 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
     parts
     |> Enum.flat_map(fn
       %{"type" => "text", "text" => text} when is_binary(text) ->
-        if usable_content?(text), do: [%{"role" => "assistant", "content" => truncate(text)}], else: []
+        if usable_content?(text),
+          do: [%{"role" => "assistant", "content" => truncate(text)}],
+          else: []
 
       _ ->
         []
