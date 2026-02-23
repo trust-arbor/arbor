@@ -106,8 +106,6 @@ defmodule Arbor.Agent.Templates.Diagnostician do
       %{resource: "arbor://actions/execute/file.glob"},
       %{resource: "arbor://actions/execute/file.search"},
       %{resource: "arbor://actions/execute/file.list"},
-      # AI analysis for root cause diagnosis
-      %{resource: "arbor://actions/execute/ai.analyze"},
       # Memory for tracking patterns and past incidents
       %{resource: "arbor://actions/execute/memory.recall"},
       %{resource: "arbor://actions/execute/memory.remember"},
