@@ -297,9 +297,40 @@ defmodule Arbor.Agent.Eval.FactCorpus do
   Returns a list of message maps with `:role` and `:content` keys.
   Messages alternate between user, assistant, and tool result patterns
   to simulate a realistic agent conversation.
+
+  If a pre-generated corpus exists at `priv/eval_data/padding_corpus.jsonl`,
+  uses that for higher-quality, non-repeating padding. Otherwise falls back
+  to cycling through hardcoded templates.
   """
   @spec generate_padding(non_neg_integer()) :: [map()]
   def generate_padding(target_tokens) do
+    case load_corpus() do
+      nil -> generate_padding_from_templates(target_tokens)
+      corpus -> generate_padding_from_corpus(corpus, target_tokens)
+    end
+  end
+
+  defp generate_padding_from_corpus(corpus, target_tokens) do
+    corpus_len = length(corpus)
+
+    if corpus_len == 0 do
+      generate_padding_from_templates(target_tokens)
+    else
+      generate_corpus_loop(corpus, corpus_len, target_tokens, 0, 0, [])
+    end
+  end
+
+  defp generate_corpus_loop(_corpus, _len, target, current, _idx, acc) when current >= target do
+    Enum.reverse(acc)
+  end
+
+  defp generate_corpus_loop(corpus, len, target, current, idx, acc) do
+    msg = Enum.at(corpus, rem(idx, len))
+    tokens = estimate_tokens_text(msg_text(msg))
+    generate_corpus_loop(corpus, len, target, current + tokens, idx + 1, [msg | acc])
+  end
+
+  defp generate_padding_from_templates(target_tokens) do
     generate_padding_loop(target_tokens, 0, 0, [])
   end
 
@@ -373,7 +404,69 @@ defmodule Arbor.Agent.Eval.FactCorpus do
     %{role: :user, content: content}
   end
 
+  @doc """
+  Clear the cached corpus from persistent_term (useful for testing or reloading).
+  """
+  @spec clear_corpus_cache() :: :ok
+  def clear_corpus_cache do
+    :persistent_term.erase({__MODULE__, :corpus})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   # ── Internal ────────────────────────────────────────────────────
+
+  defp corpus_path do
+    Path.join(to_string(:code.priv_dir(:arbor_agent)), "eval_data/padding_corpus.jsonl")
+  end
+
+  defp load_corpus do
+    case :persistent_term.get({__MODULE__, :corpus}, nil) do
+      nil -> load_corpus_from_disk()
+      messages -> messages
+    end
+  end
+
+  defp load_corpus_from_disk do
+    path = corpus_path()
+
+    if File.exists?(path) do
+      messages = parse_corpus_file(path)
+
+      if messages != [] do
+        :persistent_term.put({__MODULE__, :corpus}, messages)
+        messages
+      else
+        nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp parse_corpus_file(path) do
+    path
+    |> File.stream!()
+    |> Stream.map(&String.trim/1)
+    |> Stream.reject(&(&1 == ""))
+    |> Enum.flat_map(fn line ->
+      case Jason.decode(line) do
+        {:ok, %{"role" => role, "content" => content}}
+        when is_binary(content) and content != "" ->
+          [%{role: safe_role(role), content: content}]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp safe_role("user"), do: :user
+  defp safe_role("assistant"), do: :assistant
+  defp safe_role("tool"), do: :tool
+  defp safe_role("system"), do: :system
+  defp safe_role(_), do: :user
 
   defp system_message do
     %{

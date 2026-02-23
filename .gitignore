@@ -90,3 +90,6 @@ venv/
 .claude-sdlc/.claude.json.backup.*
 .claude-sdlc/session-env/
 .claude-sdlc/stats-cache.json
+
+# Generated eval data (large, not committed)
+apps/arbor_agent/priv/eval_data/padding_corpus.jsonl
