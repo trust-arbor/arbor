@@ -429,7 +429,6 @@ defmodule Arbor.Agent.ActionCycleServer do
 
       user_msg =
         MindPrompt.build_iteration(
-          iteration: Map.get(context, :iteration, 0),
           recent_percepts: Map.get(context, :recent_percepts, [])
         )
 

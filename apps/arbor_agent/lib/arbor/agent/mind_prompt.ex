@@ -19,7 +19,7 @@ defmodule Arbor.Agent.MindPrompt do
   alias Arbor.Contracts.Memory.Percept
 
   @doc """
-  Build the Mind system prompt for a cycle iteration.
+  Build the Mind system prompt for a mental cycle.
 
   ## Options
 
@@ -28,7 +28,6 @@ defmodule Arbor.Agent.MindPrompt do
   - `:goals` — list of all active goals (for goal-aware expansion)
   - `:agent_name` — agent's display name
   - `:identity` — brief identity context
-  - `:iteration` — current mental loop iteration
   """
   @spec build(keyword()) :: String.t()
   def build(opts \\ []) do
@@ -44,17 +43,13 @@ defmodule Arbor.Agent.MindPrompt do
   end
 
   @doc """
-  Build a compact user message for a cycle iteration.
+  Build a compact user message for a mental cycle turn.
 
-  This is the per-iteration prompt that includes recent percepts
-  from mental actions executed this cycle.
+  Includes recent percepts from mental actions executed this cycle.
   """
   @spec build_iteration(keyword()) :: String.t()
   def build_iteration(opts \\ []) do
-    iteration = Keyword.get(opts, :iteration, 0)
     recent_percepts = Keyword.get(opts, :recent_percepts, [])
-
-    parts = ["Iteration #{iteration}."]
 
     parts =
       if recent_percepts != [] do
@@ -65,9 +60,9 @@ defmodule Arbor.Agent.MindPrompt do
             "- [#{p.outcome}] #{p.summary || "no summary"}"
           end)
 
-        parts ++ ["Results from mental actions:\n#{summaries}"]
+        ["Results from mental actions:\n#{summaries}"]
       else
-        parts
+        []
       end
 
     parts = parts ++ ["What's next? Respond with JSON."]
