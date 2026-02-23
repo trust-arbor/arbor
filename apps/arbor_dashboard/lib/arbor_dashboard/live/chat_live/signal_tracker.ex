@@ -140,8 +140,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   defp maybe_add_action(socket, signal) do
     event = to_string(signal.type)
 
-    is_action = (String.contains?(event, "action") or String.contains?(event, "tool")) and
-                event not in @action_cycle_lifecycle
+    is_action =
+      (String.contains?(event, "action") or String.contains?(event, "tool")) and
+        event not in @action_cycle_lifecycle
 
     if is_action do
       action_entry = %{

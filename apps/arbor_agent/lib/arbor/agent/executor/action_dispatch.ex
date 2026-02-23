@@ -263,7 +263,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # ── Config ──
 
-
   # ── Safety ──
 
   defp safe_call(fun) do
