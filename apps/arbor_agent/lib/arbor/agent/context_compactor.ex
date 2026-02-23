@@ -1089,7 +1089,21 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Token Estimation ───────────────────────────────────────────
 
-  defp estimate_tokens(message) when is_map(message) do
+  @doc """
+  Estimate the token count for a message or text string.
+
+  Uses a simple heuristic of ~4 characters per token for English text.
+  Adds overhead for tool calls in assistant messages.
+
+  Accepts either a message map (with :content or "content" key) or a
+  plain string. Returns at least 1 token.
+  """
+  @spec estimate_tokens(map() | String.t()) :: non_neg_integer()
+  def estimate_tokens(text) when is_binary(text) do
+    max(1, div(String.length(text), @chars_per_token))
+  end
+
+  def estimate_tokens(message) when is_map(message) do
     # Support both atom-keyed (SimpleAgent) and string-keyed (Session) messages
     content = Map.get(message, :content) || Map.get(message, "content", "")
 
@@ -1109,7 +1123,7 @@ defmodule Arbor.Agent.ContextCompactor do
     max(1, div(String.length(text), @chars_per_token) + tool_overhead)
   end
 
-  defp estimate_tokens(_), do: 1
+  def estimate_tokens(_), do: 1
 
   defp count_all_tokens(messages) do
     Enum.reduce(messages, 0, fn msg, acc -> acc + estimate_tokens(msg) end)
