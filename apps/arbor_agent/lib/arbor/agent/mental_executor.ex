@@ -12,7 +12,7 @@ defmodule Arbor.Agent.MentalExecutor do
 
   - `:goal_add` / `:goal_update` / `:goal_list` / `:goal_assess`
   - `:plan_add` / `:plan_list` / `:plan_update` / `:plan_assess`
-  - `:proposal_list` / `:proposal_defer`
+  - `:proposal_list` / `:proposal_accept` / `:proposal_reject` / `:proposal_defer`
   - `:compute_run`
   - `:think_reflect` / `:think_observe` / `:think_describe` / `:think_introspect`
   """
@@ -265,6 +265,28 @@ defmodule Arbor.Agent.MentalExecutor do
     end
   end
 
+  def execute_handler(:proposal_accept, agent_id, params) do
+    proposal_id = Map.get(params, :proposal_id) || Map.get(params, "proposal_id")
+
+    if is_nil(proposal_id) do
+      {:error, :missing_proposal_id}
+    else
+      with_proposal_bridge(:accept, [agent_id, proposal_id])
+    end
+  end
+
+  def execute_handler(:proposal_reject, agent_id, params) do
+    proposal_id = Map.get(params, :proposal_id) || Map.get(params, "proposal_id")
+
+    if is_nil(proposal_id) do
+      {:error, :missing_proposal_id}
+    else
+      reason = Map.get(params, :reason) || Map.get(params, "reason")
+      opts = if reason, do: [reason: reason], else: []
+      with_proposal_bridge(:reject, [agent_id, proposal_id, opts])
+    end
+  end
+
   def execute_handler(:proposal_defer, agent_id, params) do
     proposal_id = Map.get(params, :proposal_id) || Map.get(params, "proposal_id")
 
@@ -398,6 +420,20 @@ defmodule Arbor.Agent.MentalExecutor do
       end
     else
       {:error, :memory_not_available}
+    end
+  end
+
+  defp with_proposal_bridge(function, args) do
+    if Code.ensure_loaded?(Arbor.Memory.Proposal) do
+      try do
+        apply(Arbor.Memory.Proposal, function, args)
+      rescue
+        e -> {:error, Exception.message(e)}
+      catch
+        :exit, reason -> {:error, {:proposal_unavailable, reason}}
+      end
+    else
+      {:error, :proposal_not_available}
     end
   end
 

@@ -100,8 +100,6 @@ defmodule Arbor.Agent.Capabilities do
     # proposal — Review Proposals (Mind reviews queued suggestions)
     {"proposal", :review_queue} => Arbor.Actions.MemoryReview.ReviewQueue,
     {"proposal", :review_suggestions} => Arbor.Actions.MemoryReview.ReviewSuggestions,
-    {"proposal", :accept} => Arbor.Actions.MemoryReview.AcceptSuggestion,
-    {"proposal", :reject} => Arbor.Actions.MemoryReview.RejectSuggestion,
     # docs — Documentation Lookup
     {"docs", :lookup} => Arbor.Actions.Docs.Lookup
   }
@@ -121,8 +119,10 @@ defmodule Arbor.Agent.Capabilities do
     {"plan", :list} => :plan_list,
     {"plan", :update} => :plan_update,
     {"plan", :assess} => :plan_assess,
-    # proposal — List/Defer (non-action review)
+    # proposal — Review decisions (store-backed mental handlers)
     {"proposal", :list} => :proposal_list,
+    {"proposal", :accept} => :proposal_accept,
+    {"proposal", :reject} => :proposal_reject,
     {"proposal", :defer} => :proposal_defer,
     # compute — Dune Sandbox
     {"compute", :run} => :compute_run,
