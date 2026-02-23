@@ -119,7 +119,9 @@ defmodule Arbor.Orchestrator.Session.Adapters do
 
   # ── LLM Call ────────────────────────────────────────────────────────
   #
-  # SINGLE completion only. The turn graph handles tool loops via edges.
+  # Streams by default, falls back to complete if adapter doesn't support streaming.
+  # Pass `no_stream: true` in call_opts to force non-streaming.
+  # The turn graph handles tool loops via edges (single LLM call per node).
   # SessionHandler calls: llm_call.(messages, mode, call_opts)
   # Returns: {:ok, %{content: text}} | {:ok, %{tool_calls: calls}} | {:error, reason}
 
@@ -146,6 +148,30 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   defp do_llm_call(client, messages, call_opts, adapter_opts) do
     request = build_request(client, messages, call_opts, adapter_opts)
 
+    if Map.get(call_opts, :no_stream, false) do
+      complete_llm_call(client, request)
+    else
+      stream_llm_call(client, request)
+    end
+  end
+
+  defp stream_llm_call(client, request) do
+    case Client.stream(client, request) do
+      {:ok, events} ->
+        case Client.collect_stream(events) do
+          {:ok, response} -> format_llm_response(response)
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, {:stream_not_supported, _}} ->
+        complete_llm_call(client, request)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp complete_llm_call(client, request) do
     case Client.complete(client, request) do
       {:ok, response} -> format_llm_response(response)
       {:error, reason} -> {:error, reason}
