@@ -248,13 +248,12 @@ defmodule Arbor.Agent.HeartbeatResponse do
 
   defp parse_single_decision(_), do: nil
 
-  # Known action types that the LLM may return
+  # Known action types that the LLM may return during heartbeat.
+  # Only mental/memory actions — physical actions (shell, file, code)
+  # should be expressed as intents for the action cycle.
   @known_action_types ~w(
-    think reflect wait introspect consolidate
-    shell_execute file_read file_write
-    ai_analyze proposal_submit code_hot_load
-    memory_consolidate memory_index
-    run_consolidation check_health
+    think reflect wait introspect
+    consolidate memory_index check_health
   )a
 
   @doc false
@@ -296,19 +295,16 @@ defmodule Arbor.Agent.HeartbeatResponse do
   defp parse_single_decomposition(_), do: nil
 
   defp parse_decomposition_intention(%{"action" => action} = intent)
-       when is_binary(action) do
-    if action in Enum.map(known_action_types(), &Atom.to_string/1) do
-      %{
-        action: String.to_existing_atom(action),
-        params: Map.get(intent, "params", %{}),
-        reasoning: Map.get(intent, "reasoning", ""),
-        preconditions: Map.get(intent, "preconditions"),
-        success_criteria: Map.get(intent, "success_criteria")
-      }
-    else
-      Logger.warning("Unknown action in decomposition: #{action}, skipping")
-      nil
-    end
+       when is_binary(action) and action != "" do
+    # Decompositions can reference ANY action (mental or physical) since
+    # they become intents dispatched to the action cycle, not heartbeat actions.
+    %{
+      action: safe_to_atom(action),
+      params: Map.get(intent, "params", %{}),
+      reasoning: Map.get(intent, "reasoning", ""),
+      preconditions: Map.get(intent, "preconditions"),
+      success_criteria: Map.get(intent, "success_criteria")
+    }
   end
 
   defp parse_decomposition_intention(_), do: nil
