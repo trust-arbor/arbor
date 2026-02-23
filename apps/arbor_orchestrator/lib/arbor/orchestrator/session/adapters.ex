@@ -533,6 +533,25 @@ defmodule Arbor.Orchestrator.Session.Adapters do
         end
       end)
 
+      # Fetch existing goals for dedup — avoid LLM re-creating goals it can already see
+      existing_descriptions =
+        try do
+          case bridge(goal_store, :get_active_goals, [agent_id], []) do
+            goals when is_list(goals) ->
+              goals
+              |> Enum.map(fn g ->
+                desc = if is_map(g), do: Map.get(g, :description, ""), else: ""
+                String.downcase(String.trim(desc))
+              end)
+              |> MapSet.new()
+
+            _ ->
+              MapSet.new()
+          end
+        rescue
+          _ -> MapSet.new()
+        end
+
       Enum.each(List.wrap(new_goals), fn goal_desc ->
         description =
           cond do
@@ -548,7 +567,8 @@ defmodule Arbor.Orchestrator.Session.Adapters do
               ""
           end
 
-        if description != "" do
+        if description != "" and
+             not MapSet.member?(existing_descriptions, String.downcase(description)) do
           bridge(goal_store, :add_goal, [agent_id, description, []], :ok)
         end
       end)

@@ -555,15 +555,25 @@ defmodule Arbor.Agent.Lifecycle do
   defp set_initial_goals(_agent_id, []), do: :ok
 
   defp set_initial_goals(agent_id, goals) do
+    # Fetch existing goals to avoid duplicates on restart/re-create
+    existing_descriptions =
+      agent_id
+      |> Arbor.Memory.GoalStore.get_active_goals()
+      |> Enum.map(& &1.description)
+      |> MapSet.new()
+
     Enum.each(goals, fn goal_map ->
       description = goal_map[:description] || goal_map["description"] || "Unnamed goal"
-      type = goal_map[:type] || goal_map["type"] || :achieve
 
-      type_atom =
-        if is_binary(type), do: String.to_existing_atom(type), else: type
+      unless MapSet.member?(existing_descriptions, description) do
+        type = goal_map[:type] || goal_map["type"] || :achieve
 
-      goal = Goal.new(description, type: type_atom)
-      Arbor.Memory.add_goal(agent_id, goal)
+        type_atom =
+          if is_binary(type), do: String.to_existing_atom(type), else: type
+
+        goal = Goal.new(description, type: type_atom)
+        Arbor.Memory.add_goal(agent_id, goal)
+      end
     end)
 
     :ok

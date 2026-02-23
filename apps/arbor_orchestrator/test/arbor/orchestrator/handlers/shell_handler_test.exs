@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph

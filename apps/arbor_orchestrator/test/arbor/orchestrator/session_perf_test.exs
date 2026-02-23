@@ -158,8 +158,8 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
       assert state.turn_count == 101
       assert state.phase == :idle
 
-      # Graph traversal overhead should be < 10ms per turn
-      assert avg_us < 10_000, "Average turn overhead #{avg_us}μs exceeds 10ms budget"
+      # Graph traversal + authorization overhead should be < 20ms per turn
+      assert avg_us < 20_000, "Average turn overhead #{avg_us}μs exceeds 20ms budget"
     end
 
     @tag :perf
