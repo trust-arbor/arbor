@@ -76,9 +76,10 @@ defmodule Arbor.Agent.MindPromptTest do
   end
 
   describe "build_iteration/1" do
-    test "includes iteration number" do
-      msg = MindPrompt.build_iteration(iteration: 3)
-      assert String.contains?(msg, "Iteration 3")
+    test "does not leak internal loop state" do
+      msg = MindPrompt.build_iteration()
+      refute String.contains?(msg, "teration")
+      refute String.contains?(msg, "step")
     end
 
     test "includes recent percepts" do
@@ -87,7 +88,7 @@ defmodule Arbor.Agent.MindPromptTest do
         Percept.success("i_2", %{}, summary: "listed 5 goals")
       ]
 
-      msg = MindPrompt.build_iteration(iteration: 1, recent_percepts: percepts)
+      msg = MindPrompt.build_iteration(recent_percepts: percepts)
 
       assert String.contains?(msg, "recalled 3 memories")
       assert String.contains?(msg, "listed 5 goals")
@@ -95,7 +96,7 @@ defmodule Arbor.Agent.MindPromptTest do
     end
 
     test "omits percept section when empty" do
-      msg = MindPrompt.build_iteration(iteration: 0)
+      msg = MindPrompt.build_iteration()
       refute String.contains?(msg, "Results from mental actions:")
     end
 
