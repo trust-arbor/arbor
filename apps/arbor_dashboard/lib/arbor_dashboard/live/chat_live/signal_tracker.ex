@@ -128,10 +128,22 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
 
   # ── Action Tracking ───────────────────────────────────────────────
 
+  # Action cycle lifecycle signals (started/completed/error/throttled) are
+  # infrastructure — they belong in the Signals pane, not the Actions pane.
+  # Only actual tool executions and intent dispatches go to Actions.
+  @action_cycle_lifecycle ~w(
+    action_cycle_started action_cycle_completed
+    action_cycle_error action_cycle_throttled
+    percept_received
+  )
+
   defp maybe_add_action(socket, signal) do
     event = to_string(signal.type)
 
-    if String.contains?(event, "action") or String.contains?(event, "tool") do
+    is_action = (String.contains?(event, "action") or String.contains?(event, "tool")) and
+                event not in @action_cycle_lifecycle
+
+    if is_action do
       action_entry = %{
         id: "act-#{System.unique_integer([:positive])}",
         name: get_action_name(signal),
@@ -152,6 +164,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       %{"action" => name} -> to_string(name)
       %{tool: name} -> to_string(name)
       %{"tool" => name} -> to_string(name)
+      %{capability: cap, op: op} -> "#{cap}.#{op}"
+      %{"capability" => cap, "op" => op} -> "#{cap}.#{op}"
       %{name: name} -> to_string(name)
       %{"name" => name} -> to_string(name)
       _ -> to_string(signal.type)
