@@ -153,9 +153,7 @@ defmodule Mix.Tasks.Arbor.Eval.GenerateCorpus do
   end
 
   defp print_progress(completed, total, tokens) do
-    Mix.shell().info(
-      "[#{completed}/#{total}] Generated ~#{div(tokens, 1000)}K tokens..."
-    )
+    Mix.shell().info("[#{completed}/#{total}] Generated ~#{div(tokens, 1000)}K tokens...")
   end
 
   defp maybe_add(opts, _key, nil), do: opts

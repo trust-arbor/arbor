@@ -644,7 +644,22 @@ defmodule Arbor.Agent.Eval.FactCorpus do
     files =
       Enum.map_join(1..n_files, "\n", fn i ->
         ext = Enum.at([".ex", ".exs", ".json", ".yml"], rem(i + seed, 4))
-        name = Enum.at(["handler", "processor", "validator", "service", "helper", "utils", "config", "schema"], rem(i * seed, 8))
+
+        name =
+          Enum.at(
+            [
+              "handler",
+              "processor",
+              "validator",
+              "service",
+              "helper",
+              "utils",
+              "config",
+              "schema"
+            ],
+            rem(i * seed, 8)
+          )
+
         "  #{name}_#{i}#{ext}"
       end)
 
@@ -652,7 +667,14 @@ defmodule Arbor.Agent.Eval.FactCorpus do
   end
 
   defp generate_tool_result(:code_search, seed) do
-    patterns = ["def handle_call", "defmodule.*Controller", "@impl true", "use GenServer", "def init"]
+    patterns = [
+      "def handle_call",
+      "defmodule.*Controller",
+      "@impl true",
+      "use GenServer",
+      "def init"
+    ]
+
     pattern = Enum.at(patterns, rem(seed, length(patterns)))
     n_matches = 3 + rem(seed, 5)
 
@@ -672,10 +694,23 @@ defmodule Arbor.Agent.Eval.FactCorpus do
 
     commits =
       Enum.map_join(1..n_commits, "\n", fn i ->
-        hash = String.slice(:crypto.hash(:md5, "#{seed}-#{i}") |> Base.encode16(case: :lower), 0..6)
-        msg = Enum.at(["Fix auth token refresh", "Add input validation", "Update dependencies",
-                        "Refactor database queries", "Fix race condition in worker",
-                        "Add pagination support", "Update error handling"], rem(i + seed, 7))
+        hash =
+          String.slice(:crypto.hash(:md5, "#{seed}-#{i}") |> Base.encode16(case: :lower), 0..6)
+
+        msg =
+          Enum.at(
+            [
+              "Fix auth token refresh",
+              "Add input validation",
+              "Update dependencies",
+              "Refactor database queries",
+              "Fix race condition in worker",
+              "Add pagination support",
+              "Update error handling"
+            ],
+            rem(i + seed, 7)
+          )
+
         "  #{hash} #{msg} (#{days_ago + i}d ago)"
       end)
 

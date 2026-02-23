@@ -90,9 +90,16 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEvalTest do
 
       # Verify no fact answer appears verbatim in padding
       # (some common words like numbers might appear, so check specific answers)
-      specific_answers = ["a7b3c9d2e1f4", "8847", "10.42.17.203", "whsec_9f4a2b",
-                          "samdev-42", "prod-media-assets-us-west-2", "enable_dark_theme_v2",
-                          "v2.14.7-alpine"]
+      specific_answers = [
+        "a7b3c9d2e1f4",
+        "8847",
+        "10.42.17.203",
+        "whsec_9f4a2b",
+        "samdev-42",
+        "prod-media-assets-us-west-2",
+        "enable_dark_theme_v2",
+        "v2.14.7-alpine"
+      ]
 
       for answer <- specific_answers do
         refute String.contains?(padding_text, answer),
