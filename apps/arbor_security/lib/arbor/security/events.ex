@@ -316,21 +316,26 @@ defmodule Arbor.Security.Events do
   # apply/3 is intentional: arbor_persistence depends on arbor_security,
   # so we use runtime resolution to avoid a dependency cycle.
   defp persist_event(event_type, data) do
-    event =
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(Arbor.Persistence.Event, :new, [
-        @stream_id,
-        to_string(event_type),
-        Map.put(data, :timestamp, DateTime.utc_now())
-      ])
+    # Skip if persistence process isn't running (e.g., in test env)
+    if Process.whereis(@event_log_name) do
+      event =
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(Arbor.Persistence.Event, :new, [
+          @stream_id,
+          to_string(event_type),
+          Map.put(data, :timestamp, DateTime.utc_now())
+        ])
 
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(Arbor.Persistence, :append, [
-      @event_log_name,
-      @event_log_backend,
-      @stream_id,
-      event
-    ])
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(Arbor.Persistence, :append, [
+        @event_log_name,
+        @event_log_backend,
+        @stream_id,
+        event
+      ])
+    else
+      {:error, :audit_persistence_unavailable}
+    end
   rescue
     e ->
       require Logger
