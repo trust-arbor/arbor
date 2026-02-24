@@ -462,10 +462,14 @@ defmodule Arbor.Agent.Eval.FactCorpus do
     end)
   end
 
+  # Convert all roles to user/assistant only for cross-provider compatibility.
+  # OpenAI requires tool messages to have matching tool_call_ids from a prior
+  # assistant message — orphaned tool results cause 400 errors.
+  # For padding purposes, the content is what matters, not the role.
   defp safe_role("user"), do: :user
   defp safe_role("assistant"), do: :assistant
-  defp safe_role("tool"), do: :tool
-  defp safe_role("system"), do: :system
+  defp safe_role("tool"), do: :user
+  defp safe_role("system"), do: :user
   defp safe_role(_), do: :user
 
   defp system_message do
@@ -592,7 +596,7 @@ defmodule Arbor.Agent.Eval.FactCorpus do
     end
     """
 
-    %{role: :tool, content: "[File: #{file}]\n#{content}"}
+    %{role: :user, content: "[File: #{file}]\n#{content}"}
   end
 
   defp generate_tool_result(:test_result, seed) do
@@ -633,7 +637,7 @@ defmodule Arbor.Agent.Eval.FactCorpus do
         """
       end
 
-    %{role: :tool, content: "[Test Results]\n#{results}"}
+    %{role: :user, content: "[Test Results]\n#{results}"}
   end
 
   defp generate_tool_result(:dir_listing, seed) do
@@ -663,7 +667,7 @@ defmodule Arbor.Agent.Eval.FactCorpus do
         "  #{name}_#{i}#{ext}"
       end)
 
-    %{role: :tool, content: "[Directory: #{dir}]\n#{files}\n\n#{n_files} files"}
+    %{role: :user, content: "[Directory: #{dir}]\n#{files}\n\n#{n_files} files"}
   end
 
   defp generate_tool_result(:code_search, seed) do
@@ -685,7 +689,7 @@ defmodule Arbor.Agent.Eval.FactCorpus do
         "  #{file}:#{line}: #{pattern}(args_#{i})"
       end)
 
-    %{role: :tool, content: "[Search: #{pattern}]\n#{n_matches} matches found:\n#{matches}"}
+    %{role: :user, content: "[Search: #{pattern}]\n#{n_matches} matches found:\n#{matches}"}
   end
 
   defp generate_tool_result(:git_log, seed) do
@@ -714,7 +718,7 @@ defmodule Arbor.Agent.Eval.FactCorpus do
         "  #{hash} #{msg} (#{days_ago + i}d ago)"
       end)
 
-    %{role: :tool, content: "[Git Log]\n#{commits}"}
+    %{role: :user, content: "[Git Log]\n#{commits}"}
   end
 
   defp msg_text(%{content: content}) when is_binary(content), do: content
