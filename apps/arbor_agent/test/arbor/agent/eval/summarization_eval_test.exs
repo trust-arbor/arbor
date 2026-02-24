@@ -60,7 +60,9 @@ defmodule Arbor.Agent.Eval.SummarizationEvalTest do
 
       tool_names = Enum.map(mixed["tool_calls"], & &1["name"])
 
-      has_file = Enum.any?(tool_names, &(&1 in ["file_read", "file.read", "file_list", "file.list"]))
+      has_file =
+        Enum.any?(tool_names, &(&1 in ["file_read", "file.read", "file_list", "file.list"]))
+
       has_rel = Enum.any?(tool_names, &String.starts_with?(&1, "relationship"))
 
       assert has_file, "Mixed transcript should have file tool calls"
@@ -103,8 +105,8 @@ defmodule Arbor.Agent.Eval.SummarizationEvalTest do
       refute :system in roles
       # First user message should be skipped
       assert Enum.all?(batch_msgs, fn msg ->
-        msg.role in [:assistant, :tool]
-      end)
+               msg.role in [:assistant, :tool]
+             end)
     end
   end
 

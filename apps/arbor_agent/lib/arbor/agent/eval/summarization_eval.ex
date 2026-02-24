@@ -154,7 +154,17 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
           atom(),
           non_neg_integer()
         ) :: map()
-  def run_single(provider, model, batch_messages, original_messages, ground_truth, transcript_type, batch_size, strategy, timeout) do
+  def run_single(
+        provider,
+        model,
+        batch_messages,
+        original_messages,
+        ground_truth,
+        transcript_type,
+        batch_size,
+        strategy,
+        timeout
+      ) do
     prompt = build_prompt(batch_messages, strategy)
     input_tokens = estimate_batch_tokens(batch_messages)
 
@@ -577,7 +587,12 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
   def format_messages(messages) do
     Enum.map_join(messages, "\n", fn msg ->
       role = Map.get(msg, :role) || Map.get(msg, "role", :unknown)
-      content = (Map.get(msg, :content) || Map.get(msg, "content", "")) |> to_string() |> String.slice(0, 300)
+
+      content =
+        (Map.get(msg, :content) || Map.get(msg, "content", ""))
+        |> to_string()
+        |> String.slice(0, 300)
+
       name = Map.get(msg, :name) || Map.get(msg, "name")
 
       if name do
@@ -650,7 +665,7 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
 
   defp best_retention(results) do
     results
-    |> Enum.filter(&(is_nil(&1.error)))
+    |> Enum.filter(&is_nil(&1.error))
     |> Enum.map(& &1.retention_score)
     |> case do
       [] -> 0.0
@@ -659,7 +674,7 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
   end
 
   defp avg_timing(results) do
-    successful = Enum.filter(results, &(is_nil(&1.error)))
+    successful = Enum.filter(results, &is_nil(&1.error))
 
     if successful == [] do
       0
@@ -671,7 +686,7 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
 
   defp total_cost(results) do
     results
-    |> Enum.filter(&(is_nil(&1.error)))
+    |> Enum.filter(&is_nil(&1.error))
     |> Enum.map(& &1.cost)
     |> Enum.sum()
     |> Float.round(6)
@@ -730,7 +745,8 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
           id: "#{run_id}_#{sample_id}",
           run_id: run_id,
           sample_id: sample_id,
-          input: "#{r.transcript_type} transcript, #{r.batch_size} message batch, #{strategy} prompt",
+          input:
+            "#{r.transcript_type} transcript, #{r.batch_size} message batch, #{strategy} prompt",
           actual: "retention: #{r.retention_score}",
           passed: is_nil(r.error) and r.retention_score >= 0.5,
           scores: %{

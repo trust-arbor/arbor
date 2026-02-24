@@ -434,8 +434,9 @@ defmodule Arbor.Agent.Eval.SalienceEval do
     keyword_lift = final && final.high_salience_lift
     depth_lift = final && final.high_depth_lift
 
-    passed = (keyword_lift != nil and keyword_lift >= 0.0) or
-               (depth_lift != nil and depth_lift > 0.0)
+    passed =
+      (keyword_lift != nil and keyword_lift >= 0.0) or
+        (depth_lift != nil and depth_lift > 0.0)
 
     IO.puts("Keyword lift: #{format_lift(keyword_lift)}")
     IO.puts("Depth lift:   #{format_lift(depth_lift)}")
