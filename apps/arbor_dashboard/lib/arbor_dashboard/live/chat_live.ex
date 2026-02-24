@@ -872,8 +872,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       _ ->
         case recover_host(agent_id) do
-          {:ok, pid, metadata} -> reconnect_to_agent(socket, agent_id, pid, metadata)
-          {:error, reason} -> assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")
+          {:ok, pid, metadata} ->
+            reconnect_to_agent(socket, agent_id, pid, metadata)
+
+          {:error, reason} ->
+            assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")
         end
     end
   end
