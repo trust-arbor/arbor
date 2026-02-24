@@ -116,9 +116,17 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
   """
   @spec run_single(String.t(), String.t(), float(), [map()], non_neg_integer(), keyword()) ::
           map()
+  @max_output_tokens 4000
+  # Safety margin for token estimation error (our 4-chars/token heuristic
+  # undercounts vs real BPE tokenizers by ~12%)
+  @token_estimation_margin 0.85
+
   def run_single(provider, model, fill_level, facts, context_window, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
-    target_tokens = trunc(context_window * fill_level)
+    # Reserve max_tokens for response, then apply 15% safety margin
+    # to account for token estimation drift across different tokenizers
+    input_budget = trunc((context_window - @max_output_tokens) * @token_estimation_margin)
+    target_tokens = trunc(input_budget * fill_level)
 
     Logger.info(
       "[EffectiveWindowEval] Fill #{trunc(fill_level * 100)}% " <>
@@ -229,7 +237,7 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
           provider: provider,
           model: model,
           messages: llm_messages,
-          max_tokens: 4000,
+          max_tokens: @max_output_tokens,
           temperature: 0.0
         })
 

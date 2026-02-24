@@ -109,13 +109,10 @@ defmodule Mix.Tasks.Arbor.Eval.Window do
       ]
       |> maybe_add(:context_window, context_window)
 
-    case Arbor.Agent.Eval.EffectiveWindowEval.run(eval_opts) do
-      {:ok, results} ->
-        print_summary(results)
-
-      {:error, reason} ->
-        Mix.shell().error("Eval failed: #{inspect(reason)}")
-    end
+    {:ok, results} = Arbor.Agent.Eval.EffectiveWindowEval.run(eval_opts)
+    print_summary(results)
+  rescue
+    e -> Mix.shell().error("Eval failed: #{Exception.message(e)}")
   end
 
   defp parse_models(opts) do

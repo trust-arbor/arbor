@@ -81,7 +81,7 @@ defmodule Arbor.Persistence.EvalOperationsTest do
 
     @tag :fast
     test "accepts all valid domain values" do
-      for domain <- ~w(coding chat heartbeat embedding advisory_consultation llm_judge) do
+      for domain <- ~w(coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window) do
         attrs = Map.put(@valid_run_attrs, :domain, domain)
         changeset = EvalRun.changeset(%EvalRun{}, attrs)
         assert changeset.valid?, "Expected domain '#{domain}' to be accepted"

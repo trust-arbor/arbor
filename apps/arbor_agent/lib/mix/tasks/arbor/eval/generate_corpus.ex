@@ -127,10 +127,10 @@ defmodule Mix.Tasks.Arbor.Eval.GenerateCorpus do
       ]
       |> maybe_add(:output, opts[:output])
 
-    case Arbor.Agent.Eval.CorpusGenerator.generate(gen_opts) do
-      {:ok, stats} -> print_stats(stats)
-      {:error, reason} -> Mix.shell().error("Corpus generation failed: #{inspect(reason)}")
-    end
+    {:ok, stats} = Arbor.Agent.Eval.CorpusGenerator.generate(gen_opts)
+    print_stats(stats)
+  rescue
+    e -> Mix.shell().error("Corpus generation failed: #{Exception.message(e)}")
   end
 
   defp print_stats(stats) do

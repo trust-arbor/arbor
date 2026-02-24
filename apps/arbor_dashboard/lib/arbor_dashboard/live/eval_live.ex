@@ -13,7 +13,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
 
   @tabs ~w(runs models)
 
-  @domains ~w(coding chat heartbeat embedding advisory_consultation llm_judge)
+  @domains ~w(coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window)
   @statuses ~w(completed running failed)
 
   # Make lists available in templates via assigns
