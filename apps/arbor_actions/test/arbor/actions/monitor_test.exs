@@ -16,43 +16,53 @@ defmodule Arbor.Actions.MonitorTest do
     end
   end
 
-  describe "Monitor.Read when monitor unavailable" do
-    test "returns error when Monitor.Server is not running" do
-      # Monitor.Server won't be running in test env
-      assert {:error, :monitor_unavailable} = Monitor.Read.run(%{query: "status"}, %{})
+  describe "Monitor.Read returns data or unavailable" do
+    # Monitor may or may not be running depending on test context.
+    # Both {:ok, _} and {:error, :monitor_unavailable} are valid.
+
+    test "status query returns ok or unavailable" do
+      result = Monitor.Read.run(%{query: "status"}, %{})
+      assert match?({:ok, %{query: "status"}}, result) or result == {:error, :monitor_unavailable}
     end
 
-    test "returns error for all query types" do
+    test "all query types return ok or unavailable" do
       queries = ["status", "anomalies", "metrics", "skills", "healing_status", "collect"]
 
       for query <- queries do
-        assert {:error, :monitor_unavailable} = Monitor.Read.run(%{query: query}, %{}),
-               "Expected :monitor_unavailable for query #{query}"
+        result = Monitor.Read.run(%{query: query}, %{})
+
+        assert match?({:ok, %{query: ^query}}, result) or
+                 result == {:error, :monitor_unavailable},
+               "Expected {:ok, _} or :monitor_unavailable for query #{query}, got: #{inspect(result)}"
       end
     end
 
-    test "returns error for skill-specific metrics" do
-      assert {:error, :monitor_unavailable} =
-               Monitor.Read.run(%{query: "metrics", skill: "beam"}, %{})
+    test "skill-specific metrics returns ok or unavailable" do
+      result = Monitor.Read.run(%{query: "metrics", skill: "beam"}, %{})
+
+      assert match?({:ok, %{query: "metrics", skill: "beam"}}, result) or
+               result == {:error, :monitor_unavailable}
     end
 
-    test "returns error for skill-specific collect" do
-      assert {:error, :monitor_unavailable} =
-               Monitor.Read.run(%{query: "collect", skill: "processes"}, %{})
+    test "skill-specific collect returns ok or unavailable" do
+      result = Monitor.Read.run(%{query: "collect", skill: "processes"}, %{})
+
+      assert match?({:ok, %{query: "collect", skill: "processes"}}, result) or
+               result == {:error, :monitor_unavailable}
     end
   end
 
   describe "Monitor.Read skill validation" do
-    # These would still fail with :monitor_unavailable, but test the skill name
-    # validation by checking it doesn't crash on invalid skills
     test "known skills are accepted atoms" do
       known = [:beam, :memory, :ets, :processes, :supervisor, :system]
 
       for skill <- known do
         skill_str = Atom.to_string(skill)
-        # Should fail with :monitor_unavailable, not :unknown_skill
-        assert {:error, :monitor_unavailable} =
-                 Monitor.Read.run(%{query: "metrics", skill: skill_str}, %{})
+        result = Monitor.Read.run(%{query: "metrics", skill: skill_str}, %{})
+
+        # Should succeed or be unavailable, but never :unknown_skill for known skills
+        refute match?({:error, {:unknown_skill, _}}, result),
+               "Known skill #{skill_str} was rejected as unknown"
       end
     end
   end

@@ -63,6 +63,10 @@ defmodule Arbor.Actions.Monitor do
       else
         {:error, :monitor_unavailable}
       end
+    rescue
+      ArgumentError -> {:error, :monitor_unavailable}
+    catch
+      :exit, _ -> {:error, :monitor_unavailable}
     end
 
     defp execute_query("status", _params) do

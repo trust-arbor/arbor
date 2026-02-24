@@ -22,27 +22,25 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
   setup do
     # Start Security services (required for grant/list_capabilities/authorize)
-    start_supervised!({Arbor.Security.Identity.Registry, []})
-    start_supervised!({Arbor.Security.SystemAuthority, []})
-    start_supervised!({Arbor.Security.CapabilityStore, []})
-    start_supervised!({Arbor.Security.Reflex.Registry, []})
-    start_supervised!({Arbor.Security.Constraint.RateLimiter, []})
+    # Use ensure_started to handle umbrella runs where these are already running
+    ensure_started(Arbor.Security.Identity.Registry)
+    ensure_started(Arbor.Security.SystemAuthority)
+    ensure_started(Arbor.Security.CapabilityStore)
+    ensure_started(Arbor.Security.Reflex.Registry)
+    ensure_started(Arbor.Security.Constraint.RateLimiter)
 
     # Start Trust services
-    start_supervised!({EventStore, []})
-    start_supervised!({Store, []})
+    ensure_started(EventStore)
+    ensure_started(Store)
 
-    start_supervised!(
-      {Manager,
-       [
-         circuit_breaker: false,
-         decay: false,
-         event_store: true
-       ]}
+    ensure_started(Manager,
+      circuit_breaker: false,
+      decay: false,
+      event_store: true
     )
 
     # Start CapabilitySync (disabled mode - we'll call sync directly)
-    start_supervised!({CapabilitySync, [enabled: false]})
+    ensure_started(CapabilitySync, enabled: false)
 
     # Unique agent ID for each test
     agent_id = "agent_sync_test_#{:erlang.unique_integer([:positive])}"
@@ -185,6 +183,15 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, profile_after} = Trust.get_trust_profile(agent_id)
       assert profile_after.tier == profile.tier
       refute profile_after.frozen
+    end
+  end
+
+  # Start a service, or skip if already running (umbrella context)
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
     end
   end
 

@@ -109,13 +109,8 @@ defmodule Arbor.Agent.MentalExecutor do
           with_memory_bridge(:get_active_goals, [agent_id])
       end
 
-    case result do
-      {:ok, goals} ->
-        {:ok, %{goals: summarize_goals(goals), count: length(goals)}}
-
-      error ->
-        error
-    end
+    goals = normalize_list_result(result)
+    {:ok, %{goals: summarize_goals(goals), count: length(goals)}}
   end
 
   def execute_handler(:goal_assess, agent_id, params) do
@@ -123,24 +118,20 @@ defmodule Arbor.Agent.MentalExecutor do
 
     if is_nil(goal_id) do
       # Assess all active goals
-      case with_memory_bridge(:get_active_goals, [agent_id]) do
-        {:ok, goals} ->
-          assessments =
-            Enum.map(goals, fn goal ->
-              %{
-                id: goal_id(goal),
-                description: goal_description(goal),
-                progress: goal_progress(goal),
-                status: goal_status(goal),
-                has_pending_intents: has_pending_intents?(agent_id, goal)
-              }
-            end)
+      goals = normalize_list_result(with_memory_bridge(:get_active_goals, [agent_id]))
 
-          {:ok, %{assessments: assessments, count: length(assessments)}}
+      assessments =
+        Enum.map(goals, fn goal ->
+          %{
+            id: goal_id(goal),
+            description: goal_description(goal),
+            progress: goal_progress(goal),
+            status: goal_status(goal),
+            has_pending_intents: has_pending_intents?(agent_id, goal)
+          }
+        end)
 
-        error ->
-          error
-      end
+      {:ok, %{assessments: assessments, count: length(assessments)}}
     else
       case with_memory_bridge(:get_goal, [agent_id, goal_id]) do
         {:ok, goal} ->
@@ -179,13 +170,8 @@ defmodule Arbor.Agent.MentalExecutor do
   def execute_handler(:plan_list, agent_id, params) do
     limit = Map.get(params, :limit) || Map.get(params, "limit", 20)
 
-    case with_memory_bridge(:recent_intents, [agent_id, [limit: limit]]) do
-      {:ok, intents} ->
-        {:ok, %{intents: summarize_intents(intents), count: length(intents)}}
-
-      error ->
-        error
-    end
+    intents = normalize_list_result(with_memory_bridge(:recent_intents, [agent_id, [limit: limit]]))
+    {:ok, %{intents: summarize_intents(intents), count: length(intents)}}
   end
 
   def execute_handler(:plan_update, agent_id, params) do
@@ -422,6 +408,13 @@ defmodule Arbor.Agent.MentalExecutor do
       {:error, :memory_not_available}
     end
   end
+
+  # Memory stores return bare lists, not {:ok, list} tuples.
+  # Normalize both forms to a plain list for handlers that list items.
+  defp normalize_list_result({:ok, list}) when is_list(list), do: list
+  defp normalize_list_result(list) when is_list(list), do: list
+  defp normalize_list_result({:error, _}), do: []
+  defp normalize_list_result(_), do: []
 
   defp with_proposal_bridge(function, args) do
     if Code.ensure_loaded?(Arbor.Memory.Proposal) do

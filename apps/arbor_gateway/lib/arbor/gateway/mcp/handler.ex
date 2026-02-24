@@ -787,11 +787,14 @@ defmodule Arbor.Gateway.MCP.Handler do
     roles
     |> Enum.sort_by(fn {name, _} -> name end)
     |> Enum.map_join("\n", fn {name, role} ->
-      "- `#{name}`: #{role}"
+      "- `#{name}`: #{format_role(role)}"
     end)
   end
 
   defp format_taint_roles(_), do: "No taint roles defined."
+
+  defp format_role(role) when is_atom(role), do: to_string(role)
+  defp format_role(role), do: inspect(role)
 
   defp format_result(result) when is_map(result) do
     result
