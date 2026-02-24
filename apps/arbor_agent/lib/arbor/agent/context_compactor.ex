@@ -58,6 +58,7 @@ defmodule Arbor.Agent.ContextCompactor do
     llm_messages: [],
     file_index: %{},
     memory_index: %{},
+    salience_scores: %{},
     token_count: 0,
     peak_tokens: 0,
     turn: 0,
@@ -98,6 +99,7 @@ defmodule Arbor.Agent.ContextCompactor do
           llm_messages: [map()],
           file_index: %{String.t() => file_entry()},
           memory_index: %{String.t() => memory_entry()},
+          salience_scores: %{non_neg_integer() => float()},
           token_count: non_neg_integer(),
           peak_tokens: non_neg_integer(),
           effective_window: non_neg_integer(),
@@ -168,13 +170,24 @@ defmodule Arbor.Agent.ContextCompactor do
     new_token_count = compactor.token_count + msg_tokens
     new_peak = max(compactor.peak_tokens, new_token_count)
 
+    salience = compute_salience(message, compactor)
+    new_turn = compactor.turn + 1
+
+    new_salience_scores =
+      if salience > 0.0 do
+        Map.put(compactor.salience_scores, new_turn, salience)
+      else
+        compactor.salience_scores
+      end
+
     %{
       compactor
       | full_transcript: compactor.full_transcript ++ [message],
         llm_messages: compactor.llm_messages ++ [message],
         token_count: new_token_count,
         peak_tokens: new_peak,
-        turn: compactor.turn + 1
+        turn: new_turn,
+        salience_scores: new_salience_scores
     }
   end
 
@@ -270,7 +283,14 @@ defmodule Arbor.Agent.ContextCompactor do
 
     # Step 2-3: Apply detail-level-based compression (enriched with file + memory index)
     {messages, stats} =
-      apply_detail_decay(messages, total, stats, compactor.file_index, compactor.memory_index)
+      apply_detail_decay(
+        messages,
+        total,
+        stats,
+        compactor.file_index,
+        compactor.memory_index,
+        compactor.salience_scores
+      )
 
     # Step 4: Optional LLM narrative for very old turns
     {messages, stats} =
@@ -396,7 +416,7 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Step 2-3: Detail Level Decay ───────────────────────────────
 
-  defp apply_detail_decay(messages, total, stats, file_index, memory_index) do
+  defp apply_detail_decay(messages, total, stats, file_index, memory_index, salience_scores) do
     # Don't compress system/first-user messages (indices 0, 1)
     # Don't compress the most recent 25% of messages
     protected_tail = max(2, div(total, 4))
@@ -406,12 +426,21 @@ defmodule Arbor.Agent.ContextCompactor do
     if Range.size(compressible_range) <= 0 do
       {messages, stats}
     else
+      use_salience = salience_scores != %{}
+
       {compressed, compression_count} =
         messages
         |> Enum.with_index()
         |> Enum.map_reduce(0, fn {msg, idx}, acc ->
           if idx in compressible_range do
-            detail = detail_level(idx, total)
+            # Turn numbers are 1-indexed (idx+1 matches the turn stored in salience_scores)
+            detail =
+              if use_salience do
+                salience = Map.get(salience_scores, idx + 1, 0.0)
+                effective_detail(idx, total, salience)
+              else
+                detail_level(idx, total)
+              end
 
             {compressed_msg, did_compress} =
               compress_by_detail(msg, detail, file_index, memory_index)
@@ -432,6 +461,92 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   def detail_level(_index, _total), do: 1.0
+
+  @doc false
+  @spec effective_detail(non_neg_integer(), non_neg_integer(), float()) :: float()
+  def effective_detail(index, total, salience) do
+    base = detail_level(index, total)
+    min(1.0, base * (1.0 + salience))
+  end
+
+  @doc false
+  @spec compute_salience(map(), t()) :: float()
+  def compute_salience(message, compactor) do
+    role = msg_role(message)
+    content = msg_content(message)
+
+    score = 0.0
+
+    # User messages get a boost
+    score = if role in [:user, "user"], do: score + 0.15, else: score
+
+    # System messages get a boost
+    score = if role in [:system, "system"], do: score + 0.2, else: score
+
+    score =
+      if is_binary(content) do
+        score
+        |> maybe_add_error_signal(content)
+        |> maybe_add_decision_signal(content)
+        |> maybe_add_person_signal(content)
+        |> maybe_add_emotional_signal(content)
+        |> maybe_add_novel_file_signal(content, compactor)
+      else
+        score
+      end
+
+    # Clamp to max 0.5
+    min(0.5, score)
+  end
+
+  defp maybe_add_error_signal(score, content) do
+    if Regex.match?(~r/\b(ERROR|FAILED|error|exception|crash|panic|undefined)\b/i, content) do
+      score + 0.3
+    else
+      score
+    end
+  end
+
+  defp maybe_add_decision_signal(score, content) do
+    if Regex.match?(
+         ~r/\b(decided|chose|confirmed|resolved|concluded|approved|rejected|selected)\b/i,
+         content
+       ) do
+      score + 0.15
+    else
+      score
+    end
+  end
+
+  defp maybe_add_person_signal(score, content) do
+    if extract_person_names(content) != [] do
+      score + 0.1
+    else
+      score
+    end
+  end
+
+  defp maybe_add_emotional_signal(score, content) do
+    if extract_emotional_markers(content) != [] do
+      score + 0.05
+    else
+      score
+    end
+  end
+
+  defp maybe_add_novel_file_signal(score, content, compactor) do
+    case extract_path_from_content(content) do
+      nil ->
+        score
+
+      path ->
+        if Map.has_key?(compactor.file_index, path) do
+          score
+        else
+          score + 0.1
+        end
+    end
+  end
 
   defp compress_by_detail(msg, detail, file_index, memory_index) when detail >= 0.8 do
     # Full fidelity — but still check for very large messages even at high detail
