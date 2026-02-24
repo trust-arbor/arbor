@@ -59,6 +59,7 @@ defmodule Arbor.Agent.ContextCompactor do
     file_index: %{},
     memory_index: %{},
     salience_scores: %{},
+    message_timestamps: %{},
     token_count: 0,
     peak_tokens: 0,
     turn: 0,
@@ -100,6 +101,7 @@ defmodule Arbor.Agent.ContextCompactor do
           file_index: %{String.t() => file_entry()},
           memory_index: %{String.t() => memory_entry()},
           salience_scores: %{non_neg_integer() => float()},
+          message_timestamps: %{non_neg_integer() => DateTime.t()},
           token_count: non_neg_integer(),
           peak_tokens: non_neg_integer(),
           effective_window: non_neg_integer(),
@@ -180,6 +182,15 @@ defmodule Arbor.Agent.ContextCompactor do
         compactor.salience_scores
       end
 
+    timestamp = extract_message_timestamp(message)
+
+    new_timestamps =
+      if timestamp do
+        Map.put(compactor.message_timestamps, new_turn, timestamp)
+      else
+        compactor.message_timestamps
+      end
+
     %{
       compactor
       | full_transcript: compactor.full_transcript ++ [message],
@@ -187,7 +198,8 @@ defmodule Arbor.Agent.ContextCompactor do
         token_count: new_token_count,
         peak_tokens: new_peak,
         turn: new_turn,
-        salience_scores: new_salience_scores
+        salience_scores: new_salience_scores,
+        message_timestamps: new_timestamps
     }
   end
 
@@ -289,7 +301,8 @@ defmodule Arbor.Agent.ContextCompactor do
         stats,
         compactor.file_index,
         compactor.memory_index,
-        compactor.salience_scores
+        compactor.salience_scores,
+        compactor.message_timestamps
       )
 
     # Step 4: Optional LLM narrative for very old turns
@@ -416,14 +429,17 @@ defmodule Arbor.Agent.ContextCompactor do
 
   # ── Step 2-3: Detail Level Decay ───────────────────────────────
 
-  defp apply_detail_decay(messages, total, stats, file_index, memory_index, salience_scores) do
-    # Don't compress system/first-user messages (indices 0, 1)
-    # Don't compress the most recent 25% of messages
-    protected_tail = max(2, div(total, 4))
-
-    compressible_range = 2..(total - protected_tail - 1)//1
-
-    if Range.size(compressible_range) <= 0 do
+  defp apply_detail_decay(
+         messages,
+         total,
+         stats,
+         file_index,
+         memory_index,
+         salience_scores,
+         message_timestamps
+       ) do
+    # Skip if too few messages to compress (need at least system + user + 1 compressible)
+    if total <= 2 do
       {messages, stats}
     else
       use_salience = salience_scores != %{}
@@ -432,7 +448,10 @@ defmodule Arbor.Agent.ContextCompactor do
         messages
         |> Enum.with_index()
         |> Enum.map_reduce(0, fn {msg, idx}, acc ->
-          if idx in compressible_range do
+          # Never compress system (index 0) or first user message (index 1)
+          if idx <= 1 do
+            {msg, acc}
+          else
             # Turn numbers are 1-indexed (idx+1 matches the turn stored in salience_scores)
             detail =
               if use_salience do
@@ -443,11 +462,9 @@ defmodule Arbor.Agent.ContextCompactor do
               end
 
             {compressed_msg, did_compress} =
-              compress_by_detail(msg, detail, file_index, memory_index)
+              compress_by_detail(msg, detail, file_index, memory_index, message_timestamps, idx)
 
             {compressed_msg, acc + if(did_compress, do: 1, else: 0)}
-          else
-            {msg, acc}
           end
         end)
 
@@ -456,8 +473,8 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   @doc false
-  def detail_level(index, total) when total > 0 do
-    1.0 - index / max(total, 1)
+  def detail_level(index, total) when total > 1 do
+    index / (total - 1)
   end
 
   def detail_level(_index, _total), do: 1.0
@@ -548,27 +565,28 @@ defmodule Arbor.Agent.ContextCompactor do
     end
   end
 
-  defp compress_by_detail(msg, detail, file_index, memory_index) when detail >= 0.8 do
-    # Full fidelity — but still check for very large messages even at high detail
-    role = msg_role(msg)
+  defp compress_by_detail(msg, detail, file_index, memory_index, timestamps, idx) do
+    if detail >= 0.8 do
+      # Full fidelity — but still check for very large messages even at high detail
+      role = msg_role(msg)
 
-    if role in [:tool, "tool"] and detail >= 0.9 do
-      {msg, false}
+      if role in [:tool, "tool"] and detail >= 0.9 do
+        {msg, false}
+      else
+        compress_by_role(msg, role, detail, file_index, memory_index, timestamps, idx)
+      end
     else
-      compress_by_role(msg, role, detail, file_index, memory_index)
+      role = msg_role(msg)
+      compress_by_role(msg, role, detail, file_index, memory_index, timestamps, idx)
     end
   end
 
-  defp compress_by_detail(msg, detail, file_index, memory_index) do
-    role = msg_role(msg)
-    compress_by_role(msg, role, detail, file_index, memory_index)
-  end
-
   # Full fidelity for high detail levels (non-tool)
-  defp compress_by_role(msg, _role, detail, _fi, _mi) when detail >= 0.8, do: {msg, false}
+  defp compress_by_role(msg, _role, detail, _fi, _mi, _ts, _idx) when detail >= 0.8,
+    do: {msg, false}
 
   # Tool messages at medium detail — omission with pointer
-  defp compress_by_role(msg, role, detail, file_index, memory_index)
+  defp compress_by_role(msg, role, detail, file_index, memory_index, timestamps, idx)
        when role in [:tool, "tool"] and detail >= 0.5 do
     content = msg_content(msg)
     name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
@@ -577,8 +595,15 @@ defmodule Arbor.Agent.ContextCompactor do
       line_count = content |> String.split("\n") |> length()
       first_line = content |> String.split("\n") |> List.first("") |> String.slice(0, 120)
 
+      temporal =
+        format_temporal(
+          Map.get(timestamps, idx + 1),
+          extract_referenced_date(msg),
+          detail
+        )
+
       stub =
-        "#{name}: #{line_count} lines. Summary: #{first_line}... " <>
+        "#{temporal}#{name}: #{line_count} lines. Summary: #{first_line}... " <>
           "(detail_level=#{Float.round(detail, 2)}, use tool to re-read if needed)"
 
       new_content = enrich_stub(stub, name, file_index, memory_index, content)
@@ -589,7 +614,7 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   # Tool messages at low detail — heuristic one-liner
-  defp compress_by_role(msg, role, detail, file_index, memory_index)
+  defp compress_by_role(msg, role, detail, file_index, memory_index, timestamps, idx)
        when role in [:tool, "tool"] and detail >= 0.2 do
     name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
     content = msg_content(msg)
@@ -603,31 +628,53 @@ defmodule Arbor.Agent.ContextCompactor do
       |> List.first("")
       |> String.slice(0, 80)
 
-    stub = "[#{status}] #{name}: #{first_line}"
+    temporal =
+      format_temporal(
+        Map.get(timestamps, idx + 1),
+        extract_referenced_date(msg),
+        detail
+      )
+
+    stub = "#{temporal}[#{status}] #{name}: #{first_line}"
     new_content = enrich_stub(stub, name, file_index, memory_index, content)
     {put_content(msg, new_content), true}
   end
 
   # Tool messages at very low detail — minimal stub
-  defp compress_by_role(msg, role, _detail, file_index, memory_index)
+  defp compress_by_role(msg, role, _detail, file_index, memory_index, timestamps, idx)
        when role in [:tool, "tool"] do
     name = Map.get(msg, :name) || Map.get(msg, "name", "tool")
     content = msg_content(msg)
     success = not String.starts_with?(content, "ERROR")
     status = if success, do: "ok", else: "FAILED"
-    stub = "[#{status}] #{name}"
+
+    temporal =
+      format_temporal(
+        Map.get(timestamps, idx + 1),
+        nil,
+        0.0
+      )
+
+    stub = "#{temporal}[#{status}] #{name}"
     new_content = enrich_stub(stub, name, file_index, memory_index, content)
     {put_content(msg, new_content), true}
   end
 
   # Assistant messages at low detail — truncate long responses
-  defp compress_by_role(msg, role, detail, _fi, _mi)
+  defp compress_by_role(msg, role, detail, _fi, _mi, timestamps, idx)
        when role in [:assistant, "assistant"] and detail < 0.5 do
     content = msg_content(msg)
 
     if is_binary(content) and String.length(content) > 300 do
+      temporal =
+        format_temporal(
+          Map.get(timestamps, idx + 1),
+          nil,
+          detail
+        )
+
       truncated =
-        String.slice(content, 0, 200) <> "... (truncated, detail=#{Float.round(detail, 2)})"
+        "#{temporal}#{String.slice(content, 0, 200)}... (truncated, detail=#{Float.round(detail, 2)})"
 
       {put_content(msg, truncated), true}
     else
@@ -636,13 +683,20 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   # User messages at low detail — truncate long inputs
-  defp compress_by_role(msg, role, detail, _fi, _mi)
+  defp compress_by_role(msg, role, detail, _fi, _mi, timestamps, idx)
        when role in [:user, "user"] and detail < 0.5 do
     content = msg_content(msg)
 
     if is_binary(content) and String.length(content) > 400 do
+      temporal =
+        format_temporal(
+          Map.get(timestamps, idx + 1),
+          nil,
+          detail
+        )
+
       truncated =
-        String.slice(content, 0, 250) <> "... (truncated, detail=#{Float.round(detail, 2)})"
+        "#{temporal}#{String.slice(content, 0, 250)}... (truncated, detail=#{Float.round(detail, 2)})"
 
       {put_content(msg, truncated), true}
     else
@@ -651,7 +705,7 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   # Catch-all — no compression
-  defp compress_by_role(msg, _role, _detail, _fi, _mi), do: {msg, false}
+  defp compress_by_role(msg, _role, _detail, _fi, _mi, _ts, _idx), do: {msg, false}
 
   # ── Dual-key helpers for string/atom message maps ────────────
 
@@ -1206,6 +1260,95 @@ defmodule Arbor.Agent.ContextCompactor do
       nil
     end
   end
+
+  # ── Temporal Annotation ────────────────────────────────────────
+
+  @doc false
+  @spec format_temporal(DateTime.t() | nil, Date.t() | String.t() | nil, float()) :: String.t()
+  def format_temporal(nil, _referenced_date, _detail), do: ""
+  def format_temporal(_observation_dt, _referenced_date, detail) when detail >= 0.8, do: ""
+
+  def format_temporal(%DateTime{} = dt, referenced_date, detail) when detail >= 0.5 do
+    obs = Calendar.strftime(dt, "%b %d %H:%M")
+    ref = format_referenced_date(referenced_date)
+    "[#{obs}] #{ref}"
+  end
+
+  def format_temporal(%DateTime{} = dt, referenced_date, detail) when detail >= 0.2 do
+    obs = Calendar.strftime(dt, "%b %d")
+    ref = format_referenced_date(referenced_date)
+    "[#{obs}] #{ref}"
+  end
+
+  def format_temporal(%DateTime{} = dt, _referenced_date, _detail) do
+    obs = Calendar.strftime(dt, "%b %d")
+    "[#{obs}] "
+  end
+
+  defp format_referenced_date(nil), do: ""
+
+  defp format_referenced_date(%Date{} = d) do
+    "(ref: #{Calendar.strftime(d, "%b %d")}) "
+  end
+
+  defp format_referenced_date(date_str) when is_binary(date_str) do
+    case Date.from_iso8601(date_str) do
+      {:ok, d} -> "(ref: #{Calendar.strftime(d, "%b %d")}) "
+      _ -> ""
+    end
+  end
+
+  defp format_referenced_date(_), do: ""
+
+  defp extract_message_timestamp(message) when is_map(message) do
+    # Priority 1: explicit timestamp field
+    ts = Map.get(message, :timestamp) || Map.get(message, "timestamp")
+
+    case parse_timestamp(ts) do
+      {:ok, dt} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp extract_message_timestamp(_), do: DateTime.utc_now()
+
+  defp parse_timestamp(%DateTime{} = dt), do: {:ok, dt}
+
+  defp parse_timestamp(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> :error
+    end
+  end
+
+  defp parse_timestamp(_), do: :error
+
+  @doc false
+  @spec extract_referenced_date(map()) :: String.t() | nil
+  def extract_referenced_date(msg) when is_map(msg) do
+    # Check message metadata first
+    ref = Map.get(msg, :referenced_date) || Map.get(msg, "referenced_date")
+    if ref, do: ref, else: extract_referenced_date_from_content(msg_content(msg))
+  end
+
+  def extract_referenced_date(_), do: nil
+
+  defp extract_referenced_date_from_content(content) when is_binary(content) do
+    cond do
+      # JSON key: "referenced_date": "2026-02-15"
+      match = Regex.run(~r/"referenced_date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/, content) ->
+        Enum.at(match, 1)
+
+      # ISO8601 date pattern in content (best effort)
+      match = Regex.run(~r/\b(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}/, content) ->
+        Enum.at(match, 1)
+
+      true ->
+        nil
+    end
+  end
+
+  defp extract_referenced_date_from_content(_), do: nil
 
   # ── Token Estimation ───────────────────────────────────────────
 

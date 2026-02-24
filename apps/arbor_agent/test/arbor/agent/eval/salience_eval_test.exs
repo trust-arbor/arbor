@@ -139,17 +139,17 @@ defmodule Arbor.Agent.Eval.SalienceEvalTest do
     end
 
     test "clamps to 1.0 max" do
-      # detail_level(0, 100) = 1.0, salience = 0.5 → would be 1.5 → clamped to 1.0
-      result = ContextCompactor.effective_detail(0, 100, 0.5)
+      # detail_level(99, 100) = 1.0, salience = 0.5 → would be 1.5 → clamped to 1.0
+      result = ContextCompactor.effective_detail(99, 100, 0.5)
       assert result == 1.0
     end
 
     test "old messages with high salience get meaningfully boosted" do
-      # An old message (index 80 of 100) with salience 0.4
-      base = ContextCompactor.detail_level(80, 100)
-      boosted = ContextCompactor.effective_detail(80, 100, 0.4)
+      # An old message (index 20 of 100) with salience 0.4
+      base = ContextCompactor.detail_level(20, 100)
+      boosted = ContextCompactor.effective_detail(20, 100, 0.4)
 
-      # base = 0.2, boosted = 0.2 * 1.4 = 0.28
+      # base ≈ 0.202, boosted ≈ 0.202 * 1.4 ≈ 0.283
       assert boosted > base
       assert_in_delta boosted, base * 1.4, 0.01
     end

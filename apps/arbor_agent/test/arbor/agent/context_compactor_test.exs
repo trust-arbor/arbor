@@ -382,11 +382,11 @@ defmodule Arbor.Agent.ContextCompactorTest do
     test "is continuous, not discrete jumps" do
       levels = Enum.map(0..99, fn i -> ContextCompactor.detail_level(i, 100) end)
 
-      # Should be monotonically decreasing
+      # Should be monotonically increasing (oldest=0.0 → newest=1.0)
       pairs = Enum.zip(levels, Enum.drop(levels, 1))
 
       Enum.each(pairs, fn {a, b} ->
-        assert a >= b, "Detail level should decrease: #{a} < #{b}"
+        assert a <= b, "Detail level should increase: #{a} > #{b}"
       end)
 
       # No large jumps (difference between consecutive should be small)
@@ -395,13 +395,13 @@ defmodule Arbor.Agent.ContextCompactorTest do
       assert max_diff < 0.05, "Detail level has large jump: #{max_diff}"
     end
 
-    test "newest message has detail_level 1.0" do
-      assert ContextCompactor.detail_level(0, 100) == 1.0
+    test "oldest message has detail_level 0.0" do
+      assert ContextCompactor.detail_level(0, 100) == 0.0
     end
 
-    test "oldest message has detail_level near 0.0" do
+    test "newest message has detail_level 1.0" do
       level = ContextCompactor.detail_level(99, 100)
-      assert level < 0.02
+      assert level == 1.0
     end
   end
 

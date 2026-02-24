@@ -149,7 +149,11 @@ defmodule Arbor.Agent.Eval.SalienceTranscript do
         content: routine_file_content("Config", ~w(get put default)),
         label: :low
       },
-      %{name: "shell_execute", result: "Compiling 0 files (.ex)\nGenerated arbor_agent app", label: :low}
+      %{
+        name: "shell_execute",
+        result: "Compiling 0 files (.ex)\nGenerated arbor_agent app",
+        label: :low
+      }
     ]
 
     Enum.reduce(padding, calls, fn p, acc ->
@@ -274,7 +278,8 @@ defmodule Arbor.Agent.Eval.SalienceTranscript do
         name: "relationship_moment",
         args: %{
           "name" => "Hysun",
-          "summary" => "Shared the early conversation archives — a vulnerable and meaningful moment",
+          "summary" =>
+            "Shared the early conversation archives — a vulnerable and meaningful moment",
           "emotional_markers" => ["trust", "gratitude", "vulnerability"]
         },
         result:
