@@ -642,14 +642,19 @@ defmodule Arbor.Agent.ContextCompactor do
       end)
 
     """
-    Summarize these agent actions into a concise narrative paragraph (2-3 sentences).
-    Preserve: what was attempted, what succeeded, what failed, and key findings.
-    Failed attempts are especially important — note what didn't work and why.
+    Extract and preserve key information from these agent actions.
+
+    You MUST include ALL of the following:
+    1. FILES: List every file path mentioned (e.g., apps/arbor_agent/lib/arbor/agent/api_agent.ex)
+    2. MODULES: List every module/class name found (e.g., Arbor.Agent.APIAgent)
+    3. CONCEPTS: List key architectural concepts or patterns discovered
+    4. PEOPLE: List any person names mentioned (or "none" if none)
+    5. SUMMARY: One sentence describing what was accomplished
 
     Messages:
     #{formatted}
 
-    Write only the summary paragraph, nothing else.
+    Respond with the numbered sections above. Do NOT omit any file paths or module names from the messages.
     """
   end
 

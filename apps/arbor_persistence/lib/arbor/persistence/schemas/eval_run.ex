@@ -34,7 +34,7 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
     timestamps()
   end
 
-  @valid_domains ~w(coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window)
+  @valid_domains ~w(coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window summarization)
   @valid_statuses ~w(running completed failed)
 
   @required_fields [:id, :domain, :model, :provider, :dataset]
