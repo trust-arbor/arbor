@@ -202,9 +202,7 @@ defmodule Arbor.Agent.Eval.TemporalEval do
       |> Enum.map(fn {msg, idx} ->
         content = Map.get(msg, :content) || Map.get(msg, "content", "")
 
-        if not is_binary(content) do
-          %{is_stub: false, has_obs: false, has_ref: false, idx: idx}
-        else
+        if is_binary(content) do
           # Check if this is a compressed stub
           is_stub =
             Regex.match?(stub_pattern, content) or
@@ -224,6 +222,8 @@ defmodule Arbor.Agent.Eval.TemporalEval do
           has_ref = String.contains?(content, "(ref: ")
 
           %{is_stub: is_stub, has_obs: has_obs, has_ref: has_ref, idx: idx, content: content}
+        else
+          %{is_stub: false, has_obs: false, has_ref: false, idx: idx}
         end
       end)
 
@@ -342,10 +342,13 @@ defmodule Arbor.Agent.Eval.TemporalEval do
     if passed do
       IO.puts("PASS: temporal markers survive compression")
     else
-      reasons = []
-      reasons = if not obs_pass, do: ["observation < 90%" | reasons], else: reasons
-      reasons = if not ref_pass, do: ["referenced_date < 50%" | reasons], else: reasons
-      reasons = if not gran_pass, do: ["granularity < 80%" | reasons], else: reasons
+      reasons =
+        [
+          if(obs_pass, do: nil, else: "observation < 90%"),
+          if(ref_pass, do: nil, else: "referenced_date < 50%"),
+          if(gran_pass, do: nil, else: "granularity < 80%")
+        ]
+        |> Enum.reject(&is_nil/1)
       IO.puts("FAIL: #{Enum.join(reasons, ", ")}")
     end
 

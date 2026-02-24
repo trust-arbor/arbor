@@ -188,7 +188,7 @@ defmodule Arbor.Agent.Eval.TemporalEvalTest do
       both =
         Enum.filter(transcript["tool_calls"], &(&1["temporal_label"] == "has_both"))
 
-      assert length(both) > 0
+      assert both != []
 
       for tc <- both do
         assert tc["timestamp"] != nil, "has_both message should have timestamp"
@@ -236,7 +236,7 @@ defmodule Arbor.Agent.Eval.TemporalEvalTest do
           is_binary(content) and Regex.match?(~r/^\[(?:Feb) \d{1,2}/, content)
         end)
 
-      assert length(compressed) > 0,
+      assert compressed != [],
              "Expected some compressed stubs to have temporal markers"
     end
   end
@@ -257,8 +257,8 @@ defmodule Arbor.Agent.Eval.TemporalEvalTest do
       transcript = TemporalTranscript.generate()
       gt = TemporalEval.extract_temporal_ground_truth(transcript)
 
-      assert length(gt.observation_turns) > 0
-      assert length(gt.referenced_date_turns) > 0
+      assert gt.observation_turns != []
+      assert gt.referenced_date_turns != []
     end
   end
 end

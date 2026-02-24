@@ -11,18 +11,18 @@ defmodule Mix.Tasks.Arbor.Eval.Summarization do
       mix arbor.eval.summarization --model "sambanova/trinity-large"
 
       # Multiple models
-      mix arbor.eval.summarization \\
+      mix arbor.eval.summarization \
         --models "anthropic/claude-3-5-haiku-latest,google/gemini-3-flash-preview"
 
       # Specific transcript types and batch sizes
-      mix arbor.eval.summarization \\
-        --model "sambanova/trinity-large" \\
-        --transcripts "coding,relational" \\
+      mix arbor.eval.summarization \
+        --model "sambanova/trinity-large" \
+        --transcripts "coding,relational" \
         --batch-sizes "4,8"
 
       # Tag for experiment tracking
-      mix arbor.eval.summarization \\
-        --models "anthropic/claude-3-5-haiku-latest,sambanova/trinity-large" \\
+      mix arbor.eval.summarization \
+        --models "anthropic/claude-3-5-haiku-latest,sambanova/trinity-large" \
         --tag "v1"
 
   ## Options
@@ -89,9 +89,9 @@ defmodule Mix.Tasks.Arbor.Eval.Summarization do
     ╠══════════════════════════════════════════════════════════╣
     ║  Models:      #{pad(Enum.join(models, ", "), 42)}║
     ║  Provider:    #{pad(provider, 42)}║
-    ║  Transcripts: #{pad(Enum.join(Enum.map(transcripts, &to_string/1), ", "), 42)}║
-    ║  Batch sizes: #{pad(Enum.join(Enum.map(batch_sizes, &to_string/1), ", "), 42)}║
-    ║  Strategies:  #{pad(Enum.join(Enum.map(strategies, &to_string/1), ", "), 42)}║
+    ║  Transcripts: #{pad(Enum.map_join(transcripts, ", ", &to_string/1), 42)}║
+    ║  Batch sizes: #{pad(Enum.map_join(batch_sizes, ", ", &to_string/1), 42)}║
+    ║  Strategies:  #{pad(Enum.map_join(strategies, ", ", &to_string/1), 42)}║
     ║  Timeout:     #{pad("#{timeout}ms", 42)}║
     ║  Persist:     #{pad(to_string(persist), 42)}║
     ╚══════════════════════════════════════════════════════════╝

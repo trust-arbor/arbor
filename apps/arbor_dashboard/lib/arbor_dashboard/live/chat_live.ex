@@ -147,37 +147,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     if socket.assigns.agent == agent_id do
       {:noreply, socket}
     else
-      case Arbor.Agent.running?(agent_id) do
-        true ->
-          # Agent is already running — just reconnect
-          case Lifecycle.get_host(agent_id) do
-            {:ok, pid} ->
-              metadata = get_agent_metadata(agent_id)
-              {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
-
-            _ ->
-              # Host crashed but executor survived — auto-recover
-              case recover_host(agent_id) do
-                {:ok, pid, metadata} ->
-                  {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
-
-                {:error, reason} ->
-                  {:noreply,
-                   assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")}
-              end
-          end
-
-        false ->
-          # Agent is stopped — try to resume it
-          case Manager.resume_agent(agent_id) do
-            {:ok, ^agent_id, pid} ->
-              metadata = get_agent_metadata(agent_id)
-              {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
-
-            {:error, reason} ->
-              {:noreply, assign(socket, error: "Failed to resume agent: #{inspect(reason)}")}
-          end
-      end
+      {:noreply, connect_or_resume_agent(socket, agent_id)}
     end
   rescue
     e ->
@@ -848,21 +818,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           socket
 
         %{id: agent_id} ->
-          case Lifecycle.get_host(agent_id) do
-            {:ok, pid} ->
-              metadata = get_agent_metadata(agent_id)
-              reconnect_to_agent(socket, agent_id, pid, metadata)
-
-            _ ->
-              # Host missing — try auto-recovery
-              case recover_host(agent_id) do
-                {:ok, pid, metadata} ->
-                  reconnect_to_agent(socket, agent_id, pid, metadata)
-
-                {:error, _reason} ->
-                  assign(socket, agent_id: agent_id, display_name: agent_participant[:name])
-              end
-          end
+          connect_to_host_or_recover(socket, agent_id, agent_participant[:name])
       end
     else
       socket
@@ -897,6 +853,54 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Connect to a running agent, or resume a stopped one, handling host recovery.
+  defp connect_or_resume_agent(socket, agent_id) do
+    case Arbor.Agent.running?(agent_id) do
+      true -> get_host_or_recover(socket, agent_id)
+      false -> resume_stopped_agent(socket, agent_id)
+    end
+  end
+
+  defp get_host_or_recover(socket, agent_id) do
+    case Lifecycle.get_host(agent_id) do
+      {:ok, pid} ->
+        metadata = get_agent_metadata(agent_id)
+        reconnect_to_agent(socket, agent_id, pid, metadata)
+
+      _ ->
+        case recover_host(agent_id) do
+          {:ok, pid, metadata} -> reconnect_to_agent(socket, agent_id, pid, metadata)
+          {:error, reason} -> assign(socket, error: "Failed to recover agent host: #{inspect(reason)}")
+        end
+    end
+  end
+
+  defp resume_stopped_agent(socket, agent_id) do
+    case Manager.resume_agent(agent_id) do
+      {:ok, ^agent_id, pid} ->
+        metadata = get_agent_metadata(agent_id)
+        reconnect_to_agent(socket, agent_id, pid, metadata)
+
+      {:error, reason} ->
+        assign(socket, error: "Failed to resume agent: #{inspect(reason)}")
+    end
+  end
+
+  # Connect to host or fall back to metadata-only assignment for group agents.
+  defp connect_to_host_or_recover(socket, agent_id, fallback_name) do
+    case Lifecycle.get_host(agent_id) do
+      {:ok, pid} ->
+        metadata = get_agent_metadata(agent_id)
+        reconnect_to_agent(socket, agent_id, pid, metadata)
+
+      _ ->
+        case recover_host(agent_id) do
+          {:ok, pid, metadata} -> reconnect_to_agent(socket, agent_id, pid, metadata)
+          {:error, _reason} -> assign(socket, agent_id: agent_id, display_name: fallback_name)
+        end
     end
   end
 
