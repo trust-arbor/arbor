@@ -198,8 +198,8 @@ defmodule Arbor.Agent.Eval.SalienceEvalTest do
       high = Enum.filter(tool_calls, &(&1["salience_label"] == "high"))
       low = Enum.filter(tool_calls, &(&1["salience_label"] == "low"))
 
-      assert length(high) > 0, "Should have high-salience messages"
-      assert length(low) > 0, "Should have low-salience messages"
+      assert high != [], "Should have high-salience messages"
+      assert low != [], "Should have low-salience messages"
       assert length(high) + length(low) == length(tool_calls)
     end
 
@@ -248,8 +248,8 @@ defmodule Arbor.Agent.Eval.SalienceEvalTest do
       transcript = SalienceTranscript.generate()
       {high_facts, low_facts} = SalienceEval.extract_salience_ground_truth(transcript)
 
-      assert length(high_facts) > 0
-      assert length(low_facts) > 0
+      assert high_facts != []
+      assert low_facts != []
     end
 
     test "high facts include error patterns" do
@@ -257,7 +257,7 @@ defmodule Arbor.Agent.Eval.SalienceEvalTest do
       {high_facts, _} = SalienceEval.extract_salience_ground_truth(transcript)
 
       error_facts = Enum.filter(high_facts, fn {type, _} -> type == :error end)
-      assert length(error_facts) > 0
+      assert error_facts != []
     end
 
     test "high facts include person names" do
@@ -265,7 +265,7 @@ defmodule Arbor.Agent.Eval.SalienceEvalTest do
       {high_facts, _} = SalienceEval.extract_salience_ground_truth(transcript)
 
       person_facts = Enum.filter(high_facts, fn {type, _} -> type == :person end)
-      assert length(person_facts) > 0
+      assert person_facts != []
     end
   end
 end

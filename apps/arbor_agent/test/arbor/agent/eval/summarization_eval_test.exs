@@ -29,12 +29,12 @@ defmodule Arbor.Agent.Eval.SummarizationEvalTest do
 
       assert coding["task"] != ""
       assert coding["text"] != ""
-      assert length(coding["tool_calls"]) > 0
+      assert coding["tool_calls"] != []
 
       file_reads =
         Enum.filter(coding["tool_calls"], &(&1["name"] in ["file_read", "file.read"]))
 
-      assert length(file_reads) > 0
+      assert file_reads != []
     end
 
     test "relational transcript has relationship/memory tool calls" do
@@ -42,7 +42,7 @@ defmodule Arbor.Agent.Eval.SummarizationEvalTest do
       relational = transcripts[:relational]
 
       assert relational["task"] != ""
-      assert length(relational["tool_calls"]) > 0
+      assert relational["tool_calls"] != []
 
       rel_tools =
         ~w(relationship_save relationship_get relationship_moment

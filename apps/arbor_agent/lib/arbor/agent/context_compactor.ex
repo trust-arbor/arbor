@@ -453,13 +453,7 @@ defmodule Arbor.Agent.ContextCompactor do
             {msg, acc}
           else
             # Turn numbers are 1-indexed (idx+1 matches the turn stored in salience_scores)
-            detail =
-              if use_salience do
-                salience = Map.get(salience_scores, idx + 1, 0.0)
-                effective_detail(idx, total, salience)
-              else
-                detail_level(idx, total)
-              end
+            detail = compute_detail(use_salience, salience_scores, idx, total)
 
             {compressed_msg, did_compress} =
               compress_by_detail(msg, detail, file_index, memory_index, message_timestamps, idx)
@@ -478,6 +472,15 @@ defmodule Arbor.Agent.ContextCompactor do
   end
 
   def detail_level(_index, _total), do: 1.0
+
+  defp compute_detail(true = _use_salience, salience_scores, idx, total) do
+    salience = Map.get(salience_scores, idx + 1, 0.0)
+    effective_detail(idx, total, salience)
+  end
+
+  defp compute_detail(false = _use_salience, _salience_scores, idx, total) do
+    detail_level(idx, total)
+  end
 
   @doc false
   @spec effective_detail(non_neg_integer(), non_neg_integer(), float()) :: float()

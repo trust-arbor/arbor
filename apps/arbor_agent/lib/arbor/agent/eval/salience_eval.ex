@@ -345,12 +345,7 @@ defmodule Arbor.Agent.Eval.SalienceEval do
           if MapSet.member?(indices, idx) do
             content = Map.get(msg, :content) || Map.get(msg, "content", "")
 
-            comp_len =
-              cond do
-                is_binary(content) -> String.length(content)
-                is_list(content) -> content |> inspect() |> String.length()
-                true -> 0
-              end
+            comp_len = content_length(content)
 
             orig_len = Map.get(original_lengths, idx, 0)
             {comp_sum + comp_len, orig_sum + orig_len}
@@ -362,6 +357,10 @@ defmodule Arbor.Agent.Eval.SalienceEval do
       if original_total == 0, do: 1.0, else: compressed_total / original_total
     end
   end
+
+  defp content_length(content) when is_binary(content), do: String.length(content)
+  defp content_length(content) when is_list(content), do: content |> inspect() |> String.length()
+  defp content_length(_), do: 0
 
   # ── Summary ──────────────────────────────────────────────────
 
