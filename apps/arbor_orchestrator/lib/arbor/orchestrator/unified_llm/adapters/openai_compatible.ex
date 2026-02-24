@@ -421,7 +421,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         end
 
       _ ->
-        default_http_call(req, config)
+        default_http_call(req, opts, config)
     end
   end
 
@@ -438,8 +438,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     end
   end
 
-  defp default_http_call(req, config) do
-    timeout = Map.get(config, :receive_timeout, 60_000)
+  defp default_http_call(req, opts, config) do
+    # Caller opts (e.g. eval --timeout) override config, which overrides default.
+    # Default bumped to 300s — large-context LLM calls routinely exceed 60s.
+    timeout =
+      Keyword.get(opts, :timeout) ||
+        Map.get(config, :receive_timeout, 300_000)
 
     Req.post(req.url,
       headers: req.headers,
@@ -458,11 +462,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
 
   defp default_stream_call(req, config) do
     # For streaming, use Req's async response which implements Enumerable
+    timeout = Map.get(config, :receive_timeout, 300_000)
+
     case Req.post(req.url,
            headers: req.headers,
            json: req.body,
            into: :self,
-           receive_timeout: 120_000
+           receive_timeout: timeout
          ) do
       {:ok, resp} ->
         stream =
