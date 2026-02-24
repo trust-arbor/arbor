@@ -170,7 +170,9 @@ defmodule Arbor.Agent.MentalExecutor do
   def execute_handler(:plan_list, agent_id, params) do
     limit = Map.get(params, :limit) || Map.get(params, "limit", 20)
 
-    intents = normalize_list_result(with_memory_bridge(:recent_intents, [agent_id, [limit: limit]]))
+    intents =
+      normalize_list_result(with_memory_bridge(:recent_intents, [agent_id, [limit: limit]]))
+
     {:ok, %{intents: summarize_intents(intents), count: length(intents)}}
   end
 

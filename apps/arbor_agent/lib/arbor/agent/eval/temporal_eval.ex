@@ -349,6 +349,7 @@ defmodule Arbor.Agent.Eval.TemporalEval do
           if(gran_pass, do: nil, else: "granularity < 80%")
         ]
         |> Enum.reject(&is_nil/1)
+
       IO.puts("FAIL: #{Enum.join(reasons, ", ")}")
     end
 
