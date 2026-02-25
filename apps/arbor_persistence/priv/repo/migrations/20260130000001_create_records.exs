@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.Repo.Migrations.CreateRecords do
   use Ecto.Migration
+  import Arbor.Persistence.MigrationHelper
 
   def change do
     create table(:records, primary_key: false) do
@@ -22,10 +23,10 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateRecords do
     create(index(:records, [:namespace, :inserted_at]))
     create(index(:records, [:namespace, :updated_at]))
 
-    # JSONB queries on data (GIN index for containment queries)
-    create(index(:records, [:data], using: "GIN"))
-
-    # JSONB queries on metadata
-    create(index(:records, [:metadata], using: "GIN"))
+    # JSONB queries (GIN indexes — Postgres only, SQLite uses full scan)
+    if postgres?() do
+      create(index(:records, [:data], using: "GIN"))
+      create(index(:records, [:metadata], using: "GIN"))
+    end
   end
 end

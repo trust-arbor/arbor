@@ -2,7 +2,17 @@ defmodule Arbor.Persistence.Repo do
   @moduledoc """
   Ecto Repo for Arbor persistence.
 
-  Configure in your application:
+  Supports both PostgreSQL and SQLite3 adapters. The adapter is selected at
+  compile time via the `:repo_adapter` config key:
+
+      # PostgreSQL (default for existing setups):
+      config :arbor_persistence, repo_adapter: Ecto.Adapters.Postgres
+
+      # SQLite3 (zero-config for new developers):
+      # Set ARBOR_DB=sqlite before compiling
+      config :arbor_persistence, repo_adapter: Ecto.Adapters.SQLite3
+
+  ## PostgreSQL config
 
       config :arbor_persistence, Arbor.Persistence.Repo,
         database: "arbor_dev",
@@ -11,13 +21,18 @@ defmodule Arbor.Persistence.Repo do
         hostname: "localhost",
         pool_size: 10
 
-  For tests:
+  ## SQLite3 config
 
       config :arbor_persistence, Arbor.Persistence.Repo,
-        pool: Ecto.Adapters.SQL.Sandbox
+        database: Path.expand("~/.arbor/arbor_dev.db")
   """
 
   use Ecto.Repo,
     otp_app: :arbor_persistence,
-    adapter: Ecto.Adapters.Postgres
+    adapter:
+      Application.compile_env(
+        :arbor_persistence,
+        :repo_adapter,
+        Ecto.Adapters.Postgres
+      )
 end

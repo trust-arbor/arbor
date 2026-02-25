@@ -61,7 +61,7 @@ config :arbor_signals,
   authorizer: Arbor.Signals.Adapters.OpenAuthorizer,
   allow_open_authorizer: true
 
-# Postgres tests require a database
+# Database tests require a database
 # Run: mix ecto.create -r Arbor.Persistence.Repo
 # Run: mix ecto.migrate -r Arbor.Persistence.Repo
 # Then: mix test --include database
@@ -71,12 +71,24 @@ config :arbor_comms, :limitless, enabled: false
 config :arbor_comms, :email, enabled: false
 config :arbor_comms, :handler, enabled: false
 
-config :arbor_persistence, Arbor.Persistence.Repo,
-  database: "arbor_persistence_test",
-  username: "arbor_dev",
-  hostname: "localhost",
-  pool: Ecto.Adapters.SQL.Sandbox,
-  types: Arbor.Persistence.PostgrexTypes
+# Test database — adapter-aware
+# Note: The Ecto SQLite3 adapter does not support async tests
+# when used with Ecto.Adapters.SQL.Sandbox
+if System.get_env("ARBOR_DB") == "sqlite" do
+  config :arbor_persistence,
+    repo_adapter: Ecto.Adapters.SQLite3
+
+  config :arbor_persistence, Arbor.Persistence.Repo,
+    database: Path.expand("~/.arbor/arbor_test.db"),
+    pool: Ecto.Adapters.SQL.Sandbox
+else
+  config :arbor_persistence, Arbor.Persistence.Repo,
+    database: "arbor_persistence_test",
+    username: "arbor_dev",
+    hostname: "localhost",
+    pool: Ecto.Adapters.SQL.Sandbox,
+    types: Arbor.Persistence.PostgrexTypes
+end
 
 # Memory tests use ETS by default (no database required)
 config :arbor_memory,

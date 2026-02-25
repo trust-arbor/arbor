@@ -53,7 +53,9 @@ defmodule Arbor.Persistence.MixProject do
       {:jason, "~> 1.4"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.18"},
+      {:ecto_sqlite3, "~> 0.18"},
       {:pgvector, "~> 0.3"},
+      {:sqlite_vec, "~> 0.1"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
