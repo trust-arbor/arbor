@@ -51,11 +51,9 @@ defmodule Arbor.AI do
     BudgetTracker,
     Config,
     ResponseNormalizer,
-    Router,
     SessionBridge,
     SessionReader,
     SystemPromptBuilder,
-    TaskMeta,
     ToolAuthorization,
     ToolSignals,
     UnifiedBridge,
@@ -270,67 +268,14 @@ defmodule Arbor.AI do
   defdelegate build_volatile_context(agent_id, opts \\ []), to: SystemPromptBuilder
   defdelegate build_rich_system_prompt(agent_id, opts \\ []), to: SystemPromptBuilder
 
-  # ── Task-Aware Routing ──
-
-  @doc """
-  Route a task to an appropriate backend and model.
-
-  Delegates to `Router.route_task/2`. Accepts either a prompt string
-  (which gets classified) or a TaskMeta struct.
-
-  ## Options
-
-  - `:model` - Manual override `{backend, model}` - bypasses routing entirely
-  - `:min_trust` - Override minimum trust level
-  - `:exclude` - List of backends to exclude
-
-  ## Returns
-
-  - `{:ok, {backend, model}}` - Selected backend and model
-  - `{:error, reason}` - Routing failed
-
-  ## Examples
-
-      {:ok, {:anthropic, "claude-opus-4-20250514"}} = Arbor.AI.route_task("Fix auth vulnerability")
-  """
-  @spec route_task(Arbor.AI.TaskMeta.t() | String.t(), keyword()) ::
-          {:ok, {atom(), String.t()}} | {:error, term()}
-  def route_task(task_or_prompt, opts \\ []) do
-    Router.route_task(task_or_prompt, opts)
-  end
-
-  @doc """
-  Route an embedding request to an appropriate provider.
-
-  Delegates to `Router.route_embedding/1`.
-
-  ## Options
-
-  - `:prefer` - `:local`, `:cloud`, or `:auto` (default: configured preference)
-
-  ## Returns
-
-  - `{:ok, {backend, model}}` - Selected embedding provider and model
-  - `{:error, :no_embedding_providers}` - No providers available
-
-  ## Examples
-
-      {:ok, {:ollama, "nomic-embed-text"}} = Arbor.AI.route_embedding()
-      {:ok, {:openai, "text-embedding-3-small"}} = Arbor.AI.route_embedding(prefer: :cloud)
-  """
-  @spec route_embedding(keyword()) :: {:ok, {atom(), String.t()}} | {:error, term()}
-  def route_embedding(opts \\ []) do
-    Router.route_embedding(opts)
-  end
-
   # ── Embedding API ──
 
   @doc """
   Generate an embedding for a single text.
 
   Routes to the appropriate embedding provider based on configuration.
-  Uses `Router.route_embedding/1` to select the provider, or accepts
-  an explicit `:provider` option.
+  Selects the first available provider from the `:embedding_routing` config,
+  or accepts an explicit `:provider` option.
 
   ## Options
 
@@ -385,22 +330,6 @@ defmodule Arbor.AI do
       {:error, reason} ->
         {:error, reason}
     end
-  end
-
-  @doc """
-  Classify a prompt into task metadata for routing decisions.
-
-  Delegates to `TaskMeta.classify/2`.
-
-  ## Examples
-
-      meta = Arbor.AI.classify_task("Fix the security vulnerability in auth.ex")
-      meta.risk_level  #=> :critical
-      meta.domain      #=> :security
-  """
-  @spec classify_task(String.t(), keyword()) :: Arbor.AI.TaskMeta.t()
-  def classify_task(prompt, opts \\ []) do
-    TaskMeta.classify(prompt, opts)
   end
 
   # ── Thinking Integration ──
@@ -659,14 +588,14 @@ defmodule Arbor.AI do
   #
   # Priority:
   # 1. Explicit :provider opt → use that provider directly
-  # 2. Router.route_embedding/1 → map backend atom to module
+  # 2. Config-based discovery → read embedding_routing config, filter by availability
   # 3. TestEmbedding fallback if embedding_test_fallback: true
   @spec resolve_embedding_provider(keyword()) ::
           {:ok, {module(), keyword()}} | {:error, term()}
   defp resolve_embedding_provider(opts) do
     case Keyword.get(opts, :provider) do
       nil ->
-        resolve_via_router(opts)
+        resolve_from_config(opts)
 
       provider when is_atom(provider) ->
         case provider_to_module(provider) do
@@ -676,24 +605,49 @@ defmodule Arbor.AI do
     end
   end
 
-  defp resolve_via_router(opts) do
-    case Router.route_embedding(opts) do
-      {:ok, {backend, model}} ->
-        case provider_to_module(backend) do
-          {:ok, module} ->
-            {:ok, {module, [provider: backend, model: model]}}
+  # Inline embedding provider discovery (replaces Router.route_embedding/1).
+  # Reads the embedding_routing config, filters by ProviderCatalog availability,
+  # and returns the first available provider module.
+  defp resolve_from_config(opts) do
+    config = embedding_config()
+    prefer = Keyword.get(opts, :prefer, config.preferred)
+    providers = sort_embedding_providers(config.providers, prefer)
 
-          :error ->
-            {:error, {:unknown_provider, backend}}
-        end
+    available =
+      Enum.filter(providers, fn {backend, _model} ->
+        embedding_backend_available?(backend)
+      end)
+
+    case pick_embedding_provider(available) do
+      {:ok, _} = result ->
+        result
 
       {:error, :no_embedding_providers} ->
-        maybe_test_fallback()
+        # Try cloud fallback if configured
+        if config.fallback_to_cloud do
+          cloud_available =
+            config.providers
+            |> sort_embedding_providers(:cloud)
+            |> Enum.filter(fn {backend, _model} -> embedding_backend_available?(backend) end)
 
-      {:error, reason} ->
-        {:error, reason}
+          case pick_embedding_provider(cloud_available) do
+            {:ok, _} = result -> result
+            {:error, _} -> maybe_test_fallback()
+          end
+        else
+          maybe_test_fallback()
+        end
     end
   end
+
+  defp pick_embedding_provider([{backend, model} | _]) do
+    case provider_to_module(backend) do
+      {:ok, module} -> {:ok, {module, [provider: backend, model: model]}}
+      :error -> {:error, {:unknown_provider, backend}}
+    end
+  end
+
+  defp pick_embedding_provider([]), do: {:error, :no_embedding_providers}
 
   defp maybe_test_fallback do
     if Application.get_env(:arbor_ai, :embedding_test_fallback, false) do
@@ -702,6 +656,64 @@ defmodule Arbor.AI do
       {:error, :no_embedding_providers}
     end
   end
+
+  @default_embedding_config %{
+    preferred: :local,
+    providers: [
+      {:ollama, "nomic-embed-text"},
+      {:lmstudio, "text-embedding"},
+      {:openai, "text-embedding-3-small"}
+    ],
+    fallback_to_cloud: true
+  }
+
+  defp embedding_config do
+    default = @default_embedding_config
+    config = Application.get_env(:arbor_ai, :embedding_routing, %{})
+
+    %{
+      preferred: Map.get(config, :preferred, default.preferred),
+      providers: Map.get(config, :providers, default.providers),
+      fallback_to_cloud: Map.get(config, :fallback_to_cloud, default.fallback_to_cloud)
+    }
+  end
+
+  @cloud_embedding_providers [:openai, :anthropic, :gemini, :cohere]
+
+  defp sort_embedding_providers(providers, :cloud) do
+    {cloud, local} =
+      Enum.split_with(providers, fn {backend, _model} ->
+        backend in @cloud_embedding_providers
+      end)
+
+    cloud ++ local
+  end
+
+  defp sort_embedding_providers(providers, _prefer), do: providers
+
+  # Check if an embedding backend is available via ProviderCatalog (runtime bridge)
+  defp embedding_backend_available?(backend) do
+    provider_str = embedding_backend_to_provider(backend)
+
+    if Code.ensure_loaded?(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      catalog = apply(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog, :all, [[]])
+      Enum.any?(catalog, fn entry -> entry.provider == provider_str and entry.available? end)
+    else
+      true
+    end
+  rescue
+    _ -> true
+  catch
+    :exit, _ -> true
+  end
+
+  defp embedding_backend_to_provider(:anthropic), do: "anthropic"
+  defp embedding_backend_to_provider(:openai), do: "openai"
+  defp embedding_backend_to_provider(:gemini), do: "gemini"
+  defp embedding_backend_to_provider(:lmstudio), do: "lm_studio"
+  defp embedding_backend_to_provider(:ollama), do: "ollama"
+  defp embedding_backend_to_provider(other), do: Atom.to_string(other)
 
   @embedding_providers %{
     ollama: OllamaEmbedding,

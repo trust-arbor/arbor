@@ -3,7 +3,6 @@ defmodule Arbor.AITest do
 
   alias Arbor.AI
   alias Arbor.AI.Config
-  alias Arbor.AI.Router
 
   describe "Config" do
     test "default_provider/0 returns configured provider" do
@@ -44,24 +43,6 @@ defmodule Arbor.AITest do
 
     test "cli_backend_timeout/0 returns positive integer" do
       assert Config.cli_backend_timeout() > 0
-    end
-  end
-
-  describe "Router" do
-    test "route_task/2 accepts string prompt" do
-      result = Router.route_task("Hello world")
-      assert match?({:ok, {_backend, _model}}, result) or match?({:error, _}, result)
-    end
-
-    test "route_task/2 manual override bypasses routing" do
-      result = Router.route_task("any prompt", model: {:anthropic, :opus})
-      assert {:ok, {:anthropic, model}} = result
-      assert is_binary(model)
-    end
-
-    test "route_embedding/1 returns provider or error" do
-      result = Router.route_embedding()
-      assert match?({:ok, {_backend, _model}}, result) or match?({:error, _}, result)
     end
   end
 
