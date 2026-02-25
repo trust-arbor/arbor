@@ -3,11 +3,10 @@ defmodule Arbor.Orchestrator.Conformance.MatrixTest do
 
   alias Arbor.Orchestrator.Conformance.Matrix
 
-  test "contains all three spec groups" do
+  test "contains all spec groups" do
     summary = Matrix.summary()
 
     assert Map.has_key?(summary.by_spec, :attractor)
-    assert Map.has_key?(summary.by_spec, :coding_agent_loop)
     assert Map.has_key?(summary.by_spec, :unified_llm)
   end
 

@@ -143,32 +143,6 @@ defmodule Arbor.Orchestrator.Conformance.Matrix do
         module: "Arbor.Orchestrator.CrossFeatureMatrixTest"
       }
     ],
-    coding_agent_loop: [
-      %{
-        id: "9.1",
-        title: "Core loop",
-        status: :implemented,
-        module: "Arbor.Orchestrator.AgentLoop.LoopTest"
-      },
-      %{
-        id: "9.2",
-        title: "Provider profiles",
-        status: :implemented,
-        module: "Arbor.Orchestrator.AgentLoop.ProviderProfilesTest"
-      },
-      %{
-        id: "9.3",
-        title: "Tool execution",
-        status: :implemented,
-        module: "Arbor.Orchestrator.AgentLoop.LoopTest"
-      },
-      %{
-        id: "9.10",
-        title: "Event system",
-        status: :implemented,
-        module: "Arbor.Orchestrator.AgentLoop.LoopTest"
-      }
-    ],
     unified_llm: [
       %{
         id: "8.1",
@@ -223,7 +197,6 @@ defmodule Arbor.Orchestrator.Conformance.Matrix do
 
   @spec_docs %{
     attractor: "specs/attractor/attractor-spec.md",
-    coding_agent_loop: "specs/attractor/coding-agent-loop-spec.md",
     unified_llm: "specs/attractor/unified-llm-spec.md"
   }
 

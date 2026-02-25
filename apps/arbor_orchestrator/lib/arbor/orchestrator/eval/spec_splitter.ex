@@ -22,7 +22,7 @@ defmodule Arbor.Orchestrator.Eval.SpecSplitter do
 
   @all_subsystems ~w(
     dot graph engine handlers validation ir
-    human transforms eval unified_llm agent_loop
+    human transforms eval unified_llm
   )
 
   @doc """
