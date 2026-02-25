@@ -28,10 +28,10 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
 
   ## Domain-Specific Operations
 
-  Business-logic types (eval.*, memory.*) are NOT aliases. They should be
-  expressed as `exec target="action" action="..."` in DOT pipelines, using
-  the corresponding Jido Actions from `Arbor.Actions.EvalPipeline` and
-  `Arbor.Actions.Memory`.
+  Business-logic types (eval.*, memory.*, consensus.*) are NOT aliases. They
+  should be expressed as `exec target="action" action="..."` in DOT pipelines,
+  using the corresponding Jido Actions from `Arbor.Actions.EvalPipeline`,
+  `Arbor.Actions.Memory`, and `Arbor.Actions.Consensus`.
   """
 
   @canonical_types ~w(
@@ -91,12 +91,6 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "pipeline.run" => "compose",
     "feedback.loop" => "compose",
     "stack.manager_loop" => "compose",
-    # Consensus — compose of sub-pipeline (long-term migration)
-    "consensus.propose" => "compose",
-    "consensus.ask" => "compose",
-    "consensus.await" => "compose",
-    "consensus.check" => "compose",
-    "consensus.decide" => "compose",
     # Session — compose internals (long-term migration)
     "session.classify" => "compose",
     "session.memory_recall" => "compose",
@@ -157,13 +151,6 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "feedback.loop" =>
       {"compose",
        %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/feedback-loop.dot"}},
-
-    # Consensus — delegates to ConsensusHandler via ComposeHandler
-    "consensus.propose" => {"compose", %{"mode" => "consensus"}},
-    "consensus.ask" => {"compose", %{"mode" => "consensus"}},
-    "consensus.await" => {"compose", %{"mode" => "consensus"}},
-    "consensus.check" => {"compose", %{"mode" => "consensus"}},
-    "consensus.decide" => {"compose", %{"mode" => "consensus"}},
 
     # Session — delegates to SessionHandler via ComposeHandler
     "session.classify" => {"compose", %{"mode" => "session"}},

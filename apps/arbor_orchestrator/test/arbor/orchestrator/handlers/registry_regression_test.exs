@@ -59,11 +59,6 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
     "pipeline.run" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "feedback.loop" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "stack.manager_loop" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "consensus.propose" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "consensus.ask" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "consensus.await" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "consensus.check" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "consensus.decide" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "session.classify" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "session.memory_recall" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "session.mode_select" => Arbor.Orchestrator.Handlers.ComposeHandler,
@@ -232,13 +227,6 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       {handler, updated_node} = Registry.resolve_with_attrs(node)
       assert handler == Arbor.Orchestrator.Handlers.WaitHandler
       assert updated_node.attrs["source"] == "human"
-    end
-
-    test "consensus types resolve to ComposeHandler with mode injection" do
-      node = %Node{id: "n", attrs: %{"type" => "consensus.propose"}}
-      {handler, updated_node} = Registry.resolve_with_attrs(node)
-      assert handler == Arbor.Orchestrator.Handlers.ComposeHandler
-      assert updated_node.attrs["mode"] == "consensus"
     end
 
     test "session types resolve to ComposeHandler with mode injection" do

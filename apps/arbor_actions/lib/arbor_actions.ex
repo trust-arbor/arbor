@@ -20,6 +20,7 @@ defmodule Arbor.Actions do
   | Code | `Arbor.Actions.Code` | Code compilation, testing, and hot-loading |
   | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
   | Council | `Arbor.Actions.Council` | Advisory council consultation |
+  | Consensus | `Arbor.Actions.Consensus` | Consensus propose/ask/await/check/decide |
   | Web | `Arbor.Actions.Web` | Web browsing, search, and page snapshots |
   | CLI Agent | `Arbor.Actions.CliAgent` | CLI agent execution (Claude, OpenCode, Codex, etc.) |
 
@@ -234,6 +235,13 @@ defmodule Arbor.Actions do
       council: [
         Arbor.Actions.Council.Consult,
         Arbor.Actions.Council.ConsultOne
+      ],
+      consensus: [
+        Arbor.Actions.Consensus.Propose,
+        Arbor.Actions.Consensus.Ask,
+        Arbor.Actions.Consensus.Await,
+        Arbor.Actions.Consensus.Check,
+        Arbor.Actions.Consensus.Decide
       ],
       memory: [
         Arbor.Actions.Memory.Remember,

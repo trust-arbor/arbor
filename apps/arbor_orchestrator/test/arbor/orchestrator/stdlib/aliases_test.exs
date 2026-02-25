@@ -110,14 +110,6 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert Aliases.canonical_type("stack.manager_loop") == "compose"
     end
 
-    test "consensus types → compose" do
-      for type <-
-            ~w(consensus.propose consensus.ask consensus.await consensus.check consensus.decide) do
-        assert Aliases.canonical_type(type) == "compose",
-               "#{type} should map to compose"
-      end
-    end
-
     test "session types → compose" do
       session_types = ~w(
         session.classify session.memory_recall session.mode_select
@@ -221,13 +213,12 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert "shell" in exec_aliases
     end
 
-    test "compose includes graph, consensus, session, pipeline types" do
+    test "compose includes graph, session, pipeline types" do
       compose_aliases = Aliases.aliases_for("compose")
       assert "compose" in compose_aliases
       assert "graph.invoke" in compose_aliases
       assert "graph.compose" in compose_aliases
       assert "pipeline.run" in compose_aliases
-      assert "consensus.ask" in compose_aliases
       assert "session.llm_call" in compose_aliases
     end
 

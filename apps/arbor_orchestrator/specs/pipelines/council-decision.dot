@@ -186,7 +186,7 @@ digraph council_decision {
   collect [type="parallel.fan_in"]
 
   // Tally votes, apply quorum, render CouncilDecision
-  decide [type="consensus.decide", quorum="majority", mode="decision"]
+  decide [type="exec", target="action", action="consensus.decide", param.quorum="majority", param.mode="decision", context_keys="parallel.results,council.question"]
 
   done [type="exit"]
 

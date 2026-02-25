@@ -57,12 +57,15 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
       assert evaluate.attrs["max_parallel"] == "13"
     end
 
-    test "has consensus.decide node" do
+    test "has consensus.decide exec node" do
       graph = load_council_graph()
       decide = graph.nodes["decide"]
-      assert decide.attrs["type"] == "consensus.decide"
-      assert decide.attrs["quorum"] == "majority"
-      assert decide.attrs["mode"] == "decision"
+      assert decide.attrs["type"] == "exec"
+      assert decide.attrs["target"] == "action"
+      assert decide.attrs["action"] == "consensus.decide"
+      assert decide.attrs["param.quorum"] == "majority"
+      assert decide.attrs["param.mode"] == "decision"
+      assert decide.attrs["context_keys"] == "parallel.results,council.question"
     end
 
     test "has correct graph-level attrs" do
