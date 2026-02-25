@@ -1,9 +1,7 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 children =
   [
-    Arbor.AI.BackendRegistry,
-    Arbor.AI.QuotaTracker,
-    Arbor.AI.SessionRegistry
+    Arbor.AI.QuotaTracker
   ] ++
     if(Application.get_env(:arbor_ai, :enable_budget_tracking, true),
       do: [Arbor.AI.BudgetTracker],

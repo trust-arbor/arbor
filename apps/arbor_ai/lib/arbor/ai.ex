@@ -45,12 +45,10 @@ defmodule Arbor.AI do
   @behaviour Arbor.Contracts.API.Embedding
 
   alias Arbor.AI.{
-    BackendRegistry,
     Backends.OllamaEmbedding,
     Backends.OpenAIEmbedding,
     Backends.TestEmbedding,
     BudgetTracker,
-    CliImpl,
     Config,
     ResponseNormalizer,
     Router,
@@ -142,99 +140,8 @@ defmodule Arbor.AI do
     provider = Keyword.fetch!(opts, :provider)
     Logger.debug("Arbor.AI generating with provider #{inspect(provider)}")
 
-    # Primary path: UnifiedBridge → orchestrator handles all providers (CLI + API)
-    case UnifiedBridge.generate_text(prompt, opts) do
-      {:ok, response} ->
-        {:ok, response}
-
-      :unavailable ->
-        # Fallback: orchestrator not loaded, use legacy paths
-        generate_text_legacy(prompt, opts)
-
-      {:error, reason} ->
-        Logger.warning("UnifiedBridge failed: #{inspect(reason)}, trying legacy path")
-        generate_text_legacy(prompt, opts)
-    end
-  end
-
-  # Legacy fallback when orchestrator is unavailable.
-  # Routes to CLI backends or ReqLLM based on the old backend: option.
-  defp generate_text_legacy(prompt, opts) do
-    backend = Router.select_backend(opts)
-
-    case backend do
-      :cli ->
-        generate_text_via_cli(prompt, opts)
-
-      :api ->
-        generate_text_via_api(prompt, opts)
-    end
-  end
-
-  @doc """
-  Generate text using the CLI backend directly.
-
-  Legacy function — prefer `generate_text/2` with `provider: :claude_cli` instead.
-  Kept for backward compatibility during migration.
-  """
-  @spec generate_text_via_cli(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def generate_text_via_cli(prompt, opts \\ []) do
-    opts = snapshot_config(opts)
-
-    case CliImpl.generate_text(prompt, opts) do
-      {:ok, response} ->
-        {:ok, normalize_response(response)}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  @doc """
-  Generate text using the API backend directly.
-
-  Legacy function — prefer `generate_text/2` with `provider: :anthropic` instead.
-  Kept for backward compatibility during migration.
-  """
-  @spec generate_text_via_api(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def generate_text_via_api(prompt, opts \\ []) do
-    opts = snapshot_config(opts)
-    generate_text_via_reqllm(prompt, opts)
-  end
-
-  defp generate_text_via_reqllm(prompt, opts) do
-    provider = Keyword.fetch!(opts, :provider)
-    model = Keyword.fetch!(opts, :model)
-    system_prompt = Keyword.get(opts, :system_prompt)
-    max_tokens = Keyword.get(opts, :max_tokens, 1024)
-    temperature = Keyword.get(opts, :temperature, 0.7)
-    thinking_enabled = Keyword.get(opts, :thinking, false)
-    thinking_budget = Keyword.get(opts, :thinking_budget, 4096)
-
-    messages = build_messages(prompt, system_prompt)
-    model_spec = build_model_spec(provider, model)
-
-    req_opts =
-      [
-        max_tokens: max_tokens,
-        temperature: temperature
-      ]
-      |> maybe_add_system_prompt(system_prompt)
-      |> maybe_add_api_key(provider)
-      |> maybe_add_thinking(thinking_enabled, thinking_budget)
-
-    Logger.debug(
-      "Arbor.AI API generating with #{provider}:#{model} via ReqLLM (fallback), thinking: #{thinking_enabled}"
-    )
-
-    case ReqLLM.generate_text(model_spec, messages, req_opts) do
-      {:ok, response} ->
-        {:ok, format_api_response(response, provider, model)}
-
-      {:error, reason} ->
-        Logger.warning("Arbor.AI API generation failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+    # All providers (CLI + API) are handled by the orchestrator's UnifiedLLM layer.
+    UnifiedBridge.generate_text(prompt, opts)
   end
 
   @doc """
@@ -362,16 +269,6 @@ defmodule Arbor.AI do
   defdelegate build_stable_system_prompt(agent_id, opts \\ []), to: SystemPromptBuilder
   defdelegate build_volatile_context(agent_id, opts \\ []), to: SystemPromptBuilder
   defdelegate build_rich_system_prompt(agent_id, opts \\ []), to: SystemPromptBuilder
-
-  @doc """
-  Check available backends.
-
-  Returns a list of available backends with their status.
-  """
-  @spec available_backends() :: [atom()]
-  def available_backends do
-    BackendRegistry.available_backends()
-  end
 
   # ── Task-Aware Routing ──
 
@@ -721,48 +618,6 @@ defmodule Arbor.AI do
   # Private Helpers
   # ===========================================================================
 
-  defp normalize_response(response), do: ResponseNormalizer.normalize_response(response)
-
-  defp build_messages(prompt, nil) do
-    [%{role: "user", content: prompt}]
-  end
-
-  defp build_messages(prompt, _system_prompt) do
-    # System prompt is passed via opts, not messages for ReqLLM
-    [%{role: "user", content: prompt}]
-  end
-
-  defp maybe_add_system_prompt(opts, nil), do: opts
-  defp maybe_add_system_prompt(opts, system), do: Keyword.put(opts, :system_prompt, system)
-
-  # Add extended thinking configuration for Anthropic models
-  # See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
-  defp maybe_add_thinking(opts, false, _budget), do: opts
-
-  defp maybe_add_thinking(opts, true, budget) do
-    Keyword.put(opts, :thinking, %{type: :enabled, budget_tokens: budget})
-  end
-
-  # Inject API key from environment since ReqLLM.put_key may not work
-  # after application startup
-  defp maybe_add_api_key(opts, provider) do
-    key_var = api_key_env_var(provider)
-
-    case System.get_env(key_var) do
-      nil -> opts
-      "" -> opts
-      key -> Keyword.put(opts, :api_key, key)
-    end
-  end
-
-  defp api_key_env_var(:openrouter), do: "OPENROUTER_API_KEY"
-  defp api_key_env_var(:anthropic), do: "ANTHROPIC_API_KEY"
-  defp api_key_env_var(:openai), do: "OPENAI_API_KEY"
-  defp api_key_env_var(:google), do: "GOOGLE_API_KEY"
-  defp api_key_env_var(:gemini), do: "GEMINI_API_KEY"
-  defp api_key_env_var(:zai_coding_plan), do: "ZAI_API_KEY"
-  defp api_key_env_var(_), do: nil
-
   # ── Tool-calling helpers ──
 
   defp maybe_put(map, _key, nil), do: map
@@ -783,12 +638,6 @@ defmodule Arbor.AI do
     |> Keyword.put_new_lazy(:model, fn -> Config.default_model() end)
   end
 
-  # Note: API key resolution is handled by ReqLLM.Keys.get/2 which checks
-  # (1) opts[:api_key], (2) Application.get_env(:req_llm, ...), (3) System.get_env.
-  # We no longer pre-populate Application env from System env (was a TOCTOU race).
-  # For generate_text_via_api, the key flows via maybe_add_api_key/2 → opts[:api_key].
-  # For generate_text_with_tools, ReqLLM resolves from System.get_env directly.
-
   defp build_model_spec(provider, model) do
     # Build raw LLMDB.Model struct to bypass LLMDB lookup.
     # This allows using models not yet in the database.
@@ -800,10 +649,6 @@ defmodule Arbor.AI do
       id: model
     }
     |> Map.put(:base_url, nil)
-  end
-
-  defp format_api_response(response, provider, model) do
-    ResponseNormalizer.format_api_response(response, provider, model)
   end
 
   # ===========================================================================

@@ -12,9 +12,7 @@ defmodule Arbor.AI.Application do
       if Application.get_env(:arbor_ai, :start_children, true) do
         buffered_store_child() ++
           [
-            Arbor.AI.BackendRegistry,
-            Arbor.AI.QuotaTracker,
-            Arbor.AI.SessionRegistry
+            Arbor.AI.QuotaTracker
           ] ++ budget_tracker_child() ++ usage_stats_child()
       else
         []

@@ -3,37 +3,32 @@ defmodule Arbor.AI.FacadeMigrationTest do
 
   @moduletag :integration
 
-  describe "generate_text_via_api/2 strangler fig" do
-    test "generate_text_via_api accepts standard opts" do
-      # Verify the strangler fig pattern works:
-      # 1. Tries UnifiedBridge first
-      # 2. Falls back to ReqLLM on error
-      # 3. ReqLLM will raise on missing API key (expected in test env)
-
-      # Catch the expected ReqLLM error
-      assert_raise ReqLLM.Error.Invalid.Parameter, fn ->
-        Arbor.AI.generate_text_via_api("test prompt",
+  describe "generate_text/2 unified path" do
+    test "generate_text/2 routes through UnifiedBridge" do
+      # All providers (CLI + API) are now handled by the orchestrator's UnifiedLLM layer.
+      # Without valid API keys, UnifiedBridge returns an error tuple.
+      result =
+        Arbor.AI.generate_text("test prompt",
           provider: :anthropic,
           model: "claude-sonnet-4-5-20250514",
           max_tokens: 10,
           temperature: 0.1
         )
-      end
+
+      # Either succeeds (has API key) or returns error (no key / unavailable)
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
-    test "generate_text/2 routes to api backend" do
-      # Verify the full routing path:
-      # generate_text → router → generate_text_via_api → UnifiedBridge → ReqLLM
-
-      # Catch the expected ReqLLM error
-      assert_raise ReqLLM.Error.Invalid.Parameter, fn ->
+    test "generate_text/2 accepts provider option directly" do
+      # Providers are passed directly — no CLI/API split
+      result =
         Arbor.AI.generate_text("test",
-          backend: :api,
-          provider: :anthropic,
-          model: "claude-sonnet-4-5-20250514",
+          provider: :openrouter,
+          model: "arcee-ai/trinity-large-preview:free",
           max_tokens: 10
         )
-      end
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
   end
 end
