@@ -190,6 +190,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
   end
 
   defp discover_adapter(adapter_module) do
+    Code.ensure_loaded(adapter_module)
+
     if function_exported?(adapter_module, :runtime_contract, 0) do
       contract = adapter_module.runtime_contract()
       check_result = RuntimeContract.check(contract)
