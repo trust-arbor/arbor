@@ -703,7 +703,6 @@ defmodule Arbor.AI.BudgetTracker do
     _, _ -> :ok
   end
 
-
   defp default_status do
     %{
       daily_budget: daily_budget(),
