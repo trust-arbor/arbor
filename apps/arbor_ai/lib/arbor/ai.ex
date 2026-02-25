@@ -2,21 +2,21 @@ defmodule Arbor.AI do
   @moduledoc """
   Unified LLM interface for Arbor.
 
-  Provides a simple facade for text generation with automatic routing
-  between API backends (ReqLLM, paid) and CLI backends (Claude Code, etc., "free").
+  Provides a simple facade for text generation. All LLM calls are routed
+  through the orchestrator's UnifiedLLM layer — CLI and API providers are
+  unified. `claude_cli` is just another provider, same as `anthropic` or `openai`.
 
   ## Quick Start
 
-      # Generate text with default settings (uses routing strategy)
+      # Generate text with default settings
       {:ok, result} = Arbor.AI.generate_text("What is 2+2?")
       result.text
       #=> "2+2 equals 4."
 
-      # Explicitly use CLI backend (free via subscriptions)
-      {:ok, result} = Arbor.AI.generate_text("Hello", backend: :cli)
-
-      # Explicitly use API backend (paid)
-      {:ok, result} = Arbor.AI.generate_text("Hello", backend: :api)
+      # Use a specific provider (CLI or API — doesn't matter)
+      {:ok, result} = Arbor.AI.generate_text("Hello", provider: :claude_cli)
+      {:ok, result} = Arbor.AI.generate_text("Hello", provider: :anthropic)
+      {:ok, result} = Arbor.AI.generate_text("Hello", provider: :ollama)
 
       # With custom options
       {:ok, result} = Arbor.AI.generate_text(
@@ -26,29 +26,14 @@ defmodule Arbor.AI do
         temperature: 0.3
       )
 
-  ## Backend Options
-
-  - `:backend` - Backend selection:
-    - `:api` - Use ReqLLM (paid API calls)
-    - `:cli` - Use CLI agents (Claude Code, Codex, Gemini CLI, etc.)
-    - `:auto` - Use routing strategy to decide (default)
-
   ## Configuration
 
   Configure defaults in your config:
 
       config :arbor_ai,
-        # API settings
         default_provider: :anthropic,
         default_model: "claude-sonnet-4-5-20250514",
-        timeout: 60_000,
-
-        # Routing
-        default_backend: :auto,
-        routing_strategy: :cost_optimized,  # Try CLI first
-
-        # CLI fallback chain
-        cli_fallback_chain: [:anthropic, :openai, :gemini, :lmstudio]
+        timeout: 60_000
 
   API keys are loaded from environment variables:
 
@@ -153,9 +138,29 @@ defmodule Arbor.AI do
     # SECURITY: Snapshot config at entry point to prevent TOCTOU race.
     # Another process could change Application env between our read and use.
     opts = snapshot_config(opts)
-    backend = Router.select_backend(opts)
 
-    Logger.debug("Arbor.AI routing to #{backend} backend")
+    provider = Keyword.fetch!(opts, :provider)
+    Logger.debug("Arbor.AI generating with provider #{inspect(provider)}")
+
+    # Primary path: UnifiedBridge → orchestrator handles all providers (CLI + API)
+    case UnifiedBridge.generate_text(prompt, opts) do
+      {:ok, response} ->
+        {:ok, response}
+
+      :unavailable ->
+        # Fallback: orchestrator not loaded, use legacy paths
+        generate_text_legacy(prompt, opts)
+
+      {:error, reason} ->
+        Logger.warning("UnifiedBridge failed: #{inspect(reason)}, trying legacy path")
+        generate_text_legacy(prompt, opts)
+    end
+  end
+
+  # Legacy fallback when orchestrator is unavailable.
+  # Routes to CLI backends or ReqLLM based on the old backend: option.
+  defp generate_text_legacy(prompt, opts) do
+    backend = Router.select_backend(opts)
 
     case backend do
       :cli ->
@@ -169,11 +174,11 @@ defmodule Arbor.AI do
   @doc """
   Generate text using the CLI backend directly.
 
-  Bypasses routing and uses CLI agents (Claude Code, Codex, etc.).
+  Legacy function — prefer `generate_text/2` with `provider: :claude_cli` instead.
+  Kept for backward compatibility during migration.
   """
   @spec generate_text_via_cli(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def generate_text_via_cli(prompt, opts \\ []) do
-    # SECURITY: Snapshot config if called directly (not via generate_text/2)
     opts = snapshot_config(opts)
 
     case CliImpl.generate_text(prompt, opts) do
@@ -188,26 +193,13 @@ defmodule Arbor.AI do
   @doc """
   Generate text using the API backend directly.
 
-  Bypasses routing and uses ReqLLM (paid API calls).
+  Legacy function — prefer `generate_text/2` with `provider: :anthropic` instead.
+  Kept for backward compatibility during migration.
   """
   @spec generate_text_via_api(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def generate_text_via_api(prompt, opts \\ []) do
-    # SECURITY: Snapshot config if called directly (not via generate_text/2)
     opts = snapshot_config(opts)
-
-    # Strangler fig: try unified Client first, fall back to ReqLLM
-    case UnifiedBridge.generate_text(prompt, opts) do
-      {:ok, response} ->
-        {:ok, response}
-
-      :unavailable ->
-        # Fallback to legacy ReqLLM path
-        generate_text_via_reqllm(prompt, opts)
-
-      {:error, reason} ->
-        Logger.warning("Unified LLM failed, falling back to ReqLLM: #{inspect(reason)}")
-        generate_text_via_reqllm(prompt, opts)
-    end
+    generate_text_via_reqllm(prompt, opts)
   end
 
   defp generate_text_via_reqllm(prompt, opts) do
