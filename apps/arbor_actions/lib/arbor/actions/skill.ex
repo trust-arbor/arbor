@@ -592,9 +592,9 @@ defmodule Arbor.Actions.Skill do
 
       ai_mod = Arbor.AI
 
-      if Code.ensure_loaded?(ai_mod) and function_exported?(ai_mod, :generate_text_via_api, 2) do
+      if Code.ensure_loaded?(ai_mod) and function_exported?(ai_mod, :generate_text, 2) do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        case apply(ai_mod, :generate_text_via_api, [
+        case apply(ai_mod, :generate_text, [
                user_prompt,
                [model: "fast", system_prompt: system_prompt]
              ]) do

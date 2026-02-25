@@ -48,63 +48,20 @@ defmodule Arbor.AITest do
   end
 
   describe "Router" do
-    test "select_backend/1 returns :api when backend: :api" do
-      assert Router.select_backend(backend: :api) == :api
+    test "route_task/2 accepts string prompt" do
+      result = Router.route_task("Hello world")
+      assert match?({:ok, {_backend, _model}}, result) or match?({:error, _}, result)
     end
 
-    test "select_backend/1 returns :cli when backend: :cli" do
-      assert Router.select_backend(backend: :cli) == :cli
+    test "route_task/2 manual override bypasses routing" do
+      result = Router.route_task("any prompt", model: {:anthropic, :opus})
+      assert {:ok, {:anthropic, model}} = result
+      assert is_binary(model)
     end
 
-    test "select_backend/1 handles :auto with cost_optimized strategy" do
-      # Default strategy is cost_optimized, which prefers CLI
-      assert Router.select_backend(backend: :auto, strategy: :cost_optimized) == :cli
-    end
-
-    test "select_backend/1 handles :auto with api_only strategy" do
-      assert Router.select_backend(backend: :auto, strategy: :api_only) == :api
-    end
-
-    test "select_backend/1 handles :auto with cli_only strategy" do
-      assert Router.select_backend(backend: :auto, strategy: :cli_only) == :cli
-    end
-
-    test "prefer_cli?/1 returns true for cost_optimized with auto backend" do
-      # Must specify backend: :auto to trigger strategy-based selection
-      assert Router.prefer_cli?(backend: :auto, strategy: :cost_optimized) == true
-    end
-
-    test "prefer_cli?/1 returns false for api_only with auto backend" do
-      assert Router.prefer_cli?(backend: :auto, strategy: :api_only) == false
-    end
-  end
-
-  describe "CliImpl" do
-    alias Arbor.AI.CliImpl
-
-    test "fallback_chain/0 returns configured chain" do
-      chain = CliImpl.fallback_chain()
-      assert is_list(chain)
-      assert chain != []
-    end
-
-    test "available_providers/0 returns list of providers" do
-      providers = CliImpl.available_providers()
-      assert :anthropic in providers
-      assert :openai in providers
-      assert :gemini in providers
-      assert :lmstudio in providers
-    end
-
-    test "backend_module/1 returns module for valid provider" do
-      assert CliImpl.backend_module(:anthropic) == Arbor.AI.Backends.ClaudeCli
-      assert CliImpl.backend_module(:openai) == Arbor.AI.Backends.CodexCli
-      assert CliImpl.backend_module(:gemini) == Arbor.AI.Backends.GeminiCli
-      assert CliImpl.backend_module(:lmstudio) == Arbor.AI.Backends.LMStudio
-    end
-
-    test "backend_module/1 returns nil for invalid provider" do
-      assert CliImpl.backend_module(:nonexistent) == nil
+    test "route_embedding/1 returns provider or error" do
+      result = Router.route_embedding()
+      assert match?({:ok, {_backend, _model}}, result) or match?({:error, _}, result)
     end
   end
 
@@ -152,19 +109,15 @@ defmodule Arbor.AITest do
 
   describe "module contract" do
     test "exports generate_text function" do
-      # Check module info for the function
       functions = AI.__info__(:functions)
       assert {:generate_text, 1} in functions or {:generate_text, 2} in functions
     end
 
-    test "exports generate_text_via_cli function" do
+    test "exports generate_text_with_tools function" do
       functions = AI.__info__(:functions)
-      assert {:generate_text_via_cli, 1} in functions or {:generate_text_via_cli, 2} in functions
-    end
 
-    test "exports generate_text_via_api function" do
-      functions = AI.__info__(:functions)
-      assert {:generate_text_via_api, 1} in functions or {:generate_text_via_api, 2} in functions
+      assert {:generate_text_with_tools, 1} in functions or
+               {:generate_text_with_tools, 2} in functions
     end
 
     test "implements AI contract" do

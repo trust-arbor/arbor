@@ -100,7 +100,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
     ai_opts =
       Keyword.take(opts, [:model, :provider, :max_tokens, :temperature])
 
-    case apply(Arbor.AI, :generate_text_via_cli, [prompt, ai_opts]) do
+    case apply(Arbor.AI, :generate_text, [prompt, ai_opts]) do
       {:ok, response} when is_map(response) ->
         {:ok, Map.get(response, :text, Map.get(response, "text", ""))}
 

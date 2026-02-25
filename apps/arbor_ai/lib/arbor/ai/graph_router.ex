@@ -28,7 +28,6 @@ defmodule Arbor.AI.GraphRouter do
   """
 
   alias Arbor.AI.{
-    BackendRegistry,
     BackendTrust,
     BudgetTracker,
     QuotaTracker,
@@ -44,15 +43,15 @@ defmodule Arbor.AI.GraphRouter do
   # All backends that may appear in routing candidates
   @all_backends ~w(anthropic openai gemini opencode qwen lmstudio ollama)
 
-  # Backend name → BackendRegistry name mapping
-  @backend_registry_names %{
-    "anthropic" => :claude_cli,
-    "openai" => :codex_cli,
-    "gemini" => :gemini_cli,
-    "qwen" => :qwen_cli,
-    "opencode" => :opencode_cli,
-    "lmstudio" => :lmstudio,
-    "ollama" => :ollama
+  # Backend name → ProviderCatalog provider string mapping
+  @backend_provider_names %{
+    "anthropic" => "anthropic",
+    "openai" => "openai",
+    "gemini" => "gemini",
+    "qwen" => "openai",
+    "opencode" => "opencode_cli",
+    "lmstudio" => "lm_studio",
+    "ollama" => "ollama"
   }
 
   @doc """
@@ -118,14 +117,17 @@ defmodule Arbor.AI.GraphRouter do
       "exclude" => Enum.map_join(exclude, ",", &Atom.to_string/1)
     }
 
+    # Pre-compute available providers via ProviderCatalog (runtime bridge)
+    available_set = fetch_available_providers()
+
     # Pre-compute per-backend flags
     Enum.reduce(@all_backends, context, fn backend, acc ->
-      registry_name = Map.get(@backend_registry_names, backend, String.to_existing_atom(backend))
+      provider_str = Map.get(@backend_provider_names, backend, backend)
 
       acc
       |> Map.put(
         "avail_#{backend}",
-        bool(BackendRegistry.available?(registry_name) == :available)
+        bool(MapSet.member?(available_set, provider_str))
       )
       |> Map.put(
         "trust_#{backend}",
@@ -140,6 +142,22 @@ defmodule Arbor.AI.GraphRouter do
         bool(BudgetTracker.free_backend?(String.to_existing_atom(backend)))
       )
     end)
+  end
+
+  # Fetch set of available provider strings from ProviderCatalog via runtime bridge
+  defp fetch_available_providers do
+    if Code.ensure_loaded?(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog) do
+      apply(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog, :available, [[]])
+      |> Enum.map(fn {provider, _caps} -> provider end)
+      |> MapSet.new()
+    else
+      # Orchestrator not loaded — assume all available
+      MapSet.new(@all_backends)
+    end
+  rescue
+    _ -> MapSet.new(@all_backends)
+  catch
+    :exit, _ -> MapSet.new(@all_backends)
   end
 
   defp budget_status do

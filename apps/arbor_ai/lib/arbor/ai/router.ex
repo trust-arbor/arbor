@@ -2,31 +2,18 @@ defmodule Arbor.AI.Router do
   @moduledoc """
   Routes LLM requests to the appropriate backend and model.
 
-  The router supports two routing modes:
+  Provides task-aware routing using task classification:
 
-  1. **Legacy routing** (`select_backend/1`): Simple binary choice between `:api` and `:cli`
-  2. **Task-aware routing** (`route_task/2`): Tier-based routing using task classification
-
-  ## Task-Aware Routing
-
-  When task-aware routing is enabled (default), the router:
   1. Classifies the prompt into a TaskMeta (risk, complexity, domain, etc.)
   2. Determines the routing tier from the TaskMeta
   3. Gets backend+model candidates for that tier
-  4. Filters by trust level, availability, and quota status
+  4. Filters by trust level, availability (via ProviderCatalog), and quota status
   5. Returns the first available candidate
 
   ## Configuration
 
       config :arbor_ai,
-        # Enable task-aware routing (default: true)
         enable_task_routing: true,
-
-        # Legacy routing
-        default_backend: :auto,
-        routing_strategy: :cost_optimized,
-
-        # Tier-based routing
         tier_routing: %{
           critical: [{:anthropic, :opus}, {:anthropic, :sonnet}],
           complex: [{:anthropic, :sonnet}, {:openai, :gpt5}],
@@ -35,25 +22,15 @@ defmodule Arbor.AI.Router do
 
   ## Usage
 
-      # Task-aware routing (recommended)
       {:ok, {backend, model}} = Router.route_task("Fix the auth vulnerability")
       {:ok, {backend, model}} = Router.route_task(task_meta)
-
-      # Manual model override (bypasses routing)
       {:ok, {:anthropic, "claude-opus-4"}} = Router.route_task(prompt, model: {:anthropic, "claude-opus-4"})
-
-      # Embedding routing
       {:ok, {backend, model}} = Router.route_embedding(prefer: :local)
-
-      # Legacy routing (backward compatible)
-      backend = Router.select_backend(opts)
   """
 
   alias Arbor.AI.{
-    BackendRegistry,
     BackendTrust,
     BudgetTracker,
-    CliImpl,
     GraphRouter,
     QuotaTracker,
     RoutingConfig,
@@ -67,8 +44,6 @@ defmodule Arbor.AI.Router do
 
   @type backend :: atom()
   @type model :: atom() | String.t()
-  @type legacy_backend :: :api | :cli
-  @type strategy :: :cost_optimized | :quality_first | :cli_only | :api_only
 
   # ===========================================================================
   # Task-Aware Routing
@@ -189,71 +164,6 @@ defmodule Arbor.AI.Router do
     case Enum.find(cloud_fallback, fn {backend, _model} -> backend_available?(backend) end) do
       nil -> {:error, :no_embedding_providers}
       {backend, model} -> {:ok, {backend, model}}
-    end
-  end
-
-  # ===========================================================================
-  # Legacy Routing (Backward Compatible)
-  # ===========================================================================
-
-  @doc """
-  Select the appropriate backend for a request (legacy API).
-
-  This is the original routing function that provides binary choice
-  between `:api` and `:cli` backends.
-
-  ## Options
-
-  - `:backend` - Explicit backend selection (`:api`, `:cli`, or `:auto`)
-  - `:strategy` - Override routing strategy for this request
-
-  ## Returns
-
-  `:api` or `:cli`
-  """
-  @spec select_backend(keyword()) :: legacy_backend()
-  def select_backend(opts \\ []) do
-    case Keyword.get(opts, :backend, default_backend()) do
-      :api ->
-        :api
-
-      :cli ->
-        :cli
-
-      :auto ->
-        # Use strategy to decide
-        strategy = Keyword.get(opts, :strategy, routing_strategy())
-        select_by_strategy(strategy, opts)
-    end
-  end
-
-  @doc """
-  Returns true if CLI backends should be tried before API.
-  """
-  @spec prefer_cli?(keyword()) :: boolean()
-  def prefer_cli?(opts \\ []) do
-    select_backend(opts) == :cli
-  end
-
-  @doc """
-  Route and execute a generation request (legacy convenience function).
-
-  This function selects the backend and dispatches to the appropriate
-  implementation. For task-aware routing, use `route_task/2` instead.
-  """
-  @spec route(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def route(prompt, opts \\ []) do
-    backend = select_backend(opts)
-
-    Logger.debug("Router selected backend", backend: backend)
-
-    case backend do
-      :cli ->
-        CliImpl.generate_text(prompt, opts)
-
-      :api ->
-        # Delegate to the API implementation (ReqLLM path)
-        Arbor.AI.generate_text_via_api(prompt, opts)
     end
   end
 
@@ -441,59 +351,31 @@ defmodule Arbor.AI.Router do
   end
 
   defp backend_available?(backend) do
-    # Map routing backend names to BackendRegistry names
-    registry_name = backend_to_registry_name(backend)
-    BackendRegistry.available?(registry_name) == :available
-  end
+    provider_str = backend_to_provider(backend)
 
-  # Map tier config backend names to BackendRegistry names
-  defp backend_to_registry_name(:anthropic), do: :claude_cli
-  defp backend_to_registry_name(:openai), do: :codex_cli
-  defp backend_to_registry_name(:gemini), do: :gemini_cli
-  defp backend_to_registry_name(:qwen), do: :qwen_cli
-  defp backend_to_registry_name(:opencode), do: :opencode_cli
-  defp backend_to_registry_name(:lmstudio), do: :lmstudio
-  defp backend_to_registry_name(:ollama), do: :ollama
-  defp backend_to_registry_name(other), do: other
-
-  # ===========================================================================
-  # Private Functions - Legacy Routing
-  # ===========================================================================
-
-  defp select_by_strategy(:cost_optimized, _opts) do
-    # Prefer CLI (free) over API (paid)
-    :cli
-  end
-
-  defp select_by_strategy(:quality_first, opts) do
-    # Use API for important requests, CLI for bulk/simple
-    if Keyword.get(opts, :important, false) do
-      :api
+    # Check via ProviderCatalog (runtime bridge — orchestrator is Standalone)
+    if Code.ensure_loaded?(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog) do
+      catalog = apply(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog, :all, [[]])
+      Enum.any?(catalog, fn entry -> entry.provider == provider_str and entry.available? end)
     else
-      :cli
+      # Orchestrator not loaded — assume available
+      true
     end
+  rescue
+    _ -> true
+  catch
+    :exit, _ -> true
   end
 
-  defp select_by_strategy(:cli_only, _opts) do
-    :cli
-  end
-
-  defp select_by_strategy(:api_only, _opts) do
-    :api
-  end
-
-  defp select_by_strategy(_unknown, _opts) do
-    # Default to cost-optimized
-    :cli
-  end
-
-  defp default_backend do
-    Application.get_env(:arbor_ai, :default_backend, :auto)
-  end
-
-  defp routing_strategy do
-    Application.get_env(:arbor_ai, :routing_strategy, :cost_optimized)
-  end
+  # Map tier routing backend atoms to orchestrator provider strings
+  defp backend_to_provider(:anthropic), do: "anthropic"
+  defp backend_to_provider(:openai), do: "openai"
+  defp backend_to_provider(:gemini), do: "gemini"
+  defp backend_to_provider(:opencode), do: "opencode_cli"
+  defp backend_to_provider(:qwen), do: "openai"
+  defp backend_to_provider(:lmstudio), do: "lm_studio"
+  defp backend_to_provider(:ollama), do: "ollama"
+  defp backend_to_provider(other), do: Atom.to_string(other)
 
   # ===========================================================================
   # Private Functions - Signal Emissions
