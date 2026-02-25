@@ -1,8 +1,6 @@
 defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Consensus.Evaluators.AdvisoryLLM
-  alias Arbor.Consensus.Evaluators.Consult
   alias Arbor.Orchestrator.Engine
 
   @moduletag :council_pipeline
