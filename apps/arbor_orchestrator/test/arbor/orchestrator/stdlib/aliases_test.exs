@@ -55,16 +55,16 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert Aliases.canonical_type("routing.select") == "compute"
     end
 
-    test "prompt.ab_test → compute" do
-      assert Aliases.canonical_type("prompt.ab_test") == "compute"
+    test "prompt.ab_test → compose" do
+      assert Aliases.canonical_type("prompt.ab_test") == "compose"
     end
 
-    test "drift_detect → compute" do
-      assert Aliases.canonical_type("drift_detect") == "compute"
+    test "drift_detect → compose" do
+      assert Aliases.canonical_type("drift_detect") == "compose"
     end
 
-    test "retry.escalate → compute" do
-      assert Aliases.canonical_type("retry.escalate") == "compute"
+    test "retry.escalate → compose" do
+      assert Aliases.canonical_type("retry.escalate") == "compose"
     end
 
     test "eval.run → compute" do

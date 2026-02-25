@@ -38,11 +38,13 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
     # Computation aliases → ComputeHandler
     "codergen" => Arbor.Orchestrator.Handlers.ComputeHandler,
     "routing.select" => Arbor.Orchestrator.Handlers.ComputeHandler,
-    "prompt.ab_test" => Arbor.Orchestrator.Handlers.ComputeHandler,
-    "drift_detect" => Arbor.Orchestrator.Handlers.ComputeHandler,
-    "retry.escalate" => Arbor.Orchestrator.Handlers.ComputeHandler,
     "eval.run" => Arbor.Orchestrator.Handlers.ComputeHandler,
     "eval.aggregate" => Arbor.Orchestrator.Handlers.ComputeHandler,
+
+    # Stdlib DOT aliases → ComposeHandler (via invoke)
+    "prompt.ab_test" => Arbor.Orchestrator.Handlers.ComposeHandler,
+    "drift_detect" => Arbor.Orchestrator.Handlers.ComposeHandler,
+    "retry.escalate" => Arbor.Orchestrator.Handlers.ComposeHandler,
 
     # Execution aliases → ExecHandler
     "tool" => Arbor.Orchestrator.Handlers.ExecHandler,
