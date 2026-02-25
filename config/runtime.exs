@@ -199,3 +199,107 @@ contacts =
 if map_size(contacts) > 0 do
   config :arbor_comms, :contacts, contacts
 end
+
+# ============================================================================
+# LLM Model & Provider Configuration
+# ============================================================================
+# These override the defaults in config.exs. All are optional.
+
+# Safe provider string → atom mapping. Only known providers are accepted.
+# This avoids String.to_atom/1 on user input (DoS via atom table exhaustion).
+known_providers = %{
+  "openrouter" => :openrouter,
+  "anthropic" => :anthropic,
+  "openai" => :openai,
+  "gemini" => :gemini,
+  "xai" => :xai,
+  "zai" => :zai,
+  "zai_coding_plan" => :zai_coding_plan,
+  "ollama" => :ollama,
+  "lmstudio" => :lmstudio,
+  "opencode" => :opencode,
+  "qwen" => :qwen
+}
+
+parse_provider = fn str ->
+  Map.get(known_providers, String.trim(str))
+end
+
+# --- Default model for general API calls ---
+if default_model = System.get_env("ARBOR_DEFAULT_MODEL") do
+  config :arbor_ai, default_model: default_model
+end
+
+if provider = System.get_env("ARBOR_DEFAULT_PROVIDER") |> then(&(&1 && parse_provider.(&1))) do
+  config :arbor_ai, default_provider: provider
+end
+
+# --- Heartbeat model (agent periodic thinking cycle) ---
+if heartbeat_model = System.get_env("ARBOR_HEARTBEAT_MODEL") do
+  config :arbor_agent, heartbeat_model: heartbeat_model
+
+  # Use the same model for idle heartbeats unless explicitly overridden
+  unless System.get_env("ARBOR_IDLE_HEARTBEAT_MODEL") do
+    config :arbor_agent, idle_heartbeat_model: heartbeat_model
+  end
+end
+
+if idle_heartbeat_model = System.get_env("ARBOR_IDLE_HEARTBEAT_MODEL") do
+  config :arbor_agent, idle_heartbeat_model: idle_heartbeat_model
+end
+
+if provider =
+     System.get_env("ARBOR_HEARTBEAT_PROVIDER") |> then(&(&1 && parse_provider.(&1))) do
+  config :arbor_agent, heartbeat_provider: provider
+end
+
+# --- Summarizer model (context window compression) ---
+if summarizer_model = System.get_env("ARBOR_SUMMARIZER_MODEL") do
+  config :arbor_agent, summarizer_model: summarizer_model
+end
+
+if provider =
+     System.get_env("ARBOR_SUMMARIZER_PROVIDER") |> then(&(&1 && parse_provider.(&1))) do
+  config :arbor_agent, summarizer_provider: provider
+end
+
+# --- Advisory council model (all 13 perspectives) ---
+if council_model = System.get_env("ARBOR_COUNCIL_MODEL") do
+  # Apply the same model to all perspectives as a base default.
+  # Individual perspectives can still be overridden at runtime via
+  # AdvisoryLLM.configure_perspective/2.
+  perspectives =
+    ~w(security brainstorming vision emergence resource_usage user_experience
+       consistency generalization capability performance privacy design_review
+       risk_assessment feasibility)a
+    |> Enum.map(fn p -> {p, council_model} end)
+    |> Map.new()
+
+  config :arbor_consensus, perspective_models: perspectives
+end
+
+# --- Memory / reflection model ---
+if memory_model = System.get_env("ARBOR_MEMORY_MODEL") do
+  config :arbor_memory, default_model: memory_model
+end
+
+# --- CLI coding agents fallback chain ---
+# Comma-separated list of providers to try in order.
+# Example: ARBOR_CLI_CHAIN=anthropic,openai,gemini,lmstudio
+if cli_chain = System.get_env("ARBOR_CLI_CHAIN") do
+  chain =
+    cli_chain
+    |> String.split(",", trim: true)
+    |> Enum.map(parse_provider)
+    |> Enum.reject(&is_nil/1)
+
+  if chain != [], do: config(:arbor_ai, cli_fallback_chain: chain)
+end
+
+# --- Daily API budget (USD) ---
+if daily_budget = System.get_env("ARBOR_DAILY_BUDGET") do
+  case Float.parse(daily_budget) do
+    {amount, _} -> config :arbor_ai, daily_api_budget_usd: amount
+    :error -> :skip
+  end
+end
