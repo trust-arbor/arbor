@@ -45,6 +45,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.GeminiCli do
     end
   end
 
+  @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "gemini_cli",
+        display_name: "Gemini CLI",
+        type: :cli,
+        cli_tools: [%{name: "gemini", install_hint: "npm i -g @anthropic-ai/gemini-cli"}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            multi_turn: true
+          )
+      )
+
+    contract
+  end
+
   @doc "Returns true if the `gemini` binary is available in PATH."
   def available? do
     System.find_executable("gemini") != nil

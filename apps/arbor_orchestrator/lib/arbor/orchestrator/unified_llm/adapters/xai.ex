@@ -44,6 +44,28 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.XAI do
   def provider, do: "xai"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "xai",
+        display_name: "x.ai (Grok)",
+        type: :api,
+        env_vars: [%{name: "XAI_API_KEY", required: true}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            vision: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     OpenAICompatible.complete(request, opts, @config)
   end

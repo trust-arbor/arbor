@@ -12,6 +12,29 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
   def provider, do: "gemini"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "gemini",
+        display_name: "Google Gemini API",
+        type: :api,
+        env_vars: [%{name: "GEMINI_API_KEY", required: true}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            vision: true,
+            structured_output: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     translation_warnings = unsupported_content_warnings(request)
 

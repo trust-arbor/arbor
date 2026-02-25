@@ -36,6 +36,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.LMStudio do
   def provider, do: "lm_studio"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "lm_studio",
+        display_name: "LM Studio",
+        type: :local,
+        probes: [%{type: :http, url: base_url() <> "/models", timeout_ms: 2_000}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            structured_output: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     OpenAICompatible.complete(request, opts, config())
   end

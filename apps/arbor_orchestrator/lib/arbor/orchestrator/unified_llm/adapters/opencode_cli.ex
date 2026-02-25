@@ -42,6 +42,29 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpencodeCli do
     end
   end
 
+  @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "opencode_cli",
+        display_name: "OpenCode CLI",
+        type: :cli,
+        cli_tools: [
+          %{name: "opencode", install_hint: "go install github.com/opencode-ai/opencode@latest"}
+        ],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            multi_turn: true
+          )
+      )
+
+    contract
+  end
+
   @doc "Returns true if the `opencode` binary is available in PATH."
   def available? do
     System.find_executable("opencode") != nil
