@@ -18,20 +18,22 @@ defmodule Arbor.Actions.Skill.CompilationPrompt do
   | `llm` | LLM reasoning / analysis (no side effects) | `prompt` |
   | `conditional` | Decision routing | (edges carry conditions) |
   | `tool` | Execute a registered tool | `tool_command` |
+  | `exec` | Execute an action | `target="action"`, `action`, `context_keys` |
   | `consensus.ask` | Advisory council consultation | `prompt` |
   | `consensus.decide` | Council vote/decision | `prompt` |
   | `parallel` | Fan-out to parallel branches | `fan_out="true"` |
   | `parallel.fan_in` | Wait for parallel branches | (none required) |
   | `accumulator` | Collect/aggregate results | `prompt` |
   | `feedback.loop` | Iterative refinement | `prompt`, `max_iterations` |
-  | `memory.recall` | Recall from agent memory | (none required) |
-  | `memory.store_file` | Store to agent memory | (none required) |
-  | `routing.select` | Dynamic model/provider routing | (none required) |
 
   ### Notes:
   - `llm` and `codergen` both route to LLM calls; use `llm` for pure reasoning/analysis, `codergen` for generating files/artifacts
   - `shell` nodes MUST have `simulate="true"` unless the skill explicitly requires real execution
   - All loop-back edges MUST have `max_iterations="N"` to prevent infinite loops
+  - Use `exec target="action"` for domain-specific operations (eval, memory, etc.). Action parameters
+    are passed via `arg.NAME` or `param.NAME` attributes. Use `context_keys` (comma-separated) to
+    pull values from pipeline context into action params.
+  - Example: `type="exec" target="action" action="eval_pipeline.load_dataset" arg.path="data.jsonl"`
   """
 
   @few_shot_examples """

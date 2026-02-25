@@ -25,6 +25,13 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
   `resolve/1` returns `{canonical_type, injected_attrs}` for aliases that
   need attribute injection to preserve intent, or `:passthrough` for types
   that need no transformation.
+
+  ## Domain-Specific Operations
+
+  Business-logic types (eval.*, memory.*) are NOT aliases. They should be
+  expressed as `exec target="action" action="..."` in DOT pipelines, using
+  the corresponding Jido Actions from `Arbor.Actions.EvalPipeline` and
+  `Arbor.Actions.Memory`.
   """
 
   @canonical_types ~w(
@@ -72,21 +79,10 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "shell" => "exec",
 
     # === Read aliases ===
-    "memory.recall" => "read",
-    "memory.working_load" => "read",
-    "memory.stats" => "read",
-    "memory.recall_store" => "read",
-    "eval.dataset" => "read",
 
     # === Write aliases ===
     "file.write" => "write",
-    "memory.consolidate" => "write",
-    "memory.index" => "write",
-    "memory.working_save" => "write",
-    "memory.store_file" => "write",
     "accumulator" => "write",
-    "eval.persist" => "write",
-    "eval.report" => "write",
 
     # === Composition aliases ===
     "graph.invoke" => "compose",
@@ -119,10 +115,6 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "session.consolidate" => "compose",
     "session.update_working_memory" => "compose",
     "session.store_identity" => "compose",
-    # Eval compute/exec aliases
-    "eval.run" => "compute",
-    "eval.aggregate" => "compute",
-
     # === Coordination aliases ===
     "wait.human" => "wait",
 
@@ -139,28 +131,13 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "tool" => {"exec", %{"target" => "tool"}},
     "shell" => {"exec", %{"target" => "shell"}},
 
-    # Read — source attribute distinguishes memory vs file vs eval
-    "memory.recall" => {"read", %{"source" => "memory", "op" => "recall"}},
-    "memory.working_load" => {"read", %{"source" => "memory", "op" => "working_load"}},
-    "memory.stats" => {"read", %{"source" => "memory", "op" => "stats"}},
-    "memory.recall_store" => {"read", %{"source" => "memory", "op" => "recall_store"}},
-    "eval.dataset" => {"read", %{"source" => "eval_dataset"}},
-
     # Write — target + mode attributes
     "file.write" => {"write", %{"target" => "file"}},
-    "memory.consolidate" => {"write", %{"target" => "memory", "op" => "consolidate"}},
-    "memory.index" => {"write", %{"target" => "memory", "op" => "index"}},
-    "memory.working_save" => {"write", %{"target" => "memory", "op" => "working_save"}},
-    "memory.store_file" => {"write", %{"target" => "memory", "op" => "store_file"}},
     "accumulator" => {"write", %{"target" => "accumulator", "mode" => "append"}},
-    "eval.persist" => {"write", %{"target" => "eval", "op" => "persist"}},
-    "eval.report" => {"write", %{"target" => "eval", "op" => "report"}},
 
     # Compute — purpose attribute distinguishes LLM vs routing
     "codergen" => {"compute", %{"purpose" => "llm"}},
     "routing.select" => {"compute", %{"purpose" => "routing"}},
-    "eval.run" => {"compute", %{"purpose" => "eval_run"}},
-    "eval.aggregate" => {"compute", %{"purpose" => "eval_aggregate"}},
 
     # Compose — mode attribute distinguishes invoke vs pipeline
     "graph.invoke" => {"compose", %{"mode" => "invoke"}},

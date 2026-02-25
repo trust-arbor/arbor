@@ -75,9 +75,13 @@ digraph EvalV3Trial {
     label="Collect Metrics"
   ]
 
-  // Persist trial results to Postgres
+  // Persist trial results via action
   persist [
-    type="eval.persist",
+    type="exec",
+    target="action",
+    action="eval_pipeline.persist",
+    param.domain="v3_ablation",
+    context_keys="exec.collect_metrics.results,exec.collect_metrics.metrics",
     label="Persist Results"
   ]
 

@@ -67,14 +67,6 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert Aliases.canonical_type("retry.escalate") == "compose"
     end
 
-    test "eval.run → compute" do
-      assert Aliases.canonical_type("eval.run") == "compute"
-    end
-
-    test "eval.aggregate → compute" do
-      assert Aliases.canonical_type("eval.aggregate") == "compute"
-    end
-
     # Execution aliases
     test "tool → exec" do
       assert Aliases.canonical_type("tool") == "exec"
@@ -84,50 +76,13 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert Aliases.canonical_type("shell") == "exec"
     end
 
-    # Read aliases
-    test "memory.recall → read" do
-      assert Aliases.canonical_type("memory.recall") == "read"
-    end
-
-    test "memory.working_load → read" do
-      assert Aliases.canonical_type("memory.working_load") == "read"
-    end
-
-    test "memory.stats → read" do
-      assert Aliases.canonical_type("memory.stats") == "read"
-    end
-
-    test "eval.dataset → read" do
-      assert Aliases.canonical_type("eval.dataset") == "read"
-    end
-
     # Write aliases
     test "file.write → write" do
       assert Aliases.canonical_type("file.write") == "write"
     end
 
-    test "memory.consolidate → write" do
-      assert Aliases.canonical_type("memory.consolidate") == "write"
-    end
-
-    test "memory.index → write" do
-      assert Aliases.canonical_type("memory.index") == "write"
-    end
-
-    test "memory.working_save → write" do
-      assert Aliases.canonical_type("memory.working_save") == "write"
-    end
-
     test "accumulator → write" do
       assert Aliases.canonical_type("accumulator") == "write"
-    end
-
-    test "eval.persist → write" do
-      assert Aliases.canonical_type("eval.persist") == "write"
-    end
-
-    test "eval.report → write" do
-      assert Aliases.canonical_type("eval.report") == "write"
     end
 
     # Composition aliases
@@ -212,11 +167,6 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
 
     test "shell resolves with target=shell" do
       assert {"exec", %{"target" => "shell"}} = Aliases.resolve("shell")
-    end
-
-    test "memory.recall resolves with source=memory" do
-      assert {"read", %{"source" => "memory", "op" => "recall"}} =
-               Aliases.resolve("memory.recall")
     end
 
     test "file.write resolves with target=file" do

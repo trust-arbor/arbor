@@ -8,18 +8,21 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   Dispatches by `target` attribute:
     - `"tool"` (default) — delegates to ToolHandler
     - `"shell"` — delegates to ShellHandler
-    - `"action"` — executes an Arbor action via Executor
+    - `"action"` — executes an Arbor action via ActionsExecutor
     - `"function"` — calls a function reference from opts
 
   ## Node Attributes
 
     - `target` — execution target: "tool" (default), "shell", "action", "function"
+    - `action` — action name (required when target="action"), e.g. "eval_pipeline.load_dataset"
+    - `arg.*` / `param.*` — action parameters extracted from attrs
+    - `context_keys` — comma-separated context keys to merge as action params
     - All attributes from the delegated handler are supported
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   alias Arbor.Orchestrator.Handlers.{
     ShellHandler,
@@ -42,37 +45,36 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   @impl true
   def idempotency, do: :side_effecting
 
-  defp execute_action(node, context, _opts) do
+  defp execute_action(node, context, opts) do
     action_name = Map.get(node.attrs, "action")
 
     unless action_name do
       raise "exec with target=action requires 'action' attribute"
     end
 
-    # Bridge to Arbor.Actions.Executor via runtime check
-    if Code.ensure_loaded?(Arbor.Actions.Executor) do
+    executor = Arbor.Orchestrator.ActionsExecutor
+
+    if Code.ensure_loaded?(executor) do
       agent_id =
         Map.get(node.attrs, "agent_id") ||
-          Arbor.Orchestrator.Engine.Context.get(context, "session.agent_id", "system")
+          Context.get(context, "session.agent_id", "system")
 
-      action_args = parse_action_args(node.attrs)
+      action_args = build_action_args(node.attrs, context)
+      workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
 
       try do
-        case apply(Arbor.Actions.Executor, :execute, [agent_id, action_name, action_args]) do
+        case executor.execute(action_name, action_args, workdir, agent_id: agent_id) do
           {:ok, result} ->
             %Outcome{
               status: :success,
               notes: "Action #{action_name} executed",
-              context_updates: %{
-                "exec.#{node.id}.result" => inspect(result),
-                "last_response" => inspect(result)
-              }
+              context_updates: flatten_context_updates(node.id, result)
             }
 
           {:error, reason} ->
             %Outcome{
               status: :fail,
-              failure_reason: "Action #{action_name} failed: #{inspect(reason)}"
+              failure_reason: "Action #{action_name} failed: #{reason}"
             }
         end
       catch
@@ -85,7 +87,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     else
       %Outcome{
         status: :fail,
-        failure_reason: "Arbor.Actions.Executor not available"
+        failure_reason: "Arbor.Orchestrator.ActionsExecutor not available"
       }
     end
   end
@@ -93,7 +95,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   defp execute_function(node, _context, opts) do
     case Keyword.get(opts, :function_handler) do
       fun when is_function(fun, 1) ->
-        args = parse_action_args(node.attrs)
+        args = parse_attr_args(node.attrs)
 
         case fun.(args) do
           {:ok, result} ->
@@ -131,7 +133,32 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     end
   end
 
-  defp parse_action_args(attrs) do
+  # Build action args from both attr-prefixed values AND context keys.
+  defp build_action_args(attrs, context) do
+    # 1. Collect arg.*/param.* prefixed attrs
+    attr_args = parse_attr_args(attrs)
+
+    # 2. If context_keys attr is set, merge context values as params
+    context_args =
+      case Map.get(attrs, "context_keys") do
+        nil ->
+          %{}
+
+        keys_csv ->
+          keys_csv
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.reduce(%{}, fn key, acc ->
+            value = Context.get(context, key)
+            if value != nil, do: Map.put(acc, key, value), else: acc
+          end)
+      end
+
+    Map.merge(attr_args, context_args)
+  end
+
+  defp parse_attr_args(attrs) do
     attrs
     |> Enum.filter(fn {k, _v} ->
       String.starts_with?(k, "arg.") or String.starts_with?(k, "param.")
@@ -141,5 +168,34 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       {key, v}
     end)
     |> Map.new()
+  end
+
+  # Flatten action result into context updates.
+  # If result is a JSON map, spread its keys as "exec.{node_id}.{key}".
+  defp flatten_context_updates(node_id, result) when is_binary(result) do
+    base = %{
+      "exec.#{node_id}.result" => result,
+      "last_response" => result
+    }
+
+    case Jason.decode(result) do
+      {:ok, map} when is_map(map) ->
+        spread =
+          Enum.reduce(map, %{}, fn {k, v}, acc ->
+            Map.put(acc, "exec.#{node_id}.#{k}", v)
+          end)
+
+        Map.merge(base, spread)
+
+      _ ->
+        base
+    end
+  end
+
+  defp flatten_context_updates(node_id, result) do
+    %{
+      "exec.#{node_id}.result" => inspect(result),
+      "last_response" => inspect(result)
+    }
   end
 end

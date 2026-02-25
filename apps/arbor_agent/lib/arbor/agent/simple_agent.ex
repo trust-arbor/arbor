@@ -286,7 +286,7 @@ defmodule Arbor.Agent.SimpleAgent do
       Process.whereis(Arbor.Security.CapabilityStore) != nil
 
     if security_available? do
-      executor_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :ArborActionsExecutor])
+      executor_mod = Module.concat([:Arbor, :Orchestrator, :ActionsExecutor])
 
       try do
         if Code.ensure_loaded?(executor_mod) do
