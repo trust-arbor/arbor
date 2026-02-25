@@ -1,0 +1,53 @@
+// Feedback Loop — Generate, Critique, Revise
+// Iterative refinement: generate a draft, critique it, revise if quality threshold not met.
+//
+// Context in: prompt, max_iterations (default "3"), quality_threshold
+// Context out: result, iterations, final_score
+
+digraph FeedbackLoop {
+  graph [
+    goal="Iteratively refine output through generate-critique-revise cycles",
+    label="Feedback Loop"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Initialize iteration tracking
+  init [
+    type="transform",
+    prompt="Initialize loop.iteration=0, loop.done=false."
+  ]
+
+  // Generate or revise the output
+  generate [
+    type="compute",
+    prompt="Generate or revise output based on the prompt. If previous critique feedback exists, incorporate it to improve the result."
+  ]
+
+  // Critique the generated output
+  critique [
+    type="compute",
+    prompt="Evaluate the generated output against quality criteria. Produce a quality score (0.0-1.0) and specific feedback for improvement. Set loop.score to the quality score."
+  ]
+
+  // Check if quality threshold met or max iterations reached
+  check_quality [
+    type="gate",
+    shape=diamond,
+    prompt="Check if loop.score >= quality_threshold or loop.iteration >= max_iterations."
+  ]
+
+  // Prepare revision prompt from critique feedback
+  revise_prompt [
+    type="transform",
+    prompt="Extract critique feedback and construct a revised prompt. Increment loop.iteration."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> init -> generate -> critique -> check_quality
+  check_quality -> done [condition="context.loop.done=true"]
+  check_quality -> revise_prompt [condition="context.loop.done!=true"]
+  revise_prompt -> generate
+}

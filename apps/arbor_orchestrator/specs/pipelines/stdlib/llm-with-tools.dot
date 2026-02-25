@@ -1,0 +1,53 @@
+// LLM with Tool Dispatch Loop
+// Call an LLM, dispatch any tool calls, feed results back until no more tool calls.
+//
+// Context in: prompt, tools (JSON), model, max_tool_rounds (default "5")
+// Context out: response, tool_history, tool_rounds
+
+digraph LLMWithTools {
+  graph [
+    goal="Execute an LLM call with iterative tool dispatch",
+    label="LLM With Tools"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Initialize tool loop state
+  init [
+    type="transform",
+    prompt="Initialize tool_loop.round=0, tool_loop.has_tool_calls=false, tool_history=[]."
+  ]
+
+  // Call the LLM
+  llm_call [
+    type="compute",
+    prompt="Call the LLM with the current prompt, tools, and any previous tool results. Use the specified model."
+  ]
+
+  // Check if the response contains tool calls
+  check_tools [
+    type="gate",
+    shape=diamond,
+    prompt="Check if the LLM response contains tool calls and tool_loop.round < max_tool_rounds."
+  ]
+
+  // Dispatch tool calls
+  dispatch_tools [
+    type="exec",
+    prompt="Execute each tool call from the LLM response. Collect tool results. Append to tool_history."
+  ]
+
+  // Prepare followup with tool results
+  prepare_followup [
+    type="transform",
+    prompt="Increment tool_loop.round. Construct followup prompt including tool results for the next LLM call."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> init -> llm_call -> check_tools
+  check_tools -> done [condition="context.tool_loop.has_tool_calls!=true"]
+  check_tools -> dispatch_tools [condition="context.tool_loop.has_tool_calls=true"]
+  dispatch_tools -> prepare_followup -> llm_call
+}

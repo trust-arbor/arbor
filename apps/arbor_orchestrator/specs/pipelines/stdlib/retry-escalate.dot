@@ -1,0 +1,56 @@
+// Retry with Model Escalation
+// Progressive retry pattern: try with preferred model, escalate to stronger models on failure.
+//
+// Context in: prompt, model_list (CSV of models), max_retries (default "3")
+// Context out: result, model_used, attempts
+
+digraph RetryEscalate {
+  graph [
+    goal="Retry an LLM call with progressive model escalation",
+    label="Retry Escalate"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Initialize retry state
+  init [
+    type="transform",
+    prompt="Initialize retry tracking. Set retry.count=0, retry.success=false. Parse model_list CSV into an array. Set retry.current_model to first model in list."
+  ]
+
+  // Attempt the LLM call
+  attempt [
+    type="compute",
+    prompt="Execute the prompt using retry.current_model. Store the response in result."
+  ]
+
+  // Check if the attempt succeeded
+  check_success [
+    type="gate",
+    shape=diamond,
+    prompt="Check if the LLM call succeeded and produced a valid result."
+  ]
+
+  // Escalate to next model
+  escalate [
+    type="transform",
+    prompt="Increment retry.count. Select the next model from the model list based on retry.count. If retry.count exceeds available models, cycle to the last model. Update retry.current_model."
+  ]
+
+  // Check if max retries exceeded
+  check_max [
+    type="gate",
+    shape=diamond,
+    prompt="Check if retry.count >= max_retries."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> init -> attempt -> check_success
+  check_success -> done [condition="context.retry.success=true"]
+  check_success -> escalate [condition="context.retry.success!=true"]
+  escalate -> check_max
+  check_max -> done [condition="context.retry.exhausted=true"]
+  check_max -> attempt [condition="context.retry.exhausted!=true"]
+}

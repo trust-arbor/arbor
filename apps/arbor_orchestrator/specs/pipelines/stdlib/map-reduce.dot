@@ -1,0 +1,44 @@
+// Map-Reduce — Parallel Map + Aggregation
+// Process items in parallel, then reduce results into a single output.
+//
+// Context in: items (JSON array), map_prompt, reduce_prompt
+// Context out: results, reduced
+
+digraph MapReduce {
+  graph [
+    goal="Process items in parallel and aggregate results",
+    label="Map Reduce"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Read and prepare items for parallel processing
+  prepare_items [
+    type="read",
+    prompt="Read items from context and prepare for parallel distribution."
+  ]
+
+  // Map phase: process each item in parallel
+  map_items [
+    type="parallel",
+    fan_out="true",
+    prompt="Apply map_prompt to each item in the items array. Process in parallel."
+  ]
+
+  // Collect parallel results
+  collect [
+    type="fan_in",
+    prompt="Collect all parallel map results into a single results array."
+  ]
+
+  // Reduce phase: aggregate results
+  reduce [
+    type="transform",
+    prompt="Apply reduce_prompt to aggregate the collected results into a single reduced output."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> prepare_items -> map_items -> collect -> reduce -> done
+}

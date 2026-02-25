@@ -1,0 +1,66 @@
+// LLM Prompt Chain
+// Sequential prompt chaining: output of each step feeds the next as context.
+//
+// Context in: prompt_1, prompt_2, prompt_3 (optional)
+// Context out: chain_results (array), final_result
+
+digraph LLMChain {
+  graph [
+    goal="Chain sequential LLM prompts where each builds on the previous result",
+    label="LLM Chain"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Step 1: First prompt
+  step_1 [
+    type="compute",
+    prompt="Execute prompt_1. Store result in chain.step_1_result."
+  ]
+
+  // Extract and prepare for step 2
+  extract_1 [
+    type="transform",
+    prompt="Extract the key output from step 1. Prepare context for step 2 by injecting step_1_result into prompt_2."
+  ]
+
+  // Step 2: Second prompt with step 1 context
+  step_2 [
+    type="compute",
+    prompt="Execute prompt_2 with the result from step 1 as context. Store result in chain.step_2_result."
+  ]
+
+  // Check if step 3 exists
+  check_step_3 [
+    type="gate",
+    shape=diamond,
+    prompt="Check if prompt_3 is provided in context."
+  ]
+
+  // Extract and prepare for step 3
+  extract_2 [
+    type="transform",
+    prompt="Extract the key output from step 2. Prepare context for step 3 by injecting step_2_result into prompt_3."
+  ]
+
+  // Step 3: Third prompt with accumulated context
+  step_3 [
+    type="compute",
+    prompt="Execute prompt_3 with results from steps 1 and 2 as context. Store result in chain.step_3_result."
+  ]
+
+  // Finalize results
+  finalize [
+    type="transform",
+    prompt="Collect all step results into chain_results array. Set final_result to the last step's output."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> step_1 -> extract_1 -> step_2 -> check_step_3
+  check_step_3 -> finalize [condition="context.chain.has_step_3!=true"]
+  check_step_3 -> extract_2 [condition="context.chain.has_step_3=true"]
+  extract_2 -> step_3 -> finalize
+  finalize -> done
+}

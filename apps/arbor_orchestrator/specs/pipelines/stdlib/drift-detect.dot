@@ -1,0 +1,60 @@
+// Drift Detection — Baseline Comparison with Threshold Gate
+// Compare current state against a baseline, flag if drift exceeds threshold.
+//
+// Context in: baseline_key, current_key, threshold
+// Context out: drift_score, drifted (boolean), details
+
+digraph DriftDetect {
+  graph [
+    goal="Detect drift between baseline and current state",
+    label="Drift Detect"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Read baseline data
+  read_baseline [
+    type="read",
+    prompt="Read baseline data identified by baseline_key."
+  ]
+
+  // Read current data
+  read_current [
+    type="read",
+    prompt="Read current data identified by current_key."
+  ]
+
+  // Compare baseline vs current
+  compare [
+    type="compute",
+    prompt="Compare baseline and current data. Calculate a drift_score (0.0 = identical, 1.0 = completely different). Produce detailed comparison in details field."
+  ]
+
+  // Check if drift exceeds threshold
+  check_threshold [
+    type="gate",
+    shape=diamond,
+    prompt="Check if drift_score > threshold. Set drifted=true if exceeded, drifted=false otherwise."
+  ]
+
+  // Drift detected path
+  drift_detected [
+    type="transform",
+    prompt="Set drift.status=drift_detected. Include drift_score and details in output."
+  ]
+
+  // Within threshold path
+  within_threshold [
+    type="transform",
+    prompt="Set drift.status=ok. Include drift_score in output."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> read_baseline -> read_current -> compare -> check_threshold
+  check_threshold -> drift_detected [condition="context.drifted=true"]
+  check_threshold -> within_threshold [condition="context.drifted!=true"]
+  drift_detected -> done
+  within_threshold -> done
+}
