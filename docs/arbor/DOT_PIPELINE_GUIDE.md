@@ -188,7 +188,7 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `purpose` | `"llm"` | `llm`, `routing`, `ab_test`, `drift_detect`, `retry_escalate`, `eval_run`, `eval_aggregate` |
+| `purpose` | `"llm"` | `llm`, `routing`, `eval_run`, `eval_aggregate` |
 | `prompt` | _(required for llm)_ | The prompt sent to the LLM |
 | `system_prompt` | _(optional)_ | System prompt for the LLM |
 | `llm_provider` | _(from env)_ | Provider name (e.g., `openrouter`, `anthropic`) |
@@ -202,7 +202,7 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 | `timeout` | `"120000"` | LLM call timeout in ms |
 | `reasoning_effort` | _(none)_ | `low`, `medium`, `high` (for supported models) |
 
-Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`, `prompt.ab_test`, `drift_detect`, `retry.escalate`, `eval.run`, `eval.aggregate`.
+Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`, `eval.run`, `eval.aggregate`.
 
 #### `transform`
 
@@ -270,12 +270,12 @@ Nested graph/pipeline execution. Dispatches by `mode` attribute.
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `mode` | _(required)_ | `invoke`, `compose`, `pipeline`, `feedback`, `manager_loop` |
+| `mode` | _(required)_ | `invoke`, `compose`, `pipeline`, `manager_loop` |
 | `graph_path` | _(for invoke/compose)_ | Path to the nested DOT file |
 | `pipeline_path` | _(for pipeline)_ | Path to pipeline DOT file |
 | `max_iterations` | _(for feedback)_ | Loop iteration limit |
 
-Idempotency: `side_effecting`. Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`, `feedback.loop`, `stack.manager_loop`, `consensus.*`, `session.*`.
+Idempotency: `side_effecting`. Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`, `stack.manager_loop`, `consensus.*`, `session.*`, `feedback.loop`, `prompt.ab_test`, `drift_detect`, `retry.escalate` (stdlib DOT invocations).
 
 #### `map`
 
@@ -783,9 +783,9 @@ The following type strings are supported for backwards compatibility with existi
 | `file.write` | `write` | `target="file"` |
 | `parallel.fan_in` | `fan_in` | |
 | `routing.select` | `compute` | `purpose="routing"` |
-| `prompt.ab_test` | `compute` | `purpose="ab_test"` |
-| `drift_detect` | `compute` | `purpose="drift_detect"` |
-| `retry.escalate` | `compute` | `purpose="retry_escalate"` |
+| `prompt.ab_test` | `compose` | `mode="invoke" graph_file="stdlib/ab-test.dot"` |
+| `drift_detect` | `compose` | `mode="invoke" graph_file="stdlib/drift-detect.dot"` |
+| `retry.escalate` | `compose` | `mode="invoke" graph_file="stdlib/retry-escalate.dot"` |
 | `output.validate` | `gate` | `predicate="output_valid"` |
 | `pipeline.validate` | `gate` | `predicate="pipeline_valid"` |
 | `wait.human` | `wait` | `source="human"` |
@@ -798,7 +798,7 @@ The following type strings are supported for backwards compatibility with existi
 | `graph.compose` | `compose` | `mode="compose"` |
 | `graph.adapt` | `adapt` | |
 | `pipeline.run` | `compose` | `mode="pipeline"` |
-| `feedback.loop` | `compose` | `mode="feedback"` |
+| `feedback.loop` | `compose` | `mode="invoke" graph_file="stdlib/feedback-loop.dot"` |
 | `stack.manager_loop` | `compose` | `mode="manager_loop"` |
 
 The full mapping is in `Arbor.Orchestrator.Stdlib.Aliases.canonical_type/1`.

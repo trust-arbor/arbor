@@ -1,17 +1,13 @@
 defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   @moduledoc """
-  Core handler for computation nodes — LLM calls, routing, A/B tests.
+  Core handler for computation nodes — LLM calls, routing, evals.
 
   Canonical type: `compute`
-  Aliases: `codergen`, `routing.select`, `prompt.ab_test`, `drift_detect`,
-           `retry.escalate`, `eval.run`, `eval.aggregate`
+  Aliases: `codergen`, `routing.select`, `eval.run`, `eval.aggregate`
 
   Dispatches by `purpose` attribute:
     - `"llm"` (default) — delegates to CodergenHandler
     - `"routing"` — delegates to RoutingHandler
-    - `"ab_test"` — delegates to PromptAbTestHandler
-    - `"drift_detect"` — delegates to DriftDetectHandler
-    - `"retry_escalate"` — delegates to RetryEscalateHandler
     - `"eval_run"` — delegates to EvalRunHandler
     - `"eval_aggregate"` — delegates to EvalAggregateHandler
 
@@ -41,18 +37,6 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
 
   defp dispatch("routing", node, context, graph, opts) do
     delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)
-  end
-
-  defp dispatch("ab_test", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.PromptAbTestHandler, node, context, graph, opts)
-  end
-
-  defp dispatch("drift_detect", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.DriftDetectHandler, node, context, graph, opts)
-  end
-
-  defp dispatch("retry_escalate", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.RetryEscalateHandler, node, context, graph, opts)
   end
 
   defp dispatch("eval_run", node, context, graph, opts) do

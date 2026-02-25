@@ -63,9 +63,9 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     # === Computation aliases ===
     "codergen" => "compute",
     "routing.select" => "compute",
-    "prompt.ab_test" => "compute",
-    "drift_detect" => "compute",
-    "retry.escalate" => "compute",
+    "prompt.ab_test" => "compose",
+    "drift_detect" => "compose",
+    "retry.escalate" => "compose",
 
     # === Execution aliases ===
     "tool" => "exec",
@@ -156,21 +156,30 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "eval.persist" => {"write", %{"target" => "eval", "op" => "persist"}},
     "eval.report" => {"write", %{"target" => "eval", "op" => "report"}},
 
-    # Compute — purpose attribute distinguishes LLM vs routing vs testing
+    # Compute — purpose attribute distinguishes LLM vs routing
     "codergen" => {"compute", %{"purpose" => "llm"}},
     "routing.select" => {"compute", %{"purpose" => "routing"}},
-    "prompt.ab_test" => {"compute", %{"purpose" => "ab_test"}},
-    "drift_detect" => {"compute", %{"purpose" => "drift_detect"}},
-    "retry.escalate" => {"compute", %{"purpose" => "retry_escalate"}},
     "eval.run" => {"compute", %{"purpose" => "eval_run"}},
     "eval.aggregate" => {"compute", %{"purpose" => "eval_aggregate"}},
 
-    # Compose — mode attribute distinguishes invoke vs pipeline vs feedback
+    # Compose — mode attribute distinguishes invoke vs pipeline
     "graph.invoke" => {"compose", %{"mode" => "invoke"}},
     "graph.compose" => {"compose", %{"mode" => "compose"}},
     "pipeline.run" => {"compose", %{"mode" => "pipeline"}},
-    "feedback.loop" => {"compose", %{"mode" => "feedback"}},
     "stack.manager_loop" => {"compose", %{"mode" => "manager_loop"}},
+
+    # Stdlib DOT invocations — business logic in DOT pipelines
+    "prompt.ab_test" =>
+      {"compose", %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/ab-test.dot"}},
+    "drift_detect" =>
+      {"compose",
+       %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/drift-detect.dot"}},
+    "retry.escalate" =>
+      {"compose",
+       %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/retry-escalate.dot"}},
+    "feedback.loop" =>
+      {"compose",
+       %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/feedback-loop.dot"}},
 
     # Consensus — delegates to ConsensusHandler via ComposeHandler
     "consensus.propose" => {"compose", %{"mode" => "consensus"}},
