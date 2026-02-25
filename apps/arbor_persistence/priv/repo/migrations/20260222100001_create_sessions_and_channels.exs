@@ -1,10 +1,15 @@
 defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
   use Ecto.Migration
+  import Arbor.Persistence.MigrationHelper
 
   def change do
+    uuid_gen = uuid_default()
+    now_gen = now_fragment()
+    json_array = empty_json_array()
+
     # ── Sessions: agent's private, append-only life log ──────────────
     create table(:sessions, primary_key: false) do
-      add :id, :uuid, primary_key: true, default: fragment("gen_random_uuid()")
+      add :id, :uuid, primary_key: true, default: uuid_gen
       add :session_id, :text, null: false
       add :agent_id, :text, null: false
       add :status, :text, null: false, default: "active"
@@ -22,7 +27,7 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
 
     # ── Session entries: individual events (append-only) ─────────────
     create table(:session_entries, primary_key: false) do
-      add :id, :uuid, primary_key: true, default: fragment("gen_random_uuid()")
+      add :id, :uuid, primary_key: true, default: uuid_gen
 
       add :session_id, references(:sessions, type: :uuid, on_delete: :delete_all),
         null: false
@@ -30,11 +35,11 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
       add :parent_entry_id, references(:session_entries, type: :uuid, on_delete: :nilify_all)
       add :entry_type, :text, null: false
       add :role, :text
-      add :content, :map, null: false, default: fragment("'[]'::jsonb")
+      add :content, :map, null: false, default: json_array
       add :model, :text
       add :stop_reason, :text
       add :token_usage, :map
-      add :timestamp, :utc_datetime_usec, null: false, default: fragment("now()")
+      add :timestamp, :utc_datetime_usec, null: false, default: now_gen
       add :metadata, :map, default: %{}
     end
 
@@ -43,12 +48,12 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
 
     # ── Channels: shared communication containers ────────────────────
     create table(:channels, primary_key: false) do
-      add :id, :uuid, primary_key: true, default: fragment("gen_random_uuid()")
+      add :id, :uuid, primary_key: true, default: uuid_gen
       add :channel_id, :text, null: false
       add :type, :text, null: false, default: "dm"
       add :name, :text
       add :owner_id, :text
-      add :members, :map, default: fragment("'[]'::jsonb")
+      add :members, :map, default: json_array
       add :metadata, :map, default: %{}
 
       timestamps(type: :utc_datetime_usec)
@@ -58,7 +63,7 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
 
     # ── Channel messages ─────────────────────────────────────────────
     create table(:channel_messages, primary_key: false) do
-      add :id, :uuid, primary_key: true, default: fragment("gen_random_uuid()")
+      add :id, :uuid, primary_key: true, default: uuid_gen
 
       add :channel_id, references(:channels, type: :uuid, on_delete: :delete_all),
         null: false
@@ -67,7 +72,7 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSessionsAndChannels do
       add :sender_name, :text
       add :sender_type, :text, default: "human"
       add :content, :text, null: false
-      add :timestamp, :utc_datetime_usec, null: false, default: fragment("now()")
+      add :timestamp, :utc_datetime_usec, null: false, default: now_gen
       add :metadata, :map, default: %{}
     end
 

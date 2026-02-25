@@ -2,19 +2,39 @@ import Config
 
 config :logger, level: :debug
 
-# Persistence — PostgreSQL for durable storage
-config :arbor_persistence, Arbor.Persistence.Repo,
-  database: "arbor_persistence_dev",
-  username: "arbor_dev",
-  hostname: "localhost",
-  pool_size: 10,
-  log: false,
-  types: Arbor.Persistence.PostgrexTypes
+# Persistence — adapter selected by ARBOR_DB env var
+# Default: Postgres (existing setup). Set ARBOR_DB=sqlite for zero-config.
+if System.get_env("ARBOR_DB") == "sqlite" do
+  config :arbor_persistence,
+    repo_adapter: Ecto.Adapters.SQLite3,
+    start_repo: true,
+    stores: []
 
-config :arbor_persistence,
-  start_repo: true,
-  # No ETS stores needed — Postgres backends are stateless
-  stores: []
+  config :arbor_persistence, Arbor.Persistence.Repo,
+    database: Path.expand("~/.arbor/arbor_dev.db")
+
+  config :arbor_memory,
+    persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
+    embedding_backend: :ets,
+    embedding_dedup_enabled: false
+else
+  # PostgreSQL — existing dev setup
+  config :arbor_persistence, Arbor.Persistence.Repo,
+    database: "arbor_persistence_dev",
+    username: "arbor_dev",
+    hostname: "localhost",
+    pool_size: 10,
+    log: false,
+    types: Arbor.Persistence.PostgrexTypes
+
+  config :arbor_persistence,
+    start_repo: true,
+    stores: []
+
+  config :arbor_memory,
+    persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
+    embedding_dedup_enabled: true
+end
 
 # Dashboard — local dev server on port 4001
 # LiveView debug annotations for Tidewave AI integration
@@ -30,12 +50,7 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   check_origin: false,
   server: true
 
-# Memory — Postgres backend for durable memory persistence
-config :arbor_memory,
-  persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
-  embedding_dedup_enabled: true
-
-# Actions — use Postgres backends for durable job tracking
+# Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres

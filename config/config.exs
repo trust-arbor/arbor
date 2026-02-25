@@ -73,8 +73,11 @@ config :arbor_common, :hands,
 config :arbor_gateway, mcp_workspace: "~/.arbor/workspace"
 
 # Persistence — Ecto repos for mix tasks (create, migrate, rollback)
+# Adapter selected at compile time: Postgres (default) or SQLite3
+# Set ARBOR_DB=sqlite before compiling to use SQLite for zero-config setup
 config :arbor_persistence,
-  ecto_repos: [Arbor.Persistence.Repo]
+  ecto_repos: [Arbor.Persistence.Repo],
+  repo_adapter: Ecto.Adapters.Postgres
 
 # Database backup with age encryption
 # To enable, set enabled: true and create a key pair:

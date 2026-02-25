@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.Repo.Migrations.AddAgentIdToEvents do
   use Ecto.Migration
+  # Standard Ecto — works on both Postgres and SQLite without changes
 
   def change do
     alter table(:events) do

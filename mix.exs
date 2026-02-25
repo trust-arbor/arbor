@@ -43,6 +43,7 @@ defmodule Arbor.MixProject do
 
   defp aliases do
     [
+      setup: ["arbor.setup"],
       quality: ["format --check-formatted", "credo --strict"],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": ["test --only fast"],

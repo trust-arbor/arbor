@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.Repo.Migrations.CreateEvents do
   use Ecto.Migration
+  import Arbor.Persistence.MigrationHelper
 
   def change do
     create table(:events, primary_key: false) do
@@ -14,7 +15,7 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateEvents do
       add(:correlation_id, :string)
       add(:event_timestamp, :utc_datetime_usec)
 
-      add(:created_at, :utc_datetime_usec, null: false, default: fragment("NOW()"))
+      add(:created_at, :utc_datetime_usec, null: false, default: now_fragment())
     end
 
     # Unique constraint on stream + event_number for optimistic concurrency
@@ -30,10 +31,12 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateEvents do
     # Index for event type queries
     create(index(:events, [:type]))
 
-    # Add a sequence for global_position
-    execute(
-      "CREATE SEQUENCE IF NOT EXISTS events_global_position_seq",
-      "DROP SEQUENCE IF EXISTS events_global_position_seq"
-    )
+    # Add a sequence for global_position (Postgres only)
+    if postgres?() do
+      execute(
+        "CREATE SEQUENCE IF NOT EXISTS events_global_position_seq",
+        "DROP SEQUENCE IF EXISTS events_global_position_seq"
+      )
+    end
   end
 end
