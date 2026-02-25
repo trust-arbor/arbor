@@ -5,12 +5,48 @@ defmodule Arbor.AI.UnifiedBridge do
   Provides a thin wrapper that translates between arbor_ai's option format
   and the unified Client's request format. Falls back gracefully when the
   orchestrator is not available.
+
+  This is the single execution path for all LLM generation. CLI and API
+  providers are unified — `claude_cli` is just another provider like
+  `anthropic` or `openai`. The adapter handles whether it's a Port or
+  HTTP request internally.
   """
 
   require Logger
 
   @client_module Arbor.Orchestrator.UnifiedLLM.Client
   @base_module Arbor.Orchestrator.UnifiedLLM
+
+  # Maps arbor_ai provider atoms to orchestrator provider strings.
+  # CLI and API providers are peers — no special treatment.
+  @provider_map %{
+    # API providers
+    anthropic: "anthropic",
+    openai: "openai",
+    gemini: "gemini",
+    openrouter: "openrouter",
+    xai: "xai",
+    zai: "zai",
+    zai_coding_plan: "zai_coding_plan",
+    # CLI providers
+    claude_cli: "claude_cli",
+    codex_cli: "codex_cli",
+    gemini_cli: "gemini_cli",
+    opencode_cli: "opencode_cli",
+    # Local providers
+    lmstudio: "lm_studio",
+    ollama: "ollama"
+  }
+
+  # Legacy mapping: when caller uses `backend: :cli` with an API provider name,
+  # map to the corresponding CLI provider. This preserves backward compatibility
+  # during the transition from the old CLI/API split.
+  @cli_provider_map %{
+    anthropic: "claude_cli",
+    openai: "codex_cli",
+    gemini: "gemini_cli",
+    opencode: "opencode_cli"
+  }
 
   @doc """
   Check if the unified LLM client is available.
@@ -22,16 +58,19 @@ defmodule Arbor.AI.UnifiedBridge do
   @doc """
   Generate text using the unified LLM client.
 
-  Translates arbor_ai opts format to unified Client format and back.
+  This is the single execution path for all LLM generation. Provider atoms
+  are mapped to orchestrator adapter strings — CLI and API providers are
+  treated identically.
 
   ## Options (arbor_ai format)
-  - :provider - atom like :anthropic, :openai, :openrouter
+  - :provider - atom like :anthropic, :openai, :claude_cli, :ollama
   - :model - string like "claude-sonnet-4-5-20250514"
   - :system_prompt - optional string
   - :max_tokens - integer (default 1024)
   - :temperature - float (default 0.7)
   - :thinking - boolean for extended thinking
   - :thinking_budget - integer token budget for thinking
+  - :backend - legacy option (:cli/:api/:auto) — mapped to provider selection
 
   Returns {:ok, response_map} | {:error, reason} | :unavailable
   """
@@ -44,7 +83,7 @@ defmodule Arbor.AI.UnifiedBridge do
   end
 
   defp do_generate(prompt, opts) do
-    provider = to_string(Keyword.fetch!(opts, :provider))
+    provider_string = resolve_provider(opts)
     model = Keyword.fetch!(opts, :model)
     system_prompt = Keyword.get(opts, :system_prompt)
     max_tokens = Keyword.get(opts, :max_tokens, 1024)
@@ -72,7 +111,7 @@ defmodule Arbor.AI.UnifiedBridge do
     # Build the Request struct
     request = %{
       __struct__: request_mod,
-      provider: provider,
+      provider: provider_string,
       model: model,
       messages: messages,
       tools: [],
@@ -86,8 +125,6 @@ defmodule Arbor.AI.UnifiedBridge do
     # Add thinking/reasoning effort if enabled
     request =
       if thinking_enabled do
-        # Map thinking to reasoning_effort for OpenAI-style providers
-        # Extended thinking is provider-specific
         Map.put(request, :reasoning_effort, "high")
       else
         request
@@ -112,14 +149,42 @@ defmodule Arbor.AI.UnifiedBridge do
       {:error, {:bridge_exit, reason}}
   end
 
+  @doc """
+  Resolve provider atom to orchestrator provider string.
+
+  Handles three cases:
+  1. Direct provider atom (e.g., `:claude_cli`, `:anthropic`) → mapped directly
+  2. Legacy `backend: :cli` with API provider → mapped to CLI variant
+  3. Unknown provider → passed through as string (let orchestrator handle it)
+  """
+  def resolve_provider(opts) do
+    provider = Keyword.fetch!(opts, :provider)
+    backend = Keyword.get(opts, :backend)
+
+    cond do
+      # Legacy: `backend: :cli` maps API provider to its CLI variant
+      backend == :cli and Map.has_key?(@cli_provider_map, provider) ->
+        Map.fetch!(@cli_provider_map, provider)
+
+      # Direct mapping from known provider atoms
+      Map.has_key?(@provider_map, provider) ->
+        Map.fetch!(@provider_map, provider)
+
+      # String provider — pass through (caller already using orchestrator names)
+      is_binary(provider) ->
+        provider
+
+      # Unknown atom provider — convert to string, let orchestrator handle it
+      is_atom(provider) ->
+        Atom.to_string(provider)
+    end
+  end
+
   # Format unified Client response back to arbor_ai's expected format
   defp format_response(response, opts) do
     provider = Keyword.fetch!(opts, :provider)
     model = Keyword.fetch!(opts, :model)
 
-    # The unified Client returns a Response struct with fields:
-    # text, content, usage, thinking, model, provider, etc.
-    # We need to map to arbor_ai's format: %{text, thinking, usage, model, provider}
     %{
       text: extract_text(response),
       thinking: extract_thinking(response),
@@ -139,6 +204,25 @@ defmodule Arbor.AI.UnifiedBridge do
   end
 
   defp extract_thinking(response) do
+    case response do
+      %{content_parts: parts} when is_list(parts) ->
+        thinking_parts =
+          Enum.flat_map(parts, fn
+            %{type: "thinking", text: text} = part ->
+              [%{text: text, signature: Map.get(part, :signature)}]
+
+            _ ->
+              []
+          end)
+
+        if thinking_parts == [], do: extract_thinking_legacy(response), else: thinking_parts
+
+      _ ->
+        extract_thinking_legacy(response)
+    end
+  end
+
+  defp extract_thinking_legacy(response) do
     case response do
       %{thinking: blocks} when is_list(blocks) and blocks != [] ->
         Enum.map(blocks, fn block ->
