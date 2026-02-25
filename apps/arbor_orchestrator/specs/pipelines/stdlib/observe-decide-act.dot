@@ -1,0 +1,52 @@
+// Observe-Decide-Act — Simplified OODA Loop
+// Read percepts, decide on action, execute, repeat until done.
+//
+// Context in: agent_id, max_cycles (default "5")
+// Context out: actions_taken, cycle_count, final_state
+
+digraph ObserveDecideAct {
+  graph [
+    goal="Execute an observe-decide-act loop for agent behavior cycles",
+    label="Observe Decide Act"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Initialize cycle tracking
+  init [
+    type="transform",
+    prompt="Initialize oda.cycle_count=0, oda.continue=true, actions_taken=[]."
+  ]
+
+  // Observe: read current percepts and state
+  observe [
+    type="read",
+    prompt="Read current percepts, environment state, and any pending signals for agent_id."
+  ]
+
+  // Decide: choose the next action
+  decide [
+    type="compute",
+    prompt="Based on observations, decide the next action. Consider goals, current state, and available capabilities. Output the chosen action with parameters."
+  ]
+
+  // Act: execute the decided action
+  act [
+    type="exec",
+    prompt="Execute the decided action. Record the result. Append to actions_taken."
+  ]
+
+  // Check if loop should continue
+  check_continue [
+    type="gate",
+    shape=diamond,
+    prompt="Increment oda.cycle_count. Check if oda.cycle_count < max_cycles and there is more work to do."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> init -> observe -> decide -> act -> check_continue
+  check_continue -> observe [condition="context.oda.continue=true"]
+  check_continue -> done [condition="context.oda.continue!=true"]
+}

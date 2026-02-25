@@ -1,0 +1,55 @@
+// Propose-Approve — Submit, Wait, Apply
+// Governance pattern: submit a proposal, wait for approval signal, apply or reject.
+//
+// Context in: proposal, agent_id, timeout_seconds (default "300")
+// Context out: decision, applied
+
+digraph ProposeApprove {
+  graph [
+    goal="Submit a proposal for approval and apply if accepted",
+    label="Propose Approve"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Submit the proposal
+  submit [
+    type="exec",
+    prompt="Submit the proposal for review. Record the proposal ID."
+  ]
+
+  // Wait for approval signal
+  await_decision [
+    type="wait",
+    prompt="Wait for approval decision signal within timeout_seconds.",
+    timeout="300s"
+  ]
+
+  // Check the decision
+  check_approved [
+    type="gate",
+    shape=diamond,
+    prompt="Check if the approval decision is approved or rejected."
+  ]
+
+  // Apply the approved proposal
+  apply_proposal [
+    type="exec",
+    prompt="Apply the approved proposal. Set applied=true."
+  ]
+
+  // Mark as rejected
+  mark_rejected [
+    type="transform",
+    prompt="Set decision=rejected, applied=false."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> submit -> await_decision -> check_approved
+  check_approved -> apply_proposal [condition="context.approval.status=approved"]
+  check_approved -> mark_rejected [condition="context.approval.status!=approved"]
+  apply_proposal -> done
+  mark_rejected -> done
+}

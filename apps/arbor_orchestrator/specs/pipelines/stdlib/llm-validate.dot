@@ -1,0 +1,56 @@
+// LLM Generate + Validate + Retry
+// Generate output, validate against rules, retry with error feedback if invalid.
+//
+// Context in: prompt, validation_rules, max_retries (default "3")
+// Context out: result, valid, validation_errors, attempts
+
+digraph LLMValidate {
+  graph [
+    goal="Generate LLM output with validation and retry on failure",
+    label="LLM Validate"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Initialize validation state
+  init [
+    type="transform",
+    prompt="Initialize validation.attempts=0, validation.valid=false."
+  ]
+
+  // Generate output
+  generate [
+    type="compute",
+    prompt="Generate output using the prompt. If previous validation_errors exist, incorporate them as correction guidance."
+  ]
+
+  // Validate the output
+  validate [
+    type="gate",
+    shape=diamond,
+    prompt="Validate the generated output against validation_rules. Set validation.valid and validation_errors."
+  ]
+
+  // Prepare retry with error feedback
+  prepare_retry [
+    type="transform",
+    prompt="Increment validation.attempts. Construct a corrected prompt incorporating the validation_errors."
+  ]
+
+  // Check if max retries exceeded
+  check_max [
+    type="gate",
+    shape=diamond,
+    prompt="Check if validation.attempts >= max_retries."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> init -> generate -> validate
+  validate -> done [condition="context.validation.valid=true"]
+  validate -> prepare_retry [condition="context.validation.valid!=true"]
+  prepare_retry -> check_max
+  check_max -> done [condition="context.validation.exhausted=true"]
+  check_max -> generate [condition="context.validation.exhausted!=true"]
+}

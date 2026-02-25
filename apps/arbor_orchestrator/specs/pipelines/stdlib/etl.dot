@@ -1,0 +1,37 @@
+// ETL — Extract, Transform, Load
+// Read from a source, transform the data, write to a target.
+//
+// Context in: source, source_type, transform_prompt, target, target_type
+// Context out: records_processed, result
+
+digraph ETL {
+  graph [
+    goal="Extract data from source, transform it, and load into target",
+    label="ETL"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Extract: read data from source
+  extract [
+    type="read",
+    prompt="Read data from the specified source of source_type. Parse into structured records."
+  ]
+
+  // Transform: process the data
+  transform [
+    type="transform",
+    prompt="Apply transform_prompt to process the extracted records. Clean, enrich, or restructure as specified."
+  ]
+
+  // Load: write to target
+  load [
+    type="write",
+    prompt="Write the transformed records to the specified target of target_type. Set records_processed count."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> extract -> transform -> load -> done
+}

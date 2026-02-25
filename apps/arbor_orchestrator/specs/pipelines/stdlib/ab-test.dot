@@ -1,0 +1,55 @@
+// A/B Test — Parallel Variant Comparison
+// Run two variants in parallel, compare results, determine winner.
+//
+// Context in: prompt_a, prompt_b, eval_criteria
+// Context out: result_a, result_b, comparison, winner
+
+digraph ABTest {
+  graph [
+    goal="Compare two prompt variants in parallel and select a winner",
+    label="AB Test"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Run both variants in parallel
+  run_variants [
+    type="parallel",
+    fan_out="true",
+    prompt="Execute both variant prompts in parallel."
+  ]
+
+  // Variant A
+  variant_a [
+    type="compute",
+    prompt="Execute prompt_a. Store result in result_a."
+  ]
+
+  // Variant B
+  variant_b [
+    type="compute",
+    prompt="Execute prompt_b. Store result in result_b."
+  ]
+
+  // Collect parallel results
+  collect [
+    type="fan_in",
+    prompt="Collect results from both variants."
+  ]
+
+  // Compare and score
+  compare [
+    type="compute",
+    prompt="Compare result_a and result_b against eval_criteria. Score each variant. Produce a comparison summary and declare a winner (a or b)."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> run_variants
+  run_variants -> variant_a
+  run_variants -> variant_b
+  variant_a -> collect
+  variant_b -> collect
+  collect -> compare -> done
+}

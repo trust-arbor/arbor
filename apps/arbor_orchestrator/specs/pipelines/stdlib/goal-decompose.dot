@@ -1,0 +1,37 @@
+// Goal Decompose — BDI Goal to Intent Decomposition
+// Read a goal, plan its decomposition via LLM, write resulting intents.
+//
+// Context in: agent_id, goal_id
+// Context out: intents, intent_count
+
+digraph GoalDecompose {
+  graph [
+    goal="Decompose a high-level goal into actionable intents",
+    label="Goal Decompose"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Read the goal details
+  read_goal [
+    type="read",
+    prompt="Read the goal identified by goal_id for agent_id. Include goal description, priority, and any existing sub-goals."
+  ]
+
+  // Plan the decomposition
+  plan [
+    type="compute",
+    prompt="Analyze the goal and decompose it into 1-5 concrete, actionable intents. Each intent should have: action_type, parameters, preconditions, and expected_outcome. Order by dependency and priority."
+  ]
+
+  // Write the intents
+  write_intents [
+    type="write",
+    prompt="Store the generated intents linked to the original goal_id. Set intent_count to the number of intents created."
+  ]
+
+  done [shape=Msquare]
+
+  // Flow
+  start -> read_goal -> plan -> write_intents -> done
+}
