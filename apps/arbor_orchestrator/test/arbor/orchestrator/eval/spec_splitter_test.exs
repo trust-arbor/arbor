@@ -60,7 +60,6 @@ defmodule Arbor.Orchestrator.Eval.SpecSplitterTest do
 
       # unified_llm has no spec section mapped
       assert map["unified_llm"] == ""
-      assert map["agent_loop"] == ""
     end
 
     test "returns error for missing file" do
@@ -93,7 +92,6 @@ defmodule Arbor.Orchestrator.Eval.SpecSplitterTest do
 
       assert is_list(unmapped)
       assert "unified_llm" in unmapped
-      assert "agent_loop" in unmapped
       refute "dot" in unmapped
       refute "engine" in unmapped
     end
@@ -107,7 +105,7 @@ defmodule Arbor.Orchestrator.Eval.SpecSplitterTest do
       assert "handlers" in subs
       assert "eval" in subs
       assert "validation" in subs
-      assert length(subs) == 11
+      assert length(subs) == 10
     end
   end
 

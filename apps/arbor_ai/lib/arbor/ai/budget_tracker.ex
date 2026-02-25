@@ -26,8 +26,6 @@ defmodule Arbor.AI.BudgetTracker do
         enable_budget_tracking: true,
         daily_api_budget_usd: 10.00,
         budget_prefer_free_threshold: 0.5,  # prefer free when < 50% remaining
-        budget_persistence: false,
-        budget_persistence_path: "~/.arbor/budget-tracker.json",
         cost_overrides: %{}
 
   ## Usage
@@ -633,14 +631,11 @@ defmodule Arbor.AI.BudgetTracker do
           end
 
         _ ->
-          # No stored state or store unavailable — try legacy JSON
-          maybe_load_legacy_persistence()
+          :ok
       end
-    else
-      maybe_load_legacy_persistence()
     end
   catch
-    _, _ -> maybe_load_legacy_persistence()
+    _, _ -> :ok
   end
 
   defp restore_backend_stats do
@@ -708,26 +703,6 @@ defmodule Arbor.AI.BudgetTracker do
     _, _ -> :ok
   end
 
-  # Legacy JSON file persistence (fallback for migration)
-  defp maybe_load_legacy_persistence do
-    if persistence_enabled?() do
-      path = persistence_path()
-
-      if File.exists?(path) do
-        with {:ok, content} <- File.read(path),
-             {:ok, data} <- Jason.decode(content) do
-          if data["date"] == Date.to_iso8601(Date.utc_today()) do
-            :ets.insert(@table, {:total_spent, data["spent"] || 0.0})
-            :ets.insert(@table, {:total_requests, data["requests"] || 0})
-            :ets.insert(@table, {:total_tokens, data["tokens"] || 0})
-            Logger.info("Loaded budget state from legacy JSON file")
-          end
-        else
-          _ -> :ok
-        end
-      end
-    end
-  end
 
   defp default_status do
     %{
@@ -747,15 +722,6 @@ defmodule Arbor.AI.BudgetTracker do
 
   defp prefer_free_threshold do
     Application.get_env(:arbor_ai, :budget_prefer_free_threshold, 0.5)
-  end
-
-  defp persistence_enabled? do
-    Application.get_env(:arbor_ai, :budget_persistence, false)
-  end
-
-  defp persistence_path do
-    Application.get_env(:arbor_ai, :budget_persistence_path, "~/.arbor/budget-tracker.json")
-    |> Path.expand()
   end
 
   defp signal_verbosity do
