@@ -16,27 +16,38 @@ digraph EvalHeartbeat {
   start [shape=Mdiamond]
 
   load_dataset [
-    type="eval.dataset",
-    dataset="priv/eval_datasets/heartbeat_json.jsonl",
+    type="exec",
+    target="action",
+    action="eval_pipeline.load_dataset",
+    param.path="priv/eval_datasets/heartbeat_json.jsonl",
     data_class="internal"
   ]
 
   run_eval [
-    type="eval.run",
-    subject="Arbor.Orchestrator.Eval.Subjects.LLM",
-    graders="json_valid",
+    type="exec",
+    target="action",
+    action="eval_pipeline.run_eval",
+    param.subject="Arbor.Orchestrator.Eval.Subjects.LLM",
+    param.graders="json_valid",
+    context_keys="exec.load_dataset.dataset",
     data_class="internal"
   ]
 
   aggregate [
-    type="eval.aggregate",
-    metrics="accuracy,mean_score",
+    type="exec",
+    target="action",
+    action="eval_pipeline.aggregate",
+    param.metrics="accuracy,mean_score",
+    context_keys="exec.run_eval.results",
     data_class="internal"
   ]
 
   persist [
-    type="eval.persist",
-    domain="heartbeat",
+    type="exec",
+    target="action",
+    action="eval_pipeline.persist",
+    param.domain="heartbeat",
+    context_keys="exec.run_eval.results,exec.aggregate.metrics",
     data_class="internal"
   ]
 

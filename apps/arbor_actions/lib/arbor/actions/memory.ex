@@ -340,6 +340,224 @@ defmodule Arbor.Actions.Memory do
   end
 
   # ============================================================================
+  # Consolidate
+  # ============================================================================
+
+  defmodule Consolidate do
+    @moduledoc """
+    Run memory consolidation (decay/prune/archive).
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `strategy` | string | no | Consolidation strategy: "full" (default), "decay_only", "prune_only" |
+    """
+
+    use Jido.Action,
+      name: "memory_consolidate",
+      description: "Run memory consolidation. Optional: strategy (full, decay_only, prune_only).",
+      category: "memory",
+      tags: ["memory", "consolidate", "maintenance"],
+      schema: [
+        strategy: [
+          type: :string,
+          default: "full",
+          doc: "Consolidation strategy: full, decay_only, prune_only"
+        ]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Memory, as: MemoryHelpers
+
+    def taint_roles, do: %{strategy: :control}
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, %{strategy: params[:strategy] || "full"})
+
+      with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
+           :ok <- MemoryHelpers.ensure_memory(agent_id) do
+        strategy = params[:strategy] || "full"
+
+        opts =
+          case MemoryHelpers.safe_to_atom(strategy) do
+            atom when is_atom(atom) -> [strategy: atom]
+            _ -> []
+          end
+
+        case Arbor.Memory.consolidate(agent_id, opts) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{strategy: strategy})
+            {:ok, %{status: "consolidated", strategy: strategy, detail: inspect(result)}}
+
+          :ok ->
+            Actions.emit_completed(__MODULE__, %{strategy: strategy})
+            {:ok, %{status: "consolidated", strategy: strategy}}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Consolidation failed: #{inspect(reason)}"}
+        end
+      end
+    end
+  end
+
+  # ============================================================================
+  # Index
+  # ============================================================================
+
+  defmodule Index do
+    @moduledoc """
+    Index new content into memory.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `content` | string | yes | Content to index |
+    | `metadata` | map | no | Additional metadata for the indexed content |
+    """
+
+    use Jido.Action,
+      name: "memory_index",
+      description: "Index new content into memory. Required: content. Optional: metadata map.",
+      category: "memory",
+      tags: ["memory", "index", "store"],
+      schema: [
+        content: [type: :string, required: true, doc: "Content to index"],
+        metadata: [type: :map, default: %{}, doc: "Additional metadata"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Memory, as: MemoryHelpers
+
+    def taint_roles, do: %{content: :data, metadata: :data}
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, %{})
+
+      with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
+           :ok <- MemoryHelpers.ensure_memory(agent_id) do
+        metadata = params[:metadata] || %{}
+
+        case Arbor.Memory.index(agent_id, params.content, metadata) do
+          {:ok, _} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{status: "indexed"}}
+
+          :ok ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{status: "indexed"}}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Indexing failed: #{inspect(reason)}"}
+        end
+      end
+    end
+  end
+
+  # ============================================================================
+  # LoadWorking
+  # ============================================================================
+
+  defmodule LoadWorking do
+    @moduledoc """
+    Load the agent's working memory.
+
+    No parameters required — uses agent_id from context.
+    """
+
+    use Jido.Action,
+      name: "memory_load_working",
+      description: "Load the agent's working memory into context.",
+      category: "memory",
+      tags: ["memory", "working", "load"],
+      schema: []
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Memory, as: MemoryHelpers
+
+    def taint_roles, do: %{}
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, %{})
+
+      with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
+           :ok <- MemoryHelpers.ensure_memory(agent_id) do
+        case Arbor.Memory.load_working_memory(agent_id) do
+          {:ok, wm} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{working_memory: wm}}
+
+          wm when is_map(wm) ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{working_memory: wm}}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Load working memory failed: #{inspect(reason)}"}
+        end
+      end
+    end
+  end
+
+  # ============================================================================
+  # SaveWorking
+  # ============================================================================
+
+  defmodule SaveWorking do
+    @moduledoc """
+    Save data to the agent's working memory.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `data` | map | yes | Working memory content to save |
+    """
+
+    use Jido.Action,
+      name: "memory_save_working",
+      description: "Save data to the agent's working memory. Required: data map.",
+      category: "memory",
+      tags: ["memory", "working", "save"],
+      schema: [
+        data: [type: :map, required: true, doc: "Working memory content to save"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Memory, as: MemoryHelpers
+
+    def taint_roles, do: %{data: :data}
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, %{})
+
+      with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
+           :ok <- MemoryHelpers.ensure_memory(agent_id) do
+        case Arbor.Memory.save_working_memory(agent_id, params.data) do
+          :ok ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{status: "saved"}}
+
+          {:ok, _} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, %{status: "saved"}}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Save working memory failed: #{inspect(reason)}"}
+        end
+      end
+    end
+  end
+
+  # ============================================================================
   # Reflect
   # ============================================================================
 

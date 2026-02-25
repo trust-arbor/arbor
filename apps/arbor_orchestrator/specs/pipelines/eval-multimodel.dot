@@ -21,8 +21,10 @@ digraph EvalMultiModel {
   start [shape=Mdiamond]
 
   load_dataset [
-    type="eval.dataset",
-    dataset="priv/eval_datasets/elixir_coding.jsonl",
+    type="exec",
+    target="action",
+    action="eval_pipeline.load_dataset",
+    param.path="priv/eval_datasets/elixir_coding.jsonl",
     data_class="internal"
   ]
 
@@ -31,28 +33,38 @@ digraph EvalMultiModel {
     source_key="eval.models",
     item_key="map.current_item",
     collect_key="eval.all_model_results",
-    handler_type="eval.run",
-    handler_attrs="{\"graders\": \"compile_check,functional_test\", \"subject\": \"Arbor.Orchestrator.Eval.Subjects.LLM\"}",
+    handler_type="exec",
+    handler_attrs="{\"target\": \"action\", \"action\": \"eval_pipeline.run_eval\", \"param.graders\": \"compile_check,functional_test\", \"param.subject\": \"Arbor.Orchestrator.Eval.Subjects.LLM\", \"context_keys\": \"exec.load_dataset.dataset\"}",
     max_concurrency="1",
     on_item_error="collect_nil",
     data_class="internal"
   ]
 
   aggregate [
-    type="eval.aggregate",
-    metrics="accuracy,mean_score",
+    type="exec",
+    target="action",
+    action="eval_pipeline.aggregate",
+    param.metrics="accuracy,mean_score",
+    context_keys="exec.iterate_models.results",
     data_class="internal"
   ]
 
   persist [
-    type="eval.persist",
-    domain="coding",
+    type="exec",
+    target="action",
+    action="eval_pipeline.persist",
+    param.domain="coding",
+    context_keys="exec.iterate_models.results,exec.aggregate.metrics",
     data_class="internal"
   ]
 
   report [
-    type="eval.report",
-    output="eval_reports/multimodel_latest.md",
+    type="exec",
+    target="action",
+    action="eval_pipeline.report",
+    param.format="markdown",
+    param.output_path="eval_reports/multimodel_latest.md",
+    context_keys="exec.iterate_models.results,exec.aggregate.metrics",
     data_class="internal"
   ]
 

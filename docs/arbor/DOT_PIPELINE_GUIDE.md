@@ -188,7 +188,7 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `purpose` | `"llm"` | `llm`, `routing`, `eval_run`, `eval_aggregate` |
+| `purpose` | `"llm"` | `llm`, `routing` |
 | `prompt` | _(required for llm)_ | The prompt sent to the LLM |
 | `system_prompt` | _(optional)_ | System prompt for the LLM |
 | `llm_provider` | _(from env)_ | Provider name (e.g., `openrouter`, `anthropic`) |
@@ -202,7 +202,7 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 | `timeout` | `"120000"` | LLM call timeout in ms |
 | `reasoning_effort` | _(none)_ | `low`, `medium`, `high` (for supported models) |
 
-Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`, `eval.run`, `eval.aggregate`.
+Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`.
 
 #### `transform`
 
@@ -226,12 +226,33 @@ Side-effecting execution. Dispatches by `target` attribute.
 | `target` | `"tool"` | `tool`, `shell`, `action`, `function` |
 | `tool_command` | _(for shell)_ | Shell command to execute |
 | `tool_name` | _(for tool)_ | Tool function name |
-| `action_name` | _(for action)_ | Arbor action module name |
+| `action` | _(for target=action)_ | Arbor action name (e.g., `eval_pipeline.load_dataset`) |
+| `context_keys` | _(for target=action)_ | Comma-separated context keys to pass as action params |
+| `arg.*` / `param.*` | _(for target=action)_ | Static action parameters (e.g., `arg.path="data.jsonl"`) |
 | `sandbox` | `"true"` | Enable sandboxed execution |
 | `max_retries` | `"0"` | Retry count on failure |
 | `retry_target` | _(none)_ | Node ID to jump to on failure |
 
 Idempotency: `side_effecting`. Aliases: `tool`, `shell`.
+
+##### Using `target="action"` for Domain Operations
+
+Domain-specific operations (eval, memory, etc.) are expressed as Arbor Actions invoked via `exec target="action"`. The action receives parameters from:
+1. `arg.*` / `param.*` node attributes (static values)
+2. `context_keys` (comma-separated list of context keys pulled into params at runtime)
+
+Action results are flattened into context as `exec.<node_id>.<key>` plus `last_response`.
+
+```dot
+// Load a dataset via action
+load [type="exec" target="action" action="eval_pipeline.load_dataset" arg.path="data.jsonl"]
+
+// Run eval using context from previous node
+run_eval [type="exec" target="action" action="eval_pipeline.run_eval" context_keys="dataset"]
+
+// Memory operations via actions
+recall [type="exec" target="action" action="memory.recall" arg.query="recent conversations"]
+```
 
 ### State I/O
 
@@ -241,12 +262,11 @@ Read operations. Dispatches by `source` attribute.
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `source` | _(required)_ | `memory`, `eval_dataset`, `file`, `context` |
-| `op` | _(varies)_ | Memory operation: `recall`, `working_load`, `stats`, `recall_store` |
-| `source_key` | _(varies)_ | Key to read from |
-| `output_key` | `"last_response"` | Context key for read result |
+| `source` | `"file"` | `file`, `context` |
+| `source_key` | _(varies)_ | File path or context key to read from |
+| `output_key` | `"read.<node_id>"` | Context key for read result |
 
-Idempotency: `read_only`. Aliases: `memory.recall`, `memory.working_load`, `memory.stats`, `memory.recall_store`, `eval.dataset`.
+Idempotency: `read_only`. Aliases: _(none — memory/eval reads are now actions via `exec target="action"`)_.
 
 #### `write`
 
@@ -254,13 +274,12 @@ Write operations. Dispatches by `target` attribute.
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `target` | _(required)_ | `memory`, `file`, `accumulator`, `eval` |
-| `op` | _(varies)_ | Memory operation: `consolidate`, `index`, `working_save`, `store_file` |
+| `target` | `"file"` | `file`, `accumulator` |
 | `mode` | `"overwrite"` | `overwrite` or `append` (for file/accumulator) |
 | `output_path` | _(for file)_ | File path to write to |
 | `source_key` | `"last_response"` | Context key containing data to write |
 
-Idempotency: `side_effecting`. Aliases: `file.write`, `memory.consolidate`, `memory.index`, `memory.working_save`, `memory.store_file`, `accumulator`, `eval.persist`, `eval.report`.
+Idempotency: `side_effecting`. Aliases: `file.write`, `accumulator`. _(Memory/eval writes are now actions via `exec target="action"`)_.
 
 ### Composition
 
@@ -790,8 +809,6 @@ The following type strings are supported for backwards compatibility with existi
 | `pipeline.validate` | `gate` | `predicate="pipeline_valid"` |
 | `wait.human` | `wait` | `source="human"` |
 | `accumulator` | `write` | `target="accumulator" mode="append"` |
-| `memory.*` | `read`/`write` | Various `source`/`target` + `op` attrs |
-| `eval.*` | `read`/`write`/`compute` | Various attrs |
 | `consensus.*` | `compose` | _(domain-specific handler)_ |
 | `session.*` | `compose` | _(domain-specific handler)_ |
 | `graph.invoke` | `compose` | `mode="invoke"` |

@@ -1,15 +1,13 @@
 defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   @moduledoc """
-  Core handler for computation nodes — LLM calls, routing, evals.
+  Core handler for computation nodes — LLM calls, routing.
 
   Canonical type: `compute`
-  Aliases: `codergen`, `routing.select`, `eval.run`, `eval.aggregate`
+  Aliases: `codergen`, `routing.select`
 
   Dispatches by `purpose` attribute:
     - `"llm"` (default) — delegates to CodergenHandler
     - `"routing"` — delegates to RoutingHandler
-    - `"eval_run"` — delegates to EvalRunHandler
-    - `"eval_aggregate"` — delegates to EvalAggregateHandler
 
   ## Node Attributes
 
@@ -37,14 +35,6 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
 
   defp dispatch("routing", node, context, graph, opts) do
     delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)
-  end
-
-  defp dispatch("eval_run", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.EvalRunHandler, node, context, graph, opts)
-  end
-
-  defp dispatch("eval_aggregate", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.EvalAggregateHandler, node, context, graph, opts)
   end
 
   defp dispatch(unknown, node, _context, _graph, _opts) do

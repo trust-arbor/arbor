@@ -38,8 +38,6 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
     # Computation aliases → ComputeHandler
     "codergen" => Arbor.Orchestrator.Handlers.ComputeHandler,
     "routing.select" => Arbor.Orchestrator.Handlers.ComputeHandler,
-    "eval.run" => Arbor.Orchestrator.Handlers.ComputeHandler,
-    "eval.aggregate" => Arbor.Orchestrator.Handlers.ComputeHandler,
 
     # Stdlib DOT aliases → ComposeHandler (via invoke)
     "prompt.ab_test" => Arbor.Orchestrator.Handlers.ComposeHandler,
@@ -50,22 +48,9 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
     "tool" => Arbor.Orchestrator.Handlers.ExecHandler,
     "shell" => Arbor.Orchestrator.Handlers.ExecHandler,
 
-    # Read aliases → ReadHandler
-    "memory.recall" => Arbor.Orchestrator.Handlers.ReadHandler,
-    "memory.working_load" => Arbor.Orchestrator.Handlers.ReadHandler,
-    "memory.stats" => Arbor.Orchestrator.Handlers.ReadHandler,
-    "memory.recall_store" => Arbor.Orchestrator.Handlers.ReadHandler,
-    "eval.dataset" => Arbor.Orchestrator.Handlers.ReadHandler,
-
     # Write aliases → WriteHandler
     "file.write" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "memory.consolidate" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "memory.index" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "memory.working_save" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "memory.store_file" => Arbor.Orchestrator.Handlers.WriteHandler,
     "accumulator" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "eval.persist" => Arbor.Orchestrator.Handlers.WriteHandler,
-    "eval.report" => Arbor.Orchestrator.Handlers.WriteHandler,
 
     # Composition aliases → ComposeHandler
     "graph.invoke" => Arbor.Orchestrator.Handlers.ComposeHandler,
@@ -221,26 +206,11 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       assert updated_node.attrs["target"] == "tool"
     end
 
-    test "memory.recall alias injects source and op" do
-      node = %Node{id: "n", attrs: %{"type" => "memory.recall"}}
-      {handler, updated_node} = Registry.resolve_with_attrs(node)
-      assert handler == Arbor.Orchestrator.Handlers.ReadHandler
-      assert updated_node.attrs["source"] == "memory"
-      assert updated_node.attrs["op"] == "recall"
-    end
-
     test "file.write alias injects target" do
       node = %Node{id: "n", attrs: %{"type" => "file.write"}}
       {handler, updated_node} = Registry.resolve_with_attrs(node)
       assert handler == Arbor.Orchestrator.Handlers.WriteHandler
       assert updated_node.attrs["target"] == "file"
-    end
-
-    test "eval.run alias injects purpose" do
-      node = %Node{id: "n", attrs: %{"type" => "eval.run"}}
-      {handler, updated_node} = Registry.resolve_with_attrs(node)
-      assert handler == Arbor.Orchestrator.Handlers.ComputeHandler
-      assert updated_node.attrs["purpose"] == "eval_run"
     end
 
     test "output.validate alias injects predicate" do
