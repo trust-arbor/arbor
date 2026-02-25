@@ -300,19 +300,37 @@ defmodule Arbor.Consensus.Evaluators.Consult do
           result
       end
 
-    decision = get_context_val(ctx, "council.decision")
+    # Try exec.decide.* keys first (new action-based path),
+    # fall back to council.* keys for backwards compatibility
+    decision =
+      get_context_val(ctx, "exec.decide.decision") ||
+        get_context_val(ctx, "council.decision")
 
     if decision do
       {:ok,
        %{
          decision: decision,
-         approve_count: get_context_val(ctx, "council.approve_count", 0),
-         reject_count: get_context_val(ctx, "council.reject_count", 0),
-         abstain_count: get_context_val(ctx, "council.abstain_count", 0),
-         quorum_met: get_context_val(ctx, "council.quorum_met", false),
-         average_confidence: get_context_val(ctx, "council.average_confidence", 0.0),
-         primary_concerns: get_context_val(ctx, "council.primary_concerns", "[]"),
-         status: get_context_val(ctx, "consensus.status", "unknown")
+         approve_count:
+           get_context_val(ctx, "exec.decide.approve_count") ||
+             get_context_val(ctx, "council.approve_count", 0),
+         reject_count:
+           get_context_val(ctx, "exec.decide.reject_count") ||
+             get_context_val(ctx, "council.reject_count", 0),
+         abstain_count:
+           get_context_val(ctx, "exec.decide.abstain_count") ||
+             get_context_val(ctx, "council.abstain_count", 0),
+         quorum_met:
+           get_context_val(ctx, "exec.decide.quorum_met") ||
+             get_context_val(ctx, "council.quorum_met", false),
+         average_confidence:
+           get_context_val(ctx, "exec.decide.average_confidence") ||
+             get_context_val(ctx, "council.average_confidence", 0.0),
+         primary_concerns:
+           get_context_val(ctx, "exec.decide.primary_concerns") ||
+             get_context_val(ctx, "council.primary_concerns", "[]"),
+         status:
+           get_context_val(ctx, "exec.decide.status") ||
+             get_context_val(ctx, "consensus.status", "unknown")
        }}
     else
       {:error, :no_decision_in_result}

@@ -294,7 +294,7 @@ Nested graph/pipeline execution. Dispatches by `mode` attribute.
 | `pipeline_path` | _(for pipeline)_ | Path to pipeline DOT file |
 | `max_iterations` | _(for feedback)_ | Loop iteration limit |
 
-Idempotency: `side_effecting`. Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`, `stack.manager_loop`, `consensus.*`, `session.*`, `feedback.loop`, `prompt.ab_test`, `drift_detect`, `retry.escalate` (stdlib DOT invocations).
+Idempotency: `side_effecting`. Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`, `stack.manager_loop`, `session.*`, `feedback.loop`, `prompt.ab_test`, `drift_detect`, `retry.escalate` (stdlib DOT invocations). Consensus operations use `exec target="action"` (see Actions section).
 
 #### `map`
 
@@ -809,7 +809,6 @@ The following type strings are supported for backwards compatibility with existi
 | `pipeline.validate` | `gate` | `predicate="pipeline_valid"` |
 | `wait.human` | `wait` | `source="human"` |
 | `accumulator` | `write` | `target="accumulator" mode="append"` |
-| `consensus.*` | `compose` | _(domain-specific handler)_ |
 | `session.*` | `compose` | _(domain-specific handler)_ |
 | `graph.invoke` | `compose` | `mode="invoke"` |
 | `graph.compose` | `compose` | `mode="compose"` |

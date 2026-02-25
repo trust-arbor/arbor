@@ -4,20 +4,22 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
 
   Canonical type: `compose`
   Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`,
-           `stack.manager_loop`, `consensus.*`, `session.*`
+           `stack.manager_loop`, `session.*`
 
   Dispatches by `mode` attribute:
     - `"invoke"` (default) — delegates to SubgraphHandler (graph.invoke)
     - `"compose"` — delegates to SubgraphHandler (graph.compose)
     - `"pipeline"` — delegates to PipelineRunHandler
     - `"manager_loop"` — delegates to ManagerLoopHandler
-    - `"consensus"` — delegates to ConsensusHandler (consensus.*)
     - `"session"` — delegates to SessionHandler (session.*)
+
+  Consensus operations are now Jido actions in `Arbor.Actions.Consensus`,
+  invoked via `exec target="action" action="consensus.*"` in DOT pipelines.
 
   ## Node Attributes
 
     - `mode` — composition mode: "invoke" (default), "compose", "pipeline",
-      "manager_loop", "consensus", "session"
+      "manager_loop", "session"
     - All attributes from the delegated handler are supported
   """
 
@@ -47,9 +49,6 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
 
       "manager_loop" ->
         ManagerLoopHandler.execute(node, context, graph, opts)
-
-      "consensus" ->
-        delegate_to(Arbor.Orchestrator.Handlers.ConsensusHandler, node, context, graph, opts)
 
       "session" ->
         delegate_to(Arbor.Orchestrator.Handlers.SessionHandler, node, context, graph, opts)
