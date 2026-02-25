@@ -46,6 +46,29 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenRouter do
   def provider, do: "openrouter"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "openrouter",
+        display_name: "OpenRouter",
+        type: :api,
+        env_vars: [%{name: "OPENROUTER_API_KEY", required: true}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            vision: true,
+            structured_output: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     OpenAICompatible.complete(request, opts, @config)
   end

@@ -66,6 +66,30 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ClaudeCli do
     end
   end
 
+  @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "claude_cli",
+        display_name: "Claude CLI",
+        type: :cli,
+        cli_tools: [%{name: "claude", install_hint: "npm i -g @anthropic-ai/claude-code"}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            extended_thinking: true,
+            resume: true,
+            multi_turn: true
+          )
+      )
+
+    contract
+  end
+
   @doc "Returns true if the `claude` binary is available in PATH."
   def available? do
     System.find_executable("claude") != nil

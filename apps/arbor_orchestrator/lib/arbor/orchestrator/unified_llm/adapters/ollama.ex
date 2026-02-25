@@ -37,6 +37,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Ollama do
   def provider, do: "ollama"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "ollama",
+        display_name: "Ollama",
+        type: :local,
+        probes: [%{type: :http, url: base_url() <> "/models", timeout_ms: 2_000}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            embeddings: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     OpenAICompatible.complete(request, opts, config())
   end

@@ -13,6 +13,30 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
   def provider, do: "anthropic"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "anthropic",
+        display_name: "Anthropic API",
+        type: :api,
+        env_vars: [%{name: "ANTHROPIC_API_KEY", required: true}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            extended_thinking: true,
+            vision: true,
+            structured_output: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     translation_warnings = unsupported_content_warnings(request)
 

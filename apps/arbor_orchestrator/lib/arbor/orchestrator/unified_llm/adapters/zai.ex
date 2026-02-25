@@ -32,6 +32,28 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   def provider, do: "zai"
 
   @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "zai",
+        display_name: "Z.ai",
+        type: :api,
+        env_vars: [%{name: "ZAI_API_KEY", required: true}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            structured_output: true
+          )
+      )
+
+    contract
+  end
+
+  @impl true
   def complete(%Request{} = request, opts) do
     OpenAICompatible.complete(request, opts, @config)
   end

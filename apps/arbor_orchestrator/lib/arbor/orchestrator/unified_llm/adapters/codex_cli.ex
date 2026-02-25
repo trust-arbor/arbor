@@ -37,6 +37,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.CodexCli do
     end
   end
 
+  @impl true
+  def runtime_contract do
+    alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: "codex_cli",
+        display_name: "Codex CLI",
+        type: :cli,
+        cli_tools: [%{name: "codex", install_hint: "npm i -g @openai/codex"}],
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            multi_turn: true
+          )
+      )
+
+    contract
+  end
+
   @doc "Returns true if the `codex` binary is available in PATH."
   def available? do
     System.find_executable("codex") != nil
