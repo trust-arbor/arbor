@@ -549,59 +549,63 @@ defmodule Arbor.Orchestrator.Session.Adapters do
   defp build_update_goals do
     fn goal_updates, new_goals, agent_id ->
       goal_store = Arbor.Memory.GoalStore
-
-      Enum.each(List.wrap(goal_updates), fn update ->
-        goal_id = update["id"] || update[:id]
-        progress = update["progress"] || update[:progress]
-
-        if goal_id && progress do
-          bridge(goal_store, :update_goal_progress, [agent_id, goal_id, progress], :ok)
-        end
-      end)
-
-      # Fetch existing goals for dedup — avoid LLM re-creating goals it can already see
-      existing_descriptions =
-        try do
-          case bridge(goal_store, :get_active_goals, [agent_id], []) do
-            goals when is_list(goals) ->
-              goals
-              |> Enum.map(fn g ->
-                desc = if is_map(g), do: Map.get(g, :description, ""), else: ""
-                String.downcase(String.trim(desc))
-              end)
-              |> MapSet.new()
-
-            _ ->
-              MapSet.new()
-          end
-        rescue
-          _ -> MapSet.new()
-        end
-
-      Enum.each(List.wrap(new_goals), fn goal_desc ->
-        description =
-          cond do
-            is_binary(goal_desc) ->
-              String.trim(goal_desc)
-
-            is_map(goal_desc) ->
-              (goal_desc["description"] || goal_desc[:description] || "")
-              |> to_string()
-              |> String.trim()
-
-            true ->
-              ""
-          end
-
-        if description != "" and
-             not MapSet.member?(existing_descriptions, String.downcase(description)) do
-          bridge(goal_store, :add_goal, [agent_id, description, []], :ok)
-        end
-      end)
-
+      apply_goal_progress_updates(goal_store, goal_updates, agent_id)
+      existing = fetch_existing_goal_descriptions(goal_store, agent_id)
+      add_new_goals(goal_store, new_goals, existing, agent_id)
       :ok
     end
   end
+
+  defp apply_goal_progress_updates(goal_store, goal_updates, agent_id) do
+    Enum.each(List.wrap(goal_updates), fn update ->
+      goal_id = update["id"] || update[:id]
+      progress = update["progress"] || update[:progress]
+
+      if goal_id && progress do
+        bridge(goal_store, :update_goal_progress, [agent_id, goal_id, progress], :ok)
+      end
+    end)
+  end
+
+  defp fetch_existing_goal_descriptions(goal_store, agent_id) do
+    try do
+      case bridge(goal_store, :get_active_goals, [agent_id], []) do
+        goals when is_list(goals) ->
+          goals
+          |> Enum.map(fn g ->
+            desc = if is_map(g), do: Map.get(g, :description, ""), else: ""
+            String.downcase(String.trim(desc))
+          end)
+          |> MapSet.new()
+
+        _ ->
+          MapSet.new()
+      end
+    rescue
+      _ -> MapSet.new()
+    end
+  end
+
+  defp add_new_goals(goal_store, new_goals, existing_descriptions, agent_id) do
+    Enum.each(List.wrap(new_goals), fn goal_desc ->
+      description = extract_goal_description(goal_desc)
+
+      if description != "" and
+           not MapSet.member?(existing_descriptions, String.downcase(description)) do
+        bridge(goal_store, :add_goal, [agent_id, description, []], :ok)
+      end
+    end)
+  end
+
+  defp extract_goal_description(desc) when is_binary(desc), do: String.trim(desc)
+
+  defp extract_goal_description(desc) when is_map(desc) do
+    (desc["description"] || desc[:description] || "")
+    |> to_string()
+    |> String.trim()
+  end
+
+  defp extract_goal_description(_), do: ""
 
   # ── Identity Insights ─────────────────────────────────────────────
   #
