@@ -28,12 +28,10 @@ defmodule Arbor.Agent.Lifecycle do
       profiles = Lifecycle.list_agents()
   """
 
-  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, SessionManager}
+  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, ProfileStore, SessionManager}
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
-
-  @agents_dir ".arbor/agents"
 
   @doc """
   Create a new agent from a template or options.
@@ -132,28 +130,17 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec restore(String.t()) :: {:ok, Profile.t()} | {:error, :not_found | term()}
   def restore(agent_id) do
-    path = profile_path(agent_id)
+    case ProfileStore.load_profile(agent_id) do
+      {:ok, profile} ->
+        Arbor.Signals.emit(:agent, :restored, %{
+          agent_id: agent_id,
+          version: profile.version
+        })
 
-    case File.read(path) do
-      {:ok, json} ->
-        case Profile.from_json(json) do
-          {:ok, profile} ->
-            Arbor.Signals.emit(:agent, :restored, %{
-              agent_id: agent_id,
-              version: profile.version
-            })
+        {:ok, profile}
 
-            {:ok, profile}
-
-          {:error, reason} ->
-            {:error, {:deserialize_failed, reason}}
-        end
-
-      {:error, :enoent} ->
-        {:error, :not_found}
-
-      {:error, reason} ->
-        {:error, {:read_failed, reason}}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -247,26 +234,11 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   @doc """
-  List all known agent profiles from the agents directory.
+  List all known agent profiles.
   """
   @spec list_agents() :: [Profile.t()]
   def list_agents do
-    agents_dir = agents_dir()
-
-    case File.ls(agents_dir) do
-      {:ok, files} ->
-        files
-        |> Enum.filter(&String.ends_with?(&1, ".agent.json"))
-        |> Enum.map(fn file ->
-          agent_id = String.replace_suffix(file, ".agent.json", "")
-          restore(agent_id)
-        end)
-        |> Enum.filter(&match?({:ok, _}, &1))
-        |> Enum.map(fn {:ok, profile} -> profile end)
-
-      {:error, _} ->
-        []
-    end
+    ProfileStore.list_profiles()
   end
 
   @doc """
@@ -283,20 +255,11 @@ defmodule Arbor.Agent.Lifecycle do
     # Clean up signing key
     Arbor.Security.delete_signing_key(agent_id)
 
-    # Remove profile
-    path = profile_path(agent_id)
+    # Remove profile from store (and legacy JSON)
+    ProfileStore.delete_profile(agent_id)
 
-    case File.rm(path) do
-      :ok ->
-        Arbor.Signals.emit(:agent, :destroyed, %{agent_id: agent_id})
-        :ok
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Arbor.Signals.emit(:agent, :destroyed, %{agent_id: agent_id})
+    :ok
   end
 
   # -- Private helpers --
@@ -760,14 +723,7 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp persist_profile(%Profile{} = profile) do
-    dir = agents_dir()
-    File.mkdir_p!(dir)
-    path = profile_path(profile.agent_id)
-
-    case Profile.to_json(profile) do
-      {:ok, json} -> File.write(path, json)
-      {:error, reason} -> {:error, reason}
-    end
+    ProfileStore.store_profile(profile)
   end
 
   defp emit_created_signal(%Profile{} = profile) do
@@ -777,13 +733,5 @@ defmodule Arbor.Agent.Lifecycle do
       template: profile.template,
       trust_tier: profile.trust_tier
     })
-  end
-
-  defp profile_path(agent_id) do
-    Path.join(agents_dir(), "#{agent_id}.agent.json")
-  end
-
-  defp agents_dir do
-    Path.join(File.cwd!(), @agents_dir)
   end
 end

@@ -32,6 +32,7 @@ defmodule Arbor.Agent.Profile do
     field(:initial_capabilities, [map()], default: [])
     field(:identity, map(), default: nil)
     field(:keychain_ref, String.t(), default: nil)
+    field(:auto_start, boolean(), default: false)
     field(:metadata, map(), default: %{})
     field(:created_at, DateTime.t())
     field(:version, pos_integer(), default: 1)
@@ -63,6 +64,7 @@ defmodule Arbor.Agent.Profile do
       "initial_capabilities" => profile.initial_capabilities,
       "identity" => serialize_identity(profile.identity),
       "keychain_ref" => profile.keychain_ref,
+      "auto_start" => profile.auto_start,
       "metadata" => profile.metadata,
       "created_at" => if(profile.created_at, do: DateTime.to_iso8601(profile.created_at))
     }
@@ -83,6 +85,7 @@ defmodule Arbor.Agent.Profile do
       initial_capabilities: map["initial_capabilities"] || [],
       identity: deserialize_identity(map["identity"] || legacy_identity(map["identity_ref"])),
       keychain_ref: map["keychain_ref"],
+      auto_start: map["auto_start"] || false,
       metadata: map["metadata"] || %{},
       created_at: maybe_datetime(map["created_at"]),
       version: map["version"] || 1

@@ -37,7 +37,11 @@ config :arbor_consensus, start_children: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
 config :arbor_sandbox, start_children: false
-config :arbor_agent, start_children: false
+
+config :arbor_agent,
+  start_children: false,
+  profile_storage_backend: nil
+
 config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false

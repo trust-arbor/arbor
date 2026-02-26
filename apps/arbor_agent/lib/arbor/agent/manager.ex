@@ -19,7 +19,7 @@ defmodule Arbor.Agent.Manager do
   `Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")`.
   """
 
-  alias Arbor.Agent.{APIAgent, Claude, GroupChat, Lifecycle, Profile}
+  alias Arbor.Agent.{APIAgent, Claude, GroupChat, Lifecycle, ProfileStore}
 
   require Logger
 
@@ -42,13 +42,9 @@ defmodule Arbor.Agent.Manager do
     with {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume
       updated_profile = put_in(profile.metadata[:last_model_config], model_config)
-      profile_path = Path.join([".arbor", "agents", "#{profile.agent_id}.agent.json"])
 
       try do
-        case Profile.to_json(updated_profile) do
-          {:ok, json} -> File.write(profile_path, json)
-          _ -> :ok
-        end
+        ProfileStore.store_profile(updated_profile)
       rescue
         _ -> :ok
       end

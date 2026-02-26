@@ -690,8 +690,10 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   end
 
   defp safe_find_profile(agent_id) do
-    Arbor.Agent.list_agents()
-    |> Enum.find(&(&1.agent_id == agent_id))
+    case Arbor.Agent.load_profile(agent_id) do
+      {:ok, profile} -> profile
+      _ -> nil
+    end
   rescue
     _ -> nil
   catch
