@@ -94,6 +94,9 @@ defmodule Arbor.Agent do
   @doc "List all profiles with auto_start: true."
   defdelegate list_auto_start_profiles(), to: ProfileStore
 
+  @doc "Set auto_start flag on an agent's persisted profile."
+  defdelegate set_auto_start(agent_id, enabled), to: Arbor.Agent.Manager
+
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================

@@ -106,80 +106,82 @@ defmodule Arbor.Monitor.HealingSupervisor do
     DynamicSupervisor.count_children(Arbor.Monitor.HealingWorkers).active
   end
 
-  # Deferred ops room setup — waits for agent infrastructure then creates
-  # the diagnostician agent and ops room GroupChat.
+  # Deferred ops room setup — subscribes to Bootstrap signal, with fallback poll.
+  # The diagnostician agent is now started by Arbor.Agent.Bootstrap, not here.
   defp maybe_schedule_ops_room do
     enabled = Application.get_env(:arbor_monitor, :start_ops_room, true)
 
     if enabled do
       Task.start(fn ->
-        # Wait for agent infrastructure to be available
-        Process.sleep(5_000)
-        setup_ops_room()
+        subscribe_to_bootstrap_signal()
+        # Fallback: if no signal within 30s, poll for existing diagnostician
+        Process.sleep(30_000)
+        setup_ops_room_fallback()
       end)
     end
   end
 
-  defp setup_ops_room do
-    manager_mod = Arbor.Agent.Manager
-    group_chat_mod = Arbor.Agent.GroupChat
-    lifecycle_mod = Arbor.Agent.Lifecycle
-    template_mod = Arbor.Agent.Templates.Diagnostician
-    api_agent_mod = Arbor.Agent.APIAgent
+  defp subscribe_to_bootstrap_signal do
+    signals_mod = Arbor.Signals
 
-    with true <- Code.ensure_loaded?(manager_mod),
-         true <- Code.ensure_loaded?(group_chat_mod),
-         true <- Code.ensure_loaded?(template_mod),
-         true <- Code.ensure_loaded?(api_agent_mod) do
-      # Start or resume the diagnostician agent
-      agent_result =
-        try do
-          apply(manager_mod, :start_or_resume, [
-            api_agent_mod,
-            "diagnostician",
-            [
-              template: template_mod,
-              start_host: true,
-              model_config: %{
-                id: "arcee-ai/trinity-large-preview:free",
-                provider: :openrouter,
-                backend: :api,
-                module: api_agent_mod
-              }
-            ]
-          ])
-        rescue
-          error ->
-            Logger.warning("[HealingSupervisor] Failed to start diagnostician: #{inspect(error)}")
-            {:error, error}
-        catch
-          :exit, reason ->
-            Logger.warning(
-              "[HealingSupervisor] Failed to start diagnostician (exit): #{inspect(reason)}"
-            )
+    if Code.ensure_loaded?(signals_mod) do
+      try do
+        apply(signals_mod, :subscribe, [
+          "agent.bootstrap_completed",
+          fn signal ->
+            agents = get_in(signal.data, [:agents]) || []
 
-            {:error, reason}
-        end
+            case Enum.find(agents, &(&1[:display_name] == "diagnostician")) do
+              %{agent_id: agent_id} ->
+                setup_ops_room_for_agent(agent_id)
 
-      case agent_result do
-        {:ok, agent_id, _pid} ->
-          create_ops_room(agent_id, group_chat_mod, lifecycle_mod, manager_mod)
+              _ ->
+                Logger.debug("[HealingSupervisor] Bootstrap completed but no diagnostician found")
+            end
 
-        {:ok, agent_id} ->
-          create_ops_room(agent_id, group_chat_mod, lifecycle_mod, manager_mod)
-
-        {:error, reason} ->
-          Logger.warning("[HealingSupervisor] Could not start diagnostician: #{inspect(reason)}")
+            :ok
+          end
+        ])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
       end
-    else
-      false ->
-        Logger.debug(
-          "[HealingSupervisor] Agent infrastructure not available, ops room disabled"
-        )
     end
   end
 
-  defp create_ops_room(agent_id, group_chat_mod, lifecycle_mod, _manager_mod) do
+  defp setup_ops_room_fallback do
+    lifecycle_mod = Arbor.Agent.Lifecycle
+
+    if Code.ensure_loaded?(lifecycle_mod) do
+      try do
+        profiles = apply(lifecycle_mod, :list_agents, [])
+
+        case Enum.find(profiles, &(&1.display_name == "diagnostician")) do
+          %{agent_id: agent_id} ->
+            setup_ops_room_for_agent(agent_id)
+
+          nil ->
+            Logger.debug("[HealingSupervisor] No diagnostician agent found, ops room disabled")
+        end
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  defp setup_ops_room_for_agent(agent_id) do
+    group_chat_mod = Arbor.Agent.GroupChat
+    lifecycle_mod = Arbor.Agent.Lifecycle
+
+    if Code.ensure_loaded?(group_chat_mod) and Code.ensure_loaded?(lifecycle_mod) do
+      create_ops_room(agent_id, group_chat_mod, lifecycle_mod)
+    end
+  end
+
+  defp create_ops_room(agent_id, group_chat_mod, lifecycle_mod) do
     # Look up the host process for the agent
     host_pid =
       try do
@@ -208,9 +210,7 @@ defmodule Arbor.Monitor.HealingSupervisor do
           :exit, _ -> :ok
         end
 
-        Logger.info(
-          "[HealingSupervisor] Ops room created with diagnostician agent #{agent_id}"
-        )
+        Logger.info("[HealingSupervisor] Ops room created with diagnostician agent #{agent_id}")
 
       {:error, reason} ->
         Logger.warning("[HealingSupervisor] Failed to create ops room: #{inspect(reason)}")

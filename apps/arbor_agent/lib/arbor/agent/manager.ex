@@ -109,6 +109,9 @@ defmodule Arbor.Agent.Manager do
       # Persisted configs have string keys — atomize for build_start_opts
       model_config = atomize_model_config(model_config)
 
+      # Sync model config to profile if it changed (prevents stale provider bugs)
+      sync_model_config(agent_id, profile, model_config)
+
       display_name = profile.display_name || profile.character.name || "Agent"
       {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
 
@@ -217,6 +220,26 @@ defmodule Arbor.Agent.Manager do
 
     safe_emit(:stopped, %{agent_id: agent_id})
     :ok
+  end
+
+  @doc """
+  Set auto_start flag on an agent's persisted profile.
+
+  When `enabled` is `true`, the agent will be automatically started by
+  `Arbor.Agent.Bootstrap` on application boot.
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  @spec set_auto_start(String.t(), boolean()) :: :ok | {:error, term()}
+  def set_auto_start(agent_id, enabled) when is_binary(agent_id) and is_boolean(enabled) do
+    case ProfileStore.load_profile(agent_id) do
+      {:ok, profile} ->
+        updated = %{profile | auto_start: enabled}
+        ProfileStore.store_profile(updated)
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   @doc """
@@ -436,6 +459,27 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp atomize_value(_key, value), do: value
+
+  defp sync_model_config(agent_id, profile, model_config) do
+    persisted_config =
+      get_in(profile.metadata, [:last_model_config]) ||
+        get_in(profile.metadata, ["last_model_config"])
+
+    if persisted_config != nil and atomize_model_config(persisted_config) != model_config do
+      Logger.info(
+        "[Manager] Syncing model config for #{agent_id}: " <>
+          "#{inspect(persisted_config)} → #{inspect(model_config)}"
+      )
+
+      updated_profile = put_in(profile.metadata[:last_model_config], model_config)
+
+      try do
+        ProfileStore.store_profile(updated_profile)
+      rescue
+        _ -> :ok
+      end
+    end
+  end
 
   defp find_existing_profile(display_name, template) do
     case Lifecycle.list_agents() do

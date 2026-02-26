@@ -40,7 +40,8 @@ config :arbor_sandbox, start_children: false
 
 config :arbor_agent,
   start_children: false,
-  profile_storage_backend: nil
+  profile_storage_backend: nil,
+  bootstrap_enabled: false
 
 config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
