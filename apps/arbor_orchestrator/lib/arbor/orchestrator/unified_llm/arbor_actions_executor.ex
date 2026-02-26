@@ -35,22 +35,37 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
 
   def definitions(action_names) when is_list(action_names) do
     ActionsExecutor.with_actions_module(fn ->
-      action_map = ActionsExecutor.build_action_map()
+      registry = Arbor.Common.ActionRegistry
 
       Enum.flat_map(action_names, fn name ->
         name = String.trim(name)
 
-        case Map.get(action_map, name) do
-          nil ->
+        case resolve_action(registry, name) do
+          {:ok, module} ->
+            [to_openai_format(module.to_tool())]
+
+          {:error, _} ->
             require Logger
             Logger.warning("ArborActionsExecutor: unknown action '#{name}'")
             []
-
-          module ->
-            [to_openai_format(module.to_tool())]
         end
       end)
     end) || []
+  end
+
+  # Resolve via ActionRegistry first, fall back to build_action_map for
+  # backwards compatibility when registry is not running.
+  defp resolve_action(registry, name) do
+    if Process.whereis(registry) do
+      registry.resolve_by_name(name)
+    else
+      action_map = ActionsExecutor.build_action_map()
+
+      case Map.get(action_map, name) do
+        nil -> {:error, :not_found}
+        module -> {:ok, module}
+      end
+    end
   end
 
   @doc """
