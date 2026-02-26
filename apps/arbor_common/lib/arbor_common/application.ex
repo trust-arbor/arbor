@@ -7,7 +7,18 @@ defmodule Arbor.Common.Application do
   def start(_type, _args) do
     install_log_redaction_filter()
 
-    children = []
+    children =
+      if Application.get_env(:arbor_common, :start_children, true) do
+        [
+          Arbor.Common.ReadableRegistry,
+          Arbor.Common.WriteableRegistry,
+          Arbor.Common.ComputeRegistry,
+          Arbor.Common.PipelineResolver,
+          Arbor.Common.ActionRegistry
+        ]
+      else
+        []
+      end
 
     opts = [strategy: :one_for_one, name: Arbor.Common.Supervisor]
     Supervisor.start_link(children, opts)

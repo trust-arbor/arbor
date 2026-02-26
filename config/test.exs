@@ -30,6 +30,7 @@ config :arbor_security,
   # with {:reflex_check_failed, :exception} on every call.
   reflex_checking_enabled: false
 
+config :arbor_common, start_children: false
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
 config :arbor_consensus, start_children: false

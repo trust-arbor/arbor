@@ -16,6 +16,15 @@ defmodule Arbor.Orchestrator.Application do
       Arbor.Orchestrator.Session.TaskSupervisor
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Orchestrator.Supervisor)
+    result =
+      Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.Orchestrator.Supervisor)
+
+    # Populate handler DI registries with core entries after supervision tree is up
+    case result do
+      {:ok, _pid} -> Arbor.Orchestrator.Registrar.register_core()
+      _ -> :ok
+    end
+
+    result
   end
 end
