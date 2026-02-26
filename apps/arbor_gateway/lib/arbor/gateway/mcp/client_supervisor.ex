@@ -67,6 +67,10 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
   @doc "List all active connections as `{server_name, pid, status}` tuples."
   @spec list_connections() :: [{String.t(), pid(), atom()}]
   def list_connections do
+    if Process.whereis(__MODULE__) == nil, do: [], else: do_list_connections()
+  end
+
+  defp do_list_connections do
     __MODULE__
     |> DynamicSupervisor.which_children()
     |> Enum.flat_map(fn
@@ -83,11 +87,17 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
       _ ->
         []
     end)
+  catch
+    :exit, _ -> []
   end
 
   @doc "Find a connection pid by server name."
   @spec find_connection(String.t()) :: {:ok, pid()} | :error
   def find_connection(server_name) do
+    if Process.whereis(__MODULE__) == nil, do: :error, else: do_find_connection(server_name)
+  end
+
+  defp do_find_connection(server_name) do
     result =
       __MODULE__
       |> DynamicSupervisor.which_children()
@@ -110,5 +120,7 @@ defmodule Arbor.Gateway.MCP.ClientSupervisor do
       nil -> :error
       pid -> {:ok, pid}
     end
+  catch
+    :exit, _ -> :error
   end
 end
