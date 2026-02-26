@@ -49,7 +49,9 @@ defmodule Arbor.Actions.SessionLlmTest do
                    mode: "heartbeat",
                    goals: [%{"id" => "g1", "description" => "test", "progress" => 0}],
                    working_memory: %{"key" => "value"},
-                   knowledge_graph: [%{"type" => "trait", "content" => "curious", "confidence" => 0.8}],
+                   knowledge_graph: [
+                     %{"type" => "trait", "content" => "curious", "confidence" => 0.8}
+                   ],
                    pending_proposals: [%{"id" => "p1", "type" => "insight", "content" => "test"}],
                    active_intents: [
                      %{
@@ -61,7 +63,9 @@ defmodule Arbor.Actions.SessionLlmTest do
                      }
                    ],
                    recent_thinking: [%{"text" => "I should try...", "significant" => true}],
-                   recent_percepts: [%{"data" => %{"action_type" => "file.read"}, "outcome" => "success"}]
+                   recent_percepts: [
+                     %{"data" => %{"action_type" => "file.read"}, "outcome" => "success"}
+                   ]
                  },
                  %{}
                )
@@ -149,8 +153,16 @@ defmodule Arbor.Actions.SessionLlmTest do
 
     test "formats blocked and failed percepts" do
       percepts = [
-        %{"data" => %{"action_type" => "shell.execute"}, "outcome" => "blocked", "error" => "unauthorized"},
-        %{"data" => %{"action_type" => "file.write"}, "outcome" => "failure", "error" => "permission denied"}
+        %{
+          "data" => %{"action_type" => "shell.execute"},
+          "outcome" => "blocked",
+          "error" => "unauthorized"
+        },
+        %{
+          "data" => %{"action_type" => "file.write"},
+          "outcome" => "failure",
+          "error" => "permission denied"
+        }
       ]
 
       assert {:ok, result} =
