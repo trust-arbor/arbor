@@ -48,7 +48,7 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{Lifecycle, Registry, Server, Supervisor}
+  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry, Server, Supervisor}
 
   require Logger
 
@@ -84,6 +84,15 @@ defmodule Arbor.Agent do
 
   @doc "Delete an agent and all its data."
   defdelegate destroy_agent(agent_id), to: Lifecycle, as: :destroy
+
+  @doc "Load a single agent profile by ID."
+  defdelegate load_profile(agent_id), to: ProfileStore
+
+  @doc "Store an agent profile."
+  defdelegate store_profile(profile), to: ProfileStore
+
+  @doc "List all profiles with auto_start: true."
+  defdelegate list_auto_start_profiles(), to: ProfileStore
 
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
