@@ -19,9 +19,7 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
   def read(%ScopedContext{} = ctx, opts) do
     path = ScopedContext.get(ctx, "source_key") || ScopedContext.get(ctx, "path")
 
-    unless path do
-      {:error, :missing_path}
-    else
+    if path do
       workdir =
         ScopedContext.get(ctx, "workdir") ||
           Keyword.get(opts, :workdir, ".")
@@ -36,6 +34,8 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
         {:error, reason} ->
           {:error, {:file_error, reason, resolved}}
       end
+    else
+      {:error, :missing_path}
     end
   end
 
@@ -43,9 +43,7 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
   def list(%ScopedContext{} = ctx, opts) do
     path = ScopedContext.get(ctx, "source_key") || ScopedContext.get(ctx, "path")
 
-    unless path do
-      {:error, :missing_path}
-    else
+    if path do
       workdir =
         ScopedContext.get(ctx, "workdir") ||
           Keyword.get(opts, :workdir, ".")
@@ -59,6 +57,8 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
         {:ok, files} -> {:ok, files}
         {:error, reason} -> {:error, {:file_error, reason, expanded}}
       end
+    else
+      {:error, :missing_path}
     end
   end
 

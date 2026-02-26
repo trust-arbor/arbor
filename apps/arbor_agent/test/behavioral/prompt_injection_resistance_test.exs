@@ -7,8 +7,8 @@ defmodule Arbor.Test.Behavioral.PromptInjectionResistanceTest do
   """
   use Arbor.Test.BehavioralCase
 
-  alias Arbor.AI.SystemPromptBuilder
   alias Arbor.Agent.HeartbeatPrompt
+  alias Arbor.AI.SystemPromptBuilder
   alias Arbor.Common.PromptSanitizer
   alias Arbor.Memory.Reflection.PromptBuilder, as: ReflectionPromptBuilder
 
