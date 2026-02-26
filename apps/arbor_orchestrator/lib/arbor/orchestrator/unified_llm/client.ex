@@ -286,6 +286,58 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     end
   end
 
+  @doc """
+  Generate embeddings for a list of texts using the specified provider.
+
+  Resolves the adapter from the request's provider and delegates to the
+  adapter's `embed/3` callback. Returns `{:error, :embed_not_supported}`
+  if the adapter doesn't implement embeddings.
+
+  ## Options
+
+  - `:provider` — provider string (required, used to resolve adapter)
+  - `:model` — embedding model string (required)
+  - `:dimensions` — requested embedding dimensions (optional)
+  - `:timeout` — request timeout in ms (optional)
+  """
+  @spec embed(t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def embed(%__MODULE__{} = client, provider, model, opts \\ [])
+      when is_binary(provider) and is_binary(model) do
+    case Map.get(client.adapters, provider) do
+      nil ->
+        {:error, {:unknown_provider, provider}}
+
+      adapter ->
+        if function_exported?(adapter, :embed, 3) do
+          adapter.embed([hd(List.wrap(Keyword.get(opts, :texts, [""])))], model, opts)
+        else
+          {:error, {:embed_not_supported, provider}}
+        end
+    end
+  end
+
+  @doc """
+  Generate embeddings for multiple texts in a batch.
+
+  Same as `embed/4` but takes a list of texts directly.
+  """
+  @spec embed_batch(t(), String.t(), String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def embed_batch(%__MODULE__{} = client, provider, model, texts, opts \\ [])
+      when is_binary(provider) and is_binary(model) and is_list(texts) do
+    case Map.get(client.adapters, provider) do
+      nil ->
+        {:error, {:unknown_provider, provider}}
+
+      adapter ->
+        if function_exported?(adapter, :embed, 3) do
+          adapter.embed(texts, model, opts)
+        else
+          {:error, {:embed_not_supported, provider}}
+        end
+    end
+  end
+
   defp ensure_stream_supported(adapter) do
     if function_exported?(adapter, :stream, 2),
       do: :ok,

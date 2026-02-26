@@ -67,6 +67,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Ollama do
     OpenAICompatible.stream(request, opts, config())
   end
 
+  @impl true
+  def embed(texts, model, opts) do
+    OpenAICompatible.embed(texts, model, opts, config())
+  end
+
   @doc """
   Returns true if Ollama appears to be running at the configured URL.
 

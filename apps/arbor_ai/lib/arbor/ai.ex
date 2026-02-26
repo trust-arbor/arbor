@@ -296,12 +296,24 @@ defmodule Arbor.AI do
   @spec embed(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.result()} | {:error, term()}
   def embed(text, opts \\ []) do
-    case resolve_embedding_provider(opts) do
-      {:ok, {module, provider_opts}} ->
-        module.embed(text, Keyword.merge(provider_opts, opts))
+    opts = snapshot_embedding_config(opts)
 
-      {:error, reason} ->
-        {:error, reason}
+    # Try UnifiedBridge first (orchestrator layer), fall back to legacy backends
+    case UnifiedBridge.embed(text, opts) do
+      {:ok, _} = result ->
+        result
+
+      :unavailable ->
+        embed_via_legacy(text, opts)
+
+      {:error, {:embed_not_supported, _}} ->
+        embed_via_legacy(text, opts)
+
+      {:error, {:unknown_provider, _}} ->
+        embed_via_legacy(text, opts)
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -323,12 +335,24 @@ defmodule Arbor.AI do
   @spec embed_batch([String.t()], keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.batch_result()} | {:error, term()}
   def embed_batch(texts, opts \\ []) do
-    case resolve_embedding_provider(opts) do
-      {:ok, {module, provider_opts}} ->
-        module.embed_batch(texts, Keyword.merge(provider_opts, opts))
+    opts = snapshot_embedding_config(opts)
 
-      {:error, reason} ->
-        {:error, reason}
+    # Try UnifiedBridge first, fall back to legacy backends
+    case UnifiedBridge.embed_batch(texts, opts) do
+      {:ok, _} = result ->
+        result
+
+      :unavailable ->
+        embed_batch_via_legacy(texts, opts)
+
+      {:error, {:embed_not_supported, _}} ->
+        embed_batch_via_legacy(texts, opts)
+
+      {:error, {:unknown_provider, _}} ->
+        embed_batch_via_legacy(texts, opts)
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -583,6 +607,61 @@ defmodule Arbor.AI do
   # ===========================================================================
   # Private Helpers - Embedding
   # ===========================================================================
+
+  # Snapshot embedding config at entry point, similar to snapshot_config for generation.
+  # Ensures provider and model are resolved from config if not provided.
+  @spec snapshot_embedding_config(keyword()) :: keyword()
+  defp snapshot_embedding_config(opts) do
+    case Keyword.get(opts, :provider) do
+      nil ->
+        # Resolve from config and inject provider + model
+        config = embedding_config()
+
+        case config.providers do
+          [{backend, model} | _] ->
+            opts
+            |> Keyword.put_new(:provider, backend)
+            |> Keyword.put_new(:model, model)
+
+          _ ->
+            opts
+        end
+
+      _provider ->
+        # Provider already specified, ensure model has a default
+        opts
+        |> Keyword.put_new_lazy(:model, fn ->
+          case Keyword.get(opts, :provider) do
+            :ollama -> "nomic-embed-text"
+            :lmstudio -> "text-embedding"
+            :openai -> "text-embedding-3-small"
+            :test -> "test-hash-768d"
+            _ -> "nomic-embed-text"
+          end
+        end)
+    end
+  end
+
+  # Legacy embedding path — uses the old backend modules directly
+  defp embed_via_legacy(text, opts) do
+    case resolve_embedding_provider(opts) do
+      {:ok, {module, provider_opts}} ->
+        module.embed(text, Keyword.merge(provider_opts, opts))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp embed_batch_via_legacy(texts, opts) do
+    case resolve_embedding_provider(opts) do
+      {:ok, {module, provider_opts}} ->
+        module.embed_batch(texts, Keyword.merge(provider_opts, opts))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   # Resolve which embedding provider module to use.
   #

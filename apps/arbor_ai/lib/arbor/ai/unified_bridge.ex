@@ -82,6 +82,79 @@ defmodule Arbor.AI.UnifiedBridge do
     end
   end
 
+  @doc """
+  Generate an embedding for a single text via the unified LLM client.
+
+  ## Options
+  - :provider - atom like :ollama, :openai, :lmstudio
+  - :model - string like "nomic-embed-text"
+  - :dimensions - requested dimensions (optional)
+  - :timeout - request timeout in ms
+
+  Returns {:ok, embed_result} | {:error, reason} | :unavailable
+  """
+  def embed(text, opts) when is_binary(text) do
+    if available?() do
+      do_embed([text], opts, :single)
+    else
+      :unavailable
+    end
+  end
+
+  @doc """
+  Generate embeddings for multiple texts via the unified LLM client.
+
+  Returns {:ok, batch_result} | {:error, reason} | :unavailable
+  """
+  def embed_batch(texts, opts) when is_list(texts) do
+    if available?() do
+      do_embed(texts, opts, :batch)
+    else
+      :unavailable
+    end
+  end
+
+  defp do_embed(texts, opts, mode) do
+    provider_string = resolve_provider(opts)
+    model = Keyword.fetch!(opts, :model)
+    client = get_client()
+
+    case apply(@client_module, :embed_batch, [client, provider_string, model, texts, opts]) do
+      {:ok, %{embeddings: embeddings} = result} when mode == :single ->
+        embedding = List.first(embeddings, [])
+
+        {:ok,
+         %{
+           embedding: embedding,
+           model: result.model,
+           provider: Keyword.get(opts, :provider, :unknown),
+           usage: Map.get(result, :usage, %{prompt_tokens: 0, total_tokens: 0}),
+           dimensions: Map.get(result, :dimensions, length(embedding))
+         }}
+
+      {:ok, result} when mode == :batch ->
+        {:ok,
+         %{
+           embeddings: result.embeddings,
+           model: result.model,
+           provider: Keyword.get(opts, :provider, :unknown),
+           usage: Map.get(result, :usage, %{prompt_tokens: 0, total_tokens: 0}),
+           dimensions: Map.get(result, :dimensions, 0)
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e ->
+      Logger.warning("UnifiedBridge embed exception: #{inspect(e)}")
+      {:error, {:bridge_exception, Exception.message(e)}}
+  catch
+    :exit, reason ->
+      Logger.warning("UnifiedBridge embed exit: #{inspect(reason)}")
+      {:error, {:bridge_exit, reason}}
+  end
+
   defp do_generate(prompt, opts) do
     provider_string = resolve_provider(opts)
     model = Keyword.fetch!(opts, :model)

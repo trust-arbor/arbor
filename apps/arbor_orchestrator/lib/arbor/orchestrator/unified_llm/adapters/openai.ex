@@ -51,6 +51,71 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
   end
 
   @impl true
+  def embed(texts, model, opts) do
+    with {:ok, api_key} <- fetch_api_key(opts) do
+      url = "https://api.openai.com/v1/embeddings"
+
+      headers = [
+        {"authorization", "Bearer #{api_key}"},
+        {"content-type", "application/json"}
+      ]
+
+      body = %{"model" => model, "input" => texts}
+
+      body =
+        case Keyword.get(opts, :dimensions) do
+          nil -> body
+          dims -> Map.put(body, "dimensions", dims)
+        end
+
+      timeout = Keyword.get(opts, :timeout, 30_000)
+
+      case Req.post(url, headers: headers, json: body, receive_timeout: timeout) do
+        {:ok, %Req.Response{status: status, body: resp_body}}
+        when status >= 200 and status < 300 ->
+          parse_embedding_response(resp_body, model)
+
+        {:ok, %Req.Response{status: status, body: resp_body}} ->
+          {:error, ErrorMapper.from_http(provider(), status, resp_body, [])}
+
+        {:error, reason} ->
+          {:error, ErrorMapper.from_transport(provider(), reason)}
+      end
+    end
+  end
+
+  defp parse_embedding_response(%{"data" => data} = body, model) when is_list(data) do
+    sorted =
+      data
+      |> Enum.sort_by(&Map.get(&1, "index", 0))
+      |> Enum.map(&Map.get(&1, "embedding", []))
+
+    dimensions =
+      case sorted do
+        [first | _] when is_list(first) -> length(first)
+        _ -> 0
+      end
+
+    usage = Map.get(body, "usage", %{})
+
+    {:ok,
+     %{
+       embeddings: sorted,
+       model: model,
+       provider: provider(),
+       usage: %{
+         prompt_tokens: Map.get(usage, "prompt_tokens", 0),
+         total_tokens: Map.get(usage, "total_tokens", 0)
+       },
+       dimensions: dimensions
+     }}
+  end
+
+  defp parse_embedding_response(body, _model) do
+    {:error, ErrorMapper.from_transport(provider(), {:unexpected_response, body})}
+  end
+
+  @impl true
   def stream(%Request{} = request, opts) do
     translation_warnings = unsupported_content_warnings(request)
 
