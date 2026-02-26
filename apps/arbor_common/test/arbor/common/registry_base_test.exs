@@ -315,7 +315,7 @@ defmodule Arbor.Common.RegistryBaseTest do
 
       # Not in available list (3 >= 3 threshold)
       available = CircuitBreakerRegistry.list_available()
-      assert length(available) == 0
+      assert available == []
 
       # But still resolvable
       assert {:ok, GoodImpl} = CircuitBreakerRegistry.resolve("test")

@@ -55,54 +55,52 @@ defmodule Arbor.Orchestrator.Registrar do
   # --- Readable Backends ---
 
   defp register_readable_backends(failures) do
-    unless Process.whereis(ReadableRegistry) do
-      failures
-    else
+    if Process.whereis(ReadableRegistry) do
       entries = [
         {"file", Arbor.Orchestrator.Backends.FileReadable, %{default: true}},
         {"context", Arbor.Orchestrator.Backends.ContextReadable, %{}}
       ]
 
       register_entries(ReadableRegistry, entries, failures)
+    else
+      failures
     end
   end
 
   # --- Writeable Backends ---
 
   defp register_writeable_backends(failures) do
-    unless Process.whereis(WriteableRegistry) do
-      failures
-    else
+    if Process.whereis(WriteableRegistry) do
       entries = [
         {"file", Arbor.Orchestrator.Handlers.FileWriteHandler, %{default: true}},
         {"accumulator", Arbor.Orchestrator.Handlers.AccumulatorHandler, %{}}
       ]
 
       register_entries(WriteableRegistry, entries, failures)
+    else
+      failures
     end
   end
 
   # --- Compute Backends ---
 
   defp register_compute_backends(failures) do
-    unless Process.whereis(ComputeRegistry) do
-      failures
-    else
+    if Process.whereis(ComputeRegistry) do
       entries = [
         {"llm", Arbor.Orchestrator.Handlers.CodergenHandler, %{default: true}},
         {"routing", Arbor.Orchestrator.Handlers.RoutingHandler, %{}}
       ]
 
       register_entries(ComputeRegistry, entries, failures)
+    else
+      failures
     end
   end
 
   # --- Pipeline Backends ---
 
   defp register_pipeline_backends(failures) do
-    unless Process.whereis(PipelineResolver) do
-      failures
-    else
+    if Process.whereis(PipelineResolver) do
       entries = [
         {"invoke", Arbor.Orchestrator.Handlers.SubgraphHandler, %{default: true}},
         {"compose", Arbor.Orchestrator.Handlers.SubgraphHandler, %{}},
@@ -111,15 +109,15 @@ defmodule Arbor.Orchestrator.Registrar do
       ]
 
       register_entries(PipelineResolver, entries, failures)
+    else
+      failures
     end
   end
 
   # --- Action Registry ---
 
   defp register_actions(failures) do
-    unless Process.whereis(ActionRegistry) do
-      failures
-    else
+    if Process.whereis(ActionRegistry) do
       if Code.ensure_loaded?(Arbor.Actions) do
         actions = apply(Arbor.Actions, :list_actions, [])
 
@@ -143,6 +141,8 @@ defmodule Arbor.Orchestrator.Registrar do
       else
         failures
       end
+    else
+      failures
     end
   end
 

@@ -26,8 +26,8 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
     - One EvalResult per fill level within that run
   """
 
-  alias Arbor.Agent.Eval.FactCorpus
   alias Arbor.Agent.ContextCompactor
+  alias Arbor.Agent.Eval.FactCorpus
 
   require Logger
 

@@ -1,8 +1,8 @@
 defmodule Arbor.Agent.Eval.SummarizationEvalTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Agent.Eval.SummarizationEval
   alias Arbor.Agent.Eval.CompactionEval
+  alias Arbor.Agent.Eval.SummarizationEval
 
   # ── Transcript Generation ──────────────────────────────────────
 
