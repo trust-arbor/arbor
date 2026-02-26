@@ -88,17 +88,17 @@ defmodule Arbor.Common.ActionRegistry do
   @spec list_by_category() :: %{atom() => [module()]}
   def list_by_category do
     list_all()
-    |> Enum.reduce(%{}, fn {_name, module, metadata}, acc ->
-      category = Map.get(metadata, :category, :uncategorized)
+    |> Enum.reject(fn {_name, _module, metadata} ->
+      Map.get(metadata, :is_jido_alias, false)
+    end)
+    |> Enum.reduce(%{}, &group_action_by_category/2)
+  end
 
-      # Only include canonical names (skip Jido duplicates)
-      if Map.get(metadata, :is_jido_alias, false) do
-        acc
-      else
-        Map.update(acc, category, [module], fn modules ->
-          if module in modules, do: modules, else: modules ++ [module]
-        end)
-      end
+  defp group_action_by_category({_name, module, metadata}, acc) do
+    category = Map.get(metadata, :category, :uncategorized)
+
+    Map.update(acc, category, [module], fn modules ->
+      if module in modules, do: modules, else: modules ++ [module]
     end)
   end
 

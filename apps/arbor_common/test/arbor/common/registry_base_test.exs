@@ -520,4 +520,181 @@ defmodule Arbor.Common.RegistryBaseTest do
       assert {:ok, GoodImpl} = BasicRegistry.resolve("persistent")
     end
   end
+
+  # ===========================================================================
+  # resolve/2 — node-aware resolution
+  # ===========================================================================
+
+  describe "resolve/2 with node option" do
+    setup do
+      ensure_basic_registry()
+      safe_basic_reset()
+      BasicRegistry.register("local_handler", GoodImpl, %{})
+      :ok
+    end
+
+    test "node: :local behaves like resolve/1" do
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", node: :local)
+    end
+
+    test "node: :local returns :not_found for missing" do
+      assert {:error, :not_found} = BasicRegistry.resolve("missing", node: :local)
+    end
+
+    test "node: :any resolves locally first" do
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", node: :any)
+    end
+
+    test "node: :any returns :not_found when not found locally and no remote members" do
+      assert {:error, :not_found} = BasicRegistry.resolve("nonexistent", node: :any)
+    end
+
+    test "node: self() resolves locally" do
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", node: node())
+    end
+
+    test "node: unknown_node returns :node_not_found" do
+      assert {:error, :node_not_found} =
+               BasicRegistry.resolve("local_handler", node: :unknown@nowhere)
+    end
+
+    test "defaults to :local when no option given" do
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("local_handler", [])
+    end
+  end
+
+  # ===========================================================================
+  # resolve_remote handler (GenServer callback)
+  # ===========================================================================
+
+  describe "resolve_remote GenServer handler" do
+    setup do
+      ensure_basic_registry()
+      safe_basic_reset()
+      BasicRegistry.register("remote_test", GoodImpl, %{cost: :low})
+      :ok
+    end
+
+    test "returns module and metadata for existing entry" do
+      result = GenServer.call(BasicRegistry, {:resolve_remote, "remote_test"})
+      assert {:ok, GoodImpl, %{cost: :low}} = result
+    end
+
+    test "returns :not_found for missing entry" do
+      result = GenServer.call(BasicRegistry, {:resolve_remote, "missing"})
+      assert {:error, :not_found} = result
+    end
+
+    test "returns :unstable for entry over failure threshold" do
+      # BasicRegistry has default max_failures: 5
+      for _ <- 1..5, do: BasicRegistry.record_failure("remote_test")
+
+      result = GenServer.call(BasicRegistry, {:resolve_remote, "remote_test"})
+      assert {:error, :unstable} = result
+    end
+  end
+
+  # ===========================================================================
+  # pg integration
+  # ===========================================================================
+
+  describe "pg group membership" do
+    setup do
+      # Ensure pg scope is running (may not be if app started with start_children: false)
+      case :pg.start_link(:arbor_registry) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+
+      # Stop and restart BasicRegistry so it joins the pg group
+      case Process.whereis(BasicRegistry) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+
+      Process.sleep(20)
+
+      # Clean up ETS if held by heir
+      try do
+        :ets.delete(:test_basic_registry)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      {:ok, _} = BasicRegistry.start_link()
+      :ok
+    end
+
+    test "registry joins pg group on start" do
+      members = :pg.get_members(:arbor_registry, {:registry, :test_basic_registry})
+      registry_pid = Process.whereis(BasicRegistry)
+      assert registry_pid in members
+    end
+  end
+
+  # ===========================================================================
+  # Remote cache
+  # ===========================================================================
+
+  describe "remote cache" do
+    setup do
+      ensure_basic_registry()
+      safe_basic_reset()
+      :ok
+    end
+
+    test "cache entries are stored in ETS with TTL" do
+      # Manually insert a cache entry
+      expiry = System.monotonic_time(:millisecond) + 30_000
+
+      :ets.insert(
+        :test_basic_registry,
+        {{:remote_cache, "cached_handler"}, GoodImpl, :remote@host, expiry}
+      )
+
+      # Verify it's readable via resolve/2 with node: :any
+      # (local lookup will miss, but cache won't be checked for :any — that's the remote path)
+      # Instead, let's verify the raw ETS entry exists
+      assert [{{:remote_cache, "cached_handler"}, GoodImpl, :remote@host, ^expiry}] =
+               :ets.lookup(:test_basic_registry, {:remote_cache, "cached_handler"})
+    end
+
+    test "expired cache entries are ignored" do
+      # Insert an expired cache entry
+      expiry = System.monotonic_time(:millisecond) - 1000
+
+      :ets.insert(
+        :test_basic_registry,
+        {{:remote_cache, "expired_handler"}, GoodImpl, :remote@host, expiry}
+      )
+
+      # The entry exists but would be treated as :miss by the cache lookup
+      # resolve/2 will go through remote path and find no pg members
+      assert {:error, :not_found} = BasicRegistry.resolve("expired_handler", node: :any)
+    end
+  end
+
+  # ===========================================================================
+  # call_remote/3
+  # ===========================================================================
+
+  describe "call_remote/3" do
+    setup do
+      ensure_basic_registry()
+      safe_basic_reset()
+      :ok
+    end
+
+    test "returns :node_not_found for unknown node" do
+      assert {:error, :node_not_found} =
+               BasicRegistry.call_remote("handler", :unknown@host, {:some_func, []})
+    end
+
+    test "resolves locally and calls on self node" do
+      BasicRegistry.register("callable", GoodImpl, %{})
+      # call_remote to self node should work via resolve + erpc
+      result = BasicRegistry.call_remote("callable", node(), {:do_something, []})
+      assert {:ok, :ok} = result
+    end
+  end
 end

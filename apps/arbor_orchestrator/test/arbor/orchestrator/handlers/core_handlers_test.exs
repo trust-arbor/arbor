@@ -295,24 +295,23 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
     end
 
     test "file source reads file" do
-      # Create a temp file
-      tmp =
-        Path.join(System.tmp_dir!(), "arbor_read_test_#{System.unique_integer([:positive])}.txt")
-
-      File.write!(tmp, "file content")
+      # Create a temp file — use relative path within a workdir
+      tmp_dir = System.tmp_dir!()
+      filename = "arbor_read_test_#{System.unique_integer([:positive])}.txt"
+      File.write!(Path.join(tmp_dir, filename), "file content")
 
       node =
         make_node("read_file", %{
           "type" => "read",
           "source" => "file",
-          "path" => tmp
+          "path" => filename
         })
 
-      outcome = ReadHandler.execute(node, make_context(), make_graph(), [])
+      outcome = ReadHandler.execute(node, make_context(), make_graph(), workdir: tmp_dir)
       assert outcome.status == :success
       assert outcome.context_updates["last_response"] == "file content"
 
-      File.rm!(tmp)
+      File.rm!(Path.join(tmp_dir, filename))
     end
 
     test "file source fails for missing file" do

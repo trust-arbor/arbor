@@ -5,17 +5,18 @@ defmodule Arbor.Orchestrator.Handlers.BranchHandler do
   Canonical type: `branch`
   Aliases: `conditional`
 
-  Delegates to ConditionalHandler — same logic, canonical name.
   The engine evaluates outgoing edge conditions; this handler
   simply marks the branch point as evaluated.
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Handlers.ConditionalHandler
+  alias Arbor.Orchestrator.Engine.Outcome
 
   @impl true
-  defdelegate execute(node, context, graph, opts), to: ConditionalHandler
+  def execute(node, _context, _graph, _opts) do
+    %Outcome{status: :success, notes: "Conditional node evaluated: #{node.id}"}
+  end
 
   @impl true
   def idempotency, do: :idempotent

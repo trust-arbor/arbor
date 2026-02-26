@@ -1,16 +1,40 @@
-// A/B Test — Parallel Variant Comparison
-// Run two variants in parallel, compare results, determine winner.
+// A/B Test — Parallel Variant Comparison with Statistical Rigor
+// Run two prompt variants in parallel, evaluate with LLM-as-judge,
+// compute statistical significance, and optionally auto-promote the winner.
 //
-// Context in: prompt_a, prompt_b, eval_criteria
-// Context out: result_a, result_b, comparison, winner
+// Context in:
+//   prompt_a             — first variant prompt (supports $goal interpolation)
+//   prompt_b             — second variant prompt (supports $goal interpolation)
+//   goal                 — (optional) goal text to interpolate into $goal placeholders
+//   eval_criteria        — criteria for judging variants
+//   count                — (optional) runs per variant for statistical power (default "1")
+//   auto_promote         — (optional) "true" to auto-promote significant winner
+//   persistence_path     — (optional) JSONL file path for cross-run trend analysis
+//
+// Context out:
+//   result_a             — variant A output (or array if count > 1)
+//   result_b             — variant B output (or array if count > 1)
+//   ab.score_a           — variant A score from judge (0.0-1.0)
+//   ab.score_b           — variant B score from judge (0.0-1.0)
+//   ab.winner            — "a", "b", or "tie"
+//   ab.judge_reasoning   — judge's comparison reasoning
+//   ab.significant       — true if result is statistically significant (p < 0.05)
+//   ab.p_value           — p-value from significance test (if count > 1)
+//   ab.promoted_prompt   — winning prompt (if auto-promoted)
 
 digraph ABTest {
   graph [
-    goal="Compare two prompt variants in parallel and select a winner",
+    goal="Compare prompt variants with statistical rigor and LLM-as-judge evaluation",
     label="AB Test"
   ]
 
   start [shape=Mdiamond]
+
+  // Initialize: interpolate $goal placeholders, set up run tracking
+  init [
+    type="transform",
+    prompt="Initialize: if goal is set, replace $goal in prompt_a and prompt_b. Set ab.count from count (default 1). Set ab.results_a=[], ab.results_b=[], ab.significant=false, ab.auto_promote=false."
+  ]
 
   // Run both variants in parallel
   run_variants [
@@ -19,16 +43,16 @@ digraph ABTest {
     prompt="Execute both variant prompts in parallel."
   ]
 
-  // Variant A
+  // Variant A (supports multi-run via count attribute)
   variant_a [
     type="compute",
-    prompt="Execute prompt_a. Store result in result_a."
+    prompt="Execute prompt_a. Store result in result_a. If count > 1, execute count times and collect all results in ab.results_a."
   ]
 
   // Variant B
   variant_b [
     type="compute",
-    prompt="Execute prompt_b. Store result in result_b."
+    prompt="Execute prompt_b. Store result in result_b. If count > 1, execute count times and collect all results in ab.results_b."
   ]
 
   // Collect parallel results
@@ -37,19 +61,49 @@ digraph ABTest {
     prompt="Collect results from both variants."
   ]
 
-  // Compare and score
-  compare [
+  // LLM-as-judge: independent evaluation of both results
+  judge [
     type="compute",
-    prompt="Compare result_a and result_b against eval_criteria. Score each variant. Produce a comparison summary and declare a winner (a or b)."
+    prompt="As an impartial judge, compare result_a and result_b against eval_criteria. For each result, score on: relevance (0-1), quality (0-1), completeness (0-1). Compute overall ab.score_a and ab.score_b as weighted averages. Declare ab.winner (a, b, or tie) with ab.judge_reasoning explaining the decision."
+  ]
+
+  // Compute statistical significance for multi-run experiments
+  significance [
+    type="transform",
+    prompt="If ab.results_a and ab.results_b have multiple entries (count > 1): compute mean scores and standard deviations for each variant. Run one-sample binomial test: z-score = (win_rate - 0.5) / sqrt(0.25/n). Compute p-value. Set ab.significant=true if p < 0.05. Set ab.p_value, ab.mean_a, ab.mean_b, ab.std_a, ab.std_b. For count=1, set ab.significant=false, ab.p_value=1.0."
+  ]
+
+  // Persist results to JSONL for cross-run trend analysis
+  persist [
+    type="transform",
+    prompt="If persistence_path is set: append JSON line {timestamp, prompt_a_hash, prompt_b_hash, winner, score_a, score_b, significant, p_value, count} to the JSONL file. Set ab.persisted=true."
+  ]
+
+  // Check if auto-promotion conditions are met
+  check_promote [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="ab.should_promote",
+    prompt="Set ab.should_promote=true if auto_promote=true AND ab.significant=true AND ab.winner is not tie."
+  ]
+
+  // Promote winning variant
+  promote [
+    type="transform",
+    prompt="Set ab.promoted_prompt to the winning variant's prompt text. Set ab.promotion_status=promoted. Record which variant won and by what margin."
   ]
 
   done [shape=Msquare]
 
   // Flow
-  start -> run_variants
+  start -> init -> run_variants
   run_variants -> variant_a
   run_variants -> variant_b
   variant_a -> collect
   variant_b -> collect
-  collect -> compare -> done
+  collect -> judge -> significance -> persist -> check_promote
+  check_promote -> promote [condition="context.ab.should_promote=true"]
+  check_promote -> done [condition="context.ab.should_promote!=true"]
+  promote -> done
 }

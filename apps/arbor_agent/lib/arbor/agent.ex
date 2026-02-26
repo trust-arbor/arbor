@@ -97,6 +97,12 @@ defmodule Arbor.Agent do
   @doc "Set auto_start flag on an agent's persisted profile."
   defdelegate set_auto_start(agent_id, enabled), to: Arbor.Agent.Manager
 
+  @doc "Set MCP server configuration for an agent."
+  defdelegate set_mcp_config(agent_id, servers), to: Arbor.Agent.Manager
+
+  @doc "Connect to MCP servers configured in an agent's profile."
+  defdelegate connect_mcp_servers(agent_id), to: Arbor.Agent.Manager
+
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================

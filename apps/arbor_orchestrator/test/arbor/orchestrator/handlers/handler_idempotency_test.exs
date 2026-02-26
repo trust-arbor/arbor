@@ -4,8 +4,8 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
   alias Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Handlers.{
+    BranchHandler,
     CodergenHandler,
-    ConditionalHandler,
     ExitHandler,
     FanInHandler,
     FileWriteHandler,
@@ -18,7 +18,7 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
     WaitHumanHandler
   }
 
-  @idempotent_handlers [StartHandler, ExitHandler, ConditionalHandler]
+  @idempotent_handlers [StartHandler, ExitHandler, BranchHandler]
   @read_only_handlers [PipelineValidateHandler]
   @idempotent_with_key_handlers [FileWriteHandler, CodergenHandler]
   @side_effecting_handlers [

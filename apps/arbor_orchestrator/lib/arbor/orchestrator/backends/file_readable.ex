@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
 
   @behaviour Arbor.Contracts.Handler.Readable
 
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Handler.ScopedContext
 
   @impl true
@@ -24,15 +25,15 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
         ScopedContext.get(ctx, "workdir") ||
           Keyword.get(opts, :workdir, ".")
 
-      resolved =
-        if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
+      case SafePath.resolve_within(path, Path.expand(workdir)) do
+        {:ok, resolved} ->
+          case File.read(resolved) do
+            {:ok, content} -> {:ok, content}
+            {:error, reason} -> {:error, {:file_error, reason, resolved}}
+          end
 
-      case File.read(Path.expand(resolved)) do
-        {:ok, content} ->
-          {:ok, content}
-
-        {:error, reason} ->
-          {:error, {:file_error, reason, resolved}}
+        {:error, :path_traversal} ->
+          {:error, {:path_traversal, path, workdir}}
       end
     else
       {:error, :missing_path}
@@ -48,14 +49,15 @@ defmodule Arbor.Orchestrator.Backends.FileReadable do
         ScopedContext.get(ctx, "workdir") ||
           Keyword.get(opts, :workdir, ".")
 
-      resolved =
-        if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
+      case SafePath.resolve_within(path, Path.expand(workdir)) do
+        {:ok, resolved} ->
+          case File.ls(resolved) do
+            {:ok, files} -> {:ok, files}
+            {:error, reason} -> {:error, {:file_error, reason, resolved}}
+          end
 
-      expanded = Path.expand(resolved)
-
-      case File.ls(expanded) do
-        {:ok, files} -> {:ok, files}
-        {:error, reason} -> {:error, {:file_error, reason, expanded}}
+        {:error, :path_traversal} ->
+          {:error, {:path_traversal, path, workdir}}
       end
     else
       {:error, :missing_path}

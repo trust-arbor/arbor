@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @impl true
@@ -36,23 +37,31 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
     append = Map.get(node.attrs, "append") in ["true", true]
 
     workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
-    resolved_path = resolve_path(output_path, workdir)
 
-    content = format_content(value, format)
+    case resolve_path(output_path, workdir) do
+      {:ok, resolved_path} ->
+        content = format_content(value, format)
 
-    File.mkdir_p!(Path.dirname(resolved_path))
+        File.mkdir_p!(Path.dirname(resolved_path))
 
-    if append do
-      File.write!(resolved_path, content, [:append])
-    else
-      File.write!(resolved_path, content)
+        if append do
+          File.write!(resolved_path, content, [:append])
+        else
+          File.write!(resolved_path, content)
+        end
+
+        %Outcome{
+          status: :success,
+          notes: "Wrote #{byte_size(content)} bytes to #{resolved_path}",
+          context_updates: %{"file.written.#{node.id}" => resolved_path}
+        }
+
+      {:error, :path_traversal} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "path traversal blocked: #{output_path} escapes workdir #{workdir}"
+        }
     end
-
-    %Outcome{
-      status: :success,
-      notes: "Wrote #{byte_size(content)} bytes to #{resolved_path}",
-      context_updates: %{"file.written.#{node.id}" => resolved_path}
-    }
   rescue
     e ->
       %Outcome{
@@ -65,24 +74,7 @@ defmodule Arbor.Orchestrator.Handlers.FileWriteHandler do
   def idempotency, do: :idempotent_with_key
 
   defp resolve_path(path, workdir) do
-    expanded_workdir = Path.expand(workdir)
-
-    full_path =
-      if Path.type(path) == :absolute do
-        path
-      else
-        Path.join(expanded_workdir, path)
-      end
-
-    # Normalize to resolve .. sequences, then verify the result stays within workdir
-    normalized = Path.expand(full_path)
-
-    if String.starts_with?(normalized, expanded_workdir <> "/") or
-         normalized == expanded_workdir do
-      normalized
-    else
-      raise "path traversal blocked: #{path} escapes workdir #{workdir}"
-    end
+    SafePath.resolve_within(path, Path.expand(workdir))
   end
 
   defp format_content(value, "json") do

@@ -76,6 +76,9 @@ defmodule Arbor.Common.RegistryBase do
       @max_failures unquote(max_failures)
       @heir_name Module.concat(__MODULE__, Heir)
       @pt_key {__MODULE__, :core_snapshot}
+      @pg_scope :arbor_registry
+      @pg_group {:registry, unquote(table_name)}
+      @remote_cache_ttl_ms 30_000
 
       # --- Client API ---
 
@@ -110,6 +113,61 @@ defmodule Arbor.Common.RegistryBase do
         case pt_lookup(name) do
           {:ok, _module} = ok -> ok
           :miss -> ets_resolve(name)
+        end
+      end
+
+      @doc """
+      Resolve an entry with node awareness.
+
+      Options:
+      - `node: :local` — local-only lookup (default, same as `resolve/1`)
+      - `node: :any` — local first, then remote via `:pg` discovery
+      - `node: node_name` — resolve on a specific remote node
+
+      Remote lookups enforce trust zone rules via `NodeRegistry.can_resolve?/2`.
+      Results from remote nodes are cached with a 30s TTL.
+      """
+      def resolve(name, opts) when is_binary(name) and is_list(opts) do
+        case Keyword.get(opts, :node, :local) do
+          :local ->
+            resolve(name)
+
+          :any ->
+            case resolve(name) do
+              {:ok, _module} = ok -> ok
+              {:error, :not_found} -> resolve_remote_any(name)
+              other -> other
+            end
+
+          node_name when is_atom(node_name) ->
+            if node_name == node() do
+              resolve(name)
+            else
+              resolve_on_node(name, node_name)
+            end
+        end
+      end
+
+      @doc """
+      Resolve and invoke a handler on a remote node.
+
+      Resolves `name` on `target_node`, then calls `function` with `args`
+      on the resolved module via `:erpc`. Arguments must be serializable
+      (no function refs or pids).
+
+      Returns `{:ok, result}` or `{:error, reason}`.
+      """
+      def call_remote(name, target_node, {function, args})
+          when is_binary(name) and is_atom(target_node) and is_atom(function) and is_list(args) do
+        with {:ok, module} <- resolve(name, node: target_node) do
+          try do
+            result = :erpc.call(target_node, module, function, args, 10_000)
+            {:ok, result}
+          rescue
+            e -> {:error, {:remote_call_failed, Exception.message(e)}}
+          catch
+            :exit, reason -> {:error, {:remote_call_failed, reason}}
+          end
         end
       end
 
@@ -258,10 +316,35 @@ defmodule Arbor.Common.RegistryBase do
               @table_name
           end
 
+        # Join pg group for cross-node discovery + monitor membership changes
+        maybe_join_pg()
+        maybe_monitor_pg()
+
         {:ok, %{core_locked: false, heir_pid: heir_pid}}
       end
 
       @impl GenServer
+      def handle_call({:resolve_remote, name}, _from, state) do
+        # Remote nodes call this to resolve entries on this node
+        result =
+          case :ets.lookup(@table_name, name) do
+            [{^name, module, metadata, failures, _core?}] when failures < @max_failures ->
+              if Code.ensure_loaded?(module) do
+                {:ok, module, metadata}
+              else
+                {:error, :module_not_loaded}
+              end
+
+            [{^name, _module, _metadata, _failures, _core?}] ->
+              {:error, :unstable}
+
+            [] ->
+              {:error, :not_found}
+          end
+
+        {:reply, result, state}
+      end
+
       def handle_call({:register, name, module, metadata}, _from, state) do
         result = do_register(name, module, metadata, state)
         {:reply, result, state}
@@ -353,6 +436,14 @@ defmodule Arbor.Common.RegistryBase do
         end
 
         {:noreply, %{state | heir_pid: heir_pid}}
+      end
+
+      def handle_info({:pg_membership, @pg_scope, @pg_group, _joins, leaves}, state)
+          when leaves != [] do
+        # Remote registry left — invalidate any cached entries from those nodes
+        leaving_nodes = Enum.map(leaves, &node/1) |> Enum.uniq()
+        invalidate_remote_cache_for_nodes(leaving_nodes)
+        {:noreply, state}
       end
 
       def handle_info(_msg, state) do
@@ -463,6 +554,210 @@ defmodule Arbor.Common.RegistryBase do
         else
           true
         end
+      end
+
+      # --- Remote Resolution ---
+
+      defp resolve_remote_any(name) do
+        # Check remote cache first
+        case remote_cache_lookup(name) do
+          {:ok, _module, _node} = cached -> {:ok, elem(cached, 1)}
+          :miss -> do_resolve_remote_any(name)
+        end
+      end
+
+      defp do_resolve_remote_any(name) do
+        members = safe_pg_members()
+        local_pid = Process.whereis(__MODULE__)
+
+        # Filter out self, query remotes
+        remote_pids =
+          Enum.reject(members, fn pid ->
+            pid == local_pid or node(pid) == node()
+          end)
+
+        # Check trust zone access for each remote node
+        local_zone = safe_local_zone()
+
+        Enum.find_value(remote_pids, {:error, :not_found}, fn pid ->
+          remote_node = node(pid)
+          remote_zone = safe_trust_zone(remote_node)
+
+          if safe_can_resolve?(local_zone, remote_zone) do
+            case safe_remote_call(pid, {:resolve_remote, name}) do
+              {:ok, module, metadata} ->
+                remote_cache_store(name, module, remote_node)
+                {:ok, module}
+
+              _ ->
+                nil
+            end
+          else
+            nil
+          end
+        end)
+      end
+
+      defp resolve_on_node(name, target_node) do
+        local_zone = safe_local_zone()
+        remote_zone = safe_trust_zone(target_node)
+
+        if safe_can_resolve?(local_zone, remote_zone) do
+          case remote_cache_lookup(name, target_node) do
+            {:ok, module, _node} ->
+              {:ok, module}
+
+            :miss ->
+              fetch_from_remote_node(name, target_node)
+          end
+        else
+          {:error, {:zone_violation, local_zone, remote_zone}}
+        end
+      end
+
+      defp fetch_from_remote_node(name, target_node) do
+        members = safe_pg_members()
+
+        case Enum.find(members, fn pid -> node(pid) == target_node end) do
+          nil ->
+            {:error, :node_not_found}
+
+          pid ->
+            case safe_remote_call(pid, {:resolve_remote, name}) do
+              {:ok, module, _metadata} ->
+                remote_cache_store(name, module, target_node)
+                {:ok, module}
+
+              error ->
+                error
+            end
+        end
+      end
+
+      defp safe_remote_call(pid, message) do
+        GenServer.call(pid, message, 5_000)
+      rescue
+        _ -> {:error, :remote_unavailable}
+      catch
+        :exit, _ -> {:error, :remote_unavailable}
+      end
+
+      # --- Remote Cache (ETS-based, per-entry TTL) ---
+
+      defp remote_cache_lookup(name) do
+        now = System.monotonic_time(:millisecond)
+
+        case :ets.lookup(@table_name, {:remote_cache, name}) do
+          [{{:remote_cache, ^name}, module, remote_node, expiry}] when expiry > now ->
+            {:ok, module, remote_node}
+
+          _ ->
+            :miss
+        end
+      rescue
+        ArgumentError -> :miss
+      end
+
+      defp remote_cache_lookup(name, target_node) do
+        now = System.monotonic_time(:millisecond)
+
+        case :ets.lookup(@table_name, {:remote_cache, name}) do
+          [{{:remote_cache, ^name}, module, ^target_node, expiry}] when expiry > now ->
+            {:ok, module, target_node}
+
+          _ ->
+            :miss
+        end
+      rescue
+        ArgumentError -> :miss
+      end
+
+      defp remote_cache_store(name, module, remote_node) do
+        expiry = System.monotonic_time(:millisecond) + @remote_cache_ttl_ms
+        :ets.insert(@table_name, {{:remote_cache, name}, module, remote_node, expiry})
+      rescue
+        ArgumentError -> :ok
+      end
+
+      # --- Trust Zone Bridges (safe, fail-closed) ---
+
+      defp safe_local_zone do
+        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
+             function_exported?(Arbor.Common.NodeRegistry, :local_zone, 0) do
+          Arbor.Common.NodeRegistry.local_zone()
+        else
+          2
+        end
+      rescue
+        _ -> 2
+      catch
+        :exit, _ -> 2
+      end
+
+      defp safe_trust_zone(node_name) do
+        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
+             function_exported?(Arbor.Common.NodeRegistry, :trust_zone, 1) do
+          Arbor.Common.NodeRegistry.trust_zone(node_name)
+        else
+          0
+        end
+      rescue
+        _ -> 0
+      catch
+        :exit, _ -> 0
+      end
+
+      defp safe_can_resolve?(from_zone, entry_zone) do
+        if Code.ensure_loaded?(Arbor.Common.NodeRegistry) and
+             function_exported?(Arbor.Common.NodeRegistry, :can_resolve?, 2) do
+          Arbor.Common.NodeRegistry.can_resolve?(from_zone, entry_zone)
+        else
+          # Fail open when NodeRegistry unavailable (single-node dev)
+          true
+        end
+      rescue
+        _ -> true
+      catch
+        :exit, _ -> true
+      end
+
+      defp safe_pg_members do
+        :pg.get_members(@pg_scope, @pg_group)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+      # --- pg Integration ---
+
+      defp invalidate_remote_cache_for_nodes(nodes) do
+        :ets.tab2list(@table_name)
+        |> Enum.each(fn
+          {{:remote_cache, _name} = key, _module, remote_node, _expiry} ->
+            if remote_node in nodes, do: :ets.delete(@table_name, key)
+
+          _ ->
+            :ok
+        end)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      defp maybe_join_pg do
+        :pg.join(@pg_scope, @pg_group, [self()])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+
+      defp maybe_monitor_pg do
+        :pg.monitor(@pg_scope, @pg_group)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
       end
 
       defp start_heir do

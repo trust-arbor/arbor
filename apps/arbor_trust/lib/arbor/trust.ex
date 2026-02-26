@@ -186,7 +186,9 @@ defmodule Arbor.Trust do
   def get_current_trust_tier_for_principal(agent_id), do: get_trust_tier(agent_id)
 
   @impl true
-  defdelegate calculate_trust_score_for_principal(agent_id), to: Manager, as: :calculate_trust_score
+  defdelegate calculate_trust_score_for_principal(agent_id),
+    to: Manager,
+    as: :calculate_trust_score
 
   @impl true
   def record_trust_event_for_principal_with_metadata(agent_id, event_type, metadata),
@@ -194,14 +196,16 @@ defmodule Arbor.Trust do
 
   @impl true
   defdelegate freeze_trust_progression_for_principal_with_reason(agent_id, reason),
-    to: Manager, as: :freeze_trust
+    to: Manager,
+    as: :freeze_trust
 
   @impl true
   defdelegate unfreeze_trust_progression_for_principal(agent_id), to: Manager, as: :unfreeze_trust
 
   @impl true
   defdelegate check_if_principal_meets_required_trust_tier(agent_id, required_tier),
-    to: Manager, as: :check_trust_authorization
+    to: Manager,
+    as: :check_trust_authorization
 
   # ===========================================================================
   # Administration
@@ -256,4 +260,48 @@ defmodule Arbor.Trust do
   def run_decay_check do
     Manager.run_decay_check()
   end
+
+  # ===========================================================================
+  # Policy — Trust ↔ Capability Bridge
+  # ===========================================================================
+
+  @doc "Check if agent's trust tier allows a resource URI."
+  @spec policy_allowed?(String.t(), String.t()) :: boolean()
+  defdelegate policy_allowed?(agent_id, resource_uri), to: Arbor.Trust.Policy, as: :allowed?
+
+  @doc "Get confirmation mode for a resource at agent's current tier."
+  @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
+  defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
+
+  @doc "Sync capabilities when tier changes."
+  @spec sync_capabilities(String.t(), atom(), atom()) ::
+          {:ok, Arbor.Trust.Policy.sync_result()} | {:error, term()}
+  defdelegate sync_capabilities(agent_id, old_tier, new_tier), to: Arbor.Trust.Policy
+
+  @doc "Grant all capabilities for a tier to an agent."
+  @spec grant_tier_capabilities(String.t(), atom()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  defdelegate grant_tier_capabilities(agent_id, tier), to: Arbor.Trust.Policy
+
+  @doc "Resolve a capability URI to its action bundle."
+  @spec resolve_bundle(String.t()) :: atom() | nil
+  defdelegate resolve_bundle(resource_uri), to: Arbor.Trust.ConfirmationMatrix
+
+  @doc "Look up confirmation mode for a bundle at a policy tier."
+  @spec matrix_lookup(atom(), atom()) :: :auto | :gated | :deny
+  defdelegate matrix_lookup(bundle, policy_tier), to: Arbor.Trust.ConfirmationMatrix, as: :lookup
+
+  # -- ConfirmationTracker (confirm-then-automate) --
+
+  @doc "Record a successful approval for an agent's capability use."
+  @spec record_approval(String.t(), String.t()) :: :ok | {:graduated, atom()}
+  defdelegate record_approval(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
+
+  @doc "Record a rejection for an agent's capability use."
+  @spec record_rejection(String.t(), String.t()) :: :ok
+  defdelegate record_rejection(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
+
+  @doc "Check if a capability has graduated to auto-approve for an agent."
+  @spec graduated?(String.t(), String.t()) :: boolean()
+  defdelegate graduated?(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
 end

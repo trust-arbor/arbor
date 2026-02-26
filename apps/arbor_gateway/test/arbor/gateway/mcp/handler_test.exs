@@ -327,7 +327,8 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
         Handler.handle_call_tool("arbor_status", %{"component" => "mcp"}, state)
 
       [%{type: "text", text: text}] = result.content
-      assert text =~ "No MCP servers connected"
+      assert text =~ "No external MCP servers connected"
+      assert text =~ "No agent endpoints active"
     end
   end
 
@@ -345,7 +346,8 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
         )
 
       [%{type: "text", text: text}] = result.content
-      assert text =~ "not connected" or text =~ "Error"
+      # Identity Registry may reject unknown agent_id before MCP dispatch
+      assert text =~ "not connected" or text =~ "Error" or text =~ "Unauthorized"
     end
   end
 

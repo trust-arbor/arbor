@@ -40,7 +40,10 @@ defmodule Arbor.Gateway.Application do
         []
       end
 
-    children = mcp_children ++ http_children
+    # Endpoint registry for agent-to-agent MCP
+    endpoint_children = [{Arbor.Gateway.MCP.EndpointRegistry, []}]
+
+    children = mcp_children ++ endpoint_children ++ http_children
     opts = [strategy: :one_for_one, name: Arbor.Gateway.Supervisor]
     Supervisor.start_link(children, opts)
   end

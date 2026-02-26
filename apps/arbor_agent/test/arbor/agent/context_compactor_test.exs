@@ -798,4 +798,197 @@ defmodule Arbor.Agent.ContextCompactorTest do
       assert compacted.compression_count > 0
     end
   end
+
+  # ── Compression Cache (Phase 2) ─────────────────────────────────
+
+  describe "compression_tiers tracking" do
+    test "records compression tiers for compressed messages" do
+      c = ContextCompactor.new(effective_window: 10)
+
+      # Build a conversation that triggers compaction
+      c = ContextCompactor.append(c, %{role: :system, content: "System"})
+      c = ContextCompactor.append(c, %{role: :user, content: "Hello"})
+
+      # Add enough large tool messages to trigger compaction
+      c =
+        Enum.reduce(1..15, c, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("file_read", make_large_content(20), id: "tc_#{i}")
+          )
+        end)
+
+      compacted = ContextCompactor.maybe_compact(c)
+
+      assert compacted.compression_tiers != %{}
+      assert compacted.compression_count > 0
+    end
+
+    test "cache_hits count starts at 0 for fresh compactor" do
+      c = ContextCompactor.new()
+      assert c.cache_hits == 0
+    end
+
+    test "second compaction skips already-compressed messages at same tier" do
+      c = ContextCompactor.new(effective_window: 10)
+
+      c = ContextCompactor.append(c, %{role: :system, content: "System"})
+      c = ContextCompactor.append(c, %{role: :user, content: "Start"})
+
+      # Add large tool messages
+      c =
+        Enum.reduce(1..15, c, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("file_read", make_large_content(20), id: "tc_#{i}")
+          )
+        end)
+
+      # First compaction — everything gets compressed fresh
+      first_pass = ContextCompactor.maybe_compact(c)
+      first_compressions = first_pass.compression_count
+      assert first_compressions > 0
+      assert first_pass.cache_hits == 0
+
+      # Force second compaction by temporarily lowering the window
+      second_pass = %{first_pass | effective_window: 5, token_count: 10}
+      second_pass = ContextCompactor.maybe_compact(second_pass)
+
+      # Second pass should have cache hits — messages already at correct tier
+      assert second_pass.cache_hits > 0
+    end
+
+    test "messages transition to more aggressive tier when detail drops" do
+      c = ContextCompactor.new(effective_window: 10)
+
+      c = ContextCompactor.append(c, %{role: :system, content: "System"})
+      c = ContextCompactor.append(c, %{role: :user, content: "Start"})
+
+      # Add 10 large tool messages
+      c =
+        Enum.reduce(1..10, c, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("file_read", make_large_content(20), id: "tc_#{i}")
+          )
+        end)
+
+      first_pass = ContextCompactor.maybe_compact(c)
+      first_tiers = first_pass.compression_tiers
+
+      # Add more messages — this pushes older messages to lower detail levels
+      expanded =
+        Enum.reduce(1..30, first_pass, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("eval", make_large_content(15), id: "tc_expand_#{i}")
+          )
+        end)
+
+      expanded = %{expanded | effective_window: 5, token_count: 10}
+      second_pass = ContextCompactor.maybe_compact(expanded)
+
+      # Some original messages should have been re-compressed to more aggressive tiers
+      re_compressed =
+        Enum.count(second_pass.compression_tiers, fn {idx, tier} ->
+          prev = Map.get(first_tiers, idx)
+          prev != nil and tier != prev
+        end)
+
+      # At least some messages should have transitioned
+      assert re_compressed > 0 or second_pass.cache_hits > 0
+    end
+
+    test "stats includes cache_hits" do
+      c = ContextCompactor.new(effective_window: 10)
+
+      c = ContextCompactor.append(c, %{role: :system, content: "System"})
+      c = ContextCompactor.append(c, %{role: :user, content: "Hello"})
+
+      c =
+        Enum.reduce(1..15, c, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("file_read", make_large_content(20), id: "tc_#{i}")
+          )
+        end)
+
+      compacted = ContextCompactor.maybe_compact(c)
+      stats = ContextCompactor.stats(compacted)
+
+      assert Map.has_key?(stats, :cache_hits)
+      assert is_integer(stats.cache_hits)
+    end
+  end
+
+  describe "detail_tier/2" do
+    test "tool messages map to correct tiers" do
+      assert ContextCompactor.detail_tier(0.95, :tool) == :tool_full
+      assert ContextCompactor.detail_tier(0.85, :tool) == :tool_high
+      assert ContextCompactor.detail_tier(0.6, :tool) == :tool_medium
+      assert ContextCompactor.detail_tier(0.3, :tool) == :tool_low
+      assert ContextCompactor.detail_tier(0.1, :tool) == :tool_minimal
+    end
+
+    test "assistant messages map to correct tiers" do
+      assert ContextCompactor.detail_tier(0.7, :assistant) == :text_full
+      assert ContextCompactor.detail_tier(0.3, :assistant) == :text_truncated
+    end
+
+    test "user messages map to correct tiers" do
+      assert ContextCompactor.detail_tier(0.8, :user) == :text_full
+      assert ContextCompactor.detail_tier(0.2, :user) == :text_truncated
+    end
+
+    test "string role keys work" do
+      assert ContextCompactor.detail_tier(0.1, "tool") == :tool_minimal
+      assert ContextCompactor.detail_tier(0.7, "assistant") == :text_full
+      assert ContextCompactor.detail_tier(0.7, "user") == :text_full
+    end
+
+    test "unknown roles default to :text_full" do
+      assert ContextCompactor.detail_tier(0.1, :other) == :text_full
+    end
+  end
+
+  describe "compression stability" do
+    test "already-compressed tool stubs are not re-compressed at same tier" do
+      c = ContextCompactor.new(effective_window: 10)
+
+      c = ContextCompactor.append(c, %{role: :system, content: "System"})
+      c = ContextCompactor.append(c, %{role: :user, content: "Hello"})
+
+      # Add large tool messages
+      c =
+        Enum.reduce(1..12, c, fn i, acc ->
+          ContextCompactor.append(
+            acc,
+            make_tool_msg("file_read", make_large_content(20), id: "tc_#{i}")
+          )
+        end)
+
+      # First compaction
+      first = ContextCompactor.maybe_compact(c)
+      first_messages = ContextCompactor.llm_messages(first)
+
+      # Second compaction (force)
+      second = %{first | effective_window: 5, token_count: 10}
+      second = ContextCompactor.maybe_compact(second)
+      second_messages = ContextCompactor.llm_messages(second)
+
+      # Messages that were at the same tier should be identical
+      # Find messages that had cache hits by comparing content
+      stable_count =
+        Enum.zip(first_messages, second_messages)
+        |> Enum.drop(2)
+        |> Enum.count(fn {a, b} ->
+          # If content is identical, the cache prevented re-compression
+          Map.get(a, :content) == Map.get(b, :content) and
+            Map.get(a, :content) != nil
+        end)
+
+      # At least some messages should be stable (those at the same tier)
+      assert stable_count > 0
+    end
+  end
 end

@@ -79,6 +79,9 @@ defmodule Arbor.Agent.Manager do
             :exit, _ -> :ok
           end
 
+          # Auto-connect configured MCP servers
+          connect_mcp_servers(agent_id)
+
           safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
@@ -143,6 +146,9 @@ defmodule Arbor.Agent.Manager do
           catch
             :exit, _ -> :ok
           end
+
+          # Auto-connect configured MCP servers
+          connect_mcp_servers(agent_id)
 
           safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
@@ -240,6 +246,81 @@ defmodule Arbor.Agent.Manager do
       {:error, _} = error ->
         error
     end
+  end
+
+  @doc """
+  Set the MCP server configuration for an agent.
+
+  The config is a list of server connection specs stored in the agent's
+  profile metadata. On next start/resume, the agent will auto-connect
+  to these MCP servers.
+
+  ## Server Config
+
+  Each server spec is a map with:
+  - `:name` — unique server name (required)
+  - `:transport` — `:stdio`, `:http`, `:sse`, or `:beam` (default: `:stdio`)
+  - `:command` — command for stdio transport
+  - `:url` — URL for HTTP/SSE transport
+  - `:env` — environment variables map
+  - `:auto_discover` — discover tools/resources on connect (default: true)
+
+  ## Example
+
+      Manager.set_mcp_config(agent_id, [
+        %{name: "github", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-github"]},
+        %{name: "filesystem", transport: :stdio, command: ["npx", "@modelcontextprotocol/server-filesystem", "/workspace"]}
+      ])
+  """
+  @spec set_mcp_config(String.t(), [map()]) :: :ok | {:error, term()}
+  def set_mcp_config(agent_id, servers) when is_binary(agent_id) and is_list(servers) do
+    case ProfileStore.load_profile(agent_id) do
+      {:ok, profile} ->
+        metadata = Map.put(profile.metadata || %{}, :mcp_servers, servers)
+        updated = %{profile | metadata: metadata}
+        ProfileStore.store_profile(updated)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Connect to MCP servers configured in an agent's profile.
+
+  Reads `profile.metadata["mcp_servers"]` or `profile.metadata[:mcp_servers]`
+  and connects to each via `Arbor.Gateway.connect_mcp_server/2`.
+
+  Called automatically on agent start/resume. Can also be called manually.
+  """
+  @spec connect_mcp_servers(String.t()) :: :ok
+  def connect_mcp_servers(agent_id) when is_binary(agent_id) do
+    with {:ok, profile} <- ProfileStore.load_profile(agent_id) do
+      servers =
+        get_in(profile.metadata, [:mcp_servers]) ||
+          get_in(profile.metadata, ["mcp_servers"]) ||
+          []
+
+      connect_mcp_server_list(agent_id, servers)
+    else
+      _ -> :ok
+    end
+  end
+
+  @doc """
+  Connect to MCP servers from a list of server configs.
+
+  Uses runtime bridge to Arbor.Gateway (no compile-time dependency).
+  """
+  @spec connect_mcp_server_list(String.t(), [map()]) :: :ok
+  def connect_mcp_server_list(_agent_id, []), do: :ok
+
+  def connect_mcp_server_list(agent_id, servers) when is_list(servers) do
+    if gateway_available?() do
+      Enum.each(servers, &connect_single_mcp_server(agent_id, &1))
+    end
+
+    :ok
   end
 
   @doc """
@@ -525,6 +606,34 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp handle_query_result({:error, _} = error), do: error
+
+  defp connect_single_mcp_server(agent_id, server) do
+    server_name = server[:name] || server["name"]
+
+    if server_name do
+      config =
+        server
+        |> Map.put(:agent_id, agent_id)
+        |> Map.put(:server_name, server_name)
+        |> Map.put_new(:auto_discover, true)
+
+      case apply(Arbor.Gateway, :connect_mcp_server, [server_name, config]) do
+        {:ok, _pid} ->
+          Logger.info("[Manager] Connected MCP server '#{server_name}' for #{agent_id}")
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Manager] Failed to connect MCP server '#{server_name}' for #{agent_id}: #{inspect(reason)}"
+          )
+      end
+    end
+  end
+
+  defp gateway_available? do
+    Code.ensure_loaded?(Arbor.Gateway) and
+      function_exported?(Arbor.Gateway, :connect_mcp_server, 2) and
+      Process.whereis(Arbor.Gateway.MCP.ClientSupervisor) != nil
+  end
 
   defp safe_emit(type, data) do
     Arbor.Signals.emit(:agent, type, data)

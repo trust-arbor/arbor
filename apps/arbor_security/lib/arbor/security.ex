@@ -51,7 +51,6 @@ defmodule Arbor.Security do
   alias Arbor.Security.Config
   alias Arbor.Security.Constraint
   alias Arbor.Security.Constraint.RateLimiter
-  alias Arbor.Security.Escalation
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
@@ -299,7 +298,8 @@ defmodule Arbor.Security do
          :ok <- maybe_verify_identity(principal_id, opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
-         escalation_result <- Escalation.maybe_escalate(cap, principal_id, resource_uri) do
+         escalation_result <-
+           Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
       case escalation_result do
         :ok ->
           Events.record_authorization_granted(principal_id, resource_uri, opts)

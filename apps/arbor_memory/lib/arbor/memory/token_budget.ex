@@ -36,37 +36,6 @@ defmodule Arbor.Memory.TokenBudget do
 
   @type model_id :: String.t()
 
-  # Model context sizes (tokens)
-  # https://docs.anthropic.com/en/docs/about-claude/models
-  @model_context_sizes %{
-    # Anthropic Claude 4.5
-    "anthropic:claude-opus-4-5-20251101" => 200_000,
-    "anthropic:claude-sonnet-4-5-20250514" => 200_000,
-    # Anthropic Claude 3.5
-    "anthropic:claude-3-5-sonnet-20241022" => 200_000,
-    "anthropic:claude-3-5-haiku-20241022" => 200_000,
-    # Anthropic Claude 3
-    "anthropic:claude-3-opus-20240229" => 200_000,
-    "anthropic:claude-3-sonnet-20240229" => 200_000,
-    "anthropic:claude-3-haiku-20240307" => 200_000,
-    # OpenAI GPT-4
-    "openai:gpt-4o" => 128_000,
-    "openai:gpt-4o-mini" => 128_000,
-    "openai:gpt-4-turbo" => 128_000,
-    "openai:gpt-4" => 8_192,
-    # OpenAI GPT-3.5
-    "openai:gpt-3.5-turbo" => 16_385,
-    # Google Gemini
-    "google:gemini-1.5-pro" => 2_000_000,
-    "google:gemini-1.5-flash" => 1_000_000,
-    "google:gemini-2.0-flash" => 1_000_000,
-    # Local models (conservative defaults)
-    "ollama:llama3.2" => 128_000,
-    "ollama:mistral" => 32_000,
-    "ollama:mixtral" => 32_000,
-    "lmstudio:default" => 32_000
-  }
-
   @default_context_size 100_000
   @chars_per_token 4
 
@@ -149,7 +118,7 @@ defmodule Arbor.Memory.TokenBudget do
   """
   @spec model_context_size(model_id()) :: non_neg_integer()
   def model_context_size(model_id) when is_binary(model_id) do
-    Map.get(@model_context_sizes, model_id, @default_context_size)
+    Arbor.Common.ModelProfile.context_size(model_id)
   end
 
   @doc """
@@ -181,7 +150,8 @@ defmodule Arbor.Memory.TokenBudget do
   """
   @spec known_models() :: [{model_id(), non_neg_integer()}]
   def known_models do
-    @model_context_sizes |> Map.to_list() |> Enum.sort_by(fn {_, size} -> -size end)
+    Arbor.Common.ModelProfile.known_models()
+    |> Enum.map(fn {id, profile} -> {id, profile.context_size} end)
   end
 
   @doc """
