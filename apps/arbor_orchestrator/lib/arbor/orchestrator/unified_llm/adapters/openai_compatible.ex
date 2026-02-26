@@ -64,6 +64,88 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     end
   end
 
+  # --- Embeddings ---
+
+  @default_embeddings_path "/embeddings"
+
+  @spec embed([String.t()], String.t(), keyword(), config()) ::
+          {:ok, map()} | {:error, term()}
+  def embed(texts, model, opts, config) when is_list(texts) do
+    with {:ok, api_key} <- fetch_api_key(opts, config) do
+      url =
+        String.trim_trailing(config.base_url, "/") <>
+          Map.get(config, :embeddings_path, @default_embeddings_path)
+
+      headers = build_headers(api_key, config, %Request{model: model, messages: []})
+
+      body = %{"model" => model, "input" => texts}
+
+      body =
+        case Keyword.get(opts, :dimensions) do
+          nil -> body
+          dims -> Map.put(body, "dimensions", dims)
+        end
+
+      timeout =
+        Keyword.get(opts, :timeout) ||
+          Map.get(config, :receive_timeout, 30_000)
+
+      case Req.post(url,
+             headers: headers,
+             json: body,
+             receive_timeout: timeout
+           ) do
+        {:ok, %Req.Response{status: status, body: resp_body}}
+        when status >= 200 and status < 300 ->
+          parse_embedding_response(resp_body, model, config)
+
+        {:ok, %Req.Response{status: status, body: resp_body}} ->
+          {:error,
+           ErrorMapper.from_http(
+             config.provider,
+             status,
+             resp_body,
+             []
+           )}
+
+        {:error, reason} ->
+          {:error, ErrorMapper.from_transport(config.provider, reason)}
+      end
+    end
+  end
+
+  defp parse_embedding_response(%{"data" => data} = body, model, config) when is_list(data) do
+    # Sort by index to preserve input order
+    sorted =
+      data
+      |> Enum.sort_by(&Map.get(&1, "index", 0))
+      |> Enum.map(&Map.get(&1, "embedding", []))
+
+    dimensions =
+      case sorted do
+        [first | _] when is_list(first) -> length(first)
+        _ -> 0
+      end
+
+    usage = Map.get(body, "usage", %{})
+
+    {:ok,
+     %{
+       embeddings: sorted,
+       model: model,
+       provider: config.provider,
+       usage: %{
+         prompt_tokens: Map.get(usage, "prompt_tokens", 0),
+         total_tokens: Map.get(usage, "total_tokens", 0)
+       },
+       dimensions: dimensions
+     }}
+  end
+
+  defp parse_embedding_response(body, _model, config) do
+    {:error, ErrorMapper.from_transport(config.provider, {:unexpected_response, body})}
+  end
+
   # --- Request Building ---
 
   @spec build_request(Request.t(), String.t() | nil, config()) :: map()

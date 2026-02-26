@@ -1096,7 +1096,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   defp compute_node_embedding(text) when is_binary(text) do
     if embedding_service_available?() do
       case Arbor.AI.embed(text, []) do
-        {:ok, embedding} when is_list(embedding) -> embedding
+        {:ok, %{embedding: embedding}} when is_list(embedding) -> embedding
         _ -> nil
       end
     else
