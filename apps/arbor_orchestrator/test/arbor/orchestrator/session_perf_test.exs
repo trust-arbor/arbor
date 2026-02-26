@@ -13,15 +13,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
   """
   use ExUnit.Case, async: false
 
-  alias Arbor.Orchestrator.Handlers.{Registry, SessionHandler}
   alias Arbor.Orchestrator.Session
-
-  @session_types ~w(
-    session.classify session.memory_recall session.mode_select
-    session.llm_call session.tool_dispatch session.format
-    session.memory_update session.checkpoint session.background_checks
-    session.process_results session.route_actions session.update_goals
-  )
 
   @moduletag :perf
   @moduletag timeout: 120_000
@@ -35,8 +27,6 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
       {:error, {:already_started, _pid}} -> :ok
     end
 
-    # Session types resolved via alias path since Phase 4 — no custom registration needed.
-
     # Write DOT files for all tests
     tmp_dir =
       Path.join(
@@ -46,18 +36,18 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
 
     File.mkdir_p!(tmp_dir)
 
+    # Minimal DOTs using simulated compute nodes (no real LLM or action calls)
     turn_dot = """
     digraph Turn {
       graph [goal="Perf test turn"]
       start [shape=Mdiamond]
-      classify [type="session.classify"]
-      recall [type="session.memory_recall"]
-      call_llm [type="session.llm_call"]
-      format [type="session.format"]
-      update_memory [type="session.memory_update"]
+      classify [type="compute", simulate="true"]
+      recall [type="compute", simulate="true"]
+      call_llm [type="compute", simulate="true"]
+      update_memory [type="compute", simulate="true"]
       done [shape=Msquare]
 
-      start -> classify -> recall -> call_llm -> format -> update_memory -> done
+      start -> classify -> recall -> call_llm -> update_memory -> done
     }
     """
 
@@ -65,7 +55,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
     digraph Heartbeat {
       graph [goal="Perf test heartbeat"]
       start [shape=Mdiamond]
-      select_mode [type="session.mode_select"]
+      select_mode [type="compute", simulate="true"]
       done [shape=Msquare]
 
       start -> select_mode -> done

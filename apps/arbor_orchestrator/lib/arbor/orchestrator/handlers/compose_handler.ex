@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
 
   Canonical type: `compose`
   Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`,
-           `stack.manager_loop`, `session.*`
+           `stack.manager_loop`
 
   Dispatches by `mode` attribute via PipelineResolver. Falls back to
   inline implementation when the registry is unavailable.
@@ -13,15 +13,17 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
     - `"compose"` — delegates to SubgraphHandler (graph.compose)
     - `"pipeline"` — delegates to PipelineRunHandler
     - `"manager_loop"` — delegates to ManagerLoopHandler
-    - `"session"` — delegates to SessionHandler (session.*)
 
   Consensus operations are now Jido actions in `Arbor.Actions.Consensus`,
   invoked via `exec target="action" action="consensus.*"` in DOT pipelines.
 
+  Session operations are now Jido actions in `Arbor.Actions.Session*`,
+  invoked via `exec target="action"` + `compute` nodes in DOT pipelines.
+
   ## Node Attributes
 
     - `mode` — composition mode: "invoke" (default), "compose", "pipeline",
-      "manager_loop", "session"
+      "manager_loop"
     - All attributes from the delegated handler are supported
   """
 
@@ -66,9 +68,6 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
       "manager_loop" ->
         ManagerLoopHandler.execute(node, context, graph, opts)
 
-      "session" ->
-        delegate_to(Arbor.Orchestrator.Handlers.SessionHandler, node, context, graph, opts)
-
       _ ->
         SubgraphHandler.execute(node, context, graph, opts)
     end
@@ -81,17 +80,6 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
       %Outcome{
         status: :fail,
         failure_reason: "Handler module #{inspect(module)} does not implement execute/4"
-      }
-    end
-  end
-
-  defp delegate_to(module, node, context, graph, opts) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :execute, 4) do
-      module.execute(node, context, graph, opts)
-    else
-      %Outcome{
-        status: :fail,
-        failure_reason: "Handler module #{inspect(module)} not available"
       }
     end
   end

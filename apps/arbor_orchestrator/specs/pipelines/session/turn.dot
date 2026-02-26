@@ -1,25 +1,19 @@
 // Session Turn Pipeline — Single User Message Processing
 //
 // Processes one user message through the full agent turn lifecycle:
-//   classify → authorize → recall → mode select → LLM → response routing → memory → checkpoint
+//   classify -> authorize -> recall -> mode select -> build prompt -> LLM -> memory -> checkpoint
 //
-// ┌─────────────────────────────────────────────────────────────────────────┐
-// │  GRAPH CYCLE: dispatch_tools → call_llm                                │
-// │                                                                        │
-// │  This is the key validation target of the Session-as-DOT spike.        │
-// │  When the LLM returns tool_call responses, dispatch_tools executes     │
-// │  the tools and feeds results BACK to call_llm via a cycle edge.        │
-// │  The engine handles this correctly — it does NOT track visited nodes,  │
-// │  so re-entering call_llm is legal. max_steps (default 500) prevents    │
-// │  infinite loops. Each cycle iteration:                                 │
-// │    call_llm → check_response → dispatch_tools → call_llm → ...        │
-// │  continues until the LLM returns a text response, which routes        │
-// │  through check_response → format to exit the loop.                     │
-// └─────────────────────────────────────────────────────────────────────────┘
+// Architecture: exec nodes (Jido Actions via ExecHandler) + compute node (LLM via CodergenHandler)
+//
+// The old 4-node tool loop (call_llm -> check_response -> dispatch_tools -> call_llm)
+// is replaced by a single compute node with use_tools="true". The CodergenHandler's
+// internal ToolLoop handles iterative tool dispatch until the LLM returns a text response.
+//
+// The old session.format node is replaced by a transform node that copies
+// last_response -> session.response for the Session GenServer to read.
 //
 // Condition routing:
-//   check_auth: blocked input → skip to format (error response)
-//   check_response: tool_call → dispatch_tools (cycle), text → format (exit)
+//   check_auth: blocked input -> format_error (error response), else -> recall
 
 digraph SessionTurn {
   graph [
@@ -27,64 +21,118 @@ digraph SessionTurn {
     label="Session Turn"
   ]
 
-  // ── Entry ──────────────────────────────────────────────────
+  // -- Entry ---------------------------------------------------------
   start [shape=Mdiamond]
 
-  // ── Input classification ───────────────────────────────────
-  classify [type="session.classify"]
+  // -- Input classification ------------------------------------------
+  classify [
+    type="exec",
+    target="action",
+    action="session.classify",
+    context_keys="session.input,session.agent_id",
+    output_prefix="session"
+  ]
 
-  // ── Authorization gate ─────────────────────────────────────
-  check_auth [shape=diamond, condition_key="input_type"]
+  // -- Authorization gate --------------------------------------------
+  check_auth [shape=diamond, condition_key="session.input_type"]
 
-  // ── Memory recall ──────────────────────────────────────────
-  recall [type="session.memory_recall"]
+  // -- Memory recall -------------------------------------------------
+  recall [
+    type="exec",
+    target="action",
+    action="session_memory.recall",
+    context_keys="session.agent_id,session.input",
+    output_prefix="session"
+  ]
 
-  // ── Cognitive mode selection ────────────────────────────────
-  select_mode [type="session.mode_select"]
+  // -- Cognitive mode selection --------------------------------------
+  select_mode [
+    type="exec",
+    target="action",
+    action="session.mode_select",
+    context_keys="session.goals,session.active_intents,session.turn_count,session.user_waiting",
+    output_prefix="session"
+  ]
 
-  // ── LLM call (re-entered on tool loop cycles) ──────────────
-  call_llm [type="session.llm_call"]
+  // -- Build LLM prompt (system prompt + user prompt + messages) -----
+  build_prompt [
+    type="exec",
+    target="action",
+    action="session_llm.build_prompt",
+    param.mode="turn",
+    context_keys="session.messages,session.agent_id,session.goals,session.active_intents,session.cognitive_mode",
+    output_prefix="session"
+  ]
 
-  // ── Response type routing ──────────────────────────────────
-  check_response [shape=diamond, condition_key="llm.response_type"]
+  // -- LLM call with internal tool loop ------------------------------
+  // CodergenHandler reads prompt, system prompt, and messages from context keys.
+  // use_tools="true" enables the internal ToolLoop — no separate dispatch node needed.
+  // Provider/model fall back to session.llm_provider and session.llm_model from context.
+  call_llm [
+    type="compute",
+    simulate="false",
+    prompt_context_key="session.user_prompt",
+    system_prompt_context_key="session.system_prompt",
+    messages_context_key="session.messages",
+    use_tools="true",
+    tools="file_read,file_search,file_glob,file_list,shell_execute"
+  ]
 
-  // ── Tool dispatch (cycles back to call_llm) ────────────────
-  dispatch_tools [type="session.tool_dispatch"]
+  // -- Format: copy LLM response to session.response ----------------
+  format [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="session.response"
+  ]
 
-  // ── Response formatting ────────────────────────────────────
-  format [type="session.format"]
+  // -- Error response for blocked input ------------------------------
+  format_error [
+    type="transform",
+    transform="template",
+    source_key="session.block_reason",
+    output_key="session.response",
+    expression="I cannot process that request: {value}"
+  ]
 
-  // ── Post-response: memory + checkpoint ─────────────────────
-  update_memory [type="session.memory_update"]
-  checkpoint [type="session.checkpoint"]
+  // -- Post-response: memory update ----------------------------------
+  update_memory [
+    type="exec",
+    target="action",
+    action="session_memory.update",
+    context_keys="session.agent_id,session.turn_data,session.response",
+    output_prefix="session"
+  ]
 
-  // ── Exit ───────────────────────────────────────────────────
+  // -- Checkpoint state for crash recovery ---------------------------
+  checkpoint [
+    type="exec",
+    target="action",
+    action="session_memory.checkpoint",
+    context_keys="session.id,session.turn_count,session.agent_id",
+    output_prefix="session"
+  ]
+
+  // -- Exit ----------------------------------------------------------
   done [shape=Msquare]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Flow
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   // Input processing
   start -> classify -> check_auth
 
   // Authorization routing
   check_auth -> recall [condition="context.session.input_type!=blocked"]
-  check_auth -> format [condition="context.session.input_type=blocked"]
+  check_auth -> format_error [condition="context.session.input_type=blocked"]
 
   // Core processing pipeline
-  recall -> select_mode -> call_llm -> check_response
+  recall -> select_mode -> build_prompt -> call_llm -> format
 
-  // Response type routing (tool loop vs text exit)
-  check_response -> dispatch_tools [condition="context.llm.response_type=tool_call"]
-  check_response -> format [condition="context.llm.response_type=text"]
+  // Post-response pipeline (both paths converge at update_memory)
+  format -> update_memory
+  format_error -> update_memory
 
-  // ── THE CYCLE ──────────────────────────────────────────────
-  // Tool results feed back to LLM for next iteration.
-  // Engine re-enters call_llm without visited-node checking.
-  // Loop terminates when LLM returns text instead of tool_call.
-  dispatch_tools -> call_llm
-
-  // Post-response pipeline
-  format -> update_memory -> checkpoint -> done
+  update_memory -> checkpoint -> done
 }

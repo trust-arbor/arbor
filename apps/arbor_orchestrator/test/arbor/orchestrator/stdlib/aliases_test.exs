@@ -110,22 +110,6 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert Aliases.canonical_type("stack.manager_loop") == "compose"
     end
 
-    test "session types → compose" do
-      session_types = ~w(
-        session.classify session.memory_recall session.mode_select
-        session.llm_call session.tool_dispatch session.format
-        session.memory_update session.checkpoint session.background_checks
-        session.process_results session.route_actions session.update_goals
-        session.store_decompositions session.process_proposal_decisions
-        session.consolidate session.update_working_memory session.store_identity
-      )
-
-      for type <- session_types do
-        assert Aliases.canonical_type(type) == "compose",
-               "#{type} should map to compose"
-      end
-    end
-
     # Coordination aliases
     test "wait.human → wait" do
       assert Aliases.canonical_type("wait.human") == "wait"
@@ -213,13 +197,12 @@ defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
       assert "shell" in exec_aliases
     end
 
-    test "compose includes graph, session, pipeline types" do
+    test "compose includes graph and pipeline types" do
       compose_aliases = Aliases.aliases_for("compose")
       assert "compose" in compose_aliases
       assert "graph.invoke" in compose_aliases
       assert "graph.compose" in compose_aliases
       assert "pipeline.run" in compose_aliases
-      assert "session.llm_call" in compose_aliases
     end
 
     test "returns empty list for unknown type" do

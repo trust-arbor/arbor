@@ -326,6 +326,31 @@ defmodule Arbor.Actions do
         Arbor.Actions.Remediation.RestartChild,
         Arbor.Actions.Remediation.ForceGC,
         Arbor.Actions.Remediation.DrainQueue
+      ],
+      session: [
+        Arbor.Actions.Session.Classify,
+        Arbor.Actions.Session.ModeSelect,
+        Arbor.Actions.Session.ProcessResults
+      ],
+      session_memory: [
+        Arbor.Actions.SessionMemory.Recall,
+        Arbor.Actions.SessionMemory.Update,
+        Arbor.Actions.SessionMemory.Checkpoint,
+        Arbor.Actions.SessionMemory.Consolidate,
+        Arbor.Actions.SessionMemory.UpdateWorkingMemory
+      ],
+      session_goals: [
+        Arbor.Actions.SessionGoals.UpdateGoals,
+        Arbor.Actions.SessionGoals.StoreDecompositions,
+        Arbor.Actions.SessionGoals.ProcessProposalDecisions,
+        Arbor.Actions.SessionGoals.StoreIdentity
+      ],
+      session_execution: [
+        Arbor.Actions.SessionExecution.RouteActions,
+        Arbor.Actions.SessionExecution.ExecuteActions
+      ],
+      session_llm: [
+        Arbor.Actions.SessionLlm.BuildPrompt
       ]
     }
   end

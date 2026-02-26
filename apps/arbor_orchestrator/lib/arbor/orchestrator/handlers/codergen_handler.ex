@@ -23,9 +23,15 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     goal = Map.get(graph.attrs, "goal", "")
 
     prompt =
-      node.attrs
-      |> Map.get("prompt", Map.get(node.attrs, "label", node.id))
-      |> String.replace("$goal", to_string(goal))
+      case Map.get(node.attrs, "prompt_context_key") do
+        nil ->
+          node.attrs
+          |> Map.get("prompt", Map.get(node.attrs, "label", node.id))
+          |> String.replace("$goal", to_string(goal))
+
+        key ->
+          Context.get(context, key, Map.get(node.attrs, "prompt", node.id))
+      end
 
     # In decision mode, perspective nodes should evaluate the council question,
     # not their own node ID
@@ -135,8 +141,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     client = Keyword.get(opts, :llm_client) || Client.default_client()
     nonce = @prompt_sanitizer.generate_nonce()
 
-    {system_content, user_content} = build_llm_messages(prompt, node, graph, nonce)
-    request = build_llm_request(node, system_content, user_content)
+    {system_content, user_content} = build_llm_messages(prompt, node, context, graph, nonce)
+    request = build_llm_request(node, context, system_content, user_content)
     call_opts = build_call_opts(node, opts)
     on_stream = Keyword.get(opts, :on_stream)
 
@@ -156,7 +162,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     end
   end
 
-  defp build_llm_messages(prompt, node, graph, nonce) do
+  defp build_llm_messages(prompt, node, context, graph, nonce) do
     previous_outcome =
       case Map.get(node.attrs, "context.previous_outcome") do
         nil -> ""
@@ -166,12 +172,18 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     goal = Map.get(graph.attrs, "goal", "")
 
     system_content =
-      case Map.get(node.attrs, "system_prompt") do
+      case Map.get(node.attrs, "system_prompt_context_key") do
         nil ->
-          "You are a coding agent working on the following goal: #{@prompt_sanitizer.wrap(goal, nonce)}"
+          case Map.get(node.attrs, "system_prompt") do
+            nil ->
+              "You are a coding agent working on the following goal: #{@prompt_sanitizer.wrap(goal, nonce)}"
 
-        sys ->
-          sys
+            sys ->
+              sys
+          end
+
+        key ->
+          Context.get(context, key, "You are a coding agent.")
       end
 
     system_content = @prompt_sanitizer.preamble(nonce) <> "\n\n" <> system_content
@@ -181,18 +193,56 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     {system_content, user_content}
   end
 
-  defp build_llm_request(node, system_content, user_content) do
+  defp build_llm_request(node, context, system_content, user_content) do
+    messages =
+      case Map.get(node.attrs, "messages_context_key") do
+        nil ->
+          [
+            Message.new(:system, system_content),
+            Message.new(:user, user_content)
+          ]
+
+        key ->
+          case Context.get(context, key) do
+            msgs when is_list(msgs) and msgs != [] ->
+              # Prepend system message, use context messages as conversation history
+              [Message.new(:system, system_content) | to_messages(msgs)]
+
+            _ ->
+              [
+                Message.new(:system, system_content),
+                Message.new(:user, user_content)
+              ]
+          end
+      end
+
+    # Provider/model: node attrs take priority, fall back to context
+    provider =
+      Map.get(node.attrs, "llm_provider") ||
+        Map.get(node.attrs, "handler") ||
+        Context.get(context, "session.llm_provider")
+
+    model =
+      Map.get(node.attrs, "llm_model") ||
+        Map.get(node.attrs, "model") ||
+        Context.get(context, "session.llm_model")
+
     %Request{
-      provider: Map.get(node.attrs, "llm_provider") || Map.get(node.attrs, "handler"),
-      model: Map.get(node.attrs, "llm_model") || Map.get(node.attrs, "model"),
-      messages: [
-        Message.new(:system, system_content),
-        Message.new(:user, user_content)
-      ],
+      provider: provider,
+      model: model,
+      messages: messages,
       max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
       temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
       provider_options: Map.get(node.attrs, "provider_options", %{})
     }
+  end
+
+  defp to_messages(msgs) do
+    Enum.map(msgs, fn
+      %Message{} = m -> m
+      %{"role" => role, "content" => content} -> Message.new(String.to_existing_atom(role), content)
+      %{role: role, content: content} -> Message.new(role, content)
+    end)
   end
 
   defp build_call_opts(node, opts) do

@@ -91,24 +91,6 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "pipeline.run" => "compose",
     "feedback.loop" => "compose",
     "stack.manager_loop" => "compose",
-    # Session — compose internals (long-term migration)
-    "session.classify" => "compose",
-    "session.memory_recall" => "compose",
-    "session.mode_select" => "compose",
-    "session.llm_call" => "compose",
-    "session.tool_dispatch" => "compose",
-    "session.format" => "compose",
-    "session.memory_update" => "compose",
-    "session.checkpoint" => "compose",
-    "session.background_checks" => "compose",
-    "session.process_results" => "compose",
-    "session.route_actions" => "compose",
-    "session.update_goals" => "compose",
-    "session.store_decompositions" => "compose",
-    "session.process_proposal_decisions" => "compose",
-    "session.consolidate" => "compose",
-    "session.update_working_memory" => "compose",
-    "session.store_identity" => "compose",
     # === Coordination aliases ===
     "wait.human" => "wait",
 
@@ -151,25 +133,6 @@ defmodule Arbor.Orchestrator.Stdlib.Aliases do
     "feedback.loop" =>
       {"compose",
        %{"mode" => "invoke", "graph_file" => "specs/pipelines/stdlib/feedback-loop.dot"}},
-
-    # Session — delegates to SessionHandler via ComposeHandler
-    "session.classify" => {"compose", %{"mode" => "session"}},
-    "session.memory_recall" => {"compose", %{"mode" => "session"}},
-    "session.mode_select" => {"compose", %{"mode" => "session"}},
-    "session.llm_call" => {"compose", %{"mode" => "session"}},
-    "session.tool_dispatch" => {"compose", %{"mode" => "session"}},
-    "session.format" => {"compose", %{"mode" => "session"}},
-    "session.memory_update" => {"compose", %{"mode" => "session"}},
-    "session.checkpoint" => {"compose", %{"mode" => "session"}},
-    "session.background_checks" => {"compose", %{"mode" => "session"}},
-    "session.process_results" => {"compose", %{"mode" => "session"}},
-    "session.route_actions" => {"compose", %{"mode" => "session"}},
-    "session.update_goals" => {"compose", %{"mode" => "session"}},
-    "session.store_decompositions" => {"compose", %{"mode" => "session"}},
-    "session.process_proposal_decisions" => {"compose", %{"mode" => "session"}},
-    "session.consolidate" => {"compose", %{"mode" => "session"}},
-    "session.update_working_memory" => {"compose", %{"mode" => "session"}},
-    "session.store_identity" => {"compose", %{"mode" => "session"}},
 
     # Wait — source attribute
     "wait.human" => {"wait", %{"source" => "human"}},

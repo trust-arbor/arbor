@@ -59,24 +59,6 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
     "pipeline.run" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "feedback.loop" => Arbor.Orchestrator.Handlers.ComposeHandler,
     "stack.manager_loop" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.classify" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.memory_recall" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.mode_select" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.llm_call" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.tool_dispatch" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.format" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.memory_update" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.checkpoint" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.background_checks" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.process_results" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.route_actions" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.update_goals" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.store_decompositions" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.process_proposal_decisions" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.consolidate" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.update_working_memory" => Arbor.Orchestrator.Handlers.ComposeHandler,
-    "session.store_identity" => Arbor.Orchestrator.Handlers.ComposeHandler,
-
     # Coordination aliases → WaitHandler
     "wait.human" => Arbor.Orchestrator.Handlers.WaitHandler,
 
@@ -227,13 +209,6 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
       {handler, updated_node} = Registry.resolve_with_attrs(node)
       assert handler == Arbor.Orchestrator.Handlers.WaitHandler
       assert updated_node.attrs["source"] == "human"
-    end
-
-    test "session types resolve to ComposeHandler with mode injection" do
-      node = %Node{id: "n", attrs: %{"type" => "session.classify"}}
-      {handler, updated_node} = Registry.resolve_with_attrs(node)
-      assert handler == Arbor.Orchestrator.Handlers.ComposeHandler
-      assert updated_node.attrs["mode"] == "session"
     end
 
     test "core types passthrough with no injection" do

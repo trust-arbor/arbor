@@ -110,14 +110,6 @@ defmodule Arbor.Orchestrator.Registrar do
         {"manager_loop", Arbor.Orchestrator.Handlers.ManagerLoopHandler, %{}}
       ]
 
-      # SessionHandler is in a different app — use runtime check
-      entries =
-        if Code.ensure_loaded?(Arbor.Orchestrator.Handlers.SessionHandler) do
-          entries ++ [{"session", Arbor.Orchestrator.Handlers.SessionHandler, %{}}]
-        else
-          entries
-        end
-
       register_entries(PipelineResolver, entries, failures)
     end
   end
