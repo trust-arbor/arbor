@@ -1,19 +1,26 @@
 // Heartbeat Variant: FULL — Everything persists between heartbeats
 //
-// This is the production heartbeat pipeline (identical to heartbeat.dot).
-// All post-processing nodes are active: decompositions, proposals,
-// working memory, identity (via route_actions), and goals.
+// This is the production heartbeat pipeline. All post-processing nodes
+// are active: decompositions, proposals, identity, working memory,
+// actions, and goals.
 //
 // The control variant for the v3 memory ablation eval.
 //
+// Architecture: exec (Jido Actions) + compute (LLM calls)
+//   - exec target="action" nodes run Jido Actions via ExecHandler
+//   - compute nodes make LLM calls via CodergenHandler
+//   - Mode router fans out to shared build_prompt + llm_call pair
+//     (build_prompt reads cognitive_mode from context)
+//
 // ┌─────────────────────────────────────────────────────────────────────────┐
-// │  TOOL LOOP: execute_actions -> check_loop -> llm_followup -> process   │
+// │  TOOL LOOP: execute_actions -> check_loop -> build_followup ->        │
+// │             llm_followup -> process                                    │
 // │                                                                        │
-// │  After the initial LLM call, actions are executed and results fed      │
-// │  back to the LLM for another turn. The loop continues until the LLM   │
-// │  returns no actions, or 10 tool turns are exhausted.                   │
-// │  Each loop iteration processes ALL outputs (decompositions, goals,     │
-// │  memory, identity) before checking for more actions.                   │
+// │  After the initial LLM call, actions are executed and results fed     │
+// │  back to the LLM for another turn. The loop continues until the LLM  │
+// │  returns no actions, or 10 tool turns are exhausted.                  │
+// │  Each loop iteration processes ALL outputs (decompositions, goals,    │
+// │  memory, identity) before checking for more actions.                  │
 // └─────────────────────────────────────────────────────────────────────────┘
 
 digraph HeartbeatFull {
@@ -26,34 +33,64 @@ digraph HeartbeatFull {
   start [shape=Mdiamond]
 
   // ── Background checks ─────────────────────────────────────
-  bg_checks [type="session.background_checks"]
+  bg_checks [type="exec", target="action", action="background_checks_run",
+             output_prefix="session"]
 
   // ── Cognitive mode selection ──────────────────────────────
-  select_mode [type="session.mode_select"]
+  select_mode [type="exec", target="action", action="session.mode_select",
+               context_keys="session.goals,session.working_memory,session.turn_count",
+               output_prefix="session"]
 
   // ── Mode routing ──────────────────────────────────────────
-  mode_router [shape=diamond, condition_key="cognitive_mode"]
+  mode_router [shape=diamond, condition_key="session.cognitive_mode"]
 
-  // ── Mode-specific LLM calls ──────────────────────────────
-  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
-  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
-  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
-  consolidate [type="session.consolidate"]
+  // ── Build heartbeat prompt (shared by all LLM modes) ──────
+  build_prompt [type="exec", target="action", action="session_llm.build_prompt",
+                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count",
+                param.mode="heartbeat", output_prefix="session"]
+
+  // ── LLM call (uses prompt built by build_prompt) ──────────
+  llm_call [type="compute", purpose="llm", simulate="false",
+            prompt_context_key="session.heartbeat_prompt",
+            system_prompt_context_key="session.system_prompt"]
+
+  // ── Consolidation ─────────────────────────────────────────
+  consolidate [type="exec", target="action", action="session_memory.consolidate",
+               context_keys="session.agent_id", output_prefix="session"]
 
   // ── Result processing (re-entered on tool loop cycles) ─────
-  process [type="session.process_results"]
+  process [type="exec", target="action", action="session.process_results",
+           context_keys="session.llm_response,session.cognitive_mode",
+           output_prefix="session"]
 
   // ── FULL: All post-processing nodes ───────────────────────
-  store_decompositions [type="session.store_decompositions"]
-  process_proposals [type="session.process_proposal_decisions"]
-  store_identity [type="session.store_identity"]
-  update_wm [type="session.update_working_memory"]
-  execute_actions [type="session.execute_actions"]
-  update_goals [type="session.update_goals"]
+  store_decompositions [type="exec", target="action", action="session_goals.store_decomps",
+                        context_keys="session.decompositions,session.agent_id",
+                        output_prefix="session"]
+  process_proposals [type="exec", target="action", action="session_goals.process_proposals",
+                     context_keys="session.proposal_decisions,session.agent_id",
+                     output_prefix="session"]
+  store_identity [type="exec", target="action", action="session_goals.store_identity",
+                  context_keys="session.identity_insights,session.agent_id",
+                  output_prefix="session"]
+  update_wm [type="exec", target="action", action="session_memory.update_wm",
+             context_keys="session.memory_notes,session.concerns,session.curiosity,session.agent_id",
+             output_prefix="session"]
+  execute_actions [type="exec", target="action", action="session_exec.execute_actions",
+                   context_keys="session.actions,session.agent_id",
+                   output_prefix="session"]
+  update_goals [type="exec", target="action", action="session_goals.update",
+                context_keys="session.goal_updates,session.new_goals,session.agent_id",
+                output_prefix="session"]
 
   // ── Tool loop control ──────────────────────────────────────
   check_loop [shape=diamond, condition_key="session.has_action_results"]
-  llm_followup [type="session.llm_tool_followup"]
+  build_followup [type="exec", target="action", action="session_llm.build_prompt",
+                  context_keys="session.percepts,session.messages",
+                  param.mode="followup", output_prefix="session"]
+  llm_followup [type="compute", purpose="llm", simulate="false",
+                prompt_context_key="session.followup_prompt",
+                messages_context_key="session.messages"]
 
   // ── Exit ─────────────────────────────────────────────────
   done [shape=Msquare]
@@ -64,24 +101,26 @@ digraph HeartbeatFull {
 
   start -> bg_checks -> select_mode -> mode_router
 
-  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
-  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
-  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
+  // All three LLM modes share one build_prompt + llm_call pair
+  mode_router -> build_prompt [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> build_prompt [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> build_prompt [condition="context.session.cognitive_mode=plan_execution"]
   mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
 
-  llm_goal -> process
-  llm_reflect -> process
-  llm_plan -> process
+  // LLM path
+  build_prompt -> llm_call -> process
+
+  // Consolidation path
   consolidate -> process
 
   // Full tail: all post-processing, then tool loop check
   process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> check_loop
 
   // Tool loop: if actions produced results AND under 10 turns, follow up
-  check_loop -> llm_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
+  check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
   check_loop -> done
 
   // ── THE CYCLE ──────────────────────────────────────────────
-  // LLM sees action results, produces new response, re-enters process
-  llm_followup -> process
+  // Build followup prompt from action results, LLM processes, re-enters process
+  build_followup -> llm_followup -> process
 }

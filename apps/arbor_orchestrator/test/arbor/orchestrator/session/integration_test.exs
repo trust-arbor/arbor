@@ -7,26 +7,15 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
   """
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Handlers.SessionHandler
   alias Arbor.Orchestrator.Session
 
   @moduletag :session_integration
-
-  @session_types ~w(
-    session.classify session.memory_recall session.mode_select
-    session.llm_call session.tool_dispatch session.format
-    session.memory_update session.checkpoint session.background_checks
-    session.process_results session.route_actions session.update_goals
-  )
 
   setup_all do
     case Elixir.Registry.start_link(keys: :duplicate, name: Arbor.Orchestrator.EventRegistry) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end
-
-    # Session types are resolved via alias path: session.* → ComposeHandler → SessionHandler
-    # No custom handler registration needed since Phase 4 wired aliases into the executor.
 
     :ok
   end
@@ -37,15 +26,15 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
 
     File.mkdir_p!(tmp_dir)
 
+    # Minimal DOTs using simulated compute nodes (no real LLM or action calls)
     turn_dot = """
     digraph Turn {
       graph [goal="Test turn"]
       start [shape=Mdiamond]
-      classify [type="session.classify"]
-      call_llm [type="session.llm_call"]
-      format [type="session.format"]
+      classify [type="compute", simulate="true"]
+      call_llm [type="compute", simulate="true"]
       done [shape=Msquare]
-      start -> classify -> call_llm -> format -> done
+      start -> classify -> call_llm -> done
     }
     """
 
@@ -53,7 +42,7 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
     digraph Heartbeat {
       graph [goal="Test heartbeat"]
       start [shape=Mdiamond]
-      select_mode [type="session.mode_select"]
+      select_mode [type="compute", simulate="true"]
       done [shape=Msquare]
       start -> select_mode -> done
     }

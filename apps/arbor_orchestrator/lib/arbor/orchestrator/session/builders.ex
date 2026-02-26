@@ -81,7 +81,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   @doc false
   def session_base_values(state) do
-    %{
+    base = %{
       "session.id" => state.session_id,
       "session.agent_id" => state.agent_id,
       "session.trust_tier" => to_string(state.trust_tier),
@@ -95,7 +95,19 @@ defmodule Arbor.Orchestrator.Session.Builders do
       "session.config" => state.config,
       "session.signal_topic" => state.signal_topic
     }
+
+    # Inject LLM config from session config so compute nodes can read them
+    config = state.config || %{}
+
+    base
+    |> maybe_put("session.llm_provider", config["llm_provider"] || config[:llm_provider])
+    |> maybe_put("session.llm_model", config["llm_model"] || config[:llm_model])
+    |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
+    |> maybe_put("session.tools", config["tools"] || config[:tools])
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   @doc false
   def build_engine_opts(state, initial_values) do
@@ -106,13 +118,20 @@ defmodule Arbor.Orchestrator.Session.Builders do
         state.session_id
       ])
 
-    [
+    opts = [
       session_adapters: state.adapters,
       logs_root: logs_root,
       max_steps: 100,
       initial_values: initial_values,
       authorization: false
     ]
+
+    # Pass signer to engine so CodergenHandler/ExecHandler can use it for tool calls
+    if state.signer do
+      Keyword.put(opts, :signer, state.signer)
+    else
+      opts
+    end
   end
 
   # ── Result application ───────────────────────────────────────────────

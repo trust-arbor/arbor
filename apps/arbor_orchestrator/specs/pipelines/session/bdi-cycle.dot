@@ -1,12 +1,18 @@
 // BDI Cycle — Belief-Desire-Intention Reasoning Strategy
 //
-// A composable reasoning strategy expressed as graph topology over existing
-// session handler node types. Agents execute this graph to perform one
+// A composable reasoning strategy expressed as graph topology over exec (action)
+// and compute (LLM) node types. Agents execute this graph to perform one
 // autonomous reasoning cycle using the BDI model.
 //
 // This replaces the hardcoded BDI logic in agent_seed.ex (seed_heartbeat_cycle)
 // with a graph that can be composed, swapped, or extended. Different agents
 // can use different strategy graphs — BDI is just one option.
+//
+// Architecture: exec nodes (Jido Actions via ExecHandler) + compute nodes (LLM via CodergenHandler)
+//
+// The old tool loop (llm_goal -> check_tools -> dispatch_tools -> llm_goal)
+// is replaced by a single compute node with use_tools="true". The CodergenHandler's
+// internal ToolLoop handles iterative tool dispatch until the LLM returns text.
 //
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │  BDI REASONING MODEL                                                   │
@@ -18,126 +24,283 @@
 // │  The cycle:                                                            │
 // │    1. PERCEIVE  — background checks, load beliefs (goals + intents)    │
 // │    2. DELIBERATE — select cognitive mode based on belief state          │
-// │    3. REASON    — LLM call in the selected mode                        │
+// │    3. REASON    — build prompt + LLM call in the selected mode         │
 // │    4. ACT       — route actions, execute pending intentions             │
 // │    5. UPDATE    — process results, update goals, store memories         │
-// │    6. MAINTAIN  — compression, consolidation, checkpointing            │
+// │    6. MAINTAIN  — consolidation, checkpointing                         │
 // │                                                                        │
-// │  Graph cycles:                                                         │
-// │    - goal_pursuit branch has a tool loop (like turn.dot):              │
-// │      llm_goal → check_tools → dispatch_tools → llm_goal               │
-// │    - The outer cycle is driven by the heartbeat timer, not the graph   │
-// │                                                                        │
-// │  Handler extensions needed (attribute-driven, no new types):           │
-// │    - session.memory_recall: recall_type attr for "goals", "intents",   │
-// │      "beliefs" dispatch (currently hardcoded to session.input query)   │
-// │    - session.mode_select: read goals AND intents from context to       │
-// │      support plan_execution and conversation modes                     │
-// │    - session.process_results: extract decompositions and intents       │
-// │      from LLM response (already extracts actions/goals/memory)         │
+// │  Graph topology:                                                       │
+// │    - goal_pursuit branch uses compute with use_tools="true" for        │
+// │      internal tool loop (replaces the old 4-node cycle)                │
+// │    - The outer BDI cycle is driven by the heartbeat timer, not graph   │
 // └─────────────────────────────────────────────────────────────────────────┘
 
 digraph BDICycle {
   graph [
-    goal="Execute one BDI reasoning cycle: perceive → deliberate → reason → act → update",
+    goal="Execute one BDI reasoning cycle: perceive -> deliberate -> reason -> act -> update",
     label="BDI Reasoning Cycle",
     strategy="bdi"
   ]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Phase 1: PERCEIVE — Gather beliefs about the world
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   start [shape=Mdiamond]
 
   // Background checks: memory health, timing, system state
-  bg_checks [type="session.background_checks"]
+  bg_checks [
+    type="exec",
+    target="action",
+    action="background_checks_run",
+    context_keys="session.agent_id",
+    output_prefix="session"
+  ]
 
   // Load current goals (Desires in BDI terms)
-  // Extension: recall_type="goals" tells the handler to load goals, not query memory
-  load_goals [type="session.memory_recall", recall_type="goals"]
+  load_goals [
+    type="exec",
+    target="action",
+    action="session_memory.recall",
+    param.recall_type="goals",
+    context_keys="session.agent_id",
+    output_prefix="session"
+  ]
 
   // Load pending intentions (committed plans)
-  // Extension: recall_type="intents" loads from IntentStore
-  load_intents [type="session.memory_recall", recall_type="intents"]
+  load_intents [
+    type="exec",
+    target="action",
+    action="session_memory.recall",
+    param.recall_type="intents",
+    context_keys="session.agent_id",
+    output_prefix="session"
+  ]
 
   // Load relevant working memory (Beliefs)
-  // Extension: recall_type="beliefs" loads working memory context
-  load_beliefs [type="session.memory_recall", recall_type="beliefs"]
+  load_beliefs [
+    type="exec",
+    target="action",
+    action="session_memory.recall",
+    param.recall_type="beliefs",
+    context_keys="session.agent_id",
+    output_prefix="session"
+  ]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Phase 2: DELIBERATE — Choose what to do based on beliefs
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   // Mode selection reads goals + intents from context
-  // Extension: handler checks for undecomposed goals (→ plan_execution),
-  //   active goals with intents (→ goal_pursuit), maintenance floor,
-  //   user waiting (→ conversation), else reflection
-  select_mode [type="session.mode_select"]
+  // Handler checks for: undecomposed goals (-> plan_execution),
+  //   active goals with intents (-> goal_pursuit), maintenance floor,
+  //   user waiting (-> conversation), else reflection
+  select_mode [
+    type="exec",
+    target="action",
+    action="session.mode_select",
+    context_keys="session.goals,session.active_intents,session.turn_count,session.user_waiting",
+    output_prefix="session"
+  ]
 
   // Route to the appropriate reasoning branch
-  mode_router [shape=diamond, condition_key="cognitive_mode"]
+  mode_router [shape=diamond, condition_key="session.cognitive_mode"]
 
-  // ══════════════════════════════════════════════════════════════
-  // Phase 3: REASON — Mode-specific LLM reasoning
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
+  // Phase 3: REASON — Mode-specific prompt building + LLM calls
+  // ==================================================================
 
-  // ── Goal Pursuit: advance active goals, may use tools ───────
-  llm_goal [type="session.llm_call", cognitive_mode="goal_pursuit"]
+  // -- Goal Pursuit: advance active goals, may use tools --------------
 
-  // Tool loop: if LLM requests tool calls, execute and re-enter
-  check_tools [shape=diamond, condition_key="llm.response_type"]
-  dispatch_tools [type="session.tool_dispatch"]
+  build_prompt_goal [
+    type="exec",
+    target="action",
+    action="session_llm.build_prompt",
+    param.mode="goal_pursuit",
+    context_keys="session.messages,session.agent_id,session.goals,session.active_intents",
+    output_prefix="session"
+  ]
 
-  // ── Plan Execution: decompose goals into intentions ─────────
-  llm_plan [type="session.llm_call", cognitive_mode="plan_execution"]
+  // Single compute node replaces the old 4-node tool loop.
+  // use_tools="true" enables internal ToolLoop for iterative dispatch.
+  llm_goal [
+    type="compute",
+    simulate="false",
+    prompt_context_key="session.user_prompt",
+    system_prompt_context_key="session.system_prompt",
+    messages_context_key="session.messages",
+    use_tools="true",
+    tools="file_read,file_search,file_glob,file_list,shell_execute",
+    max_turns="10"
+  ]
 
-  // ── Reflection: self-reflection and learning ────────────────
-  llm_reflect [type="session.llm_call", cognitive_mode="reflection"]
+  // -- Plan Execution: decompose goals into intentions ----------------
 
-  // ── Conversation: respond to waiting user ───────────────────
-  llm_converse [type="session.llm_call", cognitive_mode="conversation"]
+  build_prompt_plan [
+    type="exec",
+    target="action",
+    action="session_llm.build_prompt",
+    param.mode="plan_execution",
+    context_keys="session.messages,session.agent_id,session.goals,session.active_intents",
+    output_prefix="session"
+  ]
 
-  // ── Consolidation: memory maintenance, no LLM ──────────────
-  consolidate [type="session.memory_update", mode="consolidation"]
+  llm_plan [
+    type="compute",
+    simulate="false",
+    prompt_context_key="session.user_prompt",
+    system_prompt_context_key="session.system_prompt",
+    messages_context_key="session.messages"
+  ]
 
-  // ══════════════════════════════════════════════════════════════
+  // -- Reflection: self-reflection and learning -----------------------
+
+  build_prompt_reflect [
+    type="exec",
+    target="action",
+    action="session_llm.build_prompt",
+    param.mode="reflection",
+    context_keys="session.messages,session.agent_id,session.goals",
+    output_prefix="session"
+  ]
+
+  llm_reflect [
+    type="compute",
+    simulate="false",
+    prompt_context_key="session.user_prompt",
+    system_prompt_context_key="session.system_prompt",
+    messages_context_key="session.messages"
+  ]
+
+  // -- Conversation: respond to waiting user --------------------------
+
+  build_prompt_converse [
+    type="exec",
+    target="action",
+    action="session_llm.build_prompt",
+    param.mode="conversation",
+    context_keys="session.messages,session.agent_id,session.input",
+    output_prefix="session"
+  ]
+
+  llm_converse [
+    type="compute",
+    simulate="false",
+    prompt_context_key="session.user_prompt",
+    system_prompt_context_key="session.system_prompt",
+    messages_context_key="session.messages"
+  ]
+
+  // -- Consolidation: memory maintenance, no LLM ---------------------
+
+  consolidate [
+    type="exec",
+    target="action",
+    action="session_memory.consolidate",
+    param.mode="consolidation",
+    context_keys="session.agent_id",
+    output_prefix="session"
+  ]
+
+  // ==================================================================
   // Phase 4: ACT — Execute actions and route intentions
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   // Parse LLM response into structured actions, goals, intents, memory notes
-  // Extension: also extracts "decompositions" and "intents" from LLM JSON
-  process [type="session.process_results"]
+  process [
+    type="exec",
+    target="action",
+    action="session.process_results",
+    context_keys="session.agent_id,last_response",
+    output_prefix="session"
+  ]
 
   // Route executable actions through Executor
-  route_actions [type="session.route_actions"]
+  route_actions [
+    type="exec",
+    target="action",
+    action="session_exec.route_actions",
+    context_keys="session.agent_id,session.actions",
+    output_prefix="session"
+  ]
 
   // Route pending intentions from IntentStore (pull-based BDI dispatch)
-  // This reuses route_actions with intent_source="intent_store" attribute
-  route_intents [type="session.route_actions", intent_source="intent_store"]
+  route_intents [
+    type="exec",
+    target="action",
+    action="session_exec.route_actions",
+    param.intent_source="intent_store",
+    context_keys="session.agent_id,session.active_intents",
+    output_prefix="session"
+  ]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Phase 5: UPDATE — Persist changes to beliefs and desires
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   // Update goals (progress, new goals, completions)
-  update_goals [type="session.update_goals"]
+  update_goals [
+    type="exec",
+    target="action",
+    action="session_goals.update",
+    context_keys="session.agent_id,session.goal_updates,session.new_goals",
+    output_prefix="session"
+  ]
+
+  // Store decompositions as intents
+  store_decompositions [
+    type="exec",
+    target="action",
+    action="session_goals.store_decomps",
+    context_keys="session.agent_id,session.decompositions",
+    output_prefix="session"
+  ]
+
+  // Apply proposal decisions
+  process_proposals [
+    type="exec",
+    target="action",
+    action="session_goals.process_proposals",
+    context_keys="session.agent_id,session.proposal_decisions",
+    output_prefix="session"
+  ]
+
+  // Store identity insights
+  store_identity [
+    type="exec",
+    target="action",
+    action="session_goals.store_identity",
+    context_keys="session.agent_id,session.identity_updates",
+    output_prefix="session"
+  ]
 
   // Store memory notes from this cycle
-  update_memory [type="session.memory_update"]
+  update_memory [
+    type="exec",
+    target="action",
+    action="session_memory.update",
+    context_keys="session.agent_id,session.turn_data,session.memory_notes",
+    output_prefix="session"
+  ]
 
   // Checkpoint state for crash recovery
-  checkpoint [type="session.checkpoint"]
+  checkpoint [
+    type="exec",
+    target="action",
+    action="session_memory.checkpoint",
+    context_keys="session.id,session.turn_count,session.agent_id",
+    output_prefix="session"
+  ]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Exit
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   done [shape=Msquare]
 
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
   // Flow
-  // ══════════════════════════════════════════════════════════════
+  // ==================================================================
 
   // Phase 1: Perceive — sequential belief gathering
   start -> bg_checks -> load_goals -> load_intents -> load_beliefs
@@ -146,20 +309,21 @@ digraph BDICycle {
   load_beliefs -> select_mode -> mode_router
 
   // Phase 3: Reason — conditional fan-out by cognitive mode
-  mode_router -> llm_goal [condition="context.session.cognitive_mode=goal_pursuit"]
-  mode_router -> llm_plan [condition="context.session.cognitive_mode=plan_execution"]
-  mode_router -> llm_reflect [condition="context.session.cognitive_mode=reflection"]
-  mode_router -> llm_converse [condition="context.session.cognitive_mode=conversation"]
+  // Each branch: build_prompt (exec) -> LLM call (compute)
+  mode_router -> build_prompt_goal [condition="context.session.cognitive_mode=goal_pursuit"]
+  mode_router -> build_prompt_plan [condition="context.session.cognitive_mode=plan_execution"]
+  mode_router -> build_prompt_reflect [condition="context.session.cognitive_mode=reflection"]
+  mode_router -> build_prompt_converse [condition="context.session.cognitive_mode=conversation"]
   mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
 
-  // ── Goal pursuit tool loop (same pattern as turn.dot) ───────
-  // LLM may request tools to advance goals; cycle until text response
-  llm_goal -> check_tools
-  check_tools -> dispatch_tools [condition="context.llm.response_type=tool_call"]
-  check_tools -> process [condition="context.llm.response_type=text"]
-  dispatch_tools -> llm_goal
+  // Build prompt -> LLM call for each reasoning branch
+  build_prompt_goal -> llm_goal
+  build_prompt_plan -> llm_plan
+  build_prompt_reflect -> llm_reflect
+  build_prompt_converse -> llm_converse
 
-  // ── Other modes converge at process ─────────────────────────
+  // All mode branches converge at result processing
+  llm_goal -> process
   llm_plan -> process
   llm_reflect -> process
   llm_converse -> process
@@ -168,6 +332,6 @@ digraph BDICycle {
   // Phase 4: Act — route actions, then route pending intentions
   process -> route_actions -> route_intents
 
-  // Phase 5: Update — goals, memory, checkpoint
-  route_intents -> update_goals -> update_memory -> checkpoint -> done
+  // Phase 5: Update — goals, decompositions, proposals, identity, memory, checkpoint
+  route_intents -> update_goals -> store_decompositions -> process_proposals -> store_identity -> update_memory -> checkpoint -> done
 }

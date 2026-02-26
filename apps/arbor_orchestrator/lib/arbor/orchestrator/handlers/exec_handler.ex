@@ -62,13 +62,17 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       action_args = build_action_args(node.attrs, context)
       workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
 
+      output_prefix = Map.get(node.attrs, "output_prefix")
+
       try do
         case executor.execute(action_name, action_args, workdir, agent_id: agent_id) do
           {:ok, result} ->
             %Outcome{
               status: :success,
               notes: "Action #{action_name} executed",
-              context_updates: flatten_context_updates(node.id, result)
+              context_updates:
+                flatten_context_updates(node.id, result)
+                |> maybe_add_prefixed_keys(node.id, result, output_prefix)
             }
 
           {:error, reason} ->
@@ -198,4 +202,35 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       "last_response" => inspect(result)
     }
   end
+
+  # When output_prefix is set, duplicate each spread key under the prefix namespace.
+  # Example: output_prefix="session" + result key "cognitive_mode"
+  # → writes both "exec.node_id.cognitive_mode" AND "session.cognitive_mode"
+  defp maybe_add_prefixed_keys(updates, _node_id, _result, nil), do: updates
+
+  defp maybe_add_prefixed_keys(updates, _node_id, result, prefix) when is_binary(result) do
+    case Jason.decode(result) do
+      {:ok, map} when is_map(map) ->
+        prefixed =
+          Enum.reduce(map, %{}, fn {k, v}, acc ->
+            Map.put(acc, "#{prefix}.#{k}", v)
+          end)
+
+        Map.merge(updates, prefixed)
+
+      _ ->
+        updates
+    end
+  end
+
+  defp maybe_add_prefixed_keys(updates, _node_id, result, prefix) when is_map(result) do
+    prefixed =
+      Enum.reduce(result, %{}, fn {k, v}, acc ->
+        Map.put(acc, "#{prefix}.#{k}", v)
+      end)
+
+    Map.merge(updates, prefixed)
+  end
+
+  defp maybe_add_prefixed_keys(updates, _node_id, _result, _prefix), do: updates
 end

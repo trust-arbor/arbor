@@ -16,8 +16,9 @@ defmodule Arbor.Orchestrator.Session do
       send_message/2  →  Engine.run(turn_graph, initial_values)  →  apply_turn_result/2
       :heartbeat      →  Task → Engine.run(heartbeat_graph)     →  {:heartbeat_result, _}
 
-  The `SessionHandler` provides all node implementations; adapters bridge to
-  real infrastructure (LLM providers, memory stores, tool servers).
+  Node implementations are provided by Jido Actions (via `exec target="action"`)
+  and CodergenHandler (via `compute` nodes). Session-specific actions live in
+  `Arbor.Actions.Session*` modules.
 
   ## Contracts
 
@@ -172,7 +173,7 @@ defmodule Arbor.Orchestrator.Session do
 
   ## Optional
 
-    * `:adapters`           — map of adapter functions (see `SessionHandler`).
+    * `:adapters`           — map of adapter functions (legacy, unused with action-based DOTs).
                               Include `:trust_tier_resolver` (`fn agent_id -> {:ok, tier}`)
                               to verify trust_tier against the authority (e.g. `Arbor.Trust`)
     * `:heartbeat_interval` — ms between heartbeats (default #{@default_heartbeat_interval})
@@ -434,7 +435,9 @@ defmodule Arbor.Orchestrator.Session do
       |> Builders.apply_turn_result(message, result)
       |> Builders.maybe_checkpoint()
 
-    response = Map.get(result.context, "session.response", "")
+    response =
+      Map.get(result.context, "session.response") ||
+        Map.get(result.context, "last_response", "")
     tool_history = Map.get(result.context, "session.tool_history", [])
     tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
     Builders.emit_turn_signal(new_state, result)
