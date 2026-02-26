@@ -118,6 +118,24 @@ defmodule Arbor.Common.RegistryBase do
         end
       end
 
+      @doc """
+      Resolve an entry, but skip unstable entries (failure count >= max_failures).
+      Returns `{:error, :unstable}` if the entry exists but is over the failure threshold.
+      """
+      def resolve_stable(name) when is_binary(name) do
+        case :ets.lookup(@table_name, name) do
+          [{^name, module, _metadata, failures, _core?}] ->
+            cond do
+              failures >= @max_failures -> {:error, :unstable}
+              not Code.ensure_loaded?(module) -> {:error, :module_not_loaded}
+              true -> {:ok, module}
+            end
+
+          [] ->
+            {:error, :not_found}
+        end
+      end
+
       @impl Arbor.Contracts.Handler.Registry
       def resolve_entry(name) when is_binary(name) do
         case :ets.lookup(@table_name, name) do
@@ -315,6 +333,7 @@ defmodule Arbor.Common.RegistryBase do
 
       defp do_register(name, module, metadata, state) do
         with :ok <- validate_not_core_locked(name, state),
+             :ok <- validate_plugin_namespace(name, state),
              :ok <- validate_no_overwrite(name),
              :ok <- validate_behaviour(module),
              :ok <- validate_entry(name, module, metadata) do
@@ -345,6 +364,18 @@ defmodule Arbor.Common.RegistryBase do
       end
 
       defp validate_not_core_locked(_name, _state), do: :ok
+
+      # After core lock, plugin entries must contain a "." prefix separator
+      # to prevent namespace collision with core entries.
+      defp validate_plugin_namespace(_name, %{core_locked: false}), do: :ok
+
+      defp validate_plugin_namespace(name, %{core_locked: true}) do
+        if String.contains?(name, ".") do
+          :ok
+        else
+          {:error, {:plugin_namespace_required, name}}
+        end
+      end
 
       defp validate_no_overwrite(name) do
         if @allow_overwrite do

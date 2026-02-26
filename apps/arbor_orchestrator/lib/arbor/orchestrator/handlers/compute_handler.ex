@@ -78,8 +78,10 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   end
 
   defp registry_resolve(purpose) do
-    if Process.whereis(Arbor.Common.ComputeRegistry) do
-      Arbor.Common.ComputeRegistry.resolve(purpose)
+    registry = Arbor.Common.ComputeRegistry
+
+    if Process.whereis(registry) do
+      registry.resolve_stable(purpose)
     else
       {:error, :registry_unavailable}
     end

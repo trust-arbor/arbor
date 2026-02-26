@@ -137,9 +137,9 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
         def capability_required(_op, _ctx), do: "arbor://handler/read/test_plugin"
       end
 
-      :ok = ReadableRegistry.register("test_plugin", TestPluginReadable)
+      :ok = ReadableRegistry.register("test.plugin", TestPluginReadable)
 
-      node = make_node("r5", %{"source" => "test_plugin"})
+      node = make_node("r5", %{"source" => "test.plugin"})
       context = Context.new()
 
       result =

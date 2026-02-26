@@ -354,6 +354,80 @@ defmodule Arbor.Common.RegistryBaseTest do
     end
   end
 
+  describe "plugin namespace enforcement" do
+    test "before core lock, any name is allowed" do
+      :ok = BasicRegistry.register("simple_name", GoodImpl)
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("simple_name")
+    end
+
+    test "after core lock, plugin names must contain a dot" do
+      :ok = BasicRegistry.register("core_entry", GoodImpl)
+      :ok = BasicRegistry.lock_core()
+
+      # Plugin with dot prefix succeeds
+      assert :ok = BasicRegistry.register("myplugin.custom", AvailableImpl)
+
+      # Plugin without dot is rejected
+      assert {:error, {:plugin_namespace_required, "bare_name"}} =
+               BasicRegistry.register("bare_name", AvailableImpl)
+    end
+
+    test "core entries can still be registered before lock" do
+      :ok = BasicRegistry.register("no_dot_name", GoodImpl)
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("no_dot_name")
+    end
+  end
+
+  describe "resolve_stable" do
+    test "returns module for healthy entries" do
+      ensure_started(CircuitBreakerRegistry)
+
+      :ok = CircuitBreakerRegistry.register("healthy", GoodImpl)
+      assert {:ok, GoodImpl} = CircuitBreakerRegistry.resolve_stable("healthy")
+
+      stop_registry(CircuitBreakerRegistry)
+    end
+
+    test "returns :unstable for entries over failure threshold" do
+      ensure_started(CircuitBreakerRegistry)
+
+      :ok = CircuitBreakerRegistry.register("flaky", GoodImpl)
+
+      for _ <- 1..3, do: CircuitBreakerRegistry.record_failure("flaky")
+
+      # resolve still works
+      assert {:ok, GoodImpl} = CircuitBreakerRegistry.resolve("flaky")
+
+      # resolve_stable blocks unstable entries
+      assert {:error, :unstable} = CircuitBreakerRegistry.resolve_stable("flaky")
+
+      stop_registry(CircuitBreakerRegistry)
+    end
+
+    test "returns :not_found for missing entries" do
+      ensure_started(CircuitBreakerRegistry)
+
+      assert {:error, :not_found} = CircuitBreakerRegistry.resolve_stable("nope")
+
+      stop_registry(CircuitBreakerRegistry)
+    end
+
+    test "reset_failures restores resolve_stable" do
+      ensure_started(CircuitBreakerRegistry)
+
+      :ok = CircuitBreakerRegistry.register("recovered", GoodImpl)
+
+      for _ <- 1..3, do: CircuitBreakerRegistry.record_failure("recovered")
+
+      assert {:error, :unstable} = CircuitBreakerRegistry.resolve_stable("recovered")
+
+      :ok = CircuitBreakerRegistry.reset_failures("recovered")
+      assert {:ok, GoodImpl} = CircuitBreakerRegistry.resolve_stable("recovered")
+
+      stop_registry(CircuitBreakerRegistry)
+    end
+  end
+
   describe "ETS heir protection" do
     test "table data survives registry restart via heir" do
       :ok = BasicRegistry.register("persistent", GoodImpl)

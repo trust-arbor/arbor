@@ -90,12 +90,16 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
         }
 
       {:error, {:file_error, reason, resolved}} ->
+        record_failure(source)
+
         %Outcome{
           status: :fail,
           failure_reason: "File read error: #{inspect(reason)} for #{resolved}"
         }
 
       {:error, reason} ->
+        record_failure(source)
+
         %Outcome{
           status: :fail,
           failure_reason: "Read error: #{inspect(reason)}"
@@ -157,12 +161,23 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
     }
   end
 
-  # Resolve from ReadableRegistry if running.
+  # Resolve from ReadableRegistry if running. Uses resolve_stable to skip
+  # entries that have exceeded their circuit breaker failure threshold.
   defp registry_resolve(source) do
-    if Process.whereis(Arbor.Common.ReadableRegistry) do
-      Arbor.Common.ReadableRegistry.resolve(source)
+    registry = Arbor.Common.ReadableRegistry
+
+    if Process.whereis(registry) do
+      registry.resolve_stable(source)
     else
       {:error, :registry_unavailable}
+    end
+  end
+
+  defp record_failure(source) do
+    registry = Arbor.Common.ReadableRegistry
+
+    if Process.whereis(registry) do
+      registry.record_failure(source)
     end
   end
 
