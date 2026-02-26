@@ -55,6 +55,21 @@ config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres
 
+# Agent — auto-start infrastructure agents on boot
+config :arbor_agent, :auto_start_agents, [
+  %{
+    display_name: "diagnostician",
+    module: Arbor.Agent.APIAgent,
+    template: Arbor.Agent.Templates.Diagnostician,
+    model_config: %{
+      id: "arcee-ai/trinity-large-preview:free",
+      provider: :openrouter,
+      backend: :api
+    },
+    start_host: true
+  }
+]
+
 # Security — identity verification and capability signing enabled.
 # Session tool dispatch now wires signed requests via Lifecycle.build_signer.
 config :arbor_security,
