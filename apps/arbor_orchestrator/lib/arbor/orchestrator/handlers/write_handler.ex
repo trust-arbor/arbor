@@ -53,8 +53,10 @@ defmodule Arbor.Orchestrator.Handlers.WriteHandler do
   end
 
   defp registry_resolve(target) do
-    if Process.whereis(Arbor.Common.WriteableRegistry) do
-      Arbor.Common.WriteableRegistry.resolve(target)
+    registry = Arbor.Common.WriteableRegistry
+
+    if Process.whereis(registry) do
+      registry.resolve_stable(target)
     else
       {:error, :registry_unavailable}
     end

@@ -97,8 +97,10 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
   end
 
   defp registry_resolve(mode) do
-    if Process.whereis(Arbor.Common.PipelineResolver) do
-      Arbor.Common.PipelineResolver.resolve(mode)
+    registry = Arbor.Common.PipelineResolver
+
+    if Process.whereis(registry) do
+      registry.resolve_stable(mode)
     else
       {:error, :registry_unavailable}
     end
