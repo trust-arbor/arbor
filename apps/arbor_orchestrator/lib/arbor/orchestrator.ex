@@ -1,13 +1,42 @@
 defmodule Arbor.Orchestrator do
   @moduledoc """
-  Attractor-spec orchestration runtime for Arbor.
+  DOT-based pipeline orchestration runtime for Arbor.
 
-  This app is intentionally built as a parallel implementation to existing SDLC
-  automation and tracks implementation progress against three specs:
+  Provides a graph-driven execution engine where pipelines are defined as
+  DOT digraphs with typed handler nodes. Supports 31+ handler types
+  (LLM calls, tool dispatch, consensus, memory, security, etc.) and
+  12 session types for multi-turn agent interactions.
 
-  - Attractor specification
-  - Coding agent loop specification
-  - Unified LLM client specification
+  ## Quick Start
+
+      # Parse and run a DOT pipeline
+      {:ok, result} = Arbor.Orchestrator.run(dot_source)
+
+      # Run from a .dot file
+      {:ok, result} = Arbor.Orchestrator.run_file("pipelines/my_pipeline.dot")
+
+      # Compile for analysis (taint tracking, capability requirements)
+      {:ok, compiled} = Arbor.Orchestrator.compile(dot_source)
+      diagnostics = Arbor.Orchestrator.validate_typed(compiled)
+
+  ## Architecture
+
+      DOT source → Parser → Graph → IR.Compiler → Compiled Graph
+                                                        ↓
+                                               Engine.run (step loop)
+                                                        ↓
+                                               Handler dispatch per node
+
+  The engine walks the graph node-by-node, dispatching each to its typed
+  handler. Handlers receive node attributes and return results that flow
+  to downstream nodes via edges. Edge conditions gate transitions.
+
+  ## Key Subsystems
+
+  - **UnifiedLLM** — Provider-agnostic LLM client (14 adapters, embeddings)
+  - **Sessions** — Multi-turn stateful interactions (DOT-as-session-graph)
+  - **Eval** — Pipeline and agent evaluation framework
+  - **IR** — Typed intermediate representation for security analysis
   """
 
   alias Arbor.Orchestrator.Conformance
@@ -22,9 +51,11 @@ defmodule Arbor.Orchestrator do
 
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
 
+  @doc "Parse a DOT source string into a Graph struct."
   @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, term()}
   def parse(dot_source) when is_binary(dot_source), do: Parser.parse(dot_source)
 
+  @doc "Run structural validation on a DOT source or Graph, returning diagnostics."
   @spec validate(String.t() | Graph.t(), keyword()) ::
           [Arbor.Orchestrator.Validation.Diagnostic.t()]
   def validate(source_or_graph, opts \\ []) do
@@ -42,6 +73,7 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @doc "Parse, compile, validate, and execute a DOT pipeline. Returns the engine result."
   @spec run(String.t() | Graph.t(), keyword()) :: run_result()
   def run(source_or_graph, opts \\ []) do
     with {:ok, graph} <- ensure_graph(source_or_graph, opts),
@@ -50,6 +82,7 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @doc "Read a .dot file from disk and execute it as a pipeline."
   @spec run_file(String.t(), keyword()) :: run_result()
   def run_file(path, opts \\ []) do
     with {:ok, source} <- File.read(path) do
@@ -100,6 +133,7 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @doc "Return the spec conformance matrix summary."
   @spec conformance_matrix() :: map()
   def conformance_matrix, do: Conformance.Matrix.summary()
 
