@@ -10,6 +10,12 @@ defmodule Arbor.Common.Application do
     children =
       if Application.get_env(:arbor_common, :start_children, true) do
         [
+          # pg scope for cross-node registry discovery
+          %{
+            id: :arbor_registry_pg,
+            start: {:pg, :start_link, [:arbor_registry]}
+          },
+          Arbor.Common.NodeRegistry,
           Arbor.Common.ReadableRegistry,
           Arbor.Common.WriteableRegistry,
           Arbor.Common.ComputeRegistry,

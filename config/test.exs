@@ -99,7 +99,8 @@ end
 # Memory tests use ETS by default (no database required)
 config :arbor_memory,
   embedding_backend: :ets,
-  persistence_backend: nil
+  persistence_backend: nil,
+  auto_embed: false
 
 # pgvector tests (requires postgres + pgvector extension)
 config :arbor_persistence,

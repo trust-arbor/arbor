@@ -37,7 +37,6 @@ defmodule Arbor.Agent.ContextCompactor do
   require Logger
 
   @chars_per_token 4
-  @compaction_threshold 0.75
   @default_effective_window 75_000
 
   # Tool names that represent file reads
@@ -60,12 +59,14 @@ defmodule Arbor.Agent.ContextCompactor do
     memory_index: %{},
     salience_scores: %{},
     message_timestamps: %{},
+    compression_tiers: %{},
     token_count: 0,
     peak_tokens: 0,
     turn: 0,
     compression_count: 0,
     squash_count: 0,
-    narrative_count: 0
+    narrative_count: 0,
+    cache_hits: 0
   ]
 
   @type file_entry :: %{
@@ -102,6 +103,7 @@ defmodule Arbor.Agent.ContextCompactor do
           memory_index: %{String.t() => memory_entry()},
           salience_scores: %{non_neg_integer() => float()},
           message_timestamps: %{non_neg_integer() => DateTime.t()},
+          compression_tiers: %{non_neg_integer() => atom()},
           token_count: non_neg_integer(),
           peak_tokens: non_neg_integer(),
           effective_window: non_neg_integer(),
@@ -109,6 +111,7 @@ defmodule Arbor.Agent.ContextCompactor do
           compression_count: non_neg_integer(),
           squash_count: non_neg_integer(),
           narrative_count: non_neg_integer(),
+          cache_hits: non_neg_integer(),
           config: config()
         }
 
@@ -134,7 +137,7 @@ defmodule Arbor.Agent.ContextCompactor do
     effective_window =
       cond do
         explicit_window -> explicit_window
-        model -> trunc(model_context_size(model) * @compaction_threshold)
+        model -> Arbor.Common.ModelProfile.effective_window(model)
         true -> @default_effective_window
       end
 
@@ -251,6 +254,7 @@ defmodule Arbor.Agent.ContextCompactor do
       compression_count: c.compression_count,
       squash_count: c.squash_count,
       narrative_count: c.narrative_count,
+      cache_hits: c.cache_hits,
       file_index_size: map_size(c.file_index),
       memory_index_size: map_size(c.memory_index),
       turn: c.turn,
@@ -261,7 +265,7 @@ defmodule Arbor.Agent.ContextCompactor do
   # ── Compaction ─────────────────────────────────────────────────
 
   defp needs_compaction?(%{token_count: count, effective_window: window}) do
-    count >= window * @compaction_threshold
+    count >= window
   end
 
   defp compact(compactor) do
@@ -272,7 +276,8 @@ defmodule Arbor.Agent.ContextCompactor do
       # Nothing to compact — just system + user
       compactor
     else
-      {compacted, stats} = run_compaction_pipeline(messages, total, compactor)
+      {compacted, stats, new_tiers, cache_hits} =
+        run_compaction_pipeline(messages, total, compactor)
 
       new_token_count = count_all_tokens(compacted)
 
@@ -282,7 +287,9 @@ defmodule Arbor.Agent.ContextCompactor do
           token_count: new_token_count,
           compression_count: compactor.compression_count + stats.compressions,
           squash_count: compactor.squash_count + stats.squashes,
-          narrative_count: compactor.narrative_count + stats.narratives
+          narrative_count: compactor.narrative_count + stats.narratives,
+          compression_tiers: new_tiers,
+          cache_hits: compactor.cache_hits + cache_hits
       }
     end
   end
@@ -294,7 +301,7 @@ defmodule Arbor.Agent.ContextCompactor do
     {messages, stats} = semantic_squash(messages, total, stats, compactor.memory_index)
 
     # Step 2-3: Apply detail-level-based compression (enriched with file + memory index)
-    {messages, stats} =
+    {messages, stats, new_tiers, cache_hits} =
       apply_detail_decay(
         messages,
         total,
@@ -302,7 +309,8 @@ defmodule Arbor.Agent.ContextCompactor do
         compactor.file_index,
         compactor.memory_index,
         compactor.salience_scores,
-        compactor.message_timestamps
+        compactor.message_timestamps,
+        compactor.compression_tiers
       )
 
     # Step 4: Optional LLM narrative for very old turns
@@ -313,7 +321,7 @@ defmodule Arbor.Agent.ContextCompactor do
         {messages, stats}
       end
 
-    {messages, stats}
+    {messages, stats, new_tiers, cache_hits}
   end
 
   # ── Step 1: Semantic Squashing ─────────────────────────────────
@@ -436,35 +444,100 @@ defmodule Arbor.Agent.ContextCompactor do
          file_index,
          memory_index,
          salience_scores,
-         message_timestamps
+         message_timestamps,
+         compression_tiers
        ) do
     # Skip if too few messages to compress (need at least system + user + 1 compressible)
     if total <= 2 do
-      {messages, stats}
+      {messages, stats, compression_tiers, 0}
     else
       use_salience = salience_scores != %{}
 
-      {compressed, compression_count} =
+      compress_ctx = %{
+        use_salience: use_salience,
+        salience_scores: salience_scores,
+        total: total,
+        file_index: file_index,
+        memory_index: memory_index,
+        message_timestamps: message_timestamps
+      }
+
+      {compressed, {compression_count, new_tiers, hits}} =
         messages
         |> Enum.with_index()
-        |> Enum.map_reduce(0, fn {msg, idx}, acc ->
+        |> Enum.map_reduce({0, compression_tiers, 0}, fn {msg, idx}, {acc, tiers, cache_hits} ->
           # Never compress system (index 0) or first user message (index 1)
           if idx <= 1 do
-            {msg, acc}
+            {msg, {acc, tiers, cache_hits}}
           else
-            # Turn numbers are 1-indexed (idx+1 matches the turn stored in salience_scores)
-            detail = compute_detail(use_salience, salience_scores, idx, total)
-
-            {compressed_msg, did_compress} =
-              compress_by_detail(msg, detail, file_index, memory_index, message_timestamps, idx)
-
-            {compressed_msg, acc + if(did_compress, do: 1, else: 0)}
+            compress_at_detail(msg, idx, tiers, acc, cache_hits, compress_ctx)
           end
         end)
 
-      {compressed, %{stats | compressions: stats.compressions + compression_count}}
+      {compressed, %{stats | compressions: stats.compressions + compression_count}, new_tiers,
+       hits}
     end
   end
+
+  defp compress_at_detail(msg, idx, tiers, acc, cache_hits, ctx) do
+    detail = compute_detail(ctx.use_salience, ctx.salience_scores, idx, ctx.total)
+    role = msg_role(msg)
+    current_tier = detail_tier(detail, role)
+    prev_tier = Map.get(tiers, idx)
+
+    if prev_tier != nil and tier_level(prev_tier) <= tier_level(current_tier) do
+      # Already compressed at this or more aggressive tier — skip
+      {msg, {acc, tiers, cache_hits + 1}}
+    else
+      {compressed_msg, did_compress} =
+        compress_by_detail(
+          msg,
+          detail,
+          ctx.file_index,
+          ctx.memory_index,
+          ctx.message_timestamps,
+          idx
+        )
+
+      new_tiers = if did_compress, do: Map.put(tiers, idx, current_tier), else: tiers
+      {compressed_msg, {acc + if(did_compress, do: 1, else: 0), new_tiers, cache_hits}}
+    end
+  end
+
+  # Maps a detail level + role to a discrete compression tier.
+  # Tiers match the compress_by_role clause boundaries.
+  @doc false
+  @spec detail_tier(float(), atom() | String.t()) :: atom()
+  def detail_tier(detail, role) when role in [:tool, "tool"] do
+    cond do
+      detail >= 0.9 -> :tool_full
+      detail >= 0.8 -> :tool_high
+      detail >= 0.5 -> :tool_medium
+      detail >= 0.2 -> :tool_low
+      true -> :tool_minimal
+    end
+  end
+
+  def detail_tier(detail, role) when role in [:assistant, "assistant"] do
+    if detail >= 0.5, do: :text_full, else: :text_truncated
+  end
+
+  def detail_tier(detail, role) when role in [:user, "user"] do
+    if detail >= 0.5, do: :text_full, else: :text_truncated
+  end
+
+  def detail_tier(_detail, _role), do: :text_full
+
+  # Numeric tier ordering — lower number = more aggressive compression.
+  # Used to determine if a message needs re-compression.
+  defp tier_level(:tool_minimal), do: 0
+  defp tier_level(:tool_low), do: 1
+  defp tier_level(:text_truncated), do: 1
+  defp tier_level(:tool_medium), do: 2
+  defp tier_level(:tool_high), do: 3
+  defp tier_level(:text_full), do: 4
+  defp tier_level(:tool_full), do: 5
+  defp tier_level(_), do: 5
 
   @doc false
   def detail_level(index, total) when total > 1 do
@@ -1393,24 +1466,6 @@ defmodule Arbor.Agent.ContextCompactor do
 
   defp count_all_tokens(messages) do
     Enum.reduce(messages, 0, fn msg, acc -> acc + estimate_tokens(msg) end)
-  end
-
-  defp model_context_size(model) do
-    # Runtime bridge to TokenBudget
-    token_budget = Module.concat([:Arbor, :Memory, :TokenBudget])
-
-    if Code.ensure_loaded?(token_budget) and
-         function_exported?(token_budget, :model_context_size, 1) do
-      apply(token_budget, :model_context_size, [model])
-    else
-      # Reasonable defaults for common models
-      cond do
-        String.contains?(model, "claude") -> 200_000
-        String.contains?(model, "gpt-4o") -> 128_000
-        String.contains?(model, "gemini") -> 1_000_000
-        true -> 100_000
-      end
-    end
   end
 
   defp content_hash(content) when is_binary(content) do

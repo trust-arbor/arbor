@@ -1,8 +1,24 @@
 // Feedback Loop — Generate, Critique, Revise
-// Iterative refinement: generate a draft, critique it, revise if quality threshold not met.
+// Iterative refinement: generate a draft, critique with multi-method scoring,
+// revise if quality threshold not met. Includes reference-aware scoring,
+// plateau detection, and full score trajectory tracking.
 //
-// Context in: prompt, max_iterations (default "3"), quality_threshold
-// Context out: result, iterations, final_score
+// Context in:
+//   prompt            — the generation prompt
+//   max_iterations    — maximum revision cycles (default "3")
+//   quality_threshold — minimum score to accept (0.0-1.0, default "0.7")
+//   scoring_method    — "length_ratio", "keyword_coverage", "structure", "combined" (default)
+//   reference_text    — (optional) reference text for keyword coverage scoring
+//   plateau_window    — (optional) number of recent scores to check for plateau (default "3")
+//   plateau_tolerance — (optional) minimum improvement to continue (default "0.02")
+//
+// Context out:
+//   result         — final refined output
+//   loop.iteration — number of iterations completed
+//   loop.score     — final quality score
+//   loop.scores    — full score trajectory array
+//   loop.plateau   — true if stopped due to plateau detection
+//   loop.feedback  — last critique feedback
 
 digraph FeedbackLoop {
   graph [
@@ -12,41 +28,49 @@ digraph FeedbackLoop {
 
   start [shape=Mdiamond]
 
-  // Initialize iteration tracking
+  // Initialize iteration tracking and scoring config
   init [
     type="transform",
-    prompt="Initialize loop.iteration=0, loop.done=false."
+    prompt="Initialize: loop.iteration=0, loop.done=false, loop.scores=[], loop.plateau=false. Set loop.scoring_method from context scoring_method (default: combined). Load loop.reference_text from context if provided."
   ]
 
   // Generate or revise the output
   generate [
     type="compute",
-    prompt="Generate or revise output based on the prompt. If previous critique feedback exists, incorporate it to improve the result."
+    prompt="Generate or revise output based on the prompt. If loop.feedback exists from a previous critique, incorporate it to improve the result. Store output in result."
   ]
 
-  // Critique the generated output
+  // Multi-method critique with optional reference awareness
   critique [
     type="compute",
-    prompt="Evaluate the generated output against quality criteria. Produce a quality score (0.0-1.0) and specific feedback for improvement. Set loop.score to the quality score."
+    prompt="Evaluate the generated output using the scoring method(s). Methods: length_ratio — compare output length to expected range, score 0-1. keyword_coverage — count key terms present; if reference_text available, score overlap. structure — check format compliance (headers, sections, code blocks as expected). combined — weighted average of all applicable methods (weights: keyword 0.4, structure 0.3, length 0.3). Produce loop.score (0.0-1.0) and loop.feedback with specific actionable improvements."
   ]
 
-  // Check if quality threshold met or max iterations reached
+  // Record score in trajectory and check plateau
+  record_score [
+    type="transform",
+    prompt="Append loop.score to loop.scores array. Increment loop.iteration. Check plateau: if len(loop.scores) >= plateau_window (default 3) and max improvement across last plateau_window scores < plateau_tolerance (default 0.02), set loop.plateau=true."
+  ]
+
+  // Check quality threshold, max iterations, or plateau
   check_quality [
     type="gate",
     shape=diamond,
-    prompt="Check if loop.score >= quality_threshold or loop.iteration >= max_iterations."
+    predicate="expression",
+    expression="loop.done",
+    prompt="Set loop.done=true if any of: loop.score >= quality_threshold, loop.iteration >= max_iterations, loop.plateau=true."
   ]
 
   // Prepare revision prompt from critique feedback
   revise_prompt [
     type="transform",
-    prompt="Extract critique feedback and construct a revised prompt. Increment loop.iteration."
+    prompt="Extract loop.feedback and construct a revised generation prompt. Preserve the original prompt intent while addressing each feedback point. Include the score trajectory so the generator can see improvement direction."
   ]
 
   done [shape=Msquare]
 
   // Flow
-  start -> init -> generate -> critique -> check_quality
+  start -> init -> generate -> critique -> record_score -> check_quality
   check_quality -> done [condition="context.loop.done=true"]
   check_quality -> revise_prompt [condition="context.loop.done!=true"]
   revise_prompt -> generate

@@ -433,8 +433,9 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp orchestrator_available? do
-    Code.ensure_loaded?(@session_module) and
-      Code.ensure_loaded?(@adapters_module)
+    # Session.Adapters was replaced by Jido actions (2026-02-25 extraction).
+    # Only Session module is required for orchestrator availability.
+    Code.ensure_loaded?(@session_module)
   end
 
   defp turn_dot_path do

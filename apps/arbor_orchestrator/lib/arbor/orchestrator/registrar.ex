@@ -117,32 +117,30 @@ defmodule Arbor.Orchestrator.Registrar do
   # --- Action Registry ---
 
   defp register_actions(failures) do
-    if Process.whereis(ActionRegistry) do
-      if Code.ensure_loaded?(Arbor.Actions) do
-        actions = apply(Arbor.Actions, :list_actions, [])
+    if Process.whereis(ActionRegistry) != nil and Code.ensure_loaded?(Arbor.Actions) do
+      actions = apply(Arbor.Actions, :list_actions, [])
 
-        action_failures =
-          Enum.flat_map(actions, fn {category, modules} ->
-            Enum.flat_map(modules, fn module ->
-              case ActionRegistry.register_action(module, %{category: category}) do
-                :ok -> []
-                # Already registered/locked = desired state
-                {:error, :core_locked} -> []
-                {:error, :already_registered} -> []
-                {:error, reason} -> [{:action_registry, {module, reason}}]
-              end
-            end)
-          end)
+      action_failures =
+        Enum.flat_map(actions, fn {category, modules} ->
+          Enum.flat_map(modules, &register_single_action(&1, category))
+        end)
 
-        # Lock core after all actions registered
-        ActionRegistry.lock_core()
+      # Lock core after all actions registered
+      ActionRegistry.lock_core()
 
-        failures ++ action_failures
-      else
-        failures
-      end
+      failures ++ action_failures
     else
       failures
+    end
+  end
+
+  defp register_single_action(module, category) do
+    case ActionRegistry.register_action(module, %{category: category}) do
+      :ok -> []
+      # Already registered/locked = desired state
+      {:error, :core_locked} -> []
+      {:error, :already_registered} -> []
+      {:error, reason} -> [{:action_registry, {module, reason}}]
     end
   end
 

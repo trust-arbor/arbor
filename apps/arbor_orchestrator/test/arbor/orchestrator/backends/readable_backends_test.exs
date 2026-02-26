@@ -6,20 +6,22 @@ defmodule Arbor.Orchestrator.Backends.ReadableBackendsTest do
 
   describe "FileReadable" do
     test "reads file content" do
-      path = Path.join(System.tmp_dir!(), "readable_test_#{:rand.uniform(100_000)}.txt")
-      File.write!(path, "hello from file")
+      tmp = System.tmp_dir!()
+      filename = "readable_test_#{:rand.uniform(100_000)}.txt"
+      File.write!(Path.join(tmp, filename), "hello from file")
 
-      ctx = %ScopedContext{values: %{"path" => path}}
+      ctx = %ScopedContext{values: %{"path" => filename, "workdir" => tmp}}
       assert {:ok, "hello from file"} = FileReadable.read(ctx, [])
     after
       File.rm(Path.join(System.tmp_dir!(), "readable_test_*.txt"))
     end
 
     test "reads file via source_key" do
-      path = Path.join(System.tmp_dir!(), "readable_sk_#{:rand.uniform(100_000)}.txt")
-      File.write!(path, "via source_key")
+      tmp = System.tmp_dir!()
+      filename = "readable_sk_#{:rand.uniform(100_000)}.txt"
+      File.write!(Path.join(tmp, filename), "via source_key")
 
-      ctx = %ScopedContext{values: %{"source_key" => path}}
+      ctx = %ScopedContext{values: %{"source_key" => filename, "workdir" => tmp}}
       assert {:ok, "via source_key"} = FileReadable.read(ctx, [])
     after
       File.rm(Path.join(System.tmp_dir!(), "readable_sk_*.txt"))
@@ -42,17 +44,24 @@ defmodule Arbor.Orchestrator.Backends.ReadableBackendsTest do
     end
 
     test "returns error for nonexistent file" do
-      ctx = %ScopedContext{values: %{"path" => "/nonexistent/file.txt"}}
+      tmp = System.tmp_dir!()
+      ctx = %ScopedContext{values: %{"path" => "truly_nonexistent_file.txt", "workdir" => tmp}}
       assert {:error, {:file_error, :enoent, _}} = FileReadable.read(ctx, [])
     end
 
+    test "blocks path traversal" do
+      ctx = %ScopedContext{values: %{"path" => "/nonexistent/file.txt"}}
+      assert {:error, {:path_traversal, _, _}} = FileReadable.read(ctx, [])
+    end
+
     test "lists files in directory" do
-      dir = Path.join(System.tmp_dir!(), "readable_list_test")
+      tmp = System.tmp_dir!()
+      dir = Path.join(tmp, "readable_list_test")
       File.mkdir_p!(dir)
       File.write!(Path.join(dir, "a.txt"), "a")
       File.write!(Path.join(dir, "b.txt"), "b")
 
-      ctx = %ScopedContext{values: %{"path" => dir}}
+      ctx = %ScopedContext{values: %{"path" => "readable_list_test", "workdir" => tmp}}
       assert {:ok, files} = FileReadable.list(ctx, [])
       assert "a.txt" in files
       assert "b.txt" in files

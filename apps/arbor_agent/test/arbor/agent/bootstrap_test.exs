@@ -291,6 +291,108 @@ defmodule Arbor.Agent.BootstrapTest do
   end
 
   # ============================================================================
+  # MCP config management
+  # ============================================================================
+
+  describe "Manager.set_mcp_config/2" do
+    test "stores MCP server config in profile metadata" do
+      profile = make_profile("mcp-1", display_name: "MCP Agent", metadata: %{})
+      ProfileStore.store_profile(profile)
+
+      servers = [
+        %{name: "github", transport: :stdio, command: ["npx", "@mcp/server-github"]},
+        %{name: "filesystem", transport: :stdio, command: ["npx", "@mcp/server-fs", "/ws"]}
+      ]
+
+      assert :ok = Manager.set_mcp_config("mcp-1", servers)
+
+      {:ok, loaded} = ProfileStore.load_profile("mcp-1")
+      assert length(loaded.metadata[:mcp_servers]) == 2
+
+      names = Enum.map(loaded.metadata[:mcp_servers], & &1[:name])
+      assert "github" in names
+      assert "filesystem" in names
+    end
+
+    test "preserves existing metadata when setting MCP config" do
+      profile =
+        make_profile("mcp-2",
+          display_name: "MCP Agent 2",
+          metadata: %{last_model_config: %{id: "test"}, custom: "value"}
+        )
+
+      ProfileStore.store_profile(profile)
+
+      assert :ok =
+               Manager.set_mcp_config("mcp-2", [
+                 %{name: "db", transport: :http, url: "http://localhost:3000"}
+               ])
+
+      {:ok, loaded} = ProfileStore.load_profile("mcp-2")
+      # MCP config added
+      assert length(loaded.metadata[:mcp_servers]) == 1
+      # Existing metadata preserved
+      assert loaded.metadata[:last_model_config] == %{id: "test"}
+      assert loaded.metadata[:custom] == "value"
+    end
+
+    test "returns error for nonexistent agent" do
+      assert {:error, :not_found} = Manager.set_mcp_config("nonexistent", [])
+    end
+
+    test "can set empty config to clear MCP servers" do
+      profile =
+        make_profile("mcp-3",
+          display_name: "MCP Agent 3",
+          metadata: %{mcp_servers: [%{name: "old"}]}
+        )
+
+      ProfileStore.store_profile(profile)
+
+      assert :ok = Manager.set_mcp_config("mcp-3", [])
+
+      {:ok, loaded} = ProfileStore.load_profile("mcp-3")
+      assert loaded.metadata[:mcp_servers] == []
+    end
+  end
+
+  describe "Manager.connect_mcp_server_list/2" do
+    test "returns :ok with empty list" do
+      assert :ok = Manager.connect_mcp_server_list("any-agent", [])
+    end
+
+    test "handles missing gateway gracefully" do
+      # In test context, Gateway may or may not be available
+      # Either way, should not crash
+      assert :ok =
+               Manager.connect_mcp_server_list("test-agent", [
+                 %{name: "test-server", transport: :stdio, command: ["echo"]}
+               ])
+    end
+  end
+
+  describe "MCP config serialization round-trip" do
+    test "MCP config survives profile store/load cycle" do
+      mcp_servers = [
+        %{name: "github", transport: :stdio, command: ["npx", "@mcp/github"]},
+        %{name: "api", transport: :http, url: "http://localhost:8080", env: %{"TOKEN" => "abc"}}
+      ]
+
+      profile =
+        make_profile("mcp-rt-1",
+          display_name: "Round Trip",
+          metadata: %{mcp_servers: mcp_servers}
+        )
+
+      ProfileStore.store_profile(profile)
+      {:ok, loaded} = ProfileStore.load_profile("mcp-rt-1")
+
+      loaded_servers = loaded.metadata[:mcp_servers] || loaded.metadata["mcp_servers"]
+      assert length(loaded_servers) == 2
+    end
+  end
+
+  # ============================================================================
   # Retry scheduling
   # ============================================================================
 

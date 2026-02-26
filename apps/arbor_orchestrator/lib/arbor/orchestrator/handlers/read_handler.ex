@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Handler.ScopedContext
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
@@ -125,26 +126,32 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
 
     workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
 
-    resolved =
-      if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
+    case SafePath.resolve_within(path, Path.expand(workdir)) do
+      {:ok, resolved} ->
+        case File.read(resolved) do
+          {:ok, content} ->
+            output_key = Map.get(node.attrs, "output_key", "read.#{node.id}")
 
-    case File.read(Path.expand(resolved)) do
-      {:ok, content} ->
-        output_key = Map.get(node.attrs, "output_key", "read.#{node.id}")
+            %Outcome{
+              status: :success,
+              notes: "Read #{byte_size(content)} bytes from #{resolved}",
+              context_updates: %{
+                output_key => content,
+                "last_response" => content
+              }
+            }
 
-        %Outcome{
-          status: :success,
-          notes: "Read #{byte_size(content)} bytes from #{resolved}",
-          context_updates: %{
-            output_key => content,
-            "last_response" => content
-          }
-        }
+          {:error, reason} ->
+            %Outcome{
+              status: :fail,
+              failure_reason: "File read error: #{inspect(reason)} for #{resolved}"
+            }
+        end
 
-      {:error, reason} ->
+      {:error, :path_traversal} ->
         %Outcome{
           status: :fail,
-          failure_reason: "File read error: #{inspect(reason)} for #{resolved}"
+          failure_reason: "path traversal blocked: #{path} escapes workdir #{workdir}"
         }
     end
   end

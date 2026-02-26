@@ -1,60 +1,118 @@
-// Drift Detection — Baseline Comparison with Threshold Gate
-// Compare current state against a baseline, flag if drift exceeds threshold.
+// Drift Detection — Multi-Dimensional Baseline Comparison
+// Compare current state against a baseline across multiple dimensions,
+// flag if drift exceeds threshold. Supports filesystem persistence,
+// CI-friendly JSON report output, and automatic baseline updates.
 //
-// Context in: baseline_key, current_key, threshold
-// Context out: drift_score, drifted (boolean), details
+// Context in:
+//   baseline_key           — identifier for baseline data (or baseline_path for filesystem)
+//   current_key            — identifier for current data
+//   threshold              — drift score threshold to flag (0.0-1.0, default "0.3")
+//   baseline_path          — (optional) filesystem path for persistent baseline
+//   auto_update_baseline   — (optional) "true" to update baseline after comparison
+//   logs_root              — (optional) directory for CI JSON report output
+//
+// Context out:
+//   drift_score            — overall drift score (0.0=identical, 1.0=completely different)
+//   drift.exceeded         — true if drift_score > threshold
+//   drift.dimensions       — per-dimension scores {length, keywords, structure, format}
+//   drift.status           — "ok", "drift_detected", or "first_run"
+//   drift.report_path      — path to JSON report (if logs_root set)
+//   drift.baseline_updated — true if baseline was auto-updated
 
 digraph DriftDetect {
   graph [
-    goal="Detect drift between baseline and current state",
+    goal="Detect drift between baseline and current state across multiple dimensions",
     label="Drift Detect"
   ]
 
   start [shape=Mdiamond]
 
-  // Read baseline data
-  read_baseline [
+  // Load baseline from context or filesystem (auto-create on first run)
+  load_baseline [
     type="read",
-    prompt="Read baseline data identified by baseline_key."
+    prompt="Load baseline data: if baseline_path is set, read from filesystem. If file doesn't exist, set drift.first_run=true and proceed (current data becomes baseline). Otherwise read from context key baseline_key."
   ]
 
   // Read current data
   read_current [
     type="read",
-    prompt="Read current data identified by current_key."
+    prompt="Read current data identified by current_key from context."
   ]
 
-  // Compare baseline vs current
+  // Check for first-run (no existing baseline)
+  check_first_run [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="drift.first_run"
+  ]
+
+  // First run: use current as baseline, no drift
+  init_baseline [
+    type="transform",
+    prompt="Set drift.status=first_run, drift_score=0.0, drift.exceeded=false. If baseline_path is set, write current data as initial baseline."
+  ]
+
+  // Multi-dimensional comparison
   compare [
     type="compute",
-    prompt="Compare baseline and current data. Calculate a drift_score (0.0 = identical, 1.0 = completely different). Produce detailed comparison in details field."
+    prompt="Compare baseline and current data across dimensions: length — character/token count ratio (abs(1 - current_len/baseline_len), capped at 1.0). keywords — extract key terms from both, compute Jaccard similarity (1 - overlap). structure — compare format patterns (headings, sections, code blocks), score structural deviation. format — compare response shape (JSON schema, markdown structure, list vs prose). Calculate per-dimension scores in drift.dimensions map. Compute overall drift_score as weighted average (keywords: 0.35, structure: 0.30, length: 0.20, format: 0.15). Set drift.exceeded=true if drift_score > threshold."
   ]
 
   // Check if drift exceeds threshold
   check_threshold [
     type="gate",
     shape=diamond,
-    prompt="Check if drift_score > threshold. Set drifted=true if exceeded, drifted=false otherwise."
+    predicate="expression",
+    expression="drift.exceeded"
   ]
 
   // Drift detected path
   drift_detected [
     type="transform",
-    prompt="Set drift.status=drift_detected. Include drift_score and details in output."
+    prompt="Set drift.status=drift_detected. Include drift_score, drift.dimensions with per-dimension breakdowns and the most-drifted dimension highlighted."
   ]
 
   // Within threshold path
   within_threshold [
     type="transform",
-    prompt="Set drift.status=ok. Include drift_score in output."
+    prompt="Set drift.status=ok. Include drift_score summary."
+  ]
+
+  // Generate CI-friendly JSON report
+  write_report [
+    type="transform",
+    prompt="Generate JSON report: {timestamp, drift_score, status, threshold, dimensions: {length, keywords, structure, format}, baseline_key, current_key}. If logs_root is set, write to logs_root/drift-report.json and set drift.report_path."
+  ]
+
+  // Check if baseline should be auto-updated
+  check_auto_update [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="drift.should_update"
+  ]
+
+  // Update baseline with current data
+  update_baseline [
+    type="transform",
+    prompt="Write current data as new baseline to baseline_path (if set) or update baseline_key in context. Set drift.baseline_updated=true."
   ]
 
   done [shape=Msquare]
 
   // Flow
-  start -> read_baseline -> read_current -> compare -> check_threshold
-  check_threshold -> drift_detected [condition="context.drifted=true"]
-  check_threshold -> within_threshold [condition="context.drifted!=true"]
-  drift_detected -> done
-  within_threshold -> done
+  start -> load_baseline -> read_current -> check_first_run
+  check_first_run -> init_baseline [condition="context.drift.first_run=true"]
+  check_first_run -> compare [condition="context.drift.first_run!=true"]
+  init_baseline -> write_report
+  compare -> check_threshold
+  check_threshold -> drift_detected [condition="context.drift.exceeded=true"]
+  check_threshold -> within_threshold [condition="context.drift.exceeded!=true"]
+  drift_detected -> write_report
+  within_threshold -> write_report
+  write_report -> check_auto_update
+  check_auto_update -> update_baseline [condition="context.drift.should_update=true"]
+  check_auto_update -> done [condition="context.drift.should_update!=true"]
+  update_baseline -> done
 }

@@ -194,6 +194,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   - `:decay_rate` - How much relevance decays per cycle (default: 0.10)
   - `:max_nodes_per_type` - Maximum nodes per type (default: 500)
   - `:prune_threshold` - Relevance below which to prune (default: 0.1)
+  - `:auto_embed` - Whether to auto-compute embeddings on add_node (default: true)
 
   ## Examples
 
@@ -205,7 +206,9 @@ defmodule Arbor.Memory.KnowledgeGraph do
     config = %{
       decay_rate: Keyword.get(opts, :decay_rate, @default_decay_rate),
       max_nodes_per_type: Keyword.get(opts, :max_nodes_per_type, @default_max_nodes_per_type),
-      prune_threshold: Keyword.get(opts, :prune_threshold, @default_prune_threshold)
+      prune_threshold: Keyword.get(opts, :prune_threshold, @default_prune_threshold),
+      auto_embed: Keyword.get(opts, :auto_embed,
+                    Application.get_env(:arbor_memory, :auto_embed, true))
     }
 
     %__MODULE__{
@@ -248,7 +251,13 @@ defmodule Arbor.Memory.KnowledgeGraph do
       skip_dedup = Map.get(node_data, :skip_dedup, false)
       metadata = Map.get(node_data, :metadata, %{})
       text = node_to_text(content, metadata, type)
-      embedding = compute_node_embedding(text)
+
+      embedding =
+        if Map.get(graph.config, :auto_embed, true) do
+          compute_node_embedding(text)
+        else
+          nil
+        end
 
       # Check for duplicates unless skipped
       case maybe_find_duplicate(graph, type, content, embedding, skip_dedup) do

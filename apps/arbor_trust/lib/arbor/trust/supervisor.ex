@@ -47,6 +47,7 @@ defmodule Arbor.Trust.Supervisor do
   alias Arbor.Trust.{
     CapabilitySync,
     CircuitBreaker,
+    ConfirmationTracker,
     Decay,
     EventHandler,
     EventStore,
@@ -137,6 +138,9 @@ defmodule Arbor.Trust.Supervisor do
          event_store: event_store_enabled
        ]}
     ]
+
+    # Confirmation tracker (confirm-then-automate)
+    children = children ++ [{ConfirmationTracker, []}]
 
     # Optional components
     children =

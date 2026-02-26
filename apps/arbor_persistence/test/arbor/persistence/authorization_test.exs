@@ -10,7 +10,7 @@ defmodule Arbor.Persistence.AuthorizationTest do
   the Security system, producing {:error, {:unauthorized, reason}}.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
@@ -21,6 +21,11 @@ defmodule Arbor.Persistence.AuthorizationTest do
   @unauthorized_agent "agent_unauthorized_#{:erlang.unique_integer([:positive])}"
 
   setup do
+    # Security infrastructure needed for authorization checks
+    ensure_started(Arbor.Security.Identity.Registry)
+    ensure_started(Arbor.Security.SystemAuthority)
+    ensure_started(Arbor.Security.CapabilityStore)
+
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     store_name = :"auth_test_store_#{:erlang.unique_integer([:positive])}"
     start_supervised!({Store.ETS, name: store_name})
@@ -30,6 +35,14 @@ defmodule Arbor.Persistence.AuthorizationTest do
     start_supervised!({Arbor.Persistence.EventLog.ETS, name: el_name})
 
     {:ok, store: store_name, el: el_name}
+  end
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
+    end
   end
 
   describe "authorize_write/6 rejection" do

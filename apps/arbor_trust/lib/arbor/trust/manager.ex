@@ -289,6 +289,9 @@ defmodule Arbor.Trust.Manager do
         # Broadcast event to trigger capability sync
         broadcast_trust_event(agent_id, :profile_created, %{tier: :untrusted})
 
+        # Grant initial tier capabilities via Policy
+        safe_grant_tier_capabilities(agent_id, profile.tier)
+
         {:reply, {:ok, profile}, state}
 
       {:error, _} = error ->
@@ -375,6 +378,26 @@ defmodule Arbor.Trust.Manager do
 
             # Broadcast event
             broadcast_trust_event(agent_id, event_type, metadata)
+
+            # Sync capabilities if tier changed
+            if old_profile.tier != new_profile.tier do
+              safe_sync_capabilities(agent_id, old_profile.tier, new_profile.tier)
+
+              safe_emit_signal(:tier_changed, %{
+                agent_id: agent_id,
+                old_tier: old_profile.tier,
+                new_tier: new_profile.tier,
+                old_score: old_profile.trust_score,
+                new_score: new_profile.trust_score,
+                direction:
+                  if(
+                    TierResolver.tier_index(new_profile.tier) >
+                      TierResolver.tier_index(old_profile.tier),
+                    do: :promotion,
+                    else: :demotion
+                  )
+              })
+            end
 
             # Check circuit breaker for negative events
             maybe_trigger_circuit_breaker(event, agent_id, state)
@@ -520,6 +543,14 @@ defmodule Arbor.Trust.Manager do
         )
 
         broadcast_trust_event(agent_id, :trust_frozen, %{reason: reason})
+
+        safe_emit_signal(:trust_frozen, %{
+          agent_id: agent_id,
+          reason: reason,
+          score: profile.trust_score,
+          tier: profile.tier
+        })
+
         {:ok, state}
 
       {:error, _} = error ->
@@ -549,12 +580,22 @@ defmodule Arbor.Trust.Manager do
           %{p | trust_score: new_score, tier: lower_tier}
         end)
 
+        # Sync capabilities to match new (lower) tier
+        safe_sync_capabilities(agent_id, profile.tier, lower_tier)
+
         Logger.warning(
           "Trust demoted for agent #{agent_id}: #{profile.tier} -> #{lower_tier}",
           agent_id: agent_id,
           old_tier: profile.tier,
           new_tier: lower_tier
         )
+
+        safe_emit_signal(:tier_demoted, %{
+          agent_id: agent_id,
+          old_tier: profile.tier,
+          new_tier: lower_tier,
+          reason: :circuit_breaker
+        })
     end
   end
 
@@ -626,6 +667,17 @@ defmodule Arbor.Trust.Manager do
     _ -> :ok
   end
 
+  defp safe_emit_signal(type, data) do
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :emit, 3) do
+      Arbor.Signals.emit(:trust, type, data)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   defp persist_to_event_store(event, state) do
     if state.event_store_enabled do
       case EventStore.record_event(event) do
@@ -643,5 +695,66 @@ defmodule Arbor.Trust.Manager do
     e ->
       Logger.warning("EventStore persistence failed: #{Exception.message(e)}")
       :ok
+  end
+
+  # Policy integration — safe wrappers that never crash the Manager
+  defp safe_grant_tier_capabilities(agent_id, tier) do
+    if policy_available?() do
+      case Arbor.Trust.Policy.grant_tier_capabilities(agent_id, tier) do
+        {:ok, count} ->
+          Logger.debug("Granted #{count} capabilities for #{agent_id} at tier #{tier}")
+
+        {:error, reason} ->
+          Logger.warning("Failed to grant tier capabilities for #{agent_id}: #{inspect(reason)}")
+      end
+    end
+  rescue
+    e -> Logger.warning("Policy.grant_tier_capabilities failed: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("Policy.grant_tier_capabilities exit: #{inspect(reason)}")
+  end
+
+  defp safe_sync_capabilities(agent_id, old_tier, new_tier) do
+    if policy_available?() do
+      case Arbor.Trust.Policy.sync_capabilities(agent_id, old_tier, new_tier) do
+        {:ok, result} ->
+          Logger.info(
+            "Synced capabilities for #{agent_id}: #{old_tier} -> #{new_tier} " <>
+              "(granted: #{result.granted}, revoked: #{result.revoked})",
+            agent_id: agent_id,
+            old_tier: old_tier,
+            new_tier: new_tier
+          )
+
+        {:error, reason} ->
+          Logger.warning("Failed to sync capabilities for #{agent_id}: #{inspect(reason)}")
+      end
+
+      # On demotion, reset confirmation history (graduated capabilities revert)
+      if Arbor.Trust.TierResolver.tier_index(new_tier) <
+           Arbor.Trust.TierResolver.tier_index(old_tier) do
+        safe_reset_confirmations(agent_id)
+      end
+    end
+  rescue
+    e -> Logger.warning("Policy.sync_capabilities failed: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("Policy.sync_capabilities exit: #{inspect(reason)}")
+  end
+
+  defp safe_reset_confirmations(agent_id) do
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
+      Arbor.Trust.ConfirmationTracker.reset(agent_id)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp policy_available? do
+    Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 end

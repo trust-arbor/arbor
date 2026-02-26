@@ -205,8 +205,9 @@ defmodule Arbor.AI.SessionBridge do
   # ── Runtime bridges to arbor_orchestrator ────────────────────────
 
   defp orchestrator_available? do
-    Code.ensure_loaded?(@session_module) and
-      Code.ensure_loaded?(@adapters_module)
+    # Session.Adapters was replaced by Jido actions (2026-02-25 extraction).
+    # Only Session module is required for orchestrator availability.
+    Code.ensure_loaded?(@session_module)
   end
 
   defp build_adapters(agent_id, trust_tier, provider, model, system_prompt, tools) do

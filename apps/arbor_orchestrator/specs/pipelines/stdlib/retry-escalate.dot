@@ -1,8 +1,21 @@
 // Retry with Model Escalation
 // Progressive retry pattern: try with preferred model, escalate to stronger models on failure.
+// Supports pre-emptive skip via upstream quality score, per-model timeout, and attempt history.
 //
-// Context in: prompt, model_list (CSV of models), max_retries (default "3")
-// Context out: result, model_used, attempts
+// Context in:
+//   prompt          — the prompt to execute
+//   model_list      — CSV of models to try (cheapest → strongest)
+//   max_retries     — maximum attempts (default "3")
+//   score_key       — (optional) context key holding upstream quality score (0.0-1.0)
+//   score_threshold — (optional) minimum score to attempt (default "0.3")
+//   timeout_ms      — (optional) per-attempt timeout in milliseconds
+//
+// Context out:
+//   result          — final LLM response (or last attempt on exhaustion)
+//   model_used      — model that produced the successful result
+//   retry.count     — total attempts made
+//   retry.history   — JSON array of per-attempt {model, status, reason} records
+//   retry.exhausted — true if max retries reached without success
 
 digraph RetryEscalate {
   graph [
@@ -12,45 +25,65 @@ digraph RetryEscalate {
 
   start [shape=Mdiamond]
 
-  // Initialize retry state
+  // Initialize retry state and parse model list
   init [
     type="transform",
-    prompt="Initialize retry tracking. Set retry.count=0, retry.success=false. Parse model_list CSV into an array. Set retry.current_model to first model in list."
+    prompt="Initialize: retry.count=0, retry.success=false, retry.exhausted=false, retry.history=[]. Parse model_list CSV into retry.models array. Set retry.current_model to first model. Evaluate score pre-check: if score_key is set in context, read its value and set retry.score_ok=(value >= score_threshold, default 0.3). If score_key not set, retry.score_ok=true."
   ]
 
-  // Attempt the LLM call
+  // Pre-check: skip attempt if upstream quality score is below threshold
+  score_precheck [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="retry.score_ok"
+  ]
+
+  // Attempt the LLM call with per-model timeout isolation
   attempt [
     type="compute",
-    prompt="Execute the prompt using retry.current_model. Store the response in result."
+    prompt="Execute the prompt using retry.current_model. Store the response in result. Set retry.success=true on valid response.",
+    timeout="$timeout_ms"
+  ]
+
+  // Record attempt outcome in history
+  record_attempt [
+    type="transform",
+    prompt="Append {model: retry.current_model, status: success|fail, reason: error_or_null} to retry.history array. If retry.success, set model_used=retry.current_model."
   ]
 
   // Check if the attempt succeeded
   check_success [
     type="gate",
     shape=diamond,
-    prompt="Check if the LLM call succeeded and produced a valid result."
+    predicate="expression",
+    expression="retry.success"
   ]
 
   // Escalate to next model
   escalate [
     type="transform",
-    prompt="Increment retry.count. Select the next model from the model list based on retry.count. If retry.count exceeds available models, cycle to the last model. Update retry.current_model."
+    prompt="Increment retry.count. Select next model: retry.models[min(retry.count, len-1)]. Update retry.current_model. Check exhaustion: set retry.exhausted=true if retry.count >= max_retries. Reset retry.score_ok=true for next attempt."
   ]
 
   // Check if max retries exceeded
   check_max [
     type="gate",
     shape=diamond,
-    prompt="Check if retry.count >= max_retries."
+    predicate="expression",
+    expression="retry.exhausted"
   ]
 
   done [shape=Msquare]
 
   // Flow
-  start -> init -> attempt -> check_success
+  start -> init -> score_precheck
+  score_precheck -> attempt [condition="context.retry.score_ok=true"]
+  score_precheck -> escalate [condition="context.retry.score_ok!=true"]
+  attempt -> record_attempt -> check_success
   check_success -> done [condition="context.retry.success=true"]
   check_success -> escalate [condition="context.retry.success!=true"]
   escalate -> check_max
   check_max -> done [condition="context.retry.exhausted=true"]
-  check_max -> attempt [condition="context.retry.exhausted!=true"]
+  check_max -> score_precheck [condition="context.retry.exhausted!=true"]
 }

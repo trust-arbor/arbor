@@ -67,14 +67,15 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
 
   describe "ReadHandler with registry" do
     test "dispatches file reads via FileReadable from registry" do
-      path = Path.join(System.tmp_dir!(), "registry_read_#{:rand.uniform(100_000)}.txt")
-      File.write!(path, "registry dispatched")
+      tmp = System.tmp_dir!()
+      filename = "registry_read_#{:rand.uniform(100_000)}.txt"
+      File.write!(Path.join(tmp, filename), "registry dispatched")
 
-      node = make_node("r1", %{"source" => "file", "path" => path})
+      node = make_node("r1", %{"source" => "file", "path" => filename})
       context = Context.new()
 
       result =
-        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, [])
+        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, workdir: tmp)
 
       assert %Outcome{status: :success} = result
       assert result.context_updates["last_response"] == "registry dispatched"
@@ -94,14 +95,15 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
     end
 
     test "default source is file" do
-      path = Path.join(System.tmp_dir!(), "registry_default_#{:rand.uniform(100_000)}.txt")
-      File.write!(path, "default file")
+      tmp = System.tmp_dir!()
+      filename = "registry_default_#{:rand.uniform(100_000)}.txt"
+      File.write!(Path.join(tmp, filename), "default file")
 
-      node = make_node("r3", %{"path" => path})
+      node = make_node("r3", %{"path" => filename})
       context = Context.new()
 
       result =
-        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, [])
+        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, workdir: tmp)
 
       assert %Outcome{status: :success} = result
       assert result.context_updates["last_response"] == "default file"
@@ -110,14 +112,15 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
     end
 
     test "custom output_key is respected" do
-      path = Path.join(System.tmp_dir!(), "registry_okey_#{:rand.uniform(100_000)}.txt")
-      File.write!(path, "custom key")
+      tmp = System.tmp_dir!()
+      filename = "registry_okey_#{:rand.uniform(100_000)}.txt"
+      File.write!(Path.join(tmp, filename), "custom key")
 
-      node = make_node("r4", %{"path" => path, "output_key" => "custom.output"})
+      node = make_node("r4", %{"path" => filename, "output_key" => "custom.output"})
       context = Context.new()
 
       result =
-        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, [])
+        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, workdir: tmp)
 
       assert %Outcome{status: :success} = result
       assert result.context_updates["custom.output"] == "custom key"
@@ -236,14 +239,16 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
         ArgumentError -> :ok
       end
 
-      path = Path.join(System.tmp_dir!(), "fallback_read_#{:rand.uniform(100_000)}.txt")
+      tmp = System.tmp_dir!()
+      filename = "fallback_read_#{:rand.uniform(100_000)}.txt"
+      path = Path.join(tmp, filename)
       File.write!(path, "fallback content")
 
-      node = make_node("fb1", %{"source" => "file", "path" => path})
+      node = make_node("fb1", %{"source" => "file", "path" => filename})
       context = Context.new()
 
       result =
-        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, [])
+        Arbor.Orchestrator.Handlers.ReadHandler.execute(node, context, nil, workdir: tmp)
 
       assert %Outcome{status: :success} = result
       assert result.context_updates["last_response"] == "fallback content"

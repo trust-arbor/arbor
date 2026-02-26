@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.CodergenHandler
-  alias Arbor.Orchestrator.Handlers.ConditionalHandler
+  alias Arbor.Orchestrator.Handlers.BranchHandler
   alias Arbor.Orchestrator.Handlers.ExitHandler
   alias Arbor.Orchestrator.Handlers.Handler
   alias Arbor.Orchestrator.Handlers.Helpers
@@ -1619,8 +1619,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
     end
 
     @tag :fast
-    test "returns :idempotent for conditional handler" do
-      assert Handler.idempotency_of(ConditionalHandler) == :idempotent
+    test "returns :idempotent for branch handler" do
+      assert Handler.idempotency_of(BranchHandler) == :idempotent
     end
 
     @tag :fast

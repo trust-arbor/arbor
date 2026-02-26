@@ -932,7 +932,8 @@ defmodule Arbor.Gateway.MCP.Handler do
     body =
       Enum.map_join(servers, "\n", fn {server_name, tools} ->
         tool_lines = format_mcp_server_tools(tools)
-        "### #{server_name}\n#{tool_lines}"
+        resource_lines = format_mcp_server_resources(server_name)
+        "### #{server_name}\n#{tool_lines}#{resource_lines}"
       end)
 
     "## mcp (external MCP servers)\n#{body}"
@@ -944,24 +945,55 @@ defmodule Arbor.Gateway.MCP.Handler do
     end)
   end
 
-  defp get_mcp_status do
-    case Arbor.Gateway.list_mcp_connections() do
-      [] ->
-        "# MCP Connections\n\nNo MCP servers connected.\n\n" <>
-          "Use `Arbor.Gateway.connect_mcp_server/2` to connect to an external MCP server."
+  defp format_mcp_server_resources(server_name) do
+    resources = Arbor.Gateway.list_mcp_resources(server_name)
 
-      connections ->
-        format_mcp_connection_table(connections)
+    case resources do
+      [] ->
+        ""
+
+      _ ->
+        lines =
+          Enum.map_join(resources, "\n", fn res ->
+            desc = if res.description != "", do: ": #{truncate(res.description, 60)}", else: ""
+            "  - [resource] #{res.uri}#{desc}"
+          end)
+
+        "\n#{lines}"
     end
   end
 
+  defp get_mcp_status do
+    client_section =
+      case Arbor.Gateway.list_mcp_connections() do
+        [] ->
+          "# MCP Client Connections\n\nNo external MCP servers connected."
+
+        connections ->
+          format_mcp_connection_table(connections)
+      end
+
+    endpoint_section =
+      case Arbor.Gateway.list_agent_endpoints() do
+        [] ->
+          "\n\n# Agent MCP Endpoints\n\nNo agent endpoints active."
+
+        endpoints ->
+          format_agent_endpoint_table(endpoints)
+      end
+
+    client_section <> endpoint_section
+  end
+
   defp format_mcp_connection_table(connections) do
-    header = "# MCP Connections\n\n| Server | Status | Tools |\n|--------|--------|-------|\n"
+    header =
+      "# MCP Connections\n\n| Server | Status | Tools | Resources |\n|--------|--------|-------|----------|\n"
 
     rows =
       Enum.map_join(connections, "\n", fn {name, _pid, status} ->
         tool_names = format_mcp_tool_names(name)
-        "| #{name} | #{status} | #{truncate(tool_names, 60)} |"
+        resource_names = format_mcp_resource_names(name)
+        "| #{name} | #{status} | #{truncate(tool_names, 40)} | #{truncate(resource_names, 40)} |"
       end)
 
     header <> rows
@@ -971,5 +1003,23 @@ defmodule Arbor.Gateway.MCP.Handler do
     server_name
     |> Arbor.Gateway.list_mcp_tools()
     |> Enum.map_join(", ", & &1.mcp_tool_name)
+  end
+
+  defp format_mcp_resource_names(server_name) do
+    server_name
+    |> Arbor.Gateway.list_mcp_resources()
+    |> Enum.map_join(", ", & &1.name)
+  end
+
+  defp format_agent_endpoint_table(endpoints) do
+    header =
+      "\n\n# Agent MCP Endpoints\n\n| Agent | PID | Tools |\n|-------|-----|-------|\n"
+
+    rows =
+      Enum.map_join(endpoints, "\n", fn {agent_id, pid, tool_count} ->
+        "| #{agent_id} | #{inspect(pid)} | #{tool_count} |"
+      end)
+
+    header <> rows
   end
 end

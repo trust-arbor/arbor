@@ -28,6 +28,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     :agent_id,
     connection_status: :disconnected,
     tools: [],
+    resources: [],
     server_info: nil,
     last_error: nil,
     connect_attempts: 0
@@ -73,6 +74,21 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   @spec refresh_tools(pid()) :: {:ok, [map()]} | {:error, term()}
   def refresh_tools(pid), do: GenServer.call(pid, :refresh_tools)
 
+  @doc "List discovered resources from the connected MCP server."
+  @spec list_resources(pid()) :: {:ok, [map()]} | {:error, term()}
+  def list_resources(pid), do: GenServer.call(pid, :list_resources)
+
+  @doc "Read a specific resource from the connected MCP server."
+  @spec read_resource(pid(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def read_resource(pid, uri, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    GenServer.call(pid, {:read_resource, uri, timeout}, timeout + 5_000)
+  end
+
+  @doc "Refresh the cached resource list from the server."
+  @spec refresh_resources(pid()) :: {:ok, [map()]} | {:error, term()}
+  def refresh_resources(pid), do: GenServer.call(pid, :refresh_resources)
+
   @doc "Disconnect from the MCP server."
   @spec disconnect(pid()) :: :ok
   def disconnect(pid), do: GenServer.call(pid, :disconnect)
@@ -103,6 +119,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       connection_status: state.connection_status,
       tool_count: length(state.tools),
       tools: Enum.map(state.tools, & &1["name"]),
+      resource_count: length(state.resources),
+      resources: Enum.map(state.resources, & &1["name"]),
       server_info: state.server_info,
       agent_id: state.agent_id,
       last_error: state.last_error,
@@ -133,6 +151,39 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       other ->
         {:reply, {:error, {:not_connected, other}}, state}
     end
+  end
+
+  def handle_call(:list_resources, _from, %{connection_status: :connected} = state) do
+    {:reply, {:ok, state.resources}, state}
+  end
+
+  def handle_call(:list_resources, _from, state) do
+    {:reply, {:error, {:not_connected, state.connection_status}}, state}
+  end
+
+  def handle_call({:read_resource, uri, timeout}, _from, state) do
+    case state.connection_status do
+      :connected ->
+        result = do_read_resource(state.client_pid, uri, timeout)
+        {:reply, result, state}
+
+      other ->
+        {:reply, {:error, {:not_connected, other}}, state}
+    end
+  end
+
+  def handle_call(:refresh_resources, _from, %{connection_status: :connected} = state) do
+    case discover_resources(state.client_pid) do
+      {:ok, resources} ->
+        {:reply, {:ok, resources}, %{state | resources: resources}}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(:refresh_resources, _from, state) do
+    {:reply, {:error, {:not_connected, state.connection_status}}, state}
   end
 
   def handle_call(:refresh_tools, _from, %{connection_status: :connected} = state) do
@@ -245,6 +296,17 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
             []
           end
 
+        # Discover resources if auto_discover is enabled
+        resources =
+          if Map.get(state.config, :auto_discover, true) do
+            case discover_resources(pid) do
+              {:ok, resources} -> resources
+              {:error, _} -> []
+            end
+          else
+            []
+          end
+
         # Get server info
         server_info =
           case ExMCP.Client.server_info(pid) do
@@ -252,12 +314,16 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
             _ -> nil
           end
 
-        Logger.info("[MCP:#{state.server_name}] Connected. #{length(tools)} tools available.")
+        Logger.info(
+          "[MCP:#{state.server_name}] Connected. #{length(tools)} tools, #{length(resources)} resources available."
+        )
 
         safe_emit(:mcp_connected, %{
           server_name: state.server_name,
           tool_count: length(tools),
-          tools: Enum.map(tools, & &1["name"])
+          tools: Enum.map(tools, & &1["name"]),
+          resource_count: length(resources),
+          resources: Enum.map(resources, & &1["name"])
         })
 
         schedule_health_check()
@@ -267,6 +333,7 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
           | client_pid: pid,
             connection_status: :connected,
             tools: tools,
+            resources: resources,
             server_info: server_info,
             last_error: nil,
             connect_attempts: 0
@@ -294,16 +361,19 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
       :exit, _ -> :ok
     end
 
-    %{state | client_pid: nil, connection_status: :disconnected, tools: []}
+    %{state | client_pid: nil, connection_status: :disconnected, tools: [], resources: []}
   end
 
   defp discover_tools(client_pid) do
     case ExMCP.Client.list_tools(client_pid, 10_000) do
+      {:ok, %{tools: tools}} when is_list(tools) ->
+        # ExMCP.Response struct — normalize tools to string-keyed maps
+        {:ok, Enum.map(tools, &normalize_tool/1)}
+
       {:ok, %{"tools" => tools}} when is_list(tools) ->
         {:ok, tools}
 
-      {:ok, other} ->
-        Logger.warning("[MCP] Unexpected list_tools response: #{inspect(other)}")
+      {:ok, _other} ->
         {:ok, []}
 
       {:error, _} = error ->
@@ -311,9 +381,73 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     end
   end
 
+  defp discover_resources(client_pid) do
+    case ExMCP.Client.list_resources(client_pid, 10_000) do
+      {:ok, %{resources: resources}} when is_list(resources) ->
+        # ExMCP.Response struct — normalize to string-keyed maps
+        {:ok, Enum.map(resources, &normalize_resource/1)}
+
+      {:ok, %{"resources" => resources}} when is_list(resources) ->
+        {:ok, resources}
+
+      {:ok, _other} ->
+        {:ok, []}
+
+      {:error, _} = error ->
+        error
+    end
+  rescue
+    _ -> {:ok, []}
+  catch
+    :exit, _ -> {:ok, []}
+  end
+
+  defp do_read_resource(client_pid, uri, timeout) do
+    case ExMCP.Client.read_resource(client_pid, uri, timeout: timeout) do
+      {:ok, %{contents: contents}} when is_list(contents) ->
+        # ExMCP.Response struct
+        {:ok, normalize_resource_contents(contents)}
+
+      {:ok, %{"contents" => contents}} when is_list(contents) ->
+        {:ok, normalize_resource_contents(contents)}
+
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp normalize_resource(resource) when is_map(resource) do
+    %{
+      "uri" => Map.get(resource, :uri) || Map.get(resource, "uri"),
+      "name" => Map.get(resource, :name) || Map.get(resource, "name"),
+      "description" => Map.get(resource, :description) || Map.get(resource, "description", ""),
+      "mimeType" => Map.get(resource, :mimeType) || Map.get(resource, "mimeType", "")
+    }
+  end
+
+  defp normalize_resource_contents(contents) when is_list(contents) do
+    Enum.map(contents, fn content ->
+      %{
+        "uri" => Map.get(content, :uri) || Map.get(content, "uri"),
+        "text" => Map.get(content, :text) || Map.get(content, "text"),
+        "blob" => Map.get(content, :blob) || Map.get(content, "blob"),
+        "mimeType" => Map.get(content, :mimeType) || Map.get(content, "mimeType")
+      }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+    end)
+  end
+
   defp do_call_tool(client_pid, tool_name, arguments, timeout) do
     case ExMCP.Client.call_tool(client_pid, tool_name, arguments, timeout) do
-      {:ok, %{"content" => content}} ->
+      {:ok, %{content: content}} when is_list(content) ->
+        # ExMCP.Response struct
+        {:ok, extract_content(content)}
+
+      {:ok, %{"content" => content}} when is_list(content) ->
         {:ok, extract_content(content)}
 
       {:ok, result} ->
@@ -325,10 +459,11 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   end
 
   defp extract_content(content) when is_list(content) do
-    # Extract text from MCP content blocks
     content
     |> Enum.map(fn
+      %{type: "text", text: text} -> text
       %{"type" => "text", "text" => text} -> text
+      %{type: "image", data: data} -> %{type: :image, data: data}
       %{"type" => "image", "data" => data} -> %{type: :image, data: data}
       other -> other
     end)
@@ -339,6 +474,15 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   end
 
   defp extract_content(other), do: other
+
+  # Normalize a tool map to ensure string keys are present (for ToolBridge compatibility)
+  defp normalize_tool(tool) when is_map(tool) do
+    %{
+      "name" => Map.get(tool, :name) || Map.get(tool, "name"),
+      "description" => Map.get(tool, :description) || Map.get(tool, "description", ""),
+      "inputSchema" => Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", %{})
+    }
+  end
 
   defp safe_start_client(opts) do
     ExMCP.Client.start_link(opts)
@@ -377,6 +521,9 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
 
         :native ->
           [transport: :native, server: Map.fetch!(config, :server)]
+
+        :test ->
+          [transport: :test, server: Map.fetch!(config, :server)]
       end
 
     # Add name if provided
