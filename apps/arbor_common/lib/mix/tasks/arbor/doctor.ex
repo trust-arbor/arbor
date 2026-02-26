@@ -38,9 +38,9 @@ defmodule Mix.Tasks.Arbor.Doctor do
       System.halt(1)
     end
 
-    if opts[:refresh], do: catalog_mod.refresh()
+    if opts[:refresh], do: apply(catalog_mod, :refresh, [])
 
-    entries = catalog_mod.all([])
+    entries = apply(catalog_mod, :all, [[]])
 
     if opts[:json] do
       print_json(entries)
