@@ -66,6 +66,13 @@ defmodule Arbor.Common.RegistryBaseTest do
   end
 
   defp stop_registry(registry) do
+    # Erase persistent_term snapshot before stopping
+    try do
+      :persistent_term.erase({registry, :core_snapshot})
+    rescue
+      ArgumentError -> :ok
+    end
+
     case GenServer.whereis(registry) do
       nil -> :ok
       pid -> GenServer.stop(pid)
@@ -95,13 +102,36 @@ defmodule Arbor.Common.RegistryBaseTest do
     end
   end
 
-  setup do
+  defp ensure_basic_registry do
     case GenServer.whereis(BasicRegistry) do
-      nil -> {:ok, _} = BasicRegistry.start_link()
-      _pid -> :ok
-    end
+      nil ->
+        {:ok, _} = BasicRegistry.start_link()
 
+      _pid ->
+        :ok
+    end
+  rescue
+    _ ->
+      Process.sleep(50)
+      {:ok, _} = BasicRegistry.start_link()
+  catch
+    :exit, _ ->
+      Process.sleep(50)
+      {:ok, _} = BasicRegistry.start_link()
+  end
+
+  defp safe_basic_reset do
     BasicRegistry.reset()
+  catch
+    :exit, _ ->
+      Process.sleep(50)
+      ensure_basic_registry()
+      BasicRegistry.reset()
+  end
+
+  setup do
+    ensure_basic_registry()
+    safe_basic_reset()
 
     on_exit(fn ->
       # Don't stop — let the process persist across tests to avoid heir issues.
@@ -423,6 +453,50 @@ defmodule Arbor.Common.RegistryBaseTest do
 
       :ok = CircuitBreakerRegistry.reset_failures("recovered")
       assert {:ok, GoodImpl} = CircuitBreakerRegistry.resolve_stable("recovered")
+
+      stop_registry(CircuitBreakerRegistry)
+    end
+  end
+
+  describe "persistent_term fast path" do
+    test "resolve uses persistent_term after lock_core" do
+      :ok = BasicRegistry.register("fast", GoodImpl)
+      :ok = BasicRegistry.lock_core()
+
+      # persistent_term should be populated
+      pt_key = {BasicRegistry, :core_snapshot}
+      snapshot = :persistent_term.get(pt_key, nil)
+      assert is_map(snapshot)
+      assert Map.has_key?(snapshot, "fast")
+
+      # Resolve should still work (via fast path)
+      assert {:ok, GoodImpl} = BasicRegistry.resolve("fast")
+      assert {:ok, GoodImpl} = BasicRegistry.resolve_stable("fast")
+    end
+
+    test "reset clears persistent_term" do
+      :ok = BasicRegistry.register("temp", GoodImpl)
+      :ok = BasicRegistry.lock_core()
+
+      pt_key = {BasicRegistry, :core_snapshot}
+      assert :persistent_term.get(pt_key, nil) != nil
+
+      BasicRegistry.reset()
+      assert :persistent_term.get(pt_key, nil) == nil
+    end
+
+    test "record_failure invalidates persistent_term" do
+      ensure_started(CircuitBreakerRegistry)
+
+      :ok = CircuitBreakerRegistry.register("failing", GoodImpl)
+      :ok = CircuitBreakerRegistry.lock_core()
+
+      pt_key = {CircuitBreakerRegistry, :core_snapshot}
+      assert :persistent_term.get(pt_key, nil) != nil
+
+      :ok = CircuitBreakerRegistry.record_failure("failing")
+      # Snapshot invalidated after failure
+      assert :persistent_term.get(pt_key, nil) == nil
 
       stop_registry(CircuitBreakerRegistry)
     end

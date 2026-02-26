@@ -75,6 +75,7 @@ defmodule Arbor.Common.RegistryBase do
       @allow_overwrite unquote(allow_overwrite)
       @max_failures unquote(max_failures)
       @heir_name Module.concat(__MODULE__, Heir)
+      @pt_key {__MODULE__, :core_snapshot}
 
       # --- Client API ---
 
@@ -105,6 +106,14 @@ defmodule Arbor.Common.RegistryBase do
 
       @impl Arbor.Contracts.Handler.Registry
       def resolve(name) when is_binary(name) do
+        # Fast path: persistent_term snapshot (zero-cost for core entries)
+        case pt_lookup(name) do
+          {:ok, _module} = ok -> ok
+          :miss -> ets_resolve(name)
+        end
+      end
+
+      defp ets_resolve(name) do
         case :ets.lookup(@table_name, name) do
           [{^name, module, _metadata, _failures, _core?}] ->
             if Code.ensure_loaded?(module) do
@@ -123,6 +132,16 @@ defmodule Arbor.Common.RegistryBase do
       Returns `{:error, :unstable}` if the entry exists but is over the failure threshold.
       """
       def resolve_stable(name) when is_binary(name) do
+        # Fast path: persistent_term snapshot only contains healthy core entries.
+        # If an entry has failures recorded, it won't be in the snapshot —
+        # record_failure invalidates the snapshot.
+        case pt_lookup(name) do
+          {:ok, _module} = ok -> ok
+          :miss -> ets_resolve_stable(name)
+        end
+      end
+
+      defp ets_resolve_stable(name) do
         case :ets.lookup(@table_name, name) do
           [{^name, module, _metadata, failures, _core?}] ->
             cond do
@@ -260,6 +279,9 @@ defmodule Arbor.Common.RegistryBase do
           :ets.insert(@table_name, {name, module, metadata, failures, true})
         end)
 
+        # Snapshot healthy entries to persistent_term for zero-cost reads
+        pt_snapshot()
+
         {:reply, :ok, %{state | core_locked: true}}
       end
 
@@ -269,6 +291,7 @@ defmodule Arbor.Common.RegistryBase do
 
       def handle_call(:reset, _from, state) do
         :ets.delete_all_objects(@table_name)
+        pt_invalidate()
         {:reply, :ok, %{state | core_locked: false}}
       end
 
@@ -277,6 +300,8 @@ defmodule Arbor.Common.RegistryBase do
           case :ets.lookup(@table_name, name) do
             [{^name, module, metadata, failures, core?}] ->
               :ets.insert(@table_name, {name, module, metadata, failures + 1, core?})
+              # Invalidate snapshot since this entry is now degraded
+              pt_invalidate()
               :ok
 
             [] ->
@@ -291,6 +316,8 @@ defmodule Arbor.Common.RegistryBase do
           case :ets.lookup(@table_name, name) do
             [{^name, module, metadata, _failures, core?}] ->
               :ets.insert(@table_name, {name, module, metadata, 0, core?})
+              # Re-snapshot since entry is healthy again
+              if state.core_locked, do: pt_snapshot()
               :ok
 
             [] ->
@@ -306,6 +333,9 @@ defmodule Arbor.Common.RegistryBase do
         Enum.each(entries, fn entry ->
           :ets.insert(@table_name, entry)
         end)
+
+        # Rebuild snapshot if core was locked
+        if core_locked, do: pt_snapshot(), else: pt_invalidate()
 
         {:reply, :ok, %{state | core_locked: core_locked}}
       end
@@ -338,6 +368,8 @@ defmodule Arbor.Common.RegistryBase do
              :ok <- validate_behaviour(module),
              :ok <- validate_entry(name, module, metadata) do
           :ets.insert(@table_name, {name, module, metadata, 0, false})
+          # Rebuild snapshot to include new entry
+          if state.core_locked, do: pt_snapshot()
           :ok
         end
       end
@@ -349,6 +381,8 @@ defmodule Arbor.Common.RegistryBase do
 
           [{^name, _module, _metadata, _failures, _core?}] ->
             :ets.delete(@table_name, name)
+            # Rebuild snapshot to remove entry
+            if state.core_locked, do: pt_snapshot()
             :ok
 
           [] ->
@@ -451,6 +485,43 @@ defmodule Arbor.Common.RegistryBase do
           end)
 
         pid
+      end
+
+      # --- persistent_term fast path ---
+
+      # Lookup in persistent_term snapshot. Returns {:ok, module} or :miss.
+      defp pt_lookup(name) do
+        case :persistent_term.get(@pt_key, nil) do
+          nil ->
+            :miss
+
+          map when is_map(map) ->
+            case Map.fetch(map, name) do
+              {:ok, module} -> {:ok, module}
+              :error -> :miss
+            end
+        end
+      end
+
+      # Build persistent_term snapshot from all current ETS entries.
+      # Only entries with 0 failures are included.
+      defp pt_snapshot do
+        map =
+          :ets.tab2list(@table_name)
+          |> Enum.reduce(%{}, fn {name, module, _meta, failures, _core?}, acc ->
+            if failures == 0 and Code.ensure_loaded?(module) do
+              Map.put(acc, name, module)
+            else
+              acc
+            end
+          end)
+
+        :persistent_term.put(@pt_key, map)
+      end
+
+      # Invalidate persistent_term snapshot (e.g., after recording a failure).
+      defp pt_invalidate do
+        :persistent_term.erase(@pt_key)
       end
 
       defoverridable validate_entry: 3
