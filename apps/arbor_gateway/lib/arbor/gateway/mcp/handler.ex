@@ -16,6 +16,8 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   use ExMCP.Server.Handler
 
+  alias Arbor.Gateway.MCP.ToolBridge
+
   require Logger
 
   @server_name "arbor"
@@ -147,7 +149,8 @@ defmodule Arbor.Gateway.MCP.Handler do
                 "capabilities",
                 "goals",
                 "pipelines",
-                "overview"
+                "overview",
+                "mcp"
               ]
             },
             agent_id: %{
@@ -202,26 +205,42 @@ defmodule Arbor.Gateway.MCP.Handler do
   # ===========================================================================
 
   defp list_actions(nil) do
-    case call_actions(:list_actions, []) do
-      {:ok, actions_map} ->
-        actions_map
-        |> Enum.sort_by(fn {category, _} -> category end)
-        |> Enum.map_join("\n\n", fn {category, modules} ->
-          tool_names =
-            Enum.map_join(modules, "\n", fn mod ->
-              try do
-                "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
-              rescue
-                _ -> "  - #{inspect(mod)}"
-              end
-            end)
+    native_section =
+      case call_actions(:list_actions, []) do
+        {:ok, actions_map} ->
+          actions_map
+          |> Enum.sort_by(fn {category, _} -> category end)
+          |> Enum.map_join("\n\n", fn {category, modules} ->
+            tool_names =
+              Enum.map_join(modules, "\n", fn mod ->
+                try do
+                  "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
+                rescue
+                  _ -> "  - #{inspect(mod)}"
+                end
+              end)
 
-          "## #{category}\n#{tool_names}"
-        end)
-        |> then(&("# Arbor Actions\n\n" <> &1))
+            "## #{category}\n#{tool_names}"
+          end)
 
-      {:error, reason} ->
-        "Error listing actions: #{inspect(reason)}"
+        {:error, _} ->
+          ""
+      end
+
+    mcp_section = format_mcp_tools_section()
+
+    sections =
+      ["# Arbor Actions", native_section, mcp_section]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+
+    sections
+  end
+
+  defp list_actions("mcp") do
+    case format_mcp_tools_section() do
+      "" -> "No MCP servers connected."
+      section -> section
     end
   end
 
@@ -304,6 +323,37 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp run_verified_action(action_name, params, agent_id) do
+    # Check if this is an MCP tool call
+    case ToolBridge.parse_tool_name(action_name) do
+      {:ok, server_name, tool_name} ->
+        run_mcp_tool(server_name, tool_name, params, agent_id)
+
+      :error ->
+        run_native_action(action_name, params, agent_id)
+    end
+  end
+
+  defp run_mcp_tool(server_name, tool_name, params, agent_id) do
+    case Arbor.Gateway.call_mcp_tool(server_name, tool_name, params,
+           agent_id: agent_id,
+           timeout: 30_000
+         ) do
+      {:ok, %{value: value}} ->
+        "## Success (MCP: #{server_name}/#{tool_name})\n\n#{format_result(value)}"
+
+      {:error, {:not_connected, name}} ->
+        "## Error\n\nMCP server '#{name}' is not connected. " <>
+          "Use arbor_status component=mcp to see connected servers."
+
+      {:error, :unauthorized, reason} ->
+        "## Unauthorized\n\n#{reason}"
+
+      {:error, reason} ->
+        "## Error\n\n#{inspect(reason)}"
+    end
+  end
+
+  defp run_native_action(action_name, params, agent_id) do
     case find_action_module(action_name) do
       {:ok, mod} ->
         # Atomize known param keys for the action
@@ -440,8 +490,13 @@ defmodule Arbor.Gateway.MCP.Handler do
     get_pipeline_status()
   end
 
+  defp get_status("mcp", _agent_id) do
+    get_mcp_status()
+  end
+
   defp get_status(component, _agent_id) do
-    "Unknown component '#{component}'. Use: agents, memory, signals, capabilities, goals, pipelines, overview"
+    "Unknown component '#{component}'. " <>
+      "Use: agents, memory, signals, capabilities, goals, pipelines, mcp, overview"
   end
 
   # ===========================================================================
@@ -848,5 +903,73 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   rescue
     _ -> default
+  end
+
+  # ===========================================================================
+  # MCP Client Helpers
+  # ===========================================================================
+
+  defp format_mcp_tools_section do
+    tools_by_server = collect_mcp_tools_by_server()
+
+    case tools_by_server do
+      [] -> ""
+      servers -> format_mcp_tools_body(servers)
+    end
+  end
+
+  defp collect_mcp_tools_by_server do
+    Arbor.Gateway.list_mcp_connections()
+    |> Enum.flat_map(fn {name, _pid, :connected} ->
+      case Arbor.Gateway.list_mcp_tools(name) do
+        [] -> []
+        tools -> [{name, tools}]
+      end
+    end)
+  end
+
+  defp format_mcp_tools_body(servers) do
+    body =
+      Enum.map_join(servers, "\n", fn {server_name, tools} ->
+        tool_lines = format_mcp_server_tools(tools)
+        "### #{server_name}\n#{tool_lines}"
+      end)
+
+    "## mcp (external MCP servers)\n#{body}"
+  end
+
+  defp format_mcp_server_tools(tools) do
+    Enum.map_join(tools, "\n", fn tool ->
+      "  - #{tool.name}: #{truncate(tool.description, 80)}"
+    end)
+  end
+
+  defp get_mcp_status do
+    case Arbor.Gateway.list_mcp_connections() do
+      [] ->
+        "# MCP Connections\n\nNo MCP servers connected.\n\n" <>
+          "Use `Arbor.Gateway.connect_mcp_server/2` to connect to an external MCP server."
+
+      connections ->
+        format_mcp_connection_table(connections)
+    end
+  end
+
+  defp format_mcp_connection_table(connections) do
+    header = "# MCP Connections\n\n| Server | Status | Tools |\n|--------|--------|-------|\n"
+
+    rows =
+      Enum.map_join(connections, "\n", fn {name, _pid, status} ->
+        tool_names = format_mcp_tool_names(name)
+        "| #{name} | #{status} | #{truncate(tool_names, 60)} |"
+      end)
+
+    header <> rows
+  end
+
+  defp format_mcp_tool_names(server_name) do
+    server_name
+    |> Arbor.Gateway.list_mcp_tools()
+    |> Enum.map_join(", ", & &1.mcp_tool_name)
   end
 end

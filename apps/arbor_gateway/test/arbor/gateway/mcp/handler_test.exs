@@ -318,6 +318,48 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   end
 
   # ===========================================================================
+  # MCP client integration in handler
+  # ===========================================================================
+
+  describe "MCP status component" do
+    test "returns no connections message when no MCP servers", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_status", %{"component" => "mcp"}, state)
+
+      [%{type: "text", text: text}] = result.content
+      assert text =~ "No MCP servers connected"
+    end
+  end
+
+  describe "MCP tool dispatch via arbor_run" do
+    test "returns not connected error for disconnected MCP tool", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_run",
+          %{
+            "action" => "mcp.nonexistent.some_tool",
+            "params" => %{},
+            "agent_id" => "test_agent"
+          },
+          state
+        )
+
+      [%{type: "text", text: text}] = result.content
+      assert text =~ "not connected" or text =~ "Error"
+    end
+  end
+
+  describe "MCP category in arbor_actions" do
+    test "returns no servers message when filtering by mcp category", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_actions", %{"category" => "mcp"}, state)
+
+      [%{type: "text", text: text}] = result.content
+      assert text =~ "No MCP servers connected"
+    end
+  end
+
+  # ===========================================================================
   # init/1
   # ===========================================================================
 
