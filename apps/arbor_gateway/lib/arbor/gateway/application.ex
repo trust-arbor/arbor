@@ -12,7 +12,15 @@ defmodule Arbor.Gateway.Application do
 
   @impl true
   def start(_type, _args) do
-    children =
+    # MCP client supervisor (always started — manages external MCP connections)
+    mcp_children =
+      if Application.get_env(:arbor_gateway, :mcp_client_enabled, true) do
+        [{Arbor.Gateway.MCP.ClientSupervisor, []}]
+      else
+        []
+      end
+
+    http_children =
       if Application.get_env(:arbor_gateway, :start_server, true) do
         port = Application.get_env(:arbor_gateway, :port, 4000)
 
@@ -32,6 +40,7 @@ defmodule Arbor.Gateway.Application do
         []
       end
 
+    children = mcp_children ++ http_children
     opts = [strategy: :one_for_one, name: Arbor.Gateway.Supervisor]
     Supervisor.start_link(children, opts)
   end
