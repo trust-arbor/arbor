@@ -82,10 +82,16 @@ defmodule Arbor.Actions.SessionLlm do
       intents = get_list(params, :active_intents, "session.active_intents")
       thoughts = get_list(params, :recent_thinking, "session.recent_thinking")
       percepts = get_list(params, :recent_percepts, "session.recent_percepts")
-      mode = params[:cognitive_mode] || params["cognitive_mode"] || params["session.cognitive_mode"] || "reflection"
-      turn = parse_int(params[:turn_count] || params["turn_count"] || params["session.turn_count"], 0)
 
-      prompt = build_heartbeat_context(goals, wm, kg, proposals, intents, thoughts, percepts, mode, turn)
+      mode =
+        params[:cognitive_mode] || params["cognitive_mode"] || params["session.cognitive_mode"] ||
+          "reflection"
+
+      turn =
+        parse_int(params[:turn_count] || params["turn_count"] || params["session.turn_count"], 0)
+
+      prompt =
+        build_heartbeat_context(goals, wm, kg, proposals, intents, thoughts, percepts, mode, turn)
 
       {:ok, %{heartbeat_prompt: prompt}}
     end
@@ -113,7 +119,17 @@ defmodule Arbor.Actions.SessionLlm do
 
     # --- Context assembly ---
 
-    defp build_heartbeat_context(goals, wm, kg, proposals, intents, thoughts, percepts, mode, turn) do
+    defp build_heartbeat_context(
+           goals,
+           wm,
+           kg,
+           proposals,
+           intents,
+           thoughts,
+           percepts,
+           mode,
+           turn
+         ) do
       goals_section = format_goals(goals)
       wm_section = format_working_memory(wm)
       kg_section = format_knowledge_graph(kg)
@@ -380,9 +396,7 @@ defmodule Arbor.Actions.SessionLlm do
     defp truncate_for_prompt(text), do: text
 
     defp get_list(params, atom_key, context_key) do
-      List.wrap(
-        params[atom_key] || params[to_string(atom_key)] || params[context_key] || []
-      )
+      List.wrap(params[atom_key] || params[to_string(atom_key)] || params[context_key] || [])
     end
 
     defp get_map(params, atom_key, context_key) do

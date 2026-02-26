@@ -239,9 +239,14 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   defp to_messages(msgs) do
     Enum.map(msgs, fn
-      %Message{} = m -> m
-      %{"role" => role, "content" => content} -> Message.new(String.to_existing_atom(role), content)
-      %{role: role, content: content} -> Message.new(role, content)
+      %Message{} = m ->
+        m
+
+      %{"role" => role, "content" => content} ->
+        Message.new(String.to_existing_atom(role), content)
+
+      %{role: role, content: content} ->
+        Message.new(role, content)
     end)
   end
 

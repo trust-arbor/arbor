@@ -438,6 +438,7 @@ defmodule Arbor.Orchestrator.Session do
     response =
       Map.get(result.context, "session.response") ||
         Map.get(result.context, "last_response", "")
+
     tool_history = Map.get(result.context, "session.tool_history", [])
     tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
     Builders.emit_turn_signal(new_state, result)
