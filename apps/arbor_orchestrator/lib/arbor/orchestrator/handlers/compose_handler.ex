@@ -6,7 +6,9 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
   Aliases: `graph.invoke`, `graph.compose`, `pipeline.run`,
            `stack.manager_loop`, `session.*`
 
-  Dispatches by `mode` attribute:
+  Dispatches by `mode` attribute via PipelineResolver. Falls back to
+  inline implementation when the registry is unavailable.
+
     - `"invoke"` (default) — delegates to SubgraphHandler (graph.invoke)
     - `"compose"` — delegates to SubgraphHandler (graph.compose)
     - `"pipeline"` — delegates to PipelineRunHandler
@@ -37,6 +39,20 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
   def execute(node, context, graph, opts) do
     mode = Map.get(node.attrs, "mode", "invoke")
 
+    case registry_resolve(mode) do
+      {:ok, handler_module} ->
+        safe_execute(handler_module, node, context, graph, opts)
+
+      {:error, _} ->
+        legacy_dispatch(mode, node, context, graph, opts)
+    end
+  end
+
+  @impl true
+  def idempotency, do: :side_effecting
+
+  # Legacy inline dispatch — used when registry is unavailable.
+  defp legacy_dispatch(mode, node, context, graph, opts) do
     case mode do
       "invoke" ->
         SubgraphHandler.execute(node, context, graph, opts)
@@ -58,8 +74,16 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
     end
   end
 
-  @impl true
-  def idempotency, do: :side_effecting
+  defp safe_execute(module, node, context, graph, opts) do
+    if function_exported?(module, :execute, 4) do
+      module.execute(node, context, graph, opts)
+    else
+      %Outcome{
+        status: :fail,
+        failure_reason: "Handler module #{inspect(module)} does not implement execute/4"
+      }
+    end
+  end
 
   defp delegate_to(module, node, context, graph, opts) do
     if Code.ensure_loaded?(module) and function_exported?(module, :execute, 4) do
@@ -69,6 +93,14 @@ defmodule Arbor.Orchestrator.Handlers.ComposeHandler do
         status: :fail,
         failure_reason: "Handler module #{inspect(module)} not available"
       }
+    end
+  end
+
+  defp registry_resolve(mode) do
+    if Process.whereis(Arbor.Common.PipelineResolver) do
+      Arbor.Common.PipelineResolver.resolve(mode)
+    else
+      {:error, :registry_unavailable}
     end
   end
 end

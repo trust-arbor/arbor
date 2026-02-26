@@ -44,10 +44,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     signer = Keyword.get(opts, :signer)
 
     with_actions_module(fn ->
-      action_map = build_action_map()
+      # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
       normalized = normalize_name(name)
 
-      case Map.get(action_map, normalized) || Map.get(action_map, name) do
+      action_module =
+        resolve_via_registry(normalized) ||
+          resolve_via_registry(name) ||
+          resolve_via_action_map(normalized, name)
+
+      case action_module do
         nil ->
           {:error, "Unknown action: #{name}"}
 
@@ -110,6 +115,26 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # ============================================================================
   # Private
   # ============================================================================
+
+  # Resolve an action name via ActionRegistry (O(1) ETS lookup).
+  defp resolve_via_registry(name) do
+    registry = Arbor.Common.ActionRegistry
+
+    if Process.whereis(registry) do
+      case registry.resolve(name) do
+        {:ok, module} -> module
+        {:error, _} -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  # Fallback: resolve via build_action_map when registry unavailable.
+  defp resolve_via_action_map(normalized, original) do
+    action_map = build_action_map()
+    Map.get(action_map, normalized) || Map.get(action_map, original)
+  end
 
   # Normalize underscore-format names to dot-format when no dots present.
   # E.g., "file_read" -> "file.read", but "file.read" stays unchanged.

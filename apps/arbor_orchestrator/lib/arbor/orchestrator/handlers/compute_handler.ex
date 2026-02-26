@@ -5,7 +5,9 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   Canonical type: `compute`
   Aliases: `codergen`, `routing.select`
 
-  Dispatches by `purpose` attribute:
+  Dispatches by `purpose` attribute via ComputeRegistry. Falls back to
+  inline implementation when the registry is unavailable.
+
     - `"llm"` (default) — delegates to CodergenHandler
     - `"routing"` — delegates to RoutingHandler
 
@@ -23,25 +25,45 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   @impl true
   def execute(node, context, graph, opts) do
     purpose = Map.get(node.attrs, "purpose", "llm")
-    dispatch(purpose, node, context, graph, opts)
+
+    case registry_resolve(purpose) do
+      {:ok, handler_module} ->
+        safe_execute(handler_module, node, context, graph, opts)
+
+      {:error, _} ->
+        legacy_dispatch(purpose, node, context, graph, opts)
+    end
   end
 
   @impl true
   def idempotency, do: :idempotent_with_key
 
-  defp dispatch("llm", node, context, graph, opts) do
-    CodergenHandler.execute(node, context, graph, opts)
+  # Legacy inline dispatch — used when registry is unavailable.
+  defp legacy_dispatch(purpose, node, context, graph, opts) do
+    case purpose do
+      "llm" ->
+        CodergenHandler.execute(node, context, graph, opts)
+
+      "routing" ->
+        delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)
+
+      unknown ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "Unknown compute purpose '#{unknown}' for node #{node.id}"
+        }
+    end
   end
 
-  defp dispatch("routing", node, context, graph, opts) do
-    delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)
-  end
-
-  defp dispatch(unknown, node, _context, _graph, _opts) do
-    %Outcome{
-      status: :fail,
-      failure_reason: "Unknown compute purpose '#{unknown}' for node #{node.id}"
-    }
+  defp safe_execute(module, node, context, graph, opts) do
+    if function_exported?(module, :execute, 4) do
+      module.execute(node, context, graph, opts)
+    else
+      %Outcome{
+        status: :fail,
+        failure_reason: "Handler module #{inspect(module)} does not implement execute/4"
+      }
+    end
   end
 
   defp delegate_to(module, node, context, graph, opts) do
@@ -52,6 +74,14 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
         status: :fail,
         failure_reason: "Handler module #{inspect(module)} not available"
       }
+    end
+  end
+
+  defp registry_resolve(purpose) do
+    if Process.whereis(Arbor.Common.ComputeRegistry) do
+      Arbor.Common.ComputeRegistry.resolve(purpose)
+    else
+      {:error, :registry_unavailable}
     end
   end
 end
