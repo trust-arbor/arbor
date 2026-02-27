@@ -152,12 +152,14 @@ defmodule Arbor.AI.AcpSession do
 
           case start_acp_client(client_opts) do
             {:ok, client} ->
+              # Client.start_link is synchronous — if it returns ok,
+              # the initialize handshake is complete and the client is ready
               state = %__MODULE__{
                 client: client,
                 provider: provider,
                 model: Keyword.get(opts, :model),
                 stream_callback: Keyword.get(opts, :stream_callback),
-                status: :starting,
+                status: :ready,
                 opts: opts
               }
 

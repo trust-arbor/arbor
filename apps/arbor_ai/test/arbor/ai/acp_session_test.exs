@@ -114,17 +114,7 @@ defmodule Arbor.AI.AcpSessionTest do
 
       status = AcpSession.status(session)
       assert status.provider == :test
-      assert status.status == :starting
-
-      GenServer.stop(session)
-    end
-
-    test "send_message fails when session not yet created" do
-      {:ok, session} =
-        AcpSession.start_link(provider: :test, client_opts: @test_client_opts)
-
-      # Status is :starting (not :ready) because create_session hasn't been called
-      assert {:error, {:not_ready, :starting}} = AcpSession.send_message(session, "hello")
+      assert status.status == :ready
 
       GenServer.stop(session)
     end
@@ -141,7 +131,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert status.provider == :test
       assert status.model == "test-model"
       assert status.session_id == nil
-      assert status.status == :starting
+      assert status.status == :ready
 
       GenServer.stop(session)
     end
