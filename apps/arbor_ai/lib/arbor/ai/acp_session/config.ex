@@ -20,8 +20,8 @@ defmodule Arbor.AI.AcpSession.Config do
   """
 
   @native_providers %{
-    gemini: %{command: ["gemini", "--acp"]},
-    opencode: %{command: ["opencode", "--acp"]},
+    gemini: %{command: ["gemini", "--experimental-acp"]},
+    opencode: %{command: ["opencode", "acp"]},
     goose: %{command: ["goose", "--acp"]},
     copilot: %{command: ["github-copilot", "--acp"]},
     kiro: %{command: ["kiro", "--acp"]},
