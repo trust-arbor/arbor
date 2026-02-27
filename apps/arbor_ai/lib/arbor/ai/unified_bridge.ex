@@ -35,7 +35,9 @@ defmodule Arbor.AI.UnifiedBridge do
     opencode_cli: "opencode_cli",
     # Local providers
     lmstudio: "lm_studio",
-    ollama: "ollama"
+    ollama: "ollama",
+    # ACP provider (universal — agent specified via provider_options)
+    acp: "acp"
   }
 
   # Legacy mapping: when caller uses `backend: :cli` with an API provider name,
@@ -192,7 +194,7 @@ defmodule Arbor.AI.UnifiedBridge do
       max_tokens: max_tokens,
       temperature: temperature,
       reasoning_effort: nil,
-      provider_options: %{}
+      provider_options: Keyword.get(opts, :provider_options, %{})
     }
 
     # Add thinking/reasoning effort if enabled
