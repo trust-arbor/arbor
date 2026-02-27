@@ -629,6 +629,59 @@ defmodule Arbor.AI do
     AcpSession.close(session)
   end
 
+  # -- ACP Pool API --
+
+  @doc """
+  Checkout an ACP session from the pool for the given agent.
+
+  Returns `{:ok, session_pid}` on success. The session must be returned
+  via `acp_checkin/1` when done.
+
+  ## Options
+
+  - `:model` — model override
+  - `:cwd` — working directory
+  - `:timeout` — checkout timeout (default: 30_000)
+  """
+  @spec acp_checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def acp_checkout(agent, opts \\ []) do
+    alias Arbor.AI.AcpPool
+
+    if Code.ensure_loaded?(AcpPool) and is_pid(Process.whereis(AcpPool)) do
+      AcpPool.checkout(agent, opts)
+    else
+      {:error, :pool_not_available}
+    end
+  end
+
+  @doc """
+  Return a session to the ACP pool for reuse.
+  """
+  @spec acp_checkin(pid()) :: :ok | {:error, term()}
+  def acp_checkin(session) do
+    alias Arbor.AI.AcpPool
+
+    if Code.ensure_loaded?(AcpPool) and is_pid(Process.whereis(AcpPool)) do
+      AcpPool.checkin(session)
+    else
+      {:error, :pool_not_available}
+    end
+  end
+
+  @doc """
+  Get ACP pool status for all providers.
+  """
+  @spec acp_pool_status() :: map() | {:error, term()}
+  def acp_pool_status do
+    alias Arbor.AI.AcpPool
+
+    if Code.ensure_loaded?(AcpPool) and is_pid(Process.whereis(AcpPool)) do
+      AcpPool.status()
+    else
+      {:error, :pool_not_available}
+    end
+  end
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================

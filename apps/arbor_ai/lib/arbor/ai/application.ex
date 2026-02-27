@@ -13,7 +13,7 @@ defmodule Arbor.AI.Application do
         buffered_store_child() ++
           [
             Arbor.AI.QuotaTracker
-          ] ++ budget_tracker_child() ++ usage_stats_child()
+          ] ++ budget_tracker_child() ++ usage_stats_child() ++ acp_pool_children()
       else
         []
       end
@@ -72,6 +72,20 @@ defmodule Arbor.AI.Application do
   defp usage_stats_child do
     if Application.get_env(:arbor_ai, :enable_stats_tracking, true) do
       [Arbor.AI.UsageStats]
+    else
+      []
+    end
+  end
+
+  # Conditionally add ACP session pool based on config
+  defp acp_pool_children do
+    if Application.get_env(:arbor_ai, :enable_acp_pool, false) do
+      pool_config = Application.get_env(:arbor_ai, :acp_pool_config, [])
+
+      [
+        Arbor.AI.AcpPool.Supervisor,
+        {Arbor.AI.AcpPool, pool_config}
+      ]
     else
       []
     end
