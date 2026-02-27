@@ -53,7 +53,9 @@ defmodule Arbor.AI.AcpSession do
     :stream_callback,
     :opts,
     :workspace,
-    status: :starting
+    status: :starting,
+    accumulated_text: "",
+    usage: %{input_tokens: 0, output_tokens: 0}
   ]
 
   # -- Public API --
@@ -216,12 +218,15 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:send_message, content, opts}, _from, state) do
-    state = %{state | status: :busy}
+    # Reset accumulated text before each prompt — streaming chunks arrive during prompt/4
+    state = %{state | status: :busy, accumulated_text: ""}
 
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(@acp_client, :prompt, [state.client, state.session_id, content, opts]) do
       {:ok, result} ->
-        new_state = %{state | status: :ready}
+        # Merge streaming text into result if agent didn't include it
+        result = merge_accumulated_text(result, state.accumulated_text)
+        new_state = %{state | status: :ready} |> accumulate_usage(result)
         emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
         {:reply, {:ok, result}, new_state}
 
@@ -237,7 +242,8 @@ defmodule Arbor.AI.AcpSession do
       provider: state.provider,
       model: state.model,
       session_id: state.session_id,
-      status: state.status
+      status: state.status,
+      usage: state.usage
     }
 
     {:reply, info, state}
@@ -259,8 +265,12 @@ defmodule Arbor.AI.AcpSession do
       end
     end
 
+    # Accumulate streaming text chunks (Gemini delivers text via session/update,
+    # not in prompt result)
+    state = accumulate_text(update, state)
+
     Logger.debug(
-      "ACP session #{session_id} update: #{inspect(Map.get(update, "type", "unknown"))}"
+      "ACP session #{session_id} update: #{inspect(Map.get(update, "kind", "unknown"))}"
     )
 
     {:noreply, state}
@@ -342,6 +352,50 @@ defmodule Arbor.AI.AcpSession do
       end
     end
   end
+
+  # -- Streaming Text Accumulation --
+
+  defp accumulate_text(%{"kind" => "text", "content" => content}, state)
+       when is_binary(content) do
+    %{state | accumulated_text: state.accumulated_text <> content}
+  end
+
+  defp accumulate_text(_, state), do: state
+
+  @doc false
+  def merge_accumulated_text(result, "") when is_map(result), do: result
+
+  def merge_accumulated_text(result, accumulated)
+      when is_map(result) and is_binary(accumulated) do
+    existing = Map.get(result, "text") || Map.get(result, :text)
+
+    if is_nil(existing) or existing == "" do
+      Map.put(result, "text", accumulated)
+    else
+      result
+    end
+  end
+
+  def merge_accumulated_text(result, _), do: result
+
+  # -- Usage Accumulation --
+
+  defp accumulate_usage(state, result) when is_map(result) do
+    usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
+
+    input = Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens, 0)
+    output = Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens, 0)
+
+    %{
+      state
+      | usage: %{
+          input_tokens: state.usage.input_tokens + input,
+          output_tokens: state.usage.output_tokens + output
+        }
+    }
+  end
+
+  defp accumulate_usage(state, _), do: state
 
   defp summarize_result(result) when is_map(result) do
     text = Map.get(result, "text") || Map.get(result, :text, "")

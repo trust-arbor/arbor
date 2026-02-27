@@ -31,8 +31,6 @@ defmodule Arbor.AI.UnifiedBridge do
     # CLI providers
     claude_cli: "claude_cli",
     codex_cli: "codex_cli",
-    gemini_cli: "gemini_cli",
-    opencode_cli: "opencode_cli",
     # Local providers
     lmstudio: "lm_studio",
     ollama: "ollama",
@@ -45,9 +43,7 @@ defmodule Arbor.AI.UnifiedBridge do
   # during the transition from the old CLI/API split.
   @cli_provider_map %{
     anthropic: "claude_cli",
-    openai: "codex_cli",
-    gemini: "gemini_cli",
-    opencode: "opencode_cli"
+    openai: "codex_cli"
   }
 
   @doc """

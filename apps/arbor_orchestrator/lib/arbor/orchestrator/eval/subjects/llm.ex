@@ -31,11 +31,9 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     ClaudeCli,
     CodexCli,
     Gemini,
-    GeminiCli,
     LMStudio,
     Ollama,
     OpenAI,
-    OpencodeCli,
     OpenRouter,
     Xai,
     Zai
@@ -53,9 +51,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     "gemini" => Gemini,
     # CLI backends — direct adapters calling the binary via Port
     "claude_cli" => ClaudeCli,
-    "codex_cli" => CodexCli,
-    "gemini_cli" => GeminiCli,
-    "opencode_cli" => OpencodeCli
+    "codex_cli" => CodexCli
   }
 
   @impl true
@@ -185,8 +181,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   # CLI backends
   defp default_model("claude_cli"), do: "sonnet"
   defp default_model("codex_cli"), do: "gpt5"
-  defp default_model("gemini_cli"), do: "auto"
-  defp default_model("opencode_cli"), do: "opencode/big-pickle"
   defp default_model(_), do: ""
 
   defp extract_text(%{text: text}), do: text

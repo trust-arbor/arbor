@@ -48,8 +48,6 @@ defmodule Arbor.AI.UnifiedBridgeTest do
     test "maps CLI provider atoms to orchestrator strings" do
       assert UnifiedBridge.resolve_provider(provider: :claude_cli) == "claude_cli"
       assert UnifiedBridge.resolve_provider(provider: :codex_cli) == "codex_cli"
-      assert UnifiedBridge.resolve_provider(provider: :gemini_cli) == "gemini_cli"
-      assert UnifiedBridge.resolve_provider(provider: :opencode_cli) == "opencode_cli"
     end
 
     test "maps local provider atoms to orchestrator strings" do
@@ -60,8 +58,6 @@ defmodule Arbor.AI.UnifiedBridgeTest do
     test "legacy backend: :cli maps API provider to CLI variant" do
       assert UnifiedBridge.resolve_provider(provider: :anthropic, backend: :cli) == "claude_cli"
       assert UnifiedBridge.resolve_provider(provider: :openai, backend: :cli) == "codex_cli"
-      assert UnifiedBridge.resolve_provider(provider: :gemini, backend: :cli) == "gemini_cli"
-      assert UnifiedBridge.resolve_provider(provider: :opencode, backend: :cli) == "opencode_cli"
     end
 
     test "backend: :cli with already-CLI provider passes through" do

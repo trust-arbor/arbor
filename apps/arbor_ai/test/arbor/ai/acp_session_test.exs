@@ -302,6 +302,68 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
+  describe "merge_accumulated_text/2" do
+    test "returns result unchanged when accumulated text is empty" do
+      result = %{"text" => "agent text", "stopReason" => "end_turn"}
+      assert AcpSession.merge_accumulated_text(result, "") == result
+    end
+
+    test "prefers agent-provided text over accumulated" do
+      result = %{"text" => "agent text", "stopReason" => "end_turn"}
+      merged = AcpSession.merge_accumulated_text(result, "streamed text")
+      assert merged["text"] == "agent text"
+    end
+
+    test "uses accumulated text when agent text is empty" do
+      result = %{"text" => "", "stopReason" => "end_turn"}
+      merged = AcpSession.merge_accumulated_text(result, "streamed text")
+      assert merged["text"] == "streamed text"
+    end
+
+    test "uses accumulated text when agent text is nil" do
+      result = %{"stopReason" => "end_turn"}
+      merged = AcpSession.merge_accumulated_text(result, "streamed text")
+      assert merged["text"] == "streamed text"
+    end
+
+    test "handles atom-keyed result maps" do
+      result = %{text: "", stop_reason: "end_turn"}
+      merged = AcpSession.merge_accumulated_text(result, "streamed")
+      assert merged["text"] == "streamed"
+    end
+
+    test "returns non-map result unchanged" do
+      assert AcpSession.merge_accumulated_text("raw", "accumulated") == "raw"
+    end
+  end
+
+  describe "status includes usage" do
+    @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+
+    test "status returns zero usage on fresh session" do
+      {:ok, session} =
+        AcpSession.start_link(provider: :test, client_opts: @test_client_opts)
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 0, output_tokens: 0}
+
+      GenServer.stop(session)
+    end
+  end
+
+  describe "Handler trust tier integration" do
+    alias Arbor.AI.AcpSession.Handler
+
+    test "authorize approves when Trust.Policy is not loaded (no arbor_trust)" do
+      # Trust.Policy may or may not be loaded in test env, but handler should
+      # never crash regardless — it falls back to :authorized
+      {:ok, state} = Handler.init(agent_id: "test-agent")
+
+      assert {:ok, %{"outcome" => "approved"}, ^state} =
+               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+    end
+  end
+
   describe "Arbor.AI facade" do
     @test_client_opts [command: ["echo", "test"], _skip_connect: true]
 

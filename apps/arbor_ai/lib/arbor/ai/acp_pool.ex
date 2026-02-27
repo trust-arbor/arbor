@@ -117,13 +117,13 @@ defmodule Arbor.AI.AcpPool do
 
   @impl true
   def handle_call({:checkout, provider, opts}, {caller_pid, _tag}, state) do
-    case find_idle_session(state, provider) do
-      {:ok, entry} ->
-        # Reuse idle session
+    case find_healthy_session(state, provider) do
+      {:ok, entry, state} ->
+        # Reuse healthy idle session
         state = checkout_session(state, entry.ref, caller_pid)
         {:reply, {:ok, entry.pid}, state}
 
-      :none ->
+      {:none, state} ->
         # Try to spawn a new one
         max = max_for_provider(state.config, provider)
         current = count_for_provider(state, provider)
@@ -255,22 +255,49 @@ defmodule Arbor.AI.AcpPool do
     end
   end
 
-  defp find_idle_session(state, provider) do
-    refs = Map.get(state.by_provider, provider, MapSet.new())
+  # Find an idle session that passes health check. Dead/unhealthy sessions
+  # are removed from the pool automatically.
+  defp find_healthy_session(state, provider) do
+    refs = Map.get(state.by_provider, provider, MapSet.new()) |> Enum.to_list()
+    try_healthy_refs(state, refs)
+  end
 
-    refs
-    |> Enum.find_value(fn ref ->
-      case Map.get(state.sessions, ref) do
-        %Entry{status: :idle, pid: pid} = entry ->
-          if Process.alive?(pid), do: entry, else: nil
+  defp try_healthy_refs(state, []), do: {:none, state}
 
-        _ ->
-          nil
+  defp try_healthy_refs(state, [ref | rest]) do
+    case Map.get(state.sessions, ref) do
+      %Entry{status: :idle, pid: pid} = entry ->
+        case validate_session(pid) do
+          :ok ->
+            {:ok, entry, state}
+
+          {:error, _reason} ->
+            Logger.debug("AcpPool: removing unhealthy session #{inspect(pid)}")
+            safe_close(pid)
+            state = remove_session(state, ref)
+            try_healthy_refs(state, rest)
+        end
+
+      _ ->
+        try_healthy_refs(state, rest)
+    end
+  end
+
+  defp validate_session(pid) do
+    if Process.alive?(pid) do
+      try do
+        status = AcpSession.status(pid)
+
+        if status.status in [:ready] do
+          :ok
+        else
+          {:error, :not_ready}
+        end
+      catch
+        :exit, _ -> {:error, :dead}
       end
-    end)
-    |> case do
-      nil -> :none
-      entry -> {:ok, entry}
+    else
+      {:error, :dead}
     end
   end
 
