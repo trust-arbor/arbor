@@ -9,7 +9,7 @@ defmodule Arbor.AI.AcpSessionTest do
   describe "Config.resolve/2" do
     test "resolves native ACP providers" do
       assert {:ok, opts} = Config.resolve(:gemini)
-      assert opts[:command] == ["gemini", "--acp"]
+      assert opts[:command] == ["gemini", "--experimental-acp"]
     end
 
     test "resolves adapted providers" do
