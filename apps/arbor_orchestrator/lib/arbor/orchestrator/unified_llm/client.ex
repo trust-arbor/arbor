@@ -25,11 +25,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     ClaudeCli,
     CodexCli,
     Gemini,
-    GeminiCli,
     LMStudio,
     Ollama,
     OpenAI,
-    OpencodeCli,
     OpenRouter,
     XAI,
     Zai,
@@ -786,8 +784,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
         api_adapters
         |> maybe_add_cli("claude_cli", ClaudeCli)
         |> maybe_add_cli("codex_cli", CodexCli)
-        |> maybe_add_cli("gemini_cli", GeminiCli)
-        |> maybe_add_cli("opencode_cli", OpencodeCli)
       else
         api_adapters
       end

@@ -31,11 +31,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
     ClaudeCli,
     CodexCli,
     Gemini,
-    GeminiCli,
     LMStudio,
     Ollama,
     OpenAI,
-    OpencodeCli,
     OpenRouter,
     XAI,
     Zai,
@@ -57,8 +55,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
     ZaiCodingPlan,
     ClaudeCli,
     CodexCli,
-    GeminiCli,
-    OpencodeCli,
     LMStudio,
     Ollama
   ]

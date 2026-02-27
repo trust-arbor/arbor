@@ -43,7 +43,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
 
     @tag :llm_local
     test "supports CLI provider names" do
-      for provider <- ~w(claude_cli codex_cli gemini_cli opencode_cli qwen_cli) do
+      for provider <- ~w(claude_cli codex_cli qwen_cli) do
         result = LLM.run("hello", provider: provider, timeout: 1_000)
         assert match?({:ok, _}, result) or match?({:error, _}, result)
       end

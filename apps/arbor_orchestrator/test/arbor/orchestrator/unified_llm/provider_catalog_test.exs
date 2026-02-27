@@ -44,7 +44,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
     test "returns all known providers including unavailable ones" do
       results = ProviderCatalog.all()
       assert is_list(results)
-      assert length(results) >= 13
+      assert length(results) >= 11
 
       # Each entry should have the expected shape
       for entry <- results do

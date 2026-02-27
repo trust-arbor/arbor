@@ -145,6 +145,33 @@ defmodule Arbor.AI.AcpSession.Handler do
   defp authorize_action(nil, _resource_uri, _action), do: :authorized
 
   defp authorize_action(agent_id, resource_uri, action) do
+    # Check trust tier confirmation mode first (if available), then security authorization
+    with :authorized <- check_confirmation_mode(agent_id, resource_uri),
+         :authorized <- check_security_authorize(agent_id, resource_uri, action) do
+      :authorized
+    end
+  end
+
+  # Trust tier integration via runtime bridge (arbor_ai does not depend on arbor_trust).
+  # Falls back to :authorized when Trust.Policy or Trust.Manager is unavailable.
+  defp check_confirmation_mode(agent_id, resource_uri) do
+    if Code.ensure_loaded?(Arbor.Trust.Policy) and
+         Process.whereis(Arbor.Trust.Manager) != nil do
+      case apply(Arbor.Trust.Policy, :confirmation_mode, [agent_id, resource_uri]) do
+        :auto -> :authorized
+        :gated -> {:denied, "requires human approval (gated by trust policy)"}
+        :deny -> {:denied, "denied by trust policy"}
+      end
+    else
+      :authorized
+    end
+  rescue
+    _ -> :authorized
+  catch
+    :exit, _ -> :authorized
+  end
+
+  defp check_security_authorize(agent_id, resource_uri, action) do
     if Process.whereis(Arbor.Security.CapabilityStore) do
       case Arbor.Security.authorize(agent_id, resource_uri, action) do
         {:ok, :authorized} -> :authorized
