@@ -44,6 +44,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
       opts
       |> Keyword.put(:model, request.model)
       |> Keyword.put(:timeout, timeout)
+      |> maybe_add(:workspace, extract_option(request, "workspace"))
+      |> maybe_add(:agent_id, extract_option(request, "agent_id") || opts[:agent_id])
 
     with {:ok, session} <- pool_checkout(agent, checkout_opts),
          {:ok, result} <- session_prompt(session, request, timeout) do
@@ -241,6 +243,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   end
 
   defp normalize_usage(_), do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
+
+  # Keys we extract from provider_options — both string and atom forms
+  @provider_option_keys %{
+    "workspace" => :workspace,
+    "agent_id" => :agent_id
+  }
+
+  defp extract_option(%Request{provider_options: opts}, key) when is_map(opts) do
+    atom_key = Map.get(@provider_option_keys, key, nil)
+    Map.get(opts, key) || (atom_key && Map.get(opts, atom_key))
+  end
+
+  defp extract_option(_, _), do: nil
 
   defp maybe_add(opts, _key, nil), do: opts
   defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)

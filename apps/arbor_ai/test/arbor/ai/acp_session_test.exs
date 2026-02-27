@@ -149,14 +149,16 @@ defmodule Arbor.AI.AcpSessionTest do
   describe "AcpSession.Handler" do
     alias Arbor.AI.AcpSession.Handler
 
-    test "init creates handler state" do
+    test "init creates handler state with workspace_root" do
       assert {:ok, state} = Handler.init(cwd: "/tmp/project")
       assert state.roots == [%{uri: "file:///tmp/project", name: "workspace"}]
+      assert state.workspace_root == "/tmp/project"
     end
 
-    test "init with no cwd creates empty roots" do
+    test "init with no cwd creates empty roots and nil workspace_root" do
       assert {:ok, state} = Handler.init([])
       assert state.roots == []
+      assert state.workspace_root == nil
     end
 
     test "handle_session_update returns ok" do
@@ -164,14 +166,21 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, ^state} = Handler.handle_session_update("s1", %{"kind" => "status"}, state)
     end
 
-    test "handle_permission_request auto-approves" do
+    test "handle_permission_request approves when no agent_id" do
       {:ok, state} = Handler.init([])
 
       assert {:ok, %{"outcome" => "approved"}, ^state} =
-               Handler.handle_permission_request("session-1", %{}, %{}, state)
+               Handler.handle_permission_request("session-1", %{"name" => "tool"}, %{}, state)
     end
 
-    test "handle_file_read reads existing file" do
+    test "handle_permission_request approves with agent_id but no CapabilityStore" do
+      {:ok, state} = Handler.init(agent_id: "test-agent")
+
+      assert {:ok, %{"outcome" => "approved"}, ^state} =
+               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+    end
+
+    test "handle_file_read reads existing file (no workspace root)" do
       {:ok, state} = Handler.init([])
       path = Path.join(System.tmp_dir!(), "acp_handler_test_#{:rand.uniform(100_000)}")
 
@@ -188,7 +197,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:error, _, _} = Handler.handle_file_read("s1", "/nonexistent/file", %{}, state)
     end
 
-    test "handle_file_write writes file" do
+    test "handle_file_write writes file (no workspace root)" do
       {:ok, state} = Handler.init([])
       path = Path.join(System.tmp_dir!(), "acp_handler_write_test_#{:rand.uniform(100_000)}")
 
@@ -200,6 +209,96 @@ defmodule Arbor.AI.AcpSessionTest do
       after
         File.rm(path)
       end
+    end
+  end
+
+  describe "Handler path validation (workspace_root set)" do
+    alias Arbor.AI.AcpSession.Handler
+
+    setup do
+      # Create a temp workspace directory
+      workspace = Path.join(System.tmp_dir!(), "acp_ws_test_#{:rand.uniform(100_000)}")
+      File.mkdir_p!(workspace)
+      {:ok, state} = Handler.init(cwd: workspace)
+
+      on_exit(fn -> File.rm_rf(workspace) end)
+      %{state: state, workspace: workspace}
+    end
+
+    test "file read within workspace root succeeds", %{state: state, workspace: workspace} do
+      file = Path.join(workspace, "allowed.txt")
+      File.write!(file, "hello")
+
+      assert {:ok, "hello", ^state} = Handler.handle_file_read("s1", file, %{}, state)
+    end
+
+    test "file write within workspace root succeeds", %{state: state, workspace: workspace} do
+      file = Path.join(workspace, "new_file.txt")
+
+      assert {:ok, ^state} = Handler.handle_file_write("s1", file, "data", %{}, state)
+      assert File.read!(file) == "data"
+    end
+
+    test "file read with path traversal is denied", %{state: state, workspace: workspace} do
+      # Create a file outside the workspace
+      outside = Path.join(System.tmp_dir!(), "outside_ws_#{:rand.uniform(100_000)}")
+      File.write!(outside, "secret")
+
+      on_exit(fn -> File.rm(outside) end)
+
+      # Try to traverse out
+      traversal_path = Path.join(workspace, "../" <> Path.basename(outside))
+      assert {:error, msg, _state} = Handler.handle_file_read("s1", traversal_path, %{}, state)
+      assert msg =~ "access denied"
+    end
+
+    test "file write with path traversal is denied", %{state: state, workspace: workspace} do
+      traversal_path = Path.join(workspace, "../../../tmp/evil.txt")
+
+      assert {:error, msg, _state} =
+               Handler.handle_file_write("s1", traversal_path, "bad", %{}, state)
+
+      assert msg =~ "access denied"
+    end
+
+    test "file read of absolute path outside workspace is denied", %{state: state} do
+      assert {:error, msg, _state} = Handler.handle_file_read("s1", "/etc/passwd", %{}, state)
+      assert msg =~ "access denied"
+    end
+
+    test "file write to absolute path outside workspace is denied", %{state: state} do
+      assert {:error, msg, _state} =
+               Handler.handle_file_write("s1", "/tmp/outside.txt", "x", %{}, state)
+
+      assert msg =~ "access denied"
+    end
+
+    test "nested subdirectory within workspace succeeds", %{
+      state: state,
+      workspace: workspace
+    } do
+      subdir = Path.join(workspace, "src/lib")
+      File.mkdir_p!(subdir)
+      file = Path.join(subdir, "module.ex")
+      File.write!(file, "defmodule M, do: nil")
+
+      assert {:ok, "defmodule M, do: nil", ^state} =
+               Handler.handle_file_read("s1", file, %{}, state)
+    end
+  end
+
+  describe "Handler workspace: {:directory, path}" do
+    alias Arbor.AI.AcpSession.Handler
+
+    test "init sets workspace_root from cwd option" do
+      dir = System.tmp_dir!()
+      {:ok, state} = Handler.init(cwd: dir)
+      assert state.workspace_root == dir
+    end
+
+    test "roots reflect workspace path" do
+      {:ok, state} = Handler.init(cwd: "/my/project")
+      assert [%{uri: "file:///my/project", name: "workspace"}] = state.roots
     end
   end
 
