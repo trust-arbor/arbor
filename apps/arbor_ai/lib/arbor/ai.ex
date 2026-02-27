@@ -45,6 +45,7 @@ defmodule Arbor.AI do
   @behaviour Arbor.Contracts.API.Embedding
 
   alias Arbor.AI.{
+    AcpSession,
     Backends.OllamaEmbedding,
     Backends.OpenAIEmbedding,
     Backends.TestEmbedding,
@@ -565,6 +566,67 @@ defmodule Arbor.AI do
   @spec budget_status() :: {:ok, map()}
   def budget_status do
     BudgetTracker.get_status()
+  end
+
+  # ── ACP Session API ──
+
+  @doc """
+  Start a new ACP coding agent session.
+
+  Returns `{:ok, pid}` where pid is the AcpSession GenServer.
+  The session must be initialized with `acp_create_session/2` before sending messages.
+
+  ## Options
+
+  - `:provider` — provider atom (required): `:claude`, `:codex`, `:gemini`, etc.
+  - `:model` — model string override
+  - `:system_prompt` — system prompt for the agent
+  - `:cwd` — working directory for the session
+  - `:stream_callback` — `fn(update) -> any()` for streaming events
+  - `:agent_id` — Arbor agent ID for security integration
+
+  ## Examples
+
+      {:ok, session} = Arbor.AI.acp_start_session(:claude, model: "opus")
+  """
+  @spec acp_start_session(atom(), keyword()) :: GenServer.on_start()
+  def acp_start_session(provider, opts \\ []) do
+    if Code.ensure_loaded?(AcpSession) do
+      AcpSession.start_link(Keyword.put(opts, :provider, provider))
+    else
+      {:error, :acp_not_available}
+    end
+  end
+
+  @doc """
+  Create a new session on a started ACP agent.
+
+  ## Options
+
+  - `:cwd` — working directory override
+  """
+  @spec acp_create_session(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
+  def acp_create_session(session, opts \\ []) do
+    AcpSession.create_session(session, opts)
+  end
+
+  @doc """
+  Send a message/prompt to an ACP session.
+
+  Blocks until the agent returns a response.
+  """
+  @spec acp_send_message(GenServer.server(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acp_send_message(session, content, opts \\ []) do
+    AcpSession.send_message(session, content, opts)
+  end
+
+  @doc """
+  Close an ACP session and disconnect from the agent.
+  """
+  @spec acp_close_session(GenServer.server()) :: :ok
+  def acp_close_session(session) do
+    AcpSession.close(session)
   end
 
   # ===========================================================================
