@@ -291,6 +291,8 @@ defmodule Arbor.AI.AcpPool do
       opts
       |> Keyword.put(:provider, provider)
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
+      |> Keyword.put_new(:workspace, Keyword.get(opts, :workspace))
+      |> Keyword.put_new(:agent_id, Keyword.get(opts, :agent_id))
 
     # Remove pool-specific opts before passing to AcpSession
     session_opts = Keyword.drop(session_opts, [:timeout])

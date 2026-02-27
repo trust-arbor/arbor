@@ -52,6 +52,7 @@ defmodule Arbor.AI.AcpSession do
     :model,
     :stream_callback,
     :opts,
+    :workspace,
     status: :starting
   ]
 
@@ -131,6 +132,10 @@ defmodule Arbor.AI.AcpSession do
     provider = Keyword.fetch!(opts, :provider)
 
     if acp_available?() do
+      # Create workspace if requested
+      workspace_result = maybe_create_workspace(opts)
+      cwd = workspace_cwd(workspace_result, opts)
+
       resolved =
         case Keyword.get(opts, :client_opts) do
           nil -> Config.resolve(provider, opts)
@@ -139,7 +144,7 @@ defmodule Arbor.AI.AcpSession do
 
       case resolved do
         {:ok, client_opts} ->
-          # Build client options
+          # Build client options with resolved workspace cwd
           client_opts =
             client_opts
             |> Keyword.put(:event_listener, self())
@@ -147,18 +152,17 @@ defmodule Arbor.AI.AcpSession do
             |> Keyword.put_new(:handler_opts,
               session_pid: self(),
               agent_id: Keyword.get(opts, :agent_id),
-              cwd: Keyword.get(opts, :cwd)
+              cwd: cwd
             )
 
           case start_acp_client(client_opts) do
             {:ok, client} ->
-              # Client.start_link is synchronous — if it returns ok,
-              # the initialize handshake is complete and the client is ready
               state = %__MODULE__{
                 client: client,
                 provider: provider,
                 model: Keyword.get(opts, :model),
                 stream_callback: Keyword.get(opts, :stream_callback),
+                workspace: workspace_result,
                 status: :ready,
                 opts: opts
               }
@@ -167,11 +171,13 @@ defmodule Arbor.AI.AcpSession do
               {:ok, state}
 
             {:error, reason} ->
+              cleanup_workspace(workspace_result)
               Logger.error("Failed to start ACP client for #{provider}: #{inspect(reason)}")
               {:stop, reason}
           end
 
         {:error, reason} ->
+          cleanup_workspace(workspace_result)
           Logger.error("Unknown ACP provider: #{inspect(provider)}")
           {:stop, reason}
       end
@@ -274,6 +280,7 @@ defmodule Arbor.AI.AcpSession do
   @impl true
   def terminate(_reason, state) do
     disconnect_client(state)
+    cleanup_workspace(state.workspace)
     :ok
   end
 
@@ -346,4 +353,55 @@ defmodule Arbor.AI.AcpSession do
   defp timeout(opts) do
     Keyword.get(opts, :timeout, 120_000)
   end
+
+  # -- Workspace Lifecycle --
+
+  defp maybe_create_workspace(opts) do
+    case Keyword.get(opts, :workspace) do
+      {:worktree, wt_opts} ->
+        id = System.unique_integer([:positive])
+        branch = Keyword.get(wt_opts, :branch, "acp/session-#{id}")
+        base = Keyword.get(wt_opts, :base_dir, System.tmp_dir!())
+        path = Path.join(base, "acp-worktree-#{id}")
+
+        case System.cmd("git", ["worktree", "add", path, "-b", branch], stderr_to_stdout: true) do
+          {_, 0} ->
+            {:worktree, path, branch}
+
+          {output, _} ->
+            Logger.warning("AcpSession: failed to create worktree: #{String.trim(output)}")
+            nil
+        end
+
+      {:directory, path} ->
+        if File.dir?(path) do
+          {:directory, path}
+        else
+          Logger.warning("AcpSession: workspace directory does not exist: #{path}")
+          nil
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
+  defp workspace_cwd({:directory, path}, _opts), do: path
+  defp workspace_cwd(_, opts), do: Keyword.get(opts, :cwd)
+
+  defp cleanup_workspace({:worktree, path, branch}) do
+    if File.dir?(path) do
+      System.cmd("git", ["worktree", "remove", path, "--force"], stderr_to_stdout: true)
+    end
+
+    System.cmd("git", ["branch", "-D", branch], stderr_to_stdout: true)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp cleanup_workspace(_), do: :ok
 end
