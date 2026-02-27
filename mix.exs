@@ -29,6 +29,9 @@ defmodule Arbor.MixProject do
       # Override to resolve conflicts
       {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
 
+      # Local ex_mcp for ACP development (switch back to hex before release)
+      {:ex_mcp, path: "/Users/azmaveth/code/ex_mcp", override: true},
+
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
