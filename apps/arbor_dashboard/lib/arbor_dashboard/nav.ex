@@ -37,8 +37,9 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/memory", label: "Memory", icon: "\u{1F9E0}", view: MemoryLive}
   ]
 
-  def on_mount(:default, _params, _session, socket) do
+  def on_mount(:default, _params, session, socket) do
     current_view = socket.view
+    agent_id = session["agent_id"]
 
     nav_items =
       Enum.map(@nav_entries, fn entry ->
@@ -50,6 +51,8 @@ defmodule Arbor.Dashboard.Nav do
       |> assign(:app_name, "Arbor Dashboard")
       |> assign(:nav_items, nav_items)
       |> assign(:node_info, node() |> to_string())
+      |> assign(:current_agent_id, agent_id)
+      |> assign(:authenticated?, agent_id != nil)
 
     {:cont, socket}
   end
