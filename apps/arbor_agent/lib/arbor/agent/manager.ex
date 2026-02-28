@@ -383,6 +383,76 @@ defmodule Arbor.Agent.Manager do
     end
   end
 
+  # ── Channels (unified message containers) ──────────────────────────
+
+  @doc """
+  Create a channel with the given members.
+
+  Returns `{:ok, channel_id}` on success. Bridges to `Arbor.Comms.create_channel/2`.
+  """
+  @spec create_channel(String.t(), [map()], keyword()) :: {:ok, String.t()} | {:error, term()}
+  def create_channel(name, member_specs, opts \\ []) do
+    members =
+      Enum.map(member_specs, fn spec ->
+        %{id: spec.id, name: spec.name, type: spec.type}
+      end)
+
+    if comms_available?() do
+      apply(Arbor.Comms, :create_channel, [name, Keyword.put(opts, :members, members)])
+    else
+      {:error, :comms_unavailable}
+    end
+  end
+
+  @doc "Send a message to a channel by ID."
+  @spec channel_send(String.t(), String.t(), String.t(), atom(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def channel_send(channel_id, sender_id, sender_name, sender_type, content) do
+    if comms_available?() do
+      apply(Arbor.Comms, :send_to_channel, [channel_id, sender_id, sender_name, sender_type, content])
+    else
+      {:error, :comms_unavailable}
+    end
+  end
+
+  @doc "Add a member to a channel."
+  @spec join_channel(String.t(), map()) :: :ok | {:error, term()}
+  def join_channel(channel_id, member) do
+    if comms_available?() do
+      apply(Arbor.Comms, :join_channel, [channel_id, member])
+    else
+      {:error, :comms_unavailable}
+    end
+  end
+
+  @doc "Remove a member from a channel."
+  @spec leave_channel(String.t(), String.t()) :: :ok | {:error, term()}
+  def leave_channel(channel_id, member_id) do
+    if comms_available?() do
+      apply(Arbor.Comms, :leave_channel, [channel_id, member_id])
+    else
+      {:error, :comms_unavailable}
+    end
+  end
+
+  @doc "List all active channels as `[{channel_id, pid}]`."
+  @spec list_channels() :: [{String.t(), pid()}]
+  def list_channels do
+    if comms_available?() do
+      apply(Arbor.Comms, :list_channels, [])
+    else
+      []
+    end
+  end
+
+  defp comms_available? do
+    Code.ensure_loaded?(Arbor.Comms) and
+      function_exported?(Arbor.Comms, :create_channel, 2)
+  end
+
+  # ── Group Chat (deprecated — use channels) ───────────────────────
+
+  @deprecated "Use create_channel/3 instead"
   @doc """
   Create a group chat with the given participants.
 
@@ -421,6 +491,7 @@ defmodule Arbor.Agent.Manager do
     GroupChat.create(name, participants: participants)
   end
 
+  @deprecated "Use channel_send/5 instead"
   @doc """
   Send a message to a group chat.
 
@@ -432,6 +503,7 @@ defmodule Arbor.Agent.Manager do
     GroupChat.send_message(group, sender_id, sender_name, sender_type, content)
   end
 
+  @deprecated "Use list_channels/0 instead"
   @doc """
   List all active group chats.
 
