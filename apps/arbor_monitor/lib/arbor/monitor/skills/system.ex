@@ -43,19 +43,22 @@ defmodule Arbor.Monitor.Skills.System do
 
   @impl true
   def check(metrics) do
-    # Check for system memory pressure
+    # Check for system memory pressure.
+    # Prefer available_memory (includes reclaimable/cached pages) over free_memory.
+    # On macOS, free_memory is only truly unused pages — always looks critically low
+    # because the OS aggressively caches files. available_memory is what matters.
     total = metrics[:system_total_memory] || 0
-    free = metrics[:system_free_memory] || metrics[:system_available_memory] || 0
+    available = metrics[:system_available_memory] || metrics[:system_free_memory] || 0
 
-    if total > 0 and free > 0 do
-      used_ratio = 1.0 - free / total
+    if total > 0 and available > 0 do
+      used_ratio = 1.0 - available / total
 
       if used_ratio > 0.95 do
         {:anomaly, :emergency,
          %{
            metric: :system_memory_pressure,
            used_ratio: used_ratio,
-           free_bytes: free,
+           free_bytes: available,
            total_bytes: total
          }}
       else
