@@ -62,6 +62,7 @@ defmodule Arbor.Agent.Lifecycle do
          agent_id = identity.agent_id,
          :ok <- persist_signing_key(agent_id, identity),
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
+         :ok <- maybe_delegate_from_parent(agent_id, opts),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
          :ok <- seed_template_identity(agent_id, character, opts) do
@@ -499,6 +500,32 @@ defmodule Arbor.Agent.Lifecycle do
 
     granted = Enum.count(results, &(&1 == :ok))
     Logger.info("Granted #{granted}/#{length(capabilities)} capabilities", agent_id: agent_id)
+    :ok
+  end
+
+  # Delegate capabilities from a parent (human or agent) to the newly created agent.
+  # Non-fatal: logs warnings on failure, always returns :ok for backwards compat.
+  defp maybe_delegate_from_parent(agent_id, opts) do
+    delegator_id = Keyword.get(opts, :delegator_id)
+    delegator_key = Keyword.get(opts, :delegator_private_key)
+
+    if delegator_id && delegator_key do
+      resources =
+        (opts[:capabilities] || [])
+        |> Enum.map(fn cap -> cap[:resource] || cap["resource"] end)
+        |> Enum.reject(&is_nil/1)
+
+      {:ok, caps} =
+        Arbor.Security.delegate_to_agent(delegator_id, agent_id,
+          delegator_private_key: delegator_key,
+          resources: resources
+        )
+
+      Logger.info(
+        "[Lifecycle] Delegated #{length(caps)} capabilities from #{delegator_id} to #{agent_id}"
+      )
+    end
+
     :ok
   end
 
