@@ -6,10 +6,9 @@ defmodule Arbor.AI.UnifiedBridge do
   and the unified Client's request format. Falls back gracefully when the
   orchestrator is not available.
 
-  This is the single execution path for all LLM generation. CLI and API
-  providers are unified — `claude_cli` is just another provider like
-  `anthropic` or `openai`. The adapter handles whether it's a Port or
-  HTTP request internally.
+  This is the single execution path for all LLM generation. API providers
+  and ACP agents are unified — `acp` routes to coding agents (claude,
+  codex, gemini) while API providers handle HTTP requests directly.
   """
 
   require Logger
@@ -28,22 +27,11 @@ defmodule Arbor.AI.UnifiedBridge do
     xai: "xai",
     zai: "zai",
     zai_coding_plan: "zai_coding_plan",
-    # CLI providers
-    claude_cli: "claude_cli",
-    codex_cli: "codex_cli",
     # Local providers
     lmstudio: "lm_studio",
     ollama: "ollama",
     # ACP provider (universal — agent specified via provider_options)
     acp: "acp"
-  }
-
-  # Legacy mapping: when caller uses `backend: :cli` with an API provider name,
-  # map to the corresponding CLI provider. This preserves backward compatibility
-  # during the transition from the old CLI/API split.
-  @cli_provider_map %{
-    anthropic: "claude_cli",
-    openai: "codex_cli"
   }
 
   @doc """
@@ -61,14 +49,14 @@ defmodule Arbor.AI.UnifiedBridge do
   treated identically.
 
   ## Options (arbor_ai format)
-  - :provider - atom like :anthropic, :openai, :claude_cli, :ollama
+  - :provider - atom like :anthropic, :openai, :acp, :ollama
   - :model - string like "claude-sonnet-4-5-20250514"
   - :system_prompt - optional string
   - :max_tokens - integer (default 1024)
   - :temperature - float (default 0.7)
   - :thinking - boolean for extended thinking
   - :thinking_budget - integer token budget for thinking
-  - :backend - legacy option (:cli/:api/:auto) — mapped to provider selection
+  - :backend - legacy option (ignored, kept for backward compat)
 
   Returns {:ok, response_map} | {:error, reason} | :unavailable
   """
@@ -224,19 +212,14 @@ defmodule Arbor.AI.UnifiedBridge do
   Resolve provider atom to orchestrator provider string.
 
   Handles three cases:
-  1. Direct provider atom (e.g., `:claude_cli`, `:anthropic`) → mapped directly
-  2. Legacy `backend: :cli` with API provider → mapped to CLI variant
-  3. Unknown provider → passed through as string (let orchestrator handle it)
+  1. Direct provider atom (e.g., `:anthropic`, `:acp`) → mapped directly
+  2. String provider → passed through unchanged
+  3. Unknown atom provider → converted to string
   """
   def resolve_provider(opts) do
     provider = Keyword.fetch!(opts, :provider)
-    backend = Keyword.get(opts, :backend)
 
     cond do
-      # Legacy: `backend: :cli` maps API provider to its CLI variant
-      backend == :cli and Map.has_key?(@cli_provider_map, provider) ->
-        Map.fetch!(@cli_provider_map, provider)
-
       # Direct mapping from known provider atoms
       Map.has_key?(@provider_map, provider) ->
         Map.fetch!(@provider_map, provider)

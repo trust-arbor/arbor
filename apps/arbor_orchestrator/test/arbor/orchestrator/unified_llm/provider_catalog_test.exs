@@ -44,7 +44,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
     test "returns all known providers including unavailable ones" do
       results = ProviderCatalog.all()
       assert is_list(results)
-      assert length(results) >= 11
+      assert length(results) >= 9
 
       # Each entry should have the expected shape
       for entry <- results do
@@ -62,7 +62,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
       # Core providers should always be listed (even if not available)
       assert "anthropic" in providers
       assert "openai" in providers
-      assert "claude_cli" in providers
       assert "ollama" in providers
     end
 
@@ -87,13 +86,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
       assert {:error, :not_found} = ProviderCatalog.get_contract("nonexistent_provider")
     end
 
-    test "claude_cli has CLI tool requirement" do
-      assert {:ok, contract} = ProviderCatalog.get_contract("claude_cli")
-      assert contract.type == :cli
-      assert length(contract.cli_tools) == 1
-      assert hd(contract.cli_tools).name == "claude"
-    end
-
     test "ollama has HTTP probe requirement" do
       assert {:ok, contract} = ProviderCatalog.get_contract("ollama")
       assert contract.type == :local
@@ -112,13 +104,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
 
     test "returns :not_found for unknown provider" do
       assert {:error, :not_found} = ProviderCatalog.capabilities("nonexistent_provider")
-    end
-
-    test "claude_cli has CLI-specific capabilities" do
-      assert {:ok, caps} = ProviderCatalog.capabilities("claude_cli")
-      assert caps.resume == true
-      assert caps.multi_turn == true
-      assert caps.thinking == true
     end
 
     test "ollama has embeddings capability" do

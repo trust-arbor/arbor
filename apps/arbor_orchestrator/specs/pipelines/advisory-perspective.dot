@@ -1,7 +1,7 @@
-// Advisory Council — Single Perspective via CLI Agent
+// Advisory Council — Single Perspective via ACP Agent
 //
-// Runs one advisory perspective through a CLI coding agent (claude, codex, gemini).
-// The CLI agent has built-in tools (file reading, search, shell) so it can
+// Runs one advisory perspective through an ACP coding agent (claude, codex, gemini).
+// The ACP agent has built-in tools (file reading, search, shell) so it can
 // research the codebase during its reasoning. No ToolLoop needed — the agent
 // IS the tool loop.
 //
@@ -10,7 +10,7 @@
 //   # Override graph attrs for the specific run:
 //   graph = %{graph | attrs: Map.merge(graph.attrs, %{
 //     "perspective" => "security",
-//     "provider" => "codex_cli",
+//     "provider" => "acp",
 //     "question" => "Should we restructure into minimal core + plugins?",
 //     "briefing_path" => ".arbor/council/2026-02-15-arbor-v2-minimal-core/briefing.md",
 //     "skill_path" => ".arbor/skills/advisory/security/SKILL.md"
@@ -21,7 +21,7 @@ digraph advisory_perspective {
   // Graph-level attrs — overridden at runtime
   goal="Advisory council perspective evaluation"
   perspective="security"
-  provider="codex_cli"
+  provider="acp"
   question="Evaluate the proposal from your perspective."
   briefing_path=".arbor/council/2026-02-15-arbor-v2-minimal-core/briefing.md"
   skill_path=".arbor/skills/advisory/security/SKILL.md"
