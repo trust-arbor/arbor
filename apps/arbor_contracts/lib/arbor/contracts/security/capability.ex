@@ -276,10 +276,12 @@ defmodule Arbor.Contracts.Security.Capability do
 
   defp valid_resource_uri?(uri) when is_binary(uri) do
     # Supports:
-    #   arbor://category/action/path   (specific resource)
-    #   arbor://category/action/        (prefix wildcard - matches any path)
+    #   arbor://**                       (root wildcard - all resources)
+    #   arbor://category/action/path     (specific resource)
+    #   arbor://category/action/         (prefix wildcard - matches any path)
     #   arbor://category/action          (exact action without path)
-    String.match?(uri, ~r/^arbor:\/\/[a-z_]+\/[a-z_]+(\/.*)?$/)
+    uri == "arbor://**" or
+      String.match?(uri, ~r/^arbor:\/\/[a-z_]+\/[a-z_]+(\/.*)?$/)
   end
 
   defp valid_resource_uri?(_), do: false

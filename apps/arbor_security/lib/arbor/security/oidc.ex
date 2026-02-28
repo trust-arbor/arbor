@@ -190,21 +190,15 @@ defmodule Arbor.Security.OIDC do
 
   defp ensure_capabilities(agent_id) do
     if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :grant, 1) do
-      capabilities = [
-        "arbor://orchestrator/execute/**",
-        "arbor://actions/execute/**"
-      ]
+         function_exported?(Arbor.Security, :assign_role, 3) do
+      role = Arbor.Security.Role.default_human_role()
 
-      Enum.each(capabilities, fn resource ->
-        # Idempotent — grant silently if already exists
-        case Arbor.Security.grant(principal: agent_id, resource: resource, action: :execute) do
-          {:ok, _cap} -> :ok
-          {:error, _} -> :ok
-        end
-      end)
-
-      :ok
+      case Arbor.Security.assign_role(agent_id, role) do
+        {:ok, _caps} -> :ok
+        {:error, reason} ->
+          Logger.warning("[OIDC] Failed to assign role #{role}: #{inspect(reason)}")
+          :ok
+      end
     else
       :ok
     end
