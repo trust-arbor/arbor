@@ -79,8 +79,11 @@ defmodule Arbor.Agent.Capabilities do
     # judge — Quality Evaluation (calls LLM)
     {"judge", :evaluate} => Arbor.Actions.Judge.Evaluate,
     {"judge", :quick} => Arbor.Actions.Judge.Quick,
-    # delegate — CLI Agent Execution
-    {"delegate", :execute} => Arbor.Actions.CliAgent.Execute
+    # acp — ACP Coding Agent Sessions
+    {"acp", :start_session} => Arbor.Actions.Acp.StartSession,
+    {"acp", :send_message} => Arbor.Actions.Acp.SendMessage,
+    {"acp", :session_status} => Arbor.Actions.Acp.SessionStatus,
+    {"acp", :close_session} => Arbor.Actions.Acp.CloseSession
   }
 
   # ── Mental Capabilities (Action-backed) ──────────────────────────────

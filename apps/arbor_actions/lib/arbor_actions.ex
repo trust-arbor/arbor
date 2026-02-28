@@ -22,7 +22,7 @@ defmodule Arbor.Actions do
   | Council | `Arbor.Actions.Council` | Advisory council consultation |
   | Consensus | `Arbor.Actions.Consensus` | Consensus propose/ask/await/check/decide |
   | Web | `Arbor.Actions.Web` | Web browsing, search, and page snapshots |
-  | CLI Agent | `Arbor.Actions.CliAgent` | CLI agent execution (Claude, OpenCode, Codex, etc.) |
+  | ACP | `Arbor.Actions.Acp` | ACP coding agent session management |
 
   ## Quick Start
 
@@ -280,9 +280,6 @@ defmodule Arbor.Actions do
         Arbor.Actions.Acp.SendMessage,
         Arbor.Actions.Acp.SessionStatus,
         Arbor.Actions.Acp.CloseSession
-      ],
-      cli_agent: [
-        Arbor.Actions.CliAgent.Execute
       ],
       background_checks: [
         Arbor.Actions.BackgroundChecks.Run
