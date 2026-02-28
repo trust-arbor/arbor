@@ -35,7 +35,7 @@ defmodule ArborAi.MixProject do
       # jido_ai and req_llm come from root mix.exs
       {:jido_ai, git: "https://github.com/agentjido/jido_ai.git", branch: "main", override: true},
       {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
-      {:ex_mcp, "~> 0.7"},
+      {:ex_mcp, path: "~/code/ex_mcp", override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
