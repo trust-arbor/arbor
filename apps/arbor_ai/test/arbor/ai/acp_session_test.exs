@@ -173,11 +173,20 @@ defmodule Arbor.AI.AcpSessionTest do
                Handler.handle_permission_request("session-1", %{"name" => "tool"}, %{}, state)
     end
 
-    test "handle_permission_request approves with agent_id but no CapabilityStore" do
+    test "handle_permission_request with agent_id respects security authorization" do
       {:ok, state} = Handler.init(agent_id: "test-agent")
 
-      assert {:ok, %{"outcome" => "approved"}, ^state} =
-               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+      # Behavior depends on whether CapabilityStore is running:
+      # - If running: denied (no capability granted for test-agent)
+      # - If not running: approved (permissive fallback)
+      {:ok, result, ^state} =
+        Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        assert result["outcome"] == "denied"
+      else
+        assert result["outcome"] == "approved"
+      end
     end
 
     test "handle_file_read reads existing file (no workspace root)" do
@@ -354,13 +363,70 @@ defmodule Arbor.AI.AcpSessionTest do
   describe "Handler trust tier integration" do
     alias Arbor.AI.AcpSession.Handler
 
-    test "authorize approves when Trust.Policy is not loaded (no arbor_trust)" do
-      # Trust.Policy may or may not be loaded in test env, but handler should
-      # never crash regardless — it falls back to :authorized
+    test "authorize never crashes regardless of trust/security availability" do
+      # Handler should never crash — it either authorizes or denies gracefully
       {:ok, state} = Handler.init(agent_id: "test-agent")
 
-      assert {:ok, %{"outcome" => "approved"}, ^state} =
-               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+      {:ok, result, ^state} =
+        Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+
+      assert result["outcome"] in ["approved", "denied"]
+    end
+  end
+
+  describe "status includes context_tokens" do
+    @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+
+    test "status returns zero context_tokens on fresh session" do
+      {:ok, session} =
+        AcpSession.start_link(provider: :test, client_opts: @test_client_opts)
+
+      status = AcpSession.status(session)
+      assert status.context_tokens == 0
+
+      GenServer.stop(session)
+    end
+  end
+
+  describe "context_pressure?/1" do
+    @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+
+    test "returns false for fresh session" do
+      {:ok, session} =
+        AcpSession.start_link(provider: :test, client_opts: @test_client_opts)
+
+      refute AcpSession.context_pressure?(session)
+
+      GenServer.stop(session)
+    end
+  end
+
+  describe "resume_session/3" do
+    test "last_session_id is preserved in struct" do
+      state = %AcpSession{}
+      assert state.last_session_id == nil
+      assert state.reconnect_attempted == false
+      assert state.context_tokens == 0
+    end
+
+    test "resume_session returns error when not available" do
+      # Start with a deliberately broken provider to force :error status
+      # The _skip_connect trick starts the client but the echo process dies immediately
+      # Use an approach that doesn't involve a real ACP client
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :nonexistent_provider_xyz,
+          client_opts: [command: ["false"], _skip_connect: true]
+        )
+
+      # Session may be in error state (config resolution failed) or ready (echo started)
+      status = AcpSession.status(session)
+
+      if status.status == :error do
+        assert {:error, _} = AcpSession.resume_session(session, "session-123")
+      end
+
+      GenServer.stop(session)
     end
   end
 

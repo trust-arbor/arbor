@@ -28,8 +28,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Anthropic,
-    ClaudeCli,
-    CodexCli,
     Gemini,
     LMStudio,
     Ollama,
@@ -53,8 +51,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
     XAI,
     Zai,
     ZaiCodingPlan,
-    ClaudeCli,
-    CodexCli,
     LMStudio,
     Ollama
   ]

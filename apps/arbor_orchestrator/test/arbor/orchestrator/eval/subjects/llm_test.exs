@@ -42,10 +42,11 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
     end
 
     @tag :llm_local
-    test "supports CLI provider names" do
-      for provider <- ~w(claude_cli codex_cli qwen_cli) do
+    test "returns error for removed CLI provider names" do
+      for provider <- ~w(claude_cli codex_cli) do
         result = LLM.run("hello", provider: provider, timeout: 1_000)
-        assert match?({:ok, _}, result) or match?({:error, _}, result)
+        assert {:error, msg} = result
+        assert msg =~ "unknown provider"
       end
     end
   end

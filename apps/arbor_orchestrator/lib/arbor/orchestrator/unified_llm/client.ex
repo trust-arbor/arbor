@@ -22,8 +22,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Acp,
     Anthropic,
-    ClaudeCli,
-    CodexCli,
     Gemini,
     LMStudio,
     Ollama,
@@ -779,14 +777,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
         if adapter, do: Map.put(acc, provider, adapter), else: acc
       end)
 
-    adapters =
-      if Keyword.get(opts, :discover_cli, true) do
-        api_adapters
-        |> maybe_add_cli("claude_cli", ClaudeCli)
-        |> maybe_add_cli("codex_cli", CodexCli)
-      else
-        api_adapters
-      end
+    adapters = api_adapters
 
     default_discover_local =
       Application.get_env(:arbor_orchestrator, :discover_local_providers, true)
@@ -803,14 +794,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     # ACP adapter — available when the AcpPool is running in arbor_ai
     if Keyword.get(opts, :discover_acp, true) do
       maybe_add_acp(adapters, "acp", Acp)
-    else
-      adapters
-    end
-  end
-
-  defp maybe_add_cli(adapters, name, mod) do
-    if mod.available?() do
-      Map.put(adapters, name, mod)
     else
       adapters
     end

@@ -3,8 +3,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   Unified eval subject that routes prompts to any LLM provider.
 
   Supports API providers (OpenRouter, Ollama, LM Studio, Anthropic, etc.)
-  and CLI backends (Claude Code, Codex, Gemini CLI, etc.) through the
-  UnifiedLLM adapter layer.
+  through the UnifiedLLM adapter layer. Coding agents are available via
+  the ACP adapter (`provider: "acp"` with `provider_options`).
 
   Input can be:
     - A string (used as the user message)
@@ -28,8 +28,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Anthropic,
-    ClaudeCli,
-    CodexCli,
     Gemini,
     LMStudio,
     Ollama,
@@ -48,10 +46,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     "openrouter" => OpenRouter,
     "zai" => Zai,
     "xai" => Xai,
-    "gemini" => Gemini,
-    # CLI backends — direct adapters calling the binary via Port
-    "claude_cli" => ClaudeCli,
-    "codex_cli" => CodexCli
+    "gemini" => Gemini
   }
 
   @impl true
@@ -166,7 +161,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   defp parse_input(%{prompt: prompt} = input), do: {prompt, input[:system]}
   defp parse_input(prompt) when is_binary(prompt), do: {prompt, nil}
 
-  # CLI providers don't need special options — they route directly via their adapter
   defp build_provider_options(_provider), do: %{}
 
   # API providers
@@ -178,9 +172,6 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
   defp default_model("zai"), do: "aurora-alpha"
   defp default_model("xai"), do: "grok-4-1-fast"
   defp default_model("gemini"), do: "gemini-2.5-flash"
-  # CLI backends
-  defp default_model("claude_cli"), do: "sonnet"
-  defp default_model("codex_cli"), do: "gpt5"
   defp default_model(_), do: ""
 
   defp extract_text(%{text: text}), do: text

@@ -48,6 +48,7 @@ defmodule Arbor.AI.AcpSession do
   defstruct [
     :client,
     :session_id,
+    :last_session_id,
     :provider,
     :model,
     :stream_callback,
@@ -55,6 +56,8 @@ defmodule Arbor.AI.AcpSession do
     :workspace,
     status: :starting,
     accumulated_text: "",
+    context_tokens: 0,
+    reconnect_attempted: false,
     usage: %{input_tokens: 0, output_tokens: 0}
   ]
 
@@ -117,6 +120,31 @@ defmodule Arbor.AI.AcpSession do
   @spec status(GenServer.server()) :: map()
   def status(session) do
     GenServer.call(session, :status)
+  end
+
+  @doc """
+  Resume an existing ACP session by ID.
+
+  Reconnects to the agent and loads the previous session state.
+  Useful for crash recovery or session migration.
+  """
+  @spec resume_session(GenServer.server(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def resume_session(session, session_id, opts \\ []) do
+    GenServer.call(session, {:resume_session, session_id, opts}, timeout(opts))
+  end
+
+  @doc """
+  Check if the session's context window is under pressure.
+
+  Returns true when the latest input token count exceeds 75% of a
+  typical 200K context window. The pool can use this to prefer fresh
+  sessions over context-heavy ones.
+  """
+  @spec context_pressure?(GenServer.server()) :: boolean()
+  def context_pressure?(session) do
+    info = status(session)
+    info.context_tokens > 150_000
   end
 
   @doc """
@@ -201,7 +229,14 @@ defmodule Arbor.AI.AcpSession do
     case apply(@acp_client, :new_session, [state.client, cwd, opts]) do
       {:ok, session_info} ->
         session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
-        new_state = %{state | session_id: session_id, status: :ready}
+
+        new_state = %{
+          state
+          | session_id: session_id,
+            last_session_id: session_id,
+            status: :ready
+        }
+
         {:reply, {:ok, session_info}, new_state}
 
       {:error, reason} = error ->
@@ -209,6 +244,42 @@ defmodule Arbor.AI.AcpSession do
         new_state = %{state | status: :error}
         emit_signal(:acp_session_error, new_state, %{error: reason, phase: :create})
         {:reply, error, new_state}
+    end
+  end
+
+  def handle_call({:resume_session, _session_id, _opts}, _from, %{status: :error} = state) do
+    {:reply, {:error, {:not_available, "ACP client not initialized"}}, state}
+  end
+
+  def handle_call({:resume_session, session_id, opts}, _from, state) do
+    cwd = Keyword.get(opts, :cwd) || Keyword.get(state.opts, :cwd)
+
+    result =
+      try do
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(@acp_client, :load_session, [state.client, session_id, cwd, opts])
+      rescue
+        e -> {:error, {:resume_failed, Exception.message(e)}}
+      catch
+        :exit, reason -> {:error, {:resume_exit, reason}}
+      end
+
+    case result do
+      {:ok, session_info} ->
+        new_state = %{
+          state
+          | session_id: session_id,
+            last_session_id: session_id,
+            status: :ready
+        }
+
+        emit_signal(:acp_session_started, new_state, %{resumed: true})
+        {:reply, {:ok, session_info}, new_state}
+
+      {:error, reason} = error ->
+        Logger.warning("AcpSession resume_session failed: #{inspect(reason)}")
+        emit_signal(:acp_session_error, state, %{error: reason, phase: :resume})
+        {:reply, error, state}
     end
   end
 
@@ -227,6 +298,7 @@ defmodule Arbor.AI.AcpSession do
         # Merge streaming text into result if agent didn't include it
         result = merge_accumulated_text(result, state.accumulated_text)
         new_state = %{state | status: :ready} |> accumulate_usage(result)
+        maybe_report_usage(new_state, result)
         emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
         {:reply, {:ok, result}, new_state}
 
@@ -243,7 +315,8 @@ defmodule Arbor.AI.AcpSession do
       model: state.model,
       session_id: state.session_id,
       status: state.status,
-      usage: state.usage
+      usage: state.usage,
+      context_tokens: state.context_tokens
     }
 
     {:reply, info, state}
@@ -279,7 +352,16 @@ defmodule Arbor.AI.AcpSession do
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{client: pid} = state) do
     Logger.warning("ACP client process died: #{inspect(reason)}")
     emit_signal(:acp_session_error, state, %{error: :client_down, reason: reason})
-    {:noreply, %{state | status: :error, client: nil}}
+
+    # Attempt auto-reconnect if we have a session to resume (max 1 try)
+    case maybe_reconnect(state) do
+      {:ok, new_state} ->
+        Logger.info("ACP client reconnected for session #{state.last_session_id}")
+        {:noreply, new_state}
+
+      :error ->
+        {:noreply, %{state | status: :error, client: nil}}
+    end
   end
 
   def handle_info(msg, state) do
@@ -378,7 +460,7 @@ defmodule Arbor.AI.AcpSession do
 
   def merge_accumulated_text(result, _), do: result
 
-  # -- Usage Accumulation --
+  # -- Usage & Context Tracking --
 
   defp accumulate_usage(state, result) when is_map(result) do
     usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
@@ -391,11 +473,106 @@ defmodule Arbor.AI.AcpSession do
       | usage: %{
           input_tokens: state.usage.input_tokens + input,
           output_tokens: state.usage.output_tokens + output
-        }
+        },
+        # Latest input_tokens approximates current context size
+        context_tokens: input
     }
   end
 
   defp accumulate_usage(state, _), do: state
+
+  # -- Cost Attribution --
+
+  defp maybe_report_usage(state, result) do
+    if Code.ensure_loaded?(Arbor.AI.BudgetTracker) and
+         Process.whereis(Arbor.AI.BudgetTracker) != nil do
+      usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
+      model = state.model || "unknown"
+
+      try do
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(Arbor.AI.BudgetTracker, :record_usage, [
+          provider_to_backend(state.provider),
+          %{
+            model: model,
+            input_tokens: Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens, 0),
+            output_tokens: Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens, 0)
+          }
+        ])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  defp provider_to_backend(:claude), do: :anthropic
+  defp provider_to_backend(:codex), do: :openai
+  defp provider_to_backend(:gemini), do: :google
+  defp provider_to_backend(other), do: other
+
+  # -- Crash Recovery --
+
+  defp maybe_reconnect(%{reconnect_attempted: true}), do: :error
+  defp maybe_reconnect(%{last_session_id: nil}), do: :error
+
+  defp maybe_reconnect(state) do
+    resolved =
+      case Keyword.get(state.opts, :client_opts) do
+        nil -> Config.resolve(state.provider, state.opts)
+        raw -> {:ok, raw}
+      end
+
+    case resolved do
+      {:ok, client_opts} ->
+        client_opts =
+          client_opts
+          |> Keyword.put(:event_listener, self())
+          |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
+          |> Keyword.put_new(:handler_opts,
+            session_pid: self(),
+            agent_id: Keyword.get(state.opts, :agent_id),
+            cwd: Keyword.get(state.opts, :cwd)
+          )
+
+        case start_acp_client(client_opts) do
+          {:ok, client} ->
+            # Try to resume the previous session
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            case apply(@acp_client, :load_session, [
+                   client,
+                   state.last_session_id,
+                   Keyword.get(state.opts, :cwd)
+                 ]) do
+              {:ok, _session_info} ->
+                {:ok,
+                 %{
+                   state
+                   | client: client,
+                     session_id: state.last_session_id,
+                     status: :ready,
+                     reconnect_attempted: true
+                 }}
+
+              {:error, _reason} ->
+                # Resume failed — kill the new client
+                disconnect_client(%{client: client})
+                :error
+            end
+
+          {:error, _} ->
+            :error
+        end
+
+      {:error, _} ->
+        :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
 
   defp summarize_result(result) when is_map(result) do
     text = Map.get(result, "text") || Map.get(result, :text, "")
