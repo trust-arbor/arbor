@@ -54,11 +54,16 @@ Add to your `.env` in the Arbor root:
 
 ```bash
 OIDC_ISSUER=http://localhost:8080
-OIDC_CLIENT_ID=<your-client-id>
-OIDC_CLIENT_SECRET=<your-client-secret>  # omit for PKCE / native apps
+OIDC_CLIENT_ID=<dashboard-client-id>
+OIDC_CLIENT_SECRET=<dashboard-client-secret>  # omit for PKCE
+OIDC_DEVICE_CLIENT_ID=<cli-client-id>         # from the Native app
 ```
 
+If using a single Native app for both dashboard and CLI, you can omit
+`OIDC_DEVICE_CLIENT_ID` (it defaults to `OIDC_CLIENT_ID`).
+
 Restart Arbor. The dashboard will redirect to Zitadel for authentication.
+CLI tools (`mix arbor.orchestrate`) will use the device flow.
 
 ## Architecture
 

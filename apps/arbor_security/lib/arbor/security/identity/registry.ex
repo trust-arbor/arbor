@@ -216,7 +216,10 @@ defmodule Arbor.Security.Identity.Registry do
     expected_id = Crypto.derive_agent_id(identity.public_key)
 
     cond do
-      identity.agent_id != expected_id ->
+      # Human identities derive agent_id from OIDC iss:sub, not from public key.
+      # The OIDC token verification authenticates the binding; IdentityStore ensures
+      # the same iss:sub always loads the same keypair.
+      not String.starts_with?(identity.agent_id, "human_") and identity.agent_id != expected_id ->
         {:reply, {:error, {:agent_id_mismatch, identity.agent_id, :expected, expected_id}}, state}
 
       Map.has_key?(state.by_agent_id, identity.agent_id) ->
