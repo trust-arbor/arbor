@@ -193,4 +193,24 @@ defmodule Arbor.Security.Config do
   def strict_identity_mode? do
     Application.get_env(@app, :strict_identity_mode, false)
   end
+
+  # ===========================================================================
+  # OIDC Configuration
+  # ===========================================================================
+
+  @doc """
+  Returns the full OIDC configuration.
+
+  Delegates to `Arbor.Security.OIDC.Config.get/0`.
+  """
+  @spec oidc_config() :: keyword()
+  defdelegate oidc_config, to: Arbor.Security.OIDC.Config, as: :get
+
+  @doc """
+  Whether OIDC authentication is enabled.
+
+  Returns `true` if at least one provider or device flow is configured.
+  """
+  @spec oidc_enabled?() :: boolean()
+  defdelegate oidc_enabled?, to: Arbor.Security.OIDC.Config, as: :enabled?
 end

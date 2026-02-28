@@ -81,7 +81,9 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp check_all_resources(token, _agent_id, []), do: token
 
   defp check_all_resources(token, agent_id, [resource | rest]) do
-    case apply(Arbor.Security, :authorize, [agent_id, resource, :execute]) do
+    auth_opts = build_auth_opts(token, resource)
+
+    case apply(Arbor.Security, :authorize, [agent_id, resource, :execute, auth_opts]) do
       {:ok, :authorized} ->
         check_all_resources(token, agent_id, rest)
 
@@ -102,6 +104,19 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
     _ -> token
   catch
     :exit, _ -> token
+  end
+
+  defp build_auth_opts(token, resource) do
+    case Map.get(token.assigns, :signer) do
+      signer when is_function(signer, 1) ->
+        case signer.(resource) do
+          {:ok, signed_request} -> [signed_request: signed_request]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end
   end
 
   defp security_available? do
