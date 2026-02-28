@@ -13,7 +13,8 @@ defmodule Arbor.Actions do
   | Shell | `Arbor.Actions.Shell` | Shell command execution |
   | File | `Arbor.Actions.File` | File system operations |
   | Git | `Arbor.Actions.Git` | Git repository operations |
-  | Comms | `Arbor.Actions.Comms` | Channel messaging |
+  | Comms | `Arbor.Actions.Comms` | External channel messaging |
+  | Channel | `Arbor.Actions.Channel` | Internal channel communication |
   | AI | `Arbor.Actions.AI` | AI/LLM text generation and code analysis |
   | Sandbox | `Arbor.Actions.Sandbox` | Docker sandbox environment management |
   | Historian | `Arbor.Actions.Historian` | Event log querying and causality tracing |
@@ -209,6 +210,13 @@ defmodule Arbor.Actions do
       comms: [
         Arbor.Actions.Comms.SendMessage,
         Arbor.Actions.Comms.PollMessages
+      ],
+      channel: [
+        Arbor.Actions.Channel.List,
+        Arbor.Actions.Channel.Read,
+        Arbor.Actions.Channel.Send,
+        Arbor.Actions.Channel.Join,
+        Arbor.Actions.Channel.Leave
       ],
       ai: [
         Arbor.Actions.AI.GenerateText,
