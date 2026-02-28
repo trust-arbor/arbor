@@ -195,6 +195,22 @@ defmodule Arbor.Security.Config do
   end
 
   # ===========================================================================
+  # Delegation Chain Verification
+  # ===========================================================================
+
+  @doc """
+  Whether delegation chain verification is enabled during authorization.
+
+  When `true` (default), capabilities with delegation chains have each
+  delegation record's signature verified against the delegator's public key.
+  When `false`, delegation chains are accepted without cryptographic verification.
+  """
+  @spec delegation_chain_verification_enabled?() :: boolean()
+  def delegation_chain_verification_enabled? do
+    Application.get_env(@app, :delegation_chain_verification_enabled, true)
+  end
+
+  # ===========================================================================
   # Role Configuration
   # ===========================================================================
 

@@ -37,7 +37,7 @@ defmodule Arbor.Agent.Manager do
   def start_agent(model_config, opts \\ []) do
     display_name = Keyword.get(opts, :display_name, default_display_name(model_config))
     template = Keyword.get(opts, :template) || resolve_template(model_config)
-    lifecycle_opts = [template: template] ++ Keyword.take(opts, [:capabilities, :initial_goals])
+    lifecycle_opts = [template: template] ++ Keyword.take(opts, [:capabilities, :initial_goals, :delegator_id, :delegator_private_key])
 
     with {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume

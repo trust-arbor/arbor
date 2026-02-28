@@ -107,19 +107,27 @@ defmodule Arbor.Security.Events do
   end
 
   @doc "Record a successful identity verification."
-  @spec record_identity_verification_succeeded(String.t()) :: :ok | {:error, term()}
-  def record_identity_verification_succeeded(agent_id) do
+  @spec record_identity_verification_succeeded(String.t(), keyword()) :: :ok | {:error, term()}
+  def record_identity_verification_succeeded(agent_id, opts \\ []) do
     dual_emit(:identity_verification_succeeded, %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      trace_id: Keyword.get(opts, :trace_id),
+      signature: Keyword.get(opts, :signature),
+      payload_hash: Keyword.get(opts, :payload_hash),
+      nonce: Keyword.get(opts, :nonce),
+      signed_at: Keyword.get(opts, :signed_at)
     })
   end
 
   @doc "Record a failed identity verification."
-  @spec record_identity_verification_failed(String.t(), term()) :: :ok | {:error, term()}
-  def record_identity_verification_failed(agent_id, reason) do
+  @spec record_identity_verification_failed(String.t(), term(), keyword()) :: :ok | {:error, term()}
+  def record_identity_verification_failed(agent_id, reason, opts \\ []) do
     dual_emit(:identity_verification_failed, %{
       agent_id: agent_id,
-      reason: inspect(reason)
+      reason: inspect(reason),
+      trace_id: Keyword.get(opts, :trace_id),
+      nonce: Keyword.get(opts, :nonce),
+      signed_at: Keyword.get(opts, :signed_at)
     })
   end
 
