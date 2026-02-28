@@ -3,7 +3,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   Group chat event handling extracted from ChatLive.
 
   Helper module (not a LiveComponent) — receives socket, returns socket.
-  Handles group creation modal, group messaging, and participant tracking.
+  Handles channel creation modal, channel messaging, and member tracking.
+  Uses the unified channel system via `Arbor.Agent.Manager` bridge.
   """
 
   import Phoenix.LiveView
@@ -72,14 +73,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
 
       participant_specs = build_participant_specs(selected_ids)
 
-      case Manager.create_group(group_name, participant_specs) do
-        {:ok, group_pid} ->
-          {group_id, _} =
-            Manager.list_groups()
-            |> Enum.find(fn {_id, pid} -> pid == group_pid end)
-
+      case Manager.create_channel(group_name, participant_specs) do
+        {:ok, channel_id} ->
           try do
-            Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "group_chat:#{group_id}")
+            Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "channel:#{channel_id}")
           rescue
             _ -> :ok
           end
@@ -89,8 +86,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
           socket =
             socket
             |> assign(
-              group_pid: group_pid,
-              group_id: group_id,
+              group_pid: nil,
+              group_id: channel_id,
               group_participants: participants,
               group_mode: true,
               show_group_modal: false
@@ -100,7 +97,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
           {:noreply, socket}
 
         {:error, reason} ->
-          {:noreply, assign(socket, error: "Failed to create group: #{inspect(reason)}")}
+          {:noreply, assign(socket, error: "Failed to create channel: #{inspect(reason)}")}
       end
     end
   end
@@ -110,60 +107,50 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   end
 
   def handle_event("show-join-groups", _params, socket) do
-    groups = Manager.list_groups()
-    {:noreply, assign(socket, existing_groups: groups, show_group_modal: true)}
+    channels = Manager.list_channels()
+    {:noreply, assign(socket, existing_groups: channels, show_group_modal: true)}
   end
 
-  def handle_event("join-group", %{"group-id" => group_id}, socket) do
-    groups = Manager.list_groups()
+  def handle_event("join-group", %{"group-id" => channel_id}, socket) do
+    # Add human as member
+    Manager.join_channel(channel_id, %{
+      id: "human_primary",
+      name: "User",
+      type: :human
+    })
 
-    case Enum.find(groups, fn {id, _pid} -> id == group_id end) do
-      {^group_id, group_pid} ->
-        # Add human as participant
-        Arbor.Agent.GroupChat.add_participant(group_pid, %{
-          id: "human_primary",
-          name: "User",
-          type: :human,
-          host_pid: nil
-        })
-
-        # Subscribe to group messages
-        try do
-          Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "group_chat:#{group_id}")
-        rescue
-          _ -> :ok
-        end
-
-        # Get current participants
-        participants =
-          try do
-            Arbor.Agent.GroupChat.get_participants(group_pid)
-            |> Enum.map(fn p ->
-              %{id: p.id, name: p.name, type: p.type, color: sender_color_hue(p.id)}
-            end)
-          rescue
-            _ -> []
-          catch
-            :exit, _ -> []
-          end
-
-        socket =
-          socket
-          |> assign(
-            group_pid: group_pid,
-            group_id: group_id,
-            group_participants: participants,
-            group_mode: true,
-            show_group_modal: false,
-            existing_groups: []
-          )
-          |> stream(:messages, [], reset: true)
-
-        {:noreply, socket}
-
-      nil ->
-        {:noreply, assign(socket, error: "Group not found")}
+    # Subscribe to channel messages
+    try do
+      Phoenix.PubSub.subscribe(Arbor.Dashboard.PubSub, "channel:#{channel_id}")
+    rescue
+      _ -> :ok
     end
+
+    # Get current members
+    participants =
+      case comms_channel_members(channel_id) do
+        {:ok, members} ->
+          Enum.map(members, fn m ->
+            %{id: m.id, name: m.name, type: m.type, color: sender_color_hue(m.id)}
+          end)
+
+        _ ->
+          []
+      end
+
+    socket =
+      socket
+      |> assign(
+        group_pid: nil,
+        group_id: channel_id,
+        group_participants: participants,
+        group_mode: true,
+        show_group_modal: false,
+        existing_groups: []
+      )
+      |> stream(:messages, [], reset: true)
+
+    {:noreply, socket}
   end
 
   def handle_event("leave-group", _params, socket) do
@@ -171,7 +158,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
       try do
         Phoenix.PubSub.unsubscribe(
           Arbor.Dashboard.PubSub,
-          "group_chat:#{socket.assigns.group_id}"
+          "channel:#{socket.assigns.group_id}"
         )
       rescue
         _ -> :ok
@@ -193,7 +180,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
 
   # ── handle_info callbacks ─────────────────────────────────────────
 
-  def handle_info({:group_message, message}, socket) do
+  def handle_info({:channel_message, message}, socket) do
     if message.sender_id == "human_primary" and message.sender_type == :human do
       {:noreply, socket}
     else
@@ -222,16 +209,38 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     end
   end
 
-  def handle_info({:group_participant_joined, participant}, socket) do
+  # Keep backwards compat for any remaining GroupChat broadcasts
+  def handle_info({:group_message, message}, socket) do
+    handle_info({:channel_message, message}, socket)
+  end
+
+  def handle_info({:channel_member_joined, member}, socket) do
+    participant = %{
+      id: member.id,
+      name: member.name,
+      type: member.type,
+      color: sender_color_hue(member.id)
+    }
+
     updated_participants = [participant | socket.assigns.group_participants]
     {:noreply, assign(socket, group_participants: updated_participants)}
   end
 
-  def handle_info({:group_participant_left, participant_id}, socket) do
+  # Keep backwards compat
+  def handle_info({:group_participant_joined, participant}, socket) do
+    handle_info({:channel_member_joined, participant}, socket)
+  end
+
+  def handle_info({:channel_member_left, member_id}, socket) do
     updated_participants =
-      Enum.reject(socket.assigns.group_participants, &(&1.id == participant_id))
+      Enum.reject(socket.assigns.group_participants, &(&1.id == member_id))
 
     {:noreply, assign(socket, group_participants: updated_participants)}
+  end
+
+  # Keep backwards compat
+  def handle_info({:group_participant_left, participant_id}, socket) do
+    handle_info({:channel_member_left, participant_id}, socket)
   end
 
   # ── Private Helpers ───────────────────────────────────────────────
@@ -273,5 +282,14 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
 
   defp sender_color_hue(sender_id) do
     :erlang.phash2(sender_id, 360)
+  end
+
+  defp comms_channel_members(channel_id) do
+    if Code.ensure_loaded?(Arbor.Comms) and
+         function_exported?(Arbor.Comms, :channel_members, 1) do
+      apply(Arbor.Comms, :channel_members, [channel_id])
+    else
+      {:error, :comms_unavailable}
+    end
   end
 end

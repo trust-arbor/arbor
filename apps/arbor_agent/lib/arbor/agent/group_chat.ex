@@ -2,30 +2,18 @@ defmodule Arbor.Agent.GroupChat do
   @moduledoc """
   Multi-agent group chat server.
 
+  **Deprecated:** Use `Arbor.Comms.Channel` for new channel-based communication.
+  This module is retained for backwards compatibility with ops room AnomalyForwarder.
+
   Manages a conversation between N participants (agents and/or humans).
   Messages are broadcast via PubSub. Agent participants auto-respond
   when a message arrives from someone else (humans or other agents).
-
-  ## Usage
-
-      {:ok, group} = GroupChat.create("brainstorm", participants: [
-        %{id: agent_id, name: "Alice", type: :agent, host_pid: alice_pid},
-        %{id: "hysun", name: "Hysun", type: :human}
-      ])
-      GroupChat.send_message(group, "hysun", "Hysun", :human, "Hello everyone!")
 
   ## Auto-relay behavior
 
   When a message arrives:
   - If from a **human** or **system**: All agents respond in parallel (or sequential if configured)
   - If from an **agent**: Broadcast only, no relay (prevents infinite loops)
-
-  ## Loop prevention
-
-  Human and system messages trigger agent responses. Agent responses are added to
-  history and broadcast to subscribers, but do not trigger additional agent queries.
-  This prevents agent-to-agent feedback loops while allowing automated systems
-  (like the AnomalyForwarder) to initiate conversations.
   """
 
   use GenServer
@@ -52,21 +40,9 @@ defmodule Arbor.Agent.GroupChat do
 
   # Client API
 
+  @deprecated "Use Arbor.Comms.create_channel/2 instead"
   @doc """
   Creates and starts a new group chat.
-
-  ## Options
-
-  - `:participants` - List of participant maps (required)
-  - `:response_mode` - `:parallel` (default) or `:sequential`
-  - `:max_history` - Number of messages to include in agent context (default: 50)
-
-  ## Examples
-
-      GroupChat.create("planning", participants: [
-        %{id: "agent_123", name: "Alice", type: :agent, host_pid: pid},
-        %{id: "user_1", name: "Hysun", type: :human}
-      ])
   """
   @spec create(String.t(), keyword()) :: GenServer.on_start()
   def create(name, opts \\ []) do
@@ -89,13 +65,9 @@ defmodule Arbor.Agent.GroupChat do
     )
   end
 
+  @deprecated "Use Arbor.Comms.send_to_channel/6 instead"
   @doc """
   Sends a message to the group chat.
-
-  This will:
-  1. Add the message to history
-  2. Broadcast to all subscribers via PubSub
-  3. Trigger agent responses (only if message is from a human)
   """
   @spec send_message(
           GenServer.server(),
@@ -111,33 +83,29 @@ defmodule Arbor.Agent.GroupChat do
     )
   end
 
-  @doc """
-  Adds a participant to the group chat.
-  """
+  @deprecated "Use Arbor.Comms.join_channel/2 instead"
+  @doc "Adds a participant to the group chat."
   @spec add_participant(GenServer.server(), map()) :: :ok
   def add_participant(server, participant_attrs) do
     GenServer.call(server, {:add_participant, participant_attrs})
   end
 
-  @doc """
-  Removes a participant from the group chat.
-  """
+  @deprecated "Use Arbor.Comms.leave_channel/2 instead"
+  @doc "Removes a participant from the group chat."
   @spec remove_participant(GenServer.server(), String.t()) :: :ok
   def remove_participant(server, participant_id) do
     GenServer.call(server, {:remove_participant, participant_id})
   end
 
-  @doc """
-  Returns the message history (newest first).
-  """
+  @deprecated "Use Arbor.Comms.channel_history/2 instead"
+  @doc "Returns the message history (newest first)."
   @spec get_history(GenServer.server()) :: [Message.t()]
   def get_history(server) do
     GenServer.call(server, :get_history)
   end
 
-  @doc """
-  Returns the participants map.
-  """
+  @deprecated "Use Arbor.Comms.channel_members/1 instead"
+  @doc "Returns the participants map."
   @spec get_participants(GenServer.server()) :: %{String.t() => Participant.t()}
   def get_participants(server) do
     GenServer.call(server, :get_participants)
