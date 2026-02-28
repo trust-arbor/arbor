@@ -239,7 +239,7 @@ defmodule Arbor.Contracts.Security.Capability do
   end
 
   defp validate_principal_id(%{principal_id: id}) do
-    if String.starts_with?(id, "agent_") do
+    if String.starts_with?(id, "agent_") or String.starts_with?(id, "human_") do
       :ok
     else
       {:error, {:invalid_principal_id, id}}
