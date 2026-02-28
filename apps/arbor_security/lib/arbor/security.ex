@@ -226,6 +226,18 @@ defmodule Arbor.Security do
   def list_capabilities(principal_id, opts \\ []),
     do: list_capabilities_for_principal(principal_id, opts)
 
+  @doc """
+  Generate a unique trace ID for request correlation.
+
+  Trace IDs link authorization, verification, and delegation events
+  across a single request. Generate at the request boundary and pass
+  as `trace_id: id` in authorize opts.
+  """
+  @spec generate_trace_id() :: String.t()
+  def generate_trace_id do
+    "trace_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
   # ===========================================================================
   # Public API — Identity (short names)
   # ===========================================================================
@@ -398,6 +410,7 @@ defmodule Arbor.Security do
          :ok <- check_identity_status(principal_id),
          :ok <- maybe_verify_identity(principal_id, opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
+         :ok <- maybe_verify_delegation_chain(cap),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
          escalation_result <-
            Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
@@ -526,11 +539,21 @@ defmodule Arbor.Security do
   def verify_signed_request_authenticity(%SignedRequest{} = request) do
     case Verifier.verify(request) do
       {:ok, agent_id} ->
-        Events.record_identity_verification_succeeded(agent_id)
+        Events.record_identity_verification_succeeded(agent_id,
+          signature: Base.encode64(request.signature),
+          payload_hash: Base.encode16(:crypto.hash(:sha256, request.payload), case: :lower),
+          nonce: Base.encode64(request.nonce),
+          signed_at: DateTime.to_iso8601(request.timestamp)
+        )
+
         {:ok, agent_id}
 
       {:error, reason} = error ->
-        Events.record_identity_verification_failed(request.agent_id, reason)
+        Events.record_identity_verification_failed(request.agent_id, reason,
+          nonce: Base.encode64(request.nonce),
+          signed_at: DateTime.to_iso8601(request.timestamp)
+        )
+
         error
     end
   end
@@ -799,6 +822,24 @@ defmodule Arbor.Security do
       {:ok, cap} -> {:ok, cap}
       {:error, :not_found} -> {:error, :unauthorized}
     end
+  end
+
+  defp maybe_verify_delegation_chain(%Capability{delegation_chain: []}), do: :ok
+
+  defp maybe_verify_delegation_chain(%Capability{} = cap) do
+    if Config.delegation_chain_verification_enabled?() do
+      key_lookup_fn = fn agent_id ->
+        Registry.lookup(agent_id)
+      end
+
+      Signer.verify_delegation_chain(cap, key_lookup_fn)
+    else
+      :ok
+    end
+  catch
+    :exit, _ ->
+      # Registry not running — skip verification in permissive mode
+      if Config.strict_identity_mode?(), do: {:error, :delegation_chain_verification_unavailable}, else: :ok
   end
 
   defp maybe_enforce_constraints(cap, principal_id, resource_uri) do
