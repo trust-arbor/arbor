@@ -120,6 +120,59 @@ defmodule Arbor.Security do
   def delegate(capability_id, new_principal_id, opts \\ []),
     do: delegate_capability_from_principal_to_principal(capability_id, new_principal_id, opts)
 
+  @doc """
+  Delegate matching capabilities from a parent to an agent.
+
+  For each resource URI, finds the parent's authorizing capability and
+  creates a signed delegation. Skips resources where the parent has no
+  matching capability (logs a warning).
+
+  ## Options
+
+  - `:delegator_private_key` - Private key for signing delegation records (required)
+  - `:resources` - List of resource URIs to delegate (required)
+
+  ## Examples
+
+      {:ok, caps} = Security.delegate_to_agent(human_id, agent_id,
+        delegator_private_key: key,
+        resources: ["arbor://fs/read/**", "arbor://actions/execute/**"]
+      )
+  """
+  @spec delegate_to_agent(String.t(), String.t(), keyword()) ::
+          {:ok, [Capability.t()]} | {:error, term()}
+  def delegate_to_agent(parent_id, agent_id, opts \\ []) do
+    private_key = Keyword.fetch!(opts, :delegator_private_key)
+    resources = Keyword.get(opts, :resources, [])
+
+    delegated =
+      Enum.reduce(resources, [], fn resource_uri, acc ->
+        case CapabilityStore.find_authorizing(parent_id, resource_uri) do
+          {:ok, parent_cap} ->
+            case delegate(parent_cap.id, agent_id, delegator_private_key: private_key) do
+              {:ok, delegated_cap} ->
+                [delegated_cap | acc]
+
+              {:error, reason} ->
+                Logger.warning(
+                  "[Security] Failed to delegate #{resource_uri} to #{agent_id}: #{inspect(reason)}"
+                )
+
+                acc
+            end
+
+          {:error, :not_found} ->
+            Logger.warning(
+              "[Security] Parent #{parent_id} has no capability for #{resource_uri}, skipping delegation"
+            )
+
+            acc
+        end
+      end)
+
+    {:ok, Enum.reverse(delegated)}
+  end
+
   @doc "List capabilities for an agent."
   @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
   def list_capabilities(principal_id, opts \\ []),
@@ -371,22 +424,20 @@ defmodule Arbor.Security do
   def delegate_capability_from_principal_to_principal(capability_id, new_principal_id, opts) do
     with {:ok, parent_cap} <- CapabilityStore.get(capability_id),
          delegator_private_key = Keyword.fetch!(opts, :delegator_private_key),
-         # Create the delegated capability (without delegation record yet)
+         # Create the delegated capability once (without delegation record)
          {:ok, new_cap} <-
            Capability.delegate(parent_cap, new_principal_id,
              constraints: Keyword.get(opts, :constraints, %{}),
              expires_at: Keyword.get(opts, :expires_at)
            ),
-         # Sign a delegation record with the delegator's private key
+         # Sign a delegation record over the new cap's payload
          delegation_record =
            Signer.sign_delegation(parent_cap, new_cap, delegator_private_key),
-         # Recreate with the delegation chain
-         {:ok, new_cap_with_chain} <-
-           Capability.delegate(parent_cap, new_principal_id,
-             constraints: Keyword.get(opts, :constraints, %{}),
-             expires_at: Keyword.get(opts, :expires_at),
-             delegation_record: delegation_record
-           ),
+         # Attach the chain to the SAME capability (preserving id/timestamps)
+         new_cap_with_chain = %{
+           new_cap
+           | delegation_chain: parent_cap.delegation_chain ++ [delegation_record]
+         },
          # Sign the new capability with system authority
          {:ok, signed_cap} <- SystemAuthority.sign_capability(new_cap_with_chain),
          # Store with quota enforcement

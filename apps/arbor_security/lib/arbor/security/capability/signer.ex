@@ -102,8 +102,10 @@ defmodule Arbor.Security.Capability.Signer do
   # Private
 
   defp delegation_signing_payload(%Capability{} = cap) do
-    # Sign over the new capability's core content
-    Capability.signing_payload(cap)
+    # Delegation signing happens before SystemAuthority sets issuer_id,
+    # so we exclude it to ensure sign/verify see the same payload.
+    %{cap | issuer_id: nil}
+    |> Capability.signing_payload()
   end
 
   defp verify_delegation_record(

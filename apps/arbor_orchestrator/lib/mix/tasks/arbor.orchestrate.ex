@@ -446,7 +446,8 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
          refresh_token when is_binary(refresh_token) <-
            get_in(cache_data, ["token_response", "refresh_token"]),
          config when not is_nil(config) <- apply(Arbor.Security.OIDC.Config, :device_flow, []),
-         {:ok, new_tokens} <- apply(Arbor.Security.OIDC.DeviceFlow, :refresh, [config, refresh_token]),
+         {:ok, new_tokens} <-
+           apply(Arbor.Security.OIDC.DeviceFlow, :refresh, [config, refresh_token]),
          id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
          {:ok, agent_id, signer} <- apply(Arbor.Security, :authenticate_oidc_token, [id_token]) do
       success("Re-authenticated via refresh: #{agent_id}")
