@@ -622,6 +622,19 @@ defmodule Arbor.AI do
   end
 
   @doc """
+  Resume an existing ACP session by session ID.
+
+  ## Options
+
+  - `:timeout` — resume timeout (default: 120_000)
+  """
+  @spec acp_resume_session(GenServer.server(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acp_resume_session(session, session_id, opts \\ []) do
+    AcpSession.resume_session(session, session_id, opts)
+  end
+
+  @doc """
   Close an ACP session and disconnect from the agent.
   """
   @spec acp_close_session(GenServer.server()) :: :ok
