@@ -1,5 +1,6 @@
 defmodule Arbor.Security.OIDCTest do
-  use ExUnit.Case, async: true
+  # async: false because config-clearing tests mutate Application env
+  use ExUnit.Case, async: false
 
   alias Arbor.Security.OIDC
   alias Arbor.Security.OIDC.Config
@@ -7,8 +8,14 @@ defmodule Arbor.Security.OIDCTest do
   @moduletag :fast
 
   describe "Config" do
+    setup do
+      prev = Application.get_env(:arbor_security, :oidc)
+      Application.delete_env(:arbor_security, :oidc)
+      on_exit(fn -> if prev, do: Application.put_env(:arbor_security, :oidc, prev) end)
+      :ok
+    end
+
     test "enabled? returns false when not configured" do
-      # Default (no config set) should be disabled
       refute Config.enabled?()
     end
 
@@ -34,6 +41,13 @@ defmodule Arbor.Security.OIDCTest do
   end
 
   describe "authenticate_device_flow/1" do
+    setup do
+      prev = Application.get_env(:arbor_security, :oidc)
+      Application.delete_env(:arbor_security, :oidc)
+      on_exit(fn -> if prev, do: Application.put_env(:arbor_security, :oidc, prev) end)
+      :ok
+    end
+
     test "returns error when no device flow configured" do
       assert {:error, :no_device_flow_configured} = OIDC.authenticate_device_flow(nil)
     end
