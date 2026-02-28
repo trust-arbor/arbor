@@ -173,6 +173,54 @@ defmodule Arbor.Security do
     {:ok, Enum.reverse(delegated)}
   end
 
+  @doc """
+  Assign a role to a principal, granting all capabilities defined in the role.
+
+  Grants are idempotent — capabilities that already exist are skipped.
+
+  ## Options
+
+  - `:delegation_depth` - Delegation depth for granted capabilities (default: 3)
+
+  ## Examples
+
+      {:ok, caps} = Security.assign_role("human_abc123", :admin)
+  """
+  @spec assign_role(String.t(), atom(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
+  def assign_role(principal_id, role_name, opts \\ []) do
+    alias Arbor.Security.Role
+
+    case Role.get(role_name) do
+      {:ok, resource_uris} ->
+        delegation_depth = Keyword.get(opts, :delegation_depth, 3)
+
+        granted =
+          Enum.reduce(resource_uris, [], fn resource_uri, acc ->
+            case grant(
+                   principal: principal_id,
+                   resource: resource_uri,
+                   delegation_depth: delegation_depth
+                 ) do
+              {:ok, cap} ->
+                [cap | acc]
+
+              {:error, _reason} ->
+                # Idempotent — skip if already granted or other non-fatal error
+                acc
+            end
+          end)
+
+        Logger.info(
+          "[Security] Assigned role #{role_name} to #{principal_id} (#{length(granted)} capabilities)"
+        )
+
+        {:ok, Enum.reverse(granted)}
+
+      {:error, :unknown_role} = error ->
+        error
+    end
+  end
+
   @doc "List capabilities for an agent."
   @spec list_capabilities(String.t(), keyword()) :: {:ok, [Capability.t()]} | {:error, term()}
   def list_capabilities(principal_id, opts \\ []),
