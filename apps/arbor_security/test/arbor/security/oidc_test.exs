@@ -35,6 +35,21 @@ defmodule Arbor.Security.OIDCTest do
   end
 
   describe "load_cached_token/0" do
+    setup do
+      # Point token_cache_path to a non-existent temp file so real cached
+      # tokens from previous OIDC sessions don't interfere
+      prev = Application.get_env(:arbor_security, :oidc)
+      tmp_path = Path.join(System.tmp_dir!(), "arbor_test_oidc_#{:rand.uniform(1_000_000)}.enc")
+      Application.put_env(:arbor_security, :oidc, [token_cache_path: tmp_path])
+
+      on_exit(fn ->
+        File.rm(tmp_path)
+        if prev, do: Application.put_env(:arbor_security, :oidc, prev), else: Application.delete_env(:arbor_security, :oidc)
+      end)
+
+      :ok
+    end
+
     test "returns error when no cache exists" do
       assert {:error, :no_cached_token} = OIDC.load_cached_token()
     end
