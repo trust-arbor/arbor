@@ -1,0 +1,68 @@
+// Multi-Agent Orchestrate — 2-branch reference example
+//
+// This is the canonical pattern for parallel ACP agent orchestration.
+// The mix task generates DOT dynamically, but this file serves as
+// documentation and a starting point for custom pipelines.
+//
+// Usage:
+//   mix arbor.pipeline.run specs/pipelines/multi-agent-orchestrate.dot \
+//     --set subtask.0="Implement the feature" \
+//     --set subtask.1="Write tests for the feature"
+
+digraph orchestrate {
+  goal="Multi-agent parallel coding orchestration"
+
+  start [type="start"]
+
+  plan [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_search,file_glob"
+    llm_provider="acp"
+    max_turns="10"
+    system_prompt="You are a planning agent. Analyze the goal and decompose it into exactly 2 independent subtasks that can be worked on in parallel.\n\nFor each subtask, write a clear description to the context key \"subtask.N\" (where N is 0-indexed). Each subtask should be self-contained and not depend on other subtasks.\n\nExplore the codebase first to understand the structure, then create focused, actionable subtask descriptions."
+  ]
+
+  fork [type="parallel" join_policy="wait_all" error_policy="continue" max_parallel="2"]
+
+  branch_0 [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_write,file_search,file_glob,shell"
+    llm_provider="acp"
+    provider_options="{\"agent\": \"claude\"}"
+    max_turns="20"
+    prompt_context_key="subtask.0"
+  ]
+
+  branch_1 [
+    type="codergen"
+    simulate="false"
+    use_tools="true"
+    tools="file_read,file_write,file_search,file_glob,shell"
+    llm_provider="acp"
+    provider_options="{\"agent\": \"codex\"}"
+    max_turns="20"
+    prompt_context_key="subtask.1"
+  ]
+
+  collect [type="parallel.fan_in"]
+
+  synthesize [
+    type="codergen"
+    simulate="false"
+    llm_provider="acp"
+    max_turns="5"
+    system_prompt="Review the results from all parallel branches in the context. Summarize what each branch accomplished, identify any conflicts or overlapping changes, and produce a final status report. If branches modified the same files, note the conflicts."
+  ]
+
+  done [type="exit"]
+
+  // Edges
+  start -> plan -> fork
+  fork -> branch_0 -> collect
+  fork -> branch_1 -> collect
+  collect -> synthesize -> done
+}
