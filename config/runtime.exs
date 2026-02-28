@@ -70,6 +70,60 @@ if dashboard_user && dashboard_pass do
 end
 
 # ============================================================================
+# OIDC — Human identity authentication
+# ============================================================================
+# Activate by setting both OIDC_ISSUER and OIDC_CLIENT_ID.
+# Works with any OIDC provider (Zitadel, Google, GitHub, Keycloak, etc.)
+# For self-hosted Zitadel see docker/zitadel/README.md
+
+oidc_issuer = System.get_env("OIDC_ISSUER")
+oidc_client_id = System.get_env("OIDC_CLIENT_ID")
+
+if oidc_issuer && oidc_client_id do
+  oidc_client_secret = System.get_env("OIDC_CLIENT_SECRET")
+
+  oidc_scopes =
+    case System.get_env("OIDC_SCOPES") do
+      nil -> ["openid", "email", "profile"]
+      scopes -> String.split(scopes, ",", trim: true) |> Enum.map(&String.trim/1)
+    end
+
+  # Provider entry for auth code + PKCE flow (dashboard)
+  provider = %{
+    issuer: oidc_issuer,
+    client_id: oidc_client_id,
+    scopes: oidc_scopes
+  }
+
+  provider =
+    if oidc_client_secret,
+      do: Map.put(provider, :client_secret, oidc_client_secret),
+      else: provider
+
+  # Device flow enabled by default (for CLI auth). Disable with OIDC_DEVICE_FLOW=false
+  device_flow_enabled =
+    case System.get_env("OIDC_DEVICE_FLOW") do
+      val when val in ["false", "0", "no"] -> false
+      _ -> true
+    end
+
+  oidc_config = [providers: [provider]]
+
+  oidc_config =
+    if device_flow_enabled do
+      Keyword.put(oidc_config, :device_flow, %{
+        issuer: oidc_issuer,
+        client_id: oidc_client_id,
+        scopes: oidc_scopes
+      })
+    else
+      oidc_config
+    end
+
+  config :arbor_security, :oidc, oidc_config
+end
+
+# ============================================================================
 # Signal channel
 # ============================================================================
 
