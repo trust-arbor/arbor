@@ -3,8 +3,8 @@ defmodule Arbor.Dashboard.Endpoint do
 
   use Arbor.Web.Endpoint, otp_app: :arbor_dashboard
 
-  # H5: HTTP Basic Auth for dashboard access
-  plug Arbor.Dashboard.Auth
+  # OIDC auth (replaces HTTP Basic Auth) — redirects to provider or passes through in dev
+  plug Arbor.Dashboard.OidcAuth
 
   plug Arbor.Dashboard.Router
 end

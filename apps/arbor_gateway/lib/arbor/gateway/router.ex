@@ -15,10 +15,12 @@ defmodule Arbor.Gateway.Router do
   use Plug.Router
 
   alias Arbor.Gateway.Auth
+  alias Arbor.Gateway.JwtAuth
 
   plug(Plug.Logger)
   plug(:match)
   plug(:conditional_parsers)
+  plug(:try_jwt_auth)
   plug(:require_auth_unless_health)
   # H13: Rate limiting on all authenticated endpoints
   plug(Arbor.Gateway.RateLimiter)
@@ -59,8 +61,13 @@ defmodule Arbor.Gateway.Router do
   defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
   defp conditional_parsers(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
 
+  # Try JWT bearer token auth before API key auth — non-destructive passthrough
+  defp try_jwt_auth(%{request_path: "/health"} = conn, _opts), do: conn
+  defp try_jwt_auth(conn, _opts), do: JwtAuth.call(conn, [])
+
   # Skip auth for health check only — all other endpoints require API key auth
   # C1: MCP no longer bypasses auth (was unauthenticated, enabling action execution without authorization)
   defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+  defp require_auth_unless_health(%{assigns: %{jwt_authenticated: true}} = conn, _opts), do: conn
   defp require_auth_unless_health(conn, _opts), do: Auth.call(conn, [])
 end
