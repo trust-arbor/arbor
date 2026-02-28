@@ -275,6 +275,12 @@ defmodule Arbor.Actions do
         Arbor.Actions.Identity.RequestEndorsement,
         Arbor.Actions.Identity.SignPublicKey
       ],
+      acp: [
+        Arbor.Actions.Acp.StartSession,
+        Arbor.Actions.Acp.SendMessage,
+        Arbor.Actions.Acp.SessionStatus,
+        Arbor.Actions.Acp.CloseSession
+      ],
       cli_agent: [
         Arbor.Actions.CliAgent.Execute
       ],
