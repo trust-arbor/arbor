@@ -109,11 +109,14 @@ if oidc_issuer && oidc_client_id do
 
   oidc_config = [providers: [provider]]
 
+  # Device flow can use a separate client ID (e.g. Zitadel Native app)
+  device_client_id = System.get_env("OIDC_DEVICE_CLIENT_ID") || oidc_client_id
+
   oidc_config =
     if device_flow_enabled do
       Keyword.put(oidc_config, :device_flow, %{
         issuer: oidc_issuer,
-        client_id: oidc_client_id,
+        client_id: device_client_id,
         scopes: oidc_scopes
       })
     else

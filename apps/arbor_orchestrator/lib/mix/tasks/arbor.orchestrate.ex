@@ -476,8 +476,60 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   end
 
   defp oidc_enabled? do
+    # Mix.Task.run("compile") can reload config, losing runtime.exs values.
+    # Re-apply OIDC config from env vars if needed.
+    ensure_oidc_config()
+
     apply(Arbor.Security.OIDC.Config, :enabled?, [])
   rescue
     _ -> false
+  end
+
+  defp ensure_oidc_config do
+    case Application.get_env(:arbor_security, :oidc) do
+      config when is_list(config) and config != [] ->
+        :ok
+
+      _ ->
+        issuer = System.get_env("OIDC_ISSUER")
+        client_id = System.get_env("OIDC_CLIENT_ID")
+
+        if issuer && client_id do
+          client_secret = System.get_env("OIDC_CLIENT_SECRET")
+
+          scopes =
+            case System.get_env("OIDC_SCOPES") do
+              nil -> ["openid", "email", "profile"]
+              s -> String.split(s, ",", trim: true) |> Enum.map(&String.trim/1)
+            end
+
+          provider = %{issuer: issuer, client_id: client_id, scopes: scopes}
+
+          provider =
+            if client_secret, do: Map.put(provider, :client_secret, client_secret), else: provider
+
+          device_flow_enabled =
+            case System.get_env("OIDC_DEVICE_FLOW") do
+              val when val in ["false", "0", "no"] -> false
+              _ -> true
+            end
+
+          config = [providers: [provider]]
+
+          device_client_id = System.get_env("OIDC_DEVICE_CLIENT_ID") || client_id
+
+          config =
+            if device_flow_enabled,
+              do:
+                Keyword.put(config, :device_flow, %{
+                  issuer: issuer,
+                  client_id: device_client_id,
+                  scopes: scopes
+                }),
+              else: config
+
+          Application.put_env(:arbor_security, :oidc, config)
+        end
+    end
   end
 end
