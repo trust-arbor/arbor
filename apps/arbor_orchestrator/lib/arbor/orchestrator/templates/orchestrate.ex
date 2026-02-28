@@ -33,7 +33,7 @@ defmodule Arbor.Orchestrator.Templates.Orchestrate do
     join_policy = Keyword.get(opts, :join_policy, "wait_all")
     error_policy = Keyword.get(opts, :error_policy, "continue")
 
-    branch_nodes = Enum.map(branches, &branch_node/1)
+    branch_nodes = Enum.map(branches, &branch_node(&1, no_plan, goal))
     branch_edges = Enum.map(branches, &branch_edge/1)
 
     [
@@ -52,12 +52,12 @@ defmodule Arbor.Orchestrator.Templates.Orchestrate do
       "",
       synthesize_node(),
       "",
-      "  done [type=\"exit\"]",
+      "  exit [type=\"exit\"]",
       "",
       "  // Edges",
       plan_edges(no_plan),
       Enum.join(branch_edges, "\n"),
-      "  collect -> synthesize -> done",
+      "  collect -> synthesize -> exit",
       "}"
     ]
     |> List.flatten()
@@ -97,12 +97,19 @@ defmodule Arbor.Orchestrator.Templates.Orchestrate do
     |> String.trim()
   end
 
-  defp branch_node(branch) do
+  defp branch_node(branch, no_plan, goal) do
     name = Map.fetch!(branch, :name)
     agent = Map.get(branch, :agent, "claude")
     workdir = Map.get(branch, :workdir, ".")
     tools = Map.get(branch, :tools, @default_tools)
     max_turns = Map.get(branch, :max_turns, @default_max_turns)
+
+    prompt_line =
+      if no_plan do
+        "    system_prompt=#{quote_dot(goal)}"
+      else
+        "    prompt_context_key=\"subtask.#{branch_index(name)}\""
+      end
 
     [
       "  #{name} [",
@@ -114,7 +121,7 @@ defmodule Arbor.Orchestrator.Templates.Orchestrate do
       "    provider_options=#{quote_dot("{\"agent\": \"#{agent}\"}")}",
       "    workdir=#{quote_dot(workdir)}",
       "    max_turns=\"#{max_turns}\"",
-      "    prompt_context_key=\"subtask.#{branch_index(name)}\"",
+      prompt_line,
       "  ]"
     ]
     |> Enum.join("\n")

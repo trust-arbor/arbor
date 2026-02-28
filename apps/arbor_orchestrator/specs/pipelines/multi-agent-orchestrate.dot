@@ -58,11 +58,11 @@ digraph orchestrate {
     system_prompt="Review the results from all parallel branches in the context. Summarize what each branch accomplished, identify any conflicts or overlapping changes, and produce a final status report. If branches modified the same files, note the conflicts."
   ]
 
-  done [type="exit"]
+  exit [type="exit"]
 
   // Edges
   start -> plan -> fork
   fork -> branch_0 -> collect
   fork -> branch_1 -> collect
-  collect -> synthesize -> done
+  collect -> synthesize -> exit
 }
