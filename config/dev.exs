@@ -76,6 +76,23 @@ config :arbor_security,
   identity_verification: true,
   capability_signing_required: true
 
+# OIDC — Human identity authentication for CLI and orchestration.
+# Uncomment and configure for your OIDC provider (Zitadel, Google, GitHub, etc.)
+# config :arbor_security, :oidc,
+#   device_flow: %{
+#     issuer: "https://your-provider.example.com",
+#     client_id: "your-client-id",
+#     scopes: ["openid", "email", "profile"]
+#   },
+#   providers: [
+#     %{
+#       issuer: "https://your-provider.example.com",
+#       client_id: "your-client-id",
+#       client_secret: "your-client-secret",
+#       scopes: ["openid", "email", "profile"]
+#     }
+#   ]
+
 # Signals — allow OpenAuthorizer in dev (production requires CapabilityAuthorizer)
 config :arbor_signals, allow_open_authorizer: true
 

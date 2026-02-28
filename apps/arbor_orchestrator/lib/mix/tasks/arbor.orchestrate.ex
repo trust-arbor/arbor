@@ -72,8 +72,23 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     # Get or generate the DOT pipeline
     dot_source = resolve_dot(goal, branches, opts)
 
+    # Authenticate operator (human identity via OIDC or fallback)
+    {agent_id, signer} = authenticate_operator()
+
     # Build run options
     run_opts = build_run_opts(opts, run_id)
+
+    # Thread authentication into run options
+    run_opts =
+      if signer do
+        run_opts
+        |> Keyword.put(:signer, signer)
+        |> Keyword.update(:initial_values, %{"session.agent_id" => agent_id}, fn vals ->
+          Map.put(vals, "session.agent_id", agent_id)
+        end)
+      else
+        run_opts
+      end
 
     # Execute
     case Arbor.Orchestrator.run(dot_source, run_opts) do
@@ -389,4 +404,79 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   end
 
   defp return_ok, do: :ok
+
+  # -- Authentication --
+
+  defp authenticate_operator do
+    if oidc_available?() and oidc_enabled?() do
+      authenticate_with_oidc()
+    else
+      warn("OIDC not configured — running without human identity authentication")
+      {nil, nil}
+    end
+  end
+
+  defp authenticate_with_oidc do
+    # Try cached token first
+    case apply(Arbor.Security.OIDC, :load_cached_token, []) do
+      {:ok, cache_data} ->
+        id_token = get_in(cache_data, ["token_response", "id_token"])
+
+        case apply(Arbor.Security, :authenticate_oidc_token, [id_token]) do
+          {:ok, agent_id, signer} ->
+            success("Authenticated: #{agent_id}")
+            {agent_id, signer}
+
+          {:error, reason} ->
+            warn("Cached token invalid (#{inspect(reason)}), starting device flow...")
+            run_device_flow()
+        end
+
+      :expired ->
+        # Try refresh
+        try_refresh_or_device_flow()
+
+      {:error, _} ->
+        run_device_flow()
+    end
+  end
+
+  defp try_refresh_or_device_flow do
+    with {:ok, cache_data} <- apply(Arbor.Security.OIDC, :load_cached_token, []),
+         refresh_token when is_binary(refresh_token) <-
+           get_in(cache_data, ["token_response", "refresh_token"]),
+         config when not is_nil(config) <- apply(Arbor.Security.OIDC.Config, :device_flow, []),
+         {:ok, new_tokens} <- apply(Arbor.Security.OIDC.DeviceFlow, :refresh, [config, refresh_token]),
+         id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
+         {:ok, agent_id, signer} <- apply(Arbor.Security, :authenticate_oidc_token, [id_token]) do
+      success("Re-authenticated via refresh: #{agent_id}")
+      {agent_id, signer}
+    else
+      _ -> run_device_flow()
+    end
+  end
+
+  defp run_device_flow do
+    case apply(Arbor.Security, :authenticate_oidc, []) do
+      {:ok, agent_id, signer} ->
+        success("Authenticated: #{agent_id}")
+        {agent_id, signer}
+
+      {:error, reason} ->
+        warn("OIDC authentication failed: #{inspect(reason)}")
+        warn("Continuing without authentication")
+        {nil, nil}
+    end
+  end
+
+  defp oidc_available? do
+    Code.ensure_loaded?(Arbor.Security.OIDC) and
+      Code.ensure_loaded?(Arbor.Security.OIDC.Config)
+  end
+
+  defp oidc_enabled? do
+    apply(Arbor.Security.OIDC.Config, :enabled?, [])
+  rescue
+    _ -> false
+  end
 end

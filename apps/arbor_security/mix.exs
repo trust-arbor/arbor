@@ -30,6 +30,9 @@ defmodule ArborSecurity.MixProject do
       {:arbor_signals, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:plug_crypto, "~> 2.0"},
+      {:joken, "~> 2.6"},
+      {:joken_jwks, "~> 1.6"},
+      {:req, "~> 0.5"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

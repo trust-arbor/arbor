@@ -565,6 +565,46 @@ defmodule Arbor.Security do
   end
 
   # ===========================================================================
+  # OIDC Authentication
+  # ===========================================================================
+
+  @doc """
+  Authenticate a human operator via OIDC device flow.
+
+  Starts the device authorization grant (RFC 8628), waits for the user
+  to authorize in their browser, then binds persistent keypairs to the
+  OIDC identity.
+
+  Returns `{:ok, agent_id, signer}` where signer is a function
+  `(payload -> {:ok, SignedRequest.t()})`.
+  """
+  @spec authenticate_oidc(map() | nil) :: {:ok, String.t(), function()} | {:error, term()}
+  def authenticate_oidc(config \\ nil) do
+    alias Arbor.Security.OIDC
+    OIDC.authenticate_device_flow(config)
+  end
+
+  @doc """
+  Authenticate using an existing OIDC ID token.
+
+  Verifies the token, loads the bound keypair, and returns a signer.
+  """
+  @spec authenticate_oidc_token(String.t(), map() | nil) ::
+          {:ok, String.t(), function()} | {:error, term()}
+  def authenticate_oidc_token(id_token, config \\ nil) do
+    alias Arbor.Security.OIDC
+    OIDC.authenticate_token(id_token, config)
+  end
+
+  @doc """
+  Check if an agent ID represents a human (OIDC-authenticated) identity.
+  """
+  @spec human_identity?(String.t()) :: boolean()
+  def human_identity?(agent_id) when is_binary(agent_id) do
+    String.starts_with?(agent_id, "human_")
+  end
+
+  # ===========================================================================
   # Private functions
   # ===========================================================================
 

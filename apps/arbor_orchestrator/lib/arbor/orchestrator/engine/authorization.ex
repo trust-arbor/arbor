@@ -211,6 +211,13 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
         agent_id -> Map.put(assigns, :agent_id, agent_id)
       end
 
+    # Thread signer function for signed request creation in CapabilityCheck
+    assigns =
+      case Keyword.get(opts, :signer) do
+        signer when is_function(signer, 1) -> Map.put(assigns, :signer, signer)
+        _ -> assigns
+      end
+
     node_type = Registry.node_type(node)
 
     if Keyword.get(opts, :authorization) == false or node_type in @always_authorized do

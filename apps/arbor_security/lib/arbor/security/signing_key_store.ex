@@ -69,16 +69,92 @@ defmodule Arbor.Security.SigningKeyStore do
   def get(agent_id) when is_binary(agent_id) do
     with {:ok, enc_key} <- get_encryption_key(),
          {:ok, raw} <- get_record(agent_id) do
-      # Unwrap Record struct (from disk) or use plain map (legacy ETS)
       data = unwrap_record(raw)
 
-      with {:ok, ciphertext} <- Base.decode64(data["ct"]),
-           {:ok, iv} <- Base.decode64(data["iv"]),
-           {:ok, tag} <- Base.decode64(data["tag"]) do
-        Crypto.decrypt(ciphertext, enc_key, iv, tag)
+      case data do
+        %{"format" => "keypair", "v" => 2} ->
+          # v2 keypair — extract the signing key
+          with {:ok, keypair} <- decrypt_keypair(data, enc_key) do
+            {:ok, keypair.signing}
+          end
+
+        _ ->
+          decrypt_single_key(data, enc_key)
+      end
+    else
+      {:error, :not_found} -> {:error, :no_signing_key}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Store a keypair (signing + optional encryption) for an agent, encrypted at rest.
+
+  Stores a map of `%{"signing" => ed25519_priv, "encryption" => x25519_priv}`.
+  Backwards compatible with `get/1` — `get_keypair/1` detects the format.
+  """
+  @spec put_keypair(String.t(), binary(), binary() | nil) :: :ok | {:error, term()}
+  def put_keypair(agent_id, signing_key, encryption_key \\ nil)
+      when is_binary(agent_id) and is_binary(signing_key) do
+    keypair_data = %{"signing" => signing_key}
+
+    keypair_data =
+      if encryption_key, do: Map.put(keypair_data, "encryption", encryption_key), else: keypair_data
+
+    with {:ok, enc_key} <- get_encryption_key() do
+      # Base64-encode binary keys for JSON serialization
+      encoded_data =
+        Map.new(keypair_data, fn {k, v} -> {k, Base.encode64(v)} end)
+
+      plaintext = Jason.encode!(encoded_data)
+      {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key)
+
+      data = %{
+        "v" => 2,
+        "format" => "keypair",
+        "ct" => Base.encode64(ciphertext),
+        "iv" => Base.encode64(iv),
+        "tag" => Base.encode64(tag)
+      }
+
+      record = %Record{id: agent_id, key: agent_id, data: data, metadata: %{}}
+
+      if available?() do
+        apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])
+        :ok
       else
-        :error -> {:error, :invalid_key_record}
-        {:error, reason} -> {:error, reason}
+        {:error, :store_unavailable}
+      end
+    end
+  end
+
+  @doc """
+  Load and decrypt a keypair for an agent.
+
+  Returns `{:ok, %{signing: binary, encryption: binary}}` for v2 keypair records,
+  or `{:ok, %{signing: binary}}` for legacy v1 single-key records.
+  """
+  @spec get_keypair(String.t()) :: {:ok, map()} | {:error, term()}
+  def get_keypair(agent_id) when is_binary(agent_id) do
+    with {:ok, enc_key} <- get_encryption_key(),
+         {:ok, raw} <- get_record(agent_id) do
+      data = unwrap_record(raw)
+
+      case data do
+        %{"format" => "keypair", "v" => 2} ->
+          decrypt_keypair(data, enc_key)
+
+        %{"v" => 1} ->
+          # Legacy single signing key — decrypt and wrap
+          with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+            {:ok, %{signing: signing_key}}
+          end
+
+        _ ->
+          # Try legacy format
+          with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+            {:ok, %{signing: signing_key}}
+          end
       end
     else
       {:error, :not_found} -> {:error, :no_signing_key}
@@ -106,6 +182,15 @@ defmodule Arbor.Security.SigningKeyStore do
     Code.ensure_loaded?(@buffered_store) and
       Process.whereis(@store_name) != nil
   end
+
+  @doc """
+  Returns the master key for OIDC token cache encryption.
+
+  This is a public wrapper around the internal master key management
+  for use by the OIDC subsystem only.
+  """
+  @spec ensure_master_key_for_oidc() :: {:ok, binary()} | {:error, term()}
+  def ensure_master_key_for_oidc, do: ensure_master_key()
 
   # -- Private --
 
@@ -179,5 +264,44 @@ defmodule Arbor.Security.SigningKeyStore do
   defp master_key_path do
     default = Path.join(System.user_home!(), ".arbor/security/master.key")
     Application.get_env(:arbor_security, :master_key_path, default)
+  end
+
+  defp decrypt_single_key(data, enc_key) do
+    with {:ok, ciphertext} <- Base.decode64(data["ct"]),
+         {:ok, iv} <- Base.decode64(data["iv"]),
+         {:ok, tag} <- Base.decode64(data["tag"]) do
+      Crypto.decrypt(ciphertext, enc_key, iv, tag)
+    else
+      :error -> {:error, :invalid_key_record}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decrypt_keypair(data, enc_key) do
+    with {:ok, ciphertext} <- Base.decode64(data["ct"]),
+         {:ok, iv} <- Base.decode64(data["iv"]),
+         {:ok, tag} <- Base.decode64(data["tag"]),
+         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag),
+         {:ok, keypair_map} <- Jason.decode(plaintext),
+         {:ok, signing} <- Base.decode64(keypair_map["signing"]) do
+      result = %{signing: signing}
+
+      result =
+        case keypair_map["encryption"] do
+          nil ->
+            result
+
+          enc_b64 ->
+            case Base.decode64(enc_b64) do
+              {:ok, enc} -> Map.put(result, :encryption, enc)
+              :error -> result
+            end
+        end
+
+      {:ok, result}
+    else
+      :error -> {:error, :invalid_key_record}
+      {:error, reason} -> {:error, reason}
+    end
   end
 end
