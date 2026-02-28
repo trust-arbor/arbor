@@ -23,7 +23,7 @@ defmodule Arbor.Orchestrator.Templates.OrchestrateTest do
       assert dot =~ "start -> plan -> fork"
       assert dot =~ "fork -> branch_0 -> collect"
       assert dot =~ "fork -> branch_1 -> collect"
-      assert dot =~ "collect -> synthesize -> done"
+      assert dot =~ "collect -> synthesize -> exit"
     end
 
     test "includes plan node by default" do
@@ -40,6 +40,9 @@ defmodule Arbor.Orchestrator.Templates.OrchestrateTest do
       refute dot =~ "plan ["
       assert dot =~ "start -> fork"
       refute dot =~ "start -> plan"
+      # In no_plan mode, branches get the goal as system_prompt directly
+      assert dot =~ ~s(system_prompt="Test goal")
+      refute dot =~ "prompt_context_key"
     end
 
     test "generates correct branch nodes" do
