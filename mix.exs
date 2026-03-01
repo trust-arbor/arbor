@@ -47,7 +47,12 @@ defmodule Arbor.MixProject do
   defp aliases do
     [
       setup: ["arbor.setup"],
-      quality: ["format --check-formatted", "credo --strict"],
+      quality: [
+        "format --check-formatted",
+        "credo --strict",
+        "deps.unlock --check-unused",
+        "xref graph --label compile-connected --fail-above 88"
+      ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": ["test --only fast"],
       "test.all": [
