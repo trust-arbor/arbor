@@ -216,7 +216,11 @@ defmodule Arbor.Actions do
         Arbor.Actions.Channel.Read,
         Arbor.Actions.Channel.Send,
         Arbor.Actions.Channel.Join,
-        Arbor.Actions.Channel.Leave
+        Arbor.Actions.Channel.Leave,
+        Arbor.Actions.Channel.Create,
+        Arbor.Actions.Channel.Members,
+        Arbor.Actions.Channel.Update,
+        Arbor.Actions.Channel.Invite
       ],
       ai: [
         Arbor.Actions.AI.GenerateText,

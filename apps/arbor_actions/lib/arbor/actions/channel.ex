@@ -34,62 +34,120 @@ defmodule Arbor.Actions.Channel do
     @moduledoc """
     List active channels with their metadata.
 
-    Returns channel IDs, names, types, and member counts for all active channels.
-    Optionally filter by channel type.
+    Returns channel IDs, names, types, member counts, and encryption info.
+    Supports filtering by type, name, owner, and member.
     """
 
     use Jido.Action,
       name: "channel_list",
-      description: "List active internal channels",
+      description: "List active internal channels with optional filters",
       category: "channel",
       tags: ["channel", "list", "discovery"],
       schema: [
         type: [
           type: :string,
-          doc: "Filter by type (group, dm, public, ops_room)"
+          doc: "Filter by type (group, dm, public, private, ops_room)"
+        ],
+        name: [
+          type: :string,
+          doc: "Filter by name substring (case-insensitive)"
+        ],
+        owner_id: [
+          type: :string,
+          doc: "Filter by owner agent ID"
+        ],
+        member_id: [
+          type: :string,
+          doc: "Filter by member agent ID"
+        ],
+        limit: [
+          type: :integer,
+          default: 50,
+          doc: "Maximum number of channels to return"
         ]
       ]
 
     alias Arbor.Actions
 
     def taint_roles do
-      %{type: :data}
+      %{type: :data, name: :data, owner_id: :data, member_id: :data, limit: :data}
     end
 
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      case Arbor.Actions.Channel.call_comms(:list_channels, []) do
-        {:error, :comms_unavailable} = err ->
-          Actions.emit_failed(__MODULE__, :comms_unavailable)
-          err
+      has_filters? = params[:name] || params[:owner_id] || params[:member_id]
 
-        channels when is_list(channels) ->
-          channel_infos =
-            channels
-            |> Enum.map(fn {channel_id, _pid} ->
-              case Arbor.Actions.Channel.call_comms(:get_channel_info, [channel_id]) do
-                {:ok, info} ->
-                  %{
-                    channel_id: channel_id,
-                    name: Map.get(info, :name, channel_id),
-                    type: Map.get(info, :type, :group),
-                    member_count: Map.get(info, :member_count, 0)
-                  }
+      channel_infos =
+        if has_filters? do
+          search_with_filters(params)
+        else
+          list_and_enrich(params)
+        end
 
-                _ ->
-                  nil
-              end
-            end)
-            |> Enum.reject(&is_nil/1)
-            |> maybe_filter_type(params[:type])
+      result = %{channels: channel_infos}
+      Actions.emit_completed(__MODULE__, result)
+      {:ok, result}
+    rescue
+      _ ->
+        Actions.emit_failed(__MODULE__, :unexpected_error)
+        {:ok, %{channels: []}}
+    catch
+      :exit, _ ->
+        Actions.emit_failed(__MODULE__, :comms_unavailable)
+        {:ok, %{channels: []}}
+    end
 
-          result = %{channels: channel_infos}
-          Actions.emit_completed(__MODULE__, result)
-          {:ok, result}
+    defp search_with_filters(params) do
+      opts =
+        []
+        |> maybe_add(:name, params[:name])
+        |> maybe_add(:type, params[:type])
+        |> maybe_add(:owner_id, params[:owner_id])
+        |> maybe_add(:member_id, params[:member_id])
+        |> maybe_add(:limit, params[:limit])
+
+      case Arbor.Actions.Channel.call_comms(:search_channels, [opts]) do
+        {:error, _} -> []
+        results when is_list(results) -> Enum.map(results, &normalize_info/1)
       end
     end
+
+    defp list_and_enrich(params) do
+      case Arbor.Actions.Channel.call_comms(:list_channels, []) do
+        {:error, _} ->
+          []
+
+        channels when is_list(channels) ->
+          channels
+          |> Enum.map(fn {channel_id, _pid} ->
+            case Arbor.Actions.Channel.call_comms(:get_channel_info, [channel_id]) do
+              {:ok, info} -> normalize_info(Map.put(info, :channel_id, channel_id))
+              _ -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+          |> maybe_filter_type(params[:type])
+          |> Enum.take(params[:limit] || 50)
+      end
+    end
+
+    defp normalize_info(info) do
+      %{
+        channel_id: Map.get(info, :channel_id),
+        name: Map.get(info, :name, "unnamed"),
+        type: Map.get(info, :type, :group),
+        owner_id: Map.get(info, :owner_id),
+        member_count: Map.get(info, :member_count, 0),
+        message_count: Map.get(info, :message_count, 0),
+        encrypted: Map.get(info, :encrypted, false),
+        encryption_type: Map.get(info, :encryption_type)
+      }
+    end
+
+    defp maybe_add(opts, _key, nil), do: opts
+    defp maybe_add(opts, key, value), do: [{key, value} | opts]
 
     defp maybe_filter_type(channels, nil), do: channels
 
@@ -618,6 +676,321 @@ defmodule Arbor.Actions.Channel do
           {:ok, result}
       end
     end
+  end
+
+  # ============================================================================
+  # Channel.Create
+  # ============================================================================
+
+  defmodule Create do
+    @moduledoc """
+    Create a new internal channel.
+
+    The calling agent becomes the owner and first member automatically.
+    """
+
+    use Jido.Action,
+      name: "channel_create",
+      description: "Create a new internal channel",
+      category: "channel",
+      tags: ["channel", "create", "management"],
+      schema: [
+        name: [
+          type: :string,
+          required: true,
+          doc: "Display name for the channel"
+        ],
+        type: [
+          type: :string,
+          default: "group",
+          doc: "Channel type (group, public, private, ops_room)"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    def taint_roles do
+      %{name: :data, type: :data}
+    end
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, params)
+
+      name = params.name
+      type = String.to_existing_atom(params[:type] || "group")
+      owner_id = Map.get(context, :agent_id, "unknown")
+      owner_name = Map.get(context, :agent_name, "Agent")
+
+      opts = [
+        type: type,
+        owner_id: owner_id,
+        members: [%{id: owner_id, name: owner_name, type: :agent}],
+        rate_limit_ms: 2000
+      ]
+
+      case Arbor.Actions.Channel.call_comms(:create_channel, [name, opts]) do
+        {:ok, channel_id} ->
+          result = %{channel_id: channel_id, name: name, type: type, status: :created}
+          Actions.emit_completed(__MODULE__, result)
+          {:ok, result}
+
+        {:error, :comms_unavailable} = err ->
+          Actions.emit_failed(__MODULE__, :comms_unavailable)
+          err
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, reason}
+      end
+    rescue
+      ArgumentError ->
+        Actions.emit_failed(__MODULE__, :invalid_type)
+        {:error, :invalid_type}
+    end
+  end
+
+  # ============================================================================
+  # Channel.Members
+  # ============================================================================
+
+  defmodule Members do
+    @moduledoc """
+    List members of a channel.
+
+    Returns member list with id, name, type, and joined_at timestamp.
+    """
+
+    use Jido.Action,
+      name: "channel_members",
+      description: "List members of an internal channel",
+      category: "channel",
+      tags: ["channel", "members", "discovery"],
+      schema: [
+        channel_id: [
+          type: :string,
+          required: true,
+          doc: "Channel ID to list members for"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    def taint_roles do
+      %{channel_id: :control}
+    end
+
+    @impl true
+    def run(params, _context) do
+      Actions.emit_started(__MODULE__, params)
+      channel_id = params.channel_id
+
+      case Arbor.Actions.Channel.call_comms(:channel_members, [channel_id]) do
+        {:ok, members} when is_list(members) ->
+          formatted =
+            Enum.map(members, fn m ->
+              %{
+                id: m.id,
+                name: m.name,
+                type: m.type,
+                joined_at: format_timestamp(m[:joined_at])
+              }
+            end)
+
+          result = %{channel_id: channel_id, members: formatted, count: length(formatted)}
+          Actions.emit_completed(__MODULE__, result)
+          {:ok, result}
+
+        {:error, :comms_unavailable} = err ->
+          Actions.emit_failed(__MODULE__, :comms_unavailable)
+          err
+
+        {:error, :not_found} ->
+          Actions.emit_failed(__MODULE__, :not_found)
+          {:error, :not_found}
+      end
+    end
+
+    defp format_timestamp(nil), do: nil
+    defp format_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+    defp format_timestamp(other), do: to_string(other)
+  end
+
+  # ============================================================================
+  # Channel.Update
+  # ============================================================================
+
+  defmodule Update do
+    @moduledoc """
+    Update a channel's name or topic. Owner-only.
+
+    Checks that the calling agent is the channel owner before applying changes.
+    """
+
+    use Jido.Action,
+      name: "channel_update",
+      description: "Update channel name or topic (owner only)",
+      category: "channel",
+      tags: ["channel", "update", "management"],
+      schema: [
+        channel_id: [
+          type: :string,
+          required: true,
+          doc: "Channel ID to update"
+        ],
+        name: [
+          type: :string,
+          doc: "New display name"
+        ],
+        topic: [
+          type: :string,
+          doc: "New channel topic"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    def taint_roles do
+      %{channel_id: :control, name: :data, topic: :data}
+    end
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, params)
+
+      channel_id = params.channel_id
+      agent_id = Map.get(context, :agent_id)
+
+      with {:ok, info} <- Arbor.Actions.Channel.call_comms(:get_channel_info, [channel_id]),
+           :ok <- check_owner(info, agent_id) do
+        opts =
+          []
+          |> maybe_add(:name, params[:name])
+          |> maybe_add(:topic, params[:topic])
+
+        case Arbor.Actions.Channel.call_comms(:update_channel, [channel_id, opts]) do
+          :ok ->
+            result = %{channel_id: channel_id, status: :updated}
+            Actions.emit_completed(__MODULE__, result)
+            {:ok, result}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, reason}
+        end
+      else
+        {:error, :not_owner} ->
+          Actions.emit_failed(__MODULE__, :not_owner)
+          {:error, :not_owner}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, reason}
+      end
+    end
+
+    defp check_owner(%{owner_id: owner_id}, agent_id) when owner_id == agent_id, do: :ok
+    defp check_owner(_, _), do: {:error, :not_owner}
+
+    defp maybe_add(opts, _key, nil), do: opts
+    defp maybe_add(opts, key, value), do: [{key, value} | opts]
+  end
+
+  # ============================================================================
+  # Channel.Invite
+  # ============================================================================
+
+  defmodule Invite do
+    @moduledoc """
+    Invite a member to a channel (owner-only).
+
+    Adds the invitee as a member. For private channels, the existing ECDH key
+    distribution in `Channel.add_member/2` handles encryption automatically.
+    """
+
+    use Jido.Action,
+      name: "channel_invite",
+      description: "Invite a member to a channel (owner only)",
+      category: "channel",
+      tags: ["channel", "invite", "management"],
+      schema: [
+        channel_id: [
+          type: :string,
+          required: true,
+          doc: "Channel ID to invite to"
+        ],
+        invitee_id: [
+          type: :string,
+          required: true,
+          doc: "Agent/user ID to invite"
+        ],
+        invitee_name: [
+          type: :string,
+          default: "Agent",
+          doc: "Display name of the invitee"
+        ],
+        invitee_type: [
+          type: :string,
+          default: "agent",
+          doc: "Type: agent, human, or system"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    def taint_roles do
+      %{channel_id: :control, invitee_id: :data, invitee_name: :data, invitee_type: :data}
+    end
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, params)
+
+      channel_id = params.channel_id
+      agent_id = Map.get(context, :agent_id)
+      invitee_id = params.invitee_id
+
+      with {:ok, info} <- Arbor.Actions.Channel.call_comms(:get_channel_info, [channel_id]),
+           :ok <- check_owner(info, agent_id) do
+        member = %{
+          id: invitee_id,
+          name: params[:invitee_name] || "Agent",
+          type: normalize_type(params[:invitee_type] || "agent")
+        }
+
+        case Arbor.Actions.Channel.call_comms(:join_channel, [channel_id, member]) do
+          :ok ->
+            result = %{channel_id: channel_id, invitee_id: invitee_id, status: :invited}
+            Actions.emit_completed(__MODULE__, result)
+            {:ok, result}
+
+          {:error, :already_member} ->
+            result = %{channel_id: channel_id, invitee_id: invitee_id, status: :already_member}
+            Actions.emit_completed(__MODULE__, result)
+            {:ok, result}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, reason}
+        end
+      else
+        {:error, :not_owner} ->
+          Actions.emit_failed(__MODULE__, :not_owner)
+          {:error, :not_owner}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, reason}
+      end
+    end
+
+    defp check_owner(%{owner_id: owner_id}, agent_id) when owner_id == agent_id, do: :ok
+    defp check_owner(_, _), do: {:error, :not_owner}
+
+    defp normalize_type("human"), do: :human
+    defp normalize_type("agent"), do: :agent
+    defp normalize_type("system"), do: :system
+    defp normalize_type(_), do: :agent
   end
 
   # ============================================================================

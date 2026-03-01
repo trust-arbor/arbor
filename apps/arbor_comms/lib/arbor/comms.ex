@@ -231,6 +231,167 @@ defmodule Arbor.Comms do
     Channel.verify_message_signature(message)
   end
 
+  @doc """
+  Search channels with composable filters.
+
+  When persistence is available, delegates to ChannelStore.search_channels/1.
+  Falls back to in-memory Registry scan with client-side filtering.
+
+  ## Options
+
+  - `:name` — substring match on channel name
+  - `:type` — exact type match (string)
+  - `:owner_id` — exact owner match
+  - `:member_id` — member containment check
+  - `:limit` — max results (default: 50)
+  """
+  @spec search_channels(keyword()) :: [map()]
+  def search_channels(opts \\ []) do
+    if channel_store_available?() do
+      apply(Arbor.Persistence.ChannelStore, :search_channels, [opts])
+      |> Enum.map(&channel_schema_to_info/1)
+    else
+      # Fallback: in-memory scan
+      limit = Keyword.get(opts, :limit, 50)
+
+      list_channels()
+      |> Enum.map(fn {channel_id, _pid} ->
+        case get_channel_info(channel_id) do
+          {:ok, info} -> info
+          _ -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> maybe_filter(:name, Keyword.get(opts, :name))
+      |> maybe_filter(:type, Keyword.get(opts, :type))
+      |> maybe_filter(:owner_id, Keyword.get(opts, :owner_id))
+      |> Enum.take(limit)
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Update a channel's name and/or topic.
+
+  Updates both in-memory GenServer state and persistence.
+  """
+  @spec update_channel(String.t(), keyword()) :: :ok | {:error, term()}
+  def update_channel(channel_id, opts) when is_list(opts) do
+    # Update in-memory GenServer
+    with {:ok, pid} <- lookup_channel(channel_id) do
+      Channel.update_info(pid, opts)
+
+      # Persist changes async
+      if channel_store_available?() do
+        attrs = %{}
+        attrs = if opts[:name], do: Map.put(attrs, :name, opts[:name]), else: attrs
+
+        attrs =
+          if opts[:topic],
+            do: Map.put(attrs, :metadata, %{"topic" => opts[:topic]}),
+            else: attrs
+
+        if map_size(attrs) > 0 do
+          Task.start(fn ->
+            apply(Arbor.Persistence.ChannelStore, :update_channel, [channel_id, attrs])
+          end)
+        end
+      end
+
+      :ok
+    end
+  end
+
+  @doc """
+  Delete a channel — terminates GenServer and removes from persistence.
+  """
+  @spec delete_channel(String.t()) :: :ok | {:error, term()}
+  def delete_channel(channel_id) do
+    # Terminate GenServer if running
+    case lookup_channel(channel_id) do
+      {:ok, pid} ->
+        DynamicSupervisor.terminate_child(Arbor.Comms.ChannelSupervisor, pid)
+
+      {:error, :not_found} ->
+        :ok
+    end
+
+    # Delete from persistence
+    if channel_store_available?() do
+      apply(Arbor.Persistence.ChannelStore, :delete_channel, [channel_id])
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp channel_store_available? do
+    Code.ensure_loaded?(Arbor.Persistence.ChannelStore) and
+      apply(Arbor.Persistence.ChannelStore, :available?, [])
+  end
+
+  defp channel_schema_to_info(schema) do
+    members = schema.members || []
+
+    %{
+      channel_id: schema.channel_id,
+      name: schema.name || schema.channel_id,
+      type: String.to_existing_atom(schema.type),
+      owner_id: schema.owner_id,
+      member_count: length(members),
+      message_count: 0,
+      encrypted: schema.type in ["private", "dm"],
+      encryption_type: encryption_type_for(schema.type)
+    }
+  rescue
+    # String.to_existing_atom can fail for unknown types
+    _ ->
+      %{
+        channel_id: schema.channel_id,
+        name: schema.name || schema.channel_id,
+        type: :group,
+        owner_id: schema.owner_id,
+        member_count: length(schema.members || []),
+        message_count: 0,
+        encrypted: false,
+        encryption_type: nil
+      }
+  end
+
+  defp encryption_type_for("private"), do: :aes_256_gcm
+  defp encryption_type_for("dm"), do: :double_ratchet
+  defp encryption_type_for(_), do: nil
+
+  defp maybe_filter(channels, :name, nil), do: channels
+
+  defp maybe_filter(channels, :name, name) do
+    name_down = String.downcase(name)
+    Enum.filter(channels, fn c -> String.downcase(to_string(c.name)) =~ name_down end)
+  end
+
+  defp maybe_filter(channels, :type, nil), do: channels
+
+  defp maybe_filter(channels, :type, type) do
+    type_atom =
+      if is_atom(type), do: type, else: String.to_existing_atom(type)
+
+    Enum.filter(channels, fn c -> c.type == type_atom end)
+  rescue
+    _ -> channels
+  end
+
+  defp maybe_filter(channels, :owner_id, nil), do: channels
+
+  defp maybe_filter(channels, :owner_id, owner_id) do
+    Enum.filter(channels, fn c -> c.owner_id == owner_id end)
+  end
+
   defp lookup_channel(channel_id) do
     case Registry.lookup(Arbor.Comms.ChannelRegistry, channel_id) do
       [{pid, _}] -> {:ok, pid}

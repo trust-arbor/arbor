@@ -109,6 +109,12 @@ defmodule Arbor.Comms.Channel do
     GenServer.call(server, :channel_info)
   end
 
+  @doc "Update channel name and/or topic. Returns `:ok` or `{:error, reason}`."
+  @spec update_info(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  def update_info(server, opts) when is_list(opts) do
+    GenServer.call(server, {:update_info, opts})
+  end
+
   # ── Server Callbacks ───────────────────────────────────────────────
 
   @impl true
@@ -287,6 +293,21 @@ defmodule Arbor.Comms.Channel do
     # Messages stored newest-first; return oldest-first for display
     history = state.messages |> Enum.take(limit) |> Enum.reverse()
     {:reply, history, state}
+  end
+
+  def handle_call({:update_info, opts}, _from, state) do
+    new_name = Keyword.get(opts, :name, state.name)
+    topic = Keyword.get(opts, :topic)
+
+    new_state = %{state | name: new_name}
+
+    emit_signal(:channel_updated, %{
+      channel_id: state.channel_id,
+      name: new_name,
+      topic: topic
+    })
+
+    {:reply, :ok, new_state}
   end
 
   def handle_call(:channel_info, _from, state) do

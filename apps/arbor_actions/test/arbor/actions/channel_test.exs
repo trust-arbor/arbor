@@ -11,12 +11,12 @@ defmodule Arbor.Actions.ChannelTest do
 
     # Create a test channel via the Comms facade
     {:ok, channel_id} =
-      Arbor.Comms.create_channel("test_channel", [
+      Arbor.Comms.create_channel("test_channel",
         type: :group,
         owner_id: "agent_1",
         members: [%{id: "agent_1", name: "Agent One", type: :agent}],
         rate_limit_ms: 0
-      ])
+      )
 
     on_exit(fn ->
       # Channel processes are under DynamicSupervisor; they'll be cleaned up
@@ -224,6 +224,141 @@ defmodule Arbor.Actions.ChannelTest do
   # Cross-action integration
   # ============================================================================
 
+  # ============================================================================
+  # Channel.Create
+  # ============================================================================
+
+  describe "Channel.Create" do
+    test "has correct action metadata" do
+      assert Channel.Create.name() == "channel_create"
+      assert Channel.Create.category() == "channel"
+    end
+
+    test "creates a channel with owner as first member" do
+      context = %{agent_id: "agent_creator", agent_name: "Creator"}
+      params = %{name: "new_channel", type: "group"}
+
+      assert {:ok, result} = Channel.Create.run(params, context)
+      assert result.name == "new_channel"
+      assert result.type == :group
+      assert result.status == :created
+      assert is_binary(result.channel_id)
+
+      # Verify owner is a member
+      {:ok, members} = Arbor.Comms.channel_members(result.channel_id)
+      assert Enum.any?(members, &(&1.id == "agent_creator"))
+    end
+
+    test "defaults to group type" do
+      context = %{agent_id: "agent_x", agent_name: "X"}
+      assert {:ok, result} = Channel.Create.run(%{name: "default_type"}, context)
+      assert result.type == :group
+    end
+  end
+
+  # ============================================================================
+  # Channel.Members
+  # ============================================================================
+
+  describe "Channel.Members" do
+    test "has correct action metadata" do
+      assert Channel.Members.name() == "channel_members"
+      assert Channel.Members.category() == "channel"
+    end
+
+    test "returns member list", %{channel_id: channel_id} do
+      assert {:ok, result} = Channel.Members.run(%{channel_id: channel_id}, %{})
+      assert result.channel_id == channel_id
+      assert result.count >= 1
+      [member | _] = result.members
+      assert member.id == "agent_1"
+      assert member.name == "Agent One"
+    end
+
+    test "returns error for unknown channel" do
+      assert {:error, :not_found} = Channel.Members.run(%{channel_id: "nonexistent"}, %{})
+    end
+  end
+
+  # ============================================================================
+  # Channel.Update
+  # ============================================================================
+
+  describe "Channel.Update" do
+    test "has correct action metadata" do
+      assert Channel.Update.name() == "channel_update"
+      assert Channel.Update.category() == "channel"
+    end
+
+    test "owner can rename channel", %{channel_id: channel_id} do
+      context = %{agent_id: "agent_1"}
+      params = %{channel_id: channel_id, name: "renamed_channel"}
+
+      assert {:ok, result} = Channel.Update.run(params, context)
+      assert result.status == :updated
+
+      # Verify rename
+      {:ok, info} = Arbor.Comms.get_channel_info(channel_id)
+      assert info.name == "renamed_channel"
+    end
+
+    test "non-owner cannot update", %{channel_id: channel_id} do
+      context = %{agent_id: "agent_outsider"}
+      params = %{channel_id: channel_id, name: "hacked"}
+
+      assert {:error, :not_owner} = Channel.Update.run(params, context)
+    end
+
+    test "returns error for unknown channel" do
+      context = %{agent_id: "agent_1"}
+      assert {:error, :not_found} = Channel.Update.run(%{channel_id: "nope", name: "x"}, context)
+    end
+  end
+
+  # ============================================================================
+  # Channel.Invite
+  # ============================================================================
+
+  describe "Channel.Invite" do
+    test "has correct action metadata" do
+      assert Channel.Invite.name() == "channel_invite"
+      assert Channel.Invite.category() == "channel"
+    end
+
+    test "owner can invite member", %{channel_id: channel_id} do
+      context = %{agent_id: "agent_1"}
+
+      params = %{
+        channel_id: channel_id,
+        invitee_id: "agent_invited",
+        invitee_name: "Invited Agent"
+      }
+
+      assert {:ok, result} = Channel.Invite.run(params, context)
+      assert result.status == :invited
+      assert result.invitee_id == "agent_invited"
+
+      # Verify membership
+      {:ok, members} = Arbor.Comms.channel_members(channel_id)
+      assert Enum.any?(members, &(&1.id == "agent_invited"))
+    end
+
+    test "idempotent — re-invite returns already_member", %{channel_id: channel_id} do
+      context = %{agent_id: "agent_1"}
+      params = %{channel_id: channel_id, invitee_id: "agent_1"}
+
+      assert {:ok, result} = Channel.Invite.run(params, context)
+      assert result.status == :already_member
+    end
+
+    test "non-owner cannot invite", %{channel_id: channel_id} do
+      context = %{agent_id: "agent_outsider"}
+      params = %{channel_id: channel_id, invitee_id: "agent_new"}
+
+      assert {:error, :not_owner} = Channel.Invite.run(params, context)
+    end
+  end
+
   describe "action name resolution" do
     test "action_module_to_name produces correct URIs" do
       assert Arbor.Actions.action_module_to_name(Channel.List) == "channel.list"
@@ -231,12 +366,16 @@ defmodule Arbor.Actions.ChannelTest do
       assert Arbor.Actions.action_module_to_name(Channel.Send) == "channel.send"
       assert Arbor.Actions.action_module_to_name(Channel.Join) == "channel.join"
       assert Arbor.Actions.action_module_to_name(Channel.Leave) == "channel.leave"
+      assert Arbor.Actions.action_module_to_name(Channel.Create) == "channel.create"
+      assert Arbor.Actions.action_module_to_name(Channel.Members) == "channel.members"
+      assert Arbor.Actions.action_module_to_name(Channel.Update) == "channel.update"
+      assert Arbor.Actions.action_module_to_name(Channel.Invite) == "channel.invite"
     end
 
     test "channel actions are registered in list_actions" do
       actions = Arbor.Actions.list_actions()
       assert Map.has_key?(actions, :channel)
-      assert length(actions.channel) == 5
+      assert length(actions.channel) == 9
     end
   end
 
