@@ -22,7 +22,8 @@ defmodule Arbor.Actions do
   | Proposal | `Arbor.Actions.Proposal` | Proposal submission for consensus |
   | Council | `Arbor.Actions.Council` | Advisory council consultation |
   | Consensus | `Arbor.Actions.Consensus` | Consensus propose/ask/await/check/decide |
-  | Web | `Arbor.Actions.Web` | Web browsing, search, and page snapshots |
+  | Web | `Arbor.Actions.Web` | Session-free web browsing, search, and page snapshots |
+  | Browser | `Arbor.Actions.Browser` | Interactive browser automation (session-based) |
   | ACP | `Arbor.Actions.Acp` | ACP coding agent session management |
 
   ## Quick Start
@@ -366,6 +367,39 @@ defmodule Arbor.Actions do
       ],
       session_llm: [
         Arbor.Actions.SessionLlm.BuildPrompt
+      ],
+      web: [
+        Arbor.Actions.Web.Browse,
+        Arbor.Actions.Web.Search,
+        Arbor.Actions.Web.Snapshot
+      ],
+      browser: [
+        Arbor.Actions.Browser.StartSession,
+        Arbor.Actions.Browser.EndSession,
+        Arbor.Actions.Browser.GetStatus,
+        Arbor.Actions.Browser.Navigate,
+        Arbor.Actions.Browser.Back,
+        Arbor.Actions.Browser.Forward,
+        Arbor.Actions.Browser.Reload,
+        Arbor.Actions.Browser.GetUrl,
+        Arbor.Actions.Browser.GetTitle,
+        Arbor.Actions.Browser.Click,
+        Arbor.Actions.Browser.Type,
+        Arbor.Actions.Browser.Hover,
+        Arbor.Actions.Browser.Focus,
+        Arbor.Actions.Browser.Scroll,
+        Arbor.Actions.Browser.SelectOption,
+        Arbor.Actions.Browser.Query,
+        Arbor.Actions.Browser.GetText,
+        Arbor.Actions.Browser.GetAttribute,
+        Arbor.Actions.Browser.IsVisible,
+        Arbor.Actions.Browser.ExtractContent,
+        Arbor.Actions.Browser.Screenshot,
+        Arbor.Actions.Browser.Snapshot,
+        Arbor.Actions.Browser.Wait,
+        Arbor.Actions.Browser.WaitForSelector,
+        Arbor.Actions.Browser.WaitForNavigation,
+        Arbor.Actions.Browser.Evaluate
       ]
     }
   end
