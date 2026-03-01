@@ -606,9 +606,15 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     # --backend cli|api forces CLI agents (can read source code) or API providers
     case opts[:backend] do
-      nil -> eval_opts
-      "cli" -> Keyword.put(eval_opts, :backend, :cli)
-      "api" -> Keyword.put(eval_opts, :backend, :api)
+      nil ->
+        eval_opts
+
+      "cli" ->
+        Keyword.put(eval_opts, :backend, :cli)
+
+      "api" ->
+        Keyword.put(eval_opts, :backend, :api)
+
       other ->
         Mix.shell().error("Unknown backend '#{other}'. Use 'cli' or 'api'.")
         exit({:shutdown, 1})
@@ -643,6 +649,40 @@ defmodule Mix.Tasks.Arbor.Consult do
     # It does NOT need: gateway, dashboard, signals, historian, shell, sandbox,
     # sdlc, agent, security, trust, persistence — all of which may bind ports
     # or start heavy process trees.
+    #
+    # OTP code path fix: arbor_ai depends on jido → jido_signal → memento → mnesia.
+    # When mnesia/os_mon/xmerl are started and then stopped (normal VM exit), their
+    # ebin paths can be removed from :code.get_path(). Mix's compilation cache
+    # preserves this stripped code path, so subsequent runs can't find mnesia.app.
+    # Re-add OTP ebin paths and reload the applications.
+    for otp_app <- [:mnesia, :os_mon, :xmerl] do
+      case :code.lib_dir(otp_app) do
+        {:error, _} ->
+          # lib_dir failed — app path completely gone, find it from OTP root
+          otp_root = :code.root_dir()
+          lib_dir = Path.join([to_string(otp_root), "lib"])
+
+          case File.ls(lib_dir) do
+            {:ok, entries} ->
+              prefix = "#{otp_app}-"
+
+              case Enum.find(entries, &String.starts_with?(&1, prefix)) do
+                nil -> :ok
+                dir -> :code.add_pathz(~c"#{Path.join([lib_dir, dir, "ebin"])}")
+              end
+
+            _ ->
+              :ok
+          end
+
+        lib_path ->
+          ebin = ~c"#{lib_path}/ebin"
+          unless ebin in :code.get_path(), do: :code.add_pathz(ebin)
+      end
+
+      :application.load(otp_app)
+    end
+
     {:ok, _} = Application.ensure_all_started(:logger)
     {:ok, _} = Application.ensure_all_started(:jason)
     {:ok, _} = Application.ensure_all_started(:req)
