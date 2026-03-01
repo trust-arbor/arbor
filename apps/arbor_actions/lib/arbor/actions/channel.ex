@@ -137,10 +137,11 @@ defmodule Arbor.Actions.Channel do
     end
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       Actions.emit_started(__MODULE__, params)
       channel_id = params.channel_id
       limit = params[:limit] || 20
+      reader_id = Map.get(context, :agent_id)
 
       case Arbor.Actions.Channel.call_comms(:channel_history, [channel_id, [limit: limit]]) do
         {:error, :comms_unavailable} = err ->
@@ -154,11 +155,18 @@ defmodule Arbor.Actions.Channel do
         {:ok, messages} when is_list(messages) ->
           formatted =
             Enum.map(messages, fn msg ->
+              content = Map.get(msg, :content, "")
+
+              # Attempt DM decryption if content is DM-encrypted
+              content = maybe_dm_decrypt(content, reader_id)
+
               %{
                 sender_name: Map.get(msg, :sender_name, "unknown"),
                 sender_type: Map.get(msg, :sender_type, :unknown),
-                content: Map.get(msg, :content, ""),
-                timestamp: Map.get(msg, :timestamp) |> format_timestamp()
+                content: content,
+                timestamp: Map.get(msg, :timestamp) |> format_timestamp(),
+                signed: Map.get(msg, :signed, false),
+                verified: verify_message(msg)
               }
             end)
 
@@ -166,6 +174,136 @@ defmodule Arbor.Actions.Channel do
           Actions.emit_completed(__MODULE__, result)
           {:ok, result}
       end
+    end
+
+    defp verify_message(%{signature: nil}), do: nil
+    defp verify_message(%{signed: false}), do: nil
+
+    defp verify_message(msg) do
+      channel_mod = Arbor.Comms.Channel
+
+      if Code.ensure_loaded?(channel_mod) and
+           function_exported?(channel_mod, :verify_message_signature, 1) do
+        try do
+          apply(channel_mod, :verify_message_signature, [msg])
+        rescue
+          _ -> nil
+        catch
+          :exit, _ -> nil
+        end
+      else
+        nil
+      end
+    end
+
+    defp maybe_dm_decrypt(content, nil), do: content
+
+    defp maybe_dm_decrypt(content, reader_id) when is_binary(content) do
+      case Jason.decode(content) do
+        {:ok, %{"__dm_encrypted__" => true, "sender_id" => sender_id, "sealed" => sealed_data}} ->
+          decrypt_dm_message(reader_id, sender_id, sealed_data)
+
+        _ ->
+          content
+      end
+    rescue
+      _ -> content
+    end
+
+    defp maybe_dm_decrypt(content, _reader_id), do: content
+
+    defp decrypt_dm_message(reader_id, sender_id, sealed_data) do
+      keychain_mod = Arbor.Security.Keychain
+
+      with true <- Code.ensure_loaded?(keychain_mod),
+           {:ok, keychain} <- get_reader_keychain(reader_id),
+           sealed <- deserialize_sealed(sealed_data) do
+        case apply(keychain_mod, :unseal_from_peer, [keychain, sender_id, sealed]) do
+          {:ok, plaintext, updated_keychain} ->
+            # Ratchet decryption — persist updated keychain
+            Process.put({:dm_keychain, reader_id}, updated_keychain)
+            plaintext
+
+          {:ok, plaintext} ->
+            plaintext
+
+          {:error, _reason} ->
+            "[encrypted — cannot decrypt]"
+        end
+      else
+        _ -> "[encrypted — no keychain]"
+      end
+    rescue
+      _ -> "[encrypted — error]"
+    catch
+      :exit, _ -> "[encrypted — error]"
+    end
+
+    defp get_reader_keychain(reader_id) do
+      cache_key = {:dm_keychain, reader_id}
+
+      case Process.get(cache_key) do
+        nil ->
+          keychain_mod = Arbor.Security.Keychain
+          signing_key_store = Arbor.Security.SigningKeyStore
+
+          with true <- Code.ensure_loaded?(signing_key_store),
+               true <- Code.ensure_loaded?(keychain_mod),
+               {:ok, keypair} <- apply(signing_key_store, :get_keypair, [reader_id]) do
+            signing_priv = keypair.signing
+            enc_priv = Map.get(keypair, :encryption)
+
+            if enc_priv do
+              crypto = Arbor.Security.Crypto
+              {sign_pub, _} = apply(crypto, :generate_keypair, [])
+              {enc_pub, _} = :crypto.generate_key(:ecdh, :x25519, enc_priv)
+
+              keychain =
+                apply(keychain_mod, :from_keypairs, [
+                  reader_id,
+                  {sign_pub, signing_priv},
+                  {enc_pub, enc_priv}
+                ])
+
+              Process.put(cache_key, keychain)
+              {:ok, keychain}
+            else
+              {:error, :no_encryption_key}
+            end
+          end
+
+        keychain ->
+          {:ok, keychain}
+      end
+    rescue
+      _ -> {:error, :keychain_unavailable}
+    catch
+      :exit, _ -> {:error, :keychain_unavailable}
+    end
+
+    defp deserialize_sealed(%{"type" => "ratchet"} = data) do
+      {:ok, header_bin} = Base.decode64(data["header"])
+      {:ok, ciphertext} = Base.decode64(data["ciphertext"])
+
+      %{
+        __ratchet__: true,
+        header: :erlang.binary_to_term(header_bin, [:safe]),
+        ciphertext: ciphertext
+      }
+    end
+
+    defp deserialize_sealed(%{"type" => "ecdh"} = data) do
+      {:ok, ciphertext} = Base.decode64(data["ciphertext"])
+      {:ok, iv} = Base.decode64(data["iv"])
+      {:ok, tag} = Base.decode64(data["tag"])
+      {:ok, sender_public} = Base.decode64(data["sender_public"])
+
+      %{
+        ciphertext: ciphertext,
+        iv: iv,
+        tag: tag,
+        sender_public: sender_public
+      }
     end
 
     defp format_timestamp(nil), do: nil
@@ -224,12 +362,18 @@ defmodule Arbor.Actions.Channel do
       sender_name = Map.get(context, :agent_name, "Agent")
       sender_type = :agent
 
+      # Sign the message content if a signing key is available
+      metadata = maybe_sign_content(sender_id, content, metadata)
+
+      # For DM channels, encrypt content with Double Ratchet before sending
+      {send_content, metadata} = maybe_dm_encrypt(channel_id, sender_id, content, metadata)
+
       case Arbor.Actions.Channel.call_comms(:send_to_channel, [
              channel_id,
              sender_id,
              sender_name,
              sender_type,
-             content,
+             send_content,
              metadata
            ]) do
         {:error, :comms_unavailable} = err ->
@@ -248,11 +392,169 @@ defmodule Arbor.Actions.Channel do
           result = %{
             channel_id: channel_id,
             message_id: Map.get(message, :id, "unknown"),
-            status: :sent
+            status: :sent,
+            signed: Map.get(message, :signed, false)
           }
 
           Actions.emit_completed(__MODULE__, result)
           {:ok, result}
+      end
+    end
+
+    defp maybe_sign_content(sender_id, content, metadata) do
+      signing_key_store = Arbor.Security.SigningKeyStore
+      crypto = Arbor.Security.Crypto
+
+      with true <- Code.ensure_loaded?(signing_key_store),
+           true <- Code.ensure_loaded?(crypto),
+           {:ok, private_key} <- apply(signing_key_store, :get, [sender_id]) do
+        signature = apply(crypto, :sign, [content, private_key])
+        Map.put(metadata, :signature, signature)
+      else
+        _ -> metadata
+      end
+    rescue
+      _ -> metadata
+    catch
+      :exit, _ -> metadata
+    end
+
+    defp maybe_dm_encrypt(channel_id, sender_id, content, metadata) do
+      # Check if this is a DM channel
+      case Arbor.Actions.Channel.call_comms(:get_channel_info, [channel_id]) do
+        {:ok, %{type: :dm}} ->
+          dm_encrypt(channel_id, sender_id, content, metadata)
+
+        _ ->
+          {content, metadata}
+      end
+    rescue
+      _ -> {content, metadata}
+    catch
+      :exit, _ -> {content, metadata}
+    end
+
+    defp dm_encrypt(channel_id, sender_id, content, metadata) do
+      keychain_mod = Arbor.Security.Keychain
+
+      with true <- Code.ensure_loaded?(keychain_mod),
+           {:ok, keychain} <- get_agent_keychain(sender_id),
+           {:ok, peer_id} <- find_dm_peer(channel_id, sender_id) do
+        case apply(keychain_mod, :seal_for_peer, [keychain, peer_id, content]) do
+          {:ok, sealed, updated_keychain} ->
+            # Ratchet-encrypted — persist updated keychain
+            persist_agent_keychain(sender_id, updated_keychain)
+
+            encrypted_content =
+              Jason.encode!(%{
+                "__dm_encrypted__" => true,
+                "sender_id" => sender_id,
+                "sealed" => serialize_sealed(sealed)
+              })
+
+            {encrypted_content, Map.put(metadata, :dm_encrypted, true)}
+
+          {:ok, sealed} ->
+            # One-shot ECDH
+            encrypted_content =
+              Jason.encode!(%{
+                "__dm_encrypted__" => true,
+                "sender_id" => sender_id,
+                "sealed" => serialize_sealed(sealed)
+              })
+
+            {encrypted_content, Map.put(metadata, :dm_encrypted, true)}
+
+          {:error, _reason} ->
+            # Can't encrypt — send plaintext
+            {content, metadata}
+        end
+      else
+        _ -> {content, metadata}
+      end
+    rescue
+      _ -> {content, metadata}
+    catch
+      :exit, _ -> {content, metadata}
+    end
+
+    defp serialize_sealed(%{__ratchet__: true} = sealed) do
+      %{
+        "type" => "ratchet",
+        "header" => Base.encode64(:erlang.term_to_binary(sealed.header)),
+        "ciphertext" => Base.encode64(sealed.ciphertext)
+      }
+    end
+
+    defp serialize_sealed(sealed) do
+      %{
+        "type" => "ecdh",
+        "ciphertext" => Base.encode64(sealed.ciphertext),
+        "iv" => Base.encode64(sealed.iv),
+        "tag" => Base.encode64(sealed.tag),
+        "sender_public" => Base.encode64(sealed.sender_public)
+      }
+    end
+
+    # Keychain management — these use a process dictionary cache or ETS for the session
+    defp get_agent_keychain(agent_id) do
+      keychain_mod = Arbor.Security.Keychain
+
+      # Check if agent has a keychain in the process cache
+      cache_key = {:dm_keychain, agent_id}
+
+      case Process.get(cache_key) do
+        nil ->
+          # Create a new keychain from the agent's existing keys
+          signing_key_store = Arbor.Security.SigningKeyStore
+
+          with true <- Code.ensure_loaded?(signing_key_store),
+               {:ok, keypair} <- apply(signing_key_store, :get_keypair, [agent_id]) do
+            signing_priv = keypair.signing
+            enc_priv = Map.get(keypair, :encryption)
+
+            if enc_priv do
+              crypto = Arbor.Security.Crypto
+              {sign_pub, _} = apply(crypto, :generate_keypair, [])
+              {enc_pub, _} = :crypto.generate_key(:ecdh, :x25519, enc_priv)
+
+              keychain =
+                apply(keychain_mod, :from_keypairs, [
+                  agent_id,
+                  {sign_pub, signing_priv},
+                  {enc_pub, enc_priv}
+                ])
+
+              Process.put(cache_key, keychain)
+              {:ok, keychain}
+            else
+              {:error, :no_encryption_key}
+            end
+          end
+
+        keychain ->
+          {:ok, keychain}
+      end
+    rescue
+      _ -> {:error, :keychain_unavailable}
+    catch
+      :exit, _ -> {:error, :keychain_unavailable}
+    end
+
+    defp persist_agent_keychain(agent_id, keychain) do
+      Process.put({:dm_keychain, agent_id}, keychain)
+    end
+
+    defp find_dm_peer(channel_id, sender_id) do
+      case Arbor.Actions.Channel.call_comms(:channel_members, [channel_id]) do
+        {:ok, members} ->
+          case Enum.find(members, fn m -> m.id != sender_id end) do
+            nil -> {:error, :no_peer}
+            peer -> {:ok, peer.id}
+          end
+
+        _ ->
+          {:error, :cannot_find_peer}
       end
     end
   end

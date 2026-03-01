@@ -132,10 +132,11 @@ defmodule Arbor.Comms do
   """
   @spec create_channel(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def create_channel(name, opts \\ []) do
-    channel_id = Keyword.get_lazy(opts, :channel_id, fn ->
-      suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
-      "chan_#{suffix}"
-    end)
+    channel_id =
+      Keyword.get_lazy(opts, :channel_id, fn ->
+        suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+        "chan_#{suffix}"
+      end)
 
     child_opts = Keyword.merge(opts, channel_id: channel_id, name: name)
 
@@ -154,8 +155,11 @@ defmodule Arbor.Comms do
           {:ok, map()} | {:error, term()}
   def send_to_channel(channel_id, sender_id, sender_name, sender_type, content, metadata \\ %{}) do
     case lookup_channel(channel_id) do
-      {:ok, pid} -> Channel.send_message(pid, sender_id, sender_name, sender_type, content, metadata)
-      error -> error
+      {:ok, pid} ->
+        Channel.send_message(pid, sender_id, sender_name, sender_type, content, metadata)
+
+      error ->
+        error
     end
   end
 
@@ -212,6 +216,19 @@ defmodule Arbor.Comms do
       {:ok, pid} -> {:ok, Channel.get_members(pid)}
       error -> error
     end
+  end
+
+  @doc """
+  Verify a channel message's cryptographic signature.
+
+  Returns:
+  - `true` — signature present and valid
+  - `false` — signature present but invalid (tampered or wrong key)
+  - `nil` — no signature present or public key unavailable
+  """
+  @spec verify_message_signature(map()) :: boolean() | nil
+  def verify_message_signature(message) do
+    Channel.verify_message_signature(message)
   end
 
   defp lookup_channel(channel_id) do
