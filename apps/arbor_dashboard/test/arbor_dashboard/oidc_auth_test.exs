@@ -10,6 +10,14 @@ defmodule Arbor.Dashboard.OidcAuthTest do
 
   @opts OidcAuth.init([])
 
+  # Clear OIDC config that may leak from .env file via runtime.exs
+  setup do
+    original = Application.get_env(:arbor_security, :oidc, [])
+    Application.put_env(:arbor_security, :oidc, [])
+    on_exit(fn -> Application.put_env(:arbor_security, :oidc, original) end)
+    :ok
+  end
+
   describe "when OIDC is not configured" do
     test "passes through all requests (open access)" do
       # With no OIDC providers configured, all requests pass through

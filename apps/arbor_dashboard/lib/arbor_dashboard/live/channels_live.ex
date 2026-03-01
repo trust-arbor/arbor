@@ -280,7 +280,10 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
               <span style="color: var(--aw-text, #fff);">{member.name || member.id}</span>
               <.badge label={to_string(member.type)} color={:gray} />
             </div>
-            <span :if={member[:joined_at]} style="color: var(--aw-text-muted, #888); font-size: 0.8rem;">
+            <span
+              :if={member[:joined_at]}
+              style="color: var(--aw-text-muted, #888); font-size: 0.8rem;"
+            >
               {format_datetime(member.joined_at)}
             </span>
           </div>

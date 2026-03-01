@@ -16,6 +16,11 @@ defmodule Arbor.Dashboard.ConnCase do
   end
 
   setup _tags do
+    # Clear OIDC config so OidcAuth plug allows open access in tests.
+    # Without this, .env file OIDC settings leak into test env via runtime.exs,
+    # causing all LiveView tests to get redirected to /auth/login.
+    Application.put_env(:arbor_security, :oidc, [])
+
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
 end
