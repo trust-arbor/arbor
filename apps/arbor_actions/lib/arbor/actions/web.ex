@@ -1,9 +1,13 @@
 defmodule Arbor.Actions.Web do
   @moduledoc """
-  Web browsing and search operations as Jido actions.
+  Session-free web browsing and search operations as Jido actions.
 
-  Wraps `jido_browser` with Arbor security integration (capability authorization,
-  taint tracking, signal observability, SSRF prevention).
+  Wraps `jido_browser` self-contained actions with Arbor security integration
+  (capability authorization, taint tracking, signal observability, SSRF prevention).
+  Each action manages its own browser session lifecycle automatically.
+
+  For interactive browser automation with persistent sessions (navigate, click, type,
+  screenshot, etc.), see `Arbor.Actions.Browser`.
 
   ## Actions
 
