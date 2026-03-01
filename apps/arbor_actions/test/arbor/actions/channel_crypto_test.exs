@@ -10,12 +10,12 @@ defmodule Arbor.Actions.ChannelCryptoTest do
     ensure_channel_infra()
 
     {:ok, channel_id} =
-      Arbor.Comms.create_channel("crypto_test_channel", [
+      Arbor.Comms.create_channel("crypto_test_channel",
         type: :group,
         owner_id: "agent_1",
         members: [%{id: "agent_1", name: "Agent One", type: :agent}],
         rate_limit_ms: 0
-      ])
+      )
 
     %{channel_id: channel_id}
   end
@@ -88,12 +88,12 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   describe "private channel via actions" do
     setup do
       {:ok, priv_id} =
-        Arbor.Comms.create_channel("private_test", [
+        Arbor.Comms.create_channel("private_test",
           type: :private,
           owner_id: "agent_1",
           members: [%{id: "agent_1", name: "Agent One", type: :agent}],
           rate_limit_ms: 0
-        ])
+        )
 
       %{priv_channel_id: priv_id}
     end
@@ -125,7 +125,7 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   describe "DM channel basics" do
     setup do
       {:ok, dm_id} =
-        Arbor.Comms.create_channel("dm_test", [
+        Arbor.Comms.create_channel("dm_test",
           type: :dm,
           owner_id: "agent_1",
           members: [
@@ -133,7 +133,7 @@ defmodule Arbor.Actions.ChannelCryptoTest do
             %{id: "agent_2", name: "Agent Two", type: :agent}
           ],
           rate_limit_ms: 0
-        ])
+        )
 
       %{dm_channel_id: dm_id}
     end

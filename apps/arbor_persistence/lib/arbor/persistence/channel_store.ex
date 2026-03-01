@@ -248,6 +248,113 @@ defmodule Arbor.Persistence.ChannelStore do
     end
   end
 
+  # ── Search & Management ──────────────────────────────────────────
+
+  @doc """
+  Search channels with composable filters.
+
+  ## Options
+
+  - `:name` — ILIKE substring match on channel name
+  - `:type` — exact type match
+  - `:owner_id` — exact owner match
+  - `:member_id` — JSONB containment check on members array
+  - `:limit` — max results (default: 50)
+  """
+  @spec search_channels(keyword()) :: [Channel.t()]
+  def search_channels(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 50)
+
+    query = from(c in Channel, order_by: [desc: c.updated_at], limit: ^limit)
+
+    query =
+      case Keyword.get(opts, :name) do
+        nil -> query
+        name -> from(c in query, where: ilike(c.name, ^"%#{name}%"))
+      end
+
+    query =
+      case Keyword.get(opts, :type) do
+        nil -> query
+        type -> from(c in query, where: c.type == ^type)
+      end
+
+    query =
+      case Keyword.get(opts, :owner_id) do
+        nil -> query
+        owner -> from(c in query, where: c.owner_id == ^owner)
+      end
+
+    query =
+      case Keyword.get(opts, :member_id) do
+        nil ->
+          query
+
+        member_id ->
+          member_json = Jason.encode!([%{"id" => member_id}])
+          from(c in query, where: fragment("? @> ?::jsonb", c.members, ^member_json))
+      end
+
+    Repo.all(query)
+  end
+
+  @doc """
+  Update a channel's name and/or metadata.
+
+  Attrs can include `:name` and/or `:metadata` (merged into existing).
+  """
+  @spec update_channel(String.t(), map()) :: {:ok, Channel.t()} | {:error, term()}
+  def update_channel(channel_id, attrs) when is_map(attrs) do
+    case get_channel(channel_id) do
+      {:ok, channel} ->
+        update_attrs =
+          attrs
+          |> maybe_merge_metadata(channel)
+          |> Map.take([:name, :metadata])
+
+        channel
+        |> Channel.changeset(update_attrs)
+        |> Repo.update()
+
+      error ->
+        error
+    end
+  end
+
+  defp maybe_merge_metadata(%{metadata: new_meta} = attrs, channel) when is_map(new_meta) do
+    merged = Map.merge(channel.metadata || %{}, new_meta)
+    Map.put(attrs, :metadata, merged)
+  end
+
+  defp maybe_merge_metadata(attrs, _channel), do: attrs
+
+  @doc """
+  Soft-archive a channel by setting metadata.archived = true.
+  """
+  @spec archive_channel(String.t()) :: {:ok, Channel.t()} | {:error, term()}
+  def archive_channel(channel_id) do
+    update_channel(channel_id, %{metadata: %{"archived" => true}})
+  end
+
+  @doc """
+  Hard-delete a channel and its messages.
+  """
+  @spec delete_channel(String.t()) :: :ok | {:error, term()}
+  def delete_channel(channel_id) do
+    case get_channel(channel_id) do
+      {:ok, channel} ->
+        # Delete messages first (FK constraint)
+        from(m in ChannelMessage, where: m.channel_id == ^channel.id)
+        |> Repo.delete_all()
+
+        Repo.delete(channel)
+        :ok
+
+      error ->
+        error
+    end
+  end
+
   @doc """
   Check if the channel store is available (Repo process running).
   """
