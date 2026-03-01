@@ -421,7 +421,12 @@ defmodule Arbor.Comms.Channel do
 
   defp persist_message(channel_id, message, encryption_key) do
     # Encrypt content for private channels before persistence
-    persisted_content = encrypt_content(message.content, encryption_key)
+    # JSON-encode encrypted maps so they fit the text column in Postgres
+    persisted_content =
+      case encrypt_content(message.content, encryption_key) do
+        %{} = map -> Jason.encode!(map)
+        plain -> plain
+      end
 
     persisted_metadata =
       if encryption_key do
@@ -576,6 +581,16 @@ defmodule Arbor.Comms.Channel do
 
   @doc false
   def decrypt_content(content, nil), do: content
+
+  def decrypt_content(json, encryption_key) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, %{"__encrypted__" => true} = encrypted} ->
+        decrypt_content(encrypted, encryption_key)
+
+      _ ->
+        json
+    end
+  end
 
   def decrypt_content(%{"__encrypted__" => true} = encrypted, encryption_key) do
     crypto = Arbor.Security.Crypto
