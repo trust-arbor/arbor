@@ -32,7 +32,7 @@ defmodule Arbor.Persistence.Schemas.Channel do
   @required_fields [:channel_id]
   @optional_fields [:type, :name, :owner_id, :members, :metadata]
 
-  @valid_types ~w(dm group public ops_room)
+  @valid_types ~w(dm group public private ops_room)
 
   @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(schema \\ %__MODULE__{}, attrs) do
