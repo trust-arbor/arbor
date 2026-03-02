@@ -153,6 +153,17 @@ defmodule Arbor.Agent.SessionManager do
 
     session_id = "agent-session-#{agent_id}"
 
+    # Build config map so the Session's turn/heartbeat builders can inject
+    # session.llm_provider and session.llm_model into engine context.
+    # Provider must be a string to match UnifiedLLM adapter keys.
+    provider = Keyword.get(opts, :provider)
+
+    llm_config =
+      %{}
+      |> maybe_put_config("llm_provider", if(provider, do: to_string(provider)))
+      |> maybe_put_config("llm_model", Keyword.get(opts, :model))
+      |> maybe_put_config("system_prompt", Keyword.get(opts, :system_prompt))
+
     base = [
       session_id: session_id,
       agent_id: agent_id,
@@ -162,7 +173,8 @@ defmodule Arbor.Agent.SessionManager do
       heartbeat_dot: hb,
       start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
       execution_mode: :session,
-      signer: Keyword.get(opts, :signer)
+      signer: Keyword.get(opts, :signer),
+      config: llm_config
     ]
 
     # Add compactor config if context management is enabled
@@ -195,6 +207,9 @@ defmodule Arbor.Agent.SessionManager do
       {compactor_module, compactor_opts}
     end
   end
+
+  defp maybe_put_config(map, _key, nil), do: map
+  defp maybe_put_config(map, key, value), do: Map.put(map, key, value)
 
   defp build_adapters(agent_id, trust_tier, opts) do
     if Code.ensure_loaded?(@adapters_module) do

@@ -252,6 +252,8 @@ defmodule Arbor.Agent.AgentSeed do
   """
   @spec finalize_query(String.t(), String.t(), map()) :: map()
   def finalize_query(prompt, response_text, state) do
+    prompt = to_string(prompt || "")
+    response_text = to_string(response_text || "")
     state = TimingContext.on_agent_output(state)
 
     if state.memory_initialized do

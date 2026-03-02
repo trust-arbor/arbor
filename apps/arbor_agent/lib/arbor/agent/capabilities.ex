@@ -385,6 +385,16 @@ defmodule Arbor.Agent.Capabilities do
         quick: "Quick quality check (content)"
       }
     },
+    "acp" => %{
+      name: "ACP",
+      summary: "Manage coding agent sessions",
+      ops: %{
+        start_session: "Start new coding session (task)",
+        send_message: "Send message to session (session_id, message)",
+        session_status: "Check session status (session_id)",
+        close_session: "Close session (session_id)"
+      }
+    },
     "delegate" => %{
       name: "Delegate",
       summary: "Execute via CLI agent",

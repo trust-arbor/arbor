@@ -65,7 +65,12 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       output_prefix = Map.get(node.attrs, "output_prefix")
 
       try do
-        case executor.execute(action_name, action_args, workdir, agent_id: agent_id) do
+        signer = Keyword.get(opts, :signer)
+
+        case executor.execute(action_name, action_args, workdir,
+               agent_id: agent_id,
+               signer: signer
+             ) do
           {:ok, result} ->
             %Outcome{
               status: :success,
