@@ -418,12 +418,80 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     end
   end
 
-  defp classify_by_content(_value) do
-    if struct_propagation_available?() do
-      make_taint_struct(:trusted, :internal)
+  defp classify_by_content(value) do
+    if sensitive_data_available?() do
+      classify_by_content_scan(value)
     else
-      :trusted
+      if struct_propagation_available?() do
+        make_taint_struct(:trusted, :public)
+      else
+        :trusted
+      end
     end
+  end
+
+  # Scan content for secrets and PII using Arbor.Common.SensitiveData.
+  # Maps finding labels to sensitivity levels:
+  #   - Secrets (API keys, tokens, private keys, passwords) → :restricted
+  #   - PII (SSN, credit cards) → :confidential
+  #   - Other PII (emails, phones, IPs, paths) → :internal
+  #   - No findings → :public
+  defp classify_by_content_scan(value) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    findings = apply(Arbor.Common.SensitiveData, :scan_all, [value])
+
+    case findings do
+      [] ->
+        make_taint_struct(:trusted, :public)
+
+      findings ->
+        sensitivity = max_sensitivity_from_findings(findings)
+        level = if sensitivity in [:restricted, :confidential], do: :untrusted, else: :derived
+        make_taint_struct(level, sensitivity)
+    end
+  end
+
+  @restricted_labels [
+    "Anthropic API Key",
+    "OpenAI API Key",
+    "AWS Access Key",
+    "AWS Secret Key",
+    "GitHub Token",
+    "GitHub Fine-Grained PAT",
+    "GitLab PAT",
+    "Slack Token",
+    "Google API Key",
+    "Stripe Key",
+    "Private Key",
+    "JWT Token",
+    "Database Connection String",
+    "Bearer Token",
+    "Password in Config",
+    "API Key/Token",
+    "High-Entropy Base64"
+  ]
+
+  @confidential_labels [
+    "US Social Security Number",
+    "Credit Card Number"
+  ]
+
+  defp max_sensitivity_from_findings(findings) do
+    Enum.reduce(findings, :public, fn {label, _match}, acc ->
+      finding_sensitivity =
+        cond do
+          label in @restricted_labels -> :restricted
+          label in @confidential_labels -> :confidential
+          true -> :internal
+        end
+
+      # Return the higher sensitivity
+      if Map.get(@sensitivity_rank, finding_sensitivity, 0) > Map.get(@sensitivity_rank, acc, 0) do
+        finding_sensitivity
+      else
+        acc
+      end
+    end)
   end
 
   defp make_taint_struct(level, sensitivity) do
@@ -525,5 +593,10 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
   defp backend_trust_available? do
     Code.ensure_loaded?(Arbor.AI.BackendTrust) and
       function_exported?(Arbor.AI.BackendTrust, :can_see?, 2)
+  end
+
+  defp sensitive_data_available? do
+    Code.ensure_loaded?(Arbor.Common.SensitiveData) and
+      function_exported?(Arbor.Common.SensitiveData, :scan_all, 1)
   end
 end
