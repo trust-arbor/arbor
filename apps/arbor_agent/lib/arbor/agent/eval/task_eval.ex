@@ -300,7 +300,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
     }
 
     opts = [
-      template: Arbor.Agent.Templates.Diagnostician,
+      template: "diagnostician",
       display_name: "eval-diagnostician-#{:erlang.unique_integer([:positive])}",
       heartbeat_dot: dot_path,
       system_prompt: directive,

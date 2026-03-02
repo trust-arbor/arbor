@@ -46,6 +46,7 @@ defmodule Arbor.Agent.Application do
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
         schedule_json_migration()
+        schedule_template_seeding()
         {:ok, pid}
 
       error ->
@@ -61,6 +62,20 @@ defmodule Arbor.Agent.Application do
 
       try do
         Arbor.Agent.ProfileStore.migrate_json_profiles()
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+  end
+
+  defp schedule_template_seeding do
+    Task.start(fn ->
+      Process.sleep(500)
+
+      try do
+        Arbor.Agent.TemplateStore.seed_builtins()
       rescue
         _ -> :ok
       catch

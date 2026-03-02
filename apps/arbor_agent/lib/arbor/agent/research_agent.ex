@@ -26,7 +26,7 @@ defmodule Arbor.Agent.ResearchAgent do
 
   alias Arbor.Agent.{APIAgent, Lifecycle, Manager}
 
-  @template Arbor.Agent.Templates.Researcher
+  @template "researcher"
 
   @default_model_config %{
     backend: :api,

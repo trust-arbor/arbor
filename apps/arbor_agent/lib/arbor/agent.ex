@@ -370,6 +370,34 @@ defmodule Arbor.Agent do
   end
 
   # ===========================================================================
+  # Template Management
+  # ===========================================================================
+
+  @doc "List all available agent templates."
+  @spec list_templates() :: [map()]
+  defdelegate list_templates(), to: Arbor.Agent.TemplateStore, as: :list
+
+  @doc "Get a template by name."
+  @spec get_template(String.t()) :: {:ok, map()} | {:error, :not_found}
+  defdelegate get_template(name), to: Arbor.Agent.TemplateStore, as: :get
+
+  @doc "Store a template by name."
+  @spec put_template(String.t(), map()) :: :ok | {:error, term()}
+  defdelegate put_template(name, data), to: Arbor.Agent.TemplateStore, as: :put
+
+  @doc "Delete a template by name."
+  @spec delete_template(String.t()) :: :ok | {:error, :builtin_protected}
+  defdelegate delete_template(name), to: Arbor.Agent.TemplateStore, as: :delete
+
+  @doc "Create a template from keyword options."
+  @spec create_template(String.t(), keyword()) :: :ok | {:error, term()}
+  defdelegate create_template(name, opts), to: Arbor.Agent.TemplateStore, as: :create_from_opts
+
+  @doc "Reload all templates from disk."
+  @spec reload_templates() :: :ok
+  defdelegate reload_templates(), to: Arbor.Agent.TemplateStore, as: :reload
+
+  # ===========================================================================
   # Private helpers
   # ===========================================================================
 

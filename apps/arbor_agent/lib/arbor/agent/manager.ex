@@ -582,8 +582,8 @@ defmodule Arbor.Agent.Manager do
   defp default_display_name(%{id: id}) when is_atom(id), do: Atom.to_string(id)
   defp default_display_name(_), do: "Agent"
 
-  defp resolve_template(%{backend: :cli}), do: Arbor.Agent.Templates.ClaudeCode
-  defp resolve_template(_), do: Arbor.Agent.Templates.ClaudeCode
+  defp resolve_template(%{backend: :cli}), do: "cli_agent"
+  defp resolve_template(_), do: "cli_agent"
 
   defp atomize_model_config(config) when is_map(config) do
     known_keys = ~w(id label provider backend module name start_opts)
@@ -644,6 +644,8 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp find_existing_profile(display_name, template) do
+    normalized_template = normalize_template_ref(template)
+
     case Lifecycle.list_agents() do
       profiles when is_list(profiles) ->
         match =
@@ -652,7 +654,10 @@ defmodule Arbor.Agent.Manager do
               p.display_name == display_name or
                 (p.character && p.character.name == display_name)
 
-            template_matches? = template == nil or p.template == template
+            template_matches? =
+              normalized_template == nil or
+                normalize_template_ref(p.template) == normalized_template
+
             name_matches? and template_matches?
           end)
 
@@ -661,6 +666,13 @@ defmodule Arbor.Agent.Manager do
       _ ->
         :not_found
     end
+  end
+
+  defp normalize_template_ref(nil), do: nil
+  defp normalize_template_ref(name) when is_binary(name), do: name
+
+  defp normalize_template_ref(mod) when is_atom(mod) do
+    Arbor.Agent.TemplateStore.module_to_name(mod)
   end
 
   defp dispatch_query(pid, metadata, input, opts) do

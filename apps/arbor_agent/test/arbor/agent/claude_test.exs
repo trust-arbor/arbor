@@ -2,29 +2,29 @@ defmodule Arbor.Agent.ClaudeTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.Claude
-  alias Arbor.Agent.Templates.ClaudeCode
+  alias Arbor.Agent.Templates.CliAgent
 
-  describe "ClaudeCode template" do
+  describe "CliAgent template" do
     test "defines a character" do
-      character = ClaudeCode.character()
-      assert character.name == "Claude"
-      assert character.role == "AI collaborator and thought partner"
-      assert length(character.traits) == 5
+      character = CliAgent.character()
+      assert character.name == "CLI Agent"
+      assert character.role == "Interactive development agent"
+      assert length(character.traits) == 4
       assert length(character.values) == 4
     end
 
     test "uses established trust tier" do
-      assert ClaudeCode.trust_tier() == :established
+      assert CliAgent.trust_tier() == :established
     end
 
     test "defines initial goals" do
-      goals = ClaudeCode.initial_goals()
+      goals = CliAgent.initial_goals()
       assert length(goals) == 3
       assert Enum.any?(goals, &(&1.type == :collaborate))
     end
 
     test "requires appropriate capabilities" do
-      caps = ClaudeCode.required_capabilities()
+      caps = CliAgent.required_capabilities()
       assert length(caps) >= 5
 
       resources = Enum.map(caps, & &1.resource)
@@ -35,10 +35,8 @@ defmodule Arbor.Agent.ClaudeTest do
     end
 
     test "provides metadata" do
-      meta = ClaudeCode.metadata()
+      meta = CliAgent.metadata()
       assert meta.session_integration == true
-      assert meta.thinking_capture == true
-      assert meta.provider == :anthropic
     end
   end
 
