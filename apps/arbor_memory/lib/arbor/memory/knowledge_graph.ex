@@ -1023,8 +1023,13 @@ defmodule Arbor.Memory.KnowledgeGraph do
   defp node_to_text(content, _metadata, _type), do: to_string(content)
 
   # Ensure deserialized nodes have all fields with defaults
+  @node_atom_keys ~w(id type content relevance confidence embedding cached_tokens
+    pinned access_count metadata referenced_date created_at last_accessed)a
+
   defp ensure_node_fields(node) when is_map(node) do
+    # Normalize string keys to atoms (JSON deserialization produces string keys)
     node
+    |> atomize_known_keys(@node_atom_keys)
     |> Map.put_new(:confidence, 0.5)
     |> Map.put_new(:embedding, nil)
     |> Map.put_new(:cached_tokens, 0)
@@ -1034,9 +1039,27 @@ defmodule Arbor.Memory.KnowledgeGraph do
     |> Map.put_new(:referenced_date, nil)
   end
 
+  defp atomize_known_keys(map, keys) do
+    Enum.reduce(keys, map, fn key, acc ->
+      str_key = Atom.to_string(key)
+
+      case Map.fetch(acc, str_key) do
+        {:ok, value} ->
+          acc |> Map.put(key, value) |> Map.delete(str_key)
+
+        :error ->
+          acc
+      end
+    end)
+  end
+
+  @edge_atom_keys ~w(source_id target_id relationship weight metadata)a
+
   # Ensure deserialized edges have all fields with defaults
   defp ensure_edge_fields(edge) when is_map(edge) do
-    Map.put_new(edge, :metadata, %{})
+    edge
+    |> atomize_known_keys(@edge_atom_keys)
+    |> Map.put_new(:metadata, %{})
   end
 
   # BFS traversal for find_related -- bidirectional with optional relationship filter
