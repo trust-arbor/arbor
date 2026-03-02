@@ -129,6 +129,37 @@ config :arbor_ai,
     qwen: :low,
     openrouter: :low
   },
+  # Model-granular data-visibility capabilities for sensitivity routing.
+  # Nested format: %{default: [...], models: %{"pattern" => [...]}}
+  # Flat list format (legacy) also supported: provider: [:public, :internal]
+  backend_capabilities: %{
+    ollama: %{
+      default: [:public, :internal, :confidential, :restricted],
+      models: %{"*:cloud" => [:public, :internal]}
+    },
+    lmstudio: %{default: [:public, :internal, :confidential, :restricted], models: %{}},
+    anthropic: %{default: [:public, :internal, :confidential], models: %{}},
+    opencode: %{default: [:public, :internal, :confidential], models: %{}},
+    openai: %{default: [:public, :internal], models: %{}},
+    gemini: %{default: [:public, :internal], models: %{}},
+    openrouter: %{
+      default: [:public],
+      models: %{
+        "anthropic/*" => [:public, :internal, :confidential],
+        "google/*" => [:public, :internal]
+      }
+    },
+    qwen: %{default: [:public], models: %{}}
+  },
+  # Routing candidates for sensitivity-aware auto-selection.
+  # Lower priority = preferred. Router picks the lowest-priority candidate
+  # that can handle the data sensitivity level.
+  routing_candidates: [
+    %{provider: :ollama, model: "llama3.2", priority: 1},
+    %{provider: :lmstudio, model: "default", priority: 2},
+    %{provider: :anthropic, model: "claude-sonnet-4-5-20250514", priority: 3},
+    %{provider: :openrouter, model: "anthropic/claude-sonnet-4-5-20250514", priority: 4}
+  ],
   embedding_routing: %{
     preferred: :local,
     providers: [

@@ -84,6 +84,7 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
         |> check_required_sanitizations(profile)
         |> check_min_confidence(profile)
         |> check_provider_constraint(profile)
+        |> propagate_sensitivity_to_context()
     end
   end
 
@@ -165,11 +166,23 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     labels = Map.get(token.assigns, :taint_labels, %{})
 
     if backend_trust_available?() do
+      # Resolve the actual provider from node attrs or context.
+      # The constraint may be a provider atom directly, or we resolve from context.
+      provider = resolve_provider_for_constraint(constraint, token)
+      model = resolve_model_for_constraint(token)
+
       failed =
         Enum.find(labels, fn {_key, label} ->
           case extract_sensitivity(label) do
-            nil -> false
-            sensitivity -> not apply(Arbor.AI.BackendTrust, :can_see?, [constraint, sensitivity])
+            nil ->
+              false
+
+            sensitivity ->
+              if is_binary(model) do
+                not apply(Arbor.AI.BackendTrust, :can_see?, [provider, model, sensitivity])
+              else
+                not apply(Arbor.AI.BackendTrust, :can_see?, [provider, sensitivity])
+              end
           end
         end)
 
@@ -182,11 +195,11 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
 
           Token.halt(
             token,
-            "node #{token.node.id}: provider #{constraint} cannot handle #{sensitivity} data in '#{key}'",
+            "node #{token.node.id}: provider #{provider} cannot handle #{sensitivity} data in '#{key}'",
             %Outcome{
               status: :fail,
               failure_reason:
-                "Taint check failed: provider #{constraint} cannot see #{sensitivity} data"
+                "Taint check failed: provider #{provider} cannot see #{sensitivity} data"
             }
           )
       end
@@ -197,6 +210,69 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     _ -> token
   catch
     :exit, _ -> token
+  end
+
+  # Resolve provider atom for constraint checking.
+  # If the constraint is already a known provider atom, use it directly.
+  # Otherwise, look up from node attrs or session context.
+  defp resolve_provider_for_constraint(constraint, token) when is_atom(constraint) do
+    known_providers = [
+      :ollama,
+      :lmstudio,
+      :anthropic,
+      :openai,
+      :gemini,
+      :openrouter,
+      :opencode,
+      :qwen
+    ]
+
+    if constraint in known_providers do
+      constraint
+    else
+      # Constraint is a synthetic atom (e.g. :can_see_restricted) — resolve actual provider
+      provider_str =
+        Map.get(token.node.attrs, "llm_provider") ||
+          Map.get(token.node.attrs, "handler") ||
+          Context.get(token.context, "session.llm_provider")
+
+      if is_binary(provider_str) do
+        String.to_existing_atom(provider_str)
+      else
+        provider_str || constraint
+      end
+    end
+  rescue
+    ArgumentError -> constraint
+  end
+
+  defp resolve_model_for_constraint(token) do
+    Map.get(token.node.attrs, "llm_model") ||
+      Map.get(token.node.attrs, "model") ||
+      Context.get(token.context, "session.llm_model")
+  end
+
+  # Propagate the maximum data sensitivity from taint labels into engine context.
+  # This bridges the gap between middleware (token.assigns) and handlers (context).
+  # Handlers can read `__data_sensitivity__` to make routing decisions.
+  defp propagate_sensitivity_to_context(%{halted: true} = token), do: token
+
+  defp propagate_sensitivity_to_context(token) do
+    labels = Map.get(token.assigns, :taint_labels, %{})
+
+    max_sensitivity =
+      labels
+      |> Map.values()
+      |> Enum.map(&extract_sensitivity/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max_by(fn s -> Map.get(@sensitivity_rank, s, 0) end, fn -> :public end)
+
+    if max_sensitivity != :public do
+      context = Context.set(token.context, "__data_sensitivity__", max_sensitivity)
+      %{token | context: context}
+    else
+      token
+    end
   end
 
   # ── After-node enforcement (compiled taint_profile) ──────────────────
