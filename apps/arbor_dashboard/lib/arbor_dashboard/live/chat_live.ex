@@ -252,32 +252,40 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       # Single-agent mode (existing flow)
       socket.assigns.agent != nil ->
-        # Add user message
-        user_msg = %{
-          id: "msg-#{System.unique_integer([:positive])}",
-          role: :user,
-          content: input,
-          timestamp: DateTime.utc_now()
-        }
+        # Guard: don't send a second message while a query is in flight.
+        # Without this, the Session returns {:error, :turn_in_progress}
+        # and the APIAgent falls back to direct query (potentially with stale context).
+        if socket.assigns.loading do
+          Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
+          {:noreply, socket}
+        else
+          # Add user message
+          user_msg = %{
+            id: "msg-#{System.unique_integer([:positive])}",
+            role: :user,
+            content: input,
+            timestamp: DateTime.utc_now()
+          }
 
-        socket =
-          socket
-          |> stream_insert(:messages, user_msg)
-          |> assign(input: "", loading: true, error: nil)
+          socket =
+            socket
+            |> stream_insert(:messages, user_msg)
+            |> assign(input: "", loading: true, error: nil)
 
-        # Persist to chat history (agent_id is the string ID, not the PID)
-        try do
-          if socket.assigns.agent_id do
-            Arbor.Memory.append_chat_message(socket.assigns.agent_id, user_msg)
+          # Persist to chat history (agent_id is the string ID, not the PID)
+          try do
+            if socket.assigns.agent_id do
+              Arbor.Memory.append_chat_message(socket.assigns.agent_id, user_msg)
+            end
+          rescue
+            _ -> :ok
           end
-        rescue
-          _ -> :ok
+
+          # Spawn async query — keeps LiveView responsive during LLM calls
+          dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
+
+          {:noreply, socket}
         end
-
-        # Spawn async query — keeps LiveView responsive during LLM calls
-        dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
-
-        {:noreply, socket}
 
       # No agent or group
       true ->
@@ -454,13 +462,22 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:query_result, :api, {:ok, response}}, socket) do
     model_config = socket.assigns.current_model || %{}
 
+    text = response[:text] || response.text || ""
+
+    Logger.info(
+      "[ChatLive] API response received: " <>
+        "text=#{String.length(to_string(text))} chars, " <>
+        "type=#{response[:type]}, " <>
+        "tool_history=#{length(response[:tool_history] || [])}"
+    )
+
     # Session path uses tool_history, legacy uses tool_calls
     tool_uses = response[:tool_history] || response[:tool_calls] || []
 
     assistant_msg = %{
       id: "msg-#{System.unique_integer([:positive])}",
       role: :assistant,
-      content: response[:text] || response.text || "",
+      content: text,
       tool_uses: tool_uses,
       timestamp: DateTime.utc_now(),
       model: "#{model_config[:provider]}:#{model_config[:id]}",

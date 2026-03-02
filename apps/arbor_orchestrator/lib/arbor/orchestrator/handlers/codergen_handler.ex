@@ -3,6 +3,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  require Logger
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   alias Arbor.Orchestrator.UnifiedLLM.{
@@ -47,7 +49,9 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
       "score" => parse_score(Map.get(node.attrs, "score"))
     }
 
-    case Map.get(node.attrs, "simulate") do
+    simulate_attr = Map.get(node.attrs, "simulate")
+
+    case simulate_attr do
       "fail" ->
         %Outcome{
           status: :fail,
@@ -93,6 +97,10 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         raise "401 unauthorized"
 
       simulate when simulate in [nil, "true", true] ->
+        Logger.warning(
+          "[CodergenHandler] #{node.id}: SIMULATED (simulate=#{inspect(simulate_attr)})"
+        )
+
         # Simulation mode — no real LLM call
         response = "[Simulated] Response for stage: #{node.id}"
         _ = write_stage_artifacts(opts, node.id, prompt, response)
@@ -113,8 +121,29 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   def idempotency, do: :idempotent_with_key
 
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
+    agent_id = Context.get(context, "session.agent_id", "?")
+    prompt_len = if is_binary(prompt), do: String.length(prompt), else: 0
+    msgs_count = context |> Context.get("session.messages", []) |> length()
+
+    Logger.info(
+      "[CodergenHandler] #{node.id} for #{agent_id}: " <>
+        "prompt=#{prompt_len} chars, messages=#{msgs_count}, " <>
+        "provider=#{Context.get(context, "session.llm_provider")}, " <>
+        "model=#{Context.get(context, "session.llm_model")}"
+    )
+
+    start_time = System.monotonic_time(:millisecond)
+
     case call_llm(prompt, node, context, graph, opts) do
       {:ok, response_text} ->
+        elapsed = System.monotonic_time(:millisecond) - start_time
+        resp_len = if is_binary(response_text), do: String.length(response_text), else: 0
+
+        Logger.info(
+          "[CodergenHandler] #{node.id} for #{agent_id}: " <>
+            "OK in #{elapsed}ms, response=#{resp_len} chars"
+        )
+
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
         updates =
@@ -129,6 +158,13 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         }
 
       {:error, reason} ->
+        elapsed = System.monotonic_time(:millisecond) - start_time
+
+        Logger.warning(
+          "[CodergenHandler] #{node.id} for #{agent_id}: " <>
+            "FAILED in #{elapsed}ms, reason=#{inspect(reason)}"
+        )
+
         %Outcome{
           status: :fail,
           failure_reason: "LLM call failed: #{inspect(reason)}",
@@ -238,7 +274,9 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
   end
 
   defp to_messages(msgs) do
-    Enum.map(msgs, fn
+    msgs
+    |> Enum.reject(&empty_assistant?/1)
+    |> Enum.map(fn
       %Message{} = m ->
         m
 
@@ -249,6 +287,10 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         Message.new(role, content)
     end)
   end
+
+  defp empty_assistant?(%{"role" => "assistant", "content" => c}) when c in [nil, ""], do: true
+  defp empty_assistant?(%{role: :assistant, content: c}) when c in [nil, ""], do: true
+  defp empty_assistant?(_), do: false
 
   defp build_call_opts(node, opts) do
     case parse_int(Map.get(node.attrs, "timeout"), nil) do

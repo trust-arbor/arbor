@@ -244,8 +244,10 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
 
       # turn_count should be 3 (restored) + 1 (new turn) = 4
       assert state.turn_count == 4
-      # messages: 2 restored + 1 new user + 1 new assistant = 4
-      assert length(state.messages) == 4
+      # messages: 2 restored + 1 new user = 3
+      # (no assistant message added when session.response is empty —
+      #  this test DOT has no format node to set session.response)
+      assert length(state.messages) == 3
     end
   end
 
