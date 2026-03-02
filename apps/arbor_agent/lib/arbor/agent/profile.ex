@@ -27,7 +27,7 @@ defmodule Arbor.Agent.Profile do
     field(:display_name, String.t(), default: nil)
     field(:character, Character.t(), enforce: true)
     field(:trust_tier, atom(), default: :untrusted)
-    field(:template, atom(), default: nil)
+    field(:template, atom() | String.t(), default: nil)
     field(:initial_goals, [map()], default: [])
     field(:initial_capabilities, [map()], default: [])
     field(:identity, map(), default: nil)
@@ -58,7 +58,7 @@ defmodule Arbor.Agent.Profile do
       "agent_id" => profile.agent_id,
       "display_name" => profile.display_name,
       "trust_tier" => Atom.to_string(profile.trust_tier),
-      "template" => if(profile.template, do: Atom.to_string(profile.template)),
+      "template" => serialize_template(profile.template),
       "character" => Character.to_map(profile.character),
       "initial_goals" => profile.initial_goals,
       "initial_capabilities" => profile.initial_capabilities,
@@ -80,7 +80,7 @@ defmodule Arbor.Agent.Profile do
       display_name: map["display_name"],
       character: deserialize_character(map),
       trust_tier: safe_to_atom(map["trust_tier"] || "untrusted"),
-      template: maybe_to_atom(map["template"]),
+      template: deserialize_template(map["template"]),
       initial_goals: map["initial_goals"] || [],
       initial_capabilities: map["initial_capabilities"] || [],
       identity: deserialize_identity(map["identity"] || legacy_identity(map["identity_ref"])),
@@ -122,8 +122,31 @@ defmodule Arbor.Agent.Profile do
     Character.from_map(map["character"] || %{"name" => "Unknown"})
   end
 
-  defp maybe_to_atom(nil), do: nil
-  defp maybe_to_atom(str) when is_binary(str), do: safe_to_atom(str)
+  defp serialize_template(nil), do: nil
+  defp serialize_template(name) when is_binary(name), do: name
+  defp serialize_template(mod) when is_atom(mod), do: Atom.to_string(mod)
+
+  # Deserialize template: legacy profiles store module atom strings like
+  # "Elixir.Arbor.Agent.Templates.Scout". New profiles store slug names
+  # like "scout". Convert legacy module strings to slug names.
+  defp deserialize_template(nil), do: nil
+
+  defp deserialize_template("Elixir." <> _ = module_str) do
+    # Legacy atom-based template — convert to string name
+    try do
+      mod = String.to_existing_atom(module_str)
+
+      if Code.ensure_loaded?(Arbor.Agent.TemplateStore) do
+        Arbor.Agent.TemplateStore.module_to_name(mod)
+      else
+        module_str
+      end
+    rescue
+      ArgumentError -> module_str
+    end
+  end
+
+  defp deserialize_template(name) when is_binary(name), do: name
 
   defp serialize_identity(nil), do: nil
 

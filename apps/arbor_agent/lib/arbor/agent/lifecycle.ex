@@ -28,7 +28,8 @@ defmodule Arbor.Agent.Lifecycle do
       profiles = Lifecycle.list_agents()
   """
 
-  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, ProfileStore, SessionManager}
+  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, ProfileStore, SessionManager,
+                      TemplateStore}
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
@@ -357,6 +358,27 @@ defmodule Arbor.Agent.Lifecycle do
       nil ->
         %{}
 
+      name when is_binary(name) ->
+        case TemplateStore.get(name) do
+          {:ok, data} ->
+            meta = data["metadata"] || %{}
+            # Convert string keys to atom keys for compatibility
+            Map.new(meta, fn
+              {k, v} when is_binary(k) ->
+                try do
+                  {String.to_existing_atom(k), v}
+                rescue
+                  ArgumentError -> {k, v}
+                end
+
+              {k, v} ->
+                {k, v}
+            end)
+
+          {:error, _} ->
+            %{}
+        end
+
       module when is_atom(module) ->
         if Code.ensure_loaded?(module) and function_exported?(module, :metadata, 0) do
           try do
@@ -424,17 +446,64 @@ defmodule Arbor.Agent.Lifecycle do
             {:error, :missing_character_or_template}
         end
 
+      template_name when is_binary(template_name) ->
+        case TemplateStore.resolve(template_name) do
+          {:ok, data} ->
+            kw = TemplateStore.to_keyword(data)
+            character = kw[:character]
+
+            opts =
+              opts
+              |> Keyword.put_new(:trust_tier, kw[:trust_tier])
+              |> Keyword.put_new(:initial_goals, kw[:initial_goals])
+              |> Keyword.put_new(:capabilities, kw[:required_capabilities])
+              |> Keyword.put(:template, template_name)
+              |> Keyword.put(:template_data, data)
+
+            {:ok, character, opts}
+
+          {:error, _} = error ->
+            error
+        end
+
       template_mod when is_atom(template_mod) ->
-        character = template_mod.character()
+        # Try TemplateStore first (file-backed), fall back to direct module call
+        name = TemplateStore.module_to_name(template_mod)
 
-        opts =
-          opts
-          |> Keyword.put_new(:trust_tier, template_mod.trust_tier())
-          |> Keyword.put_new(:initial_goals, template_mod.initial_goals())
-          |> Keyword.put_new(:capabilities, template_mod.required_capabilities())
-          |> Keyword.put_new(:template_module, template_mod)
+        case TemplateStore.resolve(template_mod) do
+          {:ok, data} ->
+            kw = TemplateStore.to_keyword(data)
+            character = kw[:character]
 
-        {:ok, character, opts}
+            opts =
+              opts
+              |> Keyword.put_new(:trust_tier, kw[:trust_tier])
+              |> Keyword.put_new(:initial_goals, kw[:initial_goals])
+              |> Keyword.put_new(:capabilities, kw[:required_capabilities])
+              |> Keyword.put(:template, name)
+              |> Keyword.put(:template_data, data)
+
+            {:ok, character, opts}
+
+          {:error, :not_found} ->
+            # Direct module fallback for backward compatibility
+            if Code.ensure_loaded?(template_mod) and
+                 function_exported?(template_mod, :character, 0) do
+              character = template_mod.character()
+
+              opts =
+                opts
+                |> Keyword.put_new(:trust_tier, template_mod.trust_tier())
+                |> Keyword.put_new(:initial_goals, template_mod.initial_goals())
+                |> Keyword.put_new(:capabilities, template_mod.required_capabilities())
+                |> Keyword.put(:template, name)
+                |> Keyword.put_new(:template_module, template_mod)
+
+              {:ok, character, opts}
+            else
+              {:error, :not_found}
+            end
+        end
     end
   end
 
@@ -579,6 +648,7 @@ defmodule Arbor.Agent.Lifecycle do
   @spec seed_template_identity(String.t(), Character.t(), keyword()) :: :ok
   def seed_template_identity(agent_id, character, opts) do
     template_mod = Keyword.get(opts, :template_module)
+    template_data = Keyword.get(opts, :template_data)
 
     # Knowledge graph is ETS-only (transient) — always re-seed on startup
     seed_knowledge_graph(agent_id, character)
@@ -588,7 +658,7 @@ defmodule Arbor.Agent.Lifecycle do
     sk = Arbor.Memory.get_self_knowledge(agent_id)
 
     unless sk && sk.values != [] do
-      seed_durable_identity(agent_id, character, template_mod)
+      seed_durable_identity(agent_id, character, template_mod, template_data)
     end
 
     :ok
@@ -616,9 +686,22 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp seed_durable_identity(agent_id, character, template_mod) do
-    # Seed values from template callback
-    for value <- (template_mod && template_mod.values()) || character.values || [] do
+  defp seed_durable_identity(agent_id, character, template_mod, template_data) do
+    # Seed values — prefer template data, then module callback, then character
+    values =
+      cond do
+        template_data && is_list(template_data["values"]) ->
+          template_data["values"]
+
+        template_mod && Code.ensure_loaded?(template_mod) &&
+            function_exported?(template_mod, :values, 0) ->
+          template_mod.values()
+
+        true ->
+          character.values || []
+      end
+
+    for value <- values do
       Arbor.Memory.add_insight(agent_id, to_string(value), :value, confidence: 0.8)
     end
 
@@ -629,11 +712,22 @@ defmodule Arbor.Agent.Lifecycle do
       Arbor.Memory.add_insight(agent_id, name, :trait, confidence: intensity)
     end
 
-    # Seed initial thoughts from template callback
-    if template_mod do
-      for thought <- template_mod.initial_thoughts() || [] do
-        Arbor.Memory.record_thinking(agent_id, thought)
+    # Seed initial thoughts — prefer template data, then module callback
+    thoughts =
+      cond do
+        template_data && is_list(template_data["initial_thoughts"]) ->
+          template_data["initial_thoughts"]
+
+        template_mod && Code.ensure_loaded?(template_mod) &&
+            function_exported?(template_mod, :initial_thoughts, 0) ->
+          template_mod.initial_thoughts()
+
+        true ->
+          []
       end
+
+    for thought <- thoughts do
+      Arbor.Memory.record_thinking(agent_id, thought)
     end
 
     # Final sync persist to ensure the complete state reaches Postgres.
@@ -656,12 +750,19 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts) do
+    # Store template as string name (not module atom)
+    template =
+      case Keyword.get(opts, :template) do
+        mod when is_atom(mod) and not is_nil(mod) -> TemplateStore.module_to_name(mod)
+        other -> other
+      end
+
     %Profile{
       agent_id: agent_id,
       display_name: display_name,
       character: character,
       trust_tier: Keyword.get(opts, :trust_tier, :untrusted),
-      template: Keyword.get(opts, :template),
+      template: template,
       initial_goals: Keyword.get(opts, :initial_goals, []),
       initial_capabilities: Keyword.get(opts, :capabilities, []),
       identity: %{
@@ -726,25 +827,18 @@ defmodule Arbor.Agent.Lifecycle do
       nil ->
         profile.initial_capabilities || []
 
+      name when is_binary(name) ->
+        case TemplateStore.get(name) do
+          {:ok, data} -> data["required_capabilities"] || profile.initial_capabilities || []
+          {:error, _} -> profile.initial_capabilities || []
+        end
+
       template_mod when is_atom(template_mod) ->
         if Code.ensure_loaded?(template_mod) and
              function_exported?(template_mod, :required_capabilities, 0) do
           template_mod.required_capabilities()
         else
           profile.initial_capabilities || []
-        end
-
-      template_str when is_binary(template_str) ->
-        try do
-          mod = String.to_existing_atom("Elixir." <> template_str)
-
-          if function_exported?(mod, :required_capabilities, 0) do
-            mod.required_capabilities()
-          else
-            profile.initial_capabilities || []
-          end
-        rescue
-          ArgumentError -> profile.initial_capabilities || []
         end
     end
   end

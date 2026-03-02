@@ -19,7 +19,7 @@ defmodule Arbor.Agent.Bootstrap do
         %{
           display_name: "diagnostician",
           module: Arbor.Agent.APIAgent,
-          template: Arbor.Agent.Templates.Diagnostician,
+          template: "diagnostician",
           model_config: %{id: "model-id", provider: :openrouter, backend: :api},
           start_host: true
         }

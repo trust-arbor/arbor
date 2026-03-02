@@ -103,7 +103,7 @@ defmodule Arbor.Agent.BootstrapTest do
         %{
           display_name: "test-agent",
           module: Arbor.Agent.APIAgent,
-          template: Arbor.Agent.Templates.Diagnostician,
+          template: "diagnostician",
           model_config: %{id: "test-model", provider: :openrouter, backend: :api}
         }
       ])

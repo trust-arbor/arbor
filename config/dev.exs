@@ -60,7 +60,7 @@ config :arbor_agent, :auto_start_agents, [
   %{
     display_name: "diagnostician",
     module: Arbor.Agent.APIAgent,
-    template: Arbor.Agent.Templates.Diagnostician,
+    template: "diagnostician",
     model_config: %{
       id: "arcee-ai/trinity-large-preview:free",
       provider: :openrouter,
