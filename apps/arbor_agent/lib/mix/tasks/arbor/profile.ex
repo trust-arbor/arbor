@@ -61,10 +61,11 @@ defmodule Mix.Tasks.Arbor.Profile do
 
       header =
         String.pad_trailing("AGENT ID", 24) <>
-        String.pad_trailing("NAME", 18) <>
-        String.pad_trailing("TEMPLATE", 16) <>
-        String.pad_trailing("TIER", 14) <>
-        "AUTO"
+          String.pad_trailing("NAME", 18) <>
+          String.pad_trailing("TEMPLATE", 16) <>
+          String.pad_trailing("TIER", 14) <>
+          "AUTO"
+
       Mix.shell().info(header)
       Mix.shell().info(String.duplicate("-", 80))
 
@@ -102,6 +103,7 @@ defmodule Mix.Tasks.Arbor.Profile do
 
         if p.metadata && map_size(p.metadata) > 0 do
           Mix.shell().info("\nMetadata:")
+
           for {k, v} <- p.metadata do
             Mix.shell().info("  #{k}: #{inspect(v)}")
           end
@@ -125,6 +127,7 @@ defmodule Mix.Tasks.Arbor.Profile do
           case Arbor.Agent.ProfileStore.store_profile(updated) do
             :ok ->
               Mix.shell().info("Profile '#{profile.display_name}' updated.")
+
               for {k, v} <- changes do
                 Mix.shell().info("  #{k} = #{inspect(v)}")
               end
@@ -176,7 +179,9 @@ defmodule Mix.Tasks.Arbor.Profile do
           {:ok, profile} ->
             case Arbor.Agent.ProfileStore.store_profile(profile) do
               :ok ->
-                Mix.shell().info("Imported profile '#{profile.display_name}' (#{profile.agent_id}).")
+                Mix.shell().info(
+                  "Imported profile '#{profile.display_name}' (#{profile.agent_id})."
+                )
 
               {:error, reason} ->
                 Mix.shell().error("Failed to import: #{inspect(reason)}")

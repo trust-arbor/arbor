@@ -5,7 +5,10 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
   alias Arbor.Agent.{Character, Template, TemplateStore}
 
-  @test_dir Path.join(System.tmp_dir!(), "arbor_template_store_test_#{System.unique_integer([:positive])}")
+  @test_dir Path.join(
+              System.tmp_dir!(),
+              "arbor_template_store_test_#{System.unique_integer([:positive])}"
+            )
 
   setup do
     # Use a temp directory for tests
@@ -170,7 +173,10 @@ defmodule Arbor.Agent.TemplateStoreTest do
     test "module_to_name maps builtins correctly" do
       assert TemplateStore.module_to_name(Arbor.Agent.Templates.Scout) == "scout"
       assert TemplateStore.module_to_name(Arbor.Agent.Templates.Diagnostician) == "diagnostician"
-      assert TemplateStore.module_to_name(Arbor.Agent.Templates.Conversationalist) == "conversationalist"
+
+      assert TemplateStore.module_to_name(Arbor.Agent.Templates.Conversationalist) ==
+               "conversationalist"
+
       assert TemplateStore.module_to_name(Arbor.Agent.Templates.CodeReviewer) == "code_reviewer"
     end
 
@@ -230,7 +236,14 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert first_count >= 6
 
       # Verify they're loadable
-      for name <- ["scout", "researcher", "code_reviewer", "monitor", "diagnostician", "conversationalist"] do
+      for name <- [
+            "scout",
+            "researcher",
+            "code_reviewer",
+            "monitor",
+            "diagnostician",
+            "conversationalist"
+          ] do
         assert {:ok, _} = TemplateStore.get(name)
       end
 
@@ -243,13 +256,13 @@ defmodule Arbor.Agent.TemplateStoreTest do
   describe "create_from_opts/2" do
     test "creates a template from keyword opts" do
       assert :ok =
-               TemplateStore.create_from_opts("custom", [
+               TemplateStore.create_from_opts("custom",
                  character: %{name: "Custom Agent"},
                  trust_tier: :probationary,
                  initial_goals: [%{type: :explore, description: "Explore"}],
                  required_capabilities: [%{resource: "arbor://fs/read/**"}],
                  description: "A custom agent"
-               ])
+               )
 
       assert {:ok, data} = TemplateStore.get("custom")
       assert data["name"] == "custom"

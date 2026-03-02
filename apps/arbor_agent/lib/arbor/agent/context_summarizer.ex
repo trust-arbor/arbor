@@ -184,7 +184,10 @@ defmodule Arbor.Agent.ContextSummarizer do
 
       {:error, reason} ->
         Logger.warning("Context summarization failed: #{inspect(reason)}, keeping existing")
-        # Graceful degradation: keep existing summary on failure
+        {:ok, existing_summary}
+
+      :unavailable ->
+        Logger.debug("Summarizer unavailable, keeping existing summary")
         {:ok, existing_summary}
     end
   end

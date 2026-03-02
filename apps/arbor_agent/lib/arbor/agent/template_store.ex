@@ -297,7 +297,7 @@ defmodule Arbor.Agent.TemplateStore do
     trust_tier =
       case data["trust_tier"] do
         tier when tier in ~w(untrusted probationary trusted established veteran autonomous) ->
-          String.to_atom(tier)
+          String.to_existing_atom(tier)
 
         tier when is_atom(tier) and not is_nil(tier) ->
           tier
@@ -347,7 +347,8 @@ defmodule Arbor.Agent.TemplateStore do
       "character" => character,
       "trust_tier" => to_string(Keyword.get(opts, :trust_tier, :probationary)),
       "initial_goals" => stringify_keys_list(Keyword.get(opts, :initial_goals, [])),
-      "required_capabilities" => stringify_keys_list(Keyword.get(opts, :required_capabilities, [])),
+      "required_capabilities" =>
+        stringify_keys_list(Keyword.get(opts, :required_capabilities, [])),
       "description" => Keyword.get(opts, :description, ""),
       "nature" => Keyword.get(opts, :nature, ""),
       "values" => Keyword.get(opts, :values, []),
@@ -457,7 +458,10 @@ defmodule Arbor.Agent.TemplateStore do
 
   defp stringify_value(map) when is_map(map) and not is_struct(map), do: stringify_keys(map)
   defp stringify_value(list) when is_list(list), do: Enum.map(list, &stringify_value/1)
-  defp stringify_value(atom) when is_atom(atom) and atom not in [nil, true, false], do: Atom.to_string(atom)
+
+  defp stringify_value(atom) when is_atom(atom) and atom not in [nil, true, false],
+    do: Atom.to_string(atom)
+
   defp stringify_value(other), do: other
 
   defp stringify_keys_list(list) when is_list(list) do
