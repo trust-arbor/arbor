@@ -263,6 +263,9 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         Map.get(node.attrs, "model") ||
         Context.get(context, "session.llm_model")
 
+    # Sensitivity routing: reroute if the current provider can't handle the data
+    {provider, model} = maybe_route_by_sensitivity(provider, model, context)
+
     %Request{
       provider: provider,
       model: model,
@@ -395,6 +398,45 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         end
     end
   end
+
+  # Consult the sensitivity router if data sensitivity is known.
+  # Uses runtime bridge (Code.ensure_loaded? + apply) because
+  # arbor_orchestrator and arbor_ai are both Standalone — no compile dep.
+  defp maybe_route_by_sensitivity(provider, model, context) do
+    sensitivity = Context.get(context, "__data_sensitivity__")
+
+    if sensitivity && sensitivity != :public && sensitivity_router_available?() do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(Arbor.AI.SensitivityRouter, :maybe_reroute, [
+        safe_to_atom(provider),
+        model || "",
+        sensitivity,
+        []
+      ])
+      |> then(fn {p, m} -> {to_string(p), m} end)
+    else
+      {provider, model}
+    end
+  rescue
+    _ -> {provider, model}
+  catch
+    :exit, _ -> {provider, model}
+  end
+
+  defp sensitivity_router_available? do
+    Code.ensure_loaded?(Arbor.AI.SensitivityRouter) and
+      function_exported?(Arbor.AI.SensitivityRouter, :maybe_reroute, 4)
+  end
+
+  defp safe_to_atom(value) when is_atom(value), do: value
+
+  defp safe_to_atom(value) when is_binary(value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> :unknown
+  end
+
+  defp safe_to_atom(_), do: :unknown
 
   defp parse_float(nil, default), do: default
   defp parse_float(value, _default) when is_float(value), do: value

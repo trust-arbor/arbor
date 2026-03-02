@@ -496,6 +496,49 @@ defmodule Arbor.AI do
     end
   end
 
+  # ── Sensitivity Routing ──
+
+  @doc """
+  Select the best `{provider, model}` pair for the given data sensitivity.
+
+  Delegates to `SensitivityRouter.select/2`. Filters configured candidates
+  by `BackendTrust.can_see?/3`, preferring lower-priority (cheaper/faster) options.
+
+  ## Options
+
+  - `:current_provider` — prefer this provider if it qualifies (stability)
+  - `:current_model` — prefer this model if it qualifies (stability)
+  - `:candidates` — override the configured candidate pool
+
+  ## Examples
+
+      {:ok, {:ollama, "llama3.2"}} = Arbor.AI.select_for_sensitivity(:restricted)
+      {:ok, {:anthropic, "claude-sonnet-4-5-20250514"}} = Arbor.AI.select_for_sensitivity(:confidential)
+  """
+  @spec select_for_sensitivity(atom(), keyword()) ::
+          {:ok, {atom(), String.t()}} | {:error, :no_candidates}
+  defdelegate select_for_sensitivity(sensitivity, opts \\ []),
+    to: Arbor.AI.SensitivityRouter,
+    as: :select
+
+  @doc """
+  Check if a `{provider, model}` pair can handle data at the given sensitivity.
+
+  Delegates to `BackendTrust.can_see?/3` for model-granular trust checks.
+
+  ## Examples
+
+      Arbor.AI.can_handle_sensitivity?(:anthropic, "claude-sonnet-4-5-20250514", :confidential)
+      #=> true
+
+      Arbor.AI.can_handle_sensitivity?(:openrouter, "random/model", :restricted)
+      #=> false
+  """
+  @spec can_handle_sensitivity?(atom(), String.t(), atom()) :: boolean()
+  defdelegate can_handle_sensitivity?(provider, model, sensitivity),
+    to: Arbor.AI.BackendTrust,
+    as: :can_see?
+
   # ── Stats & Observability ──
 
   @doc """

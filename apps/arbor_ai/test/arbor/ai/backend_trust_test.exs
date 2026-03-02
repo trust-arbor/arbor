@@ -203,8 +203,82 @@ defmodule Arbor.AI.BackendTrustTest do
     test "returns default capabilities map" do
       caps = BackendTrust.capabilities()
       assert is_map(caps)
-      assert caps[:lmstudio] == [:public, :internal, :confidential, :restricted]
-      assert caps[:qwen] == [:public]
+      # May be nested or flat depending on config, but provider key should exist
+      assert Map.has_key?(caps, :lmstudio)
+      assert Map.has_key?(caps, :qwen)
+    end
+  end
+
+  # ── Model-Granular Trust (3-arity) ──────────────────────────────────
+
+  describe "can_see?/3 (model-granular)" do
+    test "falls back to provider default when no model patterns configured" do
+      # anthropic default allows up to :confidential
+      assert BackendTrust.can_see?(:anthropic, "claude-sonnet-4-5-20250514", :confidential)
+      refute BackendTrust.can_see?(:anthropic, "claude-sonnet-4-5-20250514", :restricted)
+    end
+
+    test "local providers allow all sensitivity levels for any model" do
+      for level <- [:public, :internal, :confidential, :restricted] do
+        assert BackendTrust.can_see?(:lmstudio, "any-model", level)
+      end
+    end
+
+    test "unknown providers default to public only" do
+      assert BackendTrust.can_see?(:unknown_provider, "some-model", :public)
+      refute BackendTrust.can_see?(:unknown_provider, "some-model", :internal)
+    end
+
+    test "glob pattern matching with openrouter anthropic/* config" do
+      # openrouter has "anthropic/*" => [:public, :internal, :confidential] in config
+      assert BackendTrust.can_see?(
+               :openrouter,
+               "anthropic/claude-sonnet-4-5-20250514",
+               :confidential
+             )
+
+      assert BackendTrust.can_see?(:openrouter, "anthropic/claude-opus-4-20250514", :internal)
+      refute BackendTrust.can_see?(:openrouter, "anthropic/claude-opus-4-20250514", :restricted)
+    end
+
+    test "glob pattern matching with openrouter google/* config" do
+      assert BackendTrust.can_see?(:openrouter, "google/gemini-pro", :internal)
+      refute BackendTrust.can_see?(:openrouter, "google/gemini-pro", :confidential)
+    end
+
+    test "unmatched model falls back to provider default" do
+      # openrouter default is [:public]
+      assert BackendTrust.can_see?(:openrouter, "random/unknown-model", :public)
+      refute BackendTrust.can_see?(:openrouter, "random/unknown-model", :internal)
+    end
+
+    test "ollama cloud model restriction via *:cloud pattern" do
+      # ollama has "*:cloud" => [:public, :internal] in config
+      assert BackendTrust.can_see?(:ollama, "llama3.2:cloud", :internal)
+      refute BackendTrust.can_see?(:ollama, "llama3.2:cloud", :confidential)
+    end
+
+    test "ollama local model gets full default access" do
+      assert BackendTrust.can_see?(:ollama, "llama3.2", :restricted)
+    end
+  end
+
+  describe "data_capabilities/2 (model-granular)" do
+    test "returns provider default for unmatched model" do
+      caps = BackendTrust.data_capabilities(:anthropic, "unknown-model")
+      assert :public in caps
+      assert :confidential in caps
+      refute :restricted in caps
+    end
+
+    test "returns model-specific capabilities when pattern matches" do
+      caps = BackendTrust.data_capabilities(:openrouter, "anthropic/claude-sonnet-4-5-20250514")
+      assert :confidential in caps
+      refute :restricted in caps
+    end
+
+    test "returns [:public] for unknown providers" do
+      assert BackendTrust.data_capabilities(:totally_unknown, "any-model") == [:public]
     end
   end
 end
