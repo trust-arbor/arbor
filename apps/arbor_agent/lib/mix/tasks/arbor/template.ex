@@ -63,8 +63,11 @@ defmodule Mix.Tasks.Arbor.Template do
     else
       Mix.shell().info("Templates (#{length(templates)}):\n")
 
-      header = String.pad_trailing("NAME", 20) <> String.pad_trailing("SOURCE", 10) <>
-        String.pad_trailing("TRUST TIER", 14) <> "DESCRIPTION"
+      header =
+        String.pad_trailing("NAME", 20) <>
+          String.pad_trailing("SOURCE", 10) <>
+          String.pad_trailing("TRUST TIER", 14) <> "DESCRIPTION"
+
       Mix.shell().info(header)
       Mix.shell().info(String.duplicate("-", 80))
 
@@ -101,15 +104,19 @@ defmodule Mix.Tasks.Arbor.Template do
             Mix.shell().info("  Tone: #{char["tone"]}")
 
             if traits = char["traits"] do
-              trait_str = Enum.map_join(traits, ", ", fn t ->
-                "#{t["name"]}(#{t["intensity"]})"
-              end)
+              trait_str =
+                Enum.map_join(traits, ", ", fn t ->
+                  "#{t["name"]}(#{t["intensity"]})"
+                end)
+
               Mix.shell().info("  Traits: #{trait_str}")
             end
           end
 
           if goals = data["initial_goals"], do: Mix.shell().info("\nGoals: #{length(goals)}")
-          if caps = data["required_capabilities"], do: Mix.shell().info("Capabilities: #{length(caps)}")
+
+          if caps = data["required_capabilities"],
+            do: Mix.shell().info("Capabilities: #{length(caps)}")
 
           Mix.shell().info("\nCreated: #{data["created_at"]}")
           Mix.shell().info("Updated: #{data["updated_at"]}")
@@ -130,10 +137,11 @@ defmodule Mix.Tasks.Arbor.Template do
       case opts[:from_module] do
         nil ->
           # Create a minimal template
-          result = Arbor.Agent.TemplateStore.create_from_opts(name, [
-            description: "Custom template",
-            trust_tier: :probationary
-          ])
+          result =
+            Arbor.Agent.TemplateStore.create_from_opts(name,
+              description: "Custom template",
+              trust_tier: :probationary
+            )
 
           case result do
             :ok ->
@@ -146,7 +154,7 @@ defmodule Mix.Tasks.Arbor.Template do
           end
 
         module_str ->
-          module = String.to_atom("Elixir.#{module_str}")
+          module = Module.concat([module_str])
 
           if Code.ensure_loaded?(module) do
             data = Arbor.Agent.TemplateStore.from_module(module)

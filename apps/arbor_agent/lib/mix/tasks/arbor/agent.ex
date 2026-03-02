@@ -83,6 +83,7 @@ defmodule Mix.Tasks.Arbor.Agent do
         running_entries =
           Enum.map(running, fn entry ->
             profile = Enum.find(profiles, &(&1.agent_id == entry.agent_id))
+
             %{
               agent_id: entry.agent_id,
               name: (profile && profile.display_name) || "?",
@@ -152,7 +153,9 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case remote(Arbor.Agent.TemplateStore, :get, [template_name]) do
       {:ok, template_data} ->
-        display_name = opts[:name] || get_in(template_data, ["character", "name"]) || template_name
+        display_name =
+          opts[:name] || get_in(template_data, ["character", "name"]) || template_name
+
         model_id = opts[:model] || "arcee-ai/trinity-large-preview:free"
         provider = parse_provider(opts[:provider] || "openrouter")
 
@@ -170,7 +173,11 @@ defmodule Mix.Tasks.Arbor.Agent do
           model_config: model_config
         ]
 
-        case remote(Arbor.Agent.Manager, :start_or_resume, [Arbor.Agent.APIAgent, display_name, start_opts]) do
+        case remote(Arbor.Agent.Manager, :start_or_resume, [
+               Arbor.Agent.APIAgent,
+               display_name,
+               start_opts
+             ]) do
           {:ok, agent_id, _pid} ->
             Mix.shell().info("Started agent '#{display_name}' (#{agent_id})")
 
@@ -199,7 +206,9 @@ defmodule Mix.Tasks.Arbor.Agent do
     templates = remote(Arbor.Agent.TemplateStore, :list, [])
 
     if templates == [] do
-      Mix.shell().info("No templates available. Run `mix arbor.template seed` to create builtins.")
+      Mix.shell().info(
+        "No templates available. Run `mix arbor.template seed` to create builtins."
+      )
     else
       Mix.shell().info("Available templates:\n")
 
@@ -238,7 +247,9 @@ defmodule Mix.Tasks.Arbor.Agent do
         end
 
       :not_found ->
-        Mix.shell().error("Agent '#{ref}' not found. Use `mix arbor.agent list --all` to see all agents.")
+        Mix.shell().error(
+          "Agent '#{ref}' not found. Use `mix arbor.agent list --all` to see all agents."
+        )
     end
   end
 
@@ -266,7 +277,9 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case find_profile(ref) do
       {:ok, profile} ->
-        if Mix.shell().yes?("Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data.") do
+        if Mix.shell().yes?(
+             "Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data."
+           ) do
           # Stop first if running
           remote(Arbor.Agent.Manager, :stop_agent, [profile.agent_id])
           remote(Arbor.Agent.Lifecycle, :destroy, [profile.agent_id])
@@ -324,7 +337,9 @@ defmodule Mix.Tasks.Arbor.Agent do
           if provider, do: Mix.shell().info("  Provider:     #{provider}")
 
           uptime_ms = System.monotonic_time(:millisecond) - (running_entry.registered_at || 0)
-          if running_entry.registered_at, do: Mix.shell().info("  Uptime:       #{format_duration(uptime_ms)}")
+
+          if running_entry.registered_at,
+            do: Mix.shell().info("  Uptime:       #{format_duration(uptime_ms)}")
         else
           Mix.shell().info("  Status:       stopped")
           Mix.shell().info("\n  Resume with: mix arbor.agent resume #{profile.display_name}")
@@ -348,7 +363,11 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case find_running(ref) do
       {:ok, agent_id, _name} ->
-        case remote(Arbor.Agent.Manager, :chat, [message, "CLI", [agent_id: agent_id, timeout: timeout]]) do
+        case remote(Arbor.Agent.Manager, :chat, [
+               message,
+               "CLI",
+               [agent_id: agent_id, timeout: timeout]
+             ]) do
           {:ok, response} ->
             Mix.shell().info(response)
 
@@ -363,7 +382,9 @@ defmodule Mix.Tasks.Arbor.Agent do
         # Check if it exists but is stopped
         case find_profile(ref) do
           {:ok, _} ->
-            Mix.shell().error("Agent '#{ref}' is not running. Resume with: mix arbor.agent resume #{ref}")
+            Mix.shell().error(
+              "Agent '#{ref}' is not running. Resume with: mix arbor.agent resume #{ref}"
+            )
 
           :not_found ->
             Mix.shell().error("Agent '#{ref}' not found.")

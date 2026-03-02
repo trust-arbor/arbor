@@ -28,8 +28,16 @@ defmodule Arbor.Agent.Lifecycle do
       profiles = Lifecycle.list_agents()
   """
 
-  alias Arbor.Agent.{APIAgent, Character, Executor, Profile, ProfileStore, SessionManager,
-                      TemplateStore}
+  alias Arbor.Agent.{
+    APIAgent,
+    Character,
+    Executor,
+    Profile,
+    ProfileStore,
+    SessionManager,
+    TemplateStore
+  }
+
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
