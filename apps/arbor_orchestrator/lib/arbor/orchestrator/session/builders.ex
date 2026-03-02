@@ -150,15 +150,22 @@ defmodule Arbor.Orchestrator.Session.Builders do
       "timestamp" => now_iso
     }
 
-    assistant_msg = %{"role" => "assistant", "content" => response, "timestamp" => now_iso}
+    assistant_msg =
+      if response != "" do
+        %{"role" => "assistant", "content" => response, "timestamp" => now_iso}
+      end
 
     updated_messages =
       case Map.get(result_ctx, "session.messages") do
         msgs when is_list(msgs) ->
-          msgs ++ [assistant_msg]
+          if assistant_msg, do: msgs ++ [assistant_msg], else: msgs
 
         _ ->
-          get_messages(state) ++ [user_msg, assistant_msg]
+          if assistant_msg do
+            get_messages(state) ++ [user_msg, assistant_msg]
+          else
+            get_messages(state) ++ [user_msg]
+          end
       end
 
     updated_wm =
@@ -172,8 +179,14 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # Append messages to compactor and run compaction
     compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
 
-    # Persist turn entries to session store (async)
-    persist_turn_entries(state, now, user_msg, assistant_msg, result_ctx)
+    # Persist turn entries to session store (async, skip nil assistant)
+    persist_turn_entries(
+      state,
+      now,
+      user_msg,
+      assistant_msg || %{"role" => "assistant", "content" => ""},
+      result_ctx
+    )
 
     state = %{
       state
@@ -841,10 +854,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp append_to_compactor(nil, _user_msg, _assistant_msg), do: nil
 
   defp append_to_compactor(compactor, user_msg, assistant_msg) do
-    compactor
-    |> apply_compactor(:append, [user_msg])
-    |> apply_compactor(:append, [assistant_msg])
-    |> apply_compactor(:maybe_compact, [])
+    compactor = apply_compactor(compactor, :append, [user_msg])
+
+    compactor =
+      if assistant_msg do
+        apply_compactor(compactor, :append, [assistant_msg])
+      else
+        compactor
+      end
+
+    apply_compactor(compactor, :maybe_compact, [])
   end
 
   # Runtime bridge: the compactor struct carries its own module via __struct__

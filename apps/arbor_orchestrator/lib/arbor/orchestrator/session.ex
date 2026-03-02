@@ -429,18 +429,25 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:turn_result, message, {:ok, result}}, state) do
+    completed = Map.get(result.context, "__completed_nodes__", [])
+
     new_state =
       state
       |> transition_phase(:processing, :complete, :idle)
       |> Builders.apply_turn_result(message, result)
       |> Builders.maybe_checkpoint()
 
-    response =
-      Map.get(result.context, "session.response") ||
-        Map.get(result.context, "last_response", "")
+    response = Map.get(result.context, "session.response", "")
 
     tool_history = Map.get(result.context, "session.tool_history", [])
     tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
+
+    Logger.info(
+      "[Session] Turn completed for #{state.agent_id}: " <>
+        "#{length(completed)} nodes, response=#{if response != "", do: "#{String.length(to_string(response))} chars", else: "EMPTY"}, " <>
+        "completed=#{inspect(completed)}"
+    )
+
     Builders.emit_turn_signal(new_state, result)
 
     # Phase 3: notify ActionCycleServer of chat percept
@@ -454,6 +461,7 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:turn_result, _message, {:error, reason}}, state) do
+    Logger.warning("[Session] Turn FAILED for #{state.agent_id}: #{inspect(reason)}")
     new_state = transition_phase(state, :processing, :complete, :idle)
 
     safe_reply(state.turn_from, {:error, reason})

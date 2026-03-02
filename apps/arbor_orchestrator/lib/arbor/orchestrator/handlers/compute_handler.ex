@@ -56,7 +56,7 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   end
 
   defp safe_execute(module, node, context, graph, opts) do
-    if function_exported?(module, :execute, 4) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :execute, 4) do
       module.execute(node, context, graph, opts)
     else
       %Outcome{
