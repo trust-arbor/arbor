@@ -46,12 +46,29 @@ defmodule Arbor.Orchestrator.Eval.Graders.CompileCheck do
 
   @doc "Extracts code from markdown fences if present."
   def extract_code(text) do
-    case Regex.run(~r/```elixir\n(.*?)```/s, text) do
+    text
+    |> normalize_line_endings()
+    |> strip_thinking_blocks()
+    |> extract_fenced_code()
+  end
+
+  defp normalize_line_endings(text) do
+    text |> String.replace("\r\n", "\n") |> String.replace("\r", "\n")
+  end
+
+  defp strip_thinking_blocks(text) do
+    Regex.replace(~r/<think>.*?<\/think>\s*/s, text, "")
+  end
+
+  defp extract_fenced_code(text) do
+    # Try ```elixir with optional spaces around language name (case-insensitive)
+    case Regex.run(~r/```\s*elixir\s*\n(.*?)```/si, text) do
       [_, code] ->
         String.trim(code)
 
       nil ->
-        case Regex.run(~r/```\n(.*?)```/s, text) do
+        # Try bare ``` fence
+        case Regex.run(~r/```\s*\n(.*?)```/s, text) do
           [_, code] -> String.trim(code)
           nil -> String.trim(text)
         end

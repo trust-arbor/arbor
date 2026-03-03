@@ -24,30 +24,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   @behaviour Arbor.Orchestrator.Eval.Subject
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
-
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
-    Anthropic,
-    Gemini,
-    LMStudio,
-    Ollama,
-    OpenAI,
-    OpenRouter,
-    Xai,
-    Zai
-  }
-
-  @adapters %{
-    # API providers
-    "lm_studio" => LMStudio,
-    "ollama" => Ollama,
-    "anthropic" => Anthropic,
-    "openai" => OpenAI,
-    "openrouter" => OpenRouter,
-    "zai" => Zai,
-    "xai" => Xai,
-    "gemini" => Gemini
-  }
+  alias Arbor.Orchestrator.UnifiedLLM.{Message, ProviderCatalog, Request}
 
   @impl true
   def run(input, opts \\ []) do
@@ -59,7 +36,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     timeout = Keyword.get(opts, :timeout, 60_000)
     use_streaming = Keyword.get(opts, :stream, false)
 
-    adapter = Map.get(@adapters, provider)
+    adapter = resolve_adapter(provider)
 
     if adapter do
       messages = build_messages(prompt, system)
@@ -79,7 +56,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
         run_complete(adapter, request, model, provider, timeout)
       end
     else
-      {:error, "unknown provider: #{provider}. Available: #{inspect(Map.keys(@adapters))}"}
+      available = ProviderCatalog.available() |> Enum.map(fn {p, _} -> p end)
+      {:error, "unknown provider: #{provider}. Available: #{inspect(available)}"}
     end
   end
 
@@ -163,16 +141,17 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   defp build_provider_options(_provider), do: %{}
 
-  # API providers
-  defp default_model("lm_studio"), do: "qwen/qwen3-coder-next"
-  defp default_model("ollama"), do: "llama3.2:latest"
-  defp default_model("anthropic"), do: "claude-sonnet-4-5-20250929"
-  defp default_model("openai"), do: "gpt-4o"
-  defp default_model("openrouter"), do: "anthropic/claude-sonnet-4-5-20250929"
-  defp default_model("zai"), do: "aurora-alpha"
-  defp default_model("xai"), do: "grok-4-1-fast"
-  defp default_model("gemini"), do: "gemini-2.5-flash"
-  defp default_model(_), do: ""
+  # Resolve adapter module from ProviderCatalog — single source of truth
+  defp resolve_adapter(provider) do
+    catalog = ProviderCatalog.all()
+
+    case Enum.find(catalog, fn entry -> entry.provider == provider end) do
+      %{adapter_module: mod} -> mod
+      _ -> nil
+    end
+  end
+
+  defp default_model(_provider), do: ""
 
   defp extract_text(%{text: text}), do: text
   defp extract_text(%{message: %{content: content}}), do: content
