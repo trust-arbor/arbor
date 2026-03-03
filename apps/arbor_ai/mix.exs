@@ -32,9 +32,9 @@ defmodule ArborAi.MixProject do
       {:arbor_persistence, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
-      # jido_ai and req_llm come from root mix.exs
-      {:jido_ai, git: "https://github.com/agentjido/jido_ai.git", branch: "main", override: true},
-      {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
+      # jido_ai and req_llm versions pinned in root mix.exs
+      {:jido_ai, "~> 2.0.0-rc.0", override: true},
+      {:req_llm, "~> 1.6", override: true},
       {:ex_mcp, path: "~/code/ex_mcp", override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
