@@ -60,6 +60,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   @domain_datasets %{
     "coding" => "apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl",
+    "arbor_coding" => "apps/arbor_orchestrator/priv/eval_datasets/arbor_coding.jsonl",
     "heartbeat" => "apps/arbor_orchestrator/priv/eval_datasets/heartbeat_json.jsonl",
     "chat" => "apps/arbor_orchestrator/priv/eval_datasets/chat_quality.jsonl",
     "dot_compilation" => "apps/arbor_orchestrator/priv/eval_datasets/dot_compilation.jsonl"
@@ -67,6 +68,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
   @domain_graders %{
     "coding" => ["compile_check", "functional_test"],
+    "arbor_coding" => ["compile_check", "functional_test"],
     "heartbeat" => ["json_valid"],
     "chat" => ["contains"],
     "dot_compilation" => ["dot_diff"]
@@ -443,19 +445,22 @@ defmodule Mix.Tasks.Arbor.Eval do
         Enum.zip(grader_names, scores)
         |> Map.new(fn {name, score} -> {name, ensure_map(score)} end)
 
-      if actual != "" do
-        score_strs =
-          Enum.map(Enum.zip(grader_names, scores), fn {name, s} ->
-            "#{name}=#{Float.round(s.score, 2)}"
-          end)
+      score_strs =
+        Enum.map(Enum.zip(grader_names, scores), fn {name, s} ->
+          "#{name}=#{Float.round(s.score, 2)}"
+        end)
 
-        duration_str = if timing.duration_ms > 0, do: " (#{timing.duration_ms}ms)", else: ""
+      duration_str = if timing.duration_ms > 0, do: " (#{timing.duration_ms}ms)", else: ""
+
+      if actual == "" do
+        Mix.shell().info("    EMPTY RESPONSE #{duration_str}")
+      else
         Mix.shell().info("    #{Enum.join(score_strs, ", ")}#{duration_str}")
+      end
 
-        # Show detail for failed samples to help diagnose issues
-        if not passed do
-          print_failure_details(scores, actual)
-        end
+      # Show detail for failed samples to help diagnose issues
+      if not passed do
+        print_failure_details(scores, actual)
       end
 
       %{
