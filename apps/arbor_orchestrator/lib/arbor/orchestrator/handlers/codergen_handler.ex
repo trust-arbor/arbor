@@ -132,6 +132,8 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         "model=#{Context.get(context, "session.llm_model")}"
     )
 
+    # Clear any stale routing decision from process dict
+    Process.delete(:__routing_decision__)
     start_time = System.monotonic_time(:millisecond)
 
     case call_llm(prompt, node, context, graph, opts) do
@@ -150,6 +152,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
           base_updates
           |> Map.put("last_response", response_text)
           |> maybe_put_perspective_key(node.attrs, response_text)
+          |> maybe_put_routing_decision()
 
         %Outcome{
           status: :success,
@@ -178,23 +181,29 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     nonce = @prompt_sanitizer.generate_nonce()
 
     {system_content, user_content} = build_llm_messages(prompt, node, context, graph, nonce)
-    request = build_llm_request(node, context, system_content, user_content)
-    call_opts = build_call_opts(node, opts)
-    on_stream = Keyword.get(opts, :on_stream)
 
-    call_opts =
-      if on_stream do
-        Keyword.put(call_opts, :stream_callback, on_stream)
-      else
-        call_opts
-      end
+    case build_llm_request(node, context, system_content, user_content) do
+      {:ok, request} ->
+        call_opts = build_call_opts(node, opts)
+        on_stream = Keyword.get(opts, :on_stream)
 
-    use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
+        call_opts =
+          if on_stream do
+            Keyword.put(call_opts, :stream_callback, on_stream)
+          else
+            call_opts
+          end
 
-    if use_tools do
-      call_llm_with_tools(client, request, node, context, on_stream, opts)
-    else
-      call_llm_direct(client, request, call_opts)
+        use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
+
+        if use_tools do
+          call_llm_with_tools(client, request, node, context, on_stream, opts)
+        else
+          call_llm_direct(client, request, call_opts)
+        end
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -264,16 +273,21 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
         Context.get(context, "session.llm_model")
 
     # Sensitivity routing: reroute if the current provider can't handle the data
-    {provider, model} = maybe_route_by_sensitivity(provider, model, context)
+    case maybe_route_by_sensitivity(provider, model, context) do
+      {:error, _} = error ->
+        error
 
-    %Request{
-      provider: provider,
-      model: model,
-      messages: messages,
-      max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
-      temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
-      provider_options: Map.get(node.attrs, "provider_options", %{})
-    }
+      {routed_provider, routed_model} ->
+        {:ok,
+         %Request{
+           provider: routed_provider,
+           model: routed_model,
+           messages: messages,
+           max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
+           temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
+           provider_options: Map.get(node.attrs, "provider_options", %{})
+         }}
+    end
   end
 
   defp to_messages(msgs) do
@@ -406,14 +420,38 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     sensitivity = Context.get(context, "__data_sensitivity__")
 
     if sensitivity && sensitivity != :public && sensitivity_router_available?() do
+      agent_id = Context.get(context, "session.agent_id")
+
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(Arbor.AI.SensitivityRouter, :maybe_reroute, [
-        safe_to_atom(provider),
-        model || "",
-        sensitivity,
-        []
-      ])
-      |> then(fn {p, m} -> {to_string(p), m} end)
+      decision =
+        apply(Arbor.AI.SensitivityRouter, :decide, [
+          safe_to_atom(provider),
+          model || "",
+          sensitivity,
+          [agent_id: agent_id]
+        ])
+
+      case decision do
+        %{action: :proceed} ->
+          {provider, model}
+
+        %{action: :rerouted, alternative: {p, m}} = d ->
+          # Store routing decision in process dict for context_updates propagation.
+          # call_llm_and_respond merges this into the Outcome's context_updates.
+          Process.put(:__routing_decision__, %{
+            action: :rerouted,
+            original: d.original,
+            alternative: d.alternative,
+            sensitivity: d.sensitivity,
+            mode: d.mode,
+            reason: d.reason
+          })
+
+          {to_string(p), m}
+
+        %{action: :blocked, reason: reason} ->
+          {:error, {:sensitivity_blocked, reason}}
+      end
     else
       {provider, model}
     end
@@ -425,7 +463,7 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
 
   defp sensitivity_router_available? do
     Code.ensure_loaded?(Arbor.AI.SensitivityRouter) and
-      function_exported?(Arbor.AI.SensitivityRouter, :maybe_reroute, 4)
+      function_exported?(Arbor.AI.SensitivityRouter, :decide, 4)
   end
 
   defp safe_to_atom(value) when is_atom(value), do: value
@@ -493,6 +531,15 @@ defmodule Arbor.Orchestrator.Handlers.CodergenHandler do
     case Map.get(node_attrs, "perspective") do
       nil -> updates
       perspective -> Map.put(updates, "vote.#{perspective}", response_text)
+    end
+  end
+
+  # Merge routing decision from process dict into context_updates.
+  # Set by maybe_route_by_sensitivity when a reroute occurs.
+  defp maybe_put_routing_decision(updates) do
+    case Process.delete(:__routing_decision__) do
+      nil -> updates
+      decision -> Map.put(updates, "__routing_decision__", decision)
     end
   end
 

@@ -178,6 +178,22 @@ config :arbor_ai,
   cost_overrides: %{},
   signal_verbosity: :normal,
 
+  # Sensitivity routing modes — controls UX behavior when rerouting.
+  # Maps policy tiers (from ConfirmationMatrix.to_policy_tier) to modes:
+  #   :auto  — reroute silently
+  #   :warn  — reroute + emit signal (UI notification)
+  #   :gated — reroute + emit signal + write decision to context
+  #   :block — fail request, refuse to send sensitive data
+  sensitivity_routing_modes: %{
+    restricted: :gated,
+    standard: :warn,
+    elevated: :auto,
+    autonomous: :auto
+  },
+  # Per-agent overrides for sensitivity routing mode.
+  # Takes precedence over trust-tier defaults.
+  sensitivity_routing_overrides: %{},
+
   # Usage stats tracking (Phase 3)
   enable_stats_tracking: true,
   stats_retention_days: 7,

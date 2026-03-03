@@ -110,13 +110,13 @@ config :arbor_ai, :backend_capabilities, %{
 #
 config :arbor_ai, :routing_candidates, [
   # Priority 1: Local Ollama — fast, free, handles everything
-  %{provider: :ollama, model: "llama3.2", priority: 1},
+  # %{provider: :ollama, model: "llama3.2", priority: 2},
   # Priority 2: Local LM Studio — alternative local
-  %{provider: :lmstudio, model: "default", priority: 2},
+  %{provider: :lmstudio, model: "qwen3.5-122b-a10b", priority: 1},
   # Priority 3: Anthropic API — high quality, handles up to :confidential
-  %{provider: :anthropic, model: "claude-sonnet-4-5-20250514", priority: 3},
+  %{provider: :anthropic, model: "claude-sonnet-4-6", priority: 2},
   # Priority 4: OpenRouter Anthropic — same quality, different billing
-  %{provider: :openrouter, model: "anthropic/claude-sonnet-4-5-20250514", priority: 4}
+  %{provider: :openrouter, model: "anthropic/claude-sonnet-4-6", priority: 3}
 ]
 
 # ── Content Classification ────────────────────────────────────────────
@@ -140,12 +140,48 @@ config :arbor_ai, :routing_candidates, [
 # This forces output sensitivity to at least :restricted regardless
 # of content classification.
 
+# ── Routing Modes (UX Control) ───────────────────────────────────────
+#
+# When the router detects that the current provider can't handle the
+# data sensitivity, the *mode* determines what UX behavior occurs:
+#
+#   :auto  — Reroute silently (no notification). For trusted agents.
+#   :warn  — Reroute + emit signal. Dashboard/UI shows notification.
+#   :gated — Reroute + emit signal + write decision to context.
+#            For new agents — gives the UI a chance to show the user.
+#   :block — Fail the request entirely. Refuse to send sensitive data.
+#
+# Modes are resolved per-agent from their trust tier:
+#
+#   restricted (untrusted/probationary) → :gated
+#   standard (trusted)                  → :warn
+#   elevated (veteran)                  → :auto
+#   autonomous (full_partner)           → :auto
+#
+# Override defaults:
+#
+config :arbor_ai, :sensitivity_routing_modes, %{
+  restricted: :gated,
+  standard: :warn,
+  elevated: :auto,
+  autonomous: :auto
+}
+
+# Per-agent overrides take precedence over trust-tier defaults.
+# Use this for agents that always need maximum safety regardless of tier.
+#
+config :arbor_ai,
+       :sensitivity_routing_overrides,
+       %{
+         # "agent_secrets_handler" => :block
+       }
+
 # ── How It All Connects ──────────────────────────────────────────────
 #
 # 1. TaintCheck.before_node scans input content → sets sensitivity
 # 2. Sensitivity propagates through pipeline (worst wins)
 # 3. CodergenHandler reads __data_sensitivity__ from context
-# 4. SensitivityRouter.maybe_reroute checks if current provider qualifies
-# 5. If not → selects best alternative from routing_candidates
+# 4. SensitivityRouter.decide/4 checks clearance + resolves routing mode
+# 5. If not ok → selects alternative, emits signal based on mode
 # 6. TaintCheck.after_node validates the provider could see the data (safety net)
-# 7. Result: secrets stay local, public data goes anywhere
+# 7. Result: secrets stay local, public data goes anywhere, users are informed
