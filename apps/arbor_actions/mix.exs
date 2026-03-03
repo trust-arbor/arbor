@@ -40,8 +40,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_historian, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
-      {:jido_action, path: "../../../jido_action", override: true},
-      {:jido_browser, git: "https://github.com/agentjido/jido_browser.git", branch: "main"},
+      # jido_action version pinned in root mix.exs
+      {:jido_action, "~> 2.0", override: true},
+      {:jido_browser, "~> 1.0"},
       {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

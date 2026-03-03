@@ -16,18 +16,15 @@ defmodule Arbor.MixProject do
 
   defp deps do
     [
-      # Jido ecosystem (Hex packages for CI/production)
-      {:jido, "~> 2.0.0-rc.4", override: true},
-      {:jido_action, "~> 2.0.0-rc.4", override: true},
-      {:jido_signal, "~> 2.0.0-rc.4", override: true},
-      {:jido_ai, git: "https://github.com/agentjido/jido_ai.git", branch: "main", override: true},
+      # Jido ecosystem — stable 2.0 Hex releases
+      {:jido, "~> 2.0", override: true},
+      {:jido_action, "~> 2.0", override: true},
+      {:jido_signal, "~> 2.0", override: true},
+      {:jido_ai, "~> 2.0.0-rc.0", override: true},
+      {:req_llm, "~> 1.6", override: true},
+      # jido_sandbox has no Hex release yet
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
-
-      # jido_behaviortree and jido_character are unused — removed
-
-      # Override to resolve conflicts
-      {:req_llm, git: "https://github.com/agentjido/req_llm.git", branch: "main", override: true},
 
       # Local ex_mcp for ACP development (switch back to hex before release)
       {:ex_mcp, path: "/Users/azmaveth/code/ex_mcp", override: true},
