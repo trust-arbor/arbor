@@ -14,7 +14,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     - `:provider` — provider name (see @adapters for full list)
     - `:model` — model name (default: provider-specific)
     - `:temperature` — sampling temperature
-    - `:max_tokens` — max response tokens (default: 4096)
+    - `:max_tokens` — max response tokens (default: 32_768)
     - `:timeout` — adapter timeout in ms (default: 60_000)
     - `:stream` — if true, uses streaming to capture TTFT (default: false)
 
@@ -24,6 +24,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   @behaviour Arbor.Orchestrator.Eval.Subject
 
+  require Logger
+
   alias Arbor.Orchestrator.UnifiedLLM.{Message, ProviderCatalog, Request}
 
   @impl true
@@ -32,7 +34,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
     provider = Keyword.get(opts, :provider, "lm_studio")
     model = Keyword.get(opts, :model, default_model(provider))
     temperature = Keyword.get(opts, :temperature)
-    max_tokens = Keyword.get(opts, :max_tokens, 4096)
+    max_tokens = Keyword.get(opts, :max_tokens, 32_768)
     timeout = Keyword.get(opts, :timeout, 60_000)
     use_streaming = Keyword.get(opts, :stream, false)
 
@@ -69,6 +71,18 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
         duration_ms = System.monotonic_time(:millisecond) - start_time
         text = extract_text(response)
         tokens = estimate_tokens(text, response)
+
+        if text == "" do
+          usage = Map.get(response, :usage, %{})
+
+          Logger.warning(
+            "Eval LLM subject: empty text from #{provider}/#{model} " <>
+              "after #{duration_ms}ms. " <>
+              "finish_reason=#{inspect(Map.get(response, :finish_reason))} " <>
+              "output_tokens=#{inspect(Map.get(usage, :output_tokens))} " <>
+              "content_parts=#{inspect(Enum.map(Map.get(response, :content_parts, []), & &1.kind))}"
+          )
+        end
 
         {:ok,
          %{
@@ -161,8 +175,10 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   defp estimate_tokens(text, response) do
     # Try to get from response usage stats first
+    # usage_from_body/1 normalizes to :output_tokens (atom key)
     usage_tokens =
       case response do
+        %{usage: %{output_tokens: n}} when is_integer(n) -> n
         %{usage: %{completion_tokens: n}} when is_integer(n) -> n
         %{usage: %{"completion_tokens" => n}} when is_integer(n) -> n
         _ -> nil

@@ -23,6 +23,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     streaming delta parsing (return nil to use default)
   """
 
+  require Logger
+
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
   alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response, StreamEvent}
 
@@ -299,6 +301,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
         "" -> Map.get(message, "content") || ""
         value -> value
       end
+
+    if text == "" do
+      raw_finish = Map.get(choice, "finish_reason")
+      raw_content = get_in(choice, ["message", "content"])
+      usage = Map.get(body, "usage", %{})
+      choices_count = body |> Map.get("choices", []) |> length()
+
+      Logger.warning(
+        "#{config.provider}: empty text response. " <>
+          "finish_reason=#{inspect(raw_finish)} " <>
+          "raw_content=#{inspect(raw_content)} " <>
+          "choices_count=#{choices_count} " <>
+          "content_parts=#{inspect(Enum.map(content_parts, & &1.kind))} " <>
+          "usage=#{inspect(usage)}"
+      )
+    end
 
     {:ok,
      %Response{
