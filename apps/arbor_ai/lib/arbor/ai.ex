@@ -522,6 +522,33 @@ defmodule Arbor.AI do
     as: :select
 
   @doc """
+  Make a sensitivity routing decision with mode-based behavior.
+
+  Returns a `%RoutingDecision{}` struct describing what should happen when
+  the current provider can't handle the data sensitivity level. The decision
+  includes the routing mode (`:auto`/`:warn`/`:gated`/`:block`) based on
+  the agent's trust tier.
+
+  ## Options
+
+  - `:agent_id` — agent ID for trust-tier lookup and per-agent overrides
+  - `:candidates` — override the configured candidate pool
+  - `:mode` — explicit mode override (bypasses trust-tier resolution)
+
+  ## Examples
+
+      decision = Arbor.AI.sensitivity_routing_decision(:openrouter, "model", :restricted, agent_id: "agent_001")
+      decision.action   #=> :rerouted
+      decision.mode     #=> :gated
+      decision.alternative  #=> {:ollama, "llama3.2"}
+  """
+  @spec sensitivity_routing_decision(atom(), String.t(), atom() | nil, keyword()) ::
+          Arbor.AI.SensitivityRouter.RoutingDecision.t()
+  defdelegate sensitivity_routing_decision(provider, model, sensitivity, opts \\ []),
+    to: Arbor.AI.SensitivityRouter,
+    as: :decide
+
+  @doc """
   Check if a `{provider, model}` pair can handle data at the given sensitivity.
 
   Delegates to `BackendTrust.can_see?/3` for model-granular trust checks.

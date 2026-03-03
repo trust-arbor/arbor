@@ -2,6 +2,7 @@ defmodule Arbor.AI.SensitivityRouterTest do
   use ExUnit.Case, async: true
 
   alias Arbor.AI.SensitivityRouter
+  alias Arbor.AI.SensitivityRouter.RoutingDecision
 
   @moduletag :fast
 
@@ -124,6 +125,215 @@ defmodule Arbor.AI.SensitivityRouterTest do
 
       # Should reroute to ollama (priority 1) or anthropic (priority 2) — both handle :confidential
       assert provider in [:ollama, :anthropic]
+    end
+
+    test "keeps original when mode is :block (backward compat)" do
+      # :block in legacy API falls back to keeping original
+      assert {:openrouter, "random/model"} =
+               SensitivityRouter.maybe_reroute(:openrouter, "random/model", :restricted,
+                 candidates: @test_candidates,
+                 mode: :block
+               )
+    end
+  end
+
+  describe "decide/4" do
+    test "returns :proceed for nil sensitivity" do
+      decision = SensitivityRouter.decide(:ollama, "llama3.2", nil, [])
+      assert %RoutingDecision{action: :proceed, original: {:ollama, "llama3.2"}} = decision
+    end
+
+    test "returns :proceed for public sensitivity" do
+      decision = SensitivityRouter.decide(:openrouter, "model", :public, [])
+
+      assert %RoutingDecision{
+               action: :proceed,
+               original: {:openrouter, "model"},
+               sensitivity: :public
+             } = decision
+    end
+
+    test "returns :proceed when provider can handle sensitivity" do
+      decision =
+        SensitivityRouter.decide(:ollama, "llama3.2", :restricted, candidates: @test_candidates)
+
+      assert %RoutingDecision{action: :proceed, sensitivity: :restricted} = decision
+    end
+
+    test "returns :rerouted with mode when provider can't handle sensitivity" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: @test_candidates,
+          mode: :warn
+        )
+
+      assert %RoutingDecision{
+               action: :rerouted,
+               original: {:openrouter, "random/model"},
+               alternative: {:ollama, "llama3.2"},
+               sensitivity: :restricted,
+               mode: :warn
+             } = decision
+
+      assert decision.reason =~ "rerouted to ollama"
+    end
+
+    test "returns :rerouted with :auto mode (no signal emitted)" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: @test_candidates,
+          mode: :auto
+        )
+
+      assert %RoutingDecision{action: :rerouted, mode: :auto} = decision
+    end
+
+    test "returns :rerouted with :gated mode" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: @test_candidates,
+          mode: :gated
+        )
+
+      assert %RoutingDecision{action: :rerouted, mode: :gated} = decision
+    end
+
+    test "returns :blocked when mode is :block" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: @test_candidates,
+          mode: :block
+        )
+
+      assert %RoutingDecision{
+               action: :blocked,
+               original: {:openrouter, "random/model"},
+               sensitivity: :restricted,
+               mode: :block
+             } = decision
+
+      assert decision.reason =~ "blocked by policy"
+      assert decision.alternative == nil
+    end
+
+    test "returns :proceed with reason when no candidates for rerouting" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: [],
+          mode: :warn
+        )
+
+      assert %RoutingDecision{action: :proceed, reason: "No alternative candidates available"} =
+               decision
+    end
+
+    test "selects best alternative when rerouting" do
+      # Add multiple candidates that can handle restricted
+      candidates = [
+        %{provider: :ollama, model: "llama3.2", priority: 1},
+        %{provider: :lmstudio, model: "default", priority: 2}
+      ]
+
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: candidates,
+          mode: :auto
+        )
+
+      assert %RoutingDecision{alternative: {:ollama, "llama3.2"}} = decision
+    end
+  end
+
+  describe "resolve_mode/1" do
+    test "returns :warn for nil agent_id" do
+      assert :warn = SensitivityRouter.resolve_mode(nil)
+    end
+
+    test "returns :warn for non-binary agent_id" do
+      assert :warn = SensitivityRouter.resolve_mode(123)
+    end
+
+    test "returns :warn when trust system unavailable" do
+      # No trust system running in test, should fall back gracefully
+      assert :warn = SensitivityRouter.resolve_mode("unknown_agent")
+    end
+
+    test "respects per-agent overrides" do
+      original = Application.get_env(:arbor_ai, :sensitivity_routing_overrides, %{})
+
+      try do
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, %{
+          "blocked_agent" => :block,
+          "auto_agent" => :auto
+        })
+
+        assert :block = SensitivityRouter.resolve_mode("blocked_agent")
+        assert :auto = SensitivityRouter.resolve_mode("auto_agent")
+        # Non-overridden agent falls through to trust lookup (→ :warn fallback)
+        assert :warn = SensitivityRouter.resolve_mode("normal_agent")
+      after
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, original)
+      end
+    end
+
+    test "ignores invalid override values" do
+      original = Application.get_env(:arbor_ai, :sensitivity_routing_overrides, %{})
+
+      try do
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, %{
+          "bad_agent" => :invalid_mode
+        })
+
+        # Invalid mode falls through to trust lookup
+        assert :warn = SensitivityRouter.resolve_mode("bad_agent")
+      after
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, original)
+      end
+    end
+  end
+
+  describe "decide/4 with per-agent mode override" do
+    test "uses per-agent override when configured" do
+      original = Application.get_env(:arbor_ai, :sensitivity_routing_overrides, %{})
+
+      try do
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, %{
+          "secure_agent" => :block
+        })
+
+        decision =
+          SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+            candidates: @test_candidates,
+            agent_id: "secure_agent"
+          )
+
+        assert %RoutingDecision{action: :blocked, mode: :block} = decision
+      after
+        Application.put_env(:arbor_ai, :sensitivity_routing_overrides, original)
+      end
+    end
+
+    test "explicit :mode opt overrides agent_id resolution" do
+      decision =
+        SensitivityRouter.decide(:openrouter, "random/model", :restricted,
+          candidates: @test_candidates,
+          agent_id: "some_agent",
+          mode: :auto
+        )
+
+      assert %RoutingDecision{action: :rerouted, mode: :auto} = decision
+    end
+  end
+
+  describe "RoutingDecision struct" do
+    test "has expected default fields" do
+      decision = %RoutingDecision{}
+      assert decision.action == nil
+      assert decision.original == nil
+      assert decision.alternative == nil
+      assert decision.sensitivity == nil
+      assert decision.mode == nil
+      assert decision.reason == nil
     end
   end
 end
