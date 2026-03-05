@@ -45,7 +45,6 @@ config :arbor_agent,
 
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
-config :arbor_demo, start_children: false
 
 config :arbor_monitor,
   start_children: false,

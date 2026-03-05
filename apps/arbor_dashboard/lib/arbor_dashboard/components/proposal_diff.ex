@@ -20,7 +20,7 @@ defmodule Arbor.Dashboard.Components.ProposalDiff do
   ## Expected proposal structure
 
       %{
-        target_module: Arbor.Demo.Faults.Flood,
+        target_module: MyApp.Worker,
         change_type: :fix,
         diff_lines: [
           %{type: :context, content: "def flood_loop(interval, batch) do"},

@@ -40,7 +40,7 @@ defmodule Arbor.Dashboard.Live.SignalSubscription do
       def mount(_params, _session, socket) do
         socket =
           if connected?(socket) do
-            SignalLive.subscribe_raw(socket, "demo.*")
+            SignalLive.subscribe_raw(socket, "agent.*")
           else
             socket
           end
