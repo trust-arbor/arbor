@@ -1,9 +1,10 @@
 defmodule Arbor.Dashboard.Live.RoadmapLive do
   @moduledoc """
-  SDLC pipeline roadmap dashboard.
+  Roadmap dashboard.
 
   Shows a kanban-style view of roadmap items across pipeline stages,
   with priority badges, category labels, and detail modals.
+  Reads directly from `.arbor/roadmap/` markdown files.
   """
 
   use Phoenix.LiveView
@@ -11,24 +12,29 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
 
   import Arbor.Web.Components
 
-  alias Arbor.SDLC.{Config, Pipeline}
   alias Arbor.Web.Helpers
+
+  @stages [:inbox, :brainstorming, :planned, :in_progress, :completed]
+  @stage_dirs %{
+    inbox: "0-inbox",
+    brainstorming: "1-brainstorming",
+    planned: "2-planned",
+    in_progress: "3-in-progress",
+    completed: "5-completed"
+  }
 
   @impl true
   def mount(_params, _session, socket) do
-    stages = safe_stages()
-    items_by_stage = safe_load_items(stages)
-    status = safe_status()
+    items_by_stage = load_items()
     total = items_by_stage |> Map.values() |> List.flatten() |> length()
 
     socket =
       socket
       |> assign(
         page_title: "Roadmap",
-        stages: stages,
+        stages: @stages,
         items_by_stage: items_by_stage,
         selected_item: nil,
-        pipeline_status: status,
         total_items: total
       )
 
@@ -38,14 +44,11 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   end
 
   defp reload_roadmap(socket) do
-    stages = socket.assigns.stages
-    items_by_stage = safe_load_items(stages)
-    status = safe_status()
+    items_by_stage = load_items()
     total = items_by_stage |> Map.values() |> List.flatten() |> length()
 
     assign(socket,
       items_by_stage: items_by_stage,
-      pipeline_status: status,
       total_items: total
     )
   end
@@ -61,15 +64,12 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   end
 
   def handle_event("refresh", _params, socket) do
-    stages = socket.assigns.stages
-    items_by_stage = safe_load_items(stages)
-    status = safe_status()
+    items_by_stage = load_items()
     total = items_by_stage |> Map.values() |> List.flatten() |> length()
 
     socket =
       socket
       |> assign(:items_by_stage, items_by_stage)
-      |> assign(:pipeline_status, status)
       |> assign(:total_items, total)
 
     {:noreply, socket}
@@ -78,7 +78,7 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <.dashboard_header title="Roadmap" subtitle="SDLC pipeline">
+    <.dashboard_header title="Roadmap" subtitle="Pipeline stages">
       <:actions>
         <button phx-click="refresh" class="aw-btn aw-btn-default">
           Refresh
@@ -88,17 +88,12 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
       <.stat_card value={@total_items} label="Total items" color={:blue} />
-      <.stat_card
-        value={if @pipeline_status[:healthy], do: "Healthy", else: "Degraded"}
-        label="Pipeline"
-        color={if @pipeline_status[:healthy], do: :green, else: :error}
-      />
     </div>
 
     <div style="display: flex; overflow-x: auto; gap: 1rem; margin-top: 1rem; padding-bottom: 1rem;">
       <div
         :for={stage <- @stages}
-        style="min-width: 200px; width: 16%; flex-shrink: 0;"
+        style="min-width: 200px; width: 20%; flex-shrink: 0;"
       >
         <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem; background: var(--aw-bg-secondary, #1a1a1a); border-radius: 4px;">
           <strong>{stage_label(stage)}</strong>
@@ -115,9 +110,16 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
             <div style="font-weight: 600; margin-bottom: 0.5rem; font-size: 0.9em;">
               {Helpers.truncate(item.title, 60)}
             </div>
-            <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
-              <.badge label={to_string(item.priority)} color={priority_color(item.priority)} />
-              <.badge label={to_string(item.category)} color={:gray} />
+            <div
+              :if={item.priority || item.category}
+              style="display: flex; gap: 0.25rem; flex-wrap: wrap;"
+            >
+              <.badge
+                :if={item.priority}
+                label={to_string(item.priority)}
+                color={priority_color(item.priority)}
+              />
+              <.badge :if={item.category} label={to_string(item.category)} color={:gray} />
             </div>
           </div>
         </div>
@@ -140,81 +142,35 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
     >
       <div class="aw-item-detail">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
-          <div>
+          <div :if={@selected_item.priority}>
             <strong>Priority:</strong>
             <.badge
               label={to_string(@selected_item.priority)}
               color={priority_color(@selected_item.priority)}
             />
           </div>
-          <div>
+          <div :if={@selected_item.category}>
             <strong>Category:</strong>
             <.badge label={to_string(@selected_item.category)} color={:gray} />
           </div>
-          <div>
+          <div :if={@selected_item.effort}>
             <strong>Effort:</strong>
             <span>{@selected_item.effort}</span>
           </div>
-          <div :if={@selected_item.id}>
-            <strong>ID:</strong>
-            <code style="font-size: 0.85em;">{@selected_item.id}</code>
-          </div>
         </div>
 
-        <div :if={@selected_item.summary} style="margin-top: 1rem;">
+        <div :if={@selected_item[:summary]} style="margin-top: 1rem;">
           <strong>Summary:</strong>
           <p style="margin-top: 0.5rem; color: var(--aw-text-muted, #888);">
             {@selected_item.summary}
           </p>
         </div>
 
-        <div :if={@selected_item.why_it_matters} style="margin-top: 1rem;">
-          <strong>Why It Matters:</strong>
-          <p style="margin-top: 0.5rem; color: var(--aw-text-muted, #888);">
-            {@selected_item.why_it_matters}
-          </p>
-        </div>
-
-        <div :if={@selected_item.acceptance_criteria != []} style="margin-top: 1rem;">
-          <strong>Acceptance Criteria:</strong>
-          <ul style="margin-top: 0.5rem; padding-left: 1.5rem;">
-            <li :for={criterion <- @selected_item.acceptance_criteria} style="margin-bottom: 0.25rem;">
-              <span :if={criterion[:completed]} style="color: var(--aw-green, #4caf50);">
-                &#10003;
-              </span>
-              <span :if={!criterion[:completed]} style="color: var(--aw-text-muted, #888);">
-                &#9744;
-              </span>
-              {criterion[:text]}
-            </li>
-          </ul>
-        </div>
-
-        <div :if={@selected_item.definition_of_done != []} style="margin-top: 1rem;">
-          <strong>Definition of Done:</strong>
-          <ul style="margin-top: 0.5rem; padding-left: 1.5rem;">
-            <li :for={dod <- @selected_item.definition_of_done} style="margin-bottom: 0.25rem;">
-              <span :if={dod[:completed]} style="color: var(--aw-green, #4caf50);">&#10003;</span>
-              <span :if={!dod[:completed]} style="color: var(--aw-text-muted, #888);">&#9744;</span>
-              {dod[:text]}
-            </li>
-          </ul>
-        </div>
-
-        <div :if={@selected_item.related_files != []} style="margin-top: 1rem;">
-          <strong>Related Files:</strong>
-          <ul style="margin-top: 0.5rem; padding-left: 1.5rem; font-size: 0.85em;">
-            <li :for={file <- @selected_item.related_files} style="margin-bottom: 0.25rem;">
-              <code>{file}</code>
-            </li>
-          </ul>
-        </div>
-
-        <div :if={@selected_item.notes} style="margin-top: 1rem;">
-          <strong>Notes:</strong>
-          <p style="margin-top: 0.5rem; color: var(--aw-text-muted, #888); white-space: pre-wrap; font-size: 0.9em;">
-            {@selected_item.notes}
-          </p>
+        <div :if={@selected_item[:content]} style="margin-top: 1rem;">
+          <strong>Content:</strong>
+          <pre style="margin-top: 0.5rem; color: var(--aw-text-muted, #888); white-space: pre-wrap; font-size: 0.9em;">
+            {@selected_item.content}
+          </pre>
         </div>
       </div>
     </.modal>
@@ -228,7 +184,6 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
   defp stage_label(:planned), do: "Planned"
   defp stage_label(:in_progress), do: "In Progress"
   defp stage_label(:completed), do: "Completed"
-  defp stage_label(:discarded), do: "Discarded"
   defp stage_label(stage), do: stage |> to_string() |> String.capitalize()
 
   defp priority_color(:critical), do: :error
@@ -245,38 +200,28 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
     |> Enum.find(&(&1.path == path))
   end
 
-  # ── Safe API wrappers ───────────────────────────────────────────────
+  # ── Data loading ───────────────────────────────────────────────────
 
-  defp safe_stages do
-    Pipeline.stages()
+  defp load_items do
+    root = roadmap_root()
+
+    Map.new(@stages, fn stage ->
+      dir = Path.join(root, Map.fetch!(@stage_dirs, stage))
+      items = load_stage_items(dir)
+      {stage, items}
+    end)
   rescue
-    _ -> [:inbox, :brainstorming, :planned, :in_progress, :completed, :discarded]
-  catch
-    :exit, _ -> [:inbox, :brainstorming, :planned, :in_progress, :completed, :discarded]
+    _ -> Map.new(@stages, &{&1, []})
   end
 
-  defp safe_load_items(stages) do
-    roadmap_root = safe_roadmap_root()
-
-    if roadmap_root do
-      Map.new(stages, fn stage ->
-        items = safe_stage_items(stage, roadmap_root)
-        {stage, items}
-      end)
-    else
-      Map.new(stages, &{&1, []})
-    end
-  end
-
-  defp safe_stage_items(stage, roadmap_root) do
-    dir = Pipeline.stage_path(stage, roadmap_root)
-
+  defp load_stage_items(dir) do
     case File.ls(dir) do
       {:ok, files} ->
         files
         |> Enum.filter(&(String.ends_with?(&1, ".md") and &1 != "INDEX.md"))
+        |> Enum.sort()
         |> Enum.map(&Path.join(dir, &1))
-        |> Enum.map(&safe_parse_file/1)
+        |> Enum.map(&parse_roadmap_file/1)
         |> Enum.reject(&is_nil/1)
 
       _ ->
@@ -284,34 +229,87 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
     end
   rescue
     _ -> []
-  catch
-    :exit, _ -> []
   end
 
-  defp safe_parse_file(path) do
-    case Arbor.SDLC.parse_file(path) do
-      {:ok, item} -> item
-      _ -> nil
+  defp parse_roadmap_file(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        metadata = parse_frontmatter(content)
+        title = metadata[:title] || path |> Path.basename(".md") |> humanize_filename()
+
+        %{
+          path: path,
+          title: title,
+          priority: safe_atom(metadata[:priority]),
+          category: safe_atom(metadata[:category]),
+          effort: metadata[:effort],
+          summary: metadata[:summary],
+          content: content |> String.slice(0, 2000)
+        }
+
+      _ ->
+        nil
     end
   rescue
     _ -> nil
-  catch
-    :exit, _ -> nil
   end
 
-  defp safe_roadmap_root do
-    Config.absolute_roadmap_root()
+  defp parse_frontmatter(content) do
+    lines = String.split(content, "\n")
+
+    # Extract title from first markdown heading
+    title =
+      Enum.find_value(lines, fn line ->
+        case Regex.run(~r/^#\s+(.+)$/, String.trim(line)) do
+          [_, title] -> String.trim(title)
+          _ -> nil
+        end
+      end)
+
+    # Extract **Key:** Value patterns from content
+    extract = fn key ->
+      Enum.find_value(lines, fn line ->
+        pattern = ~r/\*\*#{Regex.escape(key)}:\*\*\s*(.+)/i
+
+        case Regex.run(pattern, String.trim(line)) do
+          [_, value] -> String.trim(value)
+          _ -> nil
+        end
+      end)
+    end
+
+    %{
+      title: title,
+      priority: extract.("Priority"),
+      category: extract.("Category"),
+      effort: extract.("Effort"),
+      summary: extract.("Summary")
+    }
+  end
+
+  defp humanize_filename(name) do
+    name
+    |> String.replace(~r/[-_]/, " ")
+    |> String.split()
+    |> Enum.map(&String.capitalize/1)
+    |> Enum.join(" ")
+  end
+
+  defp safe_atom(nil), do: nil
+
+  defp safe_atom(value) when is_binary(value) do
+    value |> String.downcase() |> String.trim() |> String.to_existing_atom()
   rescue
     _ -> nil
-  catch
-    :exit, _ -> nil
   end
 
-  defp safe_status do
-    Arbor.SDLC.status()
-  rescue
-    _ -> %{healthy: false}
-  catch
-    :exit, _ -> %{healthy: false}
+  defp roadmap_root do
+    root = ".arbor/roadmap"
+
+    if Path.type(root) == :absolute do
+      root
+    else
+      Path.join(File.cwd!(), root)
+    end
   end
 end
