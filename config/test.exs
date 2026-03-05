@@ -43,7 +43,6 @@ config :arbor_agent,
   profile_storage_backend: nil,
   bootstrap_enabled: false
 
-config :arbor_sdlc, start_children: false
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
 config :arbor_demo, start_children: false
