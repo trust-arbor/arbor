@@ -14,7 +14,6 @@ defmodule Arbor.Dashboard.Nav do
     ChannelsLive,
     ChatLive,
     ConsensusLive,
-    DemoLive,
     EvalLive,
     EventsLive,
     LandingLive,
@@ -33,7 +32,6 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/agents", label: "Agents", icon: "\u{1F916}", view: AgentsLive},
     %{href: "/monitor", label: "Monitor", icon: "\u{1F4CA}", view: MonitorLive},
     %{href: "/roadmap", label: "Roadmap", icon: "\u{1F5FA}", view: RoadmapLive},
-    %{href: "/demo", label: "Demo", icon: "\u{1F52C}", view: DemoLive},
     %{href: "/channels", label: "Channels", icon: "\u{1F4E2}", view: ChannelsLive},
     %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive},
     %{href: "/memory", label: "Memory", icon: "\u{1F9E0}", view: MemoryLive}
