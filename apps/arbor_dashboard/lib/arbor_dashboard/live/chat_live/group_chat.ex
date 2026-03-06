@@ -18,7 +18,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   """
   def init_assigns do
     %{
-      group_pid: nil,
+
       group_id: nil,
       group_participants: [],
       group_mode: false,
@@ -86,7 +86,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
           socket =
             socket
             |> assign(
-              group_pid: nil,
+        
               group_id: channel_id,
               group_participants: participants,
               group_mode: true,
@@ -141,7 +141,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     socket =
       socket
       |> assign(
-        group_pid: nil,
+  
         group_id: channel_id,
         group_participants: participants,
         group_mode: true,
@@ -168,7 +168,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     socket =
       socket
       |> assign(
-        group_pid: nil,
+  
         group_id: nil,
         group_participants: [],
         group_mode: false
@@ -209,11 +209,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     end
   end
 
-  # Keep backwards compat for any remaining GroupChat broadcasts
-  def handle_info({:group_message, message}, socket) do
-    handle_info({:channel_message, message}, socket)
-  end
-
   def handle_info({:channel_member_joined, member}, socket) do
     participant = %{
       id: member.id,
@@ -226,21 +221,11 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     {:noreply, assign(socket, group_participants: updated_participants)}
   end
 
-  # Keep backwards compat
-  def handle_info({:group_participant_joined, participant}, socket) do
-    handle_info({:channel_member_joined, participant}, socket)
-  end
-
   def handle_info({:channel_member_left, member_id}, socket) do
     updated_participants =
       Enum.reject(socket.assigns.group_participants, &(&1.id == member_id))
 
     {:noreply, assign(socket, group_participants: updated_participants)}
-  end
-
-  # Keep backwards compat
-  def handle_info({:group_participant_left, participant_id}, socket) do
-    handle_info({:channel_member_left, participant_id}, socket)
   end
 
   # ── Private Helpers ───────────────────────────────────────────────

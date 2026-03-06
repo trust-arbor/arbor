@@ -16,15 +16,9 @@ defmodule Arbor.Actions.Browser.Wait do
   def run(%{ms: ms} = params, _context) do
     Actions.emit_started(__MODULE__, %{ms: ms})
 
-    case JidoBrowser.Actions.Wait.run(params, %{}) do
-      {:ok, result} ->
-        Actions.emit_completed(__MODULE__, %{ms: ms})
-        {:ok, result}
-
-      {:error, reason} ->
-        Actions.emit_failed(__MODULE__, reason)
-        {:error, Arbor.Actions.Browser.format_error(reason)}
-    end
+    result = JidoBrowser.Actions.Wait.run(params, %{})
+    Actions.emit_completed(__MODULE__, %{ms: ms})
+    result
   end
 end
 

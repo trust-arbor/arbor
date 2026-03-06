@@ -214,7 +214,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         {:noreply, socket}
 
       # Group chat mode
-      socket.assigns.group_mode and socket.assigns.group_pid ->
+      socket.assigns.group_mode and socket.assigns.group_id ->
         # Add user message to display
         user_msg = %{
           id: "msg-#{System.unique_integer([:positive])}",
@@ -239,9 +239,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           _ -> :ok
         end
 
-        # Send to group (triggers agent responses)
-        Manager.group_send(
-          socket.assigns.group_pid,
+        # Send to channel (triggers agent responses)
+        Manager.channel_send(
+          socket.assigns.group_id,
           "human_primary",
           "User",
           :human,
@@ -511,14 +511,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     error_msg = ChatHelpers.format_query_error(reason)
     {:noreply, assign(socket, loading: false, error: error_msg)}
   end
-
-  def handle_info({:group_message, _} = msg, socket), do: GroupChat.handle_info(msg, socket)
-
-  def handle_info({:group_participant_joined, _} = msg, socket),
-    do: GroupChat.handle_info(msg, socket)
-
-  def handle_info({:group_participant_left, _} = msg, socket),
-    do: GroupChat.handle_info(msg, socket)
 
   # Signal: agent lifecycle events (started, stopped, chat_message)
   def handle_info({:signal_received, %{category: :agent, type: type} = signal}, socket)

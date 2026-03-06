@@ -379,9 +379,9 @@ defmodule Arbor.Comms.Channel do
   defp broadcast(state, message) do
     pubsub = get_pubsub_module()
 
-    if pubsub do
+    if pubsub && Code.ensure_loaded?(Phoenix.PubSub) do
       try do
-        Phoenix.PubSub.broadcast(pubsub, state.pubsub_topic, message)
+        apply(Phoenix.PubSub, :broadcast, [pubsub, state.pubsub_topic, message])
       rescue
         _ -> :ok
       catch

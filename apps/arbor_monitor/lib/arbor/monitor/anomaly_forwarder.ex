@@ -1,21 +1,21 @@
 defmodule Arbor.Monitor.AnomalyForwarder do
   @moduledoc """
-  Bridges anomaly signals to the ops chat room.
+  Bridges anomaly signals to the ops chat channel.
 
   Subscribes to monitor signals (anomaly_detected, cascade_detected,
   healing_verified, healing_ineffective) and forwards them as system
-  messages to a GroupChat room where the diagnostician agent and
-  humans can see and respond to them.
+  messages to a channel where the diagnostician agent and humans can
+  see and respond to them.
 
   ## Debouncing
 
   During cascade events, anomalies are batched and posted as a
-  summary instead of individual messages to avoid flooding the room.
+  summary instead of individual messages to avoid flooding the channel.
 
   ## Runtime Bridges
 
   Uses `Code.ensure_loaded?` for both `Arbor.Signals` (subscription)
-  and `Arbor.Agent.GroupChat` (message delivery) since arbor_monitor
+  and `Arbor.Comms` (message delivery) since arbor_monitor
   is a standalone app.
   """
 
@@ -24,7 +24,7 @@ defmodule Arbor.Monitor.AnomalyForwarder do
   require Logger
 
   @signals_mod Arbor.Signals
-  @group_chat_mod Arbor.Agent.GroupChat
+  @comms_mod Arbor.Comms
 
   @cascade_batch_interval_ms 5_000
 
@@ -33,19 +33,19 @@ defmodule Arbor.Monitor.AnomalyForwarder do
   end
 
   @doc """
-  Set the group chat target for forwarding anomaly messages.
+  Set the channel target for forwarding anomaly messages.
   """
-  @spec set_group(pid() | GenServer.server()) :: :ok
-  def set_group(group_pid) do
-    GenServer.call(__MODULE__, {:set_group, group_pid})
+  @spec set_channel(String.t()) :: :ok
+  def set_channel(channel_id) do
+    GenServer.call(__MODULE__, {:set_channel, channel_id})
   end
 
   @impl true
   def init(opts) do
-    group_pid = Keyword.get(opts, :group_pid)
+    channel_id = Keyword.get(opts, :channel_id)
 
     state = %{
-      group_pid: group_pid,
+      channel_id: channel_id,
       subscription_ids: [],
       cascade_batch: [],
       cascade_timer: nil
@@ -53,13 +53,13 @@ defmodule Arbor.Monitor.AnomalyForwarder do
 
     state = maybe_subscribe(state)
 
-    Logger.info("[AnomalyForwarder] Started (group: #{inspect(group_pid)})")
+    Logger.info("[AnomalyForwarder] Started (channel: #{inspect(channel_id)})")
     {:ok, state}
   end
 
   @impl true
-  def handle_call({:set_group, group_pid}, _from, state) do
-    {:reply, :ok, %{state | group_pid: group_pid}}
+  def handle_call({:set_channel, channel_id}, _from, state) do
+    {:reply, :ok, %{state | channel_id: channel_id}}
   end
 
   @impl true
@@ -86,7 +86,7 @@ defmodule Arbor.Monitor.AnomalyForwarder do
     message =
       "[ANOMALY] #{severity} in #{skill}: #{details}"
 
-    send_to_group(state, message)
+    send_to_channel(state, message)
     {:noreply, state}
   end
 
@@ -96,7 +96,7 @@ defmodule Arbor.Monitor.AnomalyForwarder do
 
     message = "[CASCADE] Cascade detected — #{count} anomalies in rapid succession. Batching alerts."
 
-    send_to_group(state, message)
+    send_to_channel(state, message)
 
     # Start batching during cascade
     timer = schedule_cascade_flush(state.cascade_timer)
@@ -106,21 +106,21 @@ defmodule Arbor.Monitor.AnomalyForwarder do
   defp handle_signal(%{type: :cascade_resolved}, state) do
     state = flush_cascade_batch_now(state)
     message = "[CASCADE RESOLVED] Cascade has ended. Resuming normal alert delivery."
-    send_to_group(state, message)
+    send_to_channel(state, message)
     {:noreply, state}
   end
 
   defp handle_signal(%{type: :healing_verified} = signal, state) do
     data = signal.data || %{}
     message = "[VERIFIED] Fix verified — held through soak period. #{inspect(data[:fingerprint] || "")}"
-    send_to_group(state, message)
+    send_to_channel(state, message)
     {:noreply, state}
   end
 
   defp handle_signal(%{type: :healing_ineffective} = signal, state) do
     data = signal.data || %{}
     message = "[INEFFECTIVE] Fix did not hold — anomaly recurred. #{inspect(data[:fingerprint] || "")}"
-    send_to_group(state, message)
+    send_to_channel(state, message)
     {:noreply, state}
   end
 
@@ -128,28 +128,28 @@ defmodule Arbor.Monitor.AnomalyForwarder do
     {:noreply, state}
   end
 
-  # Group chat messaging
+  # Channel messaging
 
-  defp send_to_group(%{group_pid: nil}, _message), do: :ok
+  defp send_to_channel(%{channel_id: nil}, _message), do: :ok
 
-  defp send_to_group(%{group_pid: group_pid}, message) do
-    if group_chat_available?() do
-      apply(@group_chat_mod, :send_message, [
-        group_pid,
+  defp send_to_channel(%{channel_id: channel_id}, message) do
+    if comms_available?() do
+      apply(@comms_mod, :send_to_channel, [
+        channel_id,
         "anomaly_forwarder",
         "Monitor",
         :system,
         message
       ])
     else
-      Logger.debug("[AnomalyForwarder] GroupChat not available, logging: #{message}")
+      Logger.debug("[AnomalyForwarder] Comms not available, logging: #{message}")
     end
   rescue
     error ->
       Logger.warning("[AnomalyForwarder] Failed to send: #{inspect(error)}")
   catch
     :exit, reason ->
-      Logger.warning("[AnomalyForwarder] Group chat exited: #{inspect(reason)}")
+      Logger.warning("[AnomalyForwarder] Channel exited: #{inspect(reason)}")
   end
 
   # Cascade batching
@@ -169,7 +169,7 @@ defmodule Arbor.Monitor.AnomalyForwarder do
   defp flush_cascade_batch_now(%{cascade_batch: batch} = state) do
     count = length(batch)
     message = "[BATCH] #{count} anomalies during cascade period"
-    send_to_group(state, message)
+    send_to_channel(state, message)
     %{state | cascade_batch: [], cascade_timer: nil}
   end
 
@@ -219,9 +219,9 @@ defmodule Arbor.Monitor.AnomalyForwarder do
       function_exported?(@signals_mod, :subscribe, 2)
   end
 
-  defp group_chat_available? do
-    Code.ensure_loaded?(@group_chat_mod) and
-      function_exported?(@group_chat_mod, :send_message, 5)
+  defp comms_available? do
+    Code.ensure_loaded?(@comms_mod) and
+      function_exported?(@comms_mod, :send_to_channel, 5)
   end
 
   defp format_details(nil), do: "no details"

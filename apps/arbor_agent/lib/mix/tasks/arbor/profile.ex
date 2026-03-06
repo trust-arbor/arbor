@@ -146,10 +146,8 @@ defmodule Mix.Tasks.Arbor.Profile do
     case find_profile(ref) do
       {:ok, profile} ->
         if Mix.shell().yes?("Delete profile '#{profile.display_name}' (#{profile.agent_id})?") do
-          case Arbor.Agent.ProfileStore.delete_profile(profile.agent_id) do
-            :ok -> Mix.shell().info("Profile deleted.")
-            {:error, reason} -> Mix.shell().error("Failed to delete: #{inspect(reason)}")
-          end
+          Arbor.Agent.ProfileStore.delete_profile(profile.agent_id)
+          Mix.shell().info("Profile deleted.")
         else
           Mix.shell().info("Cancelled.")
         end

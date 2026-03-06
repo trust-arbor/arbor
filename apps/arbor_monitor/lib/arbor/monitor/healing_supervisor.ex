@@ -8,14 +8,14 @@ defmodule Arbor.Monitor.HealingSupervisor do
   - RejectionTracker — tracks proposal rejections for three-strike escalation
   - Verification — tracks fix verification during soak periods
   - HealingWorkers — DynamicSupervisor for healing agent workers
-  - AnomalyForwarder — bridges anomaly signals to the ops chat room
+  - AnomalyForwarder — bridges anomaly signals to the ops channel
 
   ## Ops Room Architecture
 
   Instead of running a custom DebugAgent GenServer, the healing system creates
-  an ops chat room (GroupChat) with a standard diagnostician agent. The
+  an ops channel via Arbor.Comms with a standard diagnostician agent. The
   AnomalyForwarder subscribes to monitor signals and posts them as messages
-  to the ops room. Humans and other agents can join the room to collaborate.
+  to the ops channel. Humans and other agents can join to collaborate.
 
   The diagnostician agent is started via `Manager.start_or_resume` (runtime bridge)
   using a deferred Task to wait for agent infrastructure to be available.
@@ -173,37 +173,23 @@ defmodule Arbor.Monitor.HealingSupervisor do
   end
 
   defp setup_ops_room_for_agent(agent_id) do
-    group_chat_mod = Arbor.Agent.GroupChat
-    lifecycle_mod = Arbor.Agent.Lifecycle
+    comms_mod = Arbor.Comms
 
-    if Code.ensure_loaded?(group_chat_mod) and Code.ensure_loaded?(lifecycle_mod) do
-      create_ops_room(agent_id, group_chat_mod, lifecycle_mod)
+    if Code.ensure_loaded?(comms_mod) do
+      create_ops_room(agent_id, comms_mod)
     end
   end
 
-  defp create_ops_room(agent_id, group_chat_mod, lifecycle_mod) do
-    # Look up the host process for the agent
-    host_pid =
-      try do
-        case apply(lifecycle_mod, :get_host, [agent_id]) do
-          {:ok, pid} -> pid
-          _ -> nil
-        end
-      rescue
-        _ -> nil
-      catch
-        :exit, _ -> nil
-      end
-
+  defp create_ops_room(agent_id, comms_mod) do
     participants = [
-      %{id: agent_id, name: "Diagnostician", type: :agent, host_pid: host_pid}
+      %{id: agent_id, name: "Diagnostician", type: :agent}
     ]
 
-    case apply(group_chat_mod, :create, ["ops-room", [participants: participants]]) do
-      {:ok, group_pid} ->
-        # Wire the forwarder to the new group
+    case apply(comms_mod, :create_channel, ["ops-room", [participants: participants]]) do
+      {:ok, channel_id} ->
+        # Wire the forwarder to the new channel
         try do
-          AnomalyForwarder.set_group(group_pid)
+          AnomalyForwarder.set_channel(channel_id)
         rescue
           _ -> :ok
         catch
