@@ -16,16 +16,15 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
 
   describe "start_link/1" do
     @tag :fast
-    test "starts without group_pid" do
+    test "starts without channel" do
       assert Process.whereis(AnomalyForwarder) != nil
     end
   end
 
-  describe "set_group/1" do
+  describe "set_channel/1" do
     @tag :fast
-    test "accepts a group pid", %{forwarder: _forwarder} do
-      # Use self() as a mock group
-      assert :ok = AnomalyForwarder.set_group(self())
+    test "accepts a channel id", %{forwarder: _forwarder} do
+      assert :ok = AnomalyForwarder.set_channel("ops-room")
     end
   end
 

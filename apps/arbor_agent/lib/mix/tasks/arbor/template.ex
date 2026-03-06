@@ -222,14 +222,9 @@ defmodule Mix.Tasks.Arbor.Template do
   defp seed_builtins do
     ensure_store()
 
-    case Arbor.Agent.TemplateStore.seed_builtins() do
-      {:ok, count} ->
-        Mix.shell().info("Seeded #{count} new builtin template(s).")
-        list_templates()
-
-      {:error, reason} ->
-        Mix.shell().error("Seeding failed: #{inspect(reason)}")
-    end
+    {:ok, count} = Arbor.Agent.TemplateStore.seed_builtins()
+    Mix.shell().info("Seeded #{count} new builtin template(s).")
+    list_templates()
   end
 
   defp reload_templates do

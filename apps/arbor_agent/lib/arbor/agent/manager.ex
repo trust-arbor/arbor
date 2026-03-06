@@ -19,7 +19,7 @@ defmodule Arbor.Agent.Manager do
   `Arbor.Web.SignalLive.subscribe_raw(socket, "agent.*")`.
   """
 
-  alias Arbor.Agent.{APIAgent, Claude, GroupChat, Lifecycle, ProfileStore}
+  alias Arbor.Agent.{APIAgent, Claude, Lifecycle, ProfileStore}
 
   require Logger
 
@@ -457,79 +457,6 @@ defmodule Arbor.Agent.Manager do
   defp comms_available? do
     Code.ensure_loaded?(Arbor.Comms) and
       function_exported?(Arbor.Comms, :create_channel, 2)
-  end
-
-  # ── Group Chat (deprecated — use channels) ───────────────────────
-
-  @deprecated "Use create_channel/3 instead"
-  @doc """
-  Create a group chat with the given participants.
-
-  ## Participant Specs
-
-  Each participant spec is a map with:
-  - `:id` - Unique identifier (agent_id for agents, user_id for humans)
-  - `:name` - Display name
-  - `:type` - `:agent` or `:human`
-
-  For agent participants, automatically looks up the host_pid via `Lifecycle.get_host/1`.
-  """
-  @spec create_group(String.t(), [map()]) :: {:ok, pid()} | {:error, term()}
-  def create_group(name, participant_specs) do
-    # Build participant structs with host_pid lookup for agents
-    participants =
-      Enum.map(participant_specs, fn spec ->
-        host_pid =
-          if spec.type == :agent do
-            case Lifecycle.get_host(spec.id) do
-              {:ok, pid} -> pid
-              _ -> nil
-            end
-          else
-            nil
-          end
-
-        %{
-          id: spec.id,
-          name: spec.name,
-          type: spec.type,
-          host_pid: host_pid
-        }
-      end)
-
-    GroupChat.create(name, participants: participants)
-  end
-
-  @deprecated "Use channel_send/5 instead"
-  @doc """
-  Send a message to a group chat.
-
-  The group parameter can be a pid or a via tuple.
-  """
-  @spec group_send(GenServer.server(), String.t(), String.t(), :agent | :human, String.t()) ::
-          :ok
-  def group_send(group, sender_id, sender_name, sender_type, content) do
-    GroupChat.send_message(group, sender_id, sender_name, sender_type, content)
-  end
-
-  @deprecated "Use list_channels/0 instead"
-  @doc """
-  List all active group chats.
-
-  Returns a list of `{group_id, pid}` tuples by querying the ExecutorRegistry
-  for all entries with `{:group, group_id}` keys.
-  """
-  @spec list_groups() :: [{String.t(), pid()}]
-  def list_groups do
-    Registry.select(Arbor.Agent.ExecutorRegistry, [
-      {
-        {{:group, :"$1"}, :"$2", :_},
-        [],
-        [{{:"$1", :"$2"}}]
-      }
-    ])
-  rescue
-    _ -> []
   end
 
   # ── Private ─────────────────────────────────────────────────────────

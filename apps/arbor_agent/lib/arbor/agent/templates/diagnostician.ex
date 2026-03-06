@@ -12,8 +12,8 @@ defmodule Arbor.Agent.Templates.Diagnostician do
 
   ## Ops Room
 
-  The diagnostician operates in a GroupChat ops room where anomaly alerts
-  arrive as system messages. Humans and other agents can join the room
+  The diagnostician operates in an ops room channel where anomaly alerts
+  arrive as system messages. Humans and other agents can join the channel
   to observe, assist with complex investigations, or guide remediation.
   """
 
