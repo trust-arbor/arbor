@@ -26,6 +26,9 @@ defmodule Mix.Tasks.Arbor.Helpers do
         line = String.trim(line)
 
         unless line == "" or String.starts_with?(line, "#") do
+          # Strip leading "export " if present
+          line = String.replace_prefix(line, "export ", "")
+
           case String.split(line, "=", parts: 2) do
             [key, value] ->
               key = String.trim(key)
