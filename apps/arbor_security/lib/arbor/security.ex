@@ -410,6 +410,7 @@ defmodule Arbor.Security do
          :ok <- check_identity_status(principal_id),
          :ok <- maybe_verify_identity(principal_id, opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
+         :ok <- check_scope_binding(cap, opts),
          :ok <- maybe_verify_delegation_chain(cap),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
          escalation_result <-
@@ -449,6 +450,8 @@ defmodule Arbor.Security do
            delegation_depth: Keyword.get(opts, :delegation_depth, 3),
            max_uses: Keyword.get(opts, :max_uses),
            allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
+           session_id: Keyword.get(opts, :session_id),
+           task_id: Keyword.get(opts, :task_id),
            metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
@@ -825,6 +828,14 @@ defmodule Arbor.Security do
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
       {:ok, cap} -> {:ok, cap}
       {:error, :not_found} -> {:error, :unauthorized}
+    end
+  end
+
+  defp check_scope_binding(cap, opts) do
+    if Capability.scope_matches?(cap, opts) do
+      :ok
+    else
+      {:error, :scope_mismatch}
     end
   end
 

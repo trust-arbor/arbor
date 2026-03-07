@@ -50,6 +50,8 @@ defmodule Arbor.Contracts.Security.Capability do
     field(:delegation_depth, non_neg_integer(), default: 3)
     field(:max_uses, pos_integer(), enforce: false)
     field(:allowed_delegatees, [binary()], enforce: false)
+    field(:session_id, binary(), enforce: false)
+    field(:task_id, binary(), enforce: false)
     field(:constraints, map(), default: %{})
     field(:signature, binary(), enforce: false)
     field(:issuer_id, Types.agent_id(), enforce: false)
@@ -72,6 +74,8 @@ defmodule Arbor.Contracts.Security.Capability do
   - `:delegation_depth` - How many times this capability can be delegated (default: 3, 0 = non-delegatable)
   - `:max_uses` - Maximum number of successful authorizations before auto-revoke (nil = unlimited)
   - `:allowed_delegatees` - List of agent IDs this cap can be delegated to (nil = anyone)
+  - `:session_id` - Bind capability to a specific session (nil = any session)
+  - `:task_id` - Bind capability to a specific task/pipeline execution (nil = any task)
   - `:constraints` - Additional constraints on capability usage
   - `:metadata` - Additional metadata
 
@@ -104,6 +108,8 @@ defmodule Arbor.Contracts.Security.Capability do
       delegation_depth: attrs[:delegation_depth] || 3,
       max_uses: attrs[:max_uses],
       allowed_delegatees: attrs[:allowed_delegatees],
+      session_id: attrs[:session_id],
+      task_id: attrs[:task_id],
       constraints: attrs[:constraints] || %{},
       issuer_id: attrs[:issuer_id],
       issuer_signature: attrs[:issuer_signature],
@@ -141,6 +147,22 @@ defmodule Arbor.Contracts.Security.Capability do
   end
 
   @doc """
+  Check if a capability's scope bindings match the given context.
+
+  A capability matches if:
+  - Its `session_id` is nil (unbound) or matches `context[:session_id]`
+  - Its `task_id` is nil (unbound) or matches `context[:task_id]`
+
+  Returns `true` if scope matches, `false` otherwise.
+  """
+  @spec scope_matches?(t(), keyword()) :: boolean()
+  def scope_matches?(%__MODULE__{} = cap, context \\ []) do
+    session_ok = cap.session_id == nil or cap.session_id == context[:session_id]
+    task_ok = cap.task_id == nil or cap.task_id == context[:task_id]
+    session_ok and task_ok
+  end
+
+  @doc """
   Create a delegated capability with reduced permissions.
 
   The new capability will have:
@@ -173,6 +195,10 @@ defmodule Arbor.Contracts.Security.Capability do
             record -> parent.delegation_chain ++ [record]
           end
 
+        # Scope binding: inherit parent's session/task binding (can't unbind)
+        session_id = opts[:session_id] || parent.session_id
+        task_id = opts[:task_id] || parent.task_id
+
         # Attenuation: delegated caps can only restrict, never expand
         new(
           resource_uri: parent.resource_uri,
@@ -180,9 +206,11 @@ defmodule Arbor.Contracts.Security.Capability do
           expires_at: new_expires_at,
           not_before: new_not_before,
           parent_capability_id: parent.id,
-          delegation_depth: parent.delegation_depth - 1,
+          delegation_depth: min(parent.delegation_depth - 1, opts[:delegation_depth] || parent.delegation_depth - 1),
           max_uses: new_max_uses,
           allowed_delegatees: opts[:allowed_delegatees] || parent.allowed_delegatees,
+          session_id: session_id,
+          task_id: task_id,
           constraints: new_constraints,
           delegation_chain: delegation_chain,
           metadata: opts[:metadata] || %{}
@@ -218,6 +246,8 @@ defmodule Arbor.Contracts.Security.Capability do
       length_prefix(not_before_bin) <>
       length_prefix(Integer.to_string(cap.delegation_depth)) <>
       length_prefix(if(cap.max_uses, do: Integer.to_string(cap.max_uses), else: "")) <>
+      length_prefix(cap.session_id || "") <>
+      length_prefix(cap.task_id || "") <>
       length_prefix(constraints_json) <>
       length_prefix(if cap.signed_at, do: DateTime.to_iso8601(cap.signed_at), else: "")
   end
