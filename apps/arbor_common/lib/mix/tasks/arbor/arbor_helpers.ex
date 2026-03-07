@@ -7,12 +7,63 @@ defmodule Mix.Tasks.Arbor.Helpers do
   """
 
   @node_name :arbor_dev
-  @full_node_name :arbor_dev@localhost
   @pid_file "/tmp/arbor-dev.pid"
   @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
 
+  @doc """
+  Loads .env file from the project root if it exists.
+  Only sets variables that aren't already in the environment
+  (env vars take precedence over .env).
+  """
+  def load_dotenv do
+    env_file = Path.join(File.cwd!(), ".env")
+
+    if File.exists?(env_file) do
+      env_file
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.each(fn line ->
+        line = String.trim(line)
+
+        unless line == "" or String.starts_with?(line, "#") do
+          case String.split(line, "=", parts: 2) do
+            [key, value] ->
+              key = String.trim(key)
+              value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
+
+              unless System.get_env(key) do
+                System.put_env(key, value)
+              end
+
+            _ ->
+              :skip
+          end
+        end
+      end)
+    end
+  end
+
   def node_name, do: @node_name
-  def full_node_name, do: @full_node_name
+
+  @doc """
+  Returns the full node name.
+
+  If ARBOR_NODE_HOST is set, uses longnames (e.g. arbor_dev@10.0.0.1).
+  Otherwise uses shortnames (arbor_dev@localhost).
+  """
+  def full_node_name do
+    host = node_hostname()
+    # Safe: node_name is a compile-time constant, host is operator-controlled env var
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    :"#{@node_name}@#{host}"
+  end
+
+  @doc """
+  Returns true if using longnames (IP/FQDN), false for shortnames (localhost).
+  """
+  def longnames? do
+    System.get_env("ARBOR_NODE_HOST") != nil
+  end
 
   def cookie do
     case System.get_env("ARBOR_COOKIE") do
@@ -39,8 +90,15 @@ defmodule Mix.Tasks.Arbor.Helpers do
   def pid_file, do: @pid_file
   def log_file, do: @log_file
 
-  @doc "Returns the hostname used for node names."
-  def node_hostname, do: "localhost"
+  @doc """
+  Returns the hostname used for node names.
+
+  Set ARBOR_NODE_HOST to an IP or FQDN for cross-machine clustering.
+  Defaults to "localhost" for local development.
+  """
+  def node_hostname do
+    System.get_env("ARBOR_NODE_HOST", "localhost")
+  end
 
   @doc "Checks if the server node is responding to pings."
   def server_running? do
@@ -65,13 +123,17 @@ defmodule Mix.Tasks.Arbor.Helpers do
   Uses a unique name to avoid conflicts with the server node.
   """
   def ensure_distribution do
+    load_dotenv()
+
     unless Node.alive?() do
       ensure_epmd()
       suffix = :rand.uniform(99_999)
-      # Safe: suffix is bounded integer from :rand, creates finite atom space
+      host = node_hostname()
+      name_type = if longnames?(), do: :longnames, else: :shortnames
+      # Safe: suffix is bounded integer from :rand, host is operator-controlled env var
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-      name = :"arbor_mix_#{suffix}@localhost"
-      {:ok, _} = Node.start(name, :shortnames)
+      name = :"arbor_mix_#{suffix}@#{host}"
+      {:ok, _} = Node.start(name, name_type)
       Node.set_cookie(cookie())
     end
 

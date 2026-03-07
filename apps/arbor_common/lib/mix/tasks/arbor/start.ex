@@ -6,10 +6,24 @@ defmodule Mix.Tasks.Arbor.Start do
       $ mix arbor.start
 
   The server runs in the background with:
-  - Node name: `arbor_dev@localhost`
-  - Cookie: `arbor_dev`
+  - Node name: `arbor_dev@localhost` (or `arbor_dev@<ip>` with ARBOR_NODE_HOST)
+  - Cookie: from ARBOR_COOKIE env var
   - Logs: `~/.arbor/logs/arbor-dev.log`
   - PID file: `/tmp/arbor-dev.pid`
+
+  ## Environment Variables
+
+  - `ARBOR_COOKIE` (required) — distribution cookie for cluster authentication
+  - `ARBOR_NODE_HOST` (optional) — IP or FQDN for cross-machine clustering.
+    When set, uses longnames (`--name`). Defaults to localhost with shortnames (`--sname`).
+
+  ## Examples
+
+      # Local development (shortnames)
+      ARBOR_COOKIE=secret mix arbor.start
+
+      # Cross-machine clustering (longnames)
+      ARBOR_NODE_HOST=10.42.42.101 ARBOR_COOKIE=secret mix arbor.start
 
   Use `mix arbor.status` to check on it and
   `mix arbor.stop` to shut it down.
@@ -43,8 +57,10 @@ defmodule Mix.Tasks.Arbor.Start do
 
     # Background via shell so stdout/stderr flow to the log file for `mix arbor.logs`.
     # The shell returns the PID immediately via `echo $!`.
+    name_flag = if Config.longnames?(), do: "--name", else: "--sname"
+
     elixir_cmd =
-      "#{elixir_path} --sname #{Config.node_name()}@localhost " <>
+      "#{elixir_path} #{name_flag} #{Config.full_node_name()} " <>
         "--cookie #{Config.cookie()} #{mix_path} run --no-halt " <>
         "> #{log_file} 2>&1 & echo $!"
 
