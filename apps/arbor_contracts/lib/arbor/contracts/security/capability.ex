@@ -45,8 +45,11 @@ defmodule Arbor.Contracts.Security.Capability do
     field(:principal_id, Types.agent_id())
     field(:granted_at, DateTime.t())
     field(:expires_at, DateTime.t(), enforce: false)
+    field(:not_before, DateTime.t(), enforce: false)
     field(:parent_capability_id, Types.capability_id(), enforce: false)
     field(:delegation_depth, non_neg_integer(), default: 3)
+    field(:max_uses, pos_integer(), enforce: false)
+    field(:allowed_delegatees, [binary()], enforce: false)
     field(:constraints, map(), default: %{})
     field(:signature, binary(), enforce: false)
     field(:issuer_id, Types.agent_id(), enforce: false)
@@ -65,7 +68,10 @@ defmodule Arbor.Contracts.Security.Capability do
   - `:principal_id` (required) - ID of the agent receiving this capability
   - `:expires_at` - When this capability expires (optional)
   - `:parent_capability_id` - Parent capability if this is a delegation
-  - `:delegation_depth` - How many times this capability can be delegated (default: 3)
+  - `:not_before` - Capability is not valid before this time (optional)
+  - `:delegation_depth` - How many times this capability can be delegated (default: 3, 0 = non-delegatable)
+  - `:max_uses` - Maximum number of successful authorizations before auto-revoke (nil = unlimited)
+  - `:allowed_delegatees` - List of agent IDs this cap can be delegated to (nil = anyone)
   - `:constraints` - Additional constraints on capability usage
   - `:metadata` - Additional metadata
 
@@ -93,8 +99,11 @@ defmodule Arbor.Contracts.Security.Capability do
       principal_id: Keyword.fetch!(attrs, :principal_id),
       granted_at: attrs[:granted_at] || DateTime.utc_now(),
       expires_at: attrs[:expires_at],
+      not_before: attrs[:not_before],
       parent_capability_id: attrs[:parent_capability_id],
       delegation_depth: attrs[:delegation_depth] || 3,
+      max_uses: attrs[:max_uses],
+      allowed_delegatees: attrs[:allowed_delegatees],
       constraints: attrs[:constraints] || %{},
       issuer_id: attrs[:issuer_id],
       issuer_signature: attrs[:issuer_signature],
@@ -113,11 +122,12 @@ defmodule Arbor.Contracts.Security.Capability do
 
   A capability is valid if:
   - It has not expired
+  - Its not_before time has passed (if set)
   - It has delegation depth remaining (if delegated)
   """
   @spec valid?(t()) :: boolean()
   def valid?(%__MODULE__{} = cap) do
-    not_expired?(cap) and has_delegation_depth?(cap)
+    not_expired?(cap) and not_before_passed?(cap) and has_delegation_depth?(cap)
   end
 
   @doc """
@@ -140,29 +150,43 @@ defmodule Arbor.Contracts.Security.Capability do
   """
   @spec delegate(t(), Types.agent_id(), keyword()) :: {:ok, t()} | {:error, term()}
   def delegate(%__MODULE__{} = parent, new_principal_id, opts \\ []) do
-    if parent.delegation_depth <= 0 do
-      {:error, :delegation_depth_exhausted}
-    else
-      new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
-      new_expires_at = min_datetime(parent.expires_at, opts[:expires_at])
+    cond do
+      parent.delegation_depth <= 0 ->
+        {:error, :delegation_depth_exhausted}
 
-      # Build delegation chain: inherit parent's chain + new entry if delegator info provided
-      delegation_chain =
-        case opts[:delegation_record] do
-          nil -> parent.delegation_chain
-          record -> parent.delegation_chain ++ [record]
-        end
+      parent.allowed_delegatees != nil and
+          new_principal_id not in parent.allowed_delegatees ->
+        {:error, {:delegatee_not_allowed, new_principal_id}}
 
-      new(
-        resource_uri: parent.resource_uri,
-        principal_id: new_principal_id,
-        expires_at: new_expires_at,
-        parent_capability_id: parent.id,
-        delegation_depth: parent.delegation_depth - 1,
-        constraints: new_constraints,
-        delegation_chain: delegation_chain,
-        metadata: opts[:metadata] || %{}
-      )
+      true ->
+        new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
+        new_expires_at = min_datetime(parent.expires_at, opts[:expires_at])
+        new_not_before = opts[:not_before] || parent.not_before
+
+        # max_uses on delegated cap: use opts if given, else inherit parent's
+        new_max_uses = min_pos_integer(parent.max_uses, opts[:max_uses])
+
+        # Build delegation chain: inherit parent's chain + new entry if delegator info provided
+        delegation_chain =
+          case opts[:delegation_record] do
+            nil -> parent.delegation_chain
+            record -> parent.delegation_chain ++ [record]
+          end
+
+        # Attenuation: delegated caps can only restrict, never expand
+        new(
+          resource_uri: parent.resource_uri,
+          principal_id: new_principal_id,
+          expires_at: new_expires_at,
+          not_before: new_not_before,
+          parent_capability_id: parent.id,
+          delegation_depth: parent.delegation_depth - 1,
+          max_uses: new_max_uses,
+          allowed_delegatees: opts[:allowed_delegatees] || parent.allowed_delegatees,
+          constraints: new_constraints,
+          delegation_chain: delegation_chain,
+          metadata: opts[:metadata] || %{}
+        )
     end
   end
 
@@ -183,6 +207,7 @@ defmodule Arbor.Contracts.Security.Capability do
       |> Jason.encode!()
 
     expires_bin = if cap.expires_at, do: DateTime.to_iso8601(cap.expires_at), else: ""
+    not_before_bin = if cap.not_before, do: DateTime.to_iso8601(cap.not_before), else: ""
 
     length_prefix(cap.id) <>
       length_prefix(cap.resource_uri) <>
@@ -190,7 +215,9 @@ defmodule Arbor.Contracts.Security.Capability do
       length_prefix(cap.issuer_id || "") <>
       length_prefix(DateTime.to_iso8601(cap.granted_at)) <>
       length_prefix(expires_bin) <>
+      length_prefix(not_before_bin) <>
       length_prefix(Integer.to_string(cap.delegation_depth)) <>
+      length_prefix(if(cap.max_uses, do: Integer.to_string(cap.max_uses), else: "")) <>
       length_prefix(constraints_json) <>
       length_prefix(if cap.signed_at, do: DateTime.to_iso8601(cap.signed_at), else: "")
   end
@@ -218,6 +245,7 @@ defmodule Arbor.Contracts.Security.Capability do
       &validate_resource_uri/1,
       &validate_principal_id/1,
       &validate_expiration/1,
+      &validate_not_before/1,
       &validate_delegation_depth/1,
       &validate_issuer_id/1
     ]
@@ -253,6 +281,25 @@ defmodule Arbor.Contracts.Security.Capability do
       :ok
     else
       {:error, {:expires_before_granted, expires, granted}}
+    end
+  end
+
+  defp validate_not_before(%{not_before: nil}), do: :ok
+
+  defp validate_not_before(%{not_before: not_before, expires_at: nil}) do
+    if is_struct(not_before, DateTime), do: :ok, else: {:error, {:invalid_not_before, not_before}}
+  end
+
+  defp validate_not_before(%{not_before: not_before, expires_at: expires_at}) do
+    cond do
+      not is_struct(not_before, DateTime) ->
+        {:error, {:invalid_not_before, not_before}}
+
+      DateTime.compare(not_before, expires_at) != :lt ->
+        {:error, {:not_before_after_expires, not_before, expires_at}}
+
+      true ->
+        :ok
     end
   end
 
@@ -292,6 +339,12 @@ defmodule Arbor.Contracts.Security.Capability do
     DateTime.compare(expires_at, DateTime.utc_now()) == :gt
   end
 
+  defp not_before_passed?(%{not_before: nil}), do: true
+
+  defp not_before_passed?(%{not_before: not_before}) do
+    DateTime.compare(DateTime.utc_now(), not_before) != :lt
+  end
+
   defp has_delegation_depth?(%{delegation_depth: depth}), do: depth >= 0
 
   defp min_datetime(nil, nil), do: nil
@@ -304,6 +357,12 @@ defmodule Arbor.Contracts.Security.Capability do
       _ -> dt2
     end
   end
+
+  # Attenuation for max_uses: delegated cap gets the smaller of parent/opts values
+  defp min_pos_integer(nil, nil), do: nil
+  defp min_pos_integer(n, nil), do: n
+  defp min_pos_integer(nil, n), do: n
+  defp min_pos_integer(a, b), do: min(a, b)
 
   # =============================================================================
   # Taint Policy Accessors
