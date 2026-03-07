@@ -417,6 +417,7 @@ defmodule Arbor.Security do
       case escalation_result do
         :ok ->
           Events.record_authorization_granted(principal_id, resource_uri, opts)
+          maybe_check_max_uses(cap)
           {:ok, :authorized}
 
         {:ok, :pending_approval, proposal_id} ->
@@ -443,8 +444,11 @@ defmodule Arbor.Security do
            resource_uri: resource_uri,
            principal_id: principal_id,
            expires_at: Keyword.get(opts, :expires_at),
+           not_before: Keyword.get(opts, :not_before),
            constraints: Keyword.get(opts, :constraints, %{}),
            delegation_depth: Keyword.get(opts, :delegation_depth, 3),
+           max_uses: Keyword.get(opts, :max_uses),
+           allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
            metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
@@ -821,6 +825,22 @@ defmodule Arbor.Security do
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
       {:ok, cap} -> {:ok, cap}
       {:error, :not_found} -> {:error, :unauthorized}
+    end
+  end
+
+  defp maybe_check_max_uses(%Capability{max_uses: nil}), do: :ok
+
+  defp maybe_check_max_uses(%Capability{max_uses: max_uses} = cap) do
+    case CapabilityStore.increment_usage(cap.id) do
+      {:ok, count} when count >= max_uses ->
+        CapabilityStore.revoke(cap.id)
+        Events.record_capability_revoked(cap.id)
+
+      {:ok, _count} ->
+        :ok
+
+      {:error, _} ->
+        :ok
     end
   end
 

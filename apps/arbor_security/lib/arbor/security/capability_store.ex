@@ -111,6 +111,16 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   @doc """
+  Increment the usage counter for a capability.
+
+  Returns `{:ok, new_count}` or `{:error, :not_found}`.
+  """
+  @spec increment_usage(String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+  def increment_usage(capability_id) do
+    GenServer.call(__MODULE__, {:increment_usage, capability_id})
+  end
+
+  @doc """
   Get store statistics.
   """
   @spec stats() :: map()
@@ -129,6 +139,7 @@ defmodule Arbor.Security.CapabilityStore do
       by_principal: %{},
       by_issuer: %{},
       by_parent: %{},
+      by_usage: %{},
       stats: %{
         total_granted: 0,
         total_revoked: 0,
@@ -203,7 +214,7 @@ defmodule Arbor.Security.CapabilityStore do
       |> Enum.map(&Map.get(state.by_id, &1))
       |> Enum.reject(&is_nil/1)
       |> Enum.find(fn cap ->
-        not expired?(cap) and authorizes_resource?(cap, resource_uri) and
+        Capability.valid?(cap) and authorizes_resource?(cap, resource_uri) and
           signature_acceptable?(cap) and delegation_chain_valid?(cap)
       end)
       |> case do
@@ -265,6 +276,19 @@ defmodule Arbor.Security.CapabilityStore do
       })
 
     {:reply, stats, state}
+  end
+
+  @impl true
+  def handle_call({:increment_usage, capability_id}, _from, state) do
+    case Map.get(state.by_id, capability_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      _cap ->
+        new_count = Map.get(state.by_usage, capability_id, 0) + 1
+        state = put_in(state, [:by_usage, capability_id], new_count)
+        {:reply, {:ok, new_count}, state}
+    end
   end
 
   @impl true
