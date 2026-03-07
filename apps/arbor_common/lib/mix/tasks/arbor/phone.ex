@@ -71,7 +71,7 @@ defmodule Mix.Tasks.Arbor.Phone do
 
   # ── Provision ──────────────────────────────────────────────────────
 
-  defp provision(phone_node, opts \\ []) do
+  defp provision(phone_node, opts) do
     force = Keyword.get(opts, :force, false)
 
     unless ping(phone_node) do
