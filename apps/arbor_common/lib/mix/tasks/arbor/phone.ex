@@ -119,6 +119,13 @@ defmodule Mix.Tasks.Arbor.Phone do
   # ── Voice ──────────────────────────────────────────────────────────
 
   defp voice(phone_node, opts) do
+    # Convert listen_mode string to atom
+    opts =
+      case Keyword.get(opts, :listen_mode) do
+        nil -> opts
+        mode -> Keyword.put(opts, :listen_mode, String.to_existing_atom(mode))
+      end
+
     unless ping(phone_node) do
       Mix.shell().error("Cannot reach #{phone_node}")
       exit({:shutdown, 1})
@@ -126,7 +133,7 @@ defmodule Mix.Tasks.Arbor.Phone do
 
     # Provision if Elixir isn't loaded yet
     unless elixir_loaded?(phone_node) do
-      provision(phone_node)
+      provision(phone_node, [])
     end
 
     homelab = Config.full_node_name()
@@ -249,10 +256,10 @@ defmodule Mix.Tasks.Arbor.Phone do
           String.contains?(name, "Finch.")
       end)
 
-    load_modules_to_phone(phone_node, modules)
+    load_modules_to_phone(phone_node, modules, [])
   end
 
-  defp load_arbor_modules(phone_node, opts \\ []) do
+  defp load_arbor_modules(phone_node, opts) do
     # Get loaded modules from the running Arbor server
     server_node = Config.full_node_name()
 
@@ -283,7 +290,7 @@ defmodule Mix.Tasks.Arbor.Phone do
     load_modules_to_phone(phone_node, modules, opts)
   end
 
-  defp load_modules_to_phone(phone_node, modules, opts \\ []) do
+  defp load_modules_to_phone(phone_node, modules, opts) do
     force = Keyword.get(opts, :force, false)
     server_node = Config.full_node_name()
 
@@ -364,23 +371,6 @@ defmodule Mix.Tasks.Arbor.Phone do
     String.to_atom(node_str)
   end
 
-  defp parse_opts(args) do
-    {opts, _, _} =
-      OptionParser.parse(args,
-        strict: [
-          agent_id: :string,
-          listen_mode: :string,
-          listen_seconds: :integer,
-          voice: :integer
-        ],
-        aliases: [a: :agent_id, m: :listen_mode, s: :listen_seconds, v: :voice]
-      )
-
-    case Keyword.get(opts, :listen_mode) do
-      nil -> opts
-      mode -> Keyword.put(opts, :listen_mode, String.to_existing_atom(mode))
-    end
-  end
 
   defp timed(fun) do
     start = System.monotonic_time(:millisecond)
