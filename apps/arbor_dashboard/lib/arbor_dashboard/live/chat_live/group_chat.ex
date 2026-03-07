@@ -18,7 +18,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   """
   def init_assigns do
     %{
-
       group_id: nil,
       group_participants: [],
       group_mode: false,
@@ -86,7 +85,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
           socket =
             socket
             |> assign(
-        
               group_id: channel_id,
               group_participants: participants,
               group_mode: true,
@@ -141,7 +139,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     socket =
       socket
       |> assign(
-  
         group_id: channel_id,
         group_participants: participants,
         group_mode: true,
@@ -168,7 +165,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
     socket =
       socket
       |> assign(
-  
         group_id: nil,
         group_participants: [],
         group_mode: false
