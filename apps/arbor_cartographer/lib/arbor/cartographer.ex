@@ -99,15 +99,15 @@ defmodule Arbor.Cartographer do
   @doc """
   Deploy to a specific node.
 
-  Currently only supports the local node. Remote deployment will be added
-  when mesh integration is complete.
+  For remote nodes, starts the agent via RPC. The agent module must be
+  loaded on the target node (e.g. via `mix arbor.phone provision`).
   """
   @impl true
   def deploy_to_node(agent_module, node_id, opts \\ []) do
     if node_id == Node.self() do
       deploy(agent_module, opts)
     else
-      {:error, :remote_deployment_not_implemented}
+      deploy_remote(agent_module, node_id, opts)
     end
   end
 
@@ -391,6 +391,80 @@ defmodule Arbor.Cartographer do
   # ==========================================================================
   # Private Helpers
   # ==========================================================================
+
+  @doc """
+  Get a summary of the entire cluster's capabilities.
+
+  Returns a map of node => capabilities for all known nodes.
+  """
+  def cluster_status do
+    case list_all_capabilities() do
+      {:ok, all_caps} ->
+        nodes =
+          Enum.map(all_caps, fn caps ->
+            %{
+              node: caps.node,
+              tags: caps.tags,
+              arch: get_in(caps, [:hardware, :arch]),
+              memory_gb: get_in(caps, [:hardware, :memory_gb]),
+              cpus: get_in(caps, [:hardware, :cpus]),
+              gpu: get_in(caps, [:hardware, :gpu]),
+              load: caps.load,
+              registered_at: caps.registered_at,
+              reachable: caps.node == Node.self() or :net_adm.ping(caps.node) == :pong
+            }
+          end)
+
+        {:ok, nodes}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Sync capabilities with all connected nodes.
+
+  Useful after configuration changes or when nodes join outside of
+  normal monitoring (e.g. manual `:net_adm.ping`).
+  """
+  def sync_cluster do
+    CapabilityRegistry.sync_cluster()
+  end
+
+  defp deploy_remote(agent_module, node_id, opts) do
+    needs = Keyword.get(opts, :needs, [])
+    args = Keyword.get(opts, :args, [])
+
+    # Verify the target node has the required capabilities
+    case get_node_capabilities(node_id) do
+      {:ok, caps} ->
+        unless Enum.all?(needs, fn need -> need in caps.tags end) do
+          {:error, {:missing_capabilities, needs -- caps.tags}}
+        else
+          # Start the agent on the remote node
+          case :rpc.call(node_id, agent_module, :start_link, [args], 15_000) do
+            {:ok, pid} -> {:ok, pid}
+            {:error, reason} -> {:error, reason}
+            {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+          end
+        end
+
+      {:error, :not_found} ->
+        # Node not in registry — try anyway if reachable
+        if :net_adm.ping(node_id) == :pong do
+          case :rpc.call(node_id, agent_module, :start_link, [args], 15_000) do
+            {:ok, pid} -> {:ok, pid}
+            {:error, reason} -> {:error, reason}
+            {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+          end
+        else
+          {:error, :node_unreachable}
+        end
+    end
+  rescue
+    e -> {:error, {:deploy_failed, e}}
+  end
 
   defp can_deploy_locally?(needs) do
     case my_capabilities() do
