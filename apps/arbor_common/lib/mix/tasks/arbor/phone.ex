@@ -63,8 +63,16 @@ defmodule Mix.Tasks.Arbor.Phone do
 
     Mix.shell().info("Provisioning #{phone_node}...")
 
-    {elixir_count, elixir_time} = timed(fn -> load_elixir_runtime(phone_node) end)
-    Mix.shell().info("  Elixir runtime: #{elixir_count} modules loaded")
+    # Skip Elixir runtime if already baked into the phone app
+    {elixir_count, elixir_time} =
+      if elixir_loaded?(phone_node) do
+        Mix.shell().info("  Elixir runtime: already on phone (skipping)")
+        {0, 0}
+      else
+        {count, time} = timed(fn -> load_elixir_runtime(phone_node) end)
+        Mix.shell().info("  Elixir runtime: #{count} modules loaded")
+        {count, time}
+      end
 
     {arbor_count, arbor_time} = timed(fn -> load_arbor_modules(phone_node) end)
     Mix.shell().info("  Arbor modules:  #{arbor_count} modules loaded")
@@ -241,14 +249,12 @@ defmodule Mix.Tasks.Arbor.Phone do
         String.starts_with?(name, "Elixir.Arbor.") or
           String.starts_with?(name, "Elixir.Jason")
       end)
-      # Exclude web/dashboard/persistence modules not needed on phone
+      # Exclude web/dashboard modules not needed on phone
       |> Enum.reject(fn mod ->
         name = Atom.to_string(mod)
 
         String.contains?(name, "Dashboard") or
           String.contains?(name, "Phoenix") or
-          String.contains?(name, "Ecto") or
-          String.contains?(name, "Persistence.Ecto") or
           String.contains?(name, "Web.")
       end)
 
@@ -256,10 +262,18 @@ defmodule Mix.Tasks.Arbor.Phone do
   end
 
   defp load_modules_to_phone(phone_node, modules) do
-    # Try local code first, fall back to RPC to Arbor server for module binaries
     server_node = Config.full_node_name()
 
-    Enum.reduce(modules, 0, fn mod, count ->
+    # Get modules already loaded on the phone to skip them
+    phone_loaded =
+      case :rpc.call(phone_node, :code, :all_loaded, []) do
+        mods when is_list(mods) -> MapSet.new(mods, fn {mod, _} -> mod end)
+        _ -> MapSet.new()
+      end
+
+    modules
+    |> Enum.reject(fn mod -> MapSet.member?(phone_loaded, mod) end)
+    |> Enum.reduce(0, fn mod, count ->
       binary = get_module_binary(mod, server_node)
 
       case binary do
