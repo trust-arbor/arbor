@@ -45,6 +45,7 @@ defmodule Arbor.Security do
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
@@ -419,10 +420,12 @@ defmodule Arbor.Security do
         :ok ->
           Events.record_authorization_granted(principal_id, resource_uri, opts)
           maybe_check_max_uses(cap)
+          maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
           {:ok, :authorized}
 
         {:ok, :pending_approval, proposal_id} ->
           Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
+          maybe_emit_receipt(cap, principal_id, resource_uri, action, :pending_approval, opts)
           {:ok, :pending_approval, proposal_id}
 
         {:error, reason} ->
@@ -829,6 +832,36 @@ defmodule Arbor.Security do
       {:ok, cap} -> {:ok, cap}
       {:error, :not_found} -> {:error, :unauthorized}
     end
+  end
+
+  defp maybe_emit_receipt(cap, principal_id, resource_uri, action, result, opts) do
+    if Config.invocation_receipts_enabled?() do
+      case InvocationReceipt.new(
+             capability_id: cap.id,
+             principal_id: principal_id,
+             resource_uri: resource_uri,
+             action: action,
+             result: result,
+             delegation_chain: cap.delegation_chain,
+             session_id: cap.session_id,
+             task_id: cap.task_id
+           ) do
+        {:ok, receipt} ->
+          case SystemAuthority.sign_receipt(receipt) do
+            {:ok, signed_receipt} ->
+              Events.record_invocation_receipt(signed_receipt)
+              Keyword.get(opts, :receipt_callback, &Function.identity/1).(signed_receipt)
+
+            {:error, _} ->
+              :ok
+          end
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  rescue
+    _ -> :ok
   end
 
   defp check_scope_binding(cap, opts) do

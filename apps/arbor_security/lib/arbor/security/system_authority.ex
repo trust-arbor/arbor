@@ -18,6 +18,7 @@ defmodule Arbor.Security.SystemAuthority do
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
@@ -41,6 +42,16 @@ defmodule Arbor.Security.SystemAuthority do
   @spec sign_capability(Capability.t()) :: {:ok, Capability.t()}
   def sign_capability(%Capability{} = cap) do
     GenServer.call(__MODULE__, {:sign_capability, cap})
+  end
+
+  @doc """
+  Sign an invocation receipt with the system authority's private key.
+
+  Sets `issuer_id` and `signature` on the receipt.
+  """
+  @spec sign_receipt(InvocationReceipt.t()) :: {:ok, InvocationReceipt.t()}
+  def sign_receipt(%InvocationReceipt{} = receipt) do
+    GenServer.call(__MODULE__, {:sign_receipt, receipt})
   end
 
   @doc """
@@ -131,6 +142,19 @@ defmodule Arbor.Security.SystemAuthority do
       |> Signer.sign(identity.private_key)
 
     {:reply, {:ok, signed_cap}, state}
+  end
+
+  @impl true
+  def handle_call({:sign_receipt, receipt}, _from, %{identity: identity} = state) do
+    payload = InvocationReceipt.signing_payload(receipt)
+    signature = Crypto.sign(payload, identity.private_key)
+
+    signed_receipt =
+      receipt
+      |> Map.put(:issuer_id, identity.agent_id)
+      |> Map.put(:signature, signature)
+
+    {:reply, {:ok, signed_receipt}, state}
   end
 
   @impl true

@@ -195,6 +195,22 @@ defmodule Arbor.Security.Config do
   end
 
   # ===========================================================================
+  # Invocation Receipts
+  # ===========================================================================
+
+  @doc """
+  Whether signed invocation receipts are generated on authorization.
+
+  When `true`, every successful authorization produces a signed receipt
+  that cryptographically proves who did what, when, and with which capability.
+  Default: false (opt-in, since it adds a GenServer call per authorization).
+  """
+  @spec invocation_receipts_enabled?() :: boolean()
+  def invocation_receipts_enabled? do
+    Application.get_env(@app, :invocation_receipts_enabled, false)
+  end
+
+  # ===========================================================================
   # Delegation Chain Verification
   # ===========================================================================
 

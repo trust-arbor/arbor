@@ -95,6 +95,25 @@ defmodule Arbor.Security.Events do
   end
 
   # ============================================================================
+  # Invocation Receipt Events
+  # ============================================================================
+
+  @doc "Record a signed invocation receipt."
+  @spec record_invocation_receipt(map()) :: :ok | {:error, term()}
+  def record_invocation_receipt(receipt) do
+    dual_emit(:invocation_receipt, %{
+      receipt_id: receipt.id,
+      capability_id: receipt.capability_id,
+      principal_id: receipt.principal_id,
+      resource_uri: receipt.resource_uri,
+      result: receipt.result,
+      delegation_chain_length: length(receipt.delegation_chain),
+      session_id: receipt.session_id,
+      task_id: receipt.task_id
+    })
+  end
+
+  # ============================================================================
   # Identity Events
   # ============================================================================
 
