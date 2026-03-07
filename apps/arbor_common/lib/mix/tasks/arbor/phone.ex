@@ -29,12 +29,24 @@ defmodule Mix.Tasks.Arbor.Phone do
   def run(args) do
     Config.ensure_distribution()
 
-    case args do
-      ["provision", node_str | _rest] ->
-        provision(parse_node(node_str))
+    {opts, positional, _} =
+      OptionParser.parse(args,
+        strict: [
+          force: :boolean,
+          agent_id: :string,
+          listen_mode: :string,
+          listen_seconds: :integer,
+          voice: :integer
+        ],
+        aliases: [f: :force, a: :agent_id, m: :listen_mode, s: :listen_seconds, v: :voice]
+      )
 
-      ["voice", node_str | rest] ->
-        voice(parse_node(node_str), parse_opts(rest))
+    case positional do
+      ["provision", node_str | _rest] ->
+        provision(parse_node(node_str), force: Keyword.get(opts, :force, false))
+
+      ["voice", node_str | _rest] ->
+        voice(parse_node(node_str), opts)
 
       ["status", node_str | _rest] ->
         status(parse_node(node_str))
@@ -42,12 +54,16 @@ defmodule Mix.Tasks.Arbor.Phone do
       _ ->
         Mix.shell().info("""
         Usage:
-          mix arbor.phone provision <node>
+          mix arbor.phone provision <node> [--force]
           mix arbor.phone voice <node> [options]
           mix arbor.phone status <node>
 
+        Options:
+          --force, -f   Force reload all modules (even if already loaded)
+
         Examples:
           mix arbor.phone provision beamapp@10.42.42.205
+          mix arbor.phone provision beamapp@10.42.42.205 --force
           mix arbor.phone voice beamapp@10.42.42.205 --listen-seconds 8
         """)
     end
@@ -55,17 +71,23 @@ defmodule Mix.Tasks.Arbor.Phone do
 
   # ── Provision ──────────────────────────────────────────────────────
 
-  defp provision(phone_node) do
+  defp provision(phone_node, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
+
     unless ping(phone_node) do
       Mix.shell().error("Cannot reach #{phone_node}")
       exit({:shutdown, 1})
     end
 
-    Mix.shell().info("Provisioning #{phone_node}...")
+    if force do
+      Mix.shell().info("Provisioning #{phone_node} (force reload)...")
+    else
+      Mix.shell().info("Provisioning #{phone_node}...")
+    end
 
     # Skip Elixir runtime if already baked into the phone app
     {elixir_count, elixir_time} =
-      if elixir_loaded?(phone_node) do
+      if not force and elixir_loaded?(phone_node) do
         Mix.shell().info("  Elixir runtime: already on phone (skipping)")
         {0, 0}
       else
@@ -74,7 +96,7 @@ defmodule Mix.Tasks.Arbor.Phone do
         {count, time}
       end
 
-    {arbor_count, arbor_time} = timed(fn -> load_arbor_modules(phone_node) end)
+    {arbor_count, arbor_time} = timed(fn -> load_arbor_modules(phone_node, force: force) end)
     Mix.shell().info("  Arbor modules:  #{arbor_count} modules loaded")
 
     mem = Config.rpc(phone_node, :erlang, :memory, [:total])
@@ -230,7 +252,7 @@ defmodule Mix.Tasks.Arbor.Phone do
     load_modules_to_phone(phone_node, modules)
   end
 
-  defp load_arbor_modules(phone_node) do
+  defp load_arbor_modules(phone_node, opts \\ []) do
     # Get loaded modules from the running Arbor server
     server_node = Config.full_node_name()
 
@@ -258,22 +280,28 @@ defmodule Mix.Tasks.Arbor.Phone do
           String.contains?(name, "Web.")
       end)
 
-    load_modules_to_phone(phone_node, modules)
+    load_modules_to_phone(phone_node, modules, opts)
   end
 
-  defp load_modules_to_phone(phone_node, modules) do
+  defp load_modules_to_phone(phone_node, modules, opts \\ []) do
+    force = Keyword.get(opts, :force, false)
     server_node = Config.full_node_name()
 
-    # Get modules already loaded on the phone to skip them
-    phone_loaded =
-      case :rpc.call(phone_node, :code, :all_loaded, []) do
-        mods when is_list(mods) -> MapSet.new(mods, fn {mod, _} -> mod end)
-        _ -> MapSet.new()
+    # Get modules already loaded on the phone to skip them (unless force)
+    modules_to_load =
+      if force do
+        modules
+      else
+        phone_loaded =
+          case :rpc.call(phone_node, :code, :all_loaded, []) do
+            mods when is_list(mods) -> MapSet.new(mods, fn {mod, _} -> mod end)
+            _ -> MapSet.new()
+          end
+
+        Enum.reject(modules, fn mod -> MapSet.member?(phone_loaded, mod) end)
       end
 
-    modules
-    |> Enum.reject(fn mod -> MapSet.member?(phone_loaded, mod) end)
-    |> Enum.reduce(0, fn mod, count ->
+    Enum.reduce(modules_to_load, 0, fn mod, count ->
       binary = get_module_binary(mod, server_node)
 
       case binary do
