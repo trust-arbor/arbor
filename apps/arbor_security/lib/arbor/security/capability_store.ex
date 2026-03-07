@@ -121,6 +121,28 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   @doc """
+  Revoke all capabilities bound to a specific session.
+
+  Called when a session ends to clean up session-scoped capabilities.
+  Returns `{:ok, count}` of revoked capabilities.
+  """
+  @spec revoke_by_session(String.t()) :: {:ok, non_neg_integer()}
+  def revoke_by_session(session_id) do
+    GenServer.call(__MODULE__, {:revoke_by_scope, :session_id, session_id})
+  end
+
+  @doc """
+  Revoke all capabilities bound to a specific task.
+
+  Called when a task/pipeline execution ends to clean up task-scoped capabilities.
+  Returns `{:ok, count}` of revoked capabilities.
+  """
+  @spec revoke_by_task(String.t()) :: {:ok, non_neg_integer()}
+  def revoke_by_task(task_id) do
+    GenServer.call(__MODULE__, {:revoke_by_scope, :task_id, task_id})
+  end
+
+  @doc """
   Get store statistics.
   """
   @spec stats() :: map()
@@ -289,6 +311,24 @@ defmodule Arbor.Security.CapabilityStore do
         state = put_in(state, [:by_usage, capability_id], new_count)
         {:reply, {:ok, new_count}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:revoke_by_scope, scope_field, scope_value}, _from, state) do
+    matching_ids =
+      state.by_id
+      |> Enum.filter(fn {_id, cap} -> Map.get(cap, scope_field) == scope_value end)
+      |> Enum.map(fn {id, _cap} -> id end)
+
+    count = length(matching_ids)
+    Enum.each(matching_ids, &delete_persisted_capability/1)
+
+    state =
+      state
+      |> revoke_capability_ids(matching_ids)
+      |> update_in([:stats, :total_revoked], &(&1 + count))
+
+    {:reply, {:ok, count}, state}
   end
 
   @impl true
