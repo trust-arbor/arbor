@@ -221,6 +221,9 @@ defmodule Arbor.Cartographer.CapabilityRegistry do
     :ets.new(@table_name, [:named_table, :set, :public, read_concurrency: true])
     :ets.new(@load_table_name, [:named_table, :set, :public, read_concurrency: true])
 
+    # Monitor cluster membership
+    :net_kernel.monitor_nodes(true, node_type: :visible)
+
     {:ok, %{}}
   end
 
@@ -280,6 +283,112 @@ defmodule Arbor.Cartographer.CapabilityRegistry do
     end
 
     {:reply, :ok, state}
+  end
+
+  # ==========================================================================
+  # Cluster Sync
+  # ==========================================================================
+
+  @doc """
+  Receive capabilities from a remote node's Scout.
+
+  Called via RPC when a node joins the cluster or broadcasts updates.
+  """
+  @spec receive_capabilities(node_id(), node_capabilities()) :: :ok
+  def receive_capabilities(node_id, capabilities) do
+    GenServer.call(__MODULE__, {:register, node_id, capabilities})
+  end
+
+  @doc """
+  Request capabilities exchange with all connected nodes.
+
+  Sends our capabilities to each node and requests theirs.
+  """
+  @spec sync_cluster() :: :ok
+  def sync_cluster do
+    GenServer.cast(__MODULE__, :sync_cluster)
+  end
+
+  @impl true
+  def handle_info({:nodeup, node, _info}, state) do
+    require Logger
+    Logger.info("[Cartographer.Registry] Node joined: #{node}")
+
+    # Request capabilities from the new node's Scout (async to avoid blocking)
+    Task.start(fn -> request_remote_capabilities(node) end)
+
+    # Send our capabilities to the new node
+    Task.start(fn -> push_local_capabilities(node) end)
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:nodedown, node, _info}, state) do
+    require Logger
+    Logger.info("[Cartographer.Registry] Node left: #{node}")
+
+    # Clean up the departed node's capabilities
+    :ets.delete(@table_name, node)
+    :ets.delete(@load_table_name, node)
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast(:sync_cluster, state) do
+    for node <- Node.list() do
+      Task.start(fn -> request_remote_capabilities(node) end)
+      Task.start(fn -> push_local_capabilities(node) end)
+    end
+
+    {:noreply, state}
+  end
+
+  defp request_remote_capabilities(node) do
+    require Logger
+
+    case :rpc.call(node, __MODULE__, :get, [node], 5_000) do
+      {:ok, capabilities} ->
+        :ets.insert(@table_name, {node, capabilities})
+        :ets.insert(@load_table_name, {node, capabilities.load})
+        Logger.info("[Cartographer.Registry] Synced capabilities from #{node}: #{inspect(capabilities.tags)}")
+
+      {:error, _} ->
+        # Node doesn't have Cartographer running — try raw hardware detection
+        case :rpc.call(node, Arbor.Cartographer.Hardware, :detect, [], 10_000) do
+          {:ok, hardware} ->
+            tags = Arbor.Cartographer.Hardware.to_capability_tags(hardware)
+
+            capabilities = %{
+              node: node,
+              tags: tags,
+              hardware: hardware,
+              load: 0.0,
+              registered_at: DateTime.utc_now()
+            }
+
+            :ets.insert(@table_name, {node, capabilities})
+            :ets.insert(@load_table_name, {node, 0.0})
+            Logger.info("[Cartographer.Registry] Detected hardware on #{node}: #{inspect(tags)}")
+
+          {:badrpc, _reason} ->
+            Logger.debug("[Cartographer.Registry] Cannot reach Cartographer on #{node}")
+        end
+
+      {:badrpc, _reason} ->
+        Logger.debug("[Cartographer.Registry] RPC to #{node} failed")
+    end
+  end
+
+  defp push_local_capabilities(node) do
+    case get(Node.self()) do
+      {:ok, capabilities} ->
+        :rpc.call(node, __MODULE__, :receive_capabilities, [Node.self(), capabilities], 5_000)
+
+      {:error, _} ->
+        :ok
+    end
   end
 
   # ==========================================================================

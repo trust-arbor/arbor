@@ -50,14 +50,23 @@ defmodule Arbor.Cartographer.Hardware do
   """
   @spec detect() :: {:ok, hardware_info()}
   def detect do
-    {:ok,
-     %{
-       arch: detect_arch(),
-       cpus: detect_cpus(),
-       memory_gb: detect_memory_gb(),
-       gpu: detect_gpus(),
-       accelerators: detect_accelerators()
-     }}
+    base = %{
+      arch: detect_arch(),
+      cpus: detect_cpus(),
+      memory_gb: detect_memory_gb(),
+      gpu: detect_gpus(),
+      accelerators: detect_accelerators()
+    }
+
+    # Add Android-specific info when on Android
+    info =
+      if android?() do
+        Map.put(base, :android, detect_android())
+      else
+        base
+      end
+
+    {:ok, info}
   end
 
   @doc """
@@ -73,12 +82,21 @@ defmodule Arbor.Cartographer.Hardware do
   """
   @spec to_capability_tags(hardware_info()) :: [atom()]
   def to_capability_tags(hardware_info) do
-    []
-    |> add_arch_tag(hardware_info.arch)
-    |> add_memory_tags(hardware_info.memory_gb)
-    |> add_gpu_tags(hardware_info.gpu)
-    |> add_accelerator_tags(hardware_info.accelerators)
-    |> Enum.uniq()
+    tags =
+      []
+      |> add_arch_tag(hardware_info.arch)
+      |> add_memory_tags(hardware_info.memory_gb)
+      |> add_gpu_tags(hardware_info.gpu)
+      |> add_accelerator_tags(hardware_info.accelerators)
+
+    # Add Android-specific tags
+    tags =
+      case Map.get(hardware_info, :android) do
+        nil -> tags
+        android_info -> tags ++ android_capability_tags(android_info)
+      end
+
+    Enum.uniq(tags)
   end
 
   # ==========================================================================
@@ -124,10 +142,14 @@ defmodule Arbor.Cartographer.Hardware do
   """
   @spec detect_memory_gb() :: float()
   def detect_memory_gb do
-    case :os.type() do
-      {:unix, :linux} -> detect_linux_memory_gb()
-      {:unix, :darwin} -> detect_macos_memory_gb()
-      _ -> beam_memory_gb()
+    if android?() do
+      detect_android_memory_gb()
+    else
+      case :os.type() do
+        {:unix, :linux} -> detect_linux_memory_gb()
+        {:unix, :darwin} -> detect_macos_memory_gb()
+        _ -> beam_memory_gb()
+      end
     end
   end
 
@@ -491,5 +513,119 @@ defmodule Arbor.Cartographer.Hardware do
       {f, _} -> f
       :error -> 0.0
     end
+  end
+
+  # ==========================================================================
+  # Android Detection
+  # ==========================================================================
+
+  @doc """
+  Check if running on Android (Termux/BEAM app).
+
+  Detects via the `:android` module (present on phone BEAM nodes)
+  or the `ANDROID_ROOT` environment variable.
+  """
+  @spec android?() :: boolean()
+  def android? do
+    Code.ensure_loaded?(:android) or System.get_env("ANDROID_ROOT") != nil
+  end
+
+  defp detect_android_memory_gb do
+    # Try /proc/meminfo first (works on Android)
+    case detect_linux_memory_gb() do
+      gb when gb > 0.1 -> gb
+      _ -> beam_memory_gb()
+    end
+  end
+
+  @doc """
+  Detect Android-specific hardware capabilities.
+
+  Uses the `:android` module's battery, sensor, and device info functions
+  when available. Falls back to standard Linux detection.
+  """
+  @spec detect_android() :: map()
+  def detect_android do
+    base = %{
+      platform: :android,
+      battery: detect_android_battery(),
+      sensors: detect_android_sensors()
+    }
+
+    # Add device info if available
+    case safe_android_call(:device_info, []) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, info} -> Map.put(base, :device, info)
+          _ -> base
+        end
+
+      _ ->
+        base
+    end
+  end
+
+  defp detect_android_battery do
+    case safe_android_call(:battery, []) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, %{"level" => level} = info} ->
+            %{level: level, charging: Map.get(info, "charging", false)}
+
+          _ ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp detect_android_sensors do
+    # Common Android sensors to check
+    sensors = ["accelerometer", "gyroscope", "light", "proximity", "magnetometer"]
+
+    Enum.flat_map(sensors, fn sensor ->
+      case safe_android_call(:sensor_read, [sensor]) do
+        {:ok, _} -> [String.to_atom(sensor)]
+        _ -> []
+      end
+    end)
+  end
+
+  defp safe_android_call(function, args) do
+    if Code.ensure_loaded?(:android) and function_exported?(:android, function, length(args)) do
+      apply(:android, function, args)
+    else
+      {:error, :not_available}
+    end
+  end
+
+  @doc """
+  Generate Android-specific capability tags.
+  """
+  @spec android_capability_tags(map()) :: [atom()]
+  def android_capability_tags(android_info) do
+    tags = [:android, :mobile]
+
+    tags =
+      if android_info[:battery] do
+        tags ++ [:has_battery]
+      else
+        tags
+      end
+
+    tags =
+      case android_info[:sensors] do
+        sensors when is_list(sensors) and sensors != [] ->
+          sensor_tags = Enum.map(sensors, &:"has_#{&1}")
+          tags ++ [:has_sensors | sensor_tags]
+
+        _ ->
+          tags
+      end
+
+    # Camera capability (most Android devices)
+    tags ++ [:has_camera, :has_microphone, :has_speaker, :has_gps]
   end
 end

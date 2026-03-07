@@ -231,11 +231,22 @@ defmodule Arbor.Cartographer.Scout do
     # Register with local registry
     :ok = CapabilityRegistry.register(Node.self(), capabilities)
 
+    # Broadcast to connected nodes
+    broadcast_capabilities(capabilities)
+
     Logger.info(
       "[Cartographer.Scout] Registered node #{Node.self()} with tags: #{inspect(all_tags)}"
     )
 
     %{state | hardware: hardware, hardware_tags: hardware_tags, load: load, registered_at: now}
+  end
+
+  defp broadcast_capabilities(capabilities) do
+    for node <- Node.list() do
+      Task.start(fn ->
+        :rpc.call(node, CapabilityRegistry, :receive_capabilities, [Node.self(), capabilities], 5_000)
+      end)
+    end
   end
 
   defp calculate_load do
