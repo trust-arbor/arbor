@@ -25,6 +25,7 @@ defmodule Arbor.Comms do
 
   alias Arbor.Comms.Channel
   alias Arbor.Comms.Channels.Limitless
+  alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
@@ -397,6 +398,50 @@ defmodule Arbor.Comms do
       [{pid, _}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
+  end
+
+  # -- Voice --
+
+  @doc """
+  Start a voice session with a phone node.
+
+  Returns `{:ok, pid}` for the session GenServer.
+
+  ## Options
+
+    - `:agent_id` — agent to converse with (default: first running agent)
+    - `:listen_mode` — `:listen`, `:stream_listen`, or `:buddie_listen`
+    - `:listen_seconds` — STT recording duration (default: 5)
+    - `:voice` — TTS voice index (0-7)
+    - `:thinking_sound` — show thinking toast (default: true)
+  """
+  @spec start_voice_session(node(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def start_voice_session(phone_node, opts \\ []) do
+    Voice.Session.start_link(Keyword.put(opts, :phone_node, phone_node))
+  end
+
+  @doc "Execute a single voice turn: listen -> agent -> speak."
+  @spec voice_turn(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
+  def voice_turn(session, opts \\ []) do
+    Voice.Session.voice_turn(session, opts)
+  end
+
+  @doc "Send text to agent and speak the response."
+  @spec voice_say(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def voice_say(session, text, opts \\ []) do
+    Voice.Session.conversation_turn(session, text, opts)
+  end
+
+  @doc "Speak text on the phone without agent processing."
+  @spec voice_speak(node(), String.t(), keyword()) :: :ok | {:error, term()}
+  def voice_speak(phone_node, text, opts \\ []) do
+    Voice.speak(phone_node, text, opts)
+  end
+
+  @doc "Check if a phone node is reachable."
+  @spec voice_ping(node()) :: boolean()
+  def voice_ping(phone_node) do
+    Voice.ping(phone_node)
   end
 
   # -- History --
