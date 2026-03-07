@@ -563,6 +563,10 @@ defmodule Arbor.Cartographer.Hardware do
       _ ->
         base
     end
+  rescue
+    _ -> %{platform: :android, battery: nil, sensors: []}
+  catch
+    :exit, _ -> %{platform: :android, battery: nil, sensors: []}
   end
 
   defp detect_android_battery do
@@ -582,15 +586,26 @@ defmodule Arbor.Cartographer.Hardware do
   end
 
   defp detect_android_sensors do
-    # Common Android sensors to check
-    sensors = ["accelerometer", "gyroscope", "light", "proximity", "magnetometer"]
+    # Query available sensors via the android module
+    # sensor_read can crash with function_clause for unsupported sensor types,
+    # so we catch errors and just return what works
+    case safe_android_call(:sensor_list, []) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, sensors} when is_list(sensors) ->
+            Enum.map(sensors, fn s ->
+              name = if is_map(s), do: Map.get(s, "name", "unknown"), else: to_string(s)
+              String.to_atom(String.downcase(name))
+            end)
 
-    Enum.flat_map(sensors, fn sensor ->
-      case safe_android_call(:sensor_read, [sensor]) do
-        {:ok, _} -> [String.to_atom(sensor)]
-        _ -> []
-      end
-    end)
+          _ ->
+            []
+        end
+
+      _ ->
+        # sensor_list not available — return empty rather than probing
+        []
+    end
   end
 
   defp safe_android_call(function, args) do
