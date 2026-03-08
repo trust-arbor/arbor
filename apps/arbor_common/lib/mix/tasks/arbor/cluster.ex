@@ -103,41 +103,42 @@ defmodule Mix.Tasks.Arbor.Cluster do
         for caps <- Enum.sort_by(caps_list, & &1.node) do
           Mix.shell().info("  #{caps.node}")
           Mix.shell().info("    Tags: #{Enum.join(Enum.map(caps.tags, &inspect/1), ", ")}")
-
-          if caps.hardware do
-            Mix.shell().info("    Arch: #{caps.hardware[:arch]}")
-            Mix.shell().info("    CPUs: #{caps.hardware[:cpus]}")
-            Mix.shell().info("    Memory: #{Float.round(caps.hardware[:memory_gb] || 0.0, 1)} GB")
-
-            if caps.hardware[:gpu] do
-              for gpu <- List.wrap(caps.hardware[:gpu]) do
-                Mix.shell().info(
-                  "    GPU: #{gpu[:name]} (#{Float.round(gpu[:vram_gb] || 0.0, 1)} GB)"
-                )
-              end
-            end
-
-            if caps.hardware[:android] do
-              android = caps.hardware[:android]
-
-              if android[:battery] do
-                Mix.shell().info(
-                  "    Battery: #{android.battery.level}%#{if android.battery[:charging], do: " (charging)", else: ""}"
-                )
-              end
-
-              if android[:sensors] && android.sensors != [] do
-                Mix.shell().info("    Sensors: #{Enum.join(android.sensors, ", ")}")
-              end
-            end
-          end
-
+          if caps.hardware, do: print_hardware(caps.hardware)
           Mix.shell().info("    Load: #{caps.load}")
           Mix.shell().info("")
         end
 
       _ ->
         Mix.shell().error("Cannot read capabilities — is the Arbor server running?")
+    end
+  end
+
+  defp print_hardware(hw) do
+    Mix.shell().info("    Arch: #{hw[:arch]}")
+    Mix.shell().info("    CPUs: #{hw[:cpus]}")
+    Mix.shell().info("    Memory: #{Float.round(hw[:memory_gb] || 0.0, 1)} GB")
+    print_gpus(hw[:gpu])
+    print_android(hw[:android])
+  end
+
+  defp print_gpus(nil), do: :ok
+
+  defp print_gpus(gpus) do
+    for gpu <- List.wrap(gpus) do
+      Mix.shell().info("    GPU: #{gpu[:name]} (#{Float.round(gpu[:vram_gb] || 0.0, 1)} GB)")
+    end
+  end
+
+  defp print_android(nil), do: :ok
+
+  defp print_android(android) do
+    if android[:battery] do
+      charging = if android.battery[:charging], do: " (charging)", else: ""
+      Mix.shell().info("    Battery: #{android.battery.level}%#{charging}")
+    end
+
+    if android[:sensors] && android.sensors != [] do
+      Mix.shell().info("    Sensors: #{Enum.join(android.sensors, ", ")}")
     end
   end
 

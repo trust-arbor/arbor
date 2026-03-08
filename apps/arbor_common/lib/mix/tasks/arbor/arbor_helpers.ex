@@ -22,27 +22,27 @@ defmodule Mix.Tasks.Arbor.Helpers do
       env_file
       |> File.read!()
       |> String.split("\n")
-      |> Enum.each(fn line ->
-        line = String.trim(line)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&blank_or_comment?/1)
+      |> Enum.each(&parse_and_set_env/1)
+    end
+  end
 
-        unless line == "" or String.starts_with?(line, "#") do
-          # Strip leading "export " if present
-          line = String.replace_prefix(line, "export ", "")
+  defp blank_or_comment?(""), do: true
+  defp blank_or_comment?("#" <> _), do: true
+  defp blank_or_comment?(_), do: false
 
-          case String.split(line, "=", parts: 2) do
-            [key, value] ->
-              key = String.trim(key)
-              value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
+  defp parse_and_set_env(line) do
+    line = String.replace_prefix(line, "export ", "")
 
-              unless System.get_env(key) do
-                System.put_env(key, value)
-              end
+    case String.split(line, "=", parts: 2) do
+      [key, value] ->
+        key = String.trim(key)
+        value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
+        unless System.get_env(key), do: System.put_env(key, value)
 
-            _ ->
-              :skip
-          end
-        end
-      end)
+      _ ->
+        :ok
     end
   end
 
