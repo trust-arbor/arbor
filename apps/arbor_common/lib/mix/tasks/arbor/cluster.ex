@@ -35,11 +35,15 @@ defmodule Mix.Tasks.Arbor.Cluster do
   defp status do
     server = Config.full_node_name()
 
-    # Get connected nodes
+    # Get connected nodes, filtering out ephemeral mix task nodes
     nodes =
       case :rpc.call(server, Node, :list, []) do
-        list when is_list(list) -> [server | list]
-        _ -> [server]
+        list when is_list(list) ->
+          real_nodes = Enum.reject(list, &ephemeral_node?/1)
+          [server | real_nodes]
+
+        _ ->
+          [server]
       end
 
     Mix.shell().info("\n  Arbor Cluster Status")
@@ -157,27 +161,25 @@ defmodule Mix.Tasks.Arbor.Cluster do
         _ -> "?"
       end
 
-    memory_gb =
-      case :rpc.call(node, :erlang, :memory, [:total], 5_000) do
-        bytes when is_integer(bytes) -> Float.round(bytes / 1_073_741_824, 1)
-        _ -> "?"
-      end
-
-    # Check for GPU via cartographer if available
-    gpu =
+    # Try cartographer for rich hardware info (system RAM, GPU, Android)
+    {memory_gb, gpu, android} =
       case :rpc.call(node, Arbor.Cartographer, :detect_hardware, [], 10_000) do
-        {:ok, %{gpu: gpus}} when is_list(gpus) and gpus != [] ->
-          gpus |> hd() |> Map.get(:name, "yes")
+        {:ok, hw} ->
+          mem = hw[:memory_gb] || beam_memory_gb(node)
+
+          gpu_name =
+            case hw[:gpu] do
+              [g | _] when is_map(g) -> Map.get(g, :name, "yes")
+              _ -> nil
+            end
+
+          is_android = hw[:android] != nil
+
+          {mem, gpu_name, is_android}
 
         _ ->
-          nil
-      end
-
-    # Check if Android
-    android =
-      case :rpc.call(node, :code, :ensure_loaded, [:android], 5_000) do
-        {:module, _} -> true
-        _ -> false
+          # Fallback to BEAM memory if cartographer not available
+          {beam_memory_gb(node), nil, false}
       end
 
     load =
@@ -193,5 +195,17 @@ defmodule Mix.Tasks.Arbor.Cluster do
     # Safe: operator-provided node name from CLI argument
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     String.to_atom(node_str)
+  end
+
+  defp ephemeral_node?(node) do
+    name = Atom.to_string(node)
+    String.starts_with?(name, "arbor_mix_")
+  end
+
+  defp beam_memory_gb(node) do
+    case :rpc.call(node, :erlang, :memory, [:total], 5_000) do
+      bytes when is_integer(bytes) -> Float.round(bytes / 1_073_741_824, 1)
+      _ -> "?"
+    end
   end
 end
