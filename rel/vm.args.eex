@@ -1,0 +1,6 @@
+## Erlang VM configuration for Arbor releases
+
+## Pin distribution port range for firewalls
+## EPMD uses 4369, distribution uses this range
+-kernel inet_dist_listen_min 9100
+-kernel inet_dist_listen_max 9155

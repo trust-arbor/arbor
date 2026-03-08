@@ -59,9 +59,12 @@ defmodule Mix.Tasks.Arbor.Start do
     # The shell returns the PID immediately via `echo $!`.
     name_flag = if Config.longnames?(), do: "--name", else: "--sname"
 
+    # Pin Erlang distribution to a predictable port range for firewalls
+    erl_flags = "--erl '-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155'"
+
     elixir_cmd =
       "#{elixir_path} #{name_flag} #{Config.full_node_name()} " <>
-        "--cookie #{Config.cookie()} #{mix_path} run --no-halt " <>
+        "--cookie #{Config.cookie()} #{erl_flags} #{mix_path} run --no-halt " <>
         "> #{log_file} 2>&1 & echo $!"
 
     # Inherit the full environment so API keys, PATH, etc. are available.
