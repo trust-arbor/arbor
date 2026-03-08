@@ -58,6 +58,7 @@ defmodule Mix.Tasks.Arbor.Setup do
     header()
 
     step("Checking prerequisites", &check_prerequisites/0)
+    step("Installing Hex and Rebar", &ensure_hex_and_rebar/0)
     step("Fetching dependencies", &fetch_deps/0)
     step("Setting up environment", &setup_env/0)
     step("Configuring distribution cookie", fn -> setup_cookie(opts) end)
@@ -94,6 +95,19 @@ defmodule Mix.Tasks.Arbor.Setup do
       true ->
         {:ok, "Elixir #{elixir_version} / OTP #{otp_version}"}
     end
+  end
+
+  defp ensure_hex_and_rebar do
+    # Install Hex if not available
+    unless Code.ensure_loaded?(Hex) do
+      Mix.Task.run("local.hex", ["--force", "--if-missing"])
+    end
+
+    # Install rebar3 if not available
+    Mix.Task.run("local.rebar", ["--force", "--if-missing"])
+    {:ok, "hex + rebar ready"}
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   defp fetch_deps do
