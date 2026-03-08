@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Arbor.Start do
   - Node name: `arbor_dev@localhost` (or `arbor_dev@<ip>` with ARBOR_NODE_HOST)
   - Cookie: from ARBOR_COOKIE env var
   - Logs: `~/.arbor/logs/arbor-dev.log`
-  - PID file: `/tmp/arbor-dev.pid`
+  - PID file: `~/.arbor/arbor-dev.pid`
 
   ## Environment Variables
 
