@@ -82,6 +82,12 @@ defmodule Arbor.Agent do
   @doc "List all persisted agent profiles."
   defdelegate list_agents(), to: Lifecycle
 
+  @doc "List all running agents across the cluster via `:pg` process groups."
+  defdelegate list_cluster(), to: Registry, as: :list_cluster
+
+  @doc "Find a specific agent across the cluster by agent_id."
+  defdelegate whereis_cluster(agent_id), to: Registry, as: :whereis_cluster
+
   @doc "Delete an agent and all its data."
   defdelegate destroy_agent(agent_id), to: Lifecycle, as: :destroy
 
