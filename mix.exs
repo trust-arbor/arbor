@@ -26,8 +26,7 @@ defmodule Arbor.MixProject do
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
 
-      # Local ex_mcp for ACP development (switch back to hex before release)
-      {:ex_mcp, path: "/Users/azmaveth/code/ex_mcp", override: true},
+      {:ex_mcp, "~> 0.8.0", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

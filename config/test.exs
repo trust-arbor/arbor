@@ -1,5 +1,26 @@
 import Config
 
+# Load .env at compile time so ARBOR_DB is available for adapter selection
+dotenv_path = Path.join(__DIR__, "../.env")
+
+if File.exists?(dotenv_path) do
+  dotenv_path
+  |> File.read!()
+  |> String.split("\n", trim: true)
+  |> Enum.reject(&(String.starts_with?(&1, "#") or &1 == ""))
+  |> Enum.each(fn line ->
+    case String.split(line, "=", parts: 2) do
+      [key, value] ->
+        key = String.trim(key)
+        value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
+        unless System.get_env(key), do: System.put_env(key, value)
+
+      _ ->
+        :skip
+    end
+  end)
+end
+
 config :logger, level: :warning
 
 # Don't start HTTP server or MCP client supervisor in tests
@@ -78,20 +99,23 @@ config :arbor_comms, :handler, enabled: false
 # Test database — adapter-aware
 # Note: The Ecto SQLite3 adapter does not support async tests
 # when used with Ecto.Adapters.SQL.Sandbox
-if System.get_env("ARBOR_DB") == "sqlite" do
+if System.get_env("ARBOR_DB") == "postgres" do
   config :arbor_persistence,
-    repo_adapter: Ecto.Adapters.SQLite3
+    repo_adapter: Ecto.Adapters.Postgres
 
-  config :arbor_persistence, Arbor.Persistence.Repo,
-    database: Path.expand("~/.arbor/arbor_test.db"),
-    pool: Ecto.Adapters.SQL.Sandbox
-else
   config :arbor_persistence, Arbor.Persistence.Repo,
     database: "arbor_persistence_test",
     username: "arbor_dev",
     hostname: "localhost",
     pool: Ecto.Adapters.SQL.Sandbox,
     types: Arbor.Persistence.PostgrexTypes
+else
+  config :arbor_persistence,
+    repo_adapter: Ecto.Adapters.SQLite3
+
+  config :arbor_persistence, Arbor.Persistence.Repo,
+    database: Path.expand("~/.arbor/arbor_test.db"),
+    pool: Ecto.Adapters.SQL.Sandbox
 end
 
 # Memory tests use ETS by default (no database required)
