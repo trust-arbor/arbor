@@ -352,7 +352,10 @@ defmodule Arbor.Cartographer.CapabilityRegistry do
       {:ok, capabilities} ->
         :ets.insert(@table_name, {node, capabilities})
         :ets.insert(@load_table_name, {node, capabilities.load})
-        Logger.info("[Cartographer.Registry] Synced capabilities from #{node}: #{inspect(capabilities.tags)}")
+
+        Logger.info(
+          "[Cartographer.Registry] Synced capabilities from #{node}: #{inspect(capabilities.tags)}"
+        )
 
       {:error, _} ->
         # Node doesn't have Cartographer running — try raw hardware detection

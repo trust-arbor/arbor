@@ -587,24 +587,14 @@ defmodule Arbor.Cartographer.Hardware do
 
   defp detect_android_sensors do
     # Query available sensors via the android module
-    # sensor_read can crash with function_clause for unsupported sensor types,
-    # so we catch errors and just return what works
-    case safe_android_call(:sensor_list, []) do
-      {:ok, json} ->
-        case Jason.decode(json) do
-          {:ok, sensors} when is_list(sensors) ->
-            Enum.map(sensors, fn s ->
-              name = if is_map(s), do: Map.get(s, "name", "unknown"), else: to_string(s)
-              String.to_atom(String.downcase(name))
-            end)
-
-          _ ->
-            []
-        end
-
-      _ ->
-        # sensor_list not available — return empty rather than probing
-        []
+    with {:ok, json} <- safe_android_call(:sensor_list, []),
+         {:ok, sensors} when is_list(sensors) <- Jason.decode(json) do
+      Enum.map(sensors, fn s ->
+        name = if is_map(s), do: Map.get(s, "name", "unknown"), else: to_string(s)
+        String.downcase(name)
+      end)
+    else
+      _ -> []
     end
   end
 
@@ -633,7 +623,20 @@ defmodule Arbor.Cartographer.Hardware do
     tags =
       case android_info[:sensors] do
         sensors when is_list(sensors) and sensors != [] ->
-          sensor_tags = Enum.map(sensors, &:"has_#{&1}")
+          # Sensor names are strings from device hardware — map to known atoms
+          sensor_atom_map = %{
+            "accelerometer" => :has_accelerometer,
+            "gyroscope" => :has_gyroscope,
+            "magnetometer" => :has_magnetometer,
+            "proximity" => :has_proximity,
+            "light" => :has_light,
+            "gravity" => :has_gravity,
+            "barometer" => :has_barometer,
+            "step_counter" => :has_step_counter,
+            "orientation" => :has_orientation
+          }
+
+          sensor_tags = Enum.flat_map(sensors, fn s -> List.wrap(sensor_atom_map[s]) end)
           tags ++ [:has_sensors | sensor_tags]
 
         _ ->
