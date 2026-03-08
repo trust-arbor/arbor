@@ -54,7 +54,11 @@ else
     stores: []
 
   config :arbor_persistence, Arbor.Persistence.Repo,
-    database: Path.expand("~/.arbor/arbor_dev.db")
+    database: Path.expand("~/.arbor/arbor_dev.db"),
+    busy_timeout: 5_000,
+    journal_mode: :wal,
+    cache_size: -64_000,
+    temp_store: :memory
 
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
