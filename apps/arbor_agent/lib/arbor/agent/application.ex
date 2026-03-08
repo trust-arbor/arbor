@@ -9,7 +9,7 @@ defmodule Arbor.Agent.Application do
       if Application.get_env(:arbor_agent, :start_children, true) do
         [
           # Process groups for cluster-wide agent discovery
-          {:pg, :arbor_agents},
+          %{id: :arbor_agents_pg, start: {:pg, :start_link, [:arbor_agents]}},
           # Registries (must start before supervisors that use them)
           {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},
           {Registry, keys: :unique, name: Arbor.Agent.ReasoningLoopRegistry},
