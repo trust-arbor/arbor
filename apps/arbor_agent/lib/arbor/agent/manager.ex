@@ -35,6 +35,43 @@ defmodule Arbor.Agent.Manager do
   """
   @spec start_agent(map(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def start_agent(model_config, opts \\ []) do
+    # If spawn_on is specified, RPC to the target node's Manager
+    case Keyword.get(opts, :spawn_on) do
+      nil ->
+        do_start_agent(model_config, opts)
+
+      target_node ->
+        spawn_on_remote(target_node, model_config, Keyword.delete(opts, :spawn_on))
+    end
+  end
+
+  defp spawn_on_remote(target_node, model_config, opts) do
+    case :net_adm.ping(target_node) do
+      :pong ->
+        case :rpc.call(
+               target_node,
+               __MODULE__,
+               :start_agent,
+               [model_config, opts],
+               30_000
+             ) do
+          {:ok, agent_id, pid} ->
+            Logger.info("Agent #{agent_id} started on remote node #{target_node}")
+            {:ok, agent_id, pid}
+
+          {:error, _} = error ->
+            error
+
+          {:badrpc, reason} ->
+            {:error, {:remote_spawn_failed, target_node, reason}}
+        end
+
+      :pang ->
+        {:error, {:node_unreachable, target_node}}
+    end
+  end
+
+  defp do_start_agent(model_config, opts) do
     display_name = Keyword.get(opts, :display_name, default_display_name(model_config))
     template = Keyword.get(opts, :template) || resolve_template(model_config)
 

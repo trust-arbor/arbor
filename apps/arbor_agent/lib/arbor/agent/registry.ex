@@ -146,6 +146,39 @@ defmodule Arbor.Agent.Registry do
     {:ok, Enum.filter(all, filter_fn)}
   end
 
+  @doc """
+  List all agents across the cluster via `:pg` process groups.
+
+  Returns `{:ok, [{agent_id, pid, node}]}` for all agents on all nodes.
+  """
+  @spec list_cluster() :: {:ok, [{String.t(), pid(), node()}]}
+  def list_cluster do
+    members = pg_get_members(:all_agents)
+
+    entries =
+      members
+      |> Enum.map(fn pid ->
+        agent_id = find_agent_id_for_pid(pid)
+        {agent_id, pid, node(pid)}
+      end)
+      |> Enum.reject(fn {id, _, _} -> is_nil(id) end)
+
+    {:ok, entries}
+  end
+
+  @doc """
+  Find a specific agent across the cluster by agent_id.
+
+  Returns `{:ok, pid}` or `{:error, :not_found}`.
+  """
+  @spec whereis_cluster(String.t()) :: {:ok, pid()} | {:error, :not_found}
+  def whereis_cluster(agent_id) do
+    case pg_get_members({:agent, agent_id}) do
+      [pid | _] -> {:ok, pid}
+      [] -> {:error, :not_found}
+    end
+  end
+
   # ============================================================================
   # GenServer Callbacks
   # ============================================================================
@@ -214,5 +247,50 @@ defmodule Arbor.Agent.Registry do
     }
 
     :ets.insert(@table, {agent_id, entry})
+
+    # Join pg groups for cluster-wide discovery
+    pg_join(:all_agents, pid)
+    pg_join({:agent, agent_id}, pid)
+  end
+
+  # ── pg helpers ────────────────────────────────────────────────────
+
+  defp pg_join(group, pid) do
+    try do
+      :pg.join(:arbor_agents, group, pid)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  defp pg_get_members(group) do
+    try do
+      :pg.get_members(:arbor_agents, group)
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+  end
+
+  defp find_agent_id_for_pid(pid) do
+    # Query the local or remote registry for this pid's agent_id
+    node = node(pid)
+
+    if node == Node.self() do
+      # Local lookup via ETS
+      case :ets.match_object(@table, {:_, %{pid: pid}}) do
+        [{agent_id, _} | _] -> agent_id
+        _ -> nil
+      end
+    else
+      # Remote lookup via RPC
+      case :rpc.call(node, :ets, :match_object, [@table, {:_, %{pid: pid}}], 5_000) do
+        [{agent_id, _} | _] -> agent_id
+        _ -> nil
+      end
+    end
   end
 end
