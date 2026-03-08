@@ -244,7 +244,13 @@ defmodule Arbor.Cartographer.Scout do
   defp broadcast_capabilities(capabilities) do
     for node <- Node.list() do
       Task.start(fn ->
-        :rpc.call(node, CapabilityRegistry, :receive_capabilities, [Node.self(), capabilities], 5_000)
+        :rpc.call(
+          node,
+          CapabilityRegistry,
+          :receive_capabilities,
+          [Node.self(), capabilities],
+          5_000
+        )
       end)
     end
   end

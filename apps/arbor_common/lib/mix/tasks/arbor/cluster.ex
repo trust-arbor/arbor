@@ -102,7 +102,9 @@ defmodule Mix.Tasks.Arbor.Cluster do
 
             if caps.hardware[:gpu] do
               for gpu <- List.wrap(caps.hardware[:gpu]) do
-                Mix.shell().info("    GPU: #{gpu[:name]} (#{Float.round(gpu[:vram_gb] || 0.0, 1)} GB)")
+                Mix.shell().info(
+                  "    GPU: #{gpu[:name]} (#{Float.round(gpu[:vram_gb] || 0.0, 1)} GB)"
+                )
               end
             end
 
@@ -110,7 +112,9 @@ defmodule Mix.Tasks.Arbor.Cluster do
               android = caps.hardware[:android]
 
               if android[:battery] do
-                Mix.shell().info("    Battery: #{android.battery.level}%#{if android.battery[:charging], do: " (charging)", else: ""}")
+                Mix.shell().info(
+                  "    Battery: #{android.battery.level}%#{if android.battery[:charging], do: " (charging)", else: ""}"
+                )
               end
 
               if android[:sensors] && android.sensors != [] do

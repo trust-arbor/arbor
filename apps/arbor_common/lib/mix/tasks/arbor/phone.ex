@@ -371,7 +371,6 @@ defmodule Mix.Tasks.Arbor.Phone do
     String.to_atom(node_str)
   end
 
-
   defp timed(fun) do
     start = System.monotonic_time(:millisecond)
     result = fun.()
