@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
 
         Mix.shell().info(
           "  #{status_icon} #{node}" <>
-            "  #{info.arch} | #{info.cpus} CPUs | #{info.memory_gb} GB" <>
+            "  #{info.arch} | #{info.cpus} CPUs | #{format_memory(info.memory_gb)} GB" <>
             if(info.gpu, do: " | GPU: #{info.gpu}", else: "") <>
             if(info.android, do: " | Android", else: "") <>
             if(info.load, do: " | load: #{info.load}", else: "")
@@ -74,16 +74,21 @@ defmodule Mix.Tasks.Arbor.Cluster do
   end
 
   defp connect(node) do
-    case :net_adm.ping(node) do
+    server = Config.full_node_name()
+
+    # Connect FROM the server process, not from this ephemeral mix task
+    case Config.rpc(server, :net_adm, :ping, [node]) do
       :pong ->
         Mix.shell().info("Connected to #{node}")
 
-        # Trigger capability sync on the server
-        server = Config.full_node_name()
+        # Trigger capability sync
         Config.rpc(server, Arbor.Cartographer.CapabilityRegistry, :sync_cluster, [])
 
       :pang ->
-        Mix.shell().error("Cannot reach #{node}")
+        Mix.shell().error("Cannot reach #{node} from server #{server}")
+
+      nil ->
+        Mix.shell().error("Cannot reach Arbor server at #{server}")
     end
   end
 
@@ -208,4 +213,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
       _ -> "?"
     end
   end
+
+  defp format_memory(gb) when is_number(gb), do: Float.round(gb / 1.0, 1)
+  defp format_memory(other), do: other
 end
