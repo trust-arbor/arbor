@@ -10,14 +10,19 @@ defmodule Arbor.Cartographer.Hardware do
 
   ## Detection Methods
 
-  | Hardware | macOS | Linux |
-  |----------|-------|-------|
-  | Architecture | `:system_info` | `:system_info` |
-  | CPU Count | `System.schedulers_online/0` | `System.schedulers_online/0` |
-  | Memory | `:erlang.memory/0` | `/proc/meminfo` |
-  | NVIDIA GPU | `system_profiler` | `nvidia-smi` |
-  | AMD GPU | `system_profiler` | `rocm-smi` |
-  | Coral TPU | `/dev/apex_*` | `/dev/apex_*` |
+  When osquery is installed, it provides unified cross-platform detection
+  (macOS, Linux, Windows). Otherwise falls back to platform-specific methods:
+
+  | Hardware | osquery | macOS | Linux | Windows |
+  |----------|---------|-------|-------|---------|
+  | Architecture | - | `:system_info` | `:system_info` | `:system_info` |
+  | CPU Info | `cpu_info` | `sysctl` | `/proc` | `system_info` |
+  | Memory | `system_info` | `sysctl` | `/proc/meminfo` | BEAM fallback |
+  | GPU | `pci_devices` | `system_profiler` | `nvidia-smi`/`rocm-smi` | - |
+  | Disks | `mounts` | - | - | - |
+  | Network | `interface_addresses` | - | - | - |
+  | OS Version | `os_version` | - | - | - |
+  | Coral TPU | - | `/dev/apex_*` | `/dev/apex_*` | - |
 
   ## Examples
 
@@ -50,6 +55,8 @@ defmodule Arbor.Cartographer.Hardware do
   """
   @spec detect() :: {:ok, hardware_info()}
   def detect do
+    alias Arbor.Cartographer.Hardware.Osquery
+
     base = %{
       arch: detect_arch(),
       cpus: detect_cpus(),
@@ -58,15 +65,86 @@ defmodule Arbor.Cartographer.Hardware do
       accelerators: detect_accelerators()
     }
 
+    # Enrich with osquery data when available
+    info =
+      case Osquery.detect() do
+        {:ok, osq} -> enrich_with_osquery(base, osq)
+        _ -> base
+      end
+
     # Add Android-specific info when on Android
     info =
       if android?() do
-        Map.put(base, :android, detect_android())
+        Map.put(info, :android, detect_android())
       else
-        base
+        info
       end
 
     {:ok, info}
+  end
+
+  defp enrich_with_osquery(base, osq) do
+    base
+    # Prefer osquery system memory over BEAM memory fallback
+    |> maybe_update(:memory_gb, osq[:memory_gb])
+    # Add CPU brand info
+    |> maybe_put(:cpu_brand, osq[:cpu_brand])
+    |> maybe_put(:cpu_physical_cores, osq[:cpu_physical_cores])
+    # Add system identity
+    |> maybe_put(:hostname, osq[:hostname])
+    |> maybe_put(:hardware_vendor, osq[:hardware_vendor])
+    |> maybe_put(:hardware_model, osq[:hardware_model])
+    # Add OS info
+    |> maybe_put(:os_name, osq[:os_name])
+    |> maybe_put(:os_version, osq[:os_version])
+    |> maybe_put(:os_platform, osq[:os_platform])
+    # Add disk and network info
+    |> maybe_put(:disks, osq[:disks])
+    |> maybe_put(:network_interfaces, osq[:network_interfaces])
+    # Enrich GPU list with osquery PCI data if we had no GPUs detected
+    |> enrich_gpu(osq[:gpus])
+  end
+
+  defp maybe_update(map, key, value) when is_number(value) and value > 0,
+    do: Map.put(map, key, value)
+
+  defp maybe_update(map, _key, _value), do: map
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp enrich_gpu(base, nil), do: base
+  defp enrich_gpu(base, []), do: base
+
+  defp enrich_gpu(base, osq_gpus) do
+    # Only add osquery GPU data if we didn't already detect GPUs
+    case base.gpu do
+      nil ->
+        gpus =
+          Enum.map(osq_gpus, fn g ->
+            %{type: gpu_type_from_vendor(g[:vendor]), name: g[:name], vram_gb: 0.0}
+          end)
+
+        Map.put(base, :gpu, gpus)
+
+      _ ->
+        base
+    end
+  end
+
+  defp gpu_type_from_vendor(nil), do: :unknown
+
+  defp gpu_type_from_vendor(vendor) do
+    vendor_lower = String.downcase(vendor)
+
+    cond do
+      String.contains?(vendor_lower, "nvidia") -> :nvidia
+      String.contains?(vendor_lower, "amd") or String.contains?(vendor_lower, "ati") -> :amd
+      String.contains?(vendor_lower, "intel") -> :intel
+      String.contains?(vendor_lower, "apple") -> :apple
+      true -> :unknown
+    end
   end
 
   @doc """
@@ -148,6 +226,7 @@ defmodule Arbor.Cartographer.Hardware do
       case :os.type() do
         {:unix, :linux} -> detect_linux_memory_gb()
         {:unix, :darwin} -> detect_macos_memory_gb()
+        {:win32, _} -> detect_windows_memory_gb()
         _ -> beam_memory_gb()
       end
     end
@@ -172,6 +251,26 @@ defmodule Arbor.Cartographer.Hardware do
 
   defp detect_macos_memory_gb do
     case System.cmd("sysctl", ["-n", "hw.memsize"], stderr_to_stdout: true) do
+      {output, 0} ->
+        case Integer.parse(String.trim(output)) do
+          {bytes, _} -> bytes / (1024 * 1024 * 1024)
+          :error -> beam_memory_gb()
+        end
+
+      _ ->
+        beam_memory_gb()
+    end
+  rescue
+    _ -> beam_memory_gb()
+  end
+
+  defp detect_windows_memory_gb do
+    # Use PowerShell to get total physical memory
+    case System.cmd(
+           "powershell",
+           ["-Command", "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
           {bytes, _} -> bytes / (1024 * 1024 * 1024)
