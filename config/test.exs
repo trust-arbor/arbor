@@ -115,7 +115,9 @@ else
 
   config :arbor_persistence, Arbor.Persistence.Repo,
     database: Path.expand("~/.arbor/arbor_test.db"),
-    pool: Ecto.Adapters.SQL.Sandbox
+    pool: Ecto.Adapters.SQL.Sandbox,
+    busy_timeout: 5_000,
+    journal_mode: :wal
 end
 
 # Memory tests use ETS by default (no database required)
