@@ -14,7 +14,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
   ## Options
 
     - `--checkpoint` — path to checkpoint.json (default: `<logs_root>/checkpoint.json`)
-    - `--logs-root` — directory for pipeline logs (default: `/tmp/arbor_orchestrator/<graph_id>`)
+    - `--logs-root` — directory for pipeline logs (default: `<tmp>/arbor_orchestrator/<graph_id>`)
     - `--workdir` — working directory for shell handlers
     - `--set key=value` — override context values (repeatable)
   """
@@ -130,7 +130,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
     case Keyword.get(opts, :logs_root) do
       nil ->
         graph_id = graph.id || "unknown"
-        Path.join("/tmp/arbor_orchestrator", graph_id)
+        Path.join(System.tmp_dir!(), Path.join("arbor_orchestrator", graph_id))
 
       path ->
         path

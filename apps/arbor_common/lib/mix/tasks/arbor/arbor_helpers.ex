@@ -7,7 +7,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
   """
 
   @node_name :arbor_dev
-  @pid_file "/tmp/arbor-dev.pid"
+  @pid_file Path.expand("~/.arbor/arbor-dev.pid")
   @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
 
   @doc """
