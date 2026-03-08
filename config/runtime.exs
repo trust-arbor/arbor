@@ -34,16 +34,6 @@ if File.exists?(dotenv_path) do
 end
 
 # ============================================================================
-# Erlang Distribution — predictable port range for firewalls
-# ============================================================================
-# EPMD uses port 4369. Distribution connections use the range below.
-# Open these ports between cluster nodes.
-
-config :kernel,
-  inet_dist_listen_min: 9100,
-  inet_dist_listen_max: 9155
-
-# ============================================================================
 # Dashboard secret key base (production)
 # ============================================================================
 

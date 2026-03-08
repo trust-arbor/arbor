@@ -61,6 +61,7 @@ coverage/
 
 # Release artifacts
 rel/
+!rel/vm.args.eex
 _rel/
 *.tar.gz
 
