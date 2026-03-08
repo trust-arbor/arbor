@@ -60,7 +60,10 @@ defmodule Mix.Tasks.Arbor.Start do
     name_flag = if Config.longnames?(), do: "--name", else: "--sname"
 
     # Pin Erlang distribution to a predictable port range for firewalls
-    erl_flags = "--erl '-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155'"
+    # Increase net_ticktime to 120s (disconnect after ~8 min of no response)
+    # to tolerate brief network hiccups and idle periods
+    erl_flags =
+      "--erl '-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120'"
 
     elixir_cmd =
       "#{elixir_path} #{name_flag} #{Config.full_node_name()} " <>

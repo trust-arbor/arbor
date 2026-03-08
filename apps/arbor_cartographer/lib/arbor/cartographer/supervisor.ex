@@ -42,12 +42,19 @@ defmodule Arbor.Cartographer.Supervisor do
       opts
       |> Keyword.take([:introspection_interval, :load_update_interval, :custom_tags])
 
+    cluster_keeper_opts =
+      opts
+      |> Keyword.take([:reconnect_interval])
+
     children = [
       # Registry must start first - Scout depends on it
       {Arbor.Cartographer.CapabilityRegistry, []},
 
       # Scout for hardware introspection
-      {Arbor.Cartographer.Scout, scout_opts}
+      {Arbor.Cartographer.Scout, scout_opts},
+
+      # ClusterKeeper for auto-reconnection of known nodes
+      {Arbor.Cartographer.ClusterKeeper, cluster_keeper_opts}
     ]
 
     # rest_for_one: if Registry crashes, restart Scout too

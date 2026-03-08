@@ -4,3 +4,7 @@
 ## EPMD uses 4369, distribution uses this range
 -kernel inet_dist_listen_min 9100
 -kernel inet_dist_listen_max 9155
+
+## Increase net_ticktime to 120s (disconnect after ~8 min of no response)
+## Tolerates brief network hiccups, sleep/wake, and idle periods
+-kernel net_ticktime 120
