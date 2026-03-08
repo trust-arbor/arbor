@@ -3,51 +3,69 @@ defmodule Mix.Tasks.Arbor.Setup do
   @moduledoc """
   Sets up Arbor for development from a fresh clone.
 
-      $ mix setup
+      $ mix arbor.setup
 
   This task is idempotent — safe to run multiple times.
 
   ## Steps
 
-  1. Check prerequisites (Elixir version)
+  1. Check prerequisites (Elixir + OTP version)
   2. Fetch dependencies (`mix deps.get`)
   3. Set up `.env` from `.env.example` (if `.env` doesn't exist)
-  4. Ensure `~/.arbor/` directory exists
-  5. Create database (`mix ecto.create`)
-  6. Run migrations (`mix ecto.migrate`)
-  7. Compile the project
-  8. Print summary with next steps
+  4. Generate `ARBOR_COOKIE` if not already set in `.env`
+  5. Ensure `~/.arbor/` directory structure exists
+  6. Create database (`mix ecto.create`)
+  7. Run migrations (`mix ecto.migrate`)
+  8. Compile the project
+  9. Print summary with next steps
 
   ## Options
 
     * `--skip-db` — Skip database creation and migration (for CI or no-database setups)
+    * `--node-host HOST` — Set ARBOR_NODE_HOST for cross-machine clustering
 
   ## Database Adapter
 
-  Arbor supports both PostgreSQL and SQLite. The adapter is selected via
-  the `ARBOR_DB` environment variable:
+  SQLite is the default (zero-config). For PostgreSQL, set `ARBOR_DB`:
 
-    * `ARBOR_DB=sqlite` — Use SQLite (zero-config, recommended for getting started)
-    * Default — Use PostgreSQL (existing setup, recommended for production)
+    * Default — Use SQLite (zero-config, recommended for getting started)
+    * `ARBOR_DB=postgres` — Use PostgreSQL (recommended for production)
+
+  ## Clustering
+
+  For cross-machine clustering, set `ARBOR_NODE_HOST` to this machine's IP
+  or hostname (e.g. Tailscale MagicDNS name). The setup task auto-generates
+  `ARBOR_COOKIE` if not present.
 
   Example:
 
-      $ ARBOR_DB=sqlite mix setup
+      $ mix arbor.setup --node-host 10.42.42.101
+      $ ARBOR_DB=postgres mix arbor.setup --node-host myhost.tailnet.ts.net
 
   """
   use Mix.Task
 
   @min_elixir_version "1.17.0"
+  @min_otp_version 26
 
   @impl Mix.Task
   def run(args) do
-    {opts, _, _} = OptionParser.parse(args, switches: [skip_db: :boolean])
+    {opts, _, _} =
+      OptionParser.parse(args,
+        strict: [skip_db: :boolean, node_host: :string]
+      )
 
     header()
 
     step("Checking prerequisites", &check_prerequisites/0)
     step("Fetching dependencies", &fetch_deps/0)
     step("Setting up environment", &setup_env/0)
+    step("Configuring distribution cookie", fn -> setup_cookie(opts) end)
+
+    if opts[:node_host] do
+      step("Setting node host", fn -> setup_node_host(opts[:node_host]) end)
+    end
+
     step("Ensuring directories", &ensure_directories/0)
 
     unless opts[:skip_db] do
@@ -63,12 +81,18 @@ defmodule Mix.Tasks.Arbor.Setup do
   # ── Steps ────────────────────────────────────────────────────────────
 
   defp check_prerequisites do
-    current = System.version()
+    elixir_version = System.version()
+    otp_version = System.otp_release() |> to_string() |> String.to_integer()
 
-    if Version.match?(current, ">= #{@min_elixir_version}") do
-      {:ok, "Elixir #{current}"}
-    else
-      {:error, "Elixir #{@min_elixir_version}+ required (found #{current})"}
+    cond do
+      not Version.match?(elixir_version, ">= #{@min_elixir_version}") ->
+        {:error, "Elixir #{@min_elixir_version}+ required (found #{elixir_version})"}
+
+      otp_version < @min_otp_version ->
+        {:error, "OTP #{@min_otp_version}+ required (found OTP #{otp_version})"}
+
+      true ->
+        {:ok, "Elixir #{elixir_version} / OTP #{otp_version}"}
     end
   end
 
@@ -97,14 +121,62 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
   end
 
+  defp setup_cookie(opts) do
+    env_path = Path.join(File.cwd!(), ".env")
+
+    cond do
+      # Already set in environment
+      System.get_env("ARBOR_COOKIE") ->
+        {:skip, "ARBOR_COOKIE already set in environment"}
+
+      # Already in .env file
+      env_has_key?(env_path, "ARBOR_COOKIE") ->
+        {:skip, "ARBOR_COOKIE already in .env"}
+
+      # Need to generate one
+      File.exists?(env_path) ->
+        cookie = generate_cookie()
+        append_to_env(env_path, "ARBOR_COOKIE", cookie)
+        System.put_env("ARBOR_COOKIE", cookie)
+
+        if opts[:node_host] do
+          {:ok, "generated and added to .env"}
+        else
+          {:ok, "generated and added to .env"}
+        end
+
+      true ->
+        cookie = generate_cookie()
+        # No .env file — just set it in the environment for this session
+        System.put_env("ARBOR_COOKIE", cookie)
+        {:ok, "generated (add ARBOR_COOKIE=#{cookie} to your shell profile)"}
+    end
+  end
+
+  defp setup_node_host(host) do
+    env_path = Path.join(File.cwd!(), ".env")
+
+    if File.exists?(env_path) do
+      if env_has_key?(env_path, "ARBOR_NODE_HOST") do
+        update_env_key(env_path, "ARBOR_NODE_HOST", host)
+        {:ok, "updated ARBOR_NODE_HOST=#{host} in .env"}
+      else
+        append_to_env(env_path, "ARBOR_NODE_HOST", host)
+        {:ok, "set ARBOR_NODE_HOST=#{host} in .env"}
+      end
+    else
+      {:ok, "set ARBOR_NODE_HOST=#{host} (add to shell profile for persistence)"}
+    end
+  end
+
   defp ensure_directories do
     arbor_dir = Path.expand("~/.arbor")
+    logs_dir = Path.join(arbor_dir, "logs")
 
-    unless File.dir?(arbor_dir) do
-      File.mkdir_p!(arbor_dir)
-    end
+    File.mkdir_p!(arbor_dir)
+    File.mkdir_p!(logs_dir)
 
-    {:ok, "~/.arbor/ ready"}
+    {:ok, "~/.arbor/ ready (including logs/)"}
   end
 
   defp create_db do
@@ -207,6 +279,53 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
   end
 
+  defp generate_cookie do
+    :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
+  end
+
+  defp env_has_key?(env_path, key) do
+    case File.read(env_path) do
+      {:ok, content} ->
+        content
+        |> String.split("\n")
+        |> Enum.any?(fn line ->
+          line = String.trim(line)
+          not String.starts_with?(line, "#") and String.starts_with?(line, key <> "=")
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp append_to_env(env_path, key, value) do
+    content = File.read!(env_path)
+
+    # Ensure there's a newline before appending
+    separator = if String.ends_with?(content, "\n"), do: "", else: "\n"
+
+    File.write!(env_path, content <> separator <> "#{key}=#{value}\n")
+  end
+
+  defp update_env_key(env_path, key, value) do
+    content = File.read!(env_path)
+
+    updated =
+      content
+      |> String.split("\n")
+      |> Enum.map_join("\n", fn line ->
+        trimmed = String.trim(line)
+
+        if not String.starts_with?(trimmed, "#") and String.starts_with?(trimmed, key <> "=") do
+          "#{key}=#{value}"
+        else
+          line
+        end
+      end)
+
+    File.write!(env_path, updated)
+  end
+
   # ── Output ───────────────────────────────────────────────────────────
 
   defp header do
@@ -240,11 +359,13 @@ defmodule Mix.Tasks.Arbor.Setup do
 
   defp print_summary(opts) do
     adapter_name = if sqlite?(), do: "SQLite", else: "PostgreSQL"
+    node_host = opts[:node_host] || System.get_env("ARBOR_NODE_HOST")
+    clustering = node_host != nil
 
     Mix.shell().info("""
 
     ╭─────────────────────────────╮
-    │     Setup Complete! 🎉      │
+    │     Setup Complete!         │
     ╰─────────────────────────────╯
 
       Database: #{adapter_name}#{if opts[:skip_db], do: " (skipped)", else: ""}
@@ -258,5 +379,24 @@ defmodule Mix.Tasks.Arbor.Setup do
         Add API keys to .env for LLM access
         See .env.example for all available settings
     """)
+
+    if clustering do
+      Mix.shell().info("""
+        Clustering:
+          Node host:  #{node_host}
+          Cookie:     set in .env (shared across all cluster nodes)
+
+          To join this node to an existing cluster:
+            mix arbor.start
+            mix arbor.cluster connect arbor_dev@<other-host>
+
+          Ensure these ports are open between cluster nodes:
+            4369      (EPMD — node discovery)
+            9100-9155 (Erlang distribution — node communication)
+
+          Tip: Use the same ARBOR_COOKIE value on all machines.
+               Copy it from .env on this machine to .env on others.
+      """)
+    end
   end
 end
