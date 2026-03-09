@@ -73,7 +73,7 @@ defmodule Arbor.Orchestrator.RegistrarTest do
       assert {:ok, Arbor.Orchestrator.Handlers.AccumulatorHandler} =
                WriteableRegistry.resolve("accumulator")
 
-      assert {:ok, Arbor.Orchestrator.Handlers.CodergenHandler} =
+      assert {:ok, Arbor.Orchestrator.Handlers.LlmHandler} =
                ComputeRegistry.resolve("llm")
 
       assert {:ok, Arbor.Orchestrator.Handlers.RoutingHandler} =

@@ -79,7 +79,7 @@ defmodule Arbor.Orchestrator.Conformance412Test do
     node = %Node{id: "n1", attrs: %{"type" => "custom.4_12"}}
     resolved = Registry.resolve(node)
 
-    assert resolved == Arbor.Orchestrator.Handlers.CodergenHandler
+    assert resolved == Arbor.Orchestrator.Handlers.LlmHandler
   end
 
   test "4.12 custom handler exceptions are caught and converted to fail outcome" do

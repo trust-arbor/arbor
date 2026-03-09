@@ -87,7 +87,7 @@ defmodule Arbor.Orchestrator.Registrar do
   defp register_compute_backends(failures) do
     if Process.whereis(ComputeRegistry) do
       entries = [
-        {"llm", Arbor.Orchestrator.Handlers.CodergenHandler, %{default: true}},
+        {"llm", Arbor.Orchestrator.Handlers.LlmHandler, %{default: true}},
         {"routing", Arbor.Orchestrator.Handlers.RoutingHandler, %{}}
       ]
 
