@@ -1,5 +1,6 @@
 defmodule Arbor.Common.RegistryBaseTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   # Define a test behaviour
   defmodule TestBehaviour do

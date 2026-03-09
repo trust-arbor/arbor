@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.WebTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Actions.Web
   alias Arbor.Actions.Web.Browse

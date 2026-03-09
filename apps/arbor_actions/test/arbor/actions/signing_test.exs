@@ -6,6 +6,7 @@ defmodule Arbor.Actions.SigningTest do
   and that identity/resource binding works correctly.
   """
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SignedRequest

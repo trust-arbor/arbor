@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.CommsTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Actions.Comms.PollMessages
   alias Arbor.Actions.Comms.SendMessage

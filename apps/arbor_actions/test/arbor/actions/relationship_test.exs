@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.RelationshipTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Actions.Relationship.{Browse, Get, Moment, Save, Summarize}
 

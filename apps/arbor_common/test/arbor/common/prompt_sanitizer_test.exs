@@ -1,5 +1,6 @@
 defmodule Arbor.Common.PromptSanitizerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Common.PromptSanitizer
 

@@ -1,5 +1,6 @@
 defmodule Arbor.Common.Sanitizers.CommandInjectionTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Common.Sanitizers.CommandInjection
   alias Arbor.Contracts.Security.Taint

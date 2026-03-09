@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.FileTest do
   use Arbor.Actions.ActionCase, async: true
+  @moduletag :fast
 
   alias Arbor.Actions.File, as: FileActions
 

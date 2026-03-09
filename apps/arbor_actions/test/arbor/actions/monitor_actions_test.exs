@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.MonitorActionsTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Actions.Monitor.{
     ClaimAnomaly,
