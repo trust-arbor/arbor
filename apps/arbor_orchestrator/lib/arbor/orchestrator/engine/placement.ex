@@ -142,7 +142,10 @@ defmodule Arbor.Orchestrator.Engine.Placement do
     if function_exported?(handler, :execute, 4) do
       handler.execute(node, context, graph, opts)
     else
-      %Outcome{status: :fail, failure_reason: "handler #{inspect(handler)} not available on #{Node.self()}"}
+      %Outcome{
+        status: :fail,
+        failure_reason: "handler #{inspect(handler)} not available on #{Node.self()}"
+      }
     end
   end
 
