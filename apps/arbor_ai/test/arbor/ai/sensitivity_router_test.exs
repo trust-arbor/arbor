@@ -253,9 +253,9 @@ defmodule Arbor.AI.SensitivityRouterTest do
       assert :warn = SensitivityRouter.resolve_mode(123)
     end
 
-    test "returns :warn when trust system unavailable" do
-      # No trust system running in test, should fall back gracefully
-      assert :warn = SensitivityRouter.resolve_mode("unknown_agent")
+    test "returns :gated for unknown agent (fail closed via trust profile)" do
+      # Trust system available → effective_mode returns :ask for unknown agent → :gated
+      assert :gated = SensitivityRouter.resolve_mode("unknown_agent")
     end
 
     test "respects per-agent overrides" do
@@ -269,8 +269,8 @@ defmodule Arbor.AI.SensitivityRouterTest do
 
         assert :block = SensitivityRouter.resolve_mode("blocked_agent")
         assert :auto = SensitivityRouter.resolve_mode("auto_agent")
-        # Non-overridden agent falls through to trust lookup (→ :warn fallback)
-        assert :warn = SensitivityRouter.resolve_mode("normal_agent")
+        # Non-overridden agent falls through to trust profile lookup (→ :gated for unknown)
+        assert :gated = SensitivityRouter.resolve_mode("normal_agent")
       after
         Application.put_env(:arbor_ai, :sensitivity_routing_overrides, original)
       end
@@ -284,8 +284,8 @@ defmodule Arbor.AI.SensitivityRouterTest do
           "bad_agent" => :invalid_mode
         })
 
-        # Invalid mode falls through to trust lookup
-        assert :warn = SensitivityRouter.resolve_mode("bad_agent")
+        # Invalid mode falls through to trust profile lookup (→ :gated for unknown)
+        assert :gated = SensitivityRouter.resolve_mode("bad_agent")
       after
         Application.put_env(:arbor_ai, :sensitivity_routing_overrides, original)
       end
