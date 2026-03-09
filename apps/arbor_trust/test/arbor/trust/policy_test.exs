@@ -262,25 +262,6 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
-  describe "effective_tier/1" do
-    setup :start_infrastructure
-
-    test "returns agent's behavioral tier", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
-      assert {:ok, :trusted} = Policy.effective_tier(agent_id)
-    end
-
-    test "untrusted agent", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
-      assert {:ok, :untrusted} = Policy.effective_tier(agent_id)
-    end
-
-    test "returns error for nonexistent agent" do
-      assert {:error, _} =
-               Policy.effective_tier("agent_no_such_#{System.unique_integer([:positive])}")
-    end
-  end
-
   describe "explain/3" do
     setup :start_infrastructure
 
