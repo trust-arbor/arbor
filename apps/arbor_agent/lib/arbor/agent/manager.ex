@@ -35,13 +35,47 @@ defmodule Arbor.Agent.Manager do
   """
   @spec start_agent(map(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def start_agent(model_config, opts \\ []) do
-    # If spawn_on is specified, RPC to the target node's Manager
-    case Keyword.get(opts, :spawn_on) do
-      nil ->
-        do_start_agent(model_config, opts)
+    cond do
+      # Explicit node targeting
+      Keyword.has_key?(opts, :spawn_on) ->
+        target = Keyword.fetch!(opts, :spawn_on)
+        spawn_on_remote(target, model_config, Keyword.delete(opts, :spawn_on))
 
-      target_node ->
-        spawn_on_remote(target_node, model_config, Keyword.delete(opts, :spawn_on))
+      # Capability-based scheduling
+      Keyword.has_key?(opts, :requirements) ->
+        requirements = Keyword.fetch!(opts, :requirements)
+        strategy = Keyword.get(opts, :strategy, :least_loaded)
+        clean_opts = opts |> Keyword.delete(:requirements) |> Keyword.delete(:strategy)
+
+        case schedule_and_spawn(requirements, strategy, model_config, clean_opts) do
+          {:ok, _, _} = result -> result
+          {:error, _} = error -> error
+        end
+
+      # Local spawn (default)
+      true ->
+        do_start_agent(model_config, opts)
+    end
+  end
+
+  defp schedule_and_spawn(requirements, strategy, model_config, opts) do
+    scheduler = Arbor.Cartographer.Scheduler
+
+    if Code.ensure_loaded?(scheduler) do
+      case scheduler.select_node(requirements: requirements, strategy: strategy) do
+        {:ok, node} ->
+          if node == Node.self() do
+            do_start_agent(model_config, opts)
+          else
+            Logger.info("Scheduler selected #{node} for requirements: #{inspect(requirements)}")
+            spawn_on_remote(node, model_config, opts)
+          end
+
+        {:error, :no_matching_node} ->
+          {:error, {:no_matching_node, requirements}}
+      end
+    else
+      {:error, :scheduler_not_available}
     end
   end
 
