@@ -40,7 +40,7 @@ defmodule Arbor.Trust.Calculator do
   """
 
   alias Arbor.Contracts.Trust.Profile
-  alias Arbor.Trust.{Config, TierResolver}
+  alias Arbor.Trust.Config
 
   @weights %{
     success_rate: 0.30,
@@ -307,6 +307,6 @@ defmodule Arbor.Trust.Calculator do
   end
 
   defp update_tier(%Profile{trust_score: score} = profile) do
-    %{profile | tier: TierResolver.resolve(score)}
+    %{profile | tier: Config.resolve_tier(score)}
   end
 end

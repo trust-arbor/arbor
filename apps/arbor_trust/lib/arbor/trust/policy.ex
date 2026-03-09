@@ -59,7 +59,7 @@ defmodule Arbor.Trust.Policy do
       {:ok, caps} = Policy.grant_tier_capabilities("agent_123", :trusted)
   """
 
-  alias Arbor.Trust.{CapabilityTemplates, ProfileResolver, TierResolver}
+  alias Arbor.Trust.{Config, ProfileResolver}
 
   require Logger
 
@@ -69,7 +69,7 @@ defmodule Arbor.Trust.Policy do
   @type sync_result :: %{
           granted: non_neg_integer(),
           revoked: non_neg_integer(),
-          effective_tier: TierResolver.trust_tier()
+          effective_tier: Config.trust_tier()
         }
 
   # ===========================================================================
@@ -234,7 +234,7 @@ defmodule Arbor.Trust.Policy do
   @doc """
   Get the minimum tier required for a resource URI.
 
-  Delegates to `CapabilityTemplates.min_tier_for_capability/1`.
+  Delegates to `Config.min_tier_for_capability/1`.
 
   ## Examples
 
@@ -244,9 +244,9 @@ defmodule Arbor.Trust.Policy do
       Policy.min_tier_for("arbor://capability/request/self/*")
       #=> :autonomous
   """
-  @spec min_tier_for(String.t()) :: TierResolver.trust_tier() | nil
+  @spec min_tier_for(String.t()) :: Config.trust_tier() | nil
   def min_tier_for(resource_uri) do
-    CapabilityTemplates.min_tier_for_capability(resource_uri)
+    Config.min_tier_for_capability(resource_uri)
   end
 
   # ===========================================================================
@@ -312,10 +312,10 @@ defmodule Arbor.Trust.Policy do
 
       {:ok, 12} = Policy.grant_tier_capabilities("agent_123", :trusted)
   """
-  @spec grant_tier_capabilities(String.t(), TierResolver.trust_tier()) ::
+  @spec grant_tier_capabilities(String.t(), Config.trust_tier()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def grant_tier_capabilities(agent_id, tier) do
-    templates = CapabilityTemplates.capabilities_for_tier(tier)
+    templates = Config.capabilities_for_tier(tier)
 
     with :ok <- ensure_security_available() do
       results =
@@ -363,7 +363,7 @@ defmodule Arbor.Trust.Policy do
       {:ok, %{granted: 12, revoked: 8, effective_tier: :trusted}} =
         Policy.sync_capabilities("agent_123", :probationary, :trusted)
   """
-  @spec sync_capabilities(String.t(), TierResolver.trust_tier(), TierResolver.trust_tier()) ::
+  @spec sync_capabilities(String.t(), Config.trust_tier(), Config.trust_tier()) ::
           {:ok, sync_result()} | {:error, term()}
   def sync_capabilities(agent_id, old_tier, new_tier) do
     with :ok <- ensure_security_available() do
@@ -430,7 +430,7 @@ defmodule Arbor.Trust.Policy do
     end
   end
 
-  defp tier_index(tier), do: TierResolver.tier_index(tier)
+  defp tier_index(tier), do: Config.tier_index(tier)
 
   defp resolve_uri(template_uri, agent_id) do
     template_uri

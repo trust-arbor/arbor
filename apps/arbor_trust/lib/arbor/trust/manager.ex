@@ -36,7 +36,7 @@ defmodule Arbor.Trust.Manager do
 
   alias Arbor.Contracts.Trust.{Event, Profile}
   alias Arbor.Trust.Behaviour, as: Trust
-  alias Arbor.Trust.{Calculator, Config, EventStore, Store, TierResolver}
+  alias Arbor.Trust.{Calculator, Config, EventStore, Store}
 
   require Logger
 
@@ -81,7 +81,7 @@ defmodule Arbor.Trust.Manager do
   @impl Trust
   @spec get_capability_tier(Trust.trust_score()) :: Trust.trust_tier()
   def get_capability_tier(trust_score) do
-    TierResolver.resolve(trust_score)
+    Config.resolve_tier(trust_score)
   end
 
   @doc """
@@ -222,7 +222,7 @@ defmodule Arbor.Trust.Manager do
           {:error, :trust_frozen}
 
         {:ok, profile} ->
-          if TierResolver.sufficient?(profile.tier, required_tier) do
+          if Config.tier_sufficient?(profile.tier, required_tier) do
             {:ok, :authorized}
           else
             {:error, :insufficient_trust}
@@ -395,8 +395,8 @@ defmodule Arbor.Trust.Manager do
                 new_score: new_profile.trust_score,
                 direction:
                   if(
-                    TierResolver.tier_index(new_profile.tier) >
-                      TierResolver.tier_index(old_profile.tier),
+                    Config.tier_index(new_profile.tier) >
+                      Config.tier_index(old_profile.tier),
                     do: :promotion,
                     else: :demotion
                   )
@@ -573,12 +573,12 @@ defmodule Arbor.Trust.Manager do
   end
 
   defp apply_tier_demotion(agent_id, profile) do
-    case TierResolver.previous_tier(profile.tier) do
+    case Config.previous_tier(profile.tier) do
       nil ->
         :ok
 
       lower_tier ->
-        new_score = TierResolver.max_score(lower_tier)
+        new_score = Config.max_score(lower_tier)
 
         Store.update_profile(agent_id, fn p ->
           %{p | trust_score: new_score, tier: lower_tier}
@@ -736,8 +736,7 @@ defmodule Arbor.Trust.Manager do
       end
 
       # On demotion, reset confirmation history (graduated capabilities revert)
-      if Arbor.Trust.TierResolver.tier_index(new_tier) <
-           Arbor.Trust.TierResolver.tier_index(old_tier) do
+      if Config.tier_index(new_tier) < Config.tier_index(old_tier) do
         safe_reset_confirmations(agent_id)
       end
     end

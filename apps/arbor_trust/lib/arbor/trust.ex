@@ -48,9 +48,8 @@ defmodule Arbor.Trust do
   - `Arbor.Trust.Manager` - Trust profiles, scoring, and authorization
   - `Arbor.Trust.Store` - In-memory trust profile storage
   - `Arbor.Trust.Calculator` - Trust score computation
-  - `Arbor.Trust.TierResolver` - Score-to-tier mapping
   - `Arbor.Trust.EventStore` - Durable event persistence
-  - `Arbor.Trust.Config` - Centralized configuration
+  - `Arbor.Trust.Config` - Configuration, tier resolution, and capability templates
   """
 
   @behaviour Arbor.Contracts.API.Trust

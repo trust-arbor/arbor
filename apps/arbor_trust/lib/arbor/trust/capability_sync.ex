@@ -21,7 +21,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   use GenServer
 
-  alias Arbor.Trust.{CapabilityTemplates, Config, Manager}
+  alias Arbor.Trust.{Config, Manager}
 
   require Logger
 
@@ -59,7 +59,7 @@ defmodule Arbor.Trust.CapabilitySync do
   def expected_capabilities(agent_id) do
     case Manager.get_trust_profile(agent_id) do
       {:ok, profile} ->
-        caps = CapabilityTemplates.generate_capabilities(agent_id, profile.tier)
+        caps = Config.generate_capabilities(agent_id, profile.tier)
         {:ok, caps}
 
       {:error, reason} ->
@@ -249,7 +249,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   defp grant_tier_capabilities(agent_id, tier) do
     principal_id = ensure_agent_prefix(agent_id)
-    templates = CapabilityTemplates.capabilities_for_tier(tier)
+    templates = Config.capabilities_for_tier(tier)
 
     results =
       Enum.map(templates, fn template ->
@@ -304,7 +304,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   defp grant_tier_upgrade_capabilities(agent_id, old_tier, new_tier) do
     principal_id = ensure_agent_prefix(agent_id)
-    gained = CapabilityTemplates.capabilities_gained(old_tier, new_tier)
+    gained = Config.capabilities_gained(old_tier, new_tier)
 
     Enum.each(gained, fn template ->
       resource_uri = expand_resource_uri(template.resource_uri, agent_id)
@@ -340,7 +340,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
   defp revoke_tier_downgrade_capabilities(agent_id, old_tier, new_tier) do
     principal_id = ensure_agent_prefix(agent_id)
-    lost = CapabilityTemplates.capabilities_lost(old_tier, new_tier)
+    lost = Config.capabilities_lost(old_tier, new_tier)
 
     lost_uris = Enum.map(lost, fn t -> expand_resource_uri(t.resource_uri, agent_id) end)
 
@@ -387,7 +387,7 @@ defmodule Arbor.Trust.CapabilitySync do
 
     # Get the read-only capabilities (untrusted tier)
     read_only_uris =
-      CapabilityTemplates.capabilities_for_tier(:untrusted)
+      Config.capabilities_for_tier(:untrusted)
       |> Enum.map(fn t -> expand_resource_uri(t.resource_uri, agent_id) end)
       |> MapSet.new()
 
