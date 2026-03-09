@@ -265,11 +265,19 @@ defmodule Arbor.Trust do
   # Policy — Trust ↔ Capability Bridge
   # ===========================================================================
 
-  @doc "Check if agent's trust tier allows a resource URI."
+  @doc "Get the effective trust mode for an agent and resource URI."
+  @spec effective_mode(String.t(), String.t(), keyword()) :: :block | :ask | :allow | :auto
+  defdelegate effective_mode(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
+
+  @doc "Explain the trust resolution chain for debugging."
+  @spec explain(String.t(), String.t(), keyword()) :: map()
+  defdelegate explain(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
+
+  @doc "Check if agent's trust profile allows a resource URI."
   @spec policy_allowed?(String.t(), String.t()) :: boolean()
   defdelegate policy_allowed?(agent_id, resource_uri), to: Arbor.Trust.Policy, as: :allowed?
 
-  @doc "Get confirmation mode for a resource at agent's current tier."
+  @doc "Get confirmation mode for a resource at agent's current trust level."
   @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
 

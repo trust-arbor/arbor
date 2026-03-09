@@ -1,42 +1,70 @@
 defmodule Arbor.Trust.Policy do
   @moduledoc """
-  Bridges trust tiers to capability grants.
+  Bridges trust profiles to capability authorization.
 
   The Policy module is the glue between `Arbor.Trust` (behavioral scoring,
-  tier resolution) and `Arbor.Security` (capability-based authorization).
+  trust profiles) and `Arbor.Security` (capability-based authorization).
   It answers two questions:
 
-  1. **What can this agent do?** — Given an agent's trust tier, what
-     capabilities should they hold?
+  1. **What mode applies?** — Given an agent's trust profile, what
+     behavioral mode (block/ask/allow/auto) applies for a resource URI?
   2. **How do capabilities change on tier transitions?** — When an agent
      is promoted or demoted, what capabilities are granted or revoked?
 
-  ## Key Design Principles
+  ## Trust Modes
 
-  - `effective_tier = min(behavioral_tier, policy_ceiling)` — policy can
-    restrict but NEVER elevate above earned behavioral tier
-  - `shell_exec` is NEVER auto-approved at any tier
-  - All capability mutations emit signals for audit
-  - Fail closed: if any infrastructure is unavailable, deny
+  Four behavioral modes describe what happens when an agent tries to
+  use a capability:
+
+  - `:block` — hard deny, agent cannot use this capability
+  - `:ask` — agent must get user confirmation each time
+  - `:allow` — permitted, but user is notified
+  - `:auto` — silent, just do it
+
+  ## Resolution
+
+  `effective_mode/3` resolves the mode using three layers:
+
+  1. User preference — longest-prefix match in the agent's profile rules
+  2. Security ceiling — system-enforced maximums (shell/governance → :ask)
+  3. Model constraint — optional per-model-class ceiling
+
+  The effective mode is the most restrictive of all three.
+
+  ## Backward Compatibility
+
+  `confirmation_mode/2` maps the 4-mode result to the 3-mode vocabulary
+  that `ApprovalGuard` and `AcpSession.Handler` expect:
+
+  - `:block` → `:deny`
+  - `:ask` → `:gated`
+  - `:allow` → `:auto` (proceed, notification handled elsewhere)
+  - `:auto` → `:auto`
 
   ## Usage
 
-      # Check if agent's current tier allows a resource
-      Policy.allowed?("agent_123", "arbor://code/write/self/impl/*")
+      # New primary API — returns 4-mode result
+      Policy.effective_mode("agent_123", "arbor://shell/exec/git")
+      #=> :ask
+
+      # Legacy API — returns 3-mode result for ApprovalGuard
+      Policy.confirmation_mode("agent_123", "arbor://shell/exec/git")
+      #=> :gated
+
+      # Check if agent's profile allows a resource
+      Policy.allowed?("agent_123", "arbor://code/read/self/*")
+      #=> true
 
       # Grant all capabilities for a tier
       {:ok, caps} = Policy.grant_tier_capabilities("agent_123", :trusted)
-
-      # Sync capabilities on tier change (revoke old, grant new)
-      {:ok, result} = Policy.sync_capabilities("agent_123", :probationary, :trusted)
-
-      # Get the effective tier (min of behavioral + ceiling)
-      {:ok, :trusted} = Policy.effective_tier("agent_123")
   """
 
-  alias Arbor.Trust.{CapabilityTemplates, ConfirmationMatrix, TierResolver}
+  alias Arbor.Trust.{CapabilityTemplates, ProfileResolver, TierResolver}
 
   require Logger
+
+  @type mode :: :block | :ask | :allow | :auto
+  @type confirmation :: :auto | :gated | :deny
 
   @type sync_result :: %{
           granted: non_neg_integer(),
@@ -45,15 +73,48 @@ defmodule Arbor.Trust.Policy do
         }
 
   # ===========================================================================
-  # Query API
+  # Query API — Trust Profile Resolution
   # ===========================================================================
 
   @doc """
-  Check if an agent's current trust tier allows a resource URI.
+  Get the effective trust mode for an agent and resource URI.
 
-  Resolves the agent's effective tier, then checks whether that tier
-  includes the requested capability.
+  This is the primary API. Returns the 4-mode result from the agent's
+  trust profile, constrained by security ceilings and model constraints.
 
+  Returns `:ask` if the trust system is unavailable (fail closed to gated).
+
+  ## Options
+
+  - `:model_class` — atom identifying the model class (e.g., `:frontier_cloud`)
+
+  ## Examples
+
+      Policy.effective_mode("agent_123", "arbor://code/read/self/*")
+      #=> :auto
+
+      Policy.effective_mode("agent_123", "arbor://shell/exec/rm")
+      #=> :ask  (security ceiling enforced)
+
+      Policy.effective_mode("agent_123", "arbor://shell")
+      #=> :block  (if profile blocks shell)
+  """
+  @spec effective_mode(String.t(), String.t(), keyword()) :: mode()
+  def effective_mode(agent_id, resource_uri, opts \\ []) do
+    case get_profile(agent_id) do
+      {:ok, profile} ->
+        ProfileResolver.effective_mode(profile, resource_uri, opts)
+
+      {:error, _} ->
+        # Trust system unavailable — fail closed to :ask
+        :ask
+    end
+  end
+
+  @doc """
+  Check if an agent's trust profile allows a resource URI.
+
+  Returns `true` if the effective mode is anything other than `:block`.
   Returns `false` if the trust system is unavailable (fail closed).
 
   ## Examples
@@ -61,47 +122,112 @@ defmodule Arbor.Trust.Policy do
       Policy.allowed?("agent_123", "arbor://code/read/self/*")
       #=> true
 
+      Policy.allowed?("agent_123", "arbor://shell/exec/rm")
+      #=> true  (allowed, but may require confirmation)
+
       Policy.allowed?("agent_123", "arbor://governance/change/self/*")
-      #=> false
+      #=> false  (if profile blocks governance)
   """
   @spec allowed?(String.t(), String.t()) :: boolean()
   def allowed?(agent_id, resource_uri) do
-    case effective_tier(agent_id) do
-      {:ok, tier} ->
-        CapabilityTemplates.has_capability?(tier, resource_uri)
-
-      {:error, _} ->
-        false
-    end
+    effective_mode(agent_id, resource_uri) != :block
   end
 
   @doc """
-  Check if a resource requires approval at the agent's current tier.
+  Get the confirmation mode for a capability at the agent's trust level.
 
-  Returns `true` if the capability exists but has `requires_approval: true`,
-  `false` if the capability exists without approval requirement,
-  and `{:error, :denied}` if the capability is not available at all.
+  This is the backward-compatible API for `ApprovalGuard` and
+  `AcpSession.Handler`. Maps the 4-mode result to the 3-mode vocabulary:
+
+  - `:block` → `:deny`
+  - `:ask` → `:gated`
+  - `:allow` → `:auto`
+  - `:auto` → `:auto`
+
+  ## Examples
+
+      Policy.confirmation_mode("agent_123", "arbor://code/read/self/*")
+      #=> :auto
+
+      Policy.confirmation_mode("agent_123", "arbor://shell/exec/*")
+      #=> :gated  (security ceiling enforced)
+  """
+  @spec confirmation_mode(String.t(), String.t()) :: confirmation()
+  def confirmation_mode(agent_id, resource_uri) do
+    mode_to_confirmation(effective_mode(agent_id, resource_uri))
+  end
+
+  @doc """
+  Map a 4-mode trust mode to the 3-mode confirmation vocabulary.
+
+  ## Examples
+
+      Policy.mode_to_confirmation(:block)
+      #=> :deny
+
+      Policy.mode_to_confirmation(:ask)
+      #=> :gated
+
+      Policy.mode_to_confirmation(:allow)
+      #=> :auto
+
+      Policy.mode_to_confirmation(:auto)
+      #=> :auto
+  """
+  @spec mode_to_confirmation(mode()) :: confirmation()
+  def mode_to_confirmation(:block), do: :deny
+  def mode_to_confirmation(:ask), do: :gated
+  def mode_to_confirmation(:allow), do: :auto
+  def mode_to_confirmation(:auto), do: :auto
+
+  @doc """
+  Check if a resource requires approval at the agent's current trust level.
+
+  Returns `true` if the effective mode is `:ask` (requires confirmation),
+  `false` if `:allow` or `:auto` (no confirmation needed),
+  and `{:error, :denied}` if `:block`.
 
   ## Examples
 
       Policy.requires_approval?("agent_123", "arbor://code/write/self/impl/*")
-      #=> true  (at :trusted tier)
+      #=> true  (mode is :ask)
 
-      Policy.requires_approval?("agent_123", "arbor://code/write/self/impl/*")
-      #=> false  (at :veteran tier)
+      Policy.requires_approval?("agent_123", "arbor://code/read/self/*")
+      #=> false  (mode is :auto)
   """
   @spec requires_approval?(String.t(), String.t()) :: boolean() | {:error, :denied | term()}
   def requires_approval?(agent_id, resource_uri) do
-    case effective_tier(agent_id) do
-      {:ok, tier} ->
-        if CapabilityTemplates.has_capability?(tier, resource_uri) do
-          CapabilityTemplates.requires_approval?(tier, resource_uri)
-        else
-          {:error, :denied}
-        end
+    case effective_mode(agent_id, resource_uri) do
+      :block -> {:error, :denied}
+      :ask -> true
+      :allow -> false
+      :auto -> false
+    end
+  end
 
-      {:error, _} = error ->
-        error
+  @doc """
+  Explain the trust resolution chain for debugging.
+
+  Returns a map showing how the effective mode was determined.
+
+  ## Examples
+
+      Policy.explain("agent_123", "arbor://shell/exec/git")
+      #=> %{resource_uri: "arbor://shell/exec/git", user_mode: :block,
+      #     security_ceiling: :ask, effective_mode: :ask, ...}
+  """
+  @spec explain(String.t(), String.t(), keyword()) :: map()
+  def explain(agent_id, resource_uri, opts \\ []) do
+    case get_profile(agent_id) do
+      {:ok, profile} ->
+        ProfileResolver.explain(profile, resource_uri, opts)
+
+      {:error, reason} ->
+        %{
+          resource_uri: resource_uri,
+          error: reason,
+          effective_mode: :ask
+        }
     end
   end
 
@@ -109,9 +235,10 @@ defmodule Arbor.Trust.Policy do
   Get the effective tier for an agent.
 
   The effective tier is `min(behavioral_tier, policy_ceiling)`.
-  Currently, policy_ceiling defaults to `:autonomous` (no ceiling)
-  since the ceiling system is not yet implemented. When policy ceilings
-  are added (roadmap Phase 4), this function will incorporate them.
+
+  Note: With trust profiles, the tier is primarily used as a health
+  metric for capability provisioning. The `effective_mode/3` function
+  is the primary API for authorization decisions.
 
   ## Examples
 
@@ -123,48 +250,6 @@ defmodule Arbor.Trust.Policy do
     with {:ok, behavioral_tier} <- get_behavioral_tier(agent_id),
          ceiling <- get_policy_ceiling(agent_id) do
       {:ok, min_tier(behavioral_tier, ceiling)}
-    end
-  end
-
-  @doc """
-  Get the confirmation mode for a capability at the agent's current tier.
-
-  Returns:
-  - `:auto` — capability is auto-approved (no confirmation needed)
-  - `:gated` — capability requires human confirmation before execution
-  - `:deny` — capability is not available at this tier
-
-  Shell exec is always `:gated` regardless of tier (security invariant).
-
-  ## Examples
-
-      Policy.confirmation_mode("agent_123", "arbor://code/read/self/*")
-      #=> :auto
-
-      Policy.confirmation_mode("agent_123", "arbor://code/write/self/impl/*")
-      #=> :gated  (at :trusted tier)
-
-      Policy.confirmation_mode("agent_123", "arbor://shell/exec/*")
-      #=> :gated  (always, at any tier)
-  """
-  @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
-  def confirmation_mode(agent_id, resource_uri) do
-    case effective_tier(agent_id) do
-      {:ok, tier} ->
-        policy_tier = ConfirmationMatrix.to_policy_tier(tier)
-
-        # Primary path: ConfirmationMatrix (bundle × tier → mode)
-        case ConfirmationMatrix.resolve_bundle(resource_uri) do
-          nil ->
-            # URI not in any bundle — fall back to CapabilityTemplates
-            capability_templates_mode(tier, resource_uri)
-
-          _bundle ->
-            ConfirmationMatrix.mode_for(resource_uri, policy_tier)
-        end
-
-      {:error, _} ->
-        :deny
     end
   end
 
@@ -184,6 +269,51 @@ defmodule Arbor.Trust.Policy do
   @spec min_tier_for(String.t()) :: TierResolver.trust_tier() | nil
   def min_tier_for(resource_uri) do
     CapabilityTemplates.min_tier_for_capability(resource_uri)
+  end
+
+  # ===========================================================================
+  # Trust Profile Management
+  # ===========================================================================
+
+  @doc """
+  Derive trust profile rules from a tier.
+
+  Used to initialize rules for profiles that were created before
+  the trust profiles redesign (they have a tier but no rules).
+
+  Maps tiers to presets:
+  - `:untrusted`, `:probationary` → `:cautious`
+  - `:trusted` → `:balanced`
+  - `:veteran` → `:hands_off`
+  - `:autonomous` → `:full_trust`
+
+  ## Examples
+
+      Policy.tier_to_preset(:trusted)
+      #=> :balanced
+  """
+  @spec tier_to_preset(atom()) :: atom()
+  def tier_to_preset(tier) when tier in [:untrusted, :probationary], do: :cautious
+  def tier_to_preset(:trusted), do: :balanced
+  def tier_to_preset(:veteran), do: :hands_off
+  def tier_to_preset(:autonomous), do: :full_trust
+  def tier_to_preset(_), do: :cautious
+
+  @doc """
+  Initialize trust profile rules from a preset.
+
+  Returns `{baseline, rules}` for the given preset name.
+  Used during profile creation and migration.
+
+  ## Examples
+
+      {baseline, rules} = Policy.preset_rules(:balanced)
+      #=> {:ask, %{"arbor://actions/execute/file.read" => :auto, ...}}
+  """
+  @spec preset_rules(atom()) :: {mode(), map()}
+  def preset_rules(preset_name) do
+    preset = ProfileResolver.preset(preset_name)
+    {preset.baseline, preset.rules}
   end
 
   # ===========================================================================
@@ -314,6 +444,14 @@ defmodule Arbor.Trust.Policy do
   # Internals
   # ===========================================================================
 
+  defp get_profile(agent_id) do
+    if trust_available?() do
+      Arbor.Trust.get_trust_profile(agent_id)
+    else
+      {:error, :trust_unavailable}
+    end
+  end
+
   defp get_behavioral_tier(agent_id) do
     if trust_available?() do
       Arbor.Trust.get_trust_tier(agent_id)
@@ -340,27 +478,6 @@ defmodule Arbor.Trust.Policy do
     template_uri
     |> String.replace("/self/", "/#{agent_id}/")
     |> String.replace(~r"/self$", "/#{agent_id}")
-  end
-
-  # Fallback for URIs not in any bundle — use CapabilityTemplates directly
-  defp capability_templates_mode(tier, resource_uri) do
-    cond do
-      not CapabilityTemplates.has_capability?(tier, resource_uri) ->
-        :deny
-
-      shell_exec?(resource_uri) ->
-        :gated
-
-      CapabilityTemplates.requires_approval?(tier, resource_uri) ->
-        :gated
-
-      true ->
-        :auto
-    end
-  end
-
-  defp shell_exec?(resource_uri) do
-    String.starts_with?(resource_uri, "arbor://shell/exec")
   end
 
   defp trust_available? do
