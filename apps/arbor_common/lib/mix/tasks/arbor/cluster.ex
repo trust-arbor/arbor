@@ -70,7 +70,12 @@ defmodule Mix.Tasks.Arbor.Cluster do
     end
 
     Mix.shell().info("  ════════════════════════════════════════════════")
-    Mix.shell().info("  #{length(nodes)} node(s), * = server\n")
+    Mix.shell().info("  #{length(nodes)} node(s), * = server")
+
+    # Show agents across the cluster
+    show_cluster_agents(server)
+
+    Mix.shell().info("")
   end
 
   defp connect(node) do
@@ -152,6 +157,47 @@ defmodule Mix.Tasks.Arbor.Cluster do
       _ ->
         Mix.shell().error("Failed to trigger sync — is the Arbor server running?")
     end
+  end
+
+  defp show_cluster_agents(server) do
+    case Config.rpc(server, :pg, :get_members, [:arbor_agents, :all_agents]) do
+      pids when is_list(pids) and pids != [] ->
+        Mix.shell().info("")
+        Mix.shell().info("  Agents (#{length(pids)})")
+        Mix.shell().info("  ────────────────────────────────────────────────")
+
+        agents =
+          pids
+          |> Enum.map(fn pid ->
+            agent_node = :rpc.call(server, :erlang, :node, [pid], 5_000)
+            agent_id = find_agent_id(server, pid, agent_node)
+            {agent_id || "unknown", agent_node, pid}
+          end)
+          |> Enum.sort_by(fn {id, node, _} -> {node, id} end)
+
+        for {agent_id, agent_node, _pid} <- agents do
+          Mix.shell().info("    #{agent_id}  on #{agent_node}")
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp find_agent_id(server, pid, agent_node) do
+    # Query the agent's local registry via RPC
+    case Config.rpc(server, :rpc, :call, [
+           agent_node,
+           :ets,
+           :match_object,
+           [:arbor_agent_registry, {:_, %{pid: pid}}],
+           5_000
+         ]) do
+      [{agent_id, _} | _] -> agent_id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp gather_node_info(node) do
