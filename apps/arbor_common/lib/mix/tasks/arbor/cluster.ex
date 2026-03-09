@@ -107,7 +107,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
 
         for caps <- Enum.sort_by(caps_list, & &1.node) do
           Mix.shell().info("  #{caps.node}")
-          Mix.shell().info("    Tags: #{Enum.join(Enum.map(caps.tags, &inspect/1), ", ")}")
+          Mix.shell().info("    Tags: #{Enum.map_join(caps.tags, ", ", &inspect/1)}")
           if caps.hardware, do: print_hardware(caps.hardware)
           Mix.shell().info("    Load: #{caps.load}")
           Mix.shell().info("")

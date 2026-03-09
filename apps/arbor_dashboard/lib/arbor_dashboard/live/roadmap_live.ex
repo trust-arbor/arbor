@@ -291,8 +291,7 @@ defmodule Arbor.Dashboard.Live.RoadmapLive do
     name
     |> String.replace(~r/[-_]/, " ")
     |> String.split()
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join(" ")
+    |> Enum.map_join(" ", &String.capitalize/1)
   end
 
   defp safe_atom(nil), do: nil

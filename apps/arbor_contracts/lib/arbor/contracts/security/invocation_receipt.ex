@@ -146,13 +146,10 @@ defmodule Arbor.Contracts.Security.InvocationReceipt do
   defp encode_delegation_chain([]), do: ""
 
   defp encode_delegation_chain(chain) when is_list(chain) do
-    chain
-    |> Enum.map(fn record ->
+    Enum.map_join(chain, ";", fn record ->
       record
       |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
-      |> Enum.map(fn {k, v} -> "#{k}=#{v}" end)
-      |> Enum.join(",")
+      |> Enum.map_join(",", fn {k, v} -> "#{k}=#{v}" end)
     end)
-    |> Enum.join(";")
   end
 end

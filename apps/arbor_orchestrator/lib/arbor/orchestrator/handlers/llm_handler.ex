@@ -97,9 +97,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         raise "401 unauthorized"
 
       simulate when simulate in [nil, "true", true] ->
-        Logger.warning(
-          "[LlmHandler] #{node.id}: SIMULATED (simulate=#{inspect(simulate_attr)})"
-        )
+        Logger.warning("[LlmHandler] #{node.id}: SIMULATED (simulate=#{inspect(simulate_attr)})")
 
         # Simulation mode — no real LLM call
         response = "[Simulated] Response for stage: #{node.id}"

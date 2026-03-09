@@ -39,6 +39,7 @@ defmodule Arbor.Orchestrator.Engine.Placement do
 
   require Logger
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Orchestrator.Engine.Outcome
 
   @type parsed :: %{
@@ -152,8 +153,19 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   # --- Private ---
 
   defp parse_part("node:" <> node_str, acc) do
-    node = String.to_atom(node_str)
-    %{acc | node: node}
+    # Node names must contain "@" — validate before creating atom
+    if String.contains?(node_str, "@") do
+      node =
+        case SafeAtom.to_existing(node_str) do
+          {:ok, atom} -> atom
+          {:error, _} -> String.to_atom(node_str)
+        end
+
+      %{acc | node: node}
+    else
+      Logger.warning("Placement: invalid node name (missing @): #{inspect(node_str)}")
+      acc
+    end
   end
 
   defp parse_part("strategy:" <> strategy_str, acc) do
@@ -223,14 +235,14 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   end
 
   defp parse_part("tag=" <> tag, acc) do
-    tag_atom =
-      try do
-        String.to_existing_atom(tag)
-      rescue
-        ArgumentError -> String.to_atom(tag)
-      end
+    case SafeAtom.to_existing(tag) do
+      {:ok, tag_atom} ->
+        %{acc | requirements: [{:tag, tag_atom} | acc.requirements]}
 
-    %{acc | requirements: [{:tag, tag_atom} | acc.requirements]}
+      {:error, _} ->
+        Logger.warning("Placement: unknown tag #{inspect(tag)}, skipping")
+        acc
+    end
   end
 
   defp parse_part(unknown, acc) do
