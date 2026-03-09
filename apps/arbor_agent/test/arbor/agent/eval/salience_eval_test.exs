@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Eval.SalienceEvalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.ContextCompactor
   alias Arbor.Agent.Eval.{SalienceEval, SalienceTranscript}

@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.CircuitBreakerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.CircuitBreaker
 

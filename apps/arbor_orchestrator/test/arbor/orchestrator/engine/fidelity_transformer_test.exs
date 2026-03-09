@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.FidelityTransformerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.{Context, FidelityTransformer}
 

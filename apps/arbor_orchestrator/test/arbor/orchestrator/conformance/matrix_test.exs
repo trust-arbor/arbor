@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance.MatrixTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Conformance.Matrix
 

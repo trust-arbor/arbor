@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.Conformance42Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
   alias Arbor.Orchestrator.UnifiedLLM.{Request, StreamEvent}

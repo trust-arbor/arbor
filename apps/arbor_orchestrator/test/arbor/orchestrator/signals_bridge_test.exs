@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.SignalsBridgeTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Orchestrator.SignalsBridge
 

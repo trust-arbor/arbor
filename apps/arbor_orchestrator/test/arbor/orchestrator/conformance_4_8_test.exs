@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance48Test do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   test "4.8 wait_all returns partial_success when any branch fails" do
     dot = """

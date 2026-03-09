@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance49Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph.Node

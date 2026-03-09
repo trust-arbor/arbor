@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ProfileTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.{Character, Profile}
 

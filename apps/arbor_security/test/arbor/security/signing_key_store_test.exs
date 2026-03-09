@@ -1,5 +1,6 @@
 defmodule Arbor.Security.SigningKeyStoreTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Security.SigningKeyStore
 

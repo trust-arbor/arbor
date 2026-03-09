@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.FilterTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.Filter
 

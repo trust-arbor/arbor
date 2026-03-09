@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.ActionsExecutorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.ActionsExecutor
 

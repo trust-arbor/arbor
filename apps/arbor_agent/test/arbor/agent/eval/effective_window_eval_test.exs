@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Eval.EffectiveWindowEvalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.ContextCompactor
   alias Arbor.Agent.Eval.{EffectiveWindowEval, FactCorpus}

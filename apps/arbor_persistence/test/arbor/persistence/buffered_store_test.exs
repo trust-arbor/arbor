@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.BufferedStoreTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Contracts.Persistence.{Filter, Record}
   alias Arbor.Persistence.BufferedStore

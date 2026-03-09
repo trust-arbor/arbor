@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.TransformsTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node

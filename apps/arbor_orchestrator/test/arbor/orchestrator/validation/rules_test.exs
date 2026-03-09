@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Validation.RulesTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}

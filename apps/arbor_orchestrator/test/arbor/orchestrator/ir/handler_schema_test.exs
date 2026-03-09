@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.IR.HandlerSchema
 

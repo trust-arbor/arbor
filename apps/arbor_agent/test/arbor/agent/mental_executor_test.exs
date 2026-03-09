@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.MentalExecutorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.MentalExecutor
   alias Arbor.Contracts.Memory.{Intent, Percept}

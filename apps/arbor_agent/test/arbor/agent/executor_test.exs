@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ExecutorTest do
   use ExUnit.Case
+  @moduletag :fast
 
   alias Arbor.Agent.Executor
   alias Arbor.Contracts.Memory.Intent

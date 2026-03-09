@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Eval.CompactionEvalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.Eval.CompactionEval
 

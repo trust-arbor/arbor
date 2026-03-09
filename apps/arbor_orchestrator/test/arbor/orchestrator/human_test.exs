@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.HumanTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Human.{Question, RecordingInterviewer}
 

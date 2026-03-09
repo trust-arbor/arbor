@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.EventEmitterTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.EventEmitter
 

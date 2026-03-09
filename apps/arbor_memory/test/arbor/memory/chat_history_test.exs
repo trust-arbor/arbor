@@ -1,5 +1,6 @@
 defmodule Arbor.Memory.ChatHistoryTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Memory.ChatHistory
 

@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance1110Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Transforms.ModelStylesheet
 

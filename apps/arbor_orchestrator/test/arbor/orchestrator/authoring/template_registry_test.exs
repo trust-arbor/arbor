@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Authoring.TemplateRegistryTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Authoring.TemplateRegistry
 

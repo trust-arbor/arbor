@@ -1,5 +1,6 @@
 defmodule Arbor.Gateway.Dev.RouterTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
   import Plug.Test
   import Plug.Conn
 

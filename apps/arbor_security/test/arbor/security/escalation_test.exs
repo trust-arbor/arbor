@@ -1,5 +1,6 @@
 defmodule Arbor.Security.EscalationTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Security.Escalation
 

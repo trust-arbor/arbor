@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
   and fall back to inline implementation when registries are unavailable.
   """
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Common.{
     ComputeRegistry,

@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ToolBridgeTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.ToolBridge
   alias Arbor.AI.AgentSDK.ToolServer

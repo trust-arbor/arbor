@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.LifecycleTest do
   use ExUnit.Case
+  @moduletag :fast
 
   alias Arbor.Agent.{Character, Lifecycle, Profile}
 

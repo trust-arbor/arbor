@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.EventLog.ETSTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS

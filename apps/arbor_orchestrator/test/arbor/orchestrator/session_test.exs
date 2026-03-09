@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.SessionTest do
   - Exec action sets `"session.cognitive_mode"` → DOT uses `context.session.cognitive_mode`
   """
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator
   alias Arbor.Orchestrator.Engine

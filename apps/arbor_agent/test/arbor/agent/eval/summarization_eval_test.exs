@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Eval.SummarizationEvalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.Eval.CompactionEval
   alias Arbor.Agent.Eval.SummarizationEval

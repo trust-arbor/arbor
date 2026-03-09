@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
   alias Arbor.Orchestrator.UnifiedLLM.ProviderCatalog

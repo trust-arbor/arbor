@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.ToolHooksTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.ToolHooks
 

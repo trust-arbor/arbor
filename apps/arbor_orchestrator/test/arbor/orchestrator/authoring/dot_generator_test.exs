@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Authoring.DotGeneratorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Authoring.{Conversation, DotGenerator}
 

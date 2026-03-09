@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.EvalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Eval
   alias Arbor.Orchestrator.Eval.Graders.{Composite, Contains, ExactMatch, JsonValid, RegexMatch}

@@ -1,5 +1,6 @@
 defmodule Arbor.PersistenceTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence
   alias Arbor.Persistence.{Event, Filter, Record}

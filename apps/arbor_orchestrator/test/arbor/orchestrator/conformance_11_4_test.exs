@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance114Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "11.4 goal gate retries via retry_target until gate succeeds" do
     dot = """

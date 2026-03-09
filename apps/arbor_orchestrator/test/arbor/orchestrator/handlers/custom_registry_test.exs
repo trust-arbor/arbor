@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Handlers.CustomRegistryTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Handlers.Registry

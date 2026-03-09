@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   - Executor retry edge cases
   """
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.{Authorization, Condition, Context, Executor, Outcome, Router}

@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
   gets a fresh SignedRequest with the correct resource URI as payload.
   """
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Orchestrator.UnifiedLLM.{Message, Request, ToolLoop}

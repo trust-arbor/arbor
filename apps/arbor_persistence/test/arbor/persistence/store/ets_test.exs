@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.Store.ETSTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.Store.ETS
 

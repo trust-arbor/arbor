@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.{Authorization, Context, Outcome}
   alias Arbor.Orchestrator.Graph

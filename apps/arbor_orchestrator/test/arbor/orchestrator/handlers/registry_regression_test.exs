@@ -7,6 +7,7 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
   appropriate specialized handler based on injected attributes.
   """
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
