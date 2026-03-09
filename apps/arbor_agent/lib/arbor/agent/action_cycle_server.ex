@@ -479,15 +479,17 @@ defmodule Arbor.Agent.ActionCycleServer do
   end
 
   defp mind_model do
-    Application.get_env(:arbor_agent, :mind_model) ||
-      Application.get_env(:arbor_agent, :heartbeat_model) ||
-      "arcee-ai/trinity-large-preview:free"
+    Arbor.Agent.LLMDefaults.default_model(
+      agent_model_key: :mind_model,
+      fallback_key: :heartbeat_model
+    )
   end
 
   defp mind_provider do
-    Application.get_env(:arbor_agent, :mind_provider) ||
-      Application.get_env(:arbor_agent, :heartbeat_provider) ||
-      :openrouter
+    Arbor.Agent.LLMDefaults.default_provider(
+      agent_provider_key: :mind_provider,
+      fallback_key: :heartbeat_provider
+    )
   end
 
   # ── Helpers ─────────────────────────────────────────────────────

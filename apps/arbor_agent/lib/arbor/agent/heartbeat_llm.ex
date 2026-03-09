@@ -13,7 +13,7 @@ defmodule Arbor.Agent.HeartbeatLLM do
   for fast, lightweight heartbeat thinking without spawning CLI subprocesses.
   """
 
-  alias Arbor.Agent.{CognitivePrompts, Fitness, HeartbeatPrompt, HeartbeatResponse}
+  alias Arbor.Agent.{CognitivePrompts, Fitness, HeartbeatPrompt, HeartbeatResponse, LLMDefaults}
 
   require Logger
 
@@ -127,18 +127,14 @@ defmodule Arbor.Agent.HeartbeatLLM do
   end
 
   defp heartbeat_model do
-    Application.get_env(:arbor_agent, :heartbeat_model, "arcee-ai/trinity-large-preview:free")
+    LLMDefaults.default_model(agent_model_key: :heartbeat_model)
   end
 
   defp idle_heartbeat_model do
-    Application.get_env(
-      :arbor_agent,
-      :idle_heartbeat_model,
-      "arcee-ai/trinity-large-preview:free"
-    )
+    LLMDefaults.default_model(agent_model_key: :idle_heartbeat_model, fallback_key: :heartbeat_model)
   end
 
   defp heartbeat_provider do
-    Application.get_env(:arbor_agent, :heartbeat_provider, :openrouter)
+    LLMDefaults.default_provider(agent_provider_key: :heartbeat_provider)
   end
 end

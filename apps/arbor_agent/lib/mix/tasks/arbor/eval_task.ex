@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
     bug = parse_bug(opts[:bug])
     max_heartbeats = opts[:max_heartbeats] || 15
     reps = opts[:reps] || 1
-    model = opts[:model] || "arcee-ai/trinity-large-preview:free"
+    model = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
     provider = parse_provider(opts[:provider])
     council? = opts[:council] || false
     tag = opts[:tag]

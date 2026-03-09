@@ -28,11 +28,7 @@ defmodule Arbor.Agent.ResearchAgent do
 
   @template "researcher"
 
-  @default_model_config %{
-    backend: :api,
-    id: "arcee-ai/trinity-large-preview:free",
-    provider: :openrouter
-  }
+  # Resolved at runtime via LLMDefaults — see default_model_config/0
 
   @doc """
   Create and start a new Research agent.
@@ -49,7 +45,7 @@ defmodule Arbor.Agent.ResearchAgent do
   """
   @spec start(String.t(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def start(display_name, opts \\ []) do
-    model_config = Keyword.get(opts, :model_config, @default_model_config)
+    model_config = Keyword.get_lazy(opts, :model_config, &default_model_config/0)
 
     Manager.start_agent(
       model_config,
@@ -68,7 +64,7 @@ defmodule Arbor.Agent.ResearchAgent do
   """
   @spec start_or_resume(String.t(), keyword()) :: {:ok, String.t(), pid()} | {:error, term()}
   def start_or_resume(display_name, opts \\ []) do
-    model_config = Keyword.get(opts, :model_config, @default_model_config)
+    model_config = Keyword.get_lazy(opts, :model_config, &default_model_config/0)
 
     Manager.start_or_resume(
       APIAgent,
@@ -123,5 +119,13 @@ defmodule Arbor.Agent.ResearchAgent do
         (is_map(profile.metadata) and
            Map.get(profile.metadata, :template) == @template)
     end)
+  end
+
+  defp default_model_config do
+    %{
+      backend: :api,
+      id: Arbor.Agent.LLMDefaults.default_model(),
+      provider: Arbor.Agent.LLMDefaults.default_provider()
+    }
   end
 end
