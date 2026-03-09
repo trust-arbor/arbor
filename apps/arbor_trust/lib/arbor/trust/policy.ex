@@ -232,27 +232,6 @@ defmodule Arbor.Trust.Policy do
   end
 
   @doc """
-  **DEPRECATED**: Use `effective_mode/3` instead for authorization decisions.
-
-  Get the effective tier for an agent.
-
-  The effective tier is `min(behavioral_tier, policy_ceiling)`.
-  Retained for internal use by CapabilitySync and grant_tier_capabilities.
-
-  ## Examples
-
-      Policy.effective_tier("agent_123")
-      #=> {:ok, :trusted}
-  """
-  @spec effective_tier(String.t()) :: {:ok, TierResolver.trust_tier()} | {:error, term()}
-  def effective_tier(agent_id) do
-    with {:ok, behavioral_tier} <- get_behavioral_tier(agent_id),
-         ceiling <- get_policy_ceiling(agent_id) do
-      {:ok, min_tier(behavioral_tier, ceiling)}
-    end
-  end
-
-  @doc """
   Get the minimum tier required for a resource URI.
 
   Delegates to `CapabilityTemplates.min_tier_for_capability/1`.
@@ -448,26 +427,6 @@ defmodule Arbor.Trust.Policy do
       Arbor.Trust.get_trust_profile(agent_id)
     else
       {:error, :trust_unavailable}
-    end
-  end
-
-  defp get_behavioral_tier(agent_id) do
-    if trust_available?() do
-      Arbor.Trust.get_trust_tier(agent_id)
-    else
-      {:error, :trust_unavailable}
-    end
-  end
-
-  # Policy ceiling — not yet implemented (roadmap Phase 4: onboarding interview).
-  # Returns :autonomous (no ceiling) so effective_tier = behavioral_tier.
-  defp get_policy_ceiling(_agent_id), do: :autonomous
-
-  defp min_tier(behavioral, ceiling) do
-    if tier_index(behavioral) <= tier_index(ceiling) do
-      behavioral
-    else
-      ceiling
     end
   end
 
