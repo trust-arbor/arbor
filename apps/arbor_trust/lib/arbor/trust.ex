@@ -302,7 +302,7 @@ defmodule Arbor.Trust do
   # -- ConfirmationTracker (confirm-then-automate) --
 
   @doc "Record a successful approval for an agent's capability use."
-  @spec record_approval(String.t(), String.t()) :: :ok | {:graduated, atom()}
+  @spec record_approval(String.t(), String.t()) :: :ok | {:graduation_suggested, String.t()}
   defdelegate record_approval(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
 
   @doc "Record a rejection for an agent's capability use."
