@@ -1,5 +1,13 @@
 defmodule Arbor.Trust.TierResolver do
   @moduledoc """
+  **DEPRECATED**: Trust tiers are being replaced by URI-prefix trust profiles.
+
+  Use `Arbor.Trust.ProfileResolver` for trust mode resolution. This module
+  is retained for backward compatibility with internal callers (Manager,
+  Calculator, Decay, CapabilitySync) that still use score→tier mapping.
+
+  ---
+
   Pure functions for resolving trust tiers.
 
   This module handles the mapping between trust scores and capability tiers,

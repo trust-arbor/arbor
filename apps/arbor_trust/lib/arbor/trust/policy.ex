@@ -232,13 +232,12 @@ defmodule Arbor.Trust.Policy do
   end
 
   @doc """
+  **DEPRECATED**: Use `effective_mode/3` instead for authorization decisions.
+
   Get the effective tier for an agent.
 
   The effective tier is `min(behavioral_tier, policy_ceiling)`.
-
-  Note: With trust profiles, the tier is primarily used as a health
-  metric for capability provisioning. The `effective_mode/3` function
-  is the primary API for authorization decisions.
+  Retained for internal use by CapabilitySync and grant_tier_capabilities.
 
   ## Examples
 

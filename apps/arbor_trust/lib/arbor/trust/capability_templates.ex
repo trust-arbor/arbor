@@ -1,5 +1,13 @@
 defmodule Arbor.Trust.CapabilityTemplates do
   @moduledoc """
+  **DEPRECATED**: Capability grants are being replaced by profile-based rules.
+
+  Use `Arbor.Trust.ProfileResolver` presets for trust mode configuration.
+  This module is retained for backward compatibility with CapabilitySync
+  and Policy.grant_tier_capabilities which still use tier-based grants.
+
+  ---
+
   Capability templates for trust-tier-based capabilities.
 
   This module defines the capability sets available at each trust tier.
