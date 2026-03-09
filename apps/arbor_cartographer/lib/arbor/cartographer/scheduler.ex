@@ -45,8 +45,6 @@ defmodule Arbor.Cartographer.Scheduler do
   - `:round_robin` — distribute evenly (stateful, uses persistent_term)
   """
 
-  alias Arbor.Cartographer
-
   require Logger
 
   @type requirement ::
