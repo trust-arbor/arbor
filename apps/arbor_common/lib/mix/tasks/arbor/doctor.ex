@@ -98,7 +98,10 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
     case pick_best_provider(ready) do
       nil ->
-        Mix.shell().info("  No LLM providers available. Add an API key to .env or start a local model.")
+        Mix.shell().info(
+          "  No LLM providers available. Add an API key to .env or start a local model."
+        )
+
         Mix.shell().info("")
 
       {provider_str, provider_atom, model} ->

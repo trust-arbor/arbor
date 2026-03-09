@@ -131,7 +131,10 @@ defmodule Arbor.Agent.HeartbeatLLM do
   end
 
   defp idle_heartbeat_model do
-    LLMDefaults.default_model(agent_model_key: :idle_heartbeat_model, fallback_key: :heartbeat_model)
+    LLMDefaults.default_model(
+      agent_model_key: :idle_heartbeat_model,
+      fallback_key: :heartbeat_model
+    )
   end
 
   defp heartbeat_provider do
