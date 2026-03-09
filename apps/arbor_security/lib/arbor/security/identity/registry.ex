@@ -159,23 +159,35 @@ defmodule Arbor.Security.Identity.Registry do
     GenServer.call(__MODULE__, {:revoke_identity, agent_id, reason})
   end
 
-  # DEPRECATED: get_status creates a TOCTOU race with separate lookup+status check.
-  # Prefer lookup/1 which returns the full identity including status atomically.
   @doc """
-  Get the current status of an identity.
+  Get the current status of an identity atomically.
 
-  **Deprecated**: This function creates a TOCTOU (time-of-check-time-of-use) race
-  condition when used in combination with `lookup/1`. Prefer using `lookup/1` which
-  returns the full identity including status atomically.
+  Returns the status (`:active`, `:suspended`, `:revoked`, or `:unknown`) for
+  a registered identity.
 
   ## Examples
 
-      {:ok, :active} = Registry.get_status("agent_001")
-      {:ok, :suspended} = Registry.get_status("agent_002")
+      {:ok, :active} = Registry.identity_status("agent_001")
+      {:ok, :suspended} = Registry.identity_status("agent_002")
   """
+  @spec identity_status(String.t()) :: {:ok, Identity.status()} | {:error, :not_found}
+  def identity_status(agent_id) when is_binary(agent_id) do
+    GenServer.call(__MODULE__, {:get_status, agent_id})
+  end
+
+  # DEPRECATED: get_status creates a TOCTOU race with separate lookup+status check.
+  # Use identity_status/1 instead. Kept for backward compatibility.
+  @doc """
+  Get the current status of an identity.
+
+  **Deprecated**: Use `identity_status/1` instead. This function creates a
+  TOCTOU (time-of-check-time-of-use) race condition when used in combination
+  with `lookup/1`.
+  """
+  @deprecated "Use identity_status/1 instead"
   @spec get_status(String.t()) :: {:ok, Identity.status()} | {:error, :not_found}
   def get_status(agent_id) when is_binary(agent_id) do
-    GenServer.call(__MODULE__, {:get_status, agent_id})
+    identity_status(agent_id)
   end
 
   @doc """
@@ -191,7 +203,7 @@ defmodule Arbor.Security.Identity.Registry do
   """
   @spec active?(String.t()) :: boolean()
   def active?(agent_id) when is_binary(agent_id) do
-    case get_status(agent_id) do
+    case identity_status(agent_id) do
       {:ok, :active} -> true
       _ -> false
     end

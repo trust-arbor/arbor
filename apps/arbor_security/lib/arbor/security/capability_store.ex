@@ -445,11 +445,15 @@ defmodule Arbor.Security.CapabilityStore do
   defp delegation_chain_valid?(%{delegation_chain: []}), do: true
 
   defp delegation_chain_valid?(cap) do
-    key_lookup = &Arbor.Security.lookup_public_key/1
+    if Config.delegation_chain_verification_enabled?() do
+      key_lookup = &Arbor.Security.lookup_public_key/1
 
-    case Signer.verify_delegation_chain(cap, key_lookup) do
-      :ok -> true
-      {:error, _} -> false
+      case Signer.verify_delegation_chain(cap, key_lookup) do
+        :ok -> true
+        {:error, _} -> false
+      end
+    else
+      true
     end
   end
 

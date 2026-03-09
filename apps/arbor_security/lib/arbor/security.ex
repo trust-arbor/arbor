@@ -374,7 +374,7 @@ defmodule Arbor.Security do
   """
   @spec identity_status(String.t()) :: {:ok, Identity.status()} | {:error, :not_found}
   def identity_status(agent_id) do
-    Registry.get_status(agent_id)
+    Registry.identity_status(agent_id)
   end
 
   @doc """
@@ -744,7 +744,7 @@ defmodule Arbor.Security do
   # In permissive mode (default for dev/test), unknown identities proceed to
   # capability check. In strict mode (production), unknown identities are rejected.
   defp check_identity_status(principal_id) do
-    case Registry.get_status(principal_id) do
+    case Registry.identity_status(principal_id) do
       {:ok, :active} ->
         :ok
 
