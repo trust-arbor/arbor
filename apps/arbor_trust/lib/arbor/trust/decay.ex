@@ -33,7 +33,7 @@ defmodule Arbor.Trust.Decay do
 
   alias Arbor.Contracts.Trust.{Event, Profile}
   alias Arbor.Signals
-  alias Arbor.Trust.{Config, Store, TierResolver}
+  alias Arbor.Trust.{Config, Store}
 
   require Logger
 
@@ -92,7 +92,7 @@ defmodule Arbor.Trust.Decay do
       decay_days = days_inactive - grace_period
       decay_amount = decay_days * decay_rate
       new_score = max(floor, profile.trust_score - decay_amount)
-      new_tier = TierResolver.resolve(new_score)
+      new_tier = Config.resolve_tier(new_score)
 
       %{profile | trust_score: new_score, tier: new_tier}
     else

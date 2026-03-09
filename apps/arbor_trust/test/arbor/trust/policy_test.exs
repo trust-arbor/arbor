@@ -12,7 +12,7 @@ defmodule Arbor.Trust.PolicyTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Trust.Policy
-  alias Arbor.Trust.CapabilityTemplates
+  alias Arbor.Trust.Config
 
   @moduletag :fast
 
@@ -291,13 +291,13 @@ defmodule Arbor.Trust.PolicyTest do
     setup :start_infrastructure
 
     test "grants all untrusted capabilities", %{agent_id: agent_id} do
-      expected_count = length(CapabilityTemplates.capabilities_for_tier(:untrusted))
+      expected_count = length(Config.capabilities_for_tier(:untrusted))
       {:ok, granted} = Policy.grant_tier_capabilities(agent_id, :untrusted)
       assert granted == expected_count
     end
 
     test "grants all trusted capabilities", %{agent_id: agent_id} do
-      expected_count = length(CapabilityTemplates.capabilities_for_tier(:trusted))
+      expected_count = length(Config.capabilities_for_tier(:trusted))
       {:ok, granted} = Policy.grant_tier_capabilities(agent_id, :trusted)
       assert granted == expected_count
     end
@@ -353,7 +353,7 @@ defmodule Arbor.Trust.PolicyTest do
 
       # Should have trusted-tier capabilities now
       {:ok, new_caps} = Arbor.Security.list_capabilities(agent_id)
-      expected_count = length(CapabilityTemplates.capabilities_for_tier(:trusted))
+      expected_count = length(Config.capabilities_for_tier(:trusted))
       assert length(new_caps) == expected_count
     end
 
@@ -481,28 +481,6 @@ defmodule Arbor.Trust.PolicyTest do
     else
       start_supervised!({module, opts})
     end
-  end
-
-  defp create_profile_at_tier(agent_id, tier) do
-    # Create profile (starts at untrusted with cautious preset rules)
-    case Arbor.Trust.create_trust_profile(agent_id) do
-      {:ok, _} -> :ok
-      {:error, :already_exists} -> :ok
-    end
-
-    # Set the tier directly via Store for testing
-    score =
-      case tier do
-        :untrusted -> 0
-        :probationary -> 25
-        :trusted -> 60
-        :veteran -> 80
-        :autonomous -> 95
-      end
-
-    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-      %{profile | tier: tier, trust_score: score}
-    end)
   end
 
   defp create_profile_with_preset(agent_id, preset_name) do

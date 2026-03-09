@@ -2,7 +2,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Trust.CapabilitySync
-  alias Arbor.Trust.CapabilityTemplates
+  alias Arbor.Trust.Config
   alias Arbor.Trust.Manager, as: Manager
 
   @moduletag :fast
@@ -566,7 +566,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
   describe "ensure_agent_prefix logic (tested via generate_capabilities)" do
     test "agent IDs with prefix are preserved in generated capabilities" do
-      caps = CapabilityTemplates.generate_capabilities("agent_foo", :untrusted)
+      caps = Config.generate_capabilities("agent_foo", :untrusted)
 
       for cap <- caps do
         assert cap.principal_id == "agent_foo"
@@ -575,7 +575,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "agent IDs without prefix still work in generated capabilities" do
-      caps = CapabilityTemplates.generate_capabilities("raw_id", :untrusted)
+      caps = Config.generate_capabilities("raw_id", :untrusted)
 
       for cap <- caps do
         assert cap.principal_id == "raw_id"
