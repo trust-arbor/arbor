@@ -56,8 +56,11 @@ defmodule Arbor.Cartographer.ClusterKeeper do
     # Monitor node connections/disconnections
     :net_kernel.monitor_nodes(true, node_type: :visible)
 
-    # Seed with currently connected nodes
-    known = MapSet.new(Node.list())
+    # Seed with currently connected nodes (excluding ephemeral mix task nodes)
+    known =
+      Node.list()
+      |> Enum.reject(&ephemeral_node?/1)
+      |> MapSet.new()
 
     schedule_reconnect(interval)
 
@@ -92,8 +95,12 @@ defmodule Arbor.Cartographer.ClusterKeeper do
 
   @impl true
   def handle_info({:nodeup, node, _info}, state) do
-    Logger.info("ClusterKeeper: node connected — #{node}")
-    {:noreply, %{state | known: MapSet.put(state.known, node)}}
+    if ephemeral_node?(node) do
+      {:noreply, state}
+    else
+      Logger.info("ClusterKeeper: node connected — #{node}")
+      {:noreply, %{state | known: MapSet.put(state.known, node)}}
+    end
   end
 
   @impl true
@@ -132,5 +139,9 @@ defmodule Arbor.Cartographer.ClusterKeeper do
 
   defp schedule_reconnect(interval) do
     Process.send_after(self(), :reconnect, interval)
+  end
+
+  defp ephemeral_node?(node) do
+    node |> Atom.to_string() |> String.starts_with?("arbor_mix_")
   end
 end
