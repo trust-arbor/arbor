@@ -93,8 +93,8 @@ defmodule Arbor.Orchestrator.Engine.PlacementTest do
     end
 
     test "returns error for unreachable explicit node" do
-      parsed = %{requirements: [], strategy: :first_match, node: :"nonexistent@nowhere"}
-      assert {:error, {:node_unreachable, :"nonexistent@nowhere"}} == Placement.resolve(parsed)
+      parsed = %{requirements: [], strategy: :first_match, node: :nonexistent@nowhere}
+      assert {:error, {:node_unreachable, :nonexistent@nowhere}} == Placement.resolve(parsed)
     end
 
     test "resolves requirements to local node when no scheduler available" do
