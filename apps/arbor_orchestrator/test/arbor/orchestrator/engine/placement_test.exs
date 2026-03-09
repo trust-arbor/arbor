@@ -46,9 +46,16 @@ defmodule Arbor.Orchestrator.Engine.PlacementTest do
       assert {:arch, :x86_64} in parsed.requirements
     end
 
-    test "parses tag requirement" do
+    test "parses tag requirement for existing atoms" do
+      # Ensure atom exists before parsing
+      _ = :re_tools
       parsed = Placement.parse("tag=re_tools")
       assert {:tag, :re_tools} in parsed.requirements
+    end
+
+    test "skips tag requirement for unknown atoms" do
+      parsed = Placement.parse("tag=nonexistent_tag_xyz_#{System.unique_integer()}")
+      assert parsed.requirements == []
     end
 
     test "parses explicit node" do

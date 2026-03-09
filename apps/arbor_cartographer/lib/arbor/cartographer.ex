@@ -439,15 +439,15 @@ defmodule Arbor.Cartographer do
     # Verify the target node has the required capabilities
     case get_node_capabilities(node_id) do
       {:ok, caps} ->
-        unless Enum.all?(needs, fn need -> need in caps.tags end) do
-          {:error, {:missing_capabilities, needs -- caps.tags}}
-        else
+        if Enum.all?(needs, fn need -> need in caps.tags end) do
           # Start the agent on the remote node
           case :rpc.call(node_id, agent_module, :start_link, [args], 15_000) do
             {:ok, pid} -> {:ok, pid}
             {:error, reason} -> {:error, reason}
             {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
           end
+        else
+          {:error, {:missing_capabilities, needs -- caps.tags}}
         end
 
       {:error, :not_found} ->
