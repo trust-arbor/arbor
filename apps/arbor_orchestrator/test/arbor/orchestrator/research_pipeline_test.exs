@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Handlers.CodergenHandler
+  alias Arbor.Orchestrator.Handlers.LlmHandler
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
 
   @moduletag :fast
@@ -119,9 +119,9 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
     end
   end
 
-  describe "CodergenHandler tool resolution" do
+  describe "LlmHandler tool resolution" do
     test "codergen with tools attr uses ArborActionsExecutor" do
-      # Simulate what CodergenHandler does with a tools attr
+      # Simulate what LlmHandler does with a tools attr
       node =
         make_node("research", %{
           "type" => "codergen",
@@ -135,7 +135,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
 
       # In simulate mode, the handler won't call the LLM but we can verify
       # it produces a simulated response
-      result = CodergenHandler.execute(node, context, graph, [])
+      result = LlmHandler.execute(node, context, graph, [])
       assert %Outcome{status: :success} = result
     end
 
@@ -150,7 +150,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
       graph = make_graph([node])
       context = Context.new()
 
-      result = CodergenHandler.execute(node, context, graph, [])
+      result = LlmHandler.execute(node, context, graph, [])
       assert %Outcome{status: :success} = result
     end
 
@@ -166,7 +166,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
       graph = make_graph([node])
       context = Context.new()
 
-      result = CodergenHandler.execute(node, context, graph, [])
+      result = LlmHandler.execute(node, context, graph, [])
       assert %Outcome{status: :success} = result
     end
   end

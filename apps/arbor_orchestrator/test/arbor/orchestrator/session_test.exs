@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.SessionTest do
 
   Session DOT graphs use three core handler types:
   - `exec target="action"` — Jido Actions via ExecHandler (classify, recall, etc.)
-  - `compute` — LLM calls via CodergenHandler (with internal ToolLoop when use_tools="true")
+  - `compute` — LLM calls via LlmHandler (with internal ToolLoop when use_tools="true")
   - `transform` — pure data transforms (format, copy context keys)
 
   External dependencies (LLM, memory, tools) are implemented as Jido Actions

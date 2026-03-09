@@ -126,7 +126,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       authorization: false
     ]
 
-    # Pass signer to engine so CodergenHandler/ExecHandler can use it for tool calls
+    # Pass signer to engine so LlmHandler/ExecHandler can use it for tool calls
     if state.signer do
       Keyword.put(opts, :signer, state.signer)
     else
