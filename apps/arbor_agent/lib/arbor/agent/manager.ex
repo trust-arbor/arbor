@@ -53,7 +53,7 @@ defmodule Arbor.Agent.Manager do
                __MODULE__,
                :start_agent,
                [model_config, opts],
-               30_000
+               60_000
              ) do
           {:ok, agent_id, pid} ->
             Logger.info("Agent #{agent_id} started on remote node #{target_node}")
