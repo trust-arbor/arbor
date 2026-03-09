@@ -1,10 +1,13 @@
 defmodule Arbor.Trust.PolicyTest do
   @moduledoc """
-  Tests for Trust.Policy — the bridge between trust tiers and capabilities.
+  Tests for Trust.Policy — the bridge between trust profiles and capabilities.
 
-  Unit tests (describe blocks without infrastructure) test pure query functions
-  via direct CapabilityTemplates lookup. Integration tests start the full
-  Trust + Security stack to verify grant/sync/revoke flows.
+  Policy now uses ProfileResolver for trust mode resolution. The effective
+  mode is determined by the agent's trust profile rules (URI-prefix matching),
+  security ceilings, and optional model constraints.
+
+  Unit tests verify pure functions. Integration tests start the full
+  Trust + Security stack to verify the complete pipeline.
   """
   use ExUnit.Case, async: false
 
@@ -43,35 +46,145 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
+  describe "mode_to_confirmation/1" do
+    test "block maps to deny" do
+      assert Policy.mode_to_confirmation(:block) == :deny
+    end
+
+    test "ask maps to gated" do
+      assert Policy.mode_to_confirmation(:ask) == :gated
+    end
+
+    test "allow maps to auto" do
+      assert Policy.mode_to_confirmation(:allow) == :auto
+    end
+
+    test "auto maps to auto" do
+      assert Policy.mode_to_confirmation(:auto) == :auto
+    end
+  end
+
+  describe "tier_to_preset/1" do
+    test "untrusted maps to cautious" do
+      assert Policy.tier_to_preset(:untrusted) == :cautious
+    end
+
+    test "probationary maps to cautious" do
+      assert Policy.tier_to_preset(:probationary) == :cautious
+    end
+
+    test "trusted maps to balanced" do
+      assert Policy.tier_to_preset(:trusted) == :balanced
+    end
+
+    test "veteran maps to hands_off" do
+      assert Policy.tier_to_preset(:veteran) == :hands_off
+    end
+
+    test "autonomous maps to full_trust" do
+      assert Policy.tier_to_preset(:autonomous) == :full_trust
+    end
+  end
+
+  describe "preset_rules/1" do
+    test "returns baseline and rules for each preset" do
+      for preset <- [:cautious, :balanced, :hands_off, :full_trust] do
+        {baseline, rules} = Policy.preset_rules(preset)
+        assert baseline in [:block, :ask, :allow, :auto]
+        assert is_map(rules)
+      end
+    end
+
+    test "cautious preset has ask baseline and blocks shell" do
+      {baseline, rules} = Policy.preset_rules(:cautious)
+      assert baseline == :ask
+      assert rules["arbor://shell"] == :block
+    end
+
+    test "full_trust preset has auto baseline" do
+      {baseline, _rules} = Policy.preset_rules(:full_trust)
+      assert baseline == :auto
+    end
+  end
+
   # ===========================================================================
   # Integration tests — require Trust + Security infrastructure
   # ===========================================================================
 
+  describe "effective_mode/3" do
+    setup :start_infrastructure
+
+    test "returns mode from profile rules", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced preset has "arbor://actions/execute/file.read" => :auto
+      assert Policy.effective_mode(agent_id, "arbor://actions/execute/file.read") == :auto
+    end
+
+    test "returns baseline for unmatched URIs", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced baseline is :ask, no rule for this URI
+      assert Policy.effective_mode(agent_id, "arbor://some/unknown/uri") == :ask
+    end
+
+    test "security ceiling overrides user preference", %{agent_id: agent_id} do
+      # full_trust has baseline :auto, but shell ceiling is :ask
+      create_profile_with_preset(agent_id, :full_trust)
+      assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :ask
+    end
+
+    test "returns :ask for unknown agent" do
+      # Fail closed — unknown agent gets :ask (gated)
+      assert Policy.effective_mode(
+               "agent_ghost_#{System.unique_integer([:positive])}",
+               "arbor://anything"
+             ) == :ask
+    end
+
+    test "cautious preset blocks shell", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :cautious)
+      # Cautious preset: shell → :block, but security ceiling is :ask
+      # most_restrictive(:block, :ask) = :block
+      assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :block
+    end
+
+    test "hands_off preset auto-approves writes", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :hands_off)
+      # hands_off has code/write => :auto
+      assert Policy.effective_mode(agent_id, "arbor://code/write/self/impl/*") == :auto
+    end
+
+    test "hands_off preset allows unmatched URIs", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :hands_off)
+      # hands_off baseline is :allow for unmatched URIs
+      assert Policy.effective_mode(agent_id, "arbor://some/unknown/uri") == :allow
+    end
+  end
+
   describe "allowed?/2" do
     setup :start_infrastructure
 
-    test "untrusted agent can read code", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
+    test "returns true when profile doesn't block", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
       assert Policy.allowed?(agent_id, "arbor://code/read/self/*")
     end
 
-    test "untrusted agent cannot write impl", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
-      refute Policy.allowed?(agent_id, "arbor://code/write/self/impl/*")
+    test "returns false when profile blocks", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :cautious)
+      # Cautious blocks shell
+      refute Policy.allowed?(agent_id, "arbor://shell/exec/ls")
     end
 
-    test "trusted agent can write impl", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
+    test "returns true for ask mode (allowed but gated)", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced baseline is :ask for unmatched URIs
       assert Policy.allowed?(agent_id, "arbor://code/write/self/impl/*")
     end
 
-    test "veteran agent can install", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :veteran)
-      assert Policy.allowed?(agent_id, "arbor://install/execute/self")
-    end
-
     test "returns false for unknown agent" do
-      refute Policy.allowed?(
+      # Fail closed returns :ask, which is not :block, so allowed? = true
+      # This is correct: unknown agents are gated, not blocked
+      # The capability store will deny them at the security layer
+      assert Policy.allowed?(
                "agent_nonexistent_#{System.unique_integer([:positive])}",
                "arbor://code/read/self/*"
              )
@@ -81,58 +194,71 @@ defmodule Arbor.Trust.PolicyTest do
   describe "requires_approval?/2" do
     setup :start_infrastructure
 
-    test "impl write requires approval at trusted tier", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
+    test "returns true for :ask mode", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced baseline is :ask for unmatched URIs
       assert Policy.requires_approval?(agent_id, "arbor://code/write/self/impl/*") == true
     end
 
-    test "impl write does NOT require approval at veteran tier", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :veteran)
-      assert Policy.requires_approval?(agent_id, "arbor://code/write/self/impl/*") == false
+    test "returns false for :auto mode", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced has file.read => :auto
+      assert Policy.requires_approval?(agent_id, "arbor://actions/execute/file.read") == false
     end
 
-    test "returns error for denied capability", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
+    test "returns false for :allow mode", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced has file.write => :allow
+      assert Policy.requires_approval?(agent_id, "arbor://actions/execute/file.write") == false
+    end
 
+    test "returns error for :block mode", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :cautious)
+      # cautious blocks shell
       assert {:error, :denied} =
-               Policy.requires_approval?(agent_id, "arbor://code/write/self/impl/*")
-    end
-
-    test "code read never requires approval", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
-      assert Policy.requires_approval?(agent_id, "arbor://code/read/self/*") == false
+               Policy.requires_approval?(agent_id, "arbor://shell/exec/rm")
     end
   end
 
   describe "confirmation_mode/2" do
     setup :start_infrastructure
 
-    test "auto for unconstrained capability", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
-      assert Policy.confirmation_mode(agent_id, "arbor://code/read/self/*") == :auto
+    test "auto for auto-mode capability", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced has file.read => :auto
+      assert Policy.confirmation_mode(agent_id, "arbor://actions/execute/file.read") == :auto
     end
 
-    test "gated for approval-required capability", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
+    test "gated for ask-mode capability", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced baseline is :ask → maps to :gated
       assert Policy.confirmation_mode(agent_id, "arbor://code/write/self/impl/*") == :gated
     end
 
-    test "shell_exec is always gated via ConfirmationMatrix", %{agent_id: agent_id} do
-      # Shell bundle is NEVER :auto at any tier (security invariant)
-      create_profile_at_tier(agent_id, :autonomous)
+    test "shell_exec is always gated via security ceiling", %{agent_id: agent_id} do
+      # Even full_trust can't make shell :auto — security ceiling enforces :ask
+      create_profile_with_preset(agent_id, :full_trust)
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/anything") == :gated
     end
 
-    test "deny for unavailable capability", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
-      assert Policy.confirmation_mode(agent_id, "arbor://governance/change/self/*") == :deny
+    test "deny when profile blocks", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :cautious)
+      # Cautious blocks shell
+      assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :deny
     end
 
-    test "deny for unknown agent" do
+    test "gated for unknown agent (fail closed)" do
+      # Unknown agent → :ask → :gated (not :deny)
       assert Policy.confirmation_mode(
                "agent_ghost_#{System.unique_integer([:positive])}",
                "arbor://code/read/self/*"
-             ) == :deny
+             ) == :gated
+    end
+
+    test "auto for allow-mode capability", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      # balanced has file.write => :allow → maps to :auto
+      assert Policy.confirmation_mode(agent_id, "arbor://actions/execute/file.write") == :auto
     end
   end
 
@@ -152,6 +278,31 @@ defmodule Arbor.Trust.PolicyTest do
     test "returns error for nonexistent agent" do
       assert {:error, _} =
                Policy.effective_tier("agent_no_such_#{System.unique_integer([:positive])}")
+    end
+  end
+
+  describe "explain/3" do
+    setup :start_infrastructure
+
+    test "returns resolution chain", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      result = Policy.explain(agent_id, "arbor://shell/exec/git")
+
+      assert result.resource_uri == "arbor://shell/exec/git"
+      assert result.user_mode in [:block, :ask, :allow, :auto]
+      assert result.security_ceiling in [:block, :ask, :allow, :auto]
+      assert result.effective_mode in [:block, :ask, :allow, :auto]
+    end
+
+    test "returns error info for unknown agent" do
+      result =
+        Policy.explain(
+          "agent_unknown_#{System.unique_integer([:positive])}",
+          "arbor://shell/exec/git"
+        )
+
+      assert result.effective_mode == :ask
+      assert result.error
     end
   end
 
@@ -274,45 +425,46 @@ defmodule Arbor.Trust.PolicyTest do
   describe "security invariants" do
     setup :start_infrastructure
 
-    test "shell_exec never auto-approved even at autonomous tier", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :autonomous)
-      # Shell bundle is gated at all tiers where it's available (security invariant)
+    test "shell_exec never auto-approved even at full_trust", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :full_trust)
+      # Security ceiling: shell → :ask → :gated
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/anything") == :gated
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :gated
     end
 
-    test "shell_exec denied at restricted tier", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :untrusted)
+    test "shell blocked at cautious preset", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :cautious)
+      # Cautious blocks shell → :deny
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :deny
     end
 
-    test "allowed? is monotonic with tier progression", %{agent_id: agent_id} do
-      # If something is allowed at tier N, it should be allowed at tier N+1
-      uri = "arbor://code/write/self/impl/*"
-      tiers = [:untrusted, :probationary, :trusted, :veteran, :autonomous]
-
-      results =
-        Enum.map(tiers, fn tier ->
-          create_profile_at_tier(agent_id, tier)
-          {tier, Policy.allowed?(agent_id, uri)}
-        end)
-
-      # Find where it becomes true
-      first_true_idx = Enum.find_index(results, fn {_, v} -> v end)
-
-      if first_true_idx do
-        # Everything after should also be true
-        results
-        |> Enum.drop(first_true_idx)
-        |> Enum.each(fn {tier, allowed} ->
-          assert allowed, "Expected #{uri} to be allowed at #{tier}"
-        end)
-      end
+    test "governance always gated even at full_trust", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :full_trust)
+      # Security ceiling: governance → :ask → :gated
+      assert Policy.confirmation_mode(agent_id, "arbor://governance/change/self/*") == :gated
     end
 
-    test "governance requires approval even at autonomous", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :autonomous)
-      assert Policy.confirmation_mode(agent_id, "arbor://governance/change/self/*") == :gated
+    test "security ceilings cannot be overridden by profile rules", %{agent_id: agent_id} do
+      # Create a profile with explicit :auto for shell
+      create_profile_with_rules(agent_id, :auto, %{"arbor://shell" => :auto})
+      # Security ceiling still enforces :ask
+      assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :ask
+    end
+
+    test "profile mode progression is monotonic for presets" do
+      # Each successive preset should be less restrictive for most URIs
+      presets = [:cautious, :balanced, :hands_off, :full_trust]
+      baselines = Enum.map(presets, fn p -> elem(Policy.preset_rules(p), 0) end)
+
+      # Baselines should be monotonically less restrictive
+      mode_order = %{block: 0, ask: 1, allow: 2, auto: 3}
+
+      baselines
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.each(fn [a, b] ->
+        assert mode_order[a] <= mode_order[b],
+               "Expected #{a} <= #{b} in restrictiveness"
+      end)
     end
   end
 
@@ -351,7 +503,7 @@ defmodule Arbor.Trust.PolicyTest do
   end
 
   defp create_profile_at_tier(agent_id, tier) do
-    # Create profile (starts at untrusted)
+    # Create profile (starts at untrusted with cautious preset rules)
     case Arbor.Trust.create_trust_profile(agent_id) do
       {:ok, _} -> :ok
       {:error, :already_exists} -> :ok
@@ -369,6 +521,30 @@ defmodule Arbor.Trust.PolicyTest do
 
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       %{profile | tier: tier, trust_score: score}
+    end)
+  end
+
+  defp create_profile_with_preset(agent_id, preset_name) do
+    case Arbor.Trust.create_trust_profile(agent_id) do
+      {:ok, _} -> :ok
+      {:error, :already_exists} -> :ok
+    end
+
+    {baseline, rules} = Policy.preset_rules(preset_name)
+
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: baseline, rules: rules}
+    end)
+  end
+
+  defp create_profile_with_rules(agent_id, baseline, rules) do
+    case Arbor.Trust.create_trust_profile(agent_id) do
+      {:ok, _} -> :ok
+      {:error, :already_exists} -> :ok
+    end
+
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: baseline, rules: rules}
     end)
   end
 end

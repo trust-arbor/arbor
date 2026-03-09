@@ -219,10 +219,15 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
-        "arbor://shell" => :block,
+        # Reads are frictionless
+        "arbor://code/read" => :auto,
         "arbor://actions/execute/file.read" => :auto,
         "arbor://actions/execute/code.read" => :auto,
-        "arbor://historian/query" => :auto
+        "arbor://historian/query" => :auto,
+        # Writes blocked (too risky for cautious users)
+        "arbor://code/write" => :block,
+        # Shell blocked
+        "arbor://shell" => :block
       }
     }
   end
@@ -231,10 +236,15 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
+        # Reads are frictionless
+        "arbor://code/read" => :auto,
         "arbor://actions/execute/file.read" => :auto,
         "arbor://actions/execute/code.read" => :auto,
-        "arbor://actions/execute/file.write" => :allow,
         "arbor://historian/query" => :auto,
+        # Writes are gated
+        "arbor://code/write" => :ask,
+        "arbor://actions/execute/file.write" => :allow,
+        # Shell gated for specific commands
         "arbor://shell/exec/git" => :ask
       }
     }
@@ -244,6 +254,10 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :allow,
       rules: %{
+        # Reads and writes are automatic
+        "arbor://code/read" => :auto,
+        "arbor://code/write" => :auto,
+        # Shell and governance always gated
         "arbor://shell" => :ask,
         "arbor://governance" => :ask
       }
@@ -254,6 +268,7 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :auto,
       rules: %{
+        # Shell and governance always gated (security ceiling)
         "arbor://shell" => :ask,
         "arbor://governance" => :ask
       }
