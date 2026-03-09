@@ -28,6 +28,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
           class: String.t() | nil,
           fan_out: boolean(),
           simulate: String.t() | nil,
+          placement: String.t() | nil,
           # IR compilation fields (nil/empty until Compiler.compile/1 enriches them)
           handler_module: module() | nil,
           handler_schema: HandlerSchema.t() | nil,
@@ -59,6 +60,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
             class: nil,
             fan_out: false,
             simulate: nil,
+            placement: nil,
             handler_module: nil,
             handler_schema: nil,
             capabilities_required: [],
@@ -69,7 +71,7 @@ defmodule Arbor.Orchestrator.Graph.Node do
 
   @known_attrs ~w(shape type prompt label goal_gate max_retries retry_target
     fallback_retry_target timeout llm_model llm_provider reasoning_effort
-    allow_partial content_hash fidelity class fan_out simulate)
+    allow_partial content_hash fidelity class fan_out simulate placement)
 
   @doc "List of attribute keys that have typed struct fields."
   @spec known_attrs() :: [String.t()]
@@ -99,7 +101,8 @@ defmodule Arbor.Orchestrator.Graph.Node do
       fidelity: Map.get(attrs, "fidelity"),
       class: Map.get(attrs, "class"),
       fan_out: truthy?(Map.get(attrs, "fan_out", false)),
-      simulate: Map.get(attrs, "simulate")
+      simulate: Map.get(attrs, "simulate"),
+      placement: Map.get(attrs, "placement")
     }
   end
 
