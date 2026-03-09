@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   `mix arbor.doctor --configure` picks the best available provider and writes
   `ARBOR_DEFAULT_PROVIDER` and `ARBOR_DEFAULT_MODEL` to your `.env` file.
 
-  Priority: Anthropic > OpenAI > Gemini > xAI > OpenRouter > Ollama > LM Studio
+  Priority: Anthropic > OpenAI > Gemini > xAI > OpenRouter > ACP > Ollama > LM Studio
 
   Model selection uses LLMDB to find the best available model for the chosen
   provider (requires chat capability). Falls back to hardcoded defaults if
@@ -43,6 +43,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     {"gemini", :gemini, :google},
     {"xai", :xai, :xai},
     {"open_router", :openrouter, :openrouter},
+    {"acp", :acp, :acp},
     {"ollama", :ollama, :ollama_cloud},
     {"lm_studio", :lmstudio, :lmstudio}
   ]
@@ -54,6 +55,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     google: "gemini-2.5-flash",
     xai: "grok-3-mini",
     openrouter: "arcee-ai/trinity-large-preview:free",
+    acp: "claude",
     ollama_cloud: "llama3.2",
     lmstudio: "default"
   }
@@ -140,6 +142,23 @@ defmodule Mix.Tasks.Arbor.Doctor do
         {catalog_key, config_atom, model}
       end
     end)
+  end
+
+  # ACP "model" is the agent name, not an LLMDB model.
+  # Pick best detected CLI agent by quality priority.
+  @acp_agent_priority ~w(claude gemini codex goose aider opencode cline)
+
+  defp select_best_model(:acp, :acp) do
+    acp_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
+
+    agents =
+      if Code.ensure_loaded?(acp_mod) and function_exported?(acp_mod, :detected_agents, 0) do
+        apply(acp_mod, :detected_agents, [])
+      else
+        []
+      end
+
+    Enum.find(@acp_agent_priority, "claude", fn agent -> agent in agents end)
   end
 
   # Use LLMDB to find the best model for a provider.
@@ -255,6 +274,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
         "  #{pad(entry.display_name, 18)} #{pad("ready", 10)} #{pad(type_label(entry.type), 7)} #{flag(caps.streaming, 8)} #{flag(caps.thinking, 7)} #{flag(caps.tool_calls, 7)} #{flag(caps.vision, 7)}"
       )
 
+      if entry.provider == "acp", do: print_acp_agents()
       if opts[:verbose], do: print_check_details(entry)
     end
 
@@ -282,6 +302,21 @@ defmodule Mix.Tasks.Arbor.Doctor do
     end
 
     Mix.shell().info("")
+  end
+
+  defp print_acp_agents do
+    acp_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
+
+    agents =
+      if Code.ensure_loaded?(acp_mod) and function_exported?(acp_mod, :detected_agents, 0) do
+        apply(acp_mod, :detected_agents, [])
+      else
+        []
+      end
+
+    if agents != [] do
+      Mix.shell().info("    Detected agents: #{Enum.join(agents, ", ")}")
+    end
   end
 
   defp print_check_details(entry) do
