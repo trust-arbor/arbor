@@ -7,7 +7,7 @@ defmodule Arbor.Common.ComputeRegistry do
 
   ## Core Entries (locked at boot)
 
-      "llm"     → CodergenHandler
+      "llm"     → LlmHandler
       "routing"  → RoutingHandler
 
   Phase 2 will wrap these in proper `Computable` behaviour implementations

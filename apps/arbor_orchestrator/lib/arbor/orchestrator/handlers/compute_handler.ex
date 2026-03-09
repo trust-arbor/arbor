@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   Dispatches by `purpose` attribute via ComputeRegistry. Falls back to
   inline implementation when the registry is unavailable.
 
-    - `"llm"` (default) — delegates to CodergenHandler
+    - `"llm"` (default) — delegates to LlmHandler
     - `"routing"` — delegates to RoutingHandler
 
   ## Node Attributes
@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
   alias Arbor.Orchestrator.Engine.Outcome
-  alias Arbor.Orchestrator.Handlers.CodergenHandler
+  alias Arbor.Orchestrator.Handlers.LlmHandler
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -42,7 +42,7 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
   defp legacy_dispatch(purpose, node, context, graph, opts) do
     case purpose do
       "llm" ->
-        CodergenHandler.execute(node, context, graph, opts)
+        LlmHandler.execute(node, context, graph, opts)
 
       "routing" ->
         delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)

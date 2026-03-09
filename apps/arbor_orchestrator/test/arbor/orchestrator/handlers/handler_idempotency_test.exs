@@ -5,7 +5,7 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
 
   alias Arbor.Orchestrator.Handlers.{
     BranchHandler,
-    CodergenHandler,
+    LlmHandler,
     ExitHandler,
     FanInHandler,
     FileWriteHandler,
@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
 
   @idempotent_handlers [StartHandler, ExitHandler, BranchHandler]
   @read_only_handlers [PipelineValidateHandler]
-  @idempotent_with_key_handlers [FileWriteHandler, CodergenHandler]
+  @idempotent_with_key_handlers [FileWriteHandler, LlmHandler]
   @side_effecting_handlers [
     ToolHandler,
     PipelineRunHandler,
