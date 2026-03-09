@@ -101,7 +101,9 @@ defmodule Arbor.Agent.SimpleAgent do
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(task, opts \\ []) do
-    provider = Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+    provider =
+      Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+
     model = Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end)
     max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
     working_dir = Keyword.get(opts, :working_dir, File.cwd!())

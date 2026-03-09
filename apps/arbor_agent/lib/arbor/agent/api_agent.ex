@@ -122,7 +122,8 @@ defmodule Arbor.Agent.APIAgent do
     host_state = %{
       # Query model config
       model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
-      provider: Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end),
+      provider:
+        Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end),
       max_tokens: config.max_tokens,
       temperature: config.temperature,
       max_turns: config.max_turns

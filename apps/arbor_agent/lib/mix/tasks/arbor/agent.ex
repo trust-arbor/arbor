@@ -157,7 +157,9 @@ defmodule Mix.Tasks.Arbor.Agent do
           opts[:name] || get_in(template_data, ["character", "name"]) || template_name
 
         model_id = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
-        provider = parse_provider(opts[:provider] || to_string(Arbor.Agent.LLMDefaults.default_provider()))
+
+        provider =
+          parse_provider(opts[:provider] || to_string(Arbor.Agent.LLMDefaults.default_provider()))
 
         model_config = %{
           id: model_id,
