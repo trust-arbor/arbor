@@ -291,14 +291,6 @@ defmodule Arbor.Trust do
           {:ok, non_neg_integer()} | {:error, term()}
   defdelegate grant_tier_capabilities(agent_id, tier), to: Arbor.Trust.Policy
 
-  @doc "Resolve a capability URI to its action bundle."
-  @spec resolve_bundle(String.t()) :: atom() | nil
-  defdelegate resolve_bundle(resource_uri), to: Arbor.Trust.ConfirmationMatrix
-
-  @doc "Look up confirmation mode for a bundle at a policy tier."
-  @spec matrix_lookup(atom(), atom()) :: :auto | :gated | :deny
-  defdelegate matrix_lookup(bundle, policy_tier), to: Arbor.Trust.ConfirmationMatrix, as: :lookup
-
   # -- ConfirmationTracker (confirm-then-automate) --
 
   @doc "Record a successful approval for an agent's capability use."

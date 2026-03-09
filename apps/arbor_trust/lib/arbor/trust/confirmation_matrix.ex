@@ -1,5 +1,14 @@
 defmodule Arbor.Trust.ConfirmationMatrix do
   @moduledoc """
+  **DEPRECATED**: Use `Arbor.Trust.ProfileResolver` instead.
+
+  This module is retained for backward compatibility with internal callers
+  (CapabilitySync, Policy.grant_tier_capabilities). New code should use
+  `ProfileResolver.effective_mode/3` which resolves trust modes via
+  URI-prefix rules instead of bundle×tier matrix lookups.
+
+  ---
+
   Declarative policy matrix: `(bundle, tier) → :auto | :gated | :deny`.
 
   The ConfirmationMatrix determines how capability requests are handled
