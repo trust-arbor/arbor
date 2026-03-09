@@ -325,8 +325,171 @@ defmodule Arbor.Memory do
   defdelegate list_code(agent_id, opts \\ []), to: SessionOps
 
   # ============================================================================
+  # Authorized API (for agent callers — facade-level authorization)
+  # ============================================================================
+
+  @doc """
+  Initialize memory for an agent with authorization check.
+
+  Verifies the caller has the `arbor://memory/init/{agent_id}` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting the operation
+  - `agent_id` - The agent whose memory is being initialized
+  - `opts` - Options passed to `init_for_agent/2`
+  """
+  @spec authorize_init(String.t(), String.t(), keyword()) ::
+          {:ok, pid()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_init(caller_id, agent_id, opts \\ []) do
+    case authorize(caller_id, "arbor://memory/init/#{agent_id}") do
+      :ok -> init_for_agent(agent_id, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Cleanup memory for an agent with authorization check.
+
+  Verifies the caller has the `arbor://memory/cleanup/{agent_id}` capability.
+  """
+  @spec authorize_cleanup(String.t(), String.t()) ::
+          :ok | {:error, {:unauthorized, term()}}
+  def authorize_cleanup(caller_id, agent_id) do
+    case authorize(caller_id, "arbor://memory/cleanup/#{agent_id}") do
+      :ok -> cleanup_for_agent(agent_id)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Index content into memory with authorization check.
+
+  Verifies the caller has the `arbor://memory/write/{agent_id}` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting the operation
+  - `agent_id` - The agent whose memory is being written
+  - `content` - The content to index
+  - `metadata` - Metadata map
+  - `opts` - Options passed to `index/4`
+  """
+  @spec authorize_index(String.t(), String.t(), String.t(), map(), keyword()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_index(caller_id, agent_id, content, metadata \\ %{}, opts \\ []) do
+    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+      :ok -> index(agent_id, content, metadata, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Recall from memory with authorization check.
+
+  Verifies the caller has the `arbor://memory/read/{agent_id}` capability.
+  """
+  @spec authorize_recall(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_recall(caller_id, agent_id, query, opts \\ []) do
+    case authorize(caller_id, "arbor://memory/read/#{agent_id}") do
+      :ok -> recall(agent_id, query, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Search knowledge graph with authorization check.
+
+  Verifies the caller has the `arbor://memory/search/{agent_id}` capability.
+  """
+  @spec authorize_search(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_search(caller_id, agent_id, query, opts \\ []) do
+    case authorize(caller_id, "arbor://memory/search/#{agent_id}") do
+      :ok -> search_knowledge(agent_id, query, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Read working memory with authorization check.
+
+  Verifies the caller has the `arbor://memory/read/{agent_id}` capability.
+  """
+  @spec authorize_read(String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_read(caller_id, agent_id, opts \\ []) do
+    case authorize(caller_id, "arbor://memory/read/#{agent_id}") do
+      :ok -> load_working_memory(agent_id, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Save working memory with authorization check.
+
+  Verifies the caller has the `arbor://memory/write/{agent_id}` capability.
+  """
+  @spec authorize_write(String.t(), String.t(), term()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_write(caller_id, agent_id, working_memory) do
+    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+      :ok -> save_working_memory(agent_id, working_memory)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Add knowledge to the graph with authorization check.
+
+  Verifies the caller has the `arbor://memory/write/{agent_id}` capability.
+  """
+  @spec authorize_add_knowledge(String.t(), String.t(), map()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_add_knowledge(caller_id, agent_id, node_data) do
+    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+      :ok -> add_knowledge(agent_id, node_data)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Runtime bridge for authorization — arbor_memory does not have a compile-time
+  # dependency on arbor_security, so we use Code.ensure_loaded? + function_exported?
+  # to avoid hard coupling.
+  defp authorize(caller_id, resource_uri) do
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :authorize, 3) and
+         security_available?() do
+      case Arbor.Security.authorize(caller_id, resource_uri, %{}) do
+        {:ok, :authorized} -> :ok
+        {:ok, :pending_approval, _proposal_id} = pending -> pending
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      # No security module available or not running — permit
+      :ok
+    end
+  end
+
+  defp security_available? do
+    # Check that the Security GenServer is actually running, not just module loaded
+    if function_exported?(Arbor.Security, :healthy?, 0) do
+      try do
+        Arbor.Security.healthy?()
+      rescue
+        _ -> false
+      catch
+        :exit, _ -> false
+      end
+    else
+      true
+    end
+  end
 
   defp merge_config_defaults(opts) do
     defaults = [

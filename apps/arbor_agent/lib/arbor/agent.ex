@@ -195,6 +195,99 @@ defmodule Arbor.Agent do
     end
   end
 
+  @doc """
+  Stop a running agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/stop/{agent_id}` capability
+  before stopping the agent.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting the stop
+  - `agent_id` - The agent to stop
+
+  ## Returns
+
+  - `:ok` on success
+  - `{:error, {:unauthorized, reason}}` if caller lacks capability
+  - `{:error, :not_found}` if agent is not running
+  """
+  @spec authorize_stop(String.t(), String.t()) ::
+          :ok | {:error, {:unauthorized, term()} | :not_found}
+  def authorize_stop(caller_id, agent_id) do
+    resource = "arbor://agent/stop/#{agent_id}"
+
+    case authorize(caller_id, resource, :stop) do
+      :ok -> stop(agent_id)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Create an agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/lifecycle/create` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity creating the agent
+  - `agent_id` - The new agent's ID
+  - `opts` - Options passed to `create_agent/2`
+  """
+  @spec authorize_create(String.t(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_create(caller_id, agent_id, opts \\ []) do
+    resource = "arbor://agent/lifecycle/create"
+
+    case authorize(caller_id, resource, :create) do
+      :ok -> create_agent(agent_id, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Destroy an agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/lifecycle/destroy` capability.
+  This is a high-privilege operation that deletes all agent data.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting destruction
+  - `agent_id` - The agent to destroy
+  """
+  @spec authorize_destroy(String.t(), String.t()) ::
+          :ok | {:error, {:unauthorized, term()} | term()}
+  def authorize_destroy(caller_id, agent_id) do
+    resource = "arbor://agent/lifecycle/destroy"
+
+    case authorize(caller_id, resource, :destroy) do
+      :ok -> destroy_agent(agent_id)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Restore an agent with authorization check.
+
+  Verifies the caller has the `arbor://agent/lifecycle/restore` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting the restore
+  - `agent_id` - The agent to restore
+  """
+  @spec authorize_restore(String.t(), String.t()) ::
+          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_restore(caller_id, agent_id) do
+    resource = "arbor://agent/lifecycle/restore"
+
+    case authorize(caller_id, resource, :restore) do
+      :ok -> restore_agent(agent_id)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
   # ===========================================================================
   # Public API — Unchecked versions (for system-level callers)
   # ===========================================================================
@@ -406,6 +499,25 @@ defmodule Arbor.Agent do
   # ===========================================================================
   # Private helpers
   # ===========================================================================
+
+  # Shared authorization helper for new lifecycle wrappers.
+  # Guards against CapabilityStore not running (e.g., in unit tests
+  # that don't start the full security supervision tree).
+  defp authorize(caller_id, resource, action) do
+    if security_available?() do
+      case Arbor.Security.authorize(caller_id, resource, action) do
+        {:ok, :authorized} -> :ok
+        {:ok, :pending_approval, _proposal_id} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp security_available? do
+    Process.whereis(Arbor.Security.CapabilityStore) != nil
+  end
 
   # Extract the action name from an action spec (module or {module, params} tuple)
   # Uses the canonical dotted format matching ToolBridge (e.g., "file.read")

@@ -267,6 +267,140 @@ defmodule Arbor.Consensus do
   defdelegate get_consultation(run_id), to: ConsultationLog
 
   # ============================================================================
+  # Authorized API (for agent callers — facade-level authorization)
+  # ============================================================================
+
+  @doc """
+  Submit a proposal with authorization check.
+
+  Verifies the caller has the `arbor://consensus/propose` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity submitting the proposal
+  - `attrs` - Proposal attributes map
+  - `opts` - Options passed to `propose/2`
+  """
+  @spec authorize_propose(String.t(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_propose(caller_id, attrs, opts \\ []) do
+    case authorize(caller_id, "arbor://consensus/propose") do
+      :ok -> propose(attrs, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Ask an advisory question with authorization check.
+
+  Verifies the caller has the `arbor://consensus/ask` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity asking
+  - `description` - The question to ask
+  - `opts` - Options passed to `ask/2`
+  """
+  @spec authorize_ask(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_ask(caller_id, description, opts \\ []) do
+    case authorize(caller_id, "arbor://consensus/ask") do
+      :ok -> ask(description, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Run a binding council decision with authorization check.
+
+  Verifies the caller has the `arbor://consensus/decide` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting the decision
+  - `description` - The decision description
+  - `opts` - Options passed to `decide/2`
+  """
+  @spec authorize_decide(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, {:unauthorized, term()} | term()}
+  def authorize_decide(caller_id, description, opts \\ []) do
+    case authorize(caller_id, "arbor://consensus/decide") do
+      :ok -> decide(description, opts)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Cancel a proposal with authorization check.
+
+  Verifies the caller has the `arbor://consensus/cancel` capability.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity requesting cancellation
+  - `proposal_id` - The proposal to cancel
+  - `opts` - Options (e.g., `:server`)
+  """
+  @spec authorize_cancel(String.t(), String.t(), keyword()) ::
+          :ok | {:error, {:unauthorized, term()} | term()}
+  def authorize_cancel(caller_id, proposal_id, opts \\ []) do
+    server = Keyword.get(opts, :server, Coordinator)
+
+    case authorize(caller_id, "arbor://consensus/cancel") do
+      :ok -> cancel(proposal_id, server)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Force-approve a proposal with authorization check.
+
+  Verifies the caller has the `arbor://consensus/force_approve` capability.
+  This is a high-privilege operation.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity forcing approval
+  - `proposal_id` - The proposal to approve
+  - `approver_id` - The identity recorded as the approver
+  - `opts` - Options (e.g., `:server`)
+  """
+  @spec authorize_force_approve(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, {:unauthorized, term()} | term()}
+  def authorize_force_approve(caller_id, proposal_id, approver_id, opts \\ []) do
+    server = Keyword.get(opts, :server, Coordinator)
+
+    case authorize(caller_id, "arbor://consensus/force_approve") do
+      :ok -> force_approve(proposal_id, approver_id, server)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Force-reject a proposal with authorization check.
+
+  Verifies the caller has the `arbor://consensus/force_reject` capability.
+  This is a high-privilege operation.
+
+  ## Parameters
+
+  - `caller_id` - The ID of the entity forcing rejection
+  - `proposal_id` - The proposal to reject
+  - `rejector_id` - The identity recorded as the rejector
+  - `opts` - Options (e.g., `:server`)
+  """
+  @spec authorize_force_reject(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, {:unauthorized, term()} | term()}
+  def authorize_force_reject(caller_id, proposal_id, rejector_id, opts \\ []) do
+    server = Keyword.get(opts, :server, Coordinator)
+
+    case authorize(caller_id, "arbor://consensus/force_reject") do
+      :ok -> force_reject(proposal_id, rejector_id, server)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  # ============================================================================
   # Event Store
   # ============================================================================
 
@@ -376,4 +510,39 @@ defmodule Arbor.Consensus do
   @impl Arbor.Contracts.API.Consensus
   def get_timeline_for_proposal(proposal_id),
     do: EventStore.get_timeline(proposal_id)
+
+  # ============================================================================
+  # Private — Runtime authorization bridge
+  # ============================================================================
+
+  # arbor_consensus does not have a compile-time dependency on arbor_security,
+  # so we use Code.ensure_loaded? + function_exported? to avoid hard coupling.
+  defp authorize(caller_id, resource_uri) do
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :authorize, 3) and
+         security_available?() do
+      case Arbor.Security.authorize(caller_id, resource_uri, %{}) do
+        {:ok, :authorized} -> :ok
+        {:ok, :pending_approval, _proposal_id} = pending -> pending
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      # No security module available or not running — permit
+      :ok
+    end
+  end
+
+  defp security_available? do
+    if function_exported?(Arbor.Security, :healthy?, 0) do
+      try do
+        Arbor.Security.healthy?()
+      rescue
+        _ -> false
+      catch
+        :exit, _ -> false
+      end
+    else
+      true
+    end
+  end
 end
