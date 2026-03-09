@@ -6,7 +6,9 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   and exception-based retry decisions.
   """
 
-  alias Arbor.Orchestrator.Engine.{Authorization, Backoff, Outcome}
+  require Logger
+
+  alias Arbor.Orchestrator.Engine.{Authorization, Backoff, Outcome, Placement}
   alias Arbor.Orchestrator.Event
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Handlers.Registry
@@ -17,6 +19,72 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   @doc false
   def execute_with_retry(node, context, graph, retries, opts) do
+    case resolve_placement(node, opts) do
+      {:remote, target_node, handler} ->
+        # Execute on remote node — placement resolution succeeded
+        outcome = Placement.remote_execute(target_node, handler, node, context, graph, opts)
+        {outcome, retries}
+
+      :local ->
+        # Normal local execution path
+        do_local_execute_with_retry(node, context, graph, retries, opts)
+
+      {:error, reason} ->
+        # Placement resolution failed
+        outcome = %Outcome{
+          status: :fail,
+          failure_reason: "placement failed: #{inspect(reason)}"
+        }
+
+        {outcome, retries}
+    end
+  end
+
+  defp resolve_placement(node, opts) do
+    placement_str = node.placement || Map.get(node.attrs, "placement")
+
+    case Placement.parse(placement_str) do
+      nil ->
+        :local
+
+      parsed ->
+        case Placement.resolve(parsed) do
+          nil ->
+            :local
+
+          {:ok, target_node} ->
+            if target_node == Node.self() do
+              :local
+            else
+              {handler, _node} = resolve_handler(node)
+
+              if is_atom(handler) do
+                {:remote, target_node, handler}
+              else
+                Logger.warning(
+                  "Placement: node #{node.id} resolved to #{target_node} but handler " <>
+                    "is a function — functions can't be RPC'd. Executing locally."
+                )
+
+                :local
+              end
+            end
+
+          {:error, reason} ->
+            if Keyword.get(opts, :placement_required, false) do
+              {:error, reason}
+            else
+              Logger.warning(
+                "Placement: node #{node.id} failed to resolve (#{inspect(reason)}), executing locally"
+              )
+
+              :local
+            end
+        end
+    end
+  end
+
+  defp do_local_execute_with_retry(node, context, graph, retries, opts) do
     {handler, node} = resolve_handler(node)
     max_attempts = parse_max_attempts(node, graph)
     current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
