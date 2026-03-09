@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.ValidationTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "flags unreachable nodes" do
     dot = """

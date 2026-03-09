@@ -1,5 +1,6 @@
 defmodule Arbor.Security.InvocationReceiptIntegrationTest do
   use ExUnit.Case
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Security.SystemAuthority

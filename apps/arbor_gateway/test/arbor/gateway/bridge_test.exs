@@ -1,5 +1,6 @@
 defmodule Arbor.Gateway.BridgeTest do
   use ExUnit.Case
+  @moduletag :fast
 
   alias Arbor.Gateway.Bridge.ClaudeSession
 

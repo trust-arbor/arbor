@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance411Test do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   test "4.11 manager succeeds when child reports completed success" do
     dot = """

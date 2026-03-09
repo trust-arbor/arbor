@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.BootstrapTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Agent.{Bootstrap, Character, Manager, Profile, ProfileStore}
   alias Arbor.Persistence.BufferedStore

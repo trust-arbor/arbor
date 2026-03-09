@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance37Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "3.7 fail-edge condition wins over retry_target and fallback_retry_target" do
     dot = """

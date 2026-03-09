@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.EngineTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "runs a minimal pipeline and writes checkpoint" do
     dot = """

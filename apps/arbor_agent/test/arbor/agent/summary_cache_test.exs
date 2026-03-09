@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.SummaryCacheTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Agent.SummaryCache
 

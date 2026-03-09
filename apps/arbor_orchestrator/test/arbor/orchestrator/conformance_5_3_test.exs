@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance53Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "5.3 checkpoint captures node progress, context, retry counters, and outcomes" do
     dot = """

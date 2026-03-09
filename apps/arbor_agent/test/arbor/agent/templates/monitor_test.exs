@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Templates.MonitorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.Character
   alias Arbor.Agent.Templates.Monitor

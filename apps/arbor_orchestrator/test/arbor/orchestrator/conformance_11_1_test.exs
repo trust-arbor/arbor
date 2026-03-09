@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance111Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Dot.Parser
 

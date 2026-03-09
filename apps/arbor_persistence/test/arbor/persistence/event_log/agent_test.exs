@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.EventLog.AgentTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Agent, as: ELAgent

@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance96Test do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   test "9.6 emits pipeline, stage, parallel, interview, and checkpoint events" do
     dot = """

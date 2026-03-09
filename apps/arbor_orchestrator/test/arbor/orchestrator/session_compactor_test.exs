@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
   5. Sessions without a compactor behave unchanged
   """
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Session.Builders
 

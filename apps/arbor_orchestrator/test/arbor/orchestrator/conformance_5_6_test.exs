@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance56Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "5.6 run directory has manifest, checkpoint, node stage files, and artifacts dir" do
     dot = """

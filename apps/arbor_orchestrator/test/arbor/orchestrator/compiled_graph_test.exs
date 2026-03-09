@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.CompiledGraphTest do
   - Transforms preserve compiled state
   """
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator
   alias Arbor.Orchestrator.DotCache

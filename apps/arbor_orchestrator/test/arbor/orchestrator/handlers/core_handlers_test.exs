@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph

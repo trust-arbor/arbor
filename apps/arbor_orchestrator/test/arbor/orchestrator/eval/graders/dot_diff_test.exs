@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Eval.Graders.DotDiffTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Eval.Graders.DotDiff
 

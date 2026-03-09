@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Dot.DurationTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Dot.Duration
 

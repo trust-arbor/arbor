@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
   alias Arbor.Orchestrator.UnifiedLLM.CodingTools

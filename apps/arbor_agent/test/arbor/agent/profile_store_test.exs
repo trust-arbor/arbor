@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ProfileStoreTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Agent.{Character, Profile, ProfileStore}
   alias Arbor.Persistence.BufferedStore

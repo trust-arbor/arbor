@@ -1,5 +1,6 @@
 defmodule Arbor.Security.SystemAuthorityTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.Identity.Registry

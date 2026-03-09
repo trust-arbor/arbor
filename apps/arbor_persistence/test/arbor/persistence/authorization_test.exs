@@ -11,6 +11,7 @@ defmodule Arbor.Persistence.AuthorizationTest do
   """
 
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Persistence
   alias Arbor.Persistence.Event

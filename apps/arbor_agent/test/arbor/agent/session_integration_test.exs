@@ -6,6 +6,7 @@ defmodule Arbor.Agent.SessionIntegrationTest do
   Full session integration tests live in arbor_orchestrator's test suite.
   """
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   setup do
     original_mode = Application.get_env(:arbor_agent, :session_execution_mode)

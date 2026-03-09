@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Conformance115Test do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   test "11.5 retries RETRY outcomes up to max_retries then returns fail" do
     dot = """

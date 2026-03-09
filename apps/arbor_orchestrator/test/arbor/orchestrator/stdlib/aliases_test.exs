@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Stdlib.AliasesTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Stdlib.Aliases
 

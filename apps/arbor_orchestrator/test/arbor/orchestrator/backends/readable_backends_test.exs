@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Backends.ReadableBackendsTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Contracts.Handler.ScopedContext
   alias Arbor.Orchestrator.Backends.{ContextReadable, FileReadable}

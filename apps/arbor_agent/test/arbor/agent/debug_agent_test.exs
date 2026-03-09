@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.DiagnosticianTemplateTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.Templates.Diagnostician
 

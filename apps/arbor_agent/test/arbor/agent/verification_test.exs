@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.VerificationTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.Verification
 

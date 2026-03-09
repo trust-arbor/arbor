@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Dotgen.NLSpecGeneratorTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Dotgen.NLSpecGenerator
 

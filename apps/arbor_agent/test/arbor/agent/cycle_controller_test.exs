@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.CycleControllerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.CycleController
   alias Arbor.Contracts.Memory.{Intent, Percept}

@@ -1,5 +1,6 @@
 defmodule Arbor.Security.ReflexTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.Reflex, as: ReflexContract
   alias Arbor.Security.Reflex

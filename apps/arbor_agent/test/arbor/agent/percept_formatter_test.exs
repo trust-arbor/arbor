@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.PerceptFormatterTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.PerceptFormatter
   alias Arbor.Contracts.Memory.{Intent, Percept}

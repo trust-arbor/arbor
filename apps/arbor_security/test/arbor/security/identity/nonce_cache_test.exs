@@ -1,5 +1,6 @@
 defmodule Arbor.Security.Identity.NonceCacheTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Security.Identity.NonceCache
 

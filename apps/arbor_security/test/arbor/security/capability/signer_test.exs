@@ -1,5 +1,6 @@
 defmodule Arbor.Security.Capability.SignerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity

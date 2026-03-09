@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.ArtifactStoreTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.ArtifactStore
 

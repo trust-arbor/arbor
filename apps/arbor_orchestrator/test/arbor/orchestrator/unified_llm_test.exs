@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.UnifiedLLMTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.{
     Client,

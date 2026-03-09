@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph

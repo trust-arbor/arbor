@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Authoring.ConversationTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Authoring.Conversation
 

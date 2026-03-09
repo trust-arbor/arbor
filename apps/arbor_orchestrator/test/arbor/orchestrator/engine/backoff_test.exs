@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.BackoffTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.Backoff
 

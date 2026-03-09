@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ContextManagerTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Agent.ContextManager
   alias Arbor.Memory

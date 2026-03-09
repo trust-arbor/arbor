@@ -1,5 +1,6 @@
 defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Gateway.MCP.{ActionBridge, AgentEndpoint, EndpointRegistry}
 

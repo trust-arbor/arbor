@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.QueryableStore.ETSTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.{Filter, Record}
   alias Arbor.Persistence.QueryableStore.ETS

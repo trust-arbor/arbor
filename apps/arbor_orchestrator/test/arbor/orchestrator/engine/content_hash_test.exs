@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.ContentHashTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.{ContentHash, Context}
   alias Arbor.Orchestrator.Graph.Node

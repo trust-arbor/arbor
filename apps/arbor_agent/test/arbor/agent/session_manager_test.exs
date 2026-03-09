@@ -12,6 +12,7 @@ defmodule Arbor.Agent.SessionManagerTest do
   arbor_orchestrator's test suite (session_manager_integration_test.exs).
   """
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Agent.SessionManager
 

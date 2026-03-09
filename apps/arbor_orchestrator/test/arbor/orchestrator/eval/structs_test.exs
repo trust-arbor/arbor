@@ -1,5 +1,6 @@
 defmodule Arbor.Orchestrator.Eval.StructsTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Orchestrator.Eval.{EvalResult, Sample}
 

@@ -1,5 +1,6 @@
 defmodule Arbor.Security.CapabilityStoreTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore

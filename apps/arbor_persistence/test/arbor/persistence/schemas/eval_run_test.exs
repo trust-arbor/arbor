@@ -1,5 +1,6 @@
 defmodule Arbor.Persistence.Schemas.EvalRunTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Persistence.Schemas.EvalRun
 

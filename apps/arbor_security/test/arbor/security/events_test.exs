@@ -2,6 +2,7 @@
 # apply/3 needed to start ETS backend without compile-time dependency on arbor_persistence
 defmodule Arbor.Security.EventsTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Security.Events
 

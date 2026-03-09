@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.SeedTest do
   use ExUnit.Case, async: false
+  @moduletag :fast
 
   alias Arbor.Agent.Seed
   alias Arbor.Contracts.Memory.Goal

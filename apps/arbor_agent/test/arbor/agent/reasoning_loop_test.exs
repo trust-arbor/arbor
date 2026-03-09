@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.ReasoningLoopTest do
   use ExUnit.Case
+  @moduletag :fast
 
   alias Arbor.Agent.ReasoningLoop
   alias Arbor.Contracts.Memory.Intent
