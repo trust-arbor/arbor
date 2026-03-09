@@ -1,5 +1,6 @@
 defmodule Arbor.ActionsTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Actions
 

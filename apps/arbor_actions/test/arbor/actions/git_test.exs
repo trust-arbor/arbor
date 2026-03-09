@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.GitTest do
   use Arbor.Actions.ActionCase, async: false
+  @moduletag :fast
 
   alias Arbor.Actions.Git
 

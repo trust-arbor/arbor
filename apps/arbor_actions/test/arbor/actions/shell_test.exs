@@ -1,5 +1,6 @@
 defmodule Arbor.Actions.ShellTest do
   use Arbor.Actions.ActionCase, async: false
+  @moduletag :fast
 
   alias Arbor.Actions.Shell
 

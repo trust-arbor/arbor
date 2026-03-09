@@ -1,5 +1,6 @@
 defmodule Arbor.Common.Sanitizers.PathTraversalTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
 
   alias Arbor.Common.Sanitizers.PathTraversal
   alias Arbor.Contracts.Security.Taint
