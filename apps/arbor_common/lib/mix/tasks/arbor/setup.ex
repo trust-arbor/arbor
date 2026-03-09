@@ -389,6 +389,9 @@ defmodule Mix.Tasks.Arbor.Setup do
         mix phx.server        # Or start interactively
         open http://localhost:4001  # Dashboard
 
+      Configure LLM:
+        mix arbor.doctor --configure  # Auto-detect and set default LLM
+
       Optional:
         Add API keys to .env for LLM access
         See .env.example for all available settings

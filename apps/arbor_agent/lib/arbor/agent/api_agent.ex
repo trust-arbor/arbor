@@ -121,8 +121,8 @@ defmodule Arbor.Agent.APIAgent do
     # Host-specific state
     host_state = %{
       # Query model config
-      model: Keyword.get(opts, :model, "arcee-ai/trinity-large-preview:free"),
-      provider: Keyword.get(opts, :provider, :openrouter),
+      model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
+      provider: Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end),
       max_tokens: config.max_tokens,
       temperature: config.temperature,
       max_turns: config.max_turns

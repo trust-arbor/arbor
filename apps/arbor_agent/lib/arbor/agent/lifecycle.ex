@@ -427,8 +427,8 @@ defmodule Arbor.Agent.Lifecycle do
         id: agent_id,
         name: {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:host, agent_id}}},
         display_name: profile.display_name || agent_id,
-        model: Keyword.get(opts, :model, "arcee-ai/trinity-large-preview:free"),
-        provider: Keyword.get(opts, :provider, :openrouter)
+        model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
+        provider: Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
       ]
 
       case APIAgent.start_link(host_opts) do

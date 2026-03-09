@@ -156,8 +156,8 @@ defmodule Mix.Tasks.Arbor.Agent do
         display_name =
           opts[:name] || get_in(template_data, ["character", "name"]) || template_name
 
-        model_id = opts[:model] || "arcee-ai/trinity-large-preview:free"
-        provider = parse_provider(opts[:provider] || "openrouter")
+        model_id = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
+        provider = parse_provider(opts[:provider] || to_string(Arbor.Agent.LLMDefaults.default_provider()))
 
         model_config = %{
           id: model_id,

@@ -534,9 +534,9 @@ defmodule Arbor.Agent.Manager do
 
   defp default_model_config do
     %{
-      id: "arcee-ai/trinity-large-preview:free",
-      label: "Trinity Large",
-      provider: :openrouter,
+      id: Arbor.Agent.LLMDefaults.default_model(),
+      label: "Default",
+      provider: Arbor.Agent.LLMDefaults.default_provider(),
       backend: :api,
       module: Arbor.Agent.APIAgent,
       start_opts: []

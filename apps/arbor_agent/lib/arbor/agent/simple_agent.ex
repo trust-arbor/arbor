@@ -25,8 +25,6 @@ defmodule Arbor.Agent.SimpleAgent do
 
   require Logger
 
-  @default_model "arcee-ai/trinity-large-preview:free"
-  @default_provider :openrouter
   @default_max_turns 25
   @max_result_length 4000
 
@@ -103,8 +101,8 @@ defmodule Arbor.Agent.SimpleAgent do
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(task, opts \\ []) do
-    provider = Keyword.get(opts, :provider, @default_provider)
-    model = Keyword.get(opts, :model, @default_model)
+    provider = Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+    model = Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end)
     max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
     working_dir = Keyword.get(opts, :working_dir, File.cwd!())
     agent_id = Keyword.get(opts, :agent_id, "system")
