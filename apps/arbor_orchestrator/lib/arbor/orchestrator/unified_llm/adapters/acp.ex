@@ -28,6 +28,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   @default_agent :claude
   @default_timeout 120_000
 
+  # Known ACP agent names for safe atom conversion.
+  # Prevents atom exhaustion from arbitrary user input.
+  @known_agents ~w(claude gemini codex goose opencode aider cline)
+
   # Runtime bridge targets (arbor_ai is Standalone)
   @pool_mod Arbor.AI.AcpPool
   @session_mod Arbor.AI.AcpSession
@@ -84,12 +88,24 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   def runtime_contract do
     alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
 
+    # Only include detected agents as cli_tools so RuntimeContract.check passes
+    # when at least one agent is installed (empty list = :skipped = pass).
+    found = detected_agents()
+
+    cli_tools =
+      if found == [] do
+        # No agents found — include one required tool to trigger failure with hint
+        [%{name: "claude", install_hint: "npm i -g @anthropic-ai/claude-code"}]
+      else
+        Enum.map(found, fn agent -> %{name: agent, install_hint: install_hint(agent)} end)
+      end
+
     {:ok, contract} =
       RuntimeContract.new(
         provider: "acp",
-        display_name: "ACP (Agent Communication Protocol)",
+        display_name: "ACP (CLI Agents)",
         type: :cli,
-        cli_tools: [],
+        cli_tools: cli_tools,
         capabilities:
           Capabilities.new(
             streaming: true,
@@ -102,6 +118,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
     contract
   end
 
+  @doc "Returns CLI agent binaries found in PATH."
+  def detected_agents do
+    Enum.filter(@known_agents, &System.find_executable/1)
+  end
+
+  @doc "Returns install hints for known ACP agents."
+  def install_hint("claude"), do: "npm i -g @anthropic-ai/claude-code"
+  def install_hint("gemini"), do: "npm i -g @google/gemini-cli"
+  def install_hint("codex"), do: "npm i -g @openai/codex"
+  def install_hint("goose"), do: "pip install goose-ai"
+  def install_hint("aider"), do: "pip install aider-chat"
+  def install_hint(_), do: "See agent documentation"
+
   # -- Private --
 
   defp resolve_agent(%Request{provider_options: opts}) when is_map(opts) do
@@ -113,10 +142,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   end
 
   defp resolve_agent(_), do: @default_agent
-
-  # Known ACP agent names for safe atom conversion.
-  # Prevents atom exhaustion from arbitrary user input.
-  @known_agents ~w(claude gemini codex goose opencode aider cline)
 
   defp safe_to_atom(agent_string) when is_binary(agent_string) do
     if agent_string in @known_agents do

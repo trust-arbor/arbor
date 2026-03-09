@@ -71,7 +71,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.AcpTest do
     test "returns a valid contract" do
       contract = Acp.runtime_contract()
       assert contract.provider == "acp"
-      assert contract.display_name == "ACP (Agent Communication Protocol)"
+      assert contract.display_name == "ACP (CLI Agents)"
       assert contract.type == :cli
     end
   end

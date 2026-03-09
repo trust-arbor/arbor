@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
+    Acp,
     Anthropic,
     Gemini,
     LMStudio,
@@ -51,6 +52,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
     XAI,
     Zai,
     ZaiCodingPlan,
+    Acp,
     LMStudio,
     Ollama
   ]
