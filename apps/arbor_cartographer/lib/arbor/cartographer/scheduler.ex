@@ -180,11 +180,13 @@ defmodule Arbor.Cartographer.Scheduler do
 
   defp apply_strategy(candidates, :round_robin) do
     key = {__MODULE__, :rr_index}
-    index = try do
-      :persistent_term.get(key)
-    rescue
-      ArgumentError -> 0
-    end
+
+    index =
+      try do
+        :persistent_term.get(key)
+      rescue
+        ArgumentError -> 0
+      end
 
     selected = Enum.at(candidates, rem(index, length(candidates)))
     :persistent_term.put(key, index + 1)
