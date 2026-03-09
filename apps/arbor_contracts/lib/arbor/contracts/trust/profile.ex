@@ -95,6 +95,14 @@ defmodule Arbor.Contracts.Trust.Profile do
     field(:installations_successful, non_neg_integer(), default: 0)
     field(:installations_rolled_back, non_neg_integer(), default: 0)
 
+    # URI-prefix trust rules (Trust Profiles Redesign)
+    # baseline: default mode when no rule matches (:block | :ask | :allow | :auto)
+    field(:baseline, atom(), default: :ask)
+    # rules: %{"arbor://shell" => :block, "arbor://shell/exec/git" => :ask, ...}
+    field(:rules, map(), default: %{})
+    # model_constraints: %{{:frontier_cloud, "arbor://shell"} => :ask, ...}
+    field(:model_constraints, map(), default: %{})
+
     # Timestamps
     field(:created_at, DateTime.t())
     field(:updated_at, DateTime.t())
