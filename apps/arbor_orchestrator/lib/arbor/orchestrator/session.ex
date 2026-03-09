@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.Session do
       :heartbeat      →  Task → Engine.run(heartbeat_graph)     →  {:heartbeat_result, _}
 
   Node implementations are provided by Jido Actions (via `exec target="action"`)
-  and CodergenHandler (via `compute` nodes). Session-specific actions live in
+  and LlmHandler (via `compute` nodes). Session-specific actions live in
   `Arbor.Actions.Session*` modules.
 
   ## Contracts

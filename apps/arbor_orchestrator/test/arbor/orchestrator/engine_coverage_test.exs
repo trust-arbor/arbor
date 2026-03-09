@@ -16,7 +16,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   alias Arbor.Orchestrator.Engine.{Authorization, Condition, Context, Executor, Outcome, Router}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
-  alias Arbor.Orchestrator.Handlers.CodergenHandler
+  alias Arbor.Orchestrator.Handlers.LlmHandler
   alias Arbor.Orchestrator.Handlers.BranchHandler
   alias Arbor.Orchestrator.Handlers.ExitHandler
   alias Arbor.Orchestrator.Handlers.Handler
@@ -1348,9 +1348,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
     end
 
     @tag :fast
-    test "unknown type falls back to CodergenHandler" do
+    test "unknown type falls back to LlmHandler" do
       node = %Node{id: "n", attrs: %{"type" => "completely_unknown"}}
-      assert Registry.resolve(node) == Arbor.Orchestrator.Handlers.CodergenHandler
+      assert Registry.resolve(node) == Arbor.Orchestrator.Handlers.LlmHandler
     end
   end
 
@@ -1625,7 +1625,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
 
     @tag :fast
     test "returns :idempotent_with_key for codergen handler" do
-      assert Handler.idempotency_of(CodergenHandler) == :idempotent_with_key
+      assert Handler.idempotency_of(LlmHandler) == :idempotent_with_key
     end
   end
 

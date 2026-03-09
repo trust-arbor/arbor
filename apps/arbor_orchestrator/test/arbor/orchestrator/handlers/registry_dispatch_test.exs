@@ -196,8 +196,8 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
   end
 
   describe "ComputeHandler with registry" do
-    test "dispatches llm via registry to CodergenHandler" do
-      assert {:ok, Arbor.Orchestrator.Handlers.CodergenHandler} =
+    test "dispatches llm via registry to LlmHandler" do
+      assert {:ok, Arbor.Orchestrator.Handlers.LlmHandler} =
                ComputeRegistry.resolve("llm")
     end
 

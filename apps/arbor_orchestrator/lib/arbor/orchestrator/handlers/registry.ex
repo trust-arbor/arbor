@@ -10,7 +10,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   the alias layer (`Stdlib.Aliases`) which maps them to canonical core types
   with injected attributes.
 
-  Resolution order: custom > alias-resolved core > default (CodergenHandler).
+  Resolution order: custom > alias-resolved core > default (LlmHandler).
   """
 
   alias Arbor.Orchestrator.Graph.Node
@@ -18,13 +18,13 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   alias Arbor.Orchestrator.Handlers.{
     AdaptHandler,
     BranchHandler,
-    CodergenHandler,
     ComposeHandler,
     ComputeHandler,
     ExecHandler,
     ExitHandler,
     FanInHandler,
     GateHandler,
+    LlmHandler,
     MapHandler,
     ParallelHandler,
     ReadHandler,
@@ -100,7 +100,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   1. Custom handlers (highest priority, by raw type)
   2. Alias resolution → core handler lookup (primary path)
   3. Canonical type mapping (for aliases without attr injection)
-  4. Default to CodergenHandler
+  4. Default to LlmHandler
   """
   @spec resolve_with_attrs(Node.t()) :: {module(), Node.t()}
   def resolve_with_attrs(%Node{} = node) do
@@ -125,7 +125,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
         # Merge injected attrs into node (don't overwrite existing attrs)
         merged_attrs = Map.merge(injected_attrs, node.attrs)
         prepared_node = %{node | attrs: merged_attrs}
-        handler = Map.get(@handlers, canonical_type, CodergenHandler)
+        handler = Map.get(@handlers, canonical_type, LlmHandler)
         {handler, prepared_node}
 
       :passthrough ->
@@ -134,10 +134,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
         canonical = alias_mod.canonical_type(raw_type)
 
         if canonical != raw_type do
-          handler = Map.get(@handlers, canonical, CodergenHandler)
+          handler = Map.get(@handlers, canonical, LlmHandler)
           {handler, node}
         else
-          handler = Map.get(@handlers, raw_type, CodergenHandler)
+          handler = Map.get(@handlers, raw_type, LlmHandler)
           {handler, node}
         end
     end
