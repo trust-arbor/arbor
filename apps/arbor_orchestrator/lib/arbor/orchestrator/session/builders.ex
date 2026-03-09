@@ -85,6 +85,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       "session.id" => state.session_id,
       "session.agent_id" => state.agent_id,
       "session.trust_tier" => to_string(state.trust_tier),
+      "session.trust_baseline" => to_string(Map.get(state, :trust_baseline, state.trust_tier)),
       "session.turn_count" => get_turn_count(state),
       "session.working_memory" => get_working_memory(state),
       "session.goals" => get_goals(state),

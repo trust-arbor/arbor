@@ -43,7 +43,14 @@ defmodule Arbor.AI.SensitivityRouter do
   - `:gated` — reroute + emit signal + write decision to context
   - `:block` — fail request with error, refuse to send
 
-  Modes are determined by the agent's trust tier, with per-agent overrides.
+  Modes are determined by the agent's trust profile via `Arbor.Trust.effective_mode/3`
+  for the `arbor://ai/sensitivity` URI prefix, with per-agent overrides.
+
+  Trust profile modes map to routing modes:
+  - `:block` → `:block` (refuse to route)
+  - `:ask` → `:gated` (route + require confirmation)
+  - `:allow` → `:warn` (route + notify)
+  - `:auto` → `:auto` (route silently)
 
   ## Configuration
 
@@ -52,13 +59,6 @@ defmodule Arbor.AI.SensitivityRouter do
         %{provider: :anthropic, model: "claude-sonnet-4-5-20250514", priority: 2},
         %{provider: :openrouter, model: "anthropic/claude-sonnet-4-5-20250514", priority: 3}
       ]
-
-      config :arbor_ai, :sensitivity_routing_modes, %{
-        restricted: :gated,
-        standard: :warn,
-        elevated: :auto,
-        autonomous: :auto
-      }
 
       config :arbor_ai, :sensitivity_routing_overrides, %{
         "agent_secrets_handler" => :block
@@ -79,13 +79,6 @@ defmodule Arbor.AI.SensitivityRouter do
         }
 
   @type routing_mode :: :auto | :warn | :gated | :block
-
-  @default_modes %{
-    restricted: :gated,
-    standard: :warn,
-    elevated: :auto,
-    autonomous: :auto
-  }
 
   @doc """
   Make a routing decision with mode-based behavior.
@@ -216,19 +209,24 @@ defmodule Arbor.AI.SensitivityRouter do
   end
 
   @doc """
-  Resolve the routing mode for an agent based on trust tier.
+  Resolve the routing mode for an agent based on trust profile.
 
-  Looks up the agent's trust tier via runtime bridge to `Arbor.Trust`,
-  maps to a policy tier via `ConfirmationMatrix.to_policy_tier/1`,
-  then reads the mode from config.
+  Uses `Arbor.Trust.effective_mode/3` to look up the agent's profile-based
+  trust mode for the `arbor://ai/sensitivity` URI prefix, then maps to
+  a routing mode:
+
+  - `:block` → `:block` (refuse to route)
+  - `:ask` → `:gated` (route + require confirmation)
+  - `:allow` → `:warn` (route + notify)
+  - `:auto` → `:auto` (route silently)
 
   Per-agent overrides in `:sensitivity_routing_overrides` take precedence.
   Falls back to `:warn` if the trust system is unavailable.
 
   ## Examples
 
-      resolve_mode("agent_001")  #=> :gated  (new agent, restricted tier)
-      resolve_mode("agent_vet")  #=> :auto   (veteran agent, elevated tier)
+      resolve_mode("agent_001")  #=> :gated  (new agent, :ask profile)
+      resolve_mode("agent_vet")  #=> :auto   (veteran agent, :auto profile)
       resolve_mode(nil)          #=> :warn   (no agent context)
   """
   @spec resolve_mode(String.t() | nil) :: routing_mode()
@@ -367,16 +365,19 @@ defmodule Arbor.AI.SensitivityRouter do
   # Private Helpers
   # ===========================================================================
 
-  # Resolve mode from agent trust tier via runtime bridge.
+  # URI prefix used for sensitivity routing trust resolution.
+  @sensitivity_uri "arbor://ai/sensitivity"
+
+  # Resolve mode from agent trust profile via runtime bridge.
+  # Uses effective_mode/3 which resolves via ProfileResolver (URI-prefix rules).
   @spec resolve_mode_from_trust(String.t()) :: routing_mode()
   defp resolve_mode_from_trust(agent_id) do
-    with true <- trust_available?(),
-         {:ok, tier} <- get_trust_tier(agent_id),
-         policy_tier <- to_policy_tier(tier) do
-      modes = Application.get_env(:arbor_ai, :sensitivity_routing_modes, @default_modes)
-      Map.get(modes, policy_tier, :warn)
+    if trust_effective_mode_available?() do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      trust_mode = apply(Arbor.Trust, :effective_mode, [agent_id, @sensitivity_uri])
+      trust_mode_to_routing(trust_mode)
     else
-      _ -> :warn
+      :warn
     end
   rescue
     _ -> :warn
@@ -384,32 +385,17 @@ defmodule Arbor.AI.SensitivityRouter do
     :exit, _ -> :warn
   end
 
-  defp trust_available? do
+  defp trust_effective_mode_available? do
     Code.ensure_loaded?(Arbor.Trust) and
-      function_exported?(Arbor.Trust, :get_trust_tier, 1)
+      function_exported?(Arbor.Trust, :effective_mode, 2)
   end
 
-  defp get_trust_tier(agent_id) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(Arbor.Trust, :get_trust_tier, [agent_id])
-  end
-
-  defp to_policy_tier(tier) do
-    if Code.ensure_loaded?(Arbor.Trust.ConfirmationMatrix) and
-         function_exported?(Arbor.Trust.ConfirmationMatrix, :to_policy_tier, 1) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(Arbor.Trust.ConfirmationMatrix, :to_policy_tier, [tier])
-    else
-      # Inline fallback if ConfirmationMatrix unavailable
-      case tier do
-        t when t in [:untrusted, :probationary] -> :restricted
-        :trusted -> :standard
-        :veteran -> :elevated
-        :autonomous -> :autonomous
-        _ -> :restricted
-      end
-    end
-  end
+  # Map trust profile modes to sensitivity routing modes
+  defp trust_mode_to_routing(:block), do: :block
+  defp trust_mode_to_routing(:ask), do: :gated
+  defp trust_mode_to_routing(:allow), do: :warn
+  defp trust_mode_to_routing(:auto), do: :auto
+  defp trust_mode_to_routing(_), do: :warn
 
   # Emit a signal via runtime bridge (arbor_ai is Standalone, no compile dep on signals).
   defp safe_emit_signal(type, data) do
