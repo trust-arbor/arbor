@@ -26,7 +26,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   require Logger
 
   @default_agent :claude
-  @default_timeout 120_000
+  @default_timeout :infinity
 
   # Known ACP agent names for safe atom conversion.
   # Prevents atom exhaustion from arbitrary user input.

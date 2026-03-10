@@ -251,14 +251,15 @@ defmodule Arbor.AI.AcpPool do
     if node(session_pid) == Node.self() do
       AcpSession.send_message(session_pid, content, opts)
     else
-      timeout = Keyword.get(opts, :timeout, 120_000)
+      timeout = Keyword.get(opts, :timeout, :infinity)
+      rpc_timeout = if timeout == :infinity, do: :infinity, else: timeout + 5_000
 
       case :rpc.call(
              node(session_pid),
              AcpSession,
              :send_message,
              [session_pid, content, opts],
-             timeout + 5_000
+             rpc_timeout
            ) do
         {:badrpc, reason} -> {:error, {:remote_call_failed, reason}}
         result -> result
