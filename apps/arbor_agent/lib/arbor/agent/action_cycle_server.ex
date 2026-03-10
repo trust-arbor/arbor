@@ -457,13 +457,12 @@ defmodule Arbor.Agent.ActionCycleServer do
   end
 
   defp parse_json_response(text) when is_binary(text) do
-    # Strip markdown code fences if present
+    # Extract JSON from inside code fences (handles trailing text after closing fence)
     cleaned =
-      text
-      |> String.trim()
-      |> String.replace(~r/^```(?:json)?\s*/i, "")
-      |> String.replace(~r/\s*```$/, "")
-      |> String.trim()
+      case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do
+        [_, json] -> String.trim(json)
+        nil -> String.trim(text)
+      end
 
     case Jason.decode(cleaned) do
       {:ok, parsed} -> {:ok, parsed}
