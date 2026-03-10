@@ -51,13 +51,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
       |> maybe_add(:workspace, extract_option(request, "workspace"))
       |> maybe_add(:agent_id, extract_option(request, "agent_id") || opts[:agent_id])
 
-    with {:ok, session} <- pool_checkout(agent, checkout_opts),
-         {:ok, result} <- session_prompt(session, request, timeout) do
-      pool_checkin(session)
-      {:ok, format_response(result, request, agent)}
-    else
+    case pool_checkout(agent, checkout_opts) do
+      {:ok, session} ->
+        case session_prompt(session, request, timeout) do
+          {:ok, result} ->
+            pool_checkin(session)
+            {:ok, format_response(result, request, agent)}
+
+          {:error, reason} ->
+            # Always return session to pool, even on prompt failure
+            pool_checkin(session)
+            Logger.warning("ACP adapter prompt error (agent=#{agent}): #{inspect(reason)}")
+            {:error, reason}
+        end
+
       {:error, reason} ->
-        Logger.warning("ACP adapter error (agent=#{agent}): #{inspect(reason)}")
+        Logger.warning("ACP adapter checkout error (agent=#{agent}): #{inspect(reason)}")
         {:error, reason}
     end
   end

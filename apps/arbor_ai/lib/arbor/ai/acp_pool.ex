@@ -295,7 +295,8 @@ defmodule Arbor.AI.AcpPool do
   defp validate_session(pid) do
     if Process.alive?(pid) do
       try do
-        status = AcpSession.status(pid)
+        # Use a short timeout to avoid blocking the pool if the session is stuck
+        status = GenServer.call(pid, :status, 2_000)
 
         if status.status in [:ready] do
           :ok
@@ -489,13 +490,17 @@ defmodule Arbor.AI.AcpPool do
 
   defp safe_close(pid) when is_pid(pid) do
     if Process.alive?(pid) do
-      try do
-        AcpSession.close(pid)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+      # Close asynchronously to avoid blocking the pool GenServer
+      # if the ACP session is stuck waiting on the CLI agent
+      Task.start(fn ->
+        try do
+          AcpSession.close(pid)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
+      end)
     end
   end
 
