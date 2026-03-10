@@ -67,6 +67,10 @@ digraph HeartbeatFull {
   store_decompositions [type="exec", target="action", action="session_goals.store_decompositions",
                         context_keys="session.decompositions,session.agent_id",
                         output_prefix="session"]
+  route_intents [type="exec", target="action", action="session_execution.route_actions",
+                 context_keys="session.agent_id",
+                 param.intent_source="intent_store",
+                 output_prefix="session"]
   process_proposals [type="exec", target="action", action="session_goals.process_proposal_decisions",
                      context_keys="session.proposal_decisions,session.agent_id",
                      output_prefix="session"]
@@ -117,7 +121,7 @@ digraph HeartbeatFull {
   consolidate -> process
 
   // Full tail: all post-processing, then tool loop check
-  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
+  process -> store_decompositions -> route_intents -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
 
   // Tool loop: if actions produced results AND under 10 turns, follow up
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
