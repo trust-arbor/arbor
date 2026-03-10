@@ -91,6 +91,12 @@ digraph Heartbeat {
                         context_keys="session.decompositions,session.agent_id",
                         output_prefix="session"]
 
+  // ── Post-processing: route pending intents to Executor ───
+  route_intents [type="exec", target="action", action="session_execution.route_actions",
+                 context_keys="session.agent_id",
+                 param.intent_source="intent_store",
+                 output_prefix="session"]
+
   // ── Post-processing: apply proposal decisions ────────────
   process_proposals [type="exec", target="action", action="session_goals.process_proposal_decisions",
                      context_keys="session.proposal_decisions,session.agent_id",
@@ -151,7 +157,7 @@ digraph Heartbeat {
   consolidate -> process
 
   // Shared post-processing tail, then tool loop check
-  process -> store_decompositions -> process_proposals -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
+  process -> store_decompositions -> route_intents -> process_proposals -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
 
   // Tool loop: if actions produced results AND under 10 turns, follow up
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
