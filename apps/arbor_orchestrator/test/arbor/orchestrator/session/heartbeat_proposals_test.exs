@@ -43,7 +43,7 @@ defmodule Arbor.Orchestrator.Session.HeartbeatProposalsTest do
   end
 
   describe "apply_heartbeat_result/2 (Phase 3)" do
-    test "returns state UNMODIFIED", %{state: state} do
+    test "updates cognitive_mode from heartbeat result", %{state: state} do
       result = %{
         context: %{
           "session.cognitive_mode" => "goal_pursuit",
@@ -59,8 +59,8 @@ defmodule Arbor.Orchestrator.Session.HeartbeatProposalsTest do
 
       new_state = Builders.apply_heartbeat_result(state, result)
 
-      # State should be UNCHANGED — no direct mutation
-      assert new_state.cognitive_mode == :reflection
+      # cognitive_mode is updated directly (not proposal-worthy operational state)
+      assert new_state.cognitive_mode == :goal_pursuit
       assert new_state.goals == state.goals
     end
 

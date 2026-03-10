@@ -128,7 +128,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
     test "has all expected nodes", %{graph: graph} do
       expected = ~w(start bg_checks select_mode mode_router build_prompt llm_call
                     consolidate process store_decompositions process_proposals
-                    update_wm execute_actions update_goals check_loop
+                    update_wm execute_actions update_goals prune_intents check_loop
                     build_followup llm_followup done)
 
       for node_id <- expected do
@@ -180,9 +180,9 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
 
     test "post-processing tail is correctly ordered", %{graph: graph} do
       # process -> store_decompositions -> process_proposals -> update_wm ->
-      # execute_actions -> update_goals -> check_loop
+      # execute_actions -> update_goals -> prune_intents -> check_loop
       chain = ~w(process store_decompositions process_proposals update_wm
-                 execute_actions update_goals check_loop)
+                 execute_actions update_goals prune_intents check_loop)
 
       for [from, to] <- Enum.chunk_every(chain, 2, 1, :discard) do
         assert Enum.any?(edges_from(graph, from), &(&1.to == to)),

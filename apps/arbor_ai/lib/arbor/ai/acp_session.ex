@@ -615,7 +615,7 @@ defmodule Arbor.AI.AcpSession do
   defp summarize_result(_), do: %{}
 
   defp timeout(opts) do
-    Keyword.get(opts, :timeout, 120_000)
+    Keyword.get(opts, :timeout, :infinity)
   end
 
   # -- Workspace Lifecycle --

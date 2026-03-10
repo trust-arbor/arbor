@@ -260,8 +260,8 @@ defmodule Arbor.Orchestrator.SessionTest do
       # heartbeat.dot defines: start, bg_checks, select_mode, mode_router,
       # build_prompt, llm_call, consolidate, process, store_decompositions,
       # process_proposals, update_wm, execute_actions, update_goals,
-      # check_loop, build_followup, llm_followup, done = 17 nodes
-      assert map_size(graph.nodes) == 17
+      # prune_intents, check_loop, build_followup, llm_followup, done = 18 nodes
+      assert map_size(graph.nodes) == 18
 
       # Verify mode-specific nodes exist
       assert Map.has_key?(graph.nodes, "build_prompt")
@@ -301,10 +301,10 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert graph.nodes["process"].attrs["action"] == "session.process_results"
 
       assert graph.nodes["execute_actions"].attrs["type"] == "exec"
-      assert graph.nodes["execute_actions"].attrs["action"] == "session_exec.execute_actions"
+      assert graph.nodes["execute_actions"].attrs["action"] == "session_execution.execute_actions"
 
       assert graph.nodes["update_goals"].attrs["type"] == "exec"
-      assert graph.nodes["update_goals"].attrs["action"] == "session_goals.update"
+      assert graph.nodes["update_goals"].attrs["action"] == "session_goals.update_goals"
     end
 
     @tag :spike
