@@ -67,21 +67,24 @@ digraph HeartbeatFull {
   store_decompositions [type="exec", target="action", action="session_goals.store_decompositions",
                         context_keys="session.decompositions,session.agent_id",
                         output_prefix="session"]
-  process_proposals [type="exec", target="action", action="session_goals.process_proposals",
+  process_proposals [type="exec", target="action", action="session_goals.process_proposal_decisions",
                      context_keys="session.proposal_decisions,session.agent_id",
                      output_prefix="session"]
   store_identity [type="exec", target="action", action="session_goals.store_identity",
                   context_keys="session.identity_insights,session.agent_id",
                   output_prefix="session"]
-  update_wm [type="exec", target="action", action="session_memory.update_wm",
+  update_wm [type="exec", target="action", action="session_memory.update_working_memory",
              context_keys="session.memory_notes,session.concerns,session.curiosity,session.agent_id",
              output_prefix="session"]
-  execute_actions [type="exec", target="action", action="session_exec.execute_actions",
+  execute_actions [type="exec", target="action", action="session_execution.execute_actions",
                    context_keys="session.actions,session.agent_id",
                    output_prefix="session"]
-  update_goals [type="exec", target="action", action="session_goals.update",
+  update_goals [type="exec", target="action", action="session_goals.update_goals",
                 context_keys="session.goal_updates,session.new_goals,session.agent_id",
                 output_prefix="session"]
+  prune_intents [type="exec", target="action", action="session_goals.prune_stale_intents",
+                 context_keys="session.agent_id",
+                 output_prefix="session"]
 
   // ── Tool loop control ──────────────────────────────────────
   check_loop [shape=diamond, condition_key="session.has_action_results"]
@@ -114,7 +117,7 @@ digraph HeartbeatFull {
   consolidate -> process
 
   // Full tail: all post-processing, then tool loop check
-  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> check_loop
+  process -> store_decompositions -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
 
   // Tool loop: if actions produced results AND under 10 turns, follow up
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]

@@ -647,9 +647,6 @@ defmodule Arbor.Memory.Proposal do
           nil -> :new
           node -> {:duplicate, Map.get(node, :id)}
         end
-
-      {:error, _} ->
-        :new
     end
   rescue
     # ETS table may not exist in test environments
@@ -657,14 +654,9 @@ defmodule Arbor.Memory.Proposal do
   end
 
   defp boost_existing_node(agent_id, node_id) do
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        updated = KnowledgeGraph.boost_node(graph, node_id, 0.1)
-        save_graph(agent_id, updated)
-
-      {:error, _} ->
-        :ok
-    end
+    {:ok, graph} = get_graph(agent_id)
+    updated = KnowledgeGraph.boost_node(graph, node_id, 0.1)
+    save_graph(agent_id, updated)
   rescue
     ArgumentError -> :ok
   end
@@ -690,8 +682,14 @@ defmodule Arbor.Memory.Proposal do
 
   defp get_graph(agent_id) do
     case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
+      [{^agent_id, graph}] ->
+        {:ok, graph}
+
+      [] ->
+        # Auto-initialize an empty graph so accept/reject don't fail for new agents
+        graph = KnowledgeGraph.new(agent_id)
+        :ets.insert(@graph_ets, {agent_id, graph})
+        {:ok, graph}
     end
   end
 

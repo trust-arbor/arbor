@@ -13,6 +13,7 @@ defmodule Arbor.Actions.SessionGoals do
   | `StoreDecompositions` | Create Intent structs from decomposition JSON |
   | `ProcessProposalDecisions` | Route accept/reject/defer to Proposal facade |
   | `StoreIdentity` | Store identity insights via Memory.add_insight |
+  | `PruneStaleIntents` | Remove pending intents older than max_age_ms (default 30min) |
   """
 
   require Logger
@@ -191,40 +192,62 @@ defmodule Arbor.Actions.SessionGoals do
       goal_id = decomp["goal_id"] || decomp[:goal_id]
       intentions = decomp["intentions"] || decomp[:intentions] || []
 
+      existing_pending =
+        Arbor.Actions.SessionMemory.bridge(
+          Arbor.Memory.IntentStore,
+          :pending_intents_for_goal,
+          [agent_id, goal_id],
+          []
+        )
+
+      # Normalize existing action names to strings for comparison
+      existing_actions =
+        existing_pending
+        |> List.wrap()
+        |> MapSet.new(fn intent ->
+          if is_map(intent), do: to_string(Map.get(intent, :action, "")), else: ""
+        end)
+
       Enum.each(List.wrap(intentions), fn intent_data ->
-        store_intent(intent_data, goal_id, agent_id)
+        store_intent(intent_data, goal_id, agent_id, existing_actions)
       end)
     end
 
-    defp store_intent(intent_data, goal_id, agent_id) do
+    defp store_intent(intent_data, goal_id, agent_id, existing_actions) do
       action = intent_data["action"] || intent_data[:action] || "unknown"
-      params = intent_data["params"] || intent_data[:params] || %{}
-      params = if is_map(params), do: params, else: %{}
-      reasoning = intent_data["reasoning"] || intent_data[:reasoning]
-      target = intent_data["target"] || intent_data[:target]
-      description = intent_data["description"] || intent_data[:description] || action
+      action_str = to_string(action)
 
-      opts = [
-        goal_id: goal_id,
-        reasoning: reasoning || description,
-        target: target
-      ]
+      if MapSet.member?(existing_actions, action_str) do
+        :skip
+      else
+        params = intent_data["params"] || intent_data[:params] || %{}
+        params = if is_map(params), do: params, else: %{}
+        reasoning = intent_data["reasoning"] || intent_data[:reasoning]
+        target = intent_data["target"] || intent_data[:target]
+        description = intent_data["description"] || intent_data[:description] || action
 
-      intent =
-        Arbor.Actions.SessionMemory.bridge(
-          Arbor.Contracts.Memory.Intent,
-          :action,
-          [action, params, opts],
-          nil
-        )
+        opts = [
+          goal_id: goal_id,
+          reasoning: reasoning || description,
+          target: target
+        ]
 
-      if intent do
-        Arbor.Actions.SessionMemory.bridge(
-          Arbor.Memory,
-          :record_intent,
-          [agent_id, intent],
-          :ok
-        )
+        intent =
+          Arbor.Actions.SessionMemory.bridge(
+            Arbor.Contracts.Memory.Intent,
+            :action,
+            [action, params, opts],
+            nil
+          )
+
+        if intent do
+          Arbor.Actions.SessionMemory.bridge(
+            Arbor.Memory,
+            :record_intent,
+            [agent_id, intent],
+            :ok
+          )
+        end
       end
     end
   end
@@ -381,6 +404,67 @@ defmodule Arbor.Actions.SessionGoals do
       end
 
       {:ok, %{identity_stored: true}}
+    end
+  end
+
+  # ============================================================================
+  # PruneStaleIntents
+  # ============================================================================
+
+  defmodule PruneStaleIntents do
+    @moduledoc """
+    Remove pending intents older than max_age_ms.
+
+    Calls IntentStore.prune_stale/2 to clear idle intents that were never
+    executed. Prevents unbounded accumulation when store_decompositions is
+    called repeatedly without intent execution.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `agent_id` | string | yes | Agent ID |
+    | `max_age_ms` | integer | no | Max age in ms (default: 1_800_000 = 30min) |
+
+    ## Returns
+
+    `%{intents_pruned: integer}`
+    """
+    use Jido.Action,
+      name: "session_goals_prune_stale_intents",
+      description: "Remove pending intents older than max_age_ms from IntentStore",
+      schema: [
+        agent_id: [type: :string, required: true, doc: "Agent ID"],
+        max_age_ms: [
+          type: :non_neg_integer,
+          required: false,
+          doc: "Max age in milliseconds (default: 1_800_000 = 30min)"
+        ]
+      ]
+
+    @default_max_age_ms :timer.minutes(30)
+
+    @impl true
+    def run(params, _context) do
+      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+
+      unless agent_id do
+        raise ArgumentError, "agent_id is required"
+      end
+
+      max_age_ms =
+        params[:max_age_ms] || params["max_age_ms"] || params["session.max_age_ms"] ||
+          @default_max_age_ms
+
+      count =
+        Arbor.Actions.SessionMemory.bridge(
+          Arbor.Memory.IntentStore,
+          :prune_stale,
+          [agent_id, max_age_ms],
+          0
+        )
+
+      {:ok, %{intents_pruned: count || 0}}
     end
   end
 end

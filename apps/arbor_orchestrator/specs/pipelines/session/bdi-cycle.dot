@@ -219,7 +219,7 @@ digraph BDICycle {
   route_actions [
     type="exec",
     target="action",
-    action="session_exec.route_actions",
+    action="session_execution.route_actions",
     context_keys="session.agent_id,session.actions",
     output_prefix="session"
   ]
@@ -228,7 +228,7 @@ digraph BDICycle {
   route_intents [
     type="exec",
     target="action",
-    action="session_exec.route_actions",
+    action="session_execution.route_actions",
     param.intent_source="intent_store",
     context_keys="session.agent_id,session.active_intents",
     output_prefix="session"
@@ -242,7 +242,7 @@ digraph BDICycle {
   update_goals [
     type="exec",
     target="action",
-    action="session_goals.update",
+    action="session_goals.update_goals",
     context_keys="session.agent_id,session.goal_updates,session.new_goals",
     output_prefix="session"
   ]
@@ -260,7 +260,7 @@ digraph BDICycle {
   process_proposals [
     type="exec",
     target="action",
-    action="session_goals.process_proposals",
+    action="session_goals.process_proposal_decisions",
     context_keys="session.agent_id,session.proposal_decisions",
     output_prefix="session"
   ]
@@ -280,6 +280,15 @@ digraph BDICycle {
     target="action",
     action="session_memory.update",
     context_keys="session.agent_id,session.turn_data,session.memory_notes",
+    output_prefix="session"
+  ]
+
+  // Prune idle pending intents older than 30 min (prevents accumulation)
+  prune_intents [
+    type="exec",
+    target="action",
+    action="session_goals.prune_stale_intents",
+    context_keys="session.agent_id",
     output_prefix="session"
   ]
 
@@ -333,5 +342,5 @@ digraph BDICycle {
   process -> route_actions -> route_intents
 
   // Phase 5: Update — goals, decompositions, proposals, identity, memory, checkpoint
-  route_intents -> update_goals -> store_decompositions -> process_proposals -> store_identity -> update_memory -> checkpoint -> done
+  route_intents -> update_goals -> store_decompositions -> process_proposals -> store_identity -> update_memory -> prune_intents -> checkpoint -> done
 }

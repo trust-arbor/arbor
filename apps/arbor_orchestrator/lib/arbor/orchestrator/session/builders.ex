@@ -223,8 +223,22 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # Persist heartbeat entry to session store (async)
     persist_heartbeat_entry(state, result_ctx)
 
-    # Return state UNMODIFIED — action cycle will review proposals
-    state
+    # Update cognitive_mode from the heartbeat result — this is operational state,
+    # not proposal-worthy. Without this update, maybe_add_cognitive_mode_proposal
+    # would regenerate a cognitive_mode proposal every heartbeat because the state
+    # never reflects the mode selected by select_mode.
+    case Map.get(result_ctx, "session.cognitive_mode") do
+      mode when is_binary(mode) and mode != "" ->
+        try do
+          atom_mode = String.to_existing_atom(mode)
+          %{state | cognitive_mode: atom_mode}
+        rescue
+          ArgumentError -> state
+        end
+
+      _ ->
+        state
+    end
   end
 
   @doc false

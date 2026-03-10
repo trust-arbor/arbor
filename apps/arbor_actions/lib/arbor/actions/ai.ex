@@ -120,12 +120,18 @@ defmodule Arbor.Actions.AI do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{prompt: prompt} = params, _context) do
+    def run(%{prompt: prompt} = params, context) do
       Actions.emit_started(__MODULE__, %{prompt_length: String.length(prompt)})
 
       opts = build_opts(params)
 
-      case Arbor.AI.generate_text(prompt, opts) do
+      ai_call =
+        case Map.get(context, :agent_id) do
+          nil -> Arbor.AI.generate_text(prompt, opts)
+          agent_id -> Arbor.AI.authorize_generate(agent_id, prompt, opts)
+        end
+
+      case ai_call do
         {:ok, response} ->
           result = %{
             text: response.text || "",
@@ -141,6 +147,9 @@ defmodule Arbor.Actions.AI do
           })
 
           {:ok, result}
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, :pending_approval, proposal_id}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -256,7 +265,7 @@ defmodule Arbor.Actions.AI do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{code: code, question: question} = params, _context) do
+    def run(%{code: code, question: question} = params, context) do
       Actions.emit_started(__MODULE__, %{
         code_length: String.length(code),
         language: params[:language]
@@ -265,7 +274,13 @@ defmodule Arbor.Actions.AI do
       prompt = build_analysis_prompt(code, question, params[:language])
       opts = build_opts(params)
 
-      case Arbor.AI.generate_text(prompt, opts) do
+      ai_call =
+        case Map.get(context, :agent_id) do
+          nil -> Arbor.AI.generate_text(prompt, opts)
+          agent_id -> Arbor.AI.authorize_generate(agent_id, prompt, opts)
+        end
+
+      case ai_call do
         {:ok, response} ->
           analysis_text = response.text || ""
           suggestions = extract_suggestions(analysis_text)
@@ -284,6 +299,9 @@ defmodule Arbor.Actions.AI do
           })
 
           {:ok, result}
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, :pending_approval, proposal_id}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)

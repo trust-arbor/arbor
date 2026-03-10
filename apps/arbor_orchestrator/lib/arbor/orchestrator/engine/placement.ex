@@ -60,9 +60,13 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   def parse(placement) when is_binary(placement) do
     parts = String.split(placement, ",") |> Enum.map(&String.trim/1)
 
-    Enum.reduce(parts, %{requirements: [], strategy: :first_match, node: nil}, fn part, acc ->
-      parse_part(String.trim(part), acc)
-    end)
+    Enum.reduce(
+      parts,
+      %{requirements: [], strategy: :first_match, node: nil, node_str: nil},
+      fn part, acc ->
+        parse_part(String.trim(part), acc)
+      end
+    )
   end
 
   @doc """
@@ -73,6 +77,11 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   """
   @spec resolve(parsed() | nil) :: {:ok, node()} | {:error, term()} | nil
   def resolve(nil), do: nil
+
+  # Unknown node string (atom didn't exist) — treat as unreachable
+  def resolve(%{node: nil, node_str: node_str}) when not is_nil(node_str) do
+    {:error, {:node_unreachable, node_str}}
+  end
 
   def resolve(%{node: node}) when not is_nil(node) do
     if node in [Node.self() | Node.list()] do
@@ -154,13 +163,15 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   defp parse_part("node:" <> node_str, acc) do
     # Node names must contain "@" — validate before creating atom
     if String.contains?(node_str, "@") do
-      node =
-        case SafeAtom.to_existing(node_str) do
-          {:ok, atom} -> atom
-          {:error, _} -> String.to_atom(node_str)
-        end
+      case SafeAtom.to_existing(node_str) do
+        {:ok, atom} ->
+          %{acc | node: atom}
 
-      %{acc | node: node}
+        {:error, _} ->
+          Logger.warning("Placement: unknown node #{inspect(node_str)} — not yet connected")
+          # Track the requested node string so resolve/1 can fail if placement_required
+          %{acc | node_str: node_str}
+      end
     else
       Logger.warning("Placement: invalid node name (missing @): #{inspect(node_str)}")
       acc
