@@ -512,8 +512,12 @@ defmodule Arbor.AI.AcpSession do
           provider_to_backend(state.provider),
           %{
             model: model,
-            input_tokens: Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens, 0),
-            output_tokens: Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens, 0)
+            input_tokens:
+              Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
+                Map.get(usage, "inputTokens") || 0,
+            output_tokens:
+              Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens) ||
+                Map.get(usage, "outputTokens") || 0
           }
         ])
       rescue

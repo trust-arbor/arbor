@@ -259,7 +259,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
     %Response{text: "", finish_reason: :error, warnings: ["Unexpected result format"]}
   end
 
-  defp normalize_usage(usage) when is_map(usage) do
+  @doc false
+  def normalize_usage(usage) when is_map(usage) do
     # Handle both snake_case (native ACP) and camelCase (Claude/Codex adapters)
     input =
       Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
@@ -277,7 +278,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
     }
   end
 
-  defp normalize_usage(_), do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
+  def normalize_usage(_), do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
 
   # Keys we extract from provider_options — both string and atom forms
   @provider_option_keys %{
