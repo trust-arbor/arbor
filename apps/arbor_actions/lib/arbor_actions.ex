@@ -25,6 +25,7 @@ defmodule Arbor.Actions do
   | Web | `Arbor.Actions.Web` | Session-free web browsing, search, and page snapshots |
   | Browser | `Arbor.Actions.Browser` | Interactive browser automation (session-based) |
   | ACP | `Arbor.Actions.Acp` | ACP coding agent session management |
+  | Trust | `Arbor.Actions.Trust` | Trust profile operations for the InterviewAgent |
 
   ## Quick Start
 
@@ -367,6 +368,14 @@ defmodule Arbor.Actions do
       ],
       session_llm: [
         Arbor.Actions.SessionLlm.BuildPrompt
+      ],
+      trust: [
+        Arbor.Actions.Trust.ReadProfile,
+        Arbor.Actions.Trust.ProposeProfile,
+        Arbor.Actions.Trust.ApplyProfile,
+        Arbor.Actions.Trust.ExplainMode,
+        Arbor.Actions.Trust.ListPresets,
+        Arbor.Actions.Trust.ListAgents
       ],
       web: [
         Arbor.Actions.Web.Browse,
