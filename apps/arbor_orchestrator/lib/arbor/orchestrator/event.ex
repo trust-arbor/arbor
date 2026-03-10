@@ -47,6 +47,7 @@ defmodule Arbor.Orchestrator.Event do
     %{
       type: :pipeline_started,
       graph_id: graph_id,
+      run_id: Keyword.get(opts, :run_id),
       logs_root: Keyword.get(opts, :logs_root),
       node_count: Keyword.get(opts, :node_count)
     }

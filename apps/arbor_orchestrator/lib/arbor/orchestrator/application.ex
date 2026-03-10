@@ -5,8 +5,15 @@ defmodule Arbor.Orchestrator.Application do
 
   @impl true
   def start(_type, _args) do
+    event_log_name =
+      Application.get_env(:arbor_orchestrator, :event_log_name, :orchestrator_events)
+
+    event_log_backend =
+      Application.get_env(:arbor_orchestrator, :event_log_backend, Arbor.Persistence.EventLog.ETS)
+
     children = [
       Arbor.Common.HandlerRegistry,
+      {event_log_backend, name: event_log_name},
       {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
       Arbor.Orchestrator.SignalsBridge,
       Arbor.Orchestrator.JobRegistry,

@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
     """
     defstruct [
       :pipeline_id,
+      :run_id,
       :graph_id,
       :started_at,
       :current_node,
@@ -92,9 +93,11 @@ defmodule Arbor.Orchestrator.JobRegistry do
   @impl true
   def handle_info({:pipeline_event, %{type: :pipeline_started} = event}, state) do
     pipeline_id = determine_pipeline_id(event)
+    run_id = Map.get(event, :run_id)
 
     entry = %Entry{
       pipeline_id: pipeline_id,
+      run_id: run_id,
       graph_id: Map.get(event, :graph_id),
       started_at: DateTime.utc_now(),
       current_node: nil,
@@ -194,10 +197,17 @@ defmodule Arbor.Orchestrator.JobRegistry do
   # Private helpers
 
   defp determine_pipeline_id(event) do
-    case Map.get(event, :pipeline_id) do
-      nil -> Map.get(event, :graph_id)
-      :all -> Map.get(event, :graph_id)
-      id -> id
+    # Prefer run_id (unique per execution) over pipeline_id or graph_id
+    case Map.get(event, :run_id) do
+      nil ->
+        case Map.get(event, :pipeline_id) do
+          nil -> Map.get(event, :graph_id)
+          :all -> Map.get(event, :graph_id)
+          id -> id
+        end
+
+      run_id ->
+        run_id
     end
   end
 
