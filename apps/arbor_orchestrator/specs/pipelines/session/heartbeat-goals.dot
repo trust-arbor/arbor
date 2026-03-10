@@ -57,12 +57,15 @@ digraph HeartbeatGoals {
            output_prefix="session"]
 
   // ── GOALS: Actions + goal persistence ─────────────────────
-  execute_actions [type="exec", target="action", action="session_exec.execute_actions",
+  execute_actions [type="exec", target="action", action="session_execution.execute_actions",
                    context_keys="session.actions,session.agent_id",
                    output_prefix="session"]
-  update_goals [type="exec", target="action", action="session_goals.update",
+  update_goals [type="exec", target="action", action="session_goals.update_goals",
                 context_keys="session.goal_updates,session.new_goals,session.agent_id",
                 output_prefix="session"]
+  prune_intents [type="exec", target="action", action="session_goals.prune_stale_intents",
+                 context_keys="session.agent_id",
+                 output_prefix="session"]
 
   // ── Tool loop control ──────────────────────────────────────
   check_loop [shape=diamond, condition_key="session.has_action_results"]
@@ -94,8 +97,8 @@ digraph HeartbeatGoals {
   // Consolidation path
   consolidate -> process
 
-  // Goals tail: actions + goal updates, then tool loop check
-  process -> execute_actions -> update_goals -> check_loop
+  // Goals tail: actions + goal updates + prune, then tool loop check
+  process -> execute_actions -> update_goals -> prune_intents -> check_loop
 
   // Tool loop
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]

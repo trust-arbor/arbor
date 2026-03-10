@@ -167,7 +167,9 @@ defmodule Arbor.Actions.Session do
         params[:raw_content] || params["raw_content"] || params["llm.content"] ||
           params["last_response"] || params["session.llm_response"] || ""
 
-      case Jason.decode(raw) do
+      json_text = extract_json(raw)
+
+      case Jason.decode(json_text) do
         {:ok, parsed} when is_map(parsed) ->
           {:ok,
            %{
@@ -220,5 +222,12 @@ defmodule Arbor.Actions.Session do
          do: true
 
     defp valid_proposal_decision?(_), do: false
+
+    defp extract_json(text) do
+      case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do
+        [_, json] -> String.trim(json)
+        nil -> String.trim(text)
+      end
+    end
   end
 end

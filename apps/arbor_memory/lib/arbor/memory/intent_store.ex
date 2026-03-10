@@ -298,6 +298,24 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @doc """
+  Prune pending intents older than `max_age_ms` milliseconds.
+
+  Removes intents (and their status entries) that are still in `:pending` state
+  but were created longer ago than `max_age_ms`. Useful for clearing accumulated
+  idle intents that were never executed.
+
+  Returns the count of pruned intents.
+
+  ## Examples
+
+      count = IntentStore.prune_stale("agent_001", :timer.hours(1))
+  """
+  @spec prune_stale(String.t(), pos_integer()) :: non_neg_integer()
+  def prune_stale(agent_id, max_age_ms) do
+    GenServer.call(server_name(), {:prune_stale, agent_id, max_age_ms})
+  end
+
+  @doc """
   Clear all intents and percepts for an agent.
   """
   @spec clear(String.t()) :: :ok
@@ -356,7 +374,9 @@ defmodule Arbor.Memory.IntentStore do
     persist_agent_data_async(agent_id, updated)
 
     MemoryStore.embed_async("intents", agent_id, intent_to_text(intent),
-      agent_id: agent_id, type: :intent)
+      agent_id: agent_id,
+      type: :intent
+    )
 
     Signals.emit_intent_formed(agent_id, intent)
     Logger.debug("Intent recorded for #{agent_id}: #{intent.id} (#{intent.type})")
@@ -511,6 +531,37 @@ defmodule Arbor.Memory.IntentStore do
       updated = Map.put(data, :statuses, updated_statuses)
       :ets.insert(@ets_table, {agent_id, updated})
       persist_agent_data_async(agent_id, updated)
+    end
+
+    {:reply, count, state}
+  end
+
+  @impl true
+  def handle_call({:prune_stale, agent_id, max_age_ms}, _from, state) do
+    data = get_agent_data(agent_id)
+    statuses = Map.get(data, :statuses, %{})
+    now = DateTime.utc_now()
+
+    {surviving_intents, pruned_ids} =
+      Enum.reduce(data.intents, {[], []}, fn intent, {keep, pruned} ->
+        age_ms = DateTime.diff(now, intent.created_at, :millisecond)
+        status = Map.get(Map.get(statuses, intent.id, %{}), :status, :pending)
+
+        if status == :pending and age_ms > max_age_ms do
+          {keep, [intent.id | pruned]}
+        else
+          {[intent | keep], pruned}
+        end
+      end)
+
+    count = length(pruned_ids)
+
+    if count > 0 do
+      cleaned_statuses = Map.drop(statuses, pruned_ids)
+      updated = %{data | intents: Enum.reverse(surviving_intents), statuses: cleaned_statuses}
+      :ets.insert(@ets_table, {agent_id, updated})
+      persist_agent_data_async(agent_id, updated)
+      Logger.info("IntentStore: pruned #{count} stale pending intents for #{agent_id}")
     end
 
     {:reply, count, state}
@@ -683,6 +734,7 @@ defmodule Arbor.Memory.IntentStore do
 
   defp safe_atom(nil), do: nil
   defp safe_atom(val) when is_atom(val), do: val
+
   defp safe_atom(val) when is_binary(val) do
     String.to_existing_atom(val)
   rescue
@@ -691,6 +743,7 @@ defmodule Arbor.Memory.IntentStore do
 
   defp parse_datetime(nil), do: DateTime.utc_now()
   defp parse_datetime(%DateTime{} = dt), do: dt
+
   defp parse_datetime(str) when is_binary(str) do
     case DateTime.from_iso8601(str) do
       {:ok, dt, _} -> dt
@@ -713,6 +766,7 @@ defmodule Arbor.Memory.IntentStore do
               intents: Enum.take(agent_data.intents, buffer_size),
               percepts: Enum.take(agent_data.percepts, buffer_size)
             }
+
             :ets.insert(@ets_table, {agent_id, trimmed})
           end)
 

@@ -59,9 +59,14 @@ digraph HeartbeatBare {
            output_prefix="session"]
 
   // ── BARE: Actions only, nothing persists ──────────────────
-  execute_actions [type="exec", target="action", action="session_exec.execute_actions",
+  execute_actions [type="exec", target="action", action="session_execution.execute_actions",
                    context_keys="session.actions,session.agent_id",
                    output_prefix="session"]
+
+  // ── Prune stale intents even in bare mode ─────────────────
+  prune_intents [type="exec", target="action", action="session_goals.prune_stale_intents",
+                 context_keys="session.agent_id",
+                 output_prefix="session"]
 
   // ── Tool loop control ──────────────────────────────────────
   check_loop [shape=diamond, condition_key="session.has_action_results"]
@@ -93,8 +98,8 @@ digraph HeartbeatBare {
   // Consolidation path
   consolidate -> process
 
-  // Bare tail: actions only, then tool loop check
-  process -> execute_actions -> check_loop
+  // Bare tail: actions only, prune intents, then tool loop check
+  process -> execute_actions -> prune_intents -> check_loop
 
   // Tool loop
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]
