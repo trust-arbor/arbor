@@ -82,6 +82,7 @@ defmodule Arbor.AI.AcpPool do
       :checked_out_by,
       :tool_server,
       status: :idle,
+      taint: :clean,
       last_active: nil,
       checkout_count: 0
     ]
@@ -180,18 +181,20 @@ defmodule Arbor.AI.AcpPool do
   @impl true
   def handle_call({:checkout, provider, opts}, {caller_pid, _tag}, state) do
     profile = SessionProfile.from_opts(provider, opts)
+    tool_modules = Keyword.get(opts, :tool_modules, [])
+    agent_id = Keyword.get(opts, :agent_id)
 
     case find_by_affinity(state, profile) do
       {:ok, entry, state} ->
-        # Hard affinity match
-        state = checkout_session(state, entry.ref, caller_pid)
+        # Hard affinity match — reattach tools if needed
+        state = reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id)
         {:reply, {:ok, entry.pid}, state}
 
       :no_affinity ->
         case find_compatible_session(state, profile) do
           {:ok, entry, state} ->
-            # Profile-compatible reuse
-            state = checkout_session(state, entry.ref, caller_pid)
+            # Profile-compatible reuse — reattach tools if needed
+            state = reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id)
             {:reply, {:ok, entry.pid}, state}
 
           {:none, state} ->
@@ -267,6 +270,7 @@ defmodule Arbor.AI.AcpPool do
           tool_count: entry.profile && length(entry.profile.tool_modules),
           trust_domain: entry.profile && entry.profile.trust_domain,
           tool_server_port: entry.tool_server && entry.tool_server.port,
+          taint: entry.taint,
           checkout_count: entry.checkout_count,
           checked_out_by: entry.checked_out_by,
           last_active: entry.last_active
@@ -514,7 +518,13 @@ defmodule Arbor.AI.AcpPool do
     {state, ref}
   end
 
-  defp checkout_session(state, ref, caller_pid) do
+  # Start a fresh ToolServer for a reused session if it needs tools
+  defp reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id) do
+    {tool_server, _mcp_servers} = maybe_start_tool_server(tool_modules, agent_id)
+    checkout_session(state, entry.ref, caller_pid, tool_server)
+  end
+
+  defp checkout_session(state, ref, caller_pid, tool_server \\ nil) do
     now = System.monotonic_time(:millisecond)
     caller_mon = Process.monitor(caller_pid)
 
@@ -526,6 +536,7 @@ defmodule Arbor.AI.AcpPool do
               entry
               | status: :checked_out,
                 checked_out_by: caller_pid,
+                tool_server: tool_server || entry.tool_server,
                 last_active: now,
                 checkout_count: entry.checkout_count + 1
             }
@@ -551,7 +562,19 @@ defmodule Arbor.AI.AcpPool do
       state
       | sessions:
           Map.update!(state.sessions, ref, fn entry ->
-            %{entry | status: :idle, checked_out_by: nil, last_active: now}
+            # Tear down ToolServer on checkin to prevent tool leakage
+            if entry.tool_server do
+              ToolServer.stop(entry.tool_server.ref)
+            end
+
+            %{
+              entry
+              | status: :idle,
+                checked_out_by: nil,
+                tool_server: nil,
+                taint: :tainted,
+                last_active: now
+            }
           end),
         monitors: monitors
     }
@@ -561,12 +584,24 @@ defmodule Arbor.AI.AcpPool do
     monitors = Map.delete(state.monitors, monitor_ref)
 
     case Map.get(state.sessions, session_ref) do
-      %Entry{status: :checked_out} ->
+      %Entry{status: :checked_out} = entry ->
         now = System.monotonic_time(:millisecond)
 
+        # Tear down ToolServer on auto-checkin too
+        if entry.tool_server do
+          ToolServer.stop(entry.tool_server.ref)
+        end
+
         sessions =
-          Map.update!(state.sessions, session_ref, fn entry ->
-            %{entry | status: :idle, checked_out_by: nil, last_active: now}
+          Map.update!(state.sessions, session_ref, fn e ->
+            %{
+              e
+              | status: :idle,
+                checked_out_by: nil,
+                tool_server: nil,
+                taint: :tainted,
+                last_active: now
+            }
           end)
 
         %{state | sessions: sessions, monitors: monitors}
