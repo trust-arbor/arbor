@@ -318,7 +318,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
     max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
 
-    {tool_defs, executor} = resolve_tools(node, opts)
+    {tool_defs, executor} = resolve_tools(node, context, opts)
 
     agent_id =
       Map.get(node.attrs, "agent_id") ||
@@ -362,14 +362,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   # Resolve which tools and executor to use based on node attributes.
-  # If `tools` attr is set, use ArborActionsExecutor with those specific actions.
-  # Otherwise, fall back to CodingTools (5 built-in tools).
+  # Priority: node attrs "tools" > session.tools from context > CodingTools default.
   # The `tool_executor` opt allows test injection.
-  defp resolve_tools(node, opts) do
+  defp resolve_tools(node, context, opts) do
     case Map.get(node.attrs, "tools") do
       nil ->
-        executor = Keyword.get(opts, :tool_executor, CodingTools)
-        {CodingTools.definitions(), executor}
+        case Context.get(context, "session.tools") do
+          session_tools when is_list(session_tools) and session_tools != [] ->
+            executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
+            {session_tools, executor}
+
+          _ ->
+            executor = Keyword.get(opts, :tool_executor, CodingTools)
+            {CodingTools.definitions(), executor}
+        end
 
       tools_str when is_binary(tools_str) ->
         action_names = String.split(tools_str, ",", trim: true)
