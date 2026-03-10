@@ -377,6 +377,12 @@ defmodule Arbor.Agent.Executor do
     :authorized
   end
 
+  # Self-directed heartbeat intents — agent executing its own cognitive goals.
+  # Tagged at creation in StoreDecompositions; no external trust boundary applies.
+  defp check_capabilities(%Intent{metadata: %{"source" => "heartbeat"}}, _state) do
+    :authorized
+  end
+
   # P0-2: Use full authorize/4 pipeline directly (reflexes, identity,
   # constraints, escalation, audit). Shadow mode removed — can?/3 is only
   # for UI hints, not security decisions.
