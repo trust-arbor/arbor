@@ -175,8 +175,10 @@ defmodule Arbor.Memory do
   # ============================================================================
 
   defdelegate add_knowledge(agent_id, node_data), to: KnowledgeOps
+
   defdelegate link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []),
     to: KnowledgeOps
+
   defdelegate reinforce_knowledge(agent_id, node_id), to: KnowledgeOps
   defdelegate search_knowledge(agent_id, query, opts \\ []), to: KnowledgeOps
   defdelegate find_knowledge_by_name(agent_id, name), to: KnowledgeOps
@@ -269,6 +271,52 @@ defmodule Arbor.Memory do
   defdelegate get_working_memory(agent_id), to: SessionOps
   defdelegate save_working_memory(agent_id, working_memory), to: SessionOps
   defdelegate load_working_memory(agent_id, opts \\ []), to: SessionOps
+
+  @doc """
+  Index memory notes from LLM turn output into working memory as thoughts.
+
+  Accepts a turn data map (which may contain "memory_notes" or "session.memory_notes")
+  or a list of note strings/maps directly.
+  """
+  @spec index_memory_notes(String.t(), map() | list()) :: :ok
+  def index_memory_notes(agent_id, turn_data_or_notes) do
+    notes =
+      case turn_data_or_notes do
+        notes when is_list(notes) ->
+          notes
+
+        data when is_map(data) ->
+          Map.get(data, "session.memory_notes") ||
+            Map.get(data, "memory_notes") ||
+            Map.get(data, :memory_notes, [])
+      end
+
+    case List.wrap(notes) do
+      [] ->
+        :ok
+
+      note_list ->
+        wm = load_working_memory(agent_id)
+        wm_mod = Arbor.Memory.WorkingMemory
+
+        updated_wm =
+          Enum.reduce(note_list, wm, fn note, acc ->
+            text =
+              case note do
+                s when is_binary(s) -> s
+                %{"text" => t} when is_binary(t) -> t
+                %{text: t} when is_binary(t) -> t
+                _ -> nil
+              end
+
+            if text && text != "", do: apply(wm_mod, :add_thought, [acc, text]), else: acc
+          end)
+
+        save_working_memory(agent_id, updated_wm)
+        :ok
+    end
+  end
+
   defdelegate delete_working_memory(agent_id), to: SessionOps
   defdelegate serialize_working_memory(wm), to: SessionOps
   defdelegate deserialize_working_memory(data), to: SessionOps
@@ -317,7 +365,10 @@ defmodule Arbor.Memory do
   defdelegate record_thinking(agent_id, text, opts \\ []), to: SessionOps
   defdelegate recent_thinking(agent_id, opts \\ []), to: SessionOps
   defdelegate extract_thinking(response, provider, opts \\ []), to: SessionOps
-  defdelegate extract_and_record_thinking(agent_id, response, provider, opts \\ []), to: SessionOps
+
+  defdelegate extract_and_record_thinking(agent_id, response, provider, opts \\ []),
+    to: SessionOps
+
   defdelegate store_code(agent_id, params), to: SessionOps
   defdelegate find_code_by_purpose(agent_id, query), to: SessionOps
   defdelegate get_code(agent_id, entry_id), to: SessionOps

@@ -93,6 +93,9 @@ defmodule Arbor.Orchestrator.Session do
     :trust_tier,
     :turn_graph,
     :heartbeat_graph,
+    # DOT file paths — stored so reload_dot/1 can re-parse without restarting
+    :turn_dot_path,
+    :heartbeat_dot_path,
     :trace_id,
     :seed_ref,
     :signal_topic,
@@ -133,6 +136,8 @@ defmodule Arbor.Orchestrator.Session do
           trust_tier: atom(),
           turn_graph: Arbor.Orchestrator.Graph.t(),
           heartbeat_graph: Arbor.Orchestrator.Graph.t(),
+          turn_dot_path: String.t() | nil,
+          heartbeat_dot_path: String.t() | nil,
           phase: phase(),
           session_type: session_type(),
           execution_mode: execution_mode(),
@@ -250,6 +255,18 @@ defmodule Arbor.Orchestrator.Session do
     GenServer.call(session, {:restore_checkpoint, checkpoint})
   end
 
+  @doc """
+  Re-parse the DOT pipeline files from disk and hot-reload the session graphs.
+
+  Useful when DOT files change after a session is already running — without this,
+  the session keeps its original parsed graphs indefinitely. Returns `:ok` if both
+  graphs reload successfully, or `{:error, reason}` if either file fails to parse.
+  """
+  @spec reload_dot(GenServer.server()) :: :ok | {:error, term()}
+  def reload_dot(session) do
+    GenServer.call(session, :reload_dot)
+  end
+
   # ── Delegated functions (extracted to Builders) ─────────────────────
 
   @doc false
@@ -312,6 +329,8 @@ defmodule Arbor.Orchestrator.Session do
         trust_tier: trust_tier,
         turn_graph: turn_graph,
         heartbeat_graph: heartbeat_graph,
+        turn_dot_path: turn_dot_path,
+        heartbeat_dot_path: heartbeat_dot_path,
         compactor: compactor,
         adapters: adapters,
         heartbeat_interval: heartbeat_interval,
@@ -377,6 +396,22 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_call({:restore_checkpoint, checkpoint}, _from, state) do
     {:reply, :ok, Builders.apply_checkpoint(state, checkpoint)}
+  end
+
+  def handle_call(:reload_dot, _from, state) do
+    with {:ok, turn_graph} <- Builders.parse_dot_file(state.turn_dot_path),
+         {:ok, heartbeat_graph} <- Builders.parse_dot_file(state.heartbeat_dot_path) do
+      Logger.info("[Session] Reloaded DOT graphs for #{state.agent_id}")
+      new_state = %{state | turn_graph: turn_graph, heartbeat_graph: heartbeat_graph}
+      {:reply, :ok, new_state}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "[Session] Failed to reload DOT graphs for #{state.agent_id}: #{inspect(reason)}"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp do_send_message_async(message, from, state) do

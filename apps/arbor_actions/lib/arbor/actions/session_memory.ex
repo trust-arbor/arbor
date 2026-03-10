@@ -329,21 +329,27 @@ defmodule Arbor.Actions.SessionMemory do
 
   defmodule UpdateWorkingMemory do
     @moduledoc """
-    Add concerns and curiosity to working memory.
+    Add memory notes, concerns, and curiosity to working memory.
 
     ## Parameters
 
     | Name | Type | Required | Description |
     |------|------|----------|-------------|
     | `agent_id` | string | yes | Agent ID |
+    | `memory_notes` | list | no | List of memory note strings (stored as thoughts) |
     | `concerns` | list | no | List of concern strings |
     | `curiosity` | list | no | List of curiosity strings |
     """
     use Jido.Action,
       name: "session_memory_update_wm",
-      description: "Add concerns and curiosity to working memory",
+      description: "Add memory notes, concerns, and curiosity to working memory",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
+        memory_notes: [
+          type: {:list, :any},
+          required: false,
+          doc: "Memory note strings (stored as thoughts)"
+        ],
         concerns: [type: {:list, :string}, required: false, doc: "Concern strings"],
         curiosity: [type: {:list, :string}, required: false, doc: "Curiosity strings"]
       ]
@@ -356,42 +362,54 @@ defmodule Arbor.Actions.SessionMemory do
         raise ArgumentError, "agent_id is required"
       end
 
-      concerns =
-        List.wrap(params[:concerns] || params["concerns"] || params["session.concerns"] || [])
-
-      curiosity =
-        List.wrap(params[:curiosity] || params["curiosity"] || params["session.curiosity"] || [])
-
+      memory_notes = extract_list(params, :memory_notes)
+      concerns = extract_list(params, :concerns)
+      curiosity = extract_list(params, :curiosity)
       wm_mod = Arbor.Memory.WorkingMemory
 
       wm =
-        Arbor.Actions.SessionMemory.bridge(
-          Arbor.Memory,
-          :load_working_memory,
-          [agent_id],
-          nil
-        )
+        Arbor.Actions.SessionMemory.bridge(Arbor.Memory, :load_working_memory, [agent_id], nil)
 
       if wm && Code.ensure_loaded?(wm_mod) do
-        wm =
-          Enum.reduce(concerns, wm, fn c, acc ->
-            apply(wm_mod, :add_concern, [acc, c])
-          end)
-
-        wm =
-          Enum.reduce(curiosity, wm, fn c, acc ->
-            apply(wm_mod, :add_curiosity, [acc, c])
-          end)
-
-        Arbor.Actions.SessionMemory.bridge(
-          Arbor.Memory,
-          :save_working_memory,
-          [agent_id, wm],
-          :ok
-        )
+        wm
+        |> apply_notes(wm_mod, memory_notes)
+        |> apply_items(wm_mod, :add_concern, concerns)
+        |> apply_items(wm_mod, :add_curiosity, curiosity)
+        |> then(fn updated ->
+          Arbor.Actions.SessionMemory.bridge(
+            Arbor.Memory,
+            :save_working_memory,
+            [agent_id, updated],
+            :ok
+          )
+        end)
       end
 
       {:ok, %{wm_updated: true}}
     end
+
+    defp extract_list(params, key) do
+      string_key = to_string(key)
+
+      List.wrap(params[key] || params[string_key] || params["session.#{string_key}"] || [])
+    end
+
+    defp apply_notes(wm, wm_mod, notes) do
+      Enum.reduce(notes, wm, fn note, acc ->
+        case note_text(note) do
+          text when is_binary(text) and text != "" -> apply(wm_mod, :add_thought, [acc, text])
+          _ -> acc
+        end
+      end)
+    end
+
+    defp apply_items(wm, wm_mod, fun, items) do
+      Enum.reduce(items, wm, fn item, acc -> apply(wm_mod, fun, [acc, item]) end)
+    end
+
+    defp note_text(note) when is_binary(note), do: note
+    defp note_text(%{"text" => t}) when is_binary(t), do: t
+    defp note_text(%{text: t}) when is_binary(t), do: t
+    defp note_text(_), do: nil
   end
 end
