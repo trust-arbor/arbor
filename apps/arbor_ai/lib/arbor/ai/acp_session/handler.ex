@@ -91,7 +91,7 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   Same path validation and authorization as reads, with `:write` operation.
   """
-  def handle_file_write(_session_id, path, content, _opts, state) do
+  def handle_file_write(_session_id, path, content, state) do
     with {:ok, resolved} <- validate_path(path, state.workspace_root),
          :ok <- authorize_file(state.agent_id, resolved, :write) do
       case File.write(resolved, content) do
