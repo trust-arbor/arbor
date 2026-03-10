@@ -164,7 +164,7 @@ defmodule Arbor.Actions.SessionLlm do
       - "goal_updates": list of {id, progress, status} for existing goals
       - "new_goals": list of {description, priority} for goals you want to create
       - "actions": list of {type, params} for actions to take
-      - "decompositions": list of {goal_id, intentions: [{action, description}]}
+      - "decompositions": list of {goal_id, intentions: [{action, description}]} where action must be a canonical name like "file.read" or "shell.execute"
       - "concerns": list of current concerns (strings)
       - "curiosity": list of things you're curious about (strings)
       - "identity_insights": list of {category, content, confidence} self-discoveries
@@ -278,8 +278,15 @@ defmodule Arbor.Actions.SessionLlm do
       You have active goals with pending intentions. Focus on making concrete progress
       toward the highest priority goal. Choose ONE action from the "actions" array that
       advances a goal. Populate the "actions" field with at least one action — for example,
-      use file_read to examine source code, or shell_execute to run diagnostics.
+      use "file.read" to examine source code, or "shell.execute" to run diagnostics.
       Do not just think — act. Report progress via goal_updates.
+
+      Available action names (use exact dot-path format):
+        file.read, file.write, file.list
+        shell.execute, shell.execute_script
+        memory.recall, memory.remember
+        monitor.read
+        session_memory.recall, session_memory.update
       """
     end
 
@@ -287,9 +294,21 @@ defmodule Arbor.Actions.SessionLlm do
       """
       Mode: PLAN EXECUTION
       Decompose your goals into concrete intentions (action steps).
-      Each intention should be a single, executable action.
-      If you can already identify a concrete action to take (e.g. file_read to
-      examine a file), include it in the "actions" array alongside your decompositions.
+      Each intention should be a single, executable action. The "action" field in each
+      intention must be a canonical Jido action name (dot-path format). Use ONLY names
+      from the list below — invented names will fail silently.
+
+      Available action names:
+        file.read        — read a file by path
+        file.write       — write content to a file
+        file.list        — list directory contents
+        shell.execute    — run a shell command
+        memory.recall    — search agent memory
+        memory.remember  — store a fact in memory
+        monitor.read     — read system diagnostics
+
+      If you can already identify a concrete action to take, include it in the "actions"
+      array (same action names) alongside your decompositions.
       """
     end
 
