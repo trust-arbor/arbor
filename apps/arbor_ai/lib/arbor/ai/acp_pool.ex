@@ -108,6 +108,14 @@ defmodule Arbor.AI.AcpPool do
     cleanup_ms = Keyword.get(opts, :cleanup_interval_ms, @default_cleanup_interval_ms)
     cleanup_ref = Process.send_after(self(), :cleanup_idle, cleanup_ms)
 
+    # Clear the cached UnifiedLLM Client so it re-discovers adapters
+    # (including ACP now that the pool is running).
+    client_mod = Arbor.Orchestrator.UnifiedLLM.Client
+
+    if Code.ensure_loaded?(client_mod) and function_exported?(client_mod, :clear_default_client, 0) do
+      apply(client_mod, :clear_default_client, [])
+    end
+
     {:ok,
      %__MODULE__{
        config: config,
