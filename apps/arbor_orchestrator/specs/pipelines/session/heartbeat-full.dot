@@ -64,7 +64,7 @@ digraph HeartbeatFull {
            output_prefix="session"]
 
   // ── FULL: All post-processing nodes ───────────────────────
-  store_decompositions [type="exec", target="action", action="session_goals.store_decomps",
+  store_decompositions [type="exec", target="action", action="session_goals.store_decompositions",
                         context_keys="session.decompositions,session.agent_id",
                         output_prefix="session"]
   process_proposals [type="exec", target="action", action="session_goals.process_proposals",

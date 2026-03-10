@@ -251,7 +251,7 @@ digraph BDICycle {
   store_decompositions [
     type="exec",
     target="action",
-    action="session_goals.store_decomps",
+    action="session_goals.store_decompositions",
     context_keys="session.agent_id,session.decompositions",
     output_prefix="session"
   ]
