@@ -184,6 +184,89 @@ defmodule Arbor.AI.AcpPoolTest do
     end
   end
 
+  describe "profile-based matching" do
+    test "sessions with same profile are reused" do
+      opts = [client_opts: @test_client_opts, agent_id: "agent_1", tool_modules: [ModA]]
+      {:ok, s1} = AcpPool.checkout(:test, opts)
+      :ok = AcpPool.checkin(s1)
+
+      # Same profile → reuse
+      {:ok, s2} = AcpPool.checkout(:test, opts)
+      assert s1 == s2
+    end
+
+    test "sessions with different agent_ids are not reused" do
+      {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts, agent_id: "agent_1")
+      :ok = AcpPool.checkin(s1)
+
+      # Different agent → mint fresh
+      {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, agent_id: "agent_2")
+      refute s1 == s2
+    end
+
+    test "sessions with different tool sets are not reused" do
+      {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts, tool_modules: [ModA])
+      :ok = AcpPool.checkin(s1)
+
+      {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, tool_modules: [ModB])
+      refute s1 == s2
+    end
+
+    test "sessions with different trust domains are not reused" do
+      {:ok, s1} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, trust_domain: :internal)
+      :ok = AcpPool.checkin(s1)
+
+      {:ok, s2} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, trust_domain: :external)
+      refute s1 == s2
+    end
+  end
+
+  describe "affinity" do
+    test "affinity_key returns the same session" do
+      {:ok, s1} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, affinity_key: "sticky")
+      :ok = AcpPool.checkin(s1)
+
+      {:ok, s2} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, affinity_key: "sticky")
+      assert s1 == s2
+    end
+
+    test "different affinity_keys get different sessions" do
+      {:ok, s1} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, affinity_key: "key_a")
+      :ok = AcpPool.checkin(s1)
+
+      {:ok, s2} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts, affinity_key: "key_b")
+      refute s1 == s2
+    end
+  end
+
+  describe "sessions/0" do
+    test "returns session details with profile info" do
+      {:ok, _} = AcpPool.checkout(:test,
+        client_opts: @test_client_opts,
+        agent_id: "test_agent",
+        tool_modules: [ModA]
+      )
+
+      sessions = AcpPool.sessions()
+      assert length(sessions) == 1
+
+      [session] = sessions
+      assert session.provider == :test
+      assert session.agent_id == "test_agent"
+      assert session.tool_count == 1
+      assert is_binary(session.name)
+      assert is_binary(session.urn)
+      assert session.status == :checked_out
+      assert session.checkout_count == 1
+    end
+  end
+
   describe "idle cleanup" do
     test "closes sessions idle longer than timeout" do
       {:ok, session} = AcpPool.checkout(:test, client_opts: @test_client_opts)
