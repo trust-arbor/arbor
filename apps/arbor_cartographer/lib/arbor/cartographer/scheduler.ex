@@ -121,12 +121,7 @@ defmodule Arbor.Cartographer.Scheduler do
       |> Enum.filter(fn node -> meets_requirements?(node, requirements) end)
 
     # Apply resource guard (filter overloaded nodes)
-    candidates =
-      if skip_guard do
-        candidates
-      else
-        Enum.filter(candidates, fn node -> get_load(node) <= max_load end)
-      end
+    candidates = maybe_apply_resource_guard(candidates, skip_guard, max_load)
 
     case apply_strategy(candidates, strategy) do
       nil -> {:error, :no_matching_node}
@@ -418,6 +413,12 @@ defmodule Arbor.Cartographer.Scheduler do
   end
 
   # ── Resource Guard Helpers ─────────────────────────────────────────
+
+  defp maybe_apply_resource_guard(candidates, true, _max_load), do: candidates
+
+  defp maybe_apply_resource_guard(candidates, false, max_load) do
+    Enum.filter(candidates, fn node -> get_load(node) <= max_load end)
+  end
 
   defp extract_max_load(requirements, opts) do
     # Check requirements first, then options, then default

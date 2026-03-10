@@ -173,7 +173,7 @@ defmodule Arbor.Cartographer.SchedulerTest do
 
     test "list_capabilities returns at least local node" do
       caps = Scheduler.list_capabilities()
-      assert length(caps) >= 1
+      assert caps != []
       assert Enum.any?(caps, fn {node, _} -> node == Node.self() end)
     end
   end
