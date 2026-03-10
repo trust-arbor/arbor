@@ -54,6 +54,7 @@ defmodule Arbor.AI.AcpPool do
 
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpPool.SessionProfile
+  alias Arbor.AI.AcpPool.ToolServer
 
   @default_max 2
   @default_idle_timeout_ms 300_000
@@ -79,6 +80,7 @@ defmodule Arbor.AI.AcpPool do
       :ref,
       :profile,
       :checked_out_by,
+      :tool_server,
       status: :idle,
       last_active: nil,
       checkout_count: 0
@@ -199,8 +201,8 @@ defmodule Arbor.AI.AcpPool do
 
             if current < max do
               case spawn_session(provider, opts) do
-                {:ok, pid} ->
-                  {state, _ref} = register_session(state, pid, profile, caller_pid)
+                {:ok, pid, tool_server} ->
+                  {state, _ref} = register_session(state, pid, profile, caller_pid, tool_server)
                   Logger.debug("AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})")
                   {:reply, {:ok, pid}, state}
 
@@ -264,6 +266,7 @@ defmodule Arbor.AI.AcpPool do
           agent_id: entry.profile && entry.profile.agent_id,
           tool_count: entry.profile && length(entry.profile.tool_modules),
           trust_domain: entry.profile && entry.profile.trust_domain,
+          tool_server_port: entry.tool_server && entry.tool_server.port,
           checkout_count: entry.checkout_count,
           checked_out_by: entry.checked_out_by,
           last_active: entry.last_active
@@ -309,6 +312,7 @@ defmodule Arbor.AI.AcpPool do
   @impl true
   def terminate(_reason, state) do
     Enum.each(state.sessions, fn {_ref, entry} ->
+      if entry.tool_server, do: ToolServer.stop(entry.tool_server.ref)
       safe_close(entry.pid)
     end)
 
@@ -415,12 +419,26 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp spawn_session(provider, opts) do
+    tool_modules = Keyword.get(opts, :tool_modules, [])
+    agent_id = Keyword.get(opts, :agent_id)
+
+    # Start a ToolServer if the session needs action tools
+    {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id)
+
     session_opts =
       opts
       |> Keyword.put(:provider, provider)
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
       |> Keyword.put_new(:workspace, Keyword.get(opts, :workspace))
-      |> Keyword.put_new(:agent_id, Keyword.get(opts, :agent_id))
+      |> Keyword.put_new(:agent_id, agent_id)
+
+    # Pass mcp_servers so AcpSession can include them in create_session
+    session_opts =
+      if mcp_servers do
+        Keyword.put(session_opts, :mcp_servers, mcp_servers)
+      else
+        session_opts
+      end
 
     # Remove pool-specific opts before passing to AcpSession
     pool_keys = [:timeout, :tool_modules, :trust_domain, :affinity_key, :trust_tier, :name, :tags]
@@ -430,12 +448,30 @@ defmodule Arbor.AI.AcpPool do
            Arbor.AI.AcpPool.Supervisor,
            {AcpSession, session_opts}
          ) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, reason} -> {:error, reason}
+      {:ok, pid} ->
+        {:ok, pid, tool_server}
+
+      {:error, reason} ->
+        # Clean up ToolServer if session failed to start
+        if tool_server, do: ToolServer.stop(tool_server.ref)
+        {:error, reason}
     end
   end
 
-  defp register_session(state, pid, %SessionProfile{} = profile, caller_pid) do
+  defp maybe_start_tool_server([], _agent_id), do: {nil, nil}
+
+  defp maybe_start_tool_server(tool_modules, agent_id) when is_list(tool_modules) do
+    case ToolServer.start(tool_modules, agent_id: agent_id || "anonymous") do
+      {:ok, %{port: port} = info} ->
+        {info, ToolServer.mcp_servers_entry(port)}
+
+      {:error, reason} ->
+        Logger.warning("AcpPool: failed to start ToolServer: #{inspect(reason)}")
+        {nil, nil}
+    end
+  end
+
+  defp register_session(state, pid, %SessionProfile{} = profile, caller_pid, tool_server) do
     ref = make_ref()
     now = System.monotonic_time(:millisecond)
 
@@ -447,6 +483,7 @@ defmodule Arbor.AI.AcpPool do
       provider: profile.provider,
       ref: ref,
       profile: profile,
+      tool_server: tool_server,
       status: :checked_out,
       checked_out_by: caller_pid,
       last_active: now,
@@ -539,6 +576,11 @@ defmodule Arbor.AI.AcpPool do
 
   defp remove_session(state, ref) do
     entry = Map.get(state.sessions, ref)
+
+    # Stop fate-shared ToolServer if present
+    if entry && entry.tool_server do
+      ToolServer.stop(entry.tool_server.ref)
+    end
 
     monitors =
       Enum.reduce(state.monitors, state.monitors, fn
