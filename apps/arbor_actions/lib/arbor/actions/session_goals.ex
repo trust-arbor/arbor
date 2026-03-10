@@ -229,7 +229,8 @@ defmodule Arbor.Actions.SessionGoals do
         opts = [
           goal_id: goal_id,
           reasoning: reasoning || description,
-          target: target
+          target: target,
+          metadata: %{"source" => "heartbeat"}
         ]
 
         intent =
