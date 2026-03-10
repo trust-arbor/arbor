@@ -77,9 +77,20 @@ defmodule Arbor.AI.Application do
     end
   end
 
-  # Conditionally add ACP session pool based on config
+  # Conditionally add ACP session pool based on config.
+  # Auto-enables when CLI agents (claude, gemini, codex, etc.) are detected
+  # in PATH, unless explicitly disabled with `enable_acp_pool: false`.
   defp acp_pool_children do
-    if Application.get_env(:arbor_ai, :enable_acp_pool, false) do
+    explicitly_set = Application.get_env(:arbor_ai, :enable_acp_pool)
+
+    enabled =
+      case explicitly_set do
+        true -> true
+        false -> false
+        nil -> acp_agents_detected?()
+      end
+
+    if enabled do
       pool_config = Application.get_env(:arbor_ai, :acp_pool_config, [])
 
       [
@@ -89,5 +100,10 @@ defmodule Arbor.AI.Application do
     else
       []
     end
+  end
+
+  defp acp_agents_detected? do
+    ~w(claude gemini codex goose aider opencode cline)
+    |> Enum.any?(&System.find_executable/1)
   end
 end

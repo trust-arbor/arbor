@@ -543,16 +543,6 @@ defmodule Arbor.Agent.Manager do
     }
   end
 
-  defp build_start_opts(agent_id, display_name, %{module: module} = config) do
-    extra_opts = Map.get(config, :start_opts, [])
-
-    {module,
-     Keyword.merge(
-       [id: agent_id, agent_id: agent_id, display_name: display_name, model_config: config],
-       extra_opts
-     )}
-  end
-
   defp build_start_opts(agent_id, display_name, %{backend: :cli} = config) do
     model_atom =
       case config.id do
@@ -565,14 +555,34 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp build_start_opts(agent_id, display_name, %{backend: :api} = config) do
-    {APIAgent,
+    module = Map.get(config, :module, APIAgent)
+
+    {module,
      [
        id: agent_id,
        display_name: display_name,
-       model: config.id,
-       provider: config.provider,
-       model_id: config.id
+       model: config[:id],
+       provider: config[:provider],
+       model_id: config[:id]
      ]}
+  end
+
+  # Fallback for configs with :module but no :backend
+  defp build_start_opts(agent_id, display_name, %{module: module} = config) do
+    extra_opts = Map.get(config, :start_opts, [])
+
+    {module,
+     Keyword.merge(
+       [
+         id: agent_id,
+         agent_id: agent_id,
+         display_name: display_name,
+         model: config[:id],
+         provider: config[:provider],
+         model_config: config
+       ],
+       extra_opts
+     )}
   end
 
   defp default_display_name(%{name: name}) when is_binary(name), do: name
