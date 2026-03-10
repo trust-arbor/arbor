@@ -344,6 +344,115 @@ defmodule Arbor.AI.AcpPoolTest do
     end
   end
 
+  describe "session sanitization on checkin" do
+    test "checkin marks session as tainted" do
+      {:ok, session} = AcpPool.checkout(:test, client_opts: @test_client_opts)
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.taint == :clean
+
+      :ok = AcpPool.checkin(session)
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.taint == :tainted
+    end
+
+    test "checkin tears down ToolServer" do
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction]
+        )
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      port = info.tool_server_port
+      assert port != nil
+      assert {:ok, _} = tool_server_ping(port)
+
+      :ok = AcpPool.checkin(session)
+      Process.sleep(50)
+
+      # ToolServer should be stopped
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.tool_server_port == nil
+      assert {:error, _} = tool_server_ping(port)
+    end
+
+    test "reused session gets a fresh ToolServer on checkout" do
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction]
+        )
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      port1 = info.tool_server_port
+      assert port1 != nil
+
+      :ok = AcpPool.checkin(session)
+
+      # Checkout again with same profile (will reuse session)
+      {:ok, reused} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction]
+        )
+
+      assert reused == session
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      port2 = info.tool_server_port
+      # New ToolServer on a (likely) different port
+      assert port2 != nil
+      assert {:ok, _} = tool_server_ping(port2)
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "auto-checkin on caller crash also tears down ToolServer" do
+      test_pid = self()
+
+      caller =
+        spawn(fn ->
+          {:ok, session} =
+            AcpPool.checkout(:test,
+              client_opts: @test_client_opts,
+              tool_modules: [TestToolAction]
+            )
+
+          send(test_pid, {:session, session})
+          Process.sleep(:infinity)
+        end)
+
+      _session =
+        receive do
+          {:session, s} -> s
+        end
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      port = info.tool_server_port
+      assert port != nil
+
+      # Kill the caller
+      Process.exit(caller, :kill)
+      Process.sleep(100)
+
+      # Session should be auto-checked-in with ToolServer stopped
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.status == :idle
+      assert info.taint == :tainted
+      assert info.tool_server_port == nil
+    end
+  end
+
   # Helper to ping a tool server
   defp tool_server_ping(port) do
     body =
