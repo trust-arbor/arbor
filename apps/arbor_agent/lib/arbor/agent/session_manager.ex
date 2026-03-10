@@ -68,6 +68,32 @@ defmodule Arbor.Agent.SessionManager do
     GenServer.call(__MODULE__, {:stop_session, agent_id})
   end
 
+  @doc """
+  Reload DOT pipeline graphs for all active sessions.
+
+  Useful when DOT files change after sessions are already running — calls
+  `Session.reload_dot/1` on every live session in the ETS table.
+
+  Returns a map of `agent_id => :ok | {:error, reason}`.
+  """
+  @spec reload_all_dots() :: %{String.t() => :ok | {:error, term()}}
+  def reload_all_dots do
+    session_mod = @session_module
+
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_agent_id, pid} -> is_pid(pid) and Process.alive?(pid) end)
+    |> Map.new(fn {agent_id, pid} ->
+      result =
+        if function_exported?(session_mod, :reload_dot, 1) do
+          apply(session_mod, :reload_dot, [pid])
+        else
+          {:error, :reload_dot_not_available}
+        end
+
+      {agent_id, result}
+    end)
+  end
+
   # ── GenServer ───────────────────────────────────────────────────
 
   def start_link(opts \\ []) do
