@@ -241,25 +241,54 @@ defmodule Arbor.AI do
         {:ok, response}
 
       {:unavailable, _reason} ->
-        # Fall back to CallWithTools (the legacy path)
-        result = CallWithTools.run(params, context)
-        duration_ms = System.monotonic_time(:millisecond) - start_time
+        # ACP providers handle tool calling on the CLI agent side,
+        # so route through UnifiedBridge directly (bypasses Jido.AI).
+        if provider == :acp do
+          fallback_via_unified_bridge(prompt, opts, start_time, provider, model)
+        else
+          # Fall back to CallWithTools (the legacy path)
+          result = CallWithTools.run(params, context)
+          duration_ms = System.monotonic_time(:millisecond) - start_time
 
-        case result do
-          {:ok, raw_result} ->
-            response = format_tools_response(raw_result, provider, model)
-            ToolSignals.emit_completed(provider, model, duration_ms, response)
-            ToolSignals.record_budget_usage(provider, opts, response)
-            ToolSignals.record_usage_success(provider, opts, response, duration_ms)
-            {:ok, response}
+          case result do
+            {:ok, raw_result} ->
+              response = format_tools_response(raw_result, provider, model)
+              ToolSignals.emit_completed(provider, model, duration_ms, response)
+              ToolSignals.record_budget_usage(provider, opts, response)
+              ToolSignals.record_usage_success(provider, opts, response, duration_ms)
+              {:ok, response}
 
-          {:error, reason} ->
-            duration_ms_err = System.monotonic_time(:millisecond) - start_time
-            ToolSignals.emit_failed(provider, model, reason)
-            ToolSignals.record_usage_failure(provider, opts, reason, duration_ms_err)
-            Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
-            {:error, reason}
+            {:error, reason} ->
+              duration_ms_err = System.monotonic_time(:millisecond) - start_time
+              ToolSignals.emit_failed(provider, model, reason)
+              ToolSignals.record_usage_failure(provider, opts, reason, duration_ms_err)
+              Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
+              {:error, reason}
+          end
         end
+    end
+  end
+
+  # ACP fallback: route through UnifiedBridge directly (no Jido.AI).
+  # ACP CLI agents handle tool calling internally.
+  defp fallback_via_unified_bridge(prompt, opts, start_time, provider, model) do
+    case UnifiedBridge.generate_text(prompt, opts) do
+      {:ok, response} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+        ToolSignals.emit_completed(provider, model, duration_ms, response)
+        ToolSignals.record_budget_usage(provider, opts, response)
+        ToolSignals.record_usage_success(provider, opts, response, duration_ms)
+        {:ok, response}
+
+      :unavailable ->
+        {:error, :acp_unavailable}
+
+      {:error, reason} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+        ToolSignals.emit_failed(provider, model, reason)
+        ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
+        Logger.warning("ACP generation failed: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 

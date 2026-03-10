@@ -75,6 +75,7 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
 
     step("Compiling", &compile/0)
+    step("Seeding agent templates", &seed_templates/0)
 
     print_summary(opts)
   end
@@ -257,6 +258,25 @@ defmodule Mix.Tasks.Arbor.Setup do
   defp compile do
     case Mix.Task.run("compile") do
       _ -> {:ok, "done"}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp seed_templates do
+    store = Arbor.Agent.TemplateStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :seed_builtins, 0) do
+      apply(store, :ensure_table, [])
+      {:ok, count} = apply(store, :seed_builtins, [])
+
+      if count > 0 do
+        {:ok, "#{count} new template(s) seeded"}
+      else
+        {:skip, "all templates already exist"}
+      end
+    else
+      {:skip, "TemplateStore not available"}
     end
   rescue
     e -> {:error, Exception.message(e)}

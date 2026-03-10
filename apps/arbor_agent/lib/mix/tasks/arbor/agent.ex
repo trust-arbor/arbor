@@ -485,6 +485,9 @@ defmodule Mix.Tasks.Arbor.Agent do
       "local" -> :local
       "ollama" -> :ollama
       "lmstudio" -> :lmstudio
+      "acp" -> :acp
+      "gemini" -> :gemini
+      "xai" -> :xai
       other -> Mix.raise("Unknown provider: #{other}")
     end
   end

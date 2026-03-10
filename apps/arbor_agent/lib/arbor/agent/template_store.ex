@@ -23,7 +23,8 @@ defmodule Arbor.Agent.TemplateStore do
     Arbor.Agent.Templates.CodeReviewer => "code_reviewer",
     Arbor.Agent.Templates.Monitor => "monitor",
     Arbor.Agent.Templates.Diagnostician => "diagnostician",
-    Arbor.Agent.Templates.Conversationalist => "conversationalist"
+    Arbor.Agent.Templates.Conversationalist => "conversationalist",
+    Arbor.Agent.Templates.InterviewAgent => "interview_agent"
   }
 
   @builtin_names Map.values(@builtin_modules)
