@@ -342,9 +342,10 @@ defmodule Arbor.AI.AcpSession do
     # not in prompt result)
     state = accumulate_text(update, state)
 
-    Logger.debug(
-      "ACP session #{session_id} update: #{inspect(Map.get(update, "kind", "unknown"))}"
-    )
+    update_type =
+      Map.get(update, "sessionUpdate") || Map.get(update, "kind", "unknown")
+
+    Logger.debug("ACP session #{session_id} update: #{inspect(update_type)}")
 
     {:noreply, state}
   end
@@ -437,9 +438,19 @@ defmodule Arbor.AI.AcpSession do
 
   # -- Streaming Text Accumulation --
 
+  # Legacy format (ExMCP < 0.9)
   defp accumulate_text(%{"kind" => "text", "content" => content}, state)
        when is_binary(content) do
     %{state | accumulated_text: state.accumulated_text <> content}
+  end
+
+  # New ACP spec format (ExMCP >= 0.9)
+  defp accumulate_text(
+         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"text" => text}},
+         state
+       )
+       when is_binary(text) do
+    %{state | accumulated_text: state.accumulated_text <> text}
   end
 
   defp accumulate_text(_, state), do: state
@@ -465,8 +476,14 @@ defmodule Arbor.AI.AcpSession do
   defp accumulate_usage(state, result) when is_map(result) do
     usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
 
-    input = Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens, 0)
-    output = Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens, 0)
+    # Handle both snake_case (native ACP) and camelCase (Claude/Codex adapters)
+    input =
+      Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
+        Map.get(usage, "inputTokens") || 0
+
+    output =
+      Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens) ||
+        Map.get(usage, "outputTokens") || 0
 
     %{
       state
