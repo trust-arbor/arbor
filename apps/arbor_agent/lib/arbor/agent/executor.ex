@@ -290,6 +290,9 @@ defmodule Arbor.Agent.Executor do
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
 
+    # Mark intent complete in IntentStore so it isn't re-routed
+    complete_or_fail_intent(state.agent_id, intent, outcome)
+
     # Forward percept to ActionCycleServer for Mind processing
     forward_percept_to_action_cycle(state.agent_id, percept)
 
@@ -311,6 +314,9 @@ defmodule Arbor.Agent.Executor do
 
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
+
+    # Mark intent failed in IntentStore so it isn't re-routed
+    safe_call(fn -> Arbor.Memory.fail_intent(state.agent_id, intent.id, "blocked: #{inspect(reason)}") end)
 
     # Forward blocked percept to ActionCycleServer for Mind awareness
     forward_percept_to_action_cycle(state.agent_id, percept)
@@ -385,7 +391,12 @@ defmodule Arbor.Agent.Executor do
         :error -> "arbor://agent/action/#{action}"
       end
 
-    case safe_call(fn -> Arbor.Security.authorize(state.agent_id, resource, :execute) end) do
+    # Intent sender was already verified by authorize_intent_sender/2.
+    # Skip identity re-verification here — it would require a signed_request
+    # that autonomous agents don't have in the heartbeat context.
+    case safe_call(fn ->
+           Arbor.Security.authorize(state.agent_id, resource, :execute, verify_identity: false)
+         end) do
       {:ok, :authorized} -> :authorized
       {:ok, :pending_approval, _ref} -> {:blocked, :pending_approval}
       {:error, reason} -> {:blocked, reason}
@@ -424,24 +435,12 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp build_intent_handler(executor_pid) do
-    fn signal ->
-      # Signal.data contains %{intent: %Intent{}, ...}
-      intent = extract_intent_from_signal(signal)
-      maybe_forward_intent(intent, executor_pid)
-      :ok
+    # Bridge.subscribe_to_intents extracts the Intent from the signal
+    # and passes the Intent struct directly to this handler.
+    fn %Intent{} = intent ->
+      Logger.debug("[Executor] Received intent: #{intent.id}")
+      GenServer.cast(executor_pid, {:intent, intent})
     end
-  end
-
-  defp maybe_forward_intent(nil, _executor_pid), do: :ok
-
-  defp maybe_forward_intent(intent, executor_pid) do
-    Logger.debug("[Executor] Received intent signal: #{intent.id}")
-    GenServer.cast(executor_pid, {:intent, intent})
-  end
-
-  defp extract_intent_from_signal(signal) do
-    data = Map.get(signal, :data) || %{}
-    data[:intent] || data["intent"]
   end
 
   defp safe_reflex_check(context) do
@@ -467,6 +466,14 @@ defmodule Arbor.Agent.Executor do
 
   # Forward execution results to ActionCycleServer so the Mind can process them.
   # Converts Percept struct to a plain map (ActionCycleServer expects maps).
+  defp complete_or_fail_intent(agent_id, %Intent{id: intent_id}, :success) do
+    safe_call(fn -> Arbor.Memory.complete_intent(agent_id, intent_id) end)
+  end
+
+  defp complete_or_fail_intent(agent_id, %Intent{id: intent_id}, _outcome) do
+    safe_call(fn -> Arbor.Memory.fail_intent(agent_id, intent_id, "execution failed") end)
+  end
+
   defp forward_percept_to_action_cycle(agent_id, %Percept{} = percept) do
     action_cycle = Arbor.Agent.ActionCycleSupervisor
 
