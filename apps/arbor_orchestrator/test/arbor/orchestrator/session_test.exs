@@ -259,9 +259,10 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       # heartbeat.dot defines: start, bg_checks, select_mode, mode_router,
       # build_prompt, llm_call, consolidate, process, store_decompositions,
-      # process_proposals, update_wm, execute_actions, update_goals,
-      # prune_intents, check_loop, build_followup, llm_followup, done = 18 nodes
-      assert map_size(graph.nodes) == 18
+      # route_intents, process_proposals, update_wm, execute_actions,
+      # update_goals, prune_intents, check_loop, build_followup,
+      # llm_followup, done = 19 nodes
+      assert map_size(graph.nodes) == 19
 
       # Verify mode-specific nodes exist
       assert Map.has_key?(graph.nodes, "build_prompt")
