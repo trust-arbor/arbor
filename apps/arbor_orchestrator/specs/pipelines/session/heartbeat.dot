@@ -87,7 +87,7 @@ digraph Heartbeat {
            output_prefix="session"]
 
   // ── Post-processing: store decompositions as intents ─────
-  store_decompositions [type="exec", target="action", action="session_goals.store_decomps",
+  store_decompositions [type="exec", target="action", action="session_goals.store_decompositions",
                         context_keys="session.decompositions,session.agent_id",
                         output_prefix="session"]
 
