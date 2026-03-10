@@ -2,9 +2,17 @@ defmodule Arbor.Memory.AuthorizationTest do
   use ExUnit.Case, async: true
 
   @moduletag :fast
+  @moduletag :integration
 
   @agent_id "test_agent_auth"
-  @caller_id "caller_agent"
+  @caller_id "agent_caller"
+
+  setup do
+    # When Security is fully running (cross-app umbrella tests), we need
+    # to grant capabilities. When it's not running, authorize/2 permits by default.
+    grant_memory_capabilities(@caller_id)
+    :ok
+  end
 
   describe "authorize_init/3" do
     test "delegates to init_for_agent when security permits" do
@@ -144,6 +152,35 @@ defmodule Arbor.Memory.AuthorizationTest do
       assert {:authorize_read, 2} in exports or {:authorize_read, 3} in exports
       assert {:authorize_write, 3} in exports
       assert {:authorize_add_knowledge, 3} in exports
+    end
+  end
+
+  # Grant wildcard memory capabilities when Security is running.
+  # When Security is not loaded, authorize/2 permits by default.
+  defp grant_memory_capabilities(caller_id) do
+    if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
+         Process.whereis(Arbor.Security.CapabilityStore) != nil do
+      memory_uris = [
+        "arbor://memory/init",
+        "arbor://memory/cleanup",
+        "arbor://memory/index",
+        "arbor://memory/recall",
+        "arbor://memory/search",
+        "arbor://memory/read",
+        "arbor://memory/write",
+        "arbor://memory/add_knowledge"
+      ]
+
+      for uri <- memory_uris do
+        {:ok, cap} =
+          Arbor.Contracts.Security.Capability.new(
+            resource_uri: uri,
+            principal_id: caller_id,
+            actions: [:all]
+          )
+
+        Arbor.Security.CapabilityStore.put(cap)
+      end
     end
   end
 end
