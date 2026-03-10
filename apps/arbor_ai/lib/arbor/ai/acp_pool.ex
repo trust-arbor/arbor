@@ -112,7 +112,8 @@ defmodule Arbor.AI.AcpPool do
     # (including ACP now that the pool is running).
     client_mod = Arbor.Orchestrator.UnifiedLLM.Client
 
-    if Code.ensure_loaded?(client_mod) and function_exported?(client_mod, :clear_default_client, 0) do
+    if Code.ensure_loaded?(client_mod) and
+         function_exported?(client_mod, :clear_default_client, 0) do
       apply(client_mod, :clear_default_client, [])
     end
 

@@ -73,9 +73,10 @@ defmodule Arbor.Actions.Trust do
     end
 
     defp get_trust_profile(agent_id) do
-      if Code.ensure_loaded?(Arbor.Trust) and
-           function_exported?(Arbor.Trust, :get_trust_profile, 1) do
-        Arbor.Trust.get_trust_profile(agent_id)
+      mod = Arbor.Trust
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :get_trust_profile, 1) do
+        apply(mod, :get_trust_profile, [agent_id])
       else
         {:error, :trust_unavailable}
       end
@@ -231,18 +232,20 @@ defmodule Arbor.Actions.Trust do
     end
 
     defp get_trust_profile(agent_id) do
-      if Code.ensure_loaded?(Arbor.Trust) and
-           function_exported?(Arbor.Trust, :get_trust_profile, 1) do
-        Arbor.Trust.get_trust_profile(agent_id)
+      mod = Arbor.Trust
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :get_trust_profile, 1) do
+        apply(mod, :get_trust_profile, [agent_id])
       else
         {:error, :trust_unavailable}
       end
     end
 
     defp get_preset_rules(preset_atom) do
-      if Code.ensure_loaded?(Arbor.Trust.Policy) and
-           function_exported?(Arbor.Trust.Policy, :preset_rules, 1) do
-        Arbor.Trust.Policy.preset_rules(preset_atom)
+      mod = Arbor.Trust.Policy
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :preset_rules, 1) do
+        apply(mod, :preset_rules, [preset_atom])
       else
         {:ask, %{}}
       end
@@ -375,9 +378,10 @@ defmodule Arbor.Actions.Trust do
     end
 
     defp get_explanation(agent_id, resource_uri) do
-      if Code.ensure_loaded?(Arbor.Trust) and
-           function_exported?(Arbor.Trust, :explain, 2) do
-        Arbor.Trust.explain(agent_id, resource_uri)
+      mod = Arbor.Trust
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :explain, 2) do
+        apply(mod, :explain, [agent_id, resource_uri])
       else
         %{
           resource_uri: resource_uri,
@@ -440,9 +444,10 @@ defmodule Arbor.Actions.Trust do
     end
 
     defp get_preset_rules(preset_atom) do
-      if Code.ensure_loaded?(Arbor.Trust.Policy) and
-           function_exported?(Arbor.Trust.Policy, :preset_rules, 1) do
-        Arbor.Trust.Policy.preset_rules(preset_atom)
+      mod = Arbor.Trust.Policy
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :preset_rules, 1) do
+        apply(mod, :preset_rules, [preset_atom])
       else
         {:ask, %{}}
       end
@@ -490,9 +495,10 @@ defmodule Arbor.Actions.Trust do
     end
 
     defp list_profiles do
-      if Code.ensure_loaded?(Arbor.Trust) and
-           function_exported?(Arbor.Trust, :list_profiles, 1) do
-        Arbor.Trust.list_profiles([])
+      mod = Arbor.Trust
+
+      if Code.ensure_loaded?(mod) and function_exported?(mod, :list_profiles, 1) do
+        apply(mod, :list_profiles, [[]])
       else
         {:error, :trust_unavailable}
       end

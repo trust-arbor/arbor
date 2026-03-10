@@ -260,10 +260,20 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   end
 
   defp normalize_usage(usage) when is_map(usage) do
+    # Handle both snake_case (native ACP) and camelCase (Claude/Codex adapters)
+    input =
+      Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
+        Map.get(usage, "inputTokens") || 0
+
+    output =
+      Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens) ||
+        Map.get(usage, "outputTokens") || 0
+
     %{
-      prompt_tokens: Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens, 0),
-      completion_tokens: Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens, 0),
-      total_tokens: Map.get(usage, "total_tokens") || Map.get(usage, :total_tokens, 0)
+      prompt_tokens: input,
+      completion_tokens: output,
+      total_tokens:
+        Map.get(usage, "total_tokens") || Map.get(usage, :total_tokens, input + output)
     }
   end
 
