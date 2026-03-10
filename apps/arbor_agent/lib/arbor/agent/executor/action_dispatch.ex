@@ -28,7 +28,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       iex> ActionDispatch.canonical_action_name(:unknown_thing)
       :error
   """
-  @spec canonical_action_name(atom()) :: {:ok, String.t()} | :error
+  @spec canonical_action_name(atom() | String.t()) :: {:ok, String.t()} | :error
   def canonical_action_name(action) when is_atom(action) do
     # Check hardcoded dispatch mappings first (compound names like
     # :background_checks_run that find_action_module can't discover,
@@ -43,6 +43,13 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
           nil -> :error
           module -> {:ok, module_to_dotted_name(module)}
         end
+    end
+  end
+
+  def canonical_action_name(action) when is_binary(action) do
+    case find_action_module_from_string(action) do
+      nil -> :error
+      module -> {:ok, module_to_dotted_name(module)}
     end
   end
 
@@ -111,6 +118,12 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   # Generic action dispatch — try to find a matching action module
   def dispatch(action, params) when is_atom(action) do
     action_module = find_action_module(action)
+    run_discovered_action(action_module, action, params)
+  end
+
+  # String action names from decomposition JSON — convert to atom and re-dispatch
+  def dispatch(action, params) when is_binary(action) do
+    action_module = find_action_module_from_string(action)
     run_discovered_action(action_module, action, params)
   end
 
@@ -196,6 +209,19 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   defp hardcoded_canonical_name(:proposal_status), do: {:ok, "proposal.status"}
   defp hardcoded_canonical_name(_), do: :error
+
+  # Find an action module from a string action name (dotted or underscore format)
+  # e.g., "memory.remember" -> Arbor.Actions.Memory.Remember
+  defp find_action_module_from_string(action_str) when is_binary(action_str) do
+    candidates = [
+      build_action_module_name(action_str),
+      build_action_module_from_dotted(action_str)
+    ]
+
+    Enum.find(candidates, fn mod ->
+      mod && Code.ensure_loaded?(mod) && function_exported?(mod, :run, 2)
+    end)
+  end
 
   # Try to find an action module by naming convention
   # e.g., :file_read -> Arbor.Actions.File.Read
