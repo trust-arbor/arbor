@@ -350,7 +350,8 @@ defmodule Arbor.Security.Events do
         apply(Arbor.Persistence.Event, :new, [
           @stream_id,
           to_string(event_type),
-          Map.put(data, :timestamp, DateTime.utc_now())
+          Map.put(data, :timestamp, DateTime.utc_now()),
+          [metadata: %{source_node: node()}]
         ])
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply

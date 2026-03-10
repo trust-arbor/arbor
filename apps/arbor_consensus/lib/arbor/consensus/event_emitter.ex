@@ -88,11 +88,13 @@ defmodule Arbor.Consensus.EventEmitter do
                 correlation_id: Keyword.get(opts, :correlation_id)
               )
 
+            metadata = Map.put(event_map.metadata, :source_node, node())
+
             PersistenceEvent.new(
               event_map.stream_id,
               event_map.type,
               event_map.data,
-              metadata: event_map.metadata,
+              metadata: metadata,
               causation_id: event_map.causation_id,
               correlation_id: event_map.correlation_id,
               timestamp: event_map.timestamp
@@ -369,12 +371,14 @@ defmodule Arbor.Consensus.EventEmitter do
       )
 
     # Create actual persistence event
+    metadata = Map.put(event_map.metadata, :source_node, node())
+
     persistence_event =
       PersistenceEvent.new(
         event_map.stream_id,
         event_map.type,
         event_map.data,
-        metadata: event_map.metadata,
+        metadata: metadata,
         causation_id: event_map.causation_id,
         correlation_id: event_map.correlation_id,
         timestamp: event_map.timestamp

@@ -412,7 +412,8 @@ defmodule Arbor.Memory.Events do
         to_string(event_type),
         Map.merge(data, %{
           agent_id: agent_id
-        })
+        }),
+        metadata: %{source_node: node()}
       )
 
     # Write to EventLog
