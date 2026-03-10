@@ -198,13 +198,15 @@ defmodule Arbor.Memory.IntentStore do
   @spec pending_intentions(String.t(), keyword()) :: [{Intent.t(), map()}]
   def pending_intentions(agent_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 10)
+    max_retries = Keyword.get(opts, :max_retries, 5)
     data = get_agent_data(agent_id)
     statuses = Map.get(data, :statuses, %{})
 
     data.intents
     |> Enum.filter(fn intent ->
       status = Map.get(statuses, intent.id, %{})
-      Map.get(status, :status, :pending) == :pending
+      Map.get(status, :status, :pending) == :pending and
+        Map.get(status, :retry_count, 0) < max_retries
     end)
     |> Enum.sort_by(& &1.urgency, :desc)
     |> Enum.take(limit)
