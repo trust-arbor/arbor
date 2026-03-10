@@ -2,8 +2,16 @@ defmodule Arbor.Consensus.AuthorizationTest do
   use ExUnit.Case, async: false
 
   @moduletag :fast
+  @moduletag :integration
 
-  @caller_id "test_caller"
+  @caller_id "agent_test_caller"
+
+  setup do
+    # When Security is fully running (cross-app umbrella tests), we need
+    # to grant capabilities. When it's not running, authorize/2 permits by default.
+    grant_consensus_capabilities(@caller_id)
+    :ok
+  end
 
   describe "authorize_propose/3" do
     test "delegates to propose when security permits" do
@@ -98,6 +106,33 @@ defmodule Arbor.Consensus.AuthorizationTest do
       assert {:authorize_cancel, 2} in exports or {:authorize_cancel, 3} in exports
       assert {:authorize_force_approve, 3} in exports or {:authorize_force_approve, 4} in exports
       assert {:authorize_force_reject, 3} in exports or {:authorize_force_reject, 4} in exports
+    end
+  end
+
+  # Grant wildcard consensus capabilities when Security is running.
+  # When Security is not loaded, authorize/2 permits by default.
+  defp grant_consensus_capabilities(caller_id) do
+    if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
+         Process.whereis(Arbor.Security.CapabilityStore) != nil do
+      consensus_uris = [
+        "arbor://consensus/propose",
+        "arbor://consensus/ask",
+        "arbor://consensus/cancel",
+        "arbor://consensus/force_approve",
+        "arbor://consensus/force_reject",
+        "arbor://consensus/decide"
+      ]
+
+      for uri <- consensus_uris do
+        {:ok, cap} =
+          Arbor.Contracts.Security.Capability.new(
+            resource_uri: uri,
+            principal_id: caller_id,
+            actions: [:all]
+          )
+
+        Arbor.Security.CapabilityStore.put(cap)
+      end
     end
   end
 end
