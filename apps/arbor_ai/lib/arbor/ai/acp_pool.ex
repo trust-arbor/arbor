@@ -90,6 +90,9 @@ defmodule Arbor.AI.AcpPool do
 
   # -- Public API --
 
+  @pg_scope :acp_pool
+  @pg_group :all_pools
+
   @doc "Start the pool GenServer."
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -154,6 +157,130 @@ defmodule Arbor.AI.AcpPool do
     GenServer.call(__MODULE__, :sessions)
   end
 
+  @doc """
+  Get aggregated status across all nodes in the cluster.
+
+  Returns a map of `%{node => provider_status}` for every node
+  running an AcpPool.
+  """
+  @spec cluster_status() :: map()
+  def cluster_status do
+    local = %{Node.self() => safe_call(:status)}
+
+    remote_nodes()
+    |> Enum.reduce(local, fn node, acc ->
+      case :rpc.call(node, __MODULE__, :status, [], 5_000) do
+        {:badrpc, _} -> acc
+        result -> Map.put(acc, node, result)
+      end
+    end)
+  end
+
+  @doc """
+  Get all sessions across all nodes in the cluster.
+  """
+  @spec cluster_sessions() :: [map()]
+  def cluster_sessions do
+    local =
+      safe_call(:sessions)
+      |> Enum.map(&Map.put(&1, :node, Node.self()))
+
+    remote =
+      remote_nodes()
+      |> Enum.flat_map(fn node ->
+        case :rpc.call(node, __MODULE__, :sessions, [], 5_000) do
+          {:badrpc, _} -> []
+          sessions -> Enum.map(sessions, &Map.put(&1, :node, node))
+        end
+      end)
+
+    local ++ remote
+  end
+
+  @doc """
+  Checkout a session, optionally routing to a remote node.
+
+  ## Node options
+
+  - `:local` (default) — only check local pool
+  - `:any` — try local first, then search remote nodes
+  - `node_atom` — checkout on a specific remote node
+  """
+  @spec cluster_checkout(atom(), keyword()) :: {:ok, pid(), node()} | {:error, term()}
+  def cluster_checkout(provider, opts \\ []) do
+    {node_pref, opts} = Keyword.pop(opts, :node, :local)
+
+    case node_pref do
+      :local ->
+        case checkout(provider, opts) do
+          {:ok, pid} -> {:ok, pid, Node.self()}
+          error -> error
+        end
+
+      :any ->
+        # Try local first
+        case checkout(provider, opts) do
+          {:ok, pid} ->
+            {:ok, pid, Node.self()}
+
+          {:error, :pool_exhausted} ->
+            # Try remote nodes
+            find_remote_session(provider, opts)
+
+          error ->
+            error
+        end
+
+      target_node when is_atom(target_node) ->
+        if target_node == Node.self() do
+          case checkout(provider, opts) do
+            {:ok, pid} -> {:ok, pid, Node.self()}
+            error -> error
+          end
+        else
+          remote_checkout(target_node, provider, opts)
+        end
+    end
+  end
+
+  @doc """
+  Send a message to a session, handling remote sessions transparently.
+  """
+  @spec cluster_send_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def cluster_send_message(session_pid, content, opts \\ []) do
+    if node(session_pid) == Node.self() do
+      AcpSession.send_message(session_pid, content, opts)
+    else
+      timeout = Keyword.get(opts, :timeout, 120_000)
+
+      case :rpc.call(
+             node(session_pid),
+             AcpSession,
+             :send_message,
+             [session_pid, content, opts],
+             timeout + 5_000
+           ) do
+        {:badrpc, reason} -> {:error, {:remote_call_failed, reason}}
+        result -> result
+      end
+    end
+  end
+
+  @doc """
+  Checkin a session, handling remote sessions transparently.
+  """
+  @spec cluster_checkin(pid()) :: :ok | {:error, term()}
+  def cluster_checkin(session_pid) do
+    if node(session_pid) == Node.self() do
+      checkin(session_pid)
+    else
+      case :rpc.call(node(session_pid), __MODULE__, :checkin, [session_pid], 5_000) do
+        {:badrpc, reason} -> {:error, {:remote_call_failed, reason}}
+        result -> result
+      end
+    end
+  end
+
   # -- GenServer Callbacks --
 
   @impl true
@@ -161,6 +288,9 @@ defmodule Arbor.AI.AcpPool do
     config = build_config(opts)
     cleanup_ms = Keyword.get(opts, :cleanup_interval_ms, @default_cleanup_interval_ms)
     cleanup_ref = Process.send_after(self(), :cleanup_idle, cleanup_ms)
+
+    # Join :pg group for cross-node pool discovery
+    pg_join()
 
     # Clear the cached UnifiedLLM Client so it re-discovers adapters
     # (including ACP now that the pool is running).
@@ -524,7 +654,7 @@ defmodule Arbor.AI.AcpPool do
     checkout_session(state, entry.ref, caller_pid, tool_server)
   end
 
-  defp checkout_session(state, ref, caller_pid, tool_server \\ nil) do
+  defp checkout_session(state, ref, caller_pid, tool_server) do
     now = System.monotonic_time(:millisecond)
     caller_mon = Process.monitor(caller_pid)
 
@@ -733,4 +863,64 @@ defmodule Arbor.AI.AcpPool do
 
   defp maybe_put_affinity(by_affinity, nil, _ref), do: by_affinity
   defp maybe_put_affinity(by_affinity, key, ref), do: Map.put(by_affinity, key, ref)
+
+  # -- Private: Distributed Discovery --
+
+  defp pg_join do
+    try do
+      # Start the :pg scope if not already running
+      case :pg.start_link(@pg_scope) do
+        {:ok, _} -> :ok
+        {:error, {:already_started, _}} -> :ok
+      end
+
+      :pg.join(@pg_scope, @pg_group, self())
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  defp remote_nodes do
+    try do
+      :pg.get_members(@pg_scope, @pg_group)
+      |> Enum.map(&node/1)
+      |> Enum.uniq()
+      |> Enum.reject(&(&1 == Node.self()))
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+  end
+
+  defp safe_call(msg) do
+    try do
+      GenServer.call(__MODULE__, msg, 5_000)
+    rescue
+      _ -> %{}
+    catch
+      :exit, _ -> %{}
+    end
+  end
+
+  defp find_remote_session(provider, opts) do
+    nodes = remote_nodes()
+
+    Enum.find_value(nodes, {:error, :pool_exhausted}, fn node ->
+      case remote_checkout(node, provider, opts) do
+        {:ok, pid, ^node} -> {:ok, pid, node}
+        _ -> nil
+      end
+    end)
+  end
+
+  defp remote_checkout(target_node, provider, opts) do
+    case :rpc.call(target_node, __MODULE__, :checkout, [provider, opts], 10_000) do
+      {:ok, pid} -> {:ok, pid, target_node}
+      {:badrpc, reason} -> {:error, {:remote_call_failed, target_node, reason}}
+      error -> error
+    end
+  end
 end
