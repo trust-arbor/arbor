@@ -163,7 +163,9 @@ defmodule Arbor.Actions.Session do
 
     @impl true
     def run(params, _context) do
-      raw = params[:raw_content] || params["raw_content"] || params["llm.content"] || ""
+      raw =
+        params[:raw_content] || params["raw_content"] || params["llm.content"] ||
+          params["last_response"] || params["session.llm_response"] || ""
 
       case Jason.decode(raw) do
         {:ok, parsed} when is_map(parsed) ->

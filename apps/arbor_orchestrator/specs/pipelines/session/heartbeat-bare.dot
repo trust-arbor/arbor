@@ -55,7 +55,7 @@ digraph HeartbeatBare {
 
   // ── Result processing (re-entered on tool loop cycles) ─────
   process [type="exec", target="action", action="session.process_results",
-           context_keys="session.llm_response,session.cognitive_mode",
+           context_keys="last_response,session.cognitive_mode",
            output_prefix="session"]
 
   // ── BARE: Actions only, nothing persists ──────────────────
