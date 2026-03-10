@@ -453,6 +453,86 @@ defmodule Arbor.AI.AcpPoolTest do
     end
   end
 
+  describe "distributed discovery (single-node)" do
+    test "cluster_status returns local status" do
+      {:ok, _} = AcpPool.checkout(:test, client_opts: @test_client_opts)
+      status = AcpPool.cluster_status()
+
+      assert is_map(status)
+      assert Map.has_key?(status, Node.self())
+      assert status[Node.self()][:test].total == 1
+    end
+
+    test "cluster_sessions returns sessions with node info" do
+      {:ok, _} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          agent_id: "cluster_test"
+        )
+
+      sessions = AcpPool.cluster_sessions()
+      assert length(sessions) == 1
+      [session] = sessions
+      assert session.node == Node.self()
+      assert session.agent_id == "cluster_test"
+    end
+
+    test "cluster_checkout with :local returns {ok, pid, node}" do
+      assert {:ok, pid, node} =
+               AcpPool.cluster_checkout(:test, client_opts: @test_client_opts, node: :local)
+
+      assert is_pid(pid)
+      assert node == Node.self()
+    end
+
+    test "cluster_checkout with :any falls back to local" do
+      assert {:ok, pid, node} =
+               AcpPool.cluster_checkout(:test, client_opts: @test_client_opts, node: :any)
+
+      assert is_pid(pid)
+      assert node == Node.self()
+    end
+
+    test "cluster_checkout with :any returns pool_exhausted when full" do
+      for _ <- 1..3 do
+        {:ok, _, _} = AcpPool.cluster_checkout(:test, client_opts: @test_client_opts, node: :any)
+      end
+
+      # No remote nodes, so :any can't find anything
+      assert {:error, :pool_exhausted} =
+               AcpPool.cluster_checkout(:test, client_opts: @test_client_opts, node: :any)
+    end
+
+    test "cluster_checkout defaults to :local" do
+      assert {:ok, pid, node} =
+               AcpPool.cluster_checkout(:test, client_opts: @test_client_opts)
+
+      assert is_pid(pid)
+      assert node == Node.self()
+    end
+
+    test "cluster_checkout with specific node targets local node" do
+      assert {:ok, pid, node} =
+               AcpPool.cluster_checkout(:test,
+                 client_opts: @test_client_opts,
+                 node: Node.self()
+               )
+
+      assert is_pid(pid)
+      assert node == Node.self()
+    end
+
+    test "cluster_checkin works for local sessions" do
+      {:ok, pid, _node} =
+        AcpPool.cluster_checkout(:test, client_opts: @test_client_opts)
+
+      assert :ok = AcpPool.cluster_checkin(pid)
+
+      status = AcpPool.cluster_status()
+      assert status[Node.self()][:test].idle == 1
+    end
+  end
+
   # Helper to ping a tool server
   defp tool_server_ping(port) do
     body =

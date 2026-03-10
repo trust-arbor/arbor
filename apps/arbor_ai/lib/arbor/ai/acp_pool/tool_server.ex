@@ -30,11 +30,13 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   - `:agent_id` — owning agent ID for authorization context
   - `:port` — specific port (default: 0 for OS-assigned)
+  - `:bind` — IP to bind to (default: `{127, 0, 0, 1}`; use `{0, 0, 0, 0}` for remote access)
   """
   @spec start([module()], keyword()) :: {:ok, map()} | {:error, term()}
   def start(action_modules, opts \\ []) when is_list(action_modules) do
     agent_id = Keyword.get(opts, :agent_id, "anonymous")
     port = Keyword.get(opts, :port, 0)
+    bind_ip = Keyword.get(opts, :bind, {127, 0, 0, 1})
     # Ranch refs are internal atoms, not user-controlled — safe to create
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ranch_ref = :"arbor_tool_server_#{:erlang.unique_integer([:positive])}"
@@ -56,7 +58,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
     cowboy_opts = [
       port: port,
       ref: ranch_ref,
-      ip: {127, 0, 0, 1}
+      ip: bind_ip
     ]
 
     case Plug.Cowboy.http(ExMCP.HttpPlug, plug_opts, cowboy_opts) do
@@ -95,10 +97,13 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   Returns the format expected by `ExMCP.ACP.Client.new_session/3`:
   `[%{"uri" => "http://...", "name" => "arbor-tools"}]`
+
+  Pass a `host` option for remote-accessible servers (default: "127.0.0.1").
   """
-  @spec mcp_servers_entry(non_neg_integer()) :: [map()]
-  def mcp_servers_entry(port) do
-    [%{"uri" => "http://127.0.0.1:#{port}", "name" => "arbor-tools"}]
+  @spec mcp_servers_entry(non_neg_integer(), keyword()) :: [map()]
+  def mcp_servers_entry(port, opts \\ []) do
+    host = Keyword.get(opts, :host, "127.0.0.1")
+    [%{"uri" => "http://#{host}:#{port}", "name" => "arbor-tools"}]
   end
 
   # -- MCP Request Handler --
