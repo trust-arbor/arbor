@@ -62,7 +62,7 @@ defmodule Arbor.Agent.Manager do
     scheduler = Arbor.Cartographer.Scheduler
 
     if Code.ensure_loaded?(scheduler) do
-      case scheduler.select_node(requirements: requirements, strategy: strategy) do
+      case apply(scheduler, :select_node, [[requirements: requirements, strategy: strategy]]) do
         {:ok, node} ->
           if node == Node.self() do
             do_start_agent(model_config, opts)
@@ -132,7 +132,7 @@ defmodule Arbor.Agent.Manager do
              start_opts: start_opts,
              metadata: %{
                model_config: model_config,
-               backend: model_config[:backend] || model_config.backend,
+               backend: model_config[:backend] || Map.get(model_config, :backend),
                display_name: display_name,
                started_at: System.system_time(:millisecond)
              }
@@ -567,6 +567,20 @@ defmodule Arbor.Agent.Manager do
      ]}
   end
 
+  # ACP provider — CLI agents (Claude, Gemini, Codex) as LLM backends
+  # Uses APIAgent since LLM routing happens at the Arbor.AI level
+  defp build_start_opts(agent_id, display_name, %{provider: :acp} = config) do
+    {APIAgent,
+     [
+       id: agent_id,
+       display_name: display_name,
+       model: config[:id],
+       provider: :acp,
+       provider_options: config[:provider_options] || %{},
+       model_id: config[:id]
+     ]}
+  end
+
   # Fallback for configs with :module but no :backend
   defp build_start_opts(agent_id, display_name, %{module: module} = config) do
     extra_opts = Map.get(config, :start_opts, [])
@@ -684,11 +698,17 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp dispatch_query(pid, metadata, input, opts) do
-    backend = metadata[:backend] || metadata[:model_config][:backend]
+    backend =
+      metadata[:backend] || metadata[:model_config][:backend] ||
+        infer_backend(metadata[:model_config])
 
     result = query_backend(backend, pid, input, opts)
     handle_query_result(result)
   end
+
+  # ACP provider uses APIAgent, so route to :api backend
+  defp infer_backend(%{provider: :acp}), do: :api
+  defp infer_backend(_), do: nil
 
   defp query_backend(:cli, pid, input, opts) do
     Claude.query(pid, input,

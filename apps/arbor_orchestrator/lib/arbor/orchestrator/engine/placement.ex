@@ -83,11 +83,10 @@ defmodule Arbor.Orchestrator.Engine.Placement do
   end
 
   def resolve(%{requirements: requirements, strategy: strategy}) do
-    if Code.ensure_loaded?(Arbor.Cartographer.Scheduler) do
-      Arbor.Cartographer.Scheduler.select_node(
-        requirements: requirements,
-        strategy: strategy
-      )
+    scheduler = Arbor.Cartographer.Scheduler
+
+    if Code.ensure_loaded?(scheduler) do
+      apply(scheduler, :select_node, [[requirements: requirements, strategy: strategy]])
     else
       # No scheduler available — execute locally
       {:ok, Node.self()}
