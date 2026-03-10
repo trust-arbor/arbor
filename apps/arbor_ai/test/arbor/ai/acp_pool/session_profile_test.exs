@@ -39,11 +39,12 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
 
   describe "from_opts/2" do
     test "builds profile from provider and keyword opts" do
-      profile = SessionProfile.from_opts(:claude,
-        agent_id: "agent_123",
-        tool_modules: [ModA],
-        trust_domain: :internal
-      )
+      profile =
+        SessionProfile.from_opts(:claude,
+          agent_id: "agent_123",
+          tool_modules: [ModA],
+          trust_domain: :internal
+        )
 
       assert profile.provider == :claude
       assert profile.agent_id == "agent_123"
@@ -54,10 +55,11 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
     end
 
     test "generates human-readable name" do
-      profile = SessionProfile.from_opts(:claude,
-        agent_id: "interviewer_agent",
-        tool_modules: [Arbor.Actions.Trust.ListPresets]
-      )
+      profile =
+        SessionProfile.from_opts(:claude,
+          agent_id: "interviewer_agent",
+          tool_modules: [Arbor.Actions.Trust.ListPresets]
+        )
 
       assert profile.name =~ "claude"
     end

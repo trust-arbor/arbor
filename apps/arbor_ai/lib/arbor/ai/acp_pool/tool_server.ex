@@ -35,6 +35,8 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   def start(action_modules, opts \\ []) when is_list(action_modules) do
     agent_id = Keyword.get(opts, :agent_id, "anonymous")
     port = Keyword.get(opts, :port, 0)
+    # Ranch refs are internal atoms, not user-controlled — safe to create
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ranch_ref = :"arbor_tool_server_#{:erlang.unique_integer([:positive])}"
 
     tools = to_mcp_tools(action_modules)
@@ -163,7 +165,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
         "jsonrpc" => "2.0",
         "id" => id,
         "error" => %{
-          "code" => -32601,
+          "code" => -32_601,
           "message" => "Method not found: #{method}"
         }
       }
@@ -239,8 +241,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
           %{
             "name" => tool.name,
             "description" => tool.description || "Arbor action: #{tool.name}",
-            "inputSchema" =>
-              tool.parameters_schema || %{"type" => "object", "properties" => %{}}
+            "inputSchema" => tool.parameters_schema || %{"type" => "object", "properties" => %{}}
           }
         ]
       rescue

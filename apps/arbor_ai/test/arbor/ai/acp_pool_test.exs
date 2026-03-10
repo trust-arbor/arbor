@@ -213,45 +213,40 @@ defmodule Arbor.AI.AcpPoolTest do
     end
 
     test "sessions with different trust domains are not reused" do
-      {:ok, s1} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, trust_domain: :internal)
+      {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts, trust_domain: :internal)
       :ok = AcpPool.checkin(s1)
 
-      {:ok, s2} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, trust_domain: :external)
+      {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, trust_domain: :external)
       refute s1 == s2
     end
   end
 
   describe "affinity" do
     test "affinity_key returns the same session" do
-      {:ok, s1} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, affinity_key: "sticky")
+      {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "sticky")
       :ok = AcpPool.checkin(s1)
 
-      {:ok, s2} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, affinity_key: "sticky")
+      {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "sticky")
       assert s1 == s2
     end
 
     test "different affinity_keys get different sessions" do
-      {:ok, s1} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, affinity_key: "key_a")
+      {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "key_a")
       :ok = AcpPool.checkin(s1)
 
-      {:ok, s2} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts, affinity_key: "key_b")
+      {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "key_b")
       refute s1 == s2
     end
   end
 
   describe "sessions/0" do
     test "returns session details with profile info" do
-      {:ok, _} = AcpPool.checkout(:test,
-        client_opts: @test_client_opts,
-        agent_id: "test_agent",
-        tool_modules: [ModA]
-      )
+      {:ok, _} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          agent_id: "test_agent",
+          tool_modules: [ModA]
+        )
 
       sessions = AcpPool.sessions()
       assert length(sessions) == 1
@@ -281,5 +276,92 @@ defmodule Arbor.AI.AcpPoolTest do
       status = AcpPool.status()
       assert status == %{} or status[:test] == nil or status[:test].total == 0
     end
+  end
+
+  describe "tool server lifecycle" do
+    # Define a test action module inline
+    defmodule TestToolAction do
+      @moduledoc false
+      def to_tool do
+        %{
+          name: "pool_test_tool",
+          description: "Test tool for pool integration",
+          parameters_schema: %{"type" => "object", "properties" => %{}}
+        }
+      end
+
+      def run(_params, _context), do: {:ok, %{ok: true}}
+    end
+
+    test "checkout with tool_modules starts a ToolServer" do
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction]
+        )
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.tool_server_port != nil
+      assert is_integer(info.tool_server_port)
+      assert info.tool_count == 1
+
+      # Clean up
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "checkout without tool_modules has no ToolServer" do
+      {:ok, session} = AcpPool.checkout(:test, client_opts: @test_client_opts)
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      assert info.tool_server_port == nil
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "closing session stops the ToolServer" do
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction]
+        )
+
+      sessions = AcpPool.sessions()
+      [info] = sessions
+      port = info.tool_server_port
+      assert port != nil
+
+      # Verify the tool server is reachable
+      assert {:ok, _} = tool_server_ping(port)
+
+      # Close the session (should also stop tool server)
+      :ok = AcpPool.close_session(session)
+      Process.sleep(50)
+
+      # Tool server should no longer be reachable
+      assert {:error, _} = tool_server_ping(port)
+    end
+  end
+
+  # Helper to ping a tool server
+  defp tool_server_ping(port) do
+    body =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "ping",
+        "params" => %{}
+      })
+
+    Req.post("http://127.0.0.1:#{port}",
+      body: body,
+      headers: [{"content-type", "application/json"}],
+      receive_timeout: 2_000
+    )
+  rescue
+    _ -> {:error, :unreachable}
+  catch
+    :exit, _ -> {:error, :unreachable}
   end
 end
