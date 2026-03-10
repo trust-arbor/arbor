@@ -288,7 +288,8 @@ defmodule Arbor.Actions.SessionGoals do
       end
     end
 
-    defp dispatch_proposal_action("accept", agent_id, proposal_id, _decision) do
+    defp dispatch_proposal_action(action, agent_id, proposal_id, _decision)
+         when action in ["accept", :accept] do
       Arbor.Actions.SessionMemory.bridge(
         Arbor.Memory.Proposal,
         :accept,
@@ -297,7 +298,8 @@ defmodule Arbor.Actions.SessionGoals do
       )
     end
 
-    defp dispatch_proposal_action("reject", agent_id, proposal_id, decision) do
+    defp dispatch_proposal_action(action, agent_id, proposal_id, decision)
+         when action in ["reject", :reject] do
       reason = decision["reason"] || decision[:reason]
 
       Arbor.Actions.SessionMemory.bridge(
