@@ -3,6 +3,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   @type t :: %__MODULE__{
           timestamp: String.t(),
+          run_id: String.t() | nil,
           current_node: String.t(),
           completed_nodes: [String.t()],
           node_retries: map(),
@@ -15,6 +16,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   defstruct timestamp: "",
+            run_id: nil,
             current_node: "",
             completed_nodes: [],
             node_retries: %{},
@@ -34,6 +36,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   def from_state(current_node, completed_nodes, node_retries, context, node_outcomes, opts \\ []) do
     %__MODULE__{
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+      run_id: Keyword.get(opts, :run_id),
       current_node: current_node,
       completed_nodes: completed_nodes,
       node_retries: node_retries,
@@ -142,6 +145,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       {:ok,
        %__MODULE__{
          timestamp: Map.get(decoded, "timestamp", ""),
+         run_id: Map.get(decoded, "run_id"),
          current_node: Map.get(decoded, "current_node", ""),
          completed_nodes: Map.get(decoded, "completed_nodes", []),
          node_retries: Map.get(decoded, "node_retries", %{}),

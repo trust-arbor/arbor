@@ -32,6 +32,7 @@ defmodule Arbor.Orchestrator.Engine do
   @type event :: map()
 
   @type run_result :: %{
+          run_id: String.t(),
           final_outcome: Outcome.t() | nil,
           completed_nodes: [String.t()],
           context: map(),
@@ -65,12 +66,17 @@ defmodule Arbor.Orchestrator.Engine do
     logs_root = Keyword.get(opts, :logs_root, Path.join(System.tmp_dir!(), "arbor_orchestrator"))
     max_steps = Keyword.get(opts, :max_steps, 500)
     pipeline_started_at = System.monotonic_time(:millisecond)
+    run_id = Keyword.get_lazy(opts, :run_id, fn -> generate_run_id(graph.id) end)
 
-    :ok = write_manifest(graph, logs_root)
+    # Thread run_id through opts so all events and checkpoints include it
+    opts = Keyword.put(opts, :run_id, run_id)
+    opts = Keyword.put_new(opts, :pipeline_id, run_id)
+
+    :ok = write_manifest(graph, logs_root, run_id)
 
     emit(
       opts,
-      Event.pipeline_started(graph.id, logs_root: logs_root, node_count: map_size(graph.nodes))
+      Event.pipeline_started(graph.id, run_id: run_id, logs_root: logs_root, node_count: map_size(graph.nodes))
     )
 
     case initial_state(graph, logs_root, opts) do
@@ -85,6 +91,7 @@ defmodule Arbor.Orchestrator.Engine do
 
         {:ok,
          %{
+           run_id: run_id,
            final_outcome: final_outcome,
            completed_nodes: completed,
            context: Context.snapshot(context),
@@ -302,7 +309,8 @@ defmodule Arbor.Orchestrator.Engine do
           state.retries,
           context,
           state.outcomes,
-          content_hashes: tracking.content_hashes
+          content_hashes: tracking.content_hashes,
+          run_id: Keyword.get(state.opts, :run_id)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -368,7 +376,8 @@ defmodule Arbor.Orchestrator.Engine do
 
       checkpoint =
         Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
-          content_hashes: tracking.content_hashes
+          content_hashes: tracking.content_hashes,
+          run_id: Keyword.get(state.opts, :run_id)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -434,11 +443,13 @@ defmodule Arbor.Orchestrator.Engine do
   defp finish_pipeline(outcome, %State{} = state) do
     ordered = Enum.reverse(state.completed)
     duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
+    run_id = Keyword.get(state.opts, :run_id)
 
     emit(state.opts, Event.pipeline_completed(ordered, duration_ms))
 
     {:ok,
      %{
+       run_id: run_id,
        final_outcome: outcome,
        completed_nodes: ordered,
        context: Context.snapshot(state.context),
@@ -639,9 +650,10 @@ defmodule Arbor.Orchestrator.Engine do
     EventEmitter.emit(pipeline_id, event, opts)
   end
 
-  defp write_manifest(graph, logs_root) do
+  defp write_manifest(graph, logs_root, run_id \\ nil) do
     payload = %{
       graph_id: graph.id,
+      run_id: run_id,
       goal: Map.get(graph.attrs, "goal", ""),
       started_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
@@ -651,6 +663,14 @@ defmodule Arbor.Orchestrator.Engine do
          {:ok, encoded} <- Jason.encode(payload, pretty: true) do
       File.write(Path.join(logs_root, "manifest.json"), encoded)
     end
+  end
+
+  @doc "Generates a unique run ID for a pipeline execution."
+  def generate_run_id(graph_id) do
+    ts = Calendar.strftime(DateTime.utc_now(), "%Y%m%d_%H%M%S")
+    suffix = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+    node = Kernel.node() |> to_string()
+    "run_#{graph_id}_#{node}_#{ts}_#{suffix}"
   end
 
   alias Arbor.Orchestrator.Engine.ArtifactStore

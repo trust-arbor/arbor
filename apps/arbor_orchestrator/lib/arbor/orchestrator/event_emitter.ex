@@ -59,6 +59,9 @@ defmodule Arbor.Orchestrator.EventEmitter do
       for {pid, _value} <- entries, do: send(pid, {:pipeline_event, event})
     end)
 
+    # Dual-emit: persist to EventLog + emit signal for observability
+    Arbor.Orchestrator.Events.dual_emit(event, opts)
+
     # Backward-compatible callback support
     case Keyword.get(opts, :on_event) do
       nil -> :ok
