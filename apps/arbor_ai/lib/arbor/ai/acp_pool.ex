@@ -333,7 +333,9 @@ defmodule Arbor.AI.AcpPool do
         case Map.get(state.sessions, ref) do
           %Entry{status: :idle, pid: pid} = entry ->
             case validate_session(pid) do
-              :ok -> {:ok, entry, state}
+              :ok ->
+                {:ok, entry, state}
+
               {:error, _} ->
                 safe_close(pid)
                 {:no_affinity, remove_session(state, ref)}
