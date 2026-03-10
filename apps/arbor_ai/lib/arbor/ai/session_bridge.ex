@@ -248,7 +248,7 @@ defmodule Arbor.AI.SessionBridge do
   # ── Configuration ────────────────────────────────────────────────
 
   defp enabled? do
-    Application.get_env(:arbor_ai, :session_enabled, false)
+    Application.get_env(:arbor_ai, :session_enabled, true)
   end
 
   defp turn_dot_path do

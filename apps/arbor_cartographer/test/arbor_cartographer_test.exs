@@ -271,7 +271,7 @@ defmodule Arbor.CartographerTest do
     end
 
     test "returns error for remote node" do
-      {:error, :remote_deployment_not_implemented} =
+      {:error, :node_unreachable} =
         Cartographer.deploy_to_node(TestAgent2, :remote@node, args: [])
     end
   end
