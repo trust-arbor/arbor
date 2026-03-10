@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      Arbor.Common.HandlerRegistry,
       {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
       Arbor.Orchestrator.SignalsBridge,
       Arbor.Orchestrator.JobRegistry,

@@ -316,7 +316,9 @@ defmodule Arbor.Agent.Executor do
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
 
     # Mark intent failed in IntentStore so it isn't re-routed
-    safe_call(fn -> Arbor.Memory.fail_intent(state.agent_id, intent.id, "blocked: #{inspect(reason)}") end)
+    safe_call(fn ->
+      Arbor.Memory.fail_intent(state.agent_id, intent.id, "blocked: #{inspect(reason)}")
+    end)
 
     # Forward blocked percept to ActionCycleServer for Mind awareness
     forward_percept_to_action_cycle(state.agent_id, percept)
