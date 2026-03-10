@@ -457,6 +457,44 @@ defmodule Arbor.Signals.BusTest do
     end
   end
 
+  describe "tuple category / non-atom type robustness" do
+    test "bus does not crash when signal has tuple category" do
+      # Regression: AcpSession was calling emit({:agent, :event}, data) which
+      # produced category={:agent, :event} tuple — matches_pattern? crashed with
+      # Protocol.UndefinedError because to_string/1 can't handle tuples.
+      signal = %Signal{
+        id: "sig_test_tuple",
+        category: {:agent, :acp_session_completed},
+        type: %{some: "map"},
+        data: %{},
+        timestamp: DateTime.utc_now()
+      }
+
+      # Bus should handle the signal without crashing
+      assert :ok = Bus.publish(signal)
+      # Give async delivery a moment
+      :timer.sleep(50)
+      assert is_pid(Process.whereis(Bus))
+    end
+
+    test "wildcard subscription is not triggered by mismatched tuple category" do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "agent.*",
+          fn sig -> send(test_pid, {:got, sig}); :ok end,
+          async: false
+        )
+
+      # A correctly emitted signal — should be received
+      Bus.publish(Signal.new(:agent, :started, %{}))
+      assert_receive {:got, %Signal{category: :agent}}, 500
+
+      Bus.unsubscribe(sub_id)
+    end
+  end
+
   # Test authorizer that denies everything
   defmodule DenyAuthorizer do
     @behaviour Arbor.Signals.Behaviours.SubscriptionAuthorizer

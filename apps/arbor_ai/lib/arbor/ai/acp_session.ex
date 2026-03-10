@@ -427,7 +427,7 @@ defmodule Arbor.AI.AcpSession do
 
       try do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(Arbor.Signals, :emit, [{:agent, event}, signal_data])
+        apply(Arbor.Signals, :emit, [:agent, event, signal_data])
       rescue
         _ -> :ok
       catch

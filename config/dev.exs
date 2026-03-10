@@ -134,8 +134,8 @@ config :arbor_gateway, api_key: "arbor-dev-key"
 
 # ACP Pool — allow more concurrent Claude CLI sessions in dev
 config :arbor_ai, :acp_pool_config,
-  default_max: 5,
+  default_max: 10,
   providers: %{
-    claude: %{max: 5, idle_timeout_ms: 300_000},
+    claude: %{max: 10, idle_timeout_ms: 300_000},
     gemini: %{max: 3, idle_timeout_ms: 300_000}
   }

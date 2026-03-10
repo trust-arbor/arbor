@@ -374,10 +374,24 @@ defmodule Arbor.Signals.Bus do
     pattern_segments = String.split(pattern, ".")
     # Build signal topic from category.type - this is the minimum topic
     # Signals can match deeper patterns via their category/type combo
-    signal_segments = [to_string(category), to_string(type)]
+    signal_segments = safe_to_segments(category) ++ safe_to_segments(type)
 
     match_segments?(pattern_segments, signal_segments)
   end
+
+  # Convert category/type to string segments safely.
+  # Tuples are flattened (e.g. {:agent, :started} → ["agent", "started"]).
+  # Maps, pids, and other non-printable values yield a placeholder.
+  defp safe_to_segments(tuple) when is_tuple(tuple) do
+    tuple |> Tuple.to_list() |> Enum.map(&safe_segment/1)
+  end
+
+  defp safe_to_segments(value), do: [safe_segment(value)]
+
+  defp safe_segment(value) when is_atom(value), do: Atom.to_string(value)
+  defp safe_segment(value) when is_binary(value), do: value
+  defp safe_segment(value) when is_integer(value), do: Integer.to_string(value)
+  defp safe_segment(_value), do: "_"
 
   # N-segment pattern matching with trailing wildcard support
   # Empty pattern matches empty signal - exact match at end
