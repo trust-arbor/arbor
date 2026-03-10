@@ -3,16 +3,17 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   Handler registry mapping node type strings to handler modules.
 
   Organized into two layers:
-    - **Core handlers** — 15 canonical primitives (start, exit, branch, etc.)
-    - **Custom handlers** — runtime-registered handlers via `register/2`
+    - **Core handlers** — 15 canonical primitives stored in `HandlerRegistry` (RegistryBase)
+    - **Custom handlers** — runtime-registered overrides in persistent_term
 
   All legacy type names (codergen, tool, memory.recall, etc.) are resolved via
   the alias layer (`Stdlib.Aliases`) which maps them to canonical core types
   with injected attributes.
 
-  Resolution order: custom > alias-resolved core > default (LlmHandler).
+  Resolution order: custom (persistent_term) > alias-resolved core (HandlerRegistry) > default (LlmHandler).
   """
 
+  alias Arbor.Common.HandlerRegistry
   alias Arbor.Orchestrator.Graph.Node
 
   alias Arbor.Orchestrator.Handlers.{
@@ -46,7 +47,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "octagon" => "graph.adapt"
   }
 
-  # 15 canonical core handlers
+  # 15 canonical core handlers — registered into HandlerRegistry at boot
   @core_handlers %{
     "start" => StartHandler,
     "exit" => ExitHandler,
@@ -65,7 +66,6 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "gate" => GateHandler
   }
 
-  @handlers @core_handlers
   @custom_handlers_key {__MODULE__, :custom_handlers}
 
   @doc "Returns the canonical core type for any type string."
@@ -105,10 +105,9 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   @spec resolve_with_attrs(Node.t()) :: {module(), Node.t()}
   def resolve_with_attrs(%Node{} = node) do
     raw_type = node_type(node)
-    custom = custom_handlers()
 
     # Custom handlers always take priority
-    case Map.get(custom, raw_type) do
+    case Map.get(custom_handlers(), raw_type) do
       nil ->
         resolve_via_aliases(raw_type, node)
 
@@ -125,7 +124,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
         # Merge injected attrs into node (don't overwrite existing attrs)
         merged_attrs = Map.merge(injected_attrs, node.attrs)
         prepared_node = %{node | attrs: merged_attrs}
-        handler = Map.get(@handlers, canonical_type, LlmHandler)
+        handler = lookup_core_handler(canonical_type)
         {handler, prepared_node}
 
       :passthrough ->
@@ -134,10 +133,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
         canonical = alias_mod.canonical_type(raw_type)
 
         if canonical != raw_type do
-          handler = Map.get(@handlers, canonical, LlmHandler)
+          handler = lookup_core_handler(canonical)
           {handler, node}
         else
-          handler = Map.get(@handlers, raw_type, LlmHandler)
+          handler = lookup_core_handler(raw_type)
           {handler, node}
         end
     end
@@ -175,6 +174,42 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
   @spec custom_handler_for(String.t()) :: module() | nil
   def custom_handler_for(type) when is_binary(type) do
     Map.get(custom_handlers(), type)
+  end
+
+  @doc """
+  Register the 15 core handlers into the HandlerRegistry.
+  Called by the Registrar during application boot.
+  """
+  @spec register_core_handlers() :: :ok
+  def register_core_handlers do
+    if Process.whereis(HandlerRegistry) do
+      for {type, module} <- @core_handlers do
+        case HandlerRegistry.register(type, module) do
+          :ok -> :ok
+          {:error, :already_registered} -> :ok
+          {:error, :core_locked} -> :ok
+          _ -> :ok
+        end
+      end
+
+      HandlerRegistry.lock_core()
+    end
+
+    :ok
+  end
+
+  # --- Private ---
+
+  # Look up a core handler from HandlerRegistry, falling back to compile-time map
+  defp lookup_core_handler(type) do
+    if Process.whereis(HandlerRegistry) do
+      case HandlerRegistry.resolve(type) do
+        {:ok, module} -> module
+        _ -> Map.get(@core_handlers, type, LlmHandler)
+      end
+    else
+      Map.get(@core_handlers, type, LlmHandler)
+    end
   end
 
   defp custom_handlers do

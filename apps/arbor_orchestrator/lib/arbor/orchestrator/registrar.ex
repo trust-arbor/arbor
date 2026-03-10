@@ -36,6 +36,9 @@ defmodule Arbor.Orchestrator.Registrar do
   """
   @spec register_core() :: :ok | {:error, [{atom(), term()}]}
   def register_core do
+    # Register core handler types (type string → handler module)
+    Arbor.Orchestrator.Handlers.Registry.register_core_handlers()
+
     failures =
       []
       |> register_readable_backends()
