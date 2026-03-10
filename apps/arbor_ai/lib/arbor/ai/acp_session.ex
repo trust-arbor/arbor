@@ -54,6 +54,7 @@ defmodule Arbor.AI.AcpSession do
     :stream_callback,
     :opts,
     :workspace,
+    :mcp_servers,
     status: :starting,
     accumulated_text: "",
     context_tokens: 0,
@@ -192,6 +193,7 @@ defmodule Arbor.AI.AcpSession do
                 provider: provider,
                 model: Keyword.get(opts, :model),
                 stream_callback: Keyword.get(opts, :stream_callback),
+                mcp_servers: Keyword.get(opts, :mcp_servers),
                 workspace: workspace_result,
                 status: :ready,
                 opts: opts
@@ -224,6 +226,16 @@ defmodule Arbor.AI.AcpSession do
 
   def handle_call({:create_session, opts}, _from, state) do
     cwd = Keyword.get(opts, :cwd) || Keyword.get(state.opts, :cwd)
+
+    # Inject mcp_servers from pool-provided ToolServer (if any)
+    opts =
+      case state.mcp_servers do
+        servers when is_list(servers) and servers != [] ->
+          Keyword.put_new(opts, :mcp_servers, servers)
+
+        _ ->
+          opts
+      end
 
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(@acp_client, :new_session, [state.client, cwd, opts]) do
