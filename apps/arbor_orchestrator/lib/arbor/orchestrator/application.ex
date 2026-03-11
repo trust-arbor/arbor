@@ -14,8 +14,8 @@ defmodule Arbor.Orchestrator.Application do
     children = [
       Arbor.Common.HandlerRegistry,
       {event_log_backend, name: event_log_name},
-      {Arbor.Persistence.BufferedStore, name: :arbor_orchestrator_checkpoints,
-       collection: "orchestrator_checkpoints"},
+      {Arbor.Persistence.BufferedStore,
+       name: :arbor_orchestrator_checkpoints, collection: "orchestrator_checkpoints"},
       {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
       Arbor.Orchestrator.SignalsBridge,
       Arbor.Orchestrator.JobRegistry,

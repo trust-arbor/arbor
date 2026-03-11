@@ -45,8 +45,7 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       send(
         pid,
-        {:pipeline_event,
-         %{type: :stage_started, graph_id: "test_pipeline", node_id: "node1"}}
+        {:pipeline_event, %{type: :stage_started, graph_id: "test_pipeline", node_id: "node1"}}
       )
 
       send(
@@ -63,8 +62,7 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       send(
         pid,
-        {:pipeline_event,
-         %{type: :stage_started, graph_id: "test_pipeline", node_id: "node2"}}
+        {:pipeline_event, %{type: :stage_started, graph_id: "test_pipeline", node_id: "node2"}}
       )
 
       send(
@@ -114,8 +112,7 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
     test "tracks failed pipeline", %{registry: pid} do
       send(
         pid,
-        {:pipeline_event,
-         %{type: :pipeline_started, graph_id: "failing_pipeline", node_count: 2}}
+        {:pipeline_event, %{type: :pipeline_started, graph_id: "failing_pipeline", node_count: 2}}
       )
 
       Process.sleep(10)
