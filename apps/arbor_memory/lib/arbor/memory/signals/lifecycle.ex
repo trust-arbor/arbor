@@ -24,7 +24,7 @@ defmodule Arbor.Memory.Signals.Lifecycle do
       priority: goal.priority,
       parent_id: goal.parent_id,
       created_at: DateTime.utc_now()
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -36,7 +36,7 @@ defmodule Arbor.Memory.Signals.Lifecycle do
       goal_id: goal_id,
       progress: progress,
       updated_at: DateTime.utc_now()
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -47,7 +47,7 @@ defmodule Arbor.Memory.Signals.Lifecycle do
     Arbor.Memory.Signals.emit_memory_signal(agent_id, :goal_achieved, %{
       goal_id: goal_id,
       achieved_at: DateTime.utc_now()
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -59,7 +59,7 @@ defmodule Arbor.Memory.Signals.Lifecycle do
       goal_id: goal_id,
       reason: reason,
       abandoned_at: DateTime.utc_now()
-    })
+    }, scope: :cluster)
   end
 
   # ============================================================================

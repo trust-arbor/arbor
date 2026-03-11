@@ -20,7 +20,8 @@ defmodule Arbor.Persistence.BufferedStore do
         backend:      QueryableStore.Postgres, # nil = ETS-only
         backend_opts: [repo: Repo],           # extra opts passed to backend calls
         write_mode:   :async,                 # :async | :sync
-        collection:   "my_collection"}        # passed as name: to backend
+        collection:   "my_collection",        # passed as name: to backend
+        distributed:  true}                   # enable cross-node cache invalidation
 
   ## Usage
 
@@ -166,6 +167,7 @@ defmodule Arbor.Persistence.BufferedStore do
     backend_opts = Keyword.get(opts, :backend_opts, [])
     write_mode = Keyword.get(opts, :write_mode, :async)
     collection = Keyword.get(opts, :collection, to_string(name))
+    distributed = Keyword.get(opts, :distributed, false)
 
     # Create ETS table — public for direct reads from any process
     table =
@@ -176,10 +178,15 @@ defmodule Arbor.Persistence.BufferedStore do
       backend: backend,
       backend_opts: backend_opts,
       write_mode: write_mode,
-      collection: collection
+      collection: collection,
+      distributed: distributed
     }
 
     load_from_backend(state)
+
+    if distributed do
+      subscribe_to_distributed_signals(collection)
+    end
 
     {:ok, state}
   end
@@ -188,6 +195,7 @@ defmodule Arbor.Persistence.BufferedStore do
   def handle_call({:put, key, value}, _from, state) do
     :ets.insert(state.table, {key, value})
     backend_put(state, key, value)
+    emit_distributed_signal(state, :cache_put, key)
     {:reply, :ok, state}
   end
 
@@ -195,7 +203,18 @@ defmodule Arbor.Persistence.BufferedStore do
   def handle_call({:delete, key}, _from, state) do
     :ets.delete(state.table, key)
     backend_delete(state, key)
+    emit_distributed_signal(state, :cache_delete, key)
     {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_info({:signal_received, signal}, state) do
+    handle_distributed_signal(signal, state)
+  end
+
+  @impl true
+  def handle_info(_msg, state) do
+    {:noreply, state}
   end
 
   # ===========================================================================
@@ -291,6 +310,108 @@ defmodule Arbor.Persistence.BufferedStore do
     e ->
       Logger.warning("BufferedStore: backend delete error for #{key}: #{inspect(e)}")
       :ok
+  end
+
+  # ===========================================================================
+  # Distributed Cache Invalidation
+  # ===========================================================================
+
+  defp emit_distributed_signal(%{distributed: false}, _type, _key), do: :ok
+
+  defp emit_distributed_signal(%{distributed: true, collection: collection}, type, key) do
+    if Code.ensure_loaded?(Arbor.Signals) do
+      Arbor.Signals.emit(:persistence, type, %{
+        collection: collection,
+        key: key,
+        origin_node: node()
+      }, scope: :cluster)
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp handle_distributed_signal(%{data: %{origin_node: origin}}, state)
+       when origin == node() do
+    # Ignore signals from our own node
+    {:noreply, state}
+  end
+
+  defp handle_distributed_signal(%{data: data} = signal, state) do
+    collection = Map.get(data, :collection)
+
+    if collection == state.collection do
+      key = Map.get(data, :key)
+
+      case signal.type do
+        :cache_put ->
+          # Reload from backend to update local ETS cache
+          reload_key_from_backend(state, key)
+          Logger.debug("BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}")
+
+        :cache_delete ->
+          :ets.delete(state.table, key)
+          Logger.debug("BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}")
+
+        _ ->
+          :ok
+      end
+    end
+
+    {:noreply, state}
+  rescue
+    e ->
+      Logger.warning("BufferedStore[#{state.collection}]: error handling signal: #{inspect(e)}")
+      {:noreply, state}
+  end
+
+  defp reload_key_from_backend(%{backend: nil, table: table}, key) do
+    # No backend — just delete the stale ETS entry
+    :ets.delete(table, key)
+  end
+
+  defp reload_key_from_backend(%{backend: backend, backend_opts: backend_opts, collection: collection, table: table}, key) do
+    opts = Keyword.merge(backend_opts, name: collection)
+
+    case backend.get(key, opts) do
+      {:ok, value} ->
+        :ets.insert(table, {key, value})
+
+      {:error, :not_found} ->
+        :ets.delete(table, key)
+
+      {:error, reason} ->
+        Logger.warning("BufferedStore[#{collection}]: failed to reload #{key}: #{inspect(reason)}")
+    end
+  rescue
+    e ->
+      Logger.warning("BufferedStore[#{collection}]: reload error for #{key}: #{inspect(e)}")
+  end
+
+  defp subscribe_to_distributed_signals(collection) do
+    bus = Arbor.Signals.Bus
+
+    if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+      me = self()
+
+      for type <- ~w(cache_put cache_delete) do
+        Arbor.Signals.subscribe("persistence.#{type}", fn signal ->
+          # Only forward if it's for our collection
+          if Map.get(signal.data, :collection) == collection do
+            send(me, {:signal_received, signal})
+          end
+
+          :ok
+        end)
+      end
+
+      Logger.info("BufferedStore[#{collection}]: subscribed to distributed cache signals")
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
   end
 
   # ===========================================================================
