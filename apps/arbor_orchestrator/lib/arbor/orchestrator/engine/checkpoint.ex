@@ -562,8 +562,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     peers = Node.list()
 
     if peers != [] do
-      # Pick one peer (first connected node — could be enhanced with trust zone selection)
-      peer = List.first(peers)
+      # Pick a peer, preferring one in the same trust zone
+      peer = select_replication_peer(peers)
       key = store_key(run_id)
       json = Jason.encode!(payload_map)
 
@@ -587,5 +587,30 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
 
     :ok
+  end
+
+  # Select a peer for checkpoint replication, preferring same trust zone.
+  defp select_replication_peer(peers) do
+    mod = Arbor.Cartographer.ClusterKeeper
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :trust_zone, 1) do
+      my_zone = apply(mod, :trust_zone, [Kernel.node()])
+
+      # Try same-zone peer first
+      same_zone =
+        Enum.find(peers, fn peer ->
+          try do
+            apply(mod, :trust_zone, [peer]) == my_zone
+          rescue
+            _ -> false
+          end
+        end)
+
+      same_zone || List.first(peers)
+    else
+      List.first(peers)
+    end
+  rescue
+    _ -> List.first(peers)
   end
 end
