@@ -21,7 +21,8 @@ defmodule Arbor.Orchestrator.Application do
       {DynamicSupervisor, name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one},
       {Registry, keys: :unique, name: Arbor.Orchestrator.SessionRegistry},
       Arbor.Orchestrator.Session.Supervisor,
-      Arbor.Orchestrator.Session.TaskSupervisor
+      Arbor.Orchestrator.Session.TaskSupervisor,
+      Arbor.Orchestrator.RecoveryCoordinator
     ]
 
     result =
