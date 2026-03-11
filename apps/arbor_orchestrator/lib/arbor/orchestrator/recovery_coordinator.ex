@@ -336,32 +336,71 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp attempt_recovery(%Entry{} = entry) do
     key = entry.run_id || entry.pipeline_id
 
-    # Validate that checkpoint and DOT source still exist
-    with :ok <- validate_checkpoint_exists(entry),
+    # For cross-node recovery, try multiple checkpoint sources
+    with {:ok, checkpoint_source} <- locate_checkpoint(entry),
          :ok <- validate_graph_unchanged(entry) do
       JobRegistry.mark_recovering(key)
 
       task =
         Task.Supervisor.async_nolink(
           Arbor.Orchestrator.Session.TaskSupervisor,
-          fn -> do_resume(entry) end
+          fn -> do_resume(entry, checkpoint_source) end
         )
 
       {:ok, task.ref}
     end
   end
 
-  defp validate_checkpoint_exists(%Entry{logs_root: nil}),
-    do: {:error, :no_logs_root}
+  # Locate a checkpoint, trying multiple sources:
+  # 1. Local filesystem (same node or shared storage)
+  # 2. BufferedStore (shared Postgres backend)
+  # 3. RPC to the source node (if still reachable for other data)
+  defp locate_checkpoint(%Entry{run_id: run_id, logs_root: logs_root}) do
+    # Try local file first
+    local_path = if logs_root, do: Path.join(logs_root, "checkpoint.json")
 
-  defp validate_checkpoint_exists(%Entry{logs_root: logs_root}) do
+    cond do
+      local_path && File.exists?(local_path) ->
+        {:ok, {:file, local_path}}
+
+      run_id != nil ->
+        # Try BufferedStore (works when shared Postgres backend is configured)
+        case Arbor.Persistence.BufferedStore.get(
+               run_id,
+               name: :arbor_orchestrator_checkpoints
+             ) do
+          {:ok, checkpoint_data} when checkpoint_data != nil ->
+            {:ok, {:store, checkpoint_data}}
+
+          _ ->
+            # Try querying peer nodes for the checkpoint file content
+            case fetch_checkpoint_from_peers(logs_root) do
+              {:ok, data} -> {:ok, {:remote_data, data}}
+              _ -> {:error, :checkpoint_not_found}
+            end
+        end
+
+      true ->
+        {:error, :no_checkpoint_source}
+    end
+  end
+
+  defp fetch_checkpoint_from_peers(nil), do: {:error, :no_logs_root}
+
+  defp fetch_checkpoint_from_peers(logs_root) do
     checkpoint_path = Path.join(logs_root, "checkpoint.json")
 
-    if File.exists?(checkpoint_path) do
-      :ok
-    else
-      {:error, :checkpoint_not_found}
-    end
+    # Try each connected node
+    Enum.find_value(Node.list(), {:error, :checkpoint_not_on_peers}, fn node ->
+      try do
+        case :erpc.call(node, File, :read, [checkpoint_path], 5_000) do
+          {:ok, data} -> {:ok, data}
+          _ -> nil
+        end
+      catch
+        _, _ -> nil
+      end
+    end)
   end
 
   defp validate_graph_unchanged(%Entry{graph_hash: nil}), do: :ok
@@ -383,22 +422,45 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         end
 
       {:error, _} ->
-        # Can't verify — allow recovery (checkpoint has the state)
+        # Can't verify locally — allow recovery (checkpoint has the state)
         :ok
     end
   end
 
-  defp do_resume(%Entry{} = entry) do
-    checkpoint_path = Path.join(entry.logs_root, "checkpoint.json")
+  defp do_resume(%Entry{} = entry, checkpoint_source) do
+    # Set up local logs root for this node's execution
+    logs_root = entry.logs_root || create_recovery_logs_root(entry.run_id)
 
-    opts = [
-      resume_from: checkpoint_path,
+    base_opts = [
       run_id: entry.run_id,
-      logs_root: entry.logs_root,
-      recovery: true
+      logs_root: logs_root,
+      recovery: true,
+      graph_hash: entry.graph_hash
     ]
 
-    # Load the graph from DOT source if available, otherwise from checkpoint context
+    # Build resume opts based on checkpoint source
+    opts =
+      case checkpoint_source do
+        {:file, path} ->
+          Keyword.put(base_opts, :resume_from, path)
+
+        {:store, checkpoint_data} ->
+          # Write checkpoint data to local file for the engine to load
+          local_path = Path.join(logs_root, "checkpoint.json")
+          File.mkdir_p!(logs_root)
+          data = if is_binary(checkpoint_data), do: checkpoint_data, else: Jason.encode!(checkpoint_data)
+          File.write!(local_path, data)
+          Keyword.put(base_opts, :resume_from, local_path)
+
+        {:remote_data, raw_data} ->
+          # Write remote checkpoint data to local file
+          local_path = Path.join(logs_root, "checkpoint.json")
+          File.mkdir_p!(logs_root)
+          File.write!(local_path, raw_data)
+          Keyword.put(base_opts, :resume_from, local_path)
+      end
+
+    # Load the graph from DOT source if available
     case load_graph_for_resume(entry) do
       {:ok, graph} ->
         Arbor.Orchestrator.Engine.run(graph, opts)
@@ -417,6 +479,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   defp load_graph_for_resume(_entry) do
     {:error, :no_dot_source_path}
+  end
+
+  defp create_recovery_logs_root(run_id) do
+    root = Path.join(System.tmp_dir!(), "arbor_orchestrator/recovery_#{run_id || "unknown"}")
+    File.mkdir_p!(root)
+    root
   end
 
   defp attempt_claim(%Entry{} = entry) do

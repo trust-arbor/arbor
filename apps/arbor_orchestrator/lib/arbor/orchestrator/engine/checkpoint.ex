@@ -40,6 +40,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           execution_digests: %{String.t() => execution_digest()}
         }
 
+  require Logger
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @store_name :arbor_orchestrator_checkpoints
@@ -164,6 +166,13 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
     # Write to file for backward compat and debugging
     write_to_file(payload_map, logs_root)
+
+    # Replicate to a peer node for crash recovery (ETS-only fallback)
+    if Keyword.get(opts, :replicate, false) do
+      replicate_to_peer(checkpoint.run_id, payload_map)
+    end
+
+    :ok
   end
 
   @doc """
@@ -543,4 +552,40 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   defp parse_timestamp(_), do: {:error, :invalid}
+
+  # Replicate checkpoint data to one peer node asynchronously.
+  # Used in ETS-only mode for crash recovery — writes to the peer's BufferedStore.
+  # In shared-Postgres mode this is redundant (same DB), but harmless.
+  defp replicate_to_peer(nil, _payload_map), do: :ok
+
+  defp replicate_to_peer(run_id, payload_map) do
+    peers = Node.list()
+
+    if peers != [] do
+      # Pick one peer (first connected node — could be enhanced with trust zone selection)
+      peer = List.first(peers)
+      key = store_key(run_id)
+      json = Jason.encode!(payload_map)
+
+      # Async replication — don't block the engine loop
+      Task.start(fn ->
+        try do
+          :erpc.call(
+            peer,
+            Arbor.Persistence.BufferedStore,
+            :put,
+            [key, json, [name: @store_name]],
+            5_000
+          )
+        catch
+          kind, reason ->
+            Logger.debug(
+              "[Checkpoint] Peer replication to #{peer} failed: #{inspect(kind)}: #{inspect(reason)}"
+            )
+        end
+      end)
+    end
+
+    :ok
+  end
 end
