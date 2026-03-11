@@ -14,7 +14,9 @@ defmodule Arbor.Signals.Config do
         channel_rotate_on_leave: true,
         relay_enabled: true,
         relay_batch_interval_ms: 50,
-        relay_max_batch_size: 500
+        relay_max_batch_size: 500,
+        relay_category_rate_limit: 100,
+        relay_node_rate_limit: 1000
   """
 
   require Logger
