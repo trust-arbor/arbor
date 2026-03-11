@@ -98,6 +98,7 @@ defmodule Arbor.Orchestrator.Engine do
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
         emit(opts, Event.pipeline_completed(completed, duration_ms))
+        Checkpoint.cleanup(run_id)
 
         {:ok,
          %{
@@ -147,7 +148,8 @@ defmodule Arbor.Orchestrator.Engine do
     if Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) do
       checkpoint_path = Keyword.get(opts, :resume_from, Path.join(logs_root, "checkpoint.json"))
 
-      with {:ok, checkpoint} <- Checkpoint.load(checkpoint_path),
+      with {:ok, checkpoint} <- Checkpoint.load(checkpoint_path, run_id: Keyword.get(opts, :run_id)),
+           :ok <- maybe_revalidate_capabilities(graph, opts),
            {:ok, state} <- state_from_checkpoint(graph, checkpoint) do
         emit(opts, Event.pipeline_resumed(checkpoint_path, checkpoint.current_node))
 
@@ -320,7 +322,8 @@ defmodule Arbor.Orchestrator.Engine do
           context,
           state.outcomes,
           content_hashes: tracking.content_hashes,
-          run_id: Keyword.get(state.opts, :run_id)
+          run_id: Keyword.get(state.opts, :run_id),
+          graph_hash: Keyword.get(state.opts, :graph_hash)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -387,7 +390,8 @@ defmodule Arbor.Orchestrator.Engine do
       checkpoint =
         Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
           content_hashes: tracking.content_hashes,
-          run_id: Keyword.get(state.opts, :run_id)
+          run_id: Keyword.get(state.opts, :run_id),
+          graph_hash: Keyword.get(state.opts, :graph_hash)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -456,6 +460,9 @@ defmodule Arbor.Orchestrator.Engine do
     run_id = Keyword.get(state.opts, :run_id)
 
     emit(state.opts, Event.pipeline_completed(ordered, duration_ms))
+
+    # Clean up checkpoint from durable store (no longer needed)
+    if run_id, do: Checkpoint.cleanup(run_id)
 
     {:ok,
      %{
@@ -673,6 +680,29 @@ defmodule Arbor.Orchestrator.Engine do
          {:ok, encoded} <- Jason.encode(payload, pretty: true) do
       File.write(Path.join(logs_root, "manifest.json"), encoded)
     end
+  end
+
+  # Re-validate that the resuming agent still has required capabilities.
+  # Only checked when Security is available and agent_id is provided.
+  defp maybe_revalidate_capabilities(_graph, opts) do
+    agent_id = Keyword.get(opts, :agent_id)
+
+    if agent_id && Code.ensure_loaded?(Arbor.Security) &&
+         function_exported?(Arbor.Security, :authorize, 3) do
+      case apply(Arbor.Security, :authorize, [
+             agent_id,
+             "arbor://orchestrator/execute",
+             :resume
+           ]) do
+        :ok -> :ok
+        {:ok, _} -> :ok
+        {:error, reason} -> {:error, {:unauthorized_resume, reason}}
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   @doc "Generates a unique run ID for a pipeline execution."
