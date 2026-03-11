@@ -367,6 +367,8 @@ defmodule Arbor.Trust.Store do
       cache_stats: %{hits: 0, misses: 0, writes: 0, deletes: 0, events: 0}
     }
 
+    subscribe_to_distributed_signals()
+
     Logger.info("Trust.Store started with ETS tables")
 
     {:ok, state}
@@ -376,6 +378,7 @@ defmodule Arbor.Trust.Store do
   def handle_call({:store_profile, profile}, _from, state) do
     :ok = put_profile_in_cache(profile, state)
     persist_profile(profile, state)
+    emit_distributed_signal(:profile_updated, profile.agent_id)
 
     new_stats = update_stats(state.cache_stats, :writes, 1)
     {:reply, :ok, %{state | cache_stats: new_stats}}
@@ -413,6 +416,7 @@ defmodule Arbor.Trust.Store do
   def handle_call({:delete_profile, agent_id}, _from, state) do
     :ets.delete(state.profiles_table, agent_id)
     delete_profile_from_db(agent_id, state)
+    emit_distributed_signal(:profile_deleted, agent_id)
 
     new_stats = update_stats(state.cache_stats, :deletes, 1)
     {:reply, :ok, %{state | cache_stats: new_stats}}
@@ -431,6 +435,8 @@ defmodule Arbor.Trust.Store do
         if profile.tier != updated.tier do
           emit_tier_change_event(profile, updated, state)
         end
+
+        emit_distributed_signal(:profile_updated, agent_id)
 
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
@@ -525,6 +531,36 @@ defmodule Arbor.Trust.Store do
     :ok
   end
 
+  @impl true
+  def handle_info({:signal_received, %{data: %{origin_node: origin}}}, state)
+      when origin == node() do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:signal_received, %{type: type, data: data}}, state) do
+    agent_id = Map.get(data, :agent_id)
+
+    case type do
+      :profile_updated ->
+        # Invalidate cache — next get will reload from DB
+        :ets.delete(state.profiles_table, agent_id)
+        Logger.debug("[Trust.Store] Invalidated profile cache for #{agent_id} from #{data.origin_node}")
+
+      :profile_deleted ->
+        :ets.delete(state.profiles_table, agent_id)
+        Logger.debug("[Trust.Store] Deleted profile cache for #{agent_id} from #{data.origin_node}")
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
+
   # Private functions
 
   defp put_profile_in_cache(profile, state) do
@@ -586,6 +622,40 @@ defmodule Arbor.Trust.Store do
     Task.start(fn ->
       db_module.delete_trust_profile(agent_id)
     end)
+  end
+
+  defp emit_distributed_signal(type, agent_id) do
+    if Code.ensure_loaded?(Arbor.Signals) do
+      Arbor.Signals.emit(:trust, type, %{
+        agent_id: agent_id,
+        origin_node: node()
+      }, scope: :cluster)
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp subscribe_to_distributed_signals do
+    bus = Arbor.Signals.Bus
+
+    if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+      me = self()
+
+      for type <- ~w(profile_updated profile_deleted) do
+        Arbor.Signals.subscribe("trust.#{type}", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+      end
+
+      Logger.info("[Trust.Store] Subscribed to distributed trust signals")
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
   end
 
   defp emit_tier_change_event(old_profile, new_profile, state) do

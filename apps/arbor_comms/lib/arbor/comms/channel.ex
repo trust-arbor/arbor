@@ -400,9 +400,10 @@ defmodule Arbor.Comms.Channel do
 
   defp emit_signal(type, data) do
     if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) do
+         function_exported?(Arbor.Signals, :emit, 4) do
       try do
-        apply(Arbor.Signals, :emit, [:comms, type, data])
+        data = Map.put(data, :origin_node, node())
+        apply(Arbor.Signals, :emit, [:comms, type, data, [scope: :cluster]])
       rescue
         _ -> :ok
       catch
