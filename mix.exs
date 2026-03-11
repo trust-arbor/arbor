@@ -18,7 +18,8 @@ defmodule Arbor.MixProject do
     [
       preferred_envs: [
         "test.fast": :test,
-        "test.all": :test
+        "test.all": :test,
+        "test.distributed": :test
       ]
     ]
   end
@@ -40,7 +41,8 @@ defmodule Arbor.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:local_cluster, "~> 2.1", only: [:test]}
 
       # These are umbrella apps now, auto-discovered via apps_path
       # arbor_eval — merged into arbor_common as Arbor.Eval + Arbor.Common.SensitiveData
@@ -63,6 +65,9 @@ defmodule Arbor.MixProject do
       ],
       "test.all": [
         "test --include llm --include llm_local --include integration --include external --include database"
+      ],
+      "test.distributed": [
+        "test --only distributed --include distributed"
       ],
       "test.unified_llm_conformance": [
         "cmd env MIX_ENV=test mix test apps/arbor_orchestrator/test/arbor/orchestrator/unified_llm apps/arbor_orchestrator/test/arbor/orchestrator/unified_llm_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/conformance/provider_doc_verification_test.exs"

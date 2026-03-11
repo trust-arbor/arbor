@@ -24,4 +24,4 @@ for child <- children do
   end
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:llm, :llm_local, :distributed])
