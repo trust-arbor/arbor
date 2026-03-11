@@ -807,4 +807,113 @@ defmodule Arbor.Historian do
 
   @impl Arbor.Contracts.API.Historian
   def read_historian_stats, do: stats()
+
+  # ── Cross-Node Queries (Distributed Pipeline Durability) ──
+
+  @doc """
+  Query history entries across all cluster nodes.
+
+  In shared-Postgres mode, the local query already covers all nodes (same DB).
+  In ETS-only mode, queries each peer node via RPC and merges results.
+
+  Options are the same as `recent/1` plus:
+  - `:timeout` — per-node RPC timeout in ms (default: 5000)
+  """
+  def cluster_recent(opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    query_opts = Keyword.delete(opts, :timeout)
+
+    # Local results
+    local =
+      case recent(query_opts) do
+        {:ok, entries} -> entries
+        _ -> []
+      end
+
+    # Query peer nodes in parallel
+    tasks =
+      Node.list()
+      |> Enum.map(fn node ->
+        Task.async(fn ->
+          try do
+            case :erpc.call(node, __MODULE__, :recent, [query_opts], timeout) do
+              {:ok, entries} -> entries
+              _ -> []
+            end
+          catch
+            _, _ -> []
+          end
+        end)
+      end)
+
+    remote =
+      Task.yield_many(tasks, timeout + 1_000)
+      |> Enum.flat_map(fn
+        {_task, {:ok, entries}} -> entries
+        {task, nil} ->
+          Task.shutdown(task, :brutal_kill)
+          []
+        _ -> []
+      end)
+
+    # Merge and deduplicate by event ID, sort by timestamp descending
+    merged =
+      (local ++ remote)
+      |> Enum.uniq_by(fn entry ->
+        Map.get(entry, :id) || Map.get(entry, "id") || :rand.uniform(1_000_000)
+      end)
+      |> Enum.sort_by(
+        fn entry ->
+          Map.get(entry, :timestamp) || Map.get(entry, "timestamp")
+        end,
+        {:desc, DateTime}
+      )
+
+    limit = Keyword.get(opts, :limit, 50)
+    {:ok, Enum.take(merged, limit)}
+  end
+
+  @doc """
+  Query pipeline-specific events across the cluster.
+
+  Looks up events in the `orchestrator:pipeline:{run_id}` stream.
+  In shared-Postgres mode, works locally. In ETS-only, queries peers.
+  """
+  def cluster_pipeline_events(run_id, opts \\ []) do
+    stream_id = "orchestrator:pipeline:#{run_id}"
+    timeout = Keyword.get(opts, :timeout, 5_000)
+
+    # Try local first
+    local =
+      case QueryEngine.read_stream(stream_id, opts) do
+        {:ok, entries} -> entries
+        _ -> []
+      end
+
+    if local != [] do
+      {:ok, local}
+    else
+      # Query peers for this pipeline's events
+      results =
+        Node.list()
+        |> Enum.find_value(fn node ->
+          try do
+            case :erpc.call(
+                   node,
+                   Arbor.Historian.QueryEngine,
+                   :read_stream,
+                   [stream_id, opts],
+                   timeout
+                 ) do
+              {:ok, entries} when entries != [] -> entries
+              _ -> nil
+            end
+          catch
+            _, _ -> nil
+          end
+        end)
+
+      {:ok, results || []}
+    end
+  end
 end
