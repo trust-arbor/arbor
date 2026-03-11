@@ -55,15 +55,27 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
       json =
         Jason.encode!(%{
           "thinking" => "I should check things",
-          "actions" => [%{"type" => "think", "params" => %{"topic" => "goals"}, "reasoning" => "need to plan"}],
+          "actions" => [
+            %{"type" => "think", "params" => %{"topic" => "goals"}, "reasoning" => "need to plan"}
+          ],
           "memory_notes" => ["observation one"],
           "concerns" => ["risk A"],
           "curiosity" => ["what about X?"],
           "goal_updates" => [%{"goal_id" => "g1", "progress" => 0.5, "note" => "halfway"}],
-          "new_goals" => [%{"description" => "learn Elixir", "priority" => "high", "success_criteria" => "pass test"}],
-          "proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "accept", "reason" => "looks good"}],
+          "new_goals" => [
+            %{
+              "description" => "learn Elixir",
+              "priority" => "high",
+              "success_criteria" => "pass test"
+            }
+          ],
+          "proposal_decisions" => [
+            %{"proposal_id" => "p1", "decision" => "accept", "reason" => "looks good"}
+          ],
           "decompositions" => [],
-          "identity_insights" => [%{"category" => "capability", "content" => "I can code", "confidence" => 0.9}]
+          "identity_insights" => [
+            %{"category" => "capability", "content" => "I can code", "confidence" => 0.9}
+          ]
         })
 
       result = HeartbeatResponse.parse(json)
@@ -135,7 +147,11 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_actions" do
     test "parses action with type key" do
-      json = Jason.encode!(%{"actions" => [%{"type" => "reflect", "params" => %{}, "reasoning" => "need reflection"}]})
+      json =
+        Jason.encode!(%{
+          "actions" => [%{"type" => "reflect", "params" => %{}, "reasoning" => "need reflection"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert [%{type: :reflect, params: %{}, reasoning: "need reflection"}] = result.actions
     end
@@ -179,9 +195,15 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
     end
 
     test "parses map notes with text and referenced_date" do
-      json = Jason.encode!(%{"memory_notes" => [%{"text" => "deploy happened", "referenced_date" => "2026-02-20"}]})
+      json =
+        Jason.encode!(%{
+          "memory_notes" => [%{"text" => "deploy happened", "referenced_date" => "2026-02-20"}]
+        })
+
       result = HeartbeatResponse.parse(json)
-      assert [%{"text" => "deploy happened", "referenced_date" => "2026-02-20"}] = result.memory_notes
+
+      assert [%{"text" => "deploy happened", "referenced_date" => "2026-02-20"}] =
+               result.memory_notes
     end
 
     test "normalizes map note without referenced_date to plain text" do
@@ -211,7 +233,11 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_goal_updates" do
     test "parses valid goal update" do
-      json = Jason.encode!(%{"goal_updates" => [%{"goal_id" => "g1", "progress" => 0.75, "note" => "good progress"}]})
+      json =
+        Jason.encode!(%{
+          "goal_updates" => [%{"goal_id" => "g1", "progress" => 0.75, "note" => "good progress"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert [%{goal_id: "g1", progress: 0.75, note: "good progress"}] = result.goal_updates
     end
@@ -243,16 +269,36 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_new_goals" do
     test "parses valid new goal" do
-      json = Jason.encode!(%{"new_goals" => [%{"description" => "learn OTP", "priority" => "high", "success_criteria" => "build GenServer"}]})
+      json =
+        Jason.encode!(%{
+          "new_goals" => [
+            %{
+              "description" => "learn OTP",
+              "priority" => "high",
+              "success_criteria" => "build GenServer"
+            }
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
-      assert [%{description: "learn OTP", priority: :high, success_criteria: "build GenServer"}] = result.new_goals
+
+      assert [%{description: "learn OTP", priority: :high, success_criteria: "build GenServer"}] =
+               result.new_goals
     end
 
     test "parses priority values" do
-      for {input, expected} <- [{"high", :high}, {"medium", :medium}, {"low", :low}, {"unknown", :medium}, {nil, :medium}] do
+      for {input, expected} <- [
+            {"high", :high},
+            {"medium", :medium},
+            {"low", :low},
+            {"unknown", :medium},
+            {nil, :medium}
+          ] do
         json = Jason.encode!(%{"new_goals" => [%{"description" => "test", "priority" => input}]})
         result = HeartbeatResponse.parse(json)
-        assert hd(result.new_goals).priority == expected, "Expected #{inspect(expected)} for input #{inspect(input)}"
+
+        assert hd(result.new_goals).priority == expected,
+               "Expected #{inspect(expected)} for input #{inspect(input)}"
       end
     end
 
@@ -278,16 +324,28 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_proposal_decisions" do
     test "parses accept decision" do
-      json = Jason.encode!(%{"proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "accept", "reason" => "good idea"}]})
+      json =
+        Jason.encode!(%{
+          "proposal_decisions" => [
+            %{"proposal_id" => "p1", "decision" => "accept", "reason" => "good idea"}
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
-      assert [%{proposal_id: "p1", decision: :accept, reason: "good idea"}] = result.proposal_decisions
+
+      assert [%{proposal_id: "p1", decision: :accept, reason: "good idea"}] =
+               result.proposal_decisions
     end
 
     test "parses reject and defer decisions" do
-      json = Jason.encode!(%{"proposal_decisions" => [
-        %{"proposal_id" => "p1", "decision" => "reject", "reason" => "bad"},
-        %{"proposal_id" => "p2", "decision" => "defer", "reason" => "later"}
-      ]})
+      json =
+        Jason.encode!(%{
+          "proposal_decisions" => [
+            %{"proposal_id" => "p1", "decision" => "reject", "reason" => "bad"},
+            %{"proposal_id" => "p2", "decision" => "defer", "reason" => "later"}
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert length(result.proposal_decisions) == 2
       assert Enum.at(result.proposal_decisions, 0).decision == :reject
@@ -295,13 +353,21 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
     end
 
     test "rejects invalid decision values" do
-      json = Jason.encode!(%{"proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "maybe"}]})
+      json =
+        Jason.encode!(%{
+          "proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "maybe"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert result.proposal_decisions == []
     end
 
     test "defaults reason to empty string" do
-      json = Jason.encode!(%{"proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "accept"}]})
+      json =
+        Jason.encode!(%{
+          "proposal_decisions" => [%{"proposal_id" => "p1", "decision" => "accept"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert hd(result.proposal_decisions).reason == ""
     end
@@ -309,13 +375,19 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_decompositions" do
     test "parses valid decomposition" do
-      json = Jason.encode!(%{"decompositions" => [
-        %{
-          "goal_id" => "g1",
-          "intentions" => [%{"action" => "think", "params" => %{}, "reasoning" => "plan first"}],
-          "contingency" => "fallback plan"
-        }
-      ]})
+      json =
+        Jason.encode!(%{
+          "decompositions" => [
+            %{
+              "goal_id" => "g1",
+              "intentions" => [
+                %{"action" => "think", "params" => %{}, "reasoning" => "plan first"}
+              ],
+              "contingency" => "fallback plan"
+            }
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert [decomp] = result.decompositions
       assert decomp.goal_id == "g1"
@@ -325,8 +397,12 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
     end
 
     test "limits intentions to 3 per decomposition" do
-      intentions = Enum.map(1..5, &%{"action" => "think", "params" => %{}, "reasoning" => "step #{&1}"})
-      json = Jason.encode!(%{"decompositions" => [%{"goal_id" => "g1", "intentions" => intentions}]})
+      intentions =
+        Enum.map(1..5, &%{"action" => "think", "params" => %{}, "reasoning" => "step #{&1}"})
+
+      json =
+        Jason.encode!(%{"decompositions" => [%{"goal_id" => "g1", "intentions" => intentions}]})
+
       result = HeartbeatResponse.parse(json)
       assert length(hd(result.decompositions).intentions) == 3
     end
@@ -344,24 +420,34 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
     end
 
     test "rejects intentions without action" do
-      json = Jason.encode!(%{"decompositions" => [%{"goal_id" => "g1", "intentions" => [%{"params" => %{}}]}]})
+      json =
+        Jason.encode!(%{
+          "decompositions" => [%{"goal_id" => "g1", "intentions" => [%{"params" => %{}}]}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert result.decompositions == []
     end
 
     test "parses intention with preconditions and success_criteria" do
-      json = Jason.encode!(%{"decompositions" => [
-        %{
-          "goal_id" => "g1",
-          "intentions" => [%{
-            "action" => "reflect",
-            "params" => %{},
-            "reasoning" => "why",
-            "preconditions" => "must have data",
-            "success_criteria" => "insight gained"
-          }]
-        }
-      ]})
+      json =
+        Jason.encode!(%{
+          "decompositions" => [
+            %{
+              "goal_id" => "g1",
+              "intentions" => [
+                %{
+                  "action" => "reflect",
+                  "params" => %{},
+                  "reasoning" => "why",
+                  "preconditions" => "must have data",
+                  "success_criteria" => "insight gained"
+                }
+              ]
+            }
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
       intent = hd(hd(result.decompositions).intentions)
       assert intent.preconditions == "must have data"
@@ -371,25 +457,47 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
   describe "parse_identity_insights" do
     test "parses valid insight" do
-      json = Jason.encode!(%{"identity_insights" => [%{"category" => "trait", "content" => "I am curious", "confidence" => 0.8}]})
+      json =
+        Jason.encode!(%{
+          "identity_insights" => [
+            %{"category" => "trait", "content" => "I am curious", "confidence" => 0.8}
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
-      assert [%{category: :trait, content: "I am curious", confidence: 0.8}] = result.identity_insights
+
+      assert [%{category: :trait, content: "I am curious", confidence: 0.8}] =
+               result.identity_insights
     end
 
     test "defaults confidence to 0.5" do
-      json = Jason.encode!(%{"identity_insights" => [%{"category" => "value", "content" => "I value honesty"}]})
+      json =
+        Jason.encode!(%{
+          "identity_insights" => [%{"category" => "value", "content" => "I value honesty"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert hd(result.identity_insights).confidence == 0.5
     end
 
     test "converts integer confidence" do
-      json = Jason.encode!(%{"identity_insights" => [%{"category" => "skill", "content" => "coding", "confidence" => 90}]})
+      json =
+        Jason.encode!(%{
+          "identity_insights" => [
+            %{"category" => "skill", "content" => "coding", "confidence" => 90}
+          ]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert hd(result.identity_insights).confidence == 0.9
     end
 
     test "rejects invalid categories" do
-      json = Jason.encode!(%{"identity_insights" => [%{"category" => "invalid_cat", "content" => "something"}]})
+      json =
+        Jason.encode!(%{
+          "identity_insights" => [%{"category" => "invalid_cat", "content" => "something"}]
+        })
+
       result = HeartbeatResponse.parse(json)
       assert result.identity_insights == []
     end
@@ -401,7 +509,12 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
     end
 
     test "limits to 5 insights" do
-      insights = Enum.map(1..8, &%{"category" => "trait", "content" => "insight #{&1}", "confidence" => 0.5})
+      insights =
+        Enum.map(
+          1..8,
+          &%{"category" => "trait", "content" => "insight #{&1}", "confidence" => 0.5}
+        )
+
       json = Jason.encode!(%{"identity_insights" => insights})
       result = HeartbeatResponse.parse(json)
       assert length(result.identity_insights) == 5
@@ -409,7 +522,11 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
 
     test "allows all valid categories" do
       for cat <- ~w(capability skill trait personality value) do
-        json = Jason.encode!(%{"identity_insights" => [%{"category" => cat, "content" => "test #{cat}"}]})
+        json =
+          Jason.encode!(%{
+            "identity_insights" => [%{"category" => cat, "content" => "test #{cat}"}]
+          })
+
         result = HeartbeatResponse.parse(json)
         assert length(result.identity_insights) == 1, "Category #{cat} should be accepted"
       end
@@ -445,9 +562,20 @@ defmodule Arbor.Agent.HeartbeatResponseTest do
   describe "empty_response/0" do
     test "returns all expected keys" do
       resp = HeartbeatResponse.empty_response()
+
       assert Map.keys(resp) |> Enum.sort() ==
-        [:actions, :concerns, :curiosity, :decompositions, :goal_updates,
-         :identity_insights, :memory_notes, :new_goals, :proposal_decisions, :thinking]
+               [
+                 :actions,
+                 :concerns,
+                 :curiosity,
+                 :decompositions,
+                 :goal_updates,
+                 :identity_insights,
+                 :memory_notes,
+                 :new_goals,
+                 :proposal_decisions,
+                 :thinking
+               ]
     end
   end
 

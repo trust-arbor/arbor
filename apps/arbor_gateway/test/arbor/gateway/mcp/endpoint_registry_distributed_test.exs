@@ -33,14 +33,18 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry.DistributedTest do
     test "registers remote endpoint on signal" do
       agent_id = "agent_remote_ep_#{System.unique_integer([:positive])}"
 
-      send(Process.whereis(EndpointRegistry), {:signal_received, %{
-        type: :endpoint_registered,
-        data: %{
-          agent_id: agent_id,
-          tools: [%{name: "test_tool"}],
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(EndpointRegistry),
+        {:signal_received,
+         %{
+           type: :endpoint_registered,
+           data: %{
+             agent_id: agent_id,
+             tools: [%{name: "test_tool"}],
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -60,13 +64,17 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry.DistributedTest do
       # First register it
       :ets.insert(@table, {agent_id, {:remote, :remote@node}, [], DateTime.utc_now()})
 
-      send(Process.whereis(EndpointRegistry), {:signal_received, %{
-        type: :endpoint_unregistered,
-        data: %{
-          agent_id: agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(EndpointRegistry),
+        {:signal_received,
+         %{
+           type: :endpoint_unregistered,
+           data: %{
+             agent_id: agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -80,13 +88,17 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry.DistributedTest do
       # Register as local endpoint (pid, not {:remote, node})
       :ets.insert(@table, {agent_id, local_pid, [], DateTime.utc_now()})
 
-      send(Process.whereis(EndpointRegistry), {:signal_received, %{
-        type: :endpoint_unregistered,
-        data: %{
-          agent_id: agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(EndpointRegistry),
+        {:signal_received,
+         %{
+           type: :endpoint_unregistered,
+           data: %{
+             agent_id: agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -97,14 +109,18 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry.DistributedTest do
     test "ignores signals from own node" do
       agent_id = "agent_self_ep_#{System.unique_integer([:positive])}"
 
-      send(Process.whereis(EndpointRegistry), {:signal_received, %{
-        type: :endpoint_registered,
-        data: %{
-          agent_id: agent_id,
-          tools: [],
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(EndpointRegistry),
+        {:signal_received,
+         %{
+           type: :endpoint_registered,
+           data: %{
+             agent_id: agent_id,
+             tools: [],
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 

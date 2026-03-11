@@ -16,6 +16,7 @@ defmodule Arbor.Gateway.RateLimiterTest do
 
     # Restore any app env changes
     original = Application.get_env(:arbor_gateway, :rate_limit)
+
     on_exit(fn ->
       if original do
         Application.put_env(:arbor_gateway, :rate_limit, original)

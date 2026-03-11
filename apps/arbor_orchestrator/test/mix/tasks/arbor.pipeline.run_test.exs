@@ -14,7 +14,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
       {opts, _files, _} =
         OptionParser.parse(
           ["test.dot", "--set", "model=claude", "--set", "provider=anthropic"],
-          strict: [logs_root: :string, workdir: :string, set: :keep, resume: :boolean, resume_from: :string]
+          strict: [
+            logs_root: :string,
+            workdir: :string,
+            set: :keep,
+            resume: :boolean,
+            resume_from: :string
+          ]
         )
 
       set_values = Keyword.get_values(opts, :set)
@@ -26,7 +32,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
       {opts, _files, _} =
         OptionParser.parse(
           ["test.dot", "--logs-root", "/tmp/logs", "--workdir", "/tmp/work"],
-          strict: [logs_root: :string, workdir: :string, set: :keep, resume: :boolean, resume_from: :string]
+          strict: [
+            logs_root: :string,
+            workdir: :string,
+            set: :keep,
+            resume: :boolean,
+            resume_from: :string
+          ]
         )
 
       assert opts[:logs_root] == "/tmp/logs"
@@ -37,7 +49,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
       {opts, _files, _} =
         OptionParser.parse(
           ["test.dot", "--resume"],
-          strict: [logs_root: :string, workdir: :string, set: :keep, resume: :boolean, resume_from: :string]
+          strict: [
+            logs_root: :string,
+            workdir: :string,
+            set: :keep,
+            resume: :boolean,
+            resume_from: :string
+          ]
         )
 
       assert opts[:resume] == true
@@ -47,7 +65,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
       {opts, _files, _} =
         OptionParser.parse(
           ["test.dot", "--resume-from", "/tmp/checkpoint.json"],
-          strict: [logs_root: :string, workdir: :string, set: :keep, resume: :boolean, resume_from: :string]
+          strict: [
+            logs_root: :string,
+            workdir: :string,
+            set: :keep,
+            resume: :boolean,
+            resume_from: :string
+          ]
         )
 
       assert opts[:resume_from] == "/tmp/checkpoint.json"
@@ -57,7 +81,13 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
       {_opts, files, _} =
         OptionParser.parse(
           ["my_pipeline.dot", "--set", "x=1"],
-          strict: [logs_root: :string, workdir: :string, set: :keep, resume: :boolean, resume_from: :string]
+          strict: [
+            logs_root: :string,
+            workdir: :string,
+            set: :keep,
+            resume: :boolean,
+            resume_from: :string
+          ]
         )
 
       assert files == ["my_pipeline.dot"]
