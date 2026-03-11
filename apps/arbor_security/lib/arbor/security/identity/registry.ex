@@ -23,10 +23,13 @@ defmodule Arbor.Security.Identity.Registry do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Config
   alias Arbor.Security.Crypto
+  alias Arbor.Signals
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
+  @id_store :arbor_security_identities
 
   # Client API
 
@@ -213,6 +216,8 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def init(_opts) do
+    subscribe_to_distributed_signals()
+
     state = %{
       by_agent_id: %{},
       by_public_key_hash: %{},
@@ -261,6 +266,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> update_in([:stats, :total_registered], &(&1 + 1))
 
         persist_to_store(identity.agent_id, entry)
+        emit_identity_signal(:identity_registered, identity.agent_id)
         {:reply, :ok, state}
     end
   end
@@ -314,6 +320,7 @@ defmodule Arbor.Security.Identity.Registry do
           |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
         delete_from_store(agent_id)
+        emit_identity_signal(:identity_deregistered, agent_id)
         {:reply, :ok, state}
     end
   end
@@ -361,6 +368,7 @@ defmodule Arbor.Security.Identity.Registry do
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
         persist_to_store(agent_id, updated_entry)
+        emit_identity_signal(:identity_suspended, agent_id)
         {:reply, :ok, state}
     end
   end
@@ -384,6 +392,7 @@ defmodule Arbor.Security.Identity.Registry do
 
         state = put_in(state, [:by_agent_id, agent_id], updated_entry)
         persist_to_store(agent_id, updated_entry)
+        emit_identity_signal(:identity_resumed, agent_id)
         {:reply, :ok, state}
     end
   end
@@ -408,6 +417,7 @@ defmodule Arbor.Security.Identity.Registry do
         # Revoke all capabilities for this agent
         {:ok, revoked_count} = CapabilityStore.revoke_all(agent_id)
 
+        emit_identity_signal(:identity_revoked, agent_id)
         {:reply, {:ok, revoked_count}, state}
     end
   end
@@ -445,6 +455,145 @@ defmodule Arbor.Security.Identity.Registry do
       nil -> nil
       ids -> List.delete(ids, agent_id)
     end)
+  end
+
+  # ===========================================================================
+  # Distributed Signal Handling
+  # ===========================================================================
+
+  @impl true
+  def handle_info({:signal_received, signal}, state) do
+    state = handle_distributed_signal(signal, state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp subscribe_to_distributed_signals do
+    if Config.distributed_signals_enabled?() do
+      bus = Arbor.Signals.Bus
+
+      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+        me = self()
+
+        for type <- ~w(identity_registered identity_deregistered identity_suspended identity_resumed identity_revoked) do
+          Signals.subscribe("security.#{type}", fn signal ->
+            send(me, {:signal_received, signal})
+            :ok
+          end)
+        end
+      end
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_identity_signal(type, agent_id) do
+    if Config.distributed_signals_enabled?() do
+      Signals.emit(:security, type, %{
+        agent_id: agent_id,
+        origin_node: node()
+      }, scope: :cluster)
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp handle_distributed_signal(signal, state) do
+    if signal.data[:origin_node] == node() do
+      state
+    else
+      handle_remote_identity_signal(signal.type, signal.data, state)
+    end
+  catch
+    _, reason ->
+      Logger.warning("[IdentityRegistry] Failed to handle distributed signal: #{inspect(reason)}")
+      state
+  end
+
+  defp handle_remote_identity_signal(:identity_registered, data, state) do
+    agent_id = data[:agent_id] || data["agent_id"]
+
+    if agent_id && not Map.has_key?(state.by_agent_id, agent_id) do
+      # Load from shared backend
+      case load_identity_from_backend(agent_id) do
+        {:ok, entry} ->
+          pk_hash = Crypto.hash(entry.public_key)
+
+          Logger.debug("[IdentityRegistry] Synced remote identity #{agent_id}")
+
+          state
+          |> put_in([:by_agent_id, agent_id], entry)
+          |> put_in([:by_public_key_hash, pk_hash], agent_id)
+          |> index_by_name(entry[:name], agent_id)
+
+        {:error, _} ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp handle_remote_identity_signal(type, data, state)
+       when type in [:identity_deregistered, :identity_suspended, :identity_resumed, :identity_revoked] do
+    agent_id = data[:agent_id] || data["agent_id"]
+
+    if agent_id && Map.has_key?(state.by_agent_id, agent_id) do
+      case type do
+        :identity_deregistered ->
+          case Map.get(state.by_agent_id, agent_id) do
+            %{public_key: pk, name: name} ->
+              pk_hash = Crypto.hash(pk)
+
+              state
+              |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
+              |> update_in([:by_public_key_hash], &Map.delete(&1, pk_hash))
+              |> deindex_by_name(name, agent_id)
+
+            _ ->
+              update_in(state, [:by_agent_id], &Map.delete(&1, agent_id))
+          end
+
+        :identity_suspended ->
+          update_in(state, [:by_agent_id, agent_id], fn entry ->
+            %{entry | status: :suspended, status_changed_at: DateTime.utc_now()}
+          end)
+
+        :identity_resumed ->
+          update_in(state, [:by_agent_id, agent_id], fn entry ->
+            %{entry | status: :active, status_changed_at: DateTime.utc_now(), status_reason: nil}
+          end)
+
+        :identity_revoked ->
+          update_in(state, [:by_agent_id, agent_id], fn entry ->
+            %{entry | status: :revoked, status_changed_at: DateTime.utc_now()}
+          end)
+      end
+    else
+      state
+    end
+  end
+
+  defp handle_remote_identity_signal(_type, _data, state), do: state
+
+  defp load_identity_from_backend(agent_id) do
+    if Process.whereis(@id_store) do
+      case apply(@buffered_store, :get, [agent_id, [name: @id_store]]) do
+        {:ok, %Record{data: data}} ->
+          {:ok, deserialize_entry(data)}
+
+        error ->
+          error
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  catch
+    _, reason -> {:error, reason}
   end
 
   # ===========================================================================

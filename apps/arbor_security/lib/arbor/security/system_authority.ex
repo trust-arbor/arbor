@@ -2,26 +2,45 @@ defmodule Arbor.Security.SystemAuthority do
   @moduledoc """
   The system authority is the root of trust for locally-issued capabilities.
 
-  It holds an Ed25519 keypair generated on first boot and signs capabilities
-  on request. Its public key is registered in the Identity Registry so that
-  any node can verify capability signatures using a standard key lookup.
+  It holds an Ed25519 keypair and signs capabilities on request. Its public
+  key is registered in the Identity Registry so that any node can verify
+  capability signatures using a standard key lookup.
 
   ## Design
 
   - One SystemAuthority per cluster (started by the Application supervisor)
-  - Keypair is generated fresh on startup (ephemeral per cluster lifecycle)
-  - Private key lives only in GenServer state — never serialized or stored
-  - Public key is registered in the Identity Registry under a deterministic agent_id
+  - **Persistent mode** (default): Keypair is persisted to BufferedStore and
+    loaded on startup. All cluster nodes share the same keypair, enabling
+    cross-node capability verification without RPC.
+  - **Ephemeral mode**: Fresh keypair generated on every startup (legacy
+    single-node behavior, useful for testing).
+  - Private key lives in GenServer state and (in persistent mode) encrypted
+    in the signing keys BufferedStore.
+  - Public key is registered in the Identity Registry under a deterministic agent_id.
+
+  ## Configuration
+
+      config :arbor_security,
+        system_authority_mode: :persistent   # or :ephemeral
   """
 
   use GenServer
 
+  require Logger
+
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Security.Capability.Signer
+  alias Arbor.Security.Config
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
+
+  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
+  @buffered_store Arbor.Persistence.BufferedStore
+  @key_store_name :arbor_security_signing_keys
+  @authority_key "system_authority_keypair"
 
   # Client API
 
@@ -122,11 +141,56 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def init(_opts) do
+    case Config.system_authority_mode() do
+      :persistent ->
+        init_persistent()
+
+      :ephemeral ->
+        init_ephemeral()
+    end
+  end
+
+  defp init_persistent do
+    case load_persisted_keypair() do
+      {:ok, identity} ->
+        Logger.info("[SystemAuthority] Loaded persistent keypair: #{identity.agent_id}")
+        :ok = Registry.register(Identity.public_only(identity))
+        {:ok, %{identity: identity}}
+
+      :not_found ->
+        # First boot — generate and persist
+        case Identity.generate() do
+          {:ok, identity} ->
+            persist_keypair(identity)
+            Logger.info("[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}")
+            :ok = Registry.register(Identity.public_only(identity))
+            {:ok, %{identity: identity}}
+
+          {:error, reason} ->
+            {:stop, {:failed_to_generate_identity, reason}}
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "[SystemAuthority] Failed to load persisted keypair: #{inspect(reason)}, generating new"
+        )
+
+        case Identity.generate() do
+          {:ok, identity} ->
+            persist_keypair(identity)
+            :ok = Registry.register(Identity.public_only(identity))
+            {:ok, %{identity: identity}}
+
+          {:error, gen_reason} ->
+            {:stop, {:failed_to_generate_identity, gen_reason}}
+        end
+    end
+  end
+
+  defp init_ephemeral do
     case Identity.generate() do
       {:ok, identity} ->
-        # Register the public identity so other modules can look up the key
         :ok = Registry.register(Identity.public_only(identity))
-
         {:ok, %{identity: identity}}
 
       {:error, reason} ->
@@ -215,6 +279,11 @@ defmodule Arbor.Security.SystemAuthority do
       {:ok, new_identity} ->
         :ok = Registry.register(Identity.public_only(new_identity))
 
+        # Persist the new keypair if in persistent mode
+        if Config.system_authority_mode() == :persistent do
+          persist_keypair(new_identity)
+        end
+
         result = %{
           old_agent_id: old_identity.agent_id,
           new_agent_id: new_identity.agent_id
@@ -232,4 +301,69 @@ defmodule Arbor.Security.SystemAuthority do
     <<byte_size(public_key)::32, public_key::binary,
       byte_size(agent_id)::32, agent_id::binary>>
   end
+
+  # ===========================================================================
+  # Persistent Keypair Storage
+  # ===========================================================================
+
+  defp load_persisted_keypair do
+    if Process.whereis(@key_store_name) do
+      case apply(@buffered_store, :get, [@authority_key, [name: @key_store_name]]) do
+        {:ok, %Record{data: data}} ->
+          deserialize_keypair(data)
+
+        {:error, :not_found} ->
+          :not_found
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      :not_found
+    end
+  catch
+    _, reason ->
+      {:error, {:store_unavailable, reason}}
+  end
+
+  defp persist_keypair(identity) do
+    if Process.whereis(@key_store_name) do
+      data = serialize_keypair(identity)
+      record = Record.new(@authority_key, data)
+      apply(@buffered_store, :put, [@authority_key, record, [name: @key_store_name]])
+    end
+
+    :ok
+  catch
+    _, reason ->
+      Logger.warning("[SystemAuthority] Failed to persist keypair: #{inspect(reason)}")
+      :ok
+  end
+
+  defp serialize_keypair(identity) do
+    %{
+      "agent_id" => identity.agent_id,
+      "public_key" => Base.encode64(identity.public_key),
+      "private_key" => Base.encode64(identity.private_key),
+      "name" => identity.name,
+      "created_at" => DateTime.to_iso8601(identity.created_at)
+    }
+  end
+
+  defp deserialize_keypair(data) when is_map(data) do
+    with {:ok, public_key} <- Base.decode64(data["public_key"]),
+         {:ok, private_key} <- Base.decode64(data["private_key"]),
+         {:ok, created_at, _} <- DateTime.from_iso8601(data["created_at"] || "2026-01-01T00:00:00Z") do
+      Identity.new(
+        public_key: public_key,
+        private_key: private_key,
+        name: data["name"],
+        created_at: created_at
+      )
+    else
+      _ -> {:error, :invalid_persisted_format}
+    end
+  end
+
+  defp deserialize_keypair(_), do: {:error, :invalid_persisted_format}
 end

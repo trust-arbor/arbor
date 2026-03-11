@@ -241,6 +241,40 @@ defmodule Arbor.Security.Config do
   end
 
   # ===========================================================================
+  # Distributed Security
+  # ===========================================================================
+
+  @doc """
+  Whether the SystemAuthority keypair should be persisted across restarts.
+
+  When `:persistent` (default), the keypair is saved to the signing keys
+  BufferedStore and loaded on subsequent startups. All nodes in the cluster
+  share the same keypair, enabling cross-node capability verification.
+
+  When `:ephemeral`, a fresh keypair is generated on every startup (legacy
+  behavior for single-node or test environments).
+  """
+  @spec system_authority_mode() :: :persistent | :ephemeral
+  def system_authority_mode do
+    Application.get_env(@app, :system_authority_mode, :persistent)
+  end
+
+  @doc """
+  Whether to emit distributed signals on capability state changes.
+
+  When `true`, the CapabilityStore and Identity.Registry emit `:security`
+  signals when capabilities are granted/revoked and identities are
+  registered/deregistered. Peer nodes subscribe to these signals and
+  invalidate their local caches.
+
+  Default: `true` when relay is enabled, `false` otherwise.
+  """
+  @spec distributed_signals_enabled?() :: boolean()
+  def distributed_signals_enabled? do
+    Application.get_env(@app, :distributed_signals, true)
+  end
+
+  # ===========================================================================
   # OIDC Configuration
   # ===========================================================================
 

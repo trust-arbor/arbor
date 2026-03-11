@@ -49,7 +49,9 @@ config :arbor_security,
   # Disable reflex checking in tests — reflex infrastructure (ETS tables, GenServers)
   # isn't started when start_children: false. Without this, authorize/4 fails closed
   # with {:reflex_check_failed, :exception} on every call.
-  reflex_checking_enabled: false
+  reflex_checking_enabled: false,
+  # Use ephemeral keypair in tests — no persistence side effects
+  system_authority_mode: :ephemeral
 
 config :arbor_common, start_children: false
 config :arbor_persistence, start_children: false
