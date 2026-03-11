@@ -448,7 +448,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
           # Write checkpoint data to local file for the engine to load
           local_path = Path.join(logs_root, "checkpoint.json")
           File.mkdir_p!(logs_root)
-          data = if is_binary(checkpoint_data), do: checkpoint_data, else: Jason.encode!(checkpoint_data)
+
+          data =
+            if is_binary(checkpoint_data),
+              do: checkpoint_data,
+              else: Jason.encode!(checkpoint_data)
+
           File.write!(local_path, data)
           Keyword.put(base_opts, :resume_from, local_path)
 

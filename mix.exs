@@ -58,7 +58,9 @@ defmodule Arbor.MixProject do
         "xref graph --label compile-connected --fail-above 88"
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
-      "test.fast": ["test --only fast --exclude database --exclude llm --exclude llm_local --exclude external"],
+      "test.fast": [
+        "test --only fast --exclude database --exclude llm --exclude llm_local --exclude external"
+      ],
       "test.all": [
         "test --include llm --include llm_local --include integration --include external --include database"
       ],

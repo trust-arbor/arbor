@@ -338,7 +338,7 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert Enum.any?(owned, fn e -> e.run_id == "run_owner_1" end)
 
       # No pipelines owned by a fake node
-      none = JobRegistry.list_by_owner(:"fake@node")
+      none = JobRegistry.list_by_owner(:fake@node)
       assert none == []
     end
 
@@ -399,11 +399,11 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       JobRegistry.mark_interrupted("run_double_1")
 
       # First claim succeeds
-      assert {:ok, _} = JobRegistry.claim_for_recovery("run_double_1", :"other@node")
+      assert {:ok, _} = JobRegistry.claim_for_recovery("run_double_1", :other@node)
 
       # Second claim by a different node fails (status is now :recovering)
       assert {:error, {:invalid_status, :recovering}} =
-               JobRegistry.claim_for_recovery("run_double_1", :"third@node")
+               JobRegistry.claim_for_recovery("run_double_1", :third@node)
     end
 
     test "claim_for_recovery returns not_found for unknown pipeline" do
