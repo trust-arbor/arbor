@@ -18,6 +18,8 @@ defmodule Arbor.Signals.BusEncryptionTest do
   end
 
   setup do
+    Arbor.Signals.TestCase.ensure_processes()
+
     # Use our permissive authorizer
     original_authorizer = Application.get_env(:arbor_signals, :authorizer)
     Application.put_env(:arbor_signals, :authorizer, AllowAllAuthorizer)

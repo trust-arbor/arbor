@@ -58,6 +58,9 @@ defmodule Arbor.Signals.ChannelsTest do
   end
 
   setup do
+    # Ensure signal processes are running (may have crashed in umbrella test runs)
+    Arbor.Signals.TestCase.ensure_processes()
+
     # Configure mock modules
     Application.put_env(:arbor_signals, :crypto_module, MockCrypto)
     Application.put_env(:arbor_signals, :identity_registry_module, MockRegistry)
