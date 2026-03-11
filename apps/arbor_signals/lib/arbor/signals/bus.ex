@@ -55,6 +55,7 @@ defmodule Arbor.Signals.Bus do
 
   alias Arbor.Identifiers
   alias Arbor.Signals.Config
+  alias Arbor.Signals.Relay
   alias Arbor.Signals.Signal
   alias Arbor.Signals.TopicKeys
 
@@ -141,6 +142,14 @@ defmodule Arbor.Signals.Bus do
     # Encrypt data for restricted topics before delivery
     signal = maybe_encrypt_signal(signal)
     state = deliver_to_subscribers(signal, state)
+
+    # Forward cluster-scoped signals to the Relay for cross-node delivery.
+    # Signals arriving from remote nodes have scope set to :local by the
+    # Relay to prevent re-relay loops.
+    if signal.scope == :cluster do
+      Relay.relay(signal)
+    end
+
     {:noreply, state}
   end
 

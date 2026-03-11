@@ -50,7 +50,7 @@ defmodule Arbor.Signals do
 
   @behaviour Arbor.Contracts.API.Signals
 
-  alias Arbor.Signals.{Bus, Config, Signal, Store, Taint, TopicKeys}
+  alias Arbor.Signals.{Bus, Config, Relay, Signal, Store, Taint, TopicKeys}
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -150,15 +150,16 @@ defmodule Arbor.Signals do
   @impl true
   def emit_signal_for_category_and_type(category, type, data, opts) do
     signal = Signal.new(category, type, data, opts)
-    # Set emitter_pid server-side so it can't be spoofed by callers
-    signal = %{signal | emitter_pid: self()}
+    # Set emitter_pid and origin_node server-side so they can't be spoofed
+    signal = %{signal | emitter_pid: self(), origin_node: node()}
     emit_preconstructed_signal(signal)
   end
 
   @impl true
   def emit_preconstructed_signal(%Signal{} = signal) do
-    # Stamp emitter_pid if not already set (e.g., pre-constructed signals)
+    # Stamp emitter_pid and origin_node if not already set
     signal = if signal.emitter_pid, do: signal, else: %{signal | emitter_pid: self()}
+    signal = if signal.origin_node, do: signal, else: %{signal | origin_node: node()}
     if healthy?() do
       # Encrypt restricted-topic signals BEFORE storing to prevent
       # plaintext sensitive data in the Store. Bus.publish will skip
@@ -264,9 +265,12 @@ defmodule Arbor.Signals do
     store_stats = Store.stats()
     bus_stats = Bus.stats()
 
+    relay_stats = Relay.stats()
+
     %{
       store: store_stats,
       bus: bus_stats,
+      relay: relay_stats,
       healthy: healthy?()
     }
   end

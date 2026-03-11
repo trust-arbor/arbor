@@ -11,7 +11,8 @@ defmodule Arbor.Signals.Application do
           {Arbor.Signals.Store, []},
           {Arbor.Signals.TopicKeys, []},
           {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []}
+          {Arbor.Signals.Bus, []},
+          {Arbor.Signals.Relay, []}
         ]
       else
         []
