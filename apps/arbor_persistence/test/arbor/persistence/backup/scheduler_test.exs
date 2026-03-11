@@ -54,20 +54,24 @@ defmodule Arbor.Persistence.Backup.SchedulerTest do
     end
 
     test "schedules for next day if time already passed" do
-      # Set schedule to a time that has definitely passed today
-      past_hour = rem(DateTime.utc_now().hour + 22, 24)
+      # Use an hour that is definitely in the past: current hour minus 2
+      # (wrapping around midnight). The minute is set to 0 so even if we're
+      # at the same hour, the time has passed.
+      now = DateTime.utc_now()
+      past_hour = rem(now.hour + 22, 24)
+      # Use a minute that guarantees it's in the past even if same hour
+      past_minute = max(now.minute - 2, 0)
 
       Application.put_env(:arbor_persistence, :backup,
         enabled: true,
-        schedule: {past_hour, 0}
+        schedule: {past_hour, past_minute}
       )
 
       {:ok, _pid} = Scheduler.start_link([])
 
       next_time = Scheduler.next_backup_time()
-      now = DateTime.utc_now()
 
-      # Should be scheduled for the future
+      # Should be scheduled for the future (tomorrow at that time)
       assert DateTime.compare(next_time, now) == :gt
     end
   end
