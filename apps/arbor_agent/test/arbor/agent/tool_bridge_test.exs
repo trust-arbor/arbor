@@ -110,8 +110,11 @@ defmodule Arbor.Agent.ToolBridgeTest do
       # This agent has no capabilities, so action should fail
       result = ToolServer.call_tool("file_read", %{path: "/tmp/test.txt"}, server)
 
-      assert {:ok, error_msg} = result
-      assert error_msg =~ "Unauthorized"
+      # In umbrella context, security returns {:error, ...} directly
+      case result do
+        {:ok, error_msg} -> assert error_msg =~ "Unauthorized"
+        {:error, msg} -> assert msg =~ "Unauthorized"
+      end
     end
   end
 

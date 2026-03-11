@@ -446,7 +446,9 @@ defmodule Arbor.Cartographer.Scheduler do
   defp get_load(node) do
     case :rpc.call(node, Arbor.Cartographer, :get_node_load, [node], 5_000) do
       {:ok, load} when is_number(load) -> load
-      _ -> 999.0
+      # If we can't determine load, assume 0 (available) rather than overloaded.
+      # Nodes with unknown load are still reachable — they just lack monitoring.
+      _ -> 0.0
     end
   end
 

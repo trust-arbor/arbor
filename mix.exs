@@ -14,6 +14,15 @@ defmodule Arbor.MixProject do
     ]
   end
 
+  def cli do
+    [
+      preferred_envs: [
+        "test.fast": :test,
+        "test.all": :test
+      ]
+    ]
+  end
+
   defp deps do
     [
       # Jido ecosystem — stable 2.0 Hex releases
@@ -49,7 +58,7 @@ defmodule Arbor.MixProject do
         "xref graph --label compile-connected --fail-above 88"
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
-      "test.fast": ["test --only fast"],
+      "test.fast": ["test --only fast --exclude database --exclude llm --exclude llm_local --exclude external"],
       "test.all": [
         "test --include llm --include llm_local --include integration --include external --include database"
       ],

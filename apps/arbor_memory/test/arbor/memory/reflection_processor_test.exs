@@ -947,36 +947,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   # ============================================================================
 
   describe "process_relationships/2" do
-    @tag :database
-    test "creates new relationship", %{agent_id: agent_id} do
-      ReflectionProcessor.process_relationships(agent_id, [
-        %{
-          "name" => "TestPerson",
-          "dynamic" => "Collaborative partnership",
-          "observation" => "Worked together on tests"
-        }
-      ])
-
-      {:ok, rel} = Arbor.Memory.get_relationship_by_name(agent_id, "TestPerson")
-      assert rel.name == "TestPerson"
-    end
-
-    @tag :database
-    test "updates existing relationship", %{agent_id: agent_id} do
-      rel = Relationship.new("ExistingPerson")
-      {:ok, _} = Arbor.Memory.save_relationship(agent_id, rel)
-
-      ReflectionProcessor.process_relationships(agent_id, [
-        %{
-          "name" => "ExistingPerson",
-          "dynamic" => "Updated dynamic",
-          "observation" => "New observation"
-        }
-      ])
-
-      {:ok, updated} = Arbor.Memory.get_relationship_by_name(agent_id, "ExistingPerson")
-      assert updated.name == "ExistingPerson"
-    end
+    # Database-dependent relationship tests moved to reflection_processor_relationships_test.exs
 
     test "skips entries with missing name", %{agent_id: agent_id} do
       # Should not raise
