@@ -711,10 +711,28 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp handle_remote_signal(:capability_granted, data, state) do
-    # A capability was granted on another node — load it from shared backend
     cap_id = data[:capability_id] || data["capability_id"]
     sync_remote_capability(cap_id, state)
   end
+
+  defp handle_remote_signal(type, data, state)
+       when type in [
+              :capability_revoked,
+              :capabilities_revoked_all,
+              :capabilities_cascade_revoked,
+              :capabilities_scope_revoked
+            ] do
+    cap_ids = data[:capability_ids] || data["capability_ids"] || []
+
+    if cap_ids != [] do
+      Logger.debug("[CapabilityStore] Evicting #{length(cap_ids)} remotely revoked capabilities")
+      revoke_capability_ids(state, cap_ids)
+    else
+      state
+    end
+  end
+
+  defp handle_remote_signal(_type, _data, state), do: state
 
   defp sync_remote_capability(nil, state), do: state
 
@@ -739,25 +757,6 @@ defmodule Arbor.Security.CapabilityStore do
     |> index_by_issuer(cap)
     |> index_by_parent(cap)
   end
-
-  defp handle_remote_signal(type, data, state)
-       when type in [
-              :capability_revoked,
-              :capabilities_revoked_all,
-              :capabilities_cascade_revoked,
-              :capabilities_scope_revoked
-            ] do
-    cap_ids = data[:capability_ids] || data["capability_ids"] || []
-
-    if cap_ids != [] do
-      Logger.debug("[CapabilityStore] Evicting #{length(cap_ids)} remotely revoked capabilities")
-      revoke_capability_ids(state, cap_ids)
-    else
-      state
-    end
-  end
-
-  defp handle_remote_signal(_type, _data, state), do: state
 
   defp load_capability_from_backend(cap_id) do
     if Process.whereis(@cap_store) do
