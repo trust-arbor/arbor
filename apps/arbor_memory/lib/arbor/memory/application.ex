@@ -35,7 +35,8 @@ defmodule Arbor.Memory.Application do
           {Arbor.Memory.IntentStore, []},
           {Arbor.Memory.Thinking, []},
           {Arbor.Memory.CodeStore, []},
-          {Arbor.Memory.ChatHistory, []}
+          {Arbor.Memory.ChatHistory, []},
+          {Arbor.Memory.DistributedSync, []}
         ]
       else
         []

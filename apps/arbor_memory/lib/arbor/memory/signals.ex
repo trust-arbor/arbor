@@ -262,7 +262,7 @@ defmodule Arbor.Memory.Signals do
     emit_memory_signal(agent_id, :knowledge_added, %{
       node_id: node_id,
       node_type: node_type
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -274,7 +274,7 @@ defmodule Arbor.Memory.Signals do
       source_id: source_id,
       target_id: target_id,
       relationship: relationship
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -368,7 +368,7 @@ defmodule Arbor.Memory.Signals do
       goal_count: stats[:goal_count],
       engagement_level: stats[:engagement_level],
       saved_at: DateTime.utc_now()
-    })
+    }, scope: :cluster)
   end
 
   @doc """
@@ -704,10 +704,14 @@ defmodule Arbor.Memory.Signals do
   # ============================================================================
 
   @doc false
-  @spec emit_memory_signal(String.t(), atom(), map()) :: :ok
-  def emit_memory_signal(agent_id, type, data) do
-    Arbor.Signals.emit(:memory, type, Map.put(data, :agent_id, agent_id),
-      source: memory_source(agent_id))
+  @spec emit_memory_signal(String.t(), atom(), map(), keyword()) :: :ok
+  def emit_memory_signal(agent_id, type, data, opts \\ []) do
+    data = data |> Map.put(:agent_id, agent_id) |> Map.put(:origin_node, node())
+
+    signal_opts = [source: memory_source(agent_id)]
+    signal_opts = if scope = Keyword.get(opts, :scope), do: [{:scope, scope} | signal_opts], else: signal_opts
+
+    Arbor.Signals.emit(:memory, type, data, signal_opts)
   end
 
   @doc false
