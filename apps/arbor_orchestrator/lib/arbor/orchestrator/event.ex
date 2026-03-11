@@ -49,7 +49,10 @@ defmodule Arbor.Orchestrator.Event do
       graph_id: graph_id,
       run_id: Keyword.get(opts, :run_id),
       logs_root: Keyword.get(opts, :logs_root),
-      node_count: Keyword.get(opts, :node_count)
+      node_count: Keyword.get(opts, :node_count),
+      graph_hash: Keyword.get(opts, :graph_hash),
+      dot_source_path: Keyword.get(opts, :dot_source_path),
+      source_node: Kernel.node()
     }
   end
 

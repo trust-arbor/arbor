@@ -44,6 +44,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
+  alias Arbor.Orchestrator.JobRegistry
   alias Arbor.Orchestrator.Transforms.ModelStylesheet
   alias Arbor.Orchestrator.Transforms.VariableExpansion
   alias Arbor.Orchestrator.Validation.Diagnostic
@@ -86,6 +87,14 @@ defmodule Arbor.Orchestrator do
   @spec run_file(String.t(), keyword()) :: run_result()
   def run_file(path, opts \\ []) do
     with {:ok, source} <- File.read(path) do
+      # Thread source path and hash for crash recovery + graph version checks
+      graph_hash = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
+
+      opts =
+        opts
+        |> Keyword.put_new(:dot_source_path, Path.expand(path))
+        |> Keyword.put_new(:graph_hash, graph_hash)
+
       run(source, opts)
     end
   end
@@ -136,6 +145,107 @@ defmodule Arbor.Orchestrator do
   @doc "Return the spec conformance matrix summary."
   @spec conformance_matrix() :: map()
   def conformance_matrix, do: Conformance.Matrix.summary()
+
+  # ---------------------------------------------------------------------------
+  # Pipeline recovery API
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  List pipelines that were interrupted by a crash and may be resumable.
+
+  Returns entries with `status: :interrupted` that have checkpoint files.
+  """
+  @spec list_resumable() :: [JobRegistry.Entry.t()]
+  def list_resumable do
+    JobRegistry.list_interrupted()
+    |> Enum.filter(fn entry ->
+      entry.logs_root != nil and
+        File.exists?(Path.join(entry.logs_root, "checkpoint.json"))
+    end)
+  end
+
+  @doc """
+  Resume an interrupted pipeline by run_id.
+
+  Validates that the checkpoint exists and the DOT source hasn't changed
+  since the original run. Returns `{:error, :graph_changed}` if the
+  pipeline definition was modified.
+  """
+  @spec resume(String.t(), keyword()) :: run_result()
+  def resume(run_id, opts \\ []) do
+    case JobRegistry.get(run_id) do
+      nil ->
+        {:error, :not_found}
+
+      %{status: status} when status not in [:interrupted, :failed] ->
+        {:error, {:invalid_status, status}}
+
+      entry ->
+        do_resume_entry(entry, opts)
+    end
+  end
+
+  @doc """
+  Mark an interrupted pipeline as abandoned (will not be recovered).
+  """
+  @spec abandon(String.t()) :: :ok | {:error, term()}
+  def abandon(run_id) do
+    case JobRegistry.get(run_id) do
+      nil -> {:error, :not_found}
+      _ -> JobRegistry.mark_abandoned(run_id)
+    end
+  end
+
+  defp do_resume_entry(entry, opts) do
+    checkpoint_path = Path.join(entry.logs_root, "checkpoint.json")
+
+    unless File.exists?(checkpoint_path) do
+      {:error, :checkpoint_not_found}
+    else
+      with :ok <- verify_graph_unchanged(entry) do
+        resume_opts =
+          [
+            resume_from: checkpoint_path,
+            run_id: entry.run_id,
+            logs_root: entry.logs_root,
+            graph_hash: entry.graph_hash,
+            dot_source_path: entry.dot_source_path
+          ] ++ opts
+
+        case load_graph_for_entry(entry) do
+          {:ok, graph} ->
+            Engine.run(graph, resume_opts)
+
+          {:error, reason} ->
+            {:error, {:cannot_load_graph, reason}}
+        end
+      end
+    end
+  end
+
+  defp verify_graph_unchanged(%{graph_hash: nil}), do: :ok
+  defp verify_graph_unchanged(%{dot_source_path: nil}), do: :ok
+
+  defp verify_graph_unchanged(%{graph_hash: hash, dot_source_path: path}) do
+    case File.read(path) do
+      {:ok, source} ->
+        current = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
+        if current == hash, do: :ok, else: {:error, :graph_changed}
+
+      {:error, _} ->
+        # Can't read source file — allow resume from checkpoint
+        :ok
+    end
+  end
+
+  defp load_graph_for_entry(%{dot_source_path: path}) when is_binary(path) do
+    case File.read(path) do
+      {:ok, source} -> parse(source)
+      {:error, reason} -> {:error, {:dot_file_unavailable, reason}}
+    end
+  end
+
+  defp load_graph_for_entry(_), do: {:error, :no_dot_source_path}
 
   # Already compiled — just apply transforms
   defp ensure_graph(%Graph{compiled: true} = graph, opts), do: apply_transforms(graph, opts)

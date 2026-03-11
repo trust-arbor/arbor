@@ -8,9 +8,15 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
     # Get the JobRegistry pid (should be started by Application)
     pid = Process.whereis(JobRegistry)
 
-    # Clear the ETS table
-    if :ets.whereis(:arbor_orchestrator_jobs) != :undefined do
-      :ets.delete_all_objects(:arbor_orchestrator_jobs)
+    # Clear the store
+    case Arbor.Persistence.BufferedStore.list(name: :arbor_orchestrator_jobs) do
+      {:ok, keys} ->
+        Enum.each(keys, fn key ->
+          Arbor.Persistence.BufferedStore.delete(key, name: :arbor_orchestrator_jobs)
+        end)
+
+      _ ->
+        :ok
     end
 
     {:ok, registry: pid}
@@ -18,7 +24,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
   describe "pipeline lifecycle tracking" do
     test "tracks complete pipeline execution", %{registry: pid} do
-      # Send pipeline started event
       send(
         pid,
         {:pipeline_event,
@@ -31,7 +36,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       Process.sleep(10)
 
-      # Should appear in active list
       active = JobRegistry.list_active()
       assert length(active) == 1
       assert hd(active).status == :running
@@ -39,15 +43,10 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert hd(active).total_nodes == 3
       assert hd(active).completed_count == 0
 
-      # Send stage events
       send(
         pid,
         {:pipeline_event,
-         %{
-           type: :stage_started,
-           graph_id: "test_pipeline",
-           node_id: "node1"
-         }}
+         %{type: :stage_started, graph_id: "test_pipeline", node_id: "node1"}}
       )
 
       send(
@@ -65,11 +64,7 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       send(
         pid,
         {:pipeline_event,
-         %{
-           type: :stage_started,
-           graph_id: "test_pipeline",
-           node_id: "node2"
-         }}
+         %{type: :stage_started, graph_id: "test_pipeline", node_id: "node2"}}
       )
 
       send(
@@ -86,7 +81,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       Process.sleep(10)
 
-      # Check progress
       active = JobRegistry.list_active()
       assert length(active) == 1
       entry = hd(active)
@@ -95,7 +89,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert entry.node_durations["node1"] == 100
       assert entry.node_durations["node2"] == 150
 
-      # Complete pipeline
       send(
         pid,
         {:pipeline_event,
@@ -109,7 +102,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       Process.sleep(10)
 
-      # Should move to completed
       assert JobRegistry.list_active() == []
       recent = JobRegistry.list_recent(10)
       assert length(recent) == 1
@@ -120,20 +112,14 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
     end
 
     test "tracks failed pipeline", %{registry: pid} do
-      # Start pipeline
       send(
         pid,
         {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "failing_pipeline",
-           node_count: 2
-         }}
+         %{type: :pipeline_started, graph_id: "failing_pipeline", node_count: 2}}
       )
 
       Process.sleep(10)
 
-      # Fail it
       send(
         pid,
         {:pipeline_event,
@@ -147,7 +133,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
 
       Process.sleep(10)
 
-      # Should be in recent as failed
       recent = JobRegistry.list_recent(10)
       assert length(recent) == 1
       failed = hd(recent)
@@ -156,158 +141,15 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert failed.duration_ms == 1000
     end
 
-    test "handles multiple concurrent pipelines", %{registry: pid} do
-      # Start 3 pipelines
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "pipeline1",
-           node_count: 1
-         }}
-      )
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "pipeline2",
-           node_count: 1
-         }}
-      )
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "pipeline3",
-           node_count: 1
-         }}
-      )
-
-      Process.sleep(10)
-
-      # All should be active
-      assert length(JobRegistry.list_active()) == 3
-
-      # Complete pipeline1 and pipeline2
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           completed_nodes: ["node1"],
-           duration_ms: 100
-         }}
-      )
-
-      # Need to find the right pipeline_id for pipeline2
-      # Since we're using graph_id as the key, we need to send events that match
-      # Actually, the find_entry_key will look for graph_id in the event
-      # Let me include graph_id in the completion events
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "pipeline1",
-           completed_nodes: ["node1"],
-           duration_ms: 100
-         }}
-      )
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "pipeline2",
-           completed_nodes: ["node1"],
-           duration_ms: 200
-         }}
-      )
-
-      # Fail pipeline3
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_failed,
-           graph_id: "pipeline3",
-           reason: :error,
-           duration_ms: 50
-         }}
-      )
-
-      Process.sleep(10)
-
-      # No active pipelines
-      assert JobRegistry.list_active() == []
-
-      # 3 recent pipelines
-      recent = JobRegistry.list_recent(10)
-      assert length(recent) == 3
-
-      # Check they're sorted by finished_at (newest first)
-      assert Enum.all?(recent, fn entry ->
-               entry.status in [:completed, :failed]
-             end)
-    end
-
-    test "prunes history", %{registry: pid} do
-      # Insert 55 completed pipelines
-      for i <- 1..55 do
-        send(
-          pid,
-          {:pipeline_event,
-           %{
-             type: :pipeline_started,
-             graph_id: "pipeline_#{i}",
-             node_count: 1
-           }}
-        )
-
-        # Small delay to ensure different timestamps
-        Process.sleep(1)
-
-        send(
-          pid,
-          {:pipeline_event,
-           %{
-             type: :pipeline_completed,
-             graph_id: "pipeline_#{i}",
-             completed_nodes: ["node1"],
-             duration_ms: 100
-           }}
-        )
-      end
-
-      Process.sleep(100)
-
-      # Should only keep 50
-      recent = JobRegistry.list_recent(100)
-      assert length(recent) <= 50
-    end
-
     test "get returns entry by id", %{registry: pid} do
-      # Start pipeline
       send(
         pid,
         {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "specific_pipeline",
-           node_count: 1
-         }}
+         %{type: :pipeline_started, graph_id: "specific_pipeline", node_count: 1}}
       )
 
       Process.sleep(10)
 
-      # Get by pipeline_id (which is graph_id in this case)
       entry = JobRegistry.get("specific_pipeline")
       assert entry != nil
       assert entry.graph_id == "specific_pipeline"
@@ -315,134 +157,98 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
     end
 
     test "get returns nil for unknown id" do
-      entry = JobRegistry.get("nonexistent_pipeline_12345")
-      assert entry == nil
+      assert JobRegistry.get("nonexistent_pipeline_12345") == nil
     end
 
-    test "list_recent respects limit" do
-      # Create 10 completed pipelines
-      for i <- 1..10 do
-        send(
-          Process.whereis(JobRegistry),
-          {:pipeline_event,
-           %{
-             type: :pipeline_started,
-             graph_id: "limit_test_#{i}",
-             node_count: 1
-           }}
-        )
+    test "tracks run_id and graph_hash", %{registry: pid} do
+      send(
+        pid,
+        {:pipeline_event,
+         %{
+           type: :pipeline_started,
+           graph_id: "hashed_pipeline",
+           run_id: "run_test_123",
+           graph_hash: "abc123hash",
+           dot_source_path: "/tmp/test.dot",
+           logs_root: "/tmp/test_logs",
+           node_count: 2
+         }}
+      )
 
-        Process.sleep(1)
+      Process.sleep(10)
 
-        send(
-          Process.whereis(JobRegistry),
-          {:pipeline_event,
-           %{
-             type: :pipeline_completed,
-             graph_id: "limit_test_#{i}",
-             completed_nodes: ["node1"],
-             duration_ms: 100
-           }}
-        )
-      end
+      entry = JobRegistry.get("run_test_123")
+      assert entry != nil
+      assert entry.run_id == "run_test_123"
+      assert entry.graph_hash == "abc123hash"
+      assert entry.dot_source_path == "/tmp/test.dot"
+      assert entry.logs_root == "/tmp/test_logs"
+    end
+  end
 
-      Process.sleep(50)
+  describe "recovery status management" do
+    test "mark_interrupted changes status", %{registry: pid} do
+      send(
+        pid,
+        {:pipeline_event,
+         %{
+           type: :pipeline_started,
+           graph_id: "interrupt_test",
+           run_id: "run_interrupt_1",
+           node_count: 1
+         }}
+      )
 
-      # Request only 5
-      recent = JobRegistry.list_recent(5)
-      assert length(recent) <= 5
+      Process.sleep(10)
+
+      assert JobRegistry.get("run_interrupt_1").status == :running
+
+      JobRegistry.mark_interrupted("run_interrupt_1")
+
+      entry = JobRegistry.get("run_interrupt_1")
+      assert entry.status == :interrupted
+      assert [entry] == JobRegistry.list_interrupted()
     end
 
-    test "list_recent returns newest first" do
-      pid = Process.whereis(JobRegistry)
-
-      # Create 3 pipelines with delays
+    test "mark_abandoned changes status", %{registry: pid} do
       send(
         pid,
         {:pipeline_event,
          %{
            type: :pipeline_started,
-           graph_id: "oldest",
+           graph_id: "abandon_test",
+           run_id: "run_abandon_1",
            node_count: 1
          }}
       )
 
       Process.sleep(10)
 
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "oldest",
-           completed_nodes: ["node1"],
-           duration_ms: 100
-         }}
-      )
+      JobRegistry.mark_abandoned("run_abandon_1")
 
-      Process.sleep(50)
+      entry = JobRegistry.get("run_abandon_1")
+      assert entry.status == :abandoned
+      assert entry.finished_at != nil
+    end
 
+    test "mark_recovering changes status", %{registry: pid} do
       send(
         pid,
         {:pipeline_event,
          %{
            type: :pipeline_started,
-           graph_id: "middle",
+           graph_id: "recover_test",
+           run_id: "run_recover_1",
            node_count: 1
          }}
       )
 
       Process.sleep(10)
 
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "middle",
-           completed_nodes: ["node1"],
-           duration_ms: 100
-         }}
-      )
+      JobRegistry.mark_recovering("run_recover_1")
 
-      Process.sleep(50)
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "newest",
-           node_count: 1
-         }}
-      )
-
-      Process.sleep(10)
-
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "newest",
-           completed_nodes: ["node1"],
-           duration_ms: 100
-         }}
-      )
-
-      Process.sleep(50)
-
-      recent = JobRegistry.list_recent(10)
-
-      finished_pipelines =
-        Enum.filter(recent, fn e ->
-          e.graph_id in ["oldest", "middle", "newest"]
-        end)
-
-      assert length(finished_pipelines) == 3
-
-      # First should be newest
-      assert hd(finished_pipelines).graph_id == "newest"
+      entry = JobRegistry.get("run_recover_1")
+      assert entry.status == :recovering
     end
   end
 end

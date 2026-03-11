@@ -72,11 +72,21 @@ defmodule Arbor.Orchestrator.Engine do
     opts = Keyword.put(opts, :run_id, run_id)
     opts = Keyword.put_new(opts, :pipeline_id, run_id)
 
+    # Compute graph hash for version checking on resume
+    graph_hash = Keyword.get(opts, :graph_hash)
+    dot_source_path = Keyword.get(opts, :dot_source_path)
+
     :ok = write_manifest(graph, logs_root, run_id)
 
     emit(
       opts,
-      Event.pipeline_started(graph.id, run_id: run_id, logs_root: logs_root, node_count: map_size(graph.nodes))
+      Event.pipeline_started(graph.id,
+        run_id: run_id,
+        logs_root: logs_root,
+        node_count: map_size(graph.nodes),
+        graph_hash: graph_hash,
+        dot_source_path: dot_source_path
+      )
     )
 
     case initial_state(graph, logs_root, opts) do
