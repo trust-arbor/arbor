@@ -196,6 +196,33 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @doc """
+  List resumable pipelines across the cluster.
+
+  Queries both the local JobRegistry (which may have shared Postgres backend)
+  and optionally queries peer nodes via RPC for ETS-only deployments.
+  """
+  @spec list_cluster_resumable() :: [JobRegistry.Entry.t()]
+  def list_cluster_resumable do
+    local = list_resumable()
+
+    # In shared-Postgres mode, local query already covers all nodes.
+    # In ETS-only mode, query peer nodes.
+    remote =
+      Node.list()
+      |> Enum.flat_map(fn node ->
+        try do
+          :erpc.call(node, __MODULE__, :list_resumable, [], 5_000)
+        catch
+          _, _ -> []
+        end
+      end)
+
+    # Deduplicate by run_id
+    (local ++ remote)
+    |> Enum.uniq_by(fn entry -> entry.run_id || entry.pipeline_id end)
+  end
+
   defp do_resume_entry(entry, opts) do
     checkpoint_path = Path.join(entry.logs_root, "checkpoint.json")
 

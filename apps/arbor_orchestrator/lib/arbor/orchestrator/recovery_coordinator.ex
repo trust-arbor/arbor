@@ -24,6 +24,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   @default_max_concurrent 3
   @default_delay_ms 1_000
+  @heartbeat_check_interval_ms 30_000
+  @stale_heartbeat_ms 90_000
+  @pg_group {:arbor, :recovery_coordinators}
 
   # Public API
 
@@ -78,8 +81,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     }
 
     if enabled do
+      # Join :pg group for cross-node coordinator discovery
+      join_pg_group()
+
+      # Monitor other nodes for crash detection
+      :net_kernel.monitor_nodes(true)
+
       # Delay recovery to let the rest of the system stabilize
       Process.send_after(self(), :discover_interrupted, delay_ms)
+
+      # Periodic heartbeat staleness check
+      Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
     end
 
     {:ok, state}
@@ -211,6 +223,112 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
+  def handle_info({:nodedown, dead_node}, state) do
+    if state.enabled do
+      Logger.info(
+        "[RecoveryCoordinator] Node #{dead_node} went down, scanning for orphaned pipelines"
+      )
+
+      # Find pipelines owned by the dead node
+      orphaned = JobRegistry.list_by_owner(dead_node)
+
+      if orphaned != [] do
+        Logger.info(
+          "[RecoveryCoordinator] Found #{length(orphaned)} orphaned pipeline(s) from #{dead_node}"
+        )
+
+        # Mark them interrupted, then attempt claim
+        claimable =
+          Enum.flat_map(orphaned, fn entry ->
+            key = entry.run_id || entry.pipeline_id
+
+            if key do
+              JobRegistry.mark_interrupted(key)
+
+              case attempt_claim(entry) do
+                {:ok, claimed_entry} -> [claimed_entry]
+                {:error, _reason} -> []
+              end
+            else
+              []
+            end
+          end)
+
+        if claimable != [] do
+          state = %{state | pending: state.pending ++ claimable}
+          send(self(), :recover_next)
+          {:noreply, state}
+        else
+          {:noreply, state}
+        end
+      else
+        {:noreply, state}
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:nodeup, _node}, state), do: {:noreply, state}
+
+  def handle_info(:check_stale_heartbeats, state) do
+    if state.enabled do
+      stale = JobRegistry.list_stale_heartbeats(@stale_heartbeat_ms)
+
+      if stale != [] do
+        # Only claim pipelines owned by this node (stale local pipelines)
+        # or pipelines whose owner node is no longer connected
+        connected = MapSet.new([Kernel.node() | Node.list()])
+
+        claimable =
+          Enum.flat_map(stale, fn entry ->
+            owner_connected = MapSet.member?(connected, entry.owner_node)
+
+            if not owner_connected do
+              key = entry.run_id || entry.pipeline_id
+
+              if key do
+                JobRegistry.mark_interrupted(key)
+
+                case attempt_claim(entry) do
+                  {:ok, claimed} -> [claimed]
+                  {:error, _} -> []
+                end
+              else
+                []
+              end
+            else
+              Logger.warning(
+                "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
+                  "but owner #{entry.owner_node} is still connected"
+              )
+
+              []
+            end
+          end)
+
+        state =
+          if claimable != [] do
+            send(self(), :recover_next)
+            %{state | pending: state.pending ++ claimable}
+          else
+            state
+          end
+
+        # Schedule next check
+        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+        {:noreply, state}
+      else
+        # No stale heartbeats
+        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+        {:noreply, state}
+      end
+    else
+      Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+      {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # Private
@@ -299,6 +417,78 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   defp load_graph_for_resume(_entry) do
     {:error, :no_dot_source_path}
+  end
+
+  defp attempt_claim(%Entry{} = entry) do
+    key = entry.run_id || entry.pipeline_id
+
+    # Trust zone check: only claim if our zone is <= the pipeline's origin zone
+    my_zone = resolve_trust_zone()
+    origin_zone = entry.origin_trust_zone || 0
+
+    if my_zone > origin_zone do
+      Logger.warning(
+        "[RecoveryCoordinator] Cannot claim #{key}: " <>
+          "our zone (#{my_zone}) > origin zone (#{origin_zone})"
+      )
+
+      {:error, :trust_zone_violation}
+    else
+      # Use leader-based claim: oldest coordinator in :pg group wins
+      if am_i_leader?() do
+        case JobRegistry.claim_for_recovery(key) do
+          {:ok, claimed} ->
+            Logger.info("[RecoveryCoordinator] Claimed pipeline #{key} for recovery")
+            {:ok, claimed}
+
+          {:error, reason} ->
+            Logger.debug("[RecoveryCoordinator] Could not claim #{key}: #{inspect(reason)}")
+            {:error, reason}
+        end
+      else
+        Logger.debug("[RecoveryCoordinator] Not leader, skipping claim for #{key}")
+        {:error, :not_leader}
+      end
+    end
+  end
+
+  defp am_i_leader? do
+    case :pg.get_members(@pg_group) do
+      [] ->
+        # No group members — we're the only one
+        true
+
+      members ->
+        # Leader = first PID sorted by node name (deterministic across nodes)
+        sorted = Enum.sort_by(members, fn pid -> node(pid) end)
+        List.first(sorted) == self()
+    end
+  rescue
+    _ -> true
+  end
+
+  defp join_pg_group do
+    # Ensure :pg is started (it's part of OTP kernel)
+    case :pg.start_link() do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    :pg.join(@pg_group, self())
+  rescue
+    _ -> :ok
+  end
+
+  defp resolve_trust_zone do
+    mod = Arbor.Cartographer.ClusterKeeper
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :trust_zone, 1) do
+      apply(mod, :trust_zone, [Kernel.node()])
+    else
+      0
+    end
+  rescue
+    _ -> 0
   end
 
   @doc false
