@@ -42,23 +42,30 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   @impl true
   def init(opts) do
-    enabled = Keyword.get(
-      opts,
-      :enabled,
-      Application.get_env(:arbor_orchestrator, :recovery_enabled, true)
-    )
+    enabled =
+      Keyword.get(
+        opts,
+        :enabled,
+        Application.get_env(:arbor_orchestrator, :recovery_enabled, true)
+      )
 
-    max_concurrent = Keyword.get(
-      opts,
-      :max_concurrent,
-      Application.get_env(:arbor_orchestrator, :recovery_max_concurrent, @default_max_concurrent)
-    )
+    max_concurrent =
+      Keyword.get(
+        opts,
+        :max_concurrent,
+        Application.get_env(
+          :arbor_orchestrator,
+          :recovery_max_concurrent,
+          @default_max_concurrent
+        )
+      )
 
-    delay_ms = Keyword.get(
-      opts,
-      :delay_ms,
-      Application.get_env(:arbor_orchestrator, :recovery_delay_ms, @default_delay_ms)
-    )
+    delay_ms =
+      Keyword.get(
+        opts,
+        :delay_ms,
+        Application.get_env(:arbor_orchestrator, :recovery_delay_ms, @default_delay_ms)
+      )
 
     state = %{
       enabled: enabled,
@@ -99,9 +106,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       Logger.debug("[RecoveryCoordinator] No interrupted pipelines found")
       {:noreply, state}
     else
-      Logger.info(
-        "[RecoveryCoordinator] Found #{length(interrupted)} interrupted pipeline(s)"
-      )
+      Logger.info("[RecoveryCoordinator] Found #{length(interrupted)} interrupted pipeline(s)")
 
       state = %{state | pending: interrupted}
       send(self(), :recover_next)
@@ -138,9 +143,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
               Map.put(acc, task_ref, key)
 
             {:error, reason} ->
-              Logger.warning(
-                "[RecoveryCoordinator] Cannot recover #{key}: #{inspect(reason)}"
-              )
+              Logger.warning("[RecoveryCoordinator] Cannot recover #{key}: #{inspect(reason)}")
 
               acc
           end

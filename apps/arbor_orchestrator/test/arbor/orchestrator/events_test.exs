@@ -135,6 +135,7 @@ defmodule Arbor.Orchestrator.EventsTest do
     test "returns empty list for unknown run_id" do
       {:ok, events} =
         Events.read_run_events("run_nonexistent_#{System.unique_integer([:positive])}")
+
       assert events == []
     end
   end
