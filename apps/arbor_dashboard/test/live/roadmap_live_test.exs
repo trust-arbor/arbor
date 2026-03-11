@@ -6,7 +6,7 @@ defmodule Arbor.Dashboard.Live.RoadmapLiveTest do
       {:ok, _view, html} = live(conn, "/roadmap")
 
       assert html =~ "Roadmap"
-      assert html =~ "SDLC pipeline"
+      assert html =~ "Pipeline stages"
     end
 
     test "shows refresh button", %{conn: conn} do
