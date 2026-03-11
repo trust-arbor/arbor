@@ -1,11 +1,12 @@
 defmodule Arbor.Agent.ClaudeTest do
   use ExUnit.Case, async: true
-  @moduletag :fast
 
   alias Arbor.Agent.Claude
   alias Arbor.Agent.Templates.CliAgent
 
   describe "CliAgent template" do
+    @describetag :fast
+
     test "defines a character" do
       character = CliAgent.character()
       assert character.name == "CLI Agent"
@@ -42,6 +43,8 @@ defmodule Arbor.Agent.ClaudeTest do
   end
 
   describe "Claude agent" do
+    @describetag :fast
+
     test "starts with default options" do
       {:ok, agent} = Claude.start_link()
       assert is_pid(agent)
@@ -88,7 +91,8 @@ defmodule Arbor.Agent.ClaudeTest do
   end
 
   describe "Claude agent queries" do
-    @tag :external
+    @describetag :llm
+
     @tag timeout: 120_000
     test "executes a query and returns response" do
       {:ok, agent} = Claude.start_link(model: :haiku)
