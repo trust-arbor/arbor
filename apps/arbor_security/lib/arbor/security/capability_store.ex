@@ -25,9 +25,11 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Signals
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
+  @cap_store :arbor_security_capabilities
 
   @cleanup_interval_ms 60_000
 
@@ -155,6 +157,7 @@ defmodule Arbor.Security.CapabilityStore do
   @impl true
   def init(_opts) do
     schedule_cleanup()
+    subscribe_to_distributed_signals()
 
     state = %{
       by_id: %{},
@@ -194,6 +197,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_granted], &(&1 + 1))
 
         persist_capability(cap)
+        emit_capability_signal(:capability_granted, cap)
         {:reply, {:ok, :stored}, state}
 
       {:error, _} = error ->
@@ -263,6 +267,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_revoked], &(&1 + 1))
 
         delete_persisted_capability(capability_id)
+        emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
         {:reply, :ok, state}
     end
   end
@@ -281,6 +286,10 @@ defmodule Arbor.Security.CapabilityStore do
       end)
       |> put_in([:by_principal, principal_id], [])
       |> update_in([:stats, :total_revoked], &(&1 + count))
+
+    if count > 0 do
+      emit_revocation_signal(:capabilities_revoked_all, cap_ids, principal_id)
+    end
 
     {:reply, {:ok, count}, state}
   end
@@ -328,6 +337,10 @@ defmodule Arbor.Security.CapabilityStore do
       |> revoke_capability_ids(matching_ids)
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
+    if count > 0 do
+      emit_revocation_signal(:capabilities_scope_revoked, matching_ids, nil)
+    end
+
     {:reply, {:ok, count}, state}
   end
 
@@ -350,6 +363,7 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_revoked], &(&1 + count))
           |> update_in([:stats, :total_cascade_revoked], &(&1 + count))
 
+        emit_revocation_signal(:capabilities_cascade_revoked, all_ids, nil)
         {:reply, {:ok, count}, state}
     end
   end
@@ -360,6 +374,16 @@ defmodule Arbor.Security.CapabilityStore do
     schedule_cleanup()
     {:noreply, state}
   end
+
+  # Handle distributed capability signals from other nodes
+  @impl true
+  def handle_info({:signal_received, signal}, state) do
+    state = handle_distributed_signal(signal, state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
 
   # Private functions
 
@@ -628,6 +652,156 @@ defmodule Arbor.Security.CapabilityStore do
     else
       :ok
     end
+  end
+
+  # ===========================================================================
+  # Distributed Signal Subscription
+  # ===========================================================================
+
+  defp subscribe_to_distributed_signals do
+    if Config.distributed_signals_enabled?() do
+      bus = Arbor.Signals.Bus
+
+      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+        me = self()
+
+        Signals.subscribe("security.capability_granted", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+
+        Signals.subscribe("security.capability_revoked", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+
+        Signals.subscribe("security.capabilities_revoked_all", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+
+        Signals.subscribe("security.capabilities_cascade_revoked", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+
+        Signals.subscribe("security.capabilities_scope_revoked", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+      end
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp handle_distributed_signal(signal, state) do
+    # Ignore signals originating from this node (we already have the state)
+    if signal.data[:origin_node] == node() do
+      state
+    else
+      handle_remote_signal(signal.type, signal.data, state)
+    end
+  catch
+    _, reason ->
+      Logger.warning("[CapabilityStore] Failed to handle distributed signal: #{inspect(reason)}")
+      state
+  end
+
+  defp handle_remote_signal(:capability_granted, data, state) do
+    # A capability was granted on another node — load it from shared backend
+    cap_id = data[:capability_id] || data["capability_id"]
+    sync_remote_capability(cap_id, state)
+  end
+
+  defp sync_remote_capability(nil, state), do: state
+
+  defp sync_remote_capability(cap_id, state) do
+    case load_capability_from_backend(cap_id) do
+      {:ok, cap} ->
+        Logger.debug("[CapabilityStore] Synced remote capability #{cap_id}")
+        add_capability_to_indexes(state, cap)
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  defp add_capability_to_indexes(state, cap) do
+    principal_ids = Map.get(state.by_principal, cap.principal_id, [])
+    updated_ids = if cap.id in principal_ids, do: principal_ids, else: [cap.id | principal_ids]
+
+    state
+    |> put_in([:by_id, cap.id], cap)
+    |> put_in([:by_principal, cap.principal_id], updated_ids)
+    |> index_by_issuer(cap)
+    |> index_by_parent(cap)
+  end
+
+  defp handle_remote_signal(type, data, state)
+       when type in [
+              :capability_revoked,
+              :capabilities_revoked_all,
+              :capabilities_cascade_revoked,
+              :capabilities_scope_revoked
+            ] do
+    cap_ids = data[:capability_ids] || data["capability_ids"] || []
+
+    if cap_ids != [] do
+      Logger.debug("[CapabilityStore] Evicting #{length(cap_ids)} remotely revoked capabilities")
+      revoke_capability_ids(state, cap_ids)
+    else
+      state
+    end
+  end
+
+  defp handle_remote_signal(_type, _data, state), do: state
+
+  defp load_capability_from_backend(cap_id) do
+    if Process.whereis(@cap_store) do
+      case apply(@buffered_store, :get, [cap_id, [name: @cap_store]]) do
+        {:ok, %Record{data: data}} ->
+          Serializer.deserialize(data)
+
+        error ->
+          error
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  catch
+    _, reason -> {:error, reason}
+  end
+
+  # ===========================================================================
+  # Distributed Signal Emission
+  # ===========================================================================
+
+  defp emit_capability_signal(type, cap) do
+    if Config.distributed_signals_enabled?() do
+      Signals.emit(:security, type, %{
+        capability_id: cap.id,
+        principal_id: cap.principal_id,
+        resource_uri: cap.resource_uri,
+        origin_node: node()
+      }, scope: :cluster)
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_revocation_signal(type, cap_ids, principal_id) do
+    if Config.distributed_signals_enabled?() do
+      Signals.emit(:security, type, %{
+        capability_ids: cap_ids,
+        principal_id: principal_id,
+        origin_node: node()
+      }, scope: :cluster)
+    end
+  catch
+    _, _ -> :ok
   end
 
   # ===========================================================================
