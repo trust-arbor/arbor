@@ -165,21 +165,27 @@ defmodule Arbor.Agent.HeartbeatPromptTest do
 
   describe "build_prompt/1 directive section" do
     test "goal_pursuit mode directive" do
-      state = minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :goal_pursuit})
+      state =
+        minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :goal_pursuit})
+
       prompt = HeartbeatPrompt.build_prompt(state)
       assert prompt =~ "active goals"
       assert prompt =~ "concrete progress"
     end
 
     test "plan_execution mode directive" do
-      state = minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :plan_execution})
+      state =
+        minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :plan_execution})
+
       prompt = HeartbeatPrompt.build_prompt(state)
       assert prompt =~ "plan execution"
       assert prompt =~ "Decompose"
     end
 
     test "conversation mode directive returns nothing" do
-      state = minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :conversation})
+      state =
+        minimal_state(%{enabled_prompt_sections: [:directive], cognitive_mode: :conversation})
+
       prompt = HeartbeatPrompt.build_prompt(state)
       assert prompt == ""
     end

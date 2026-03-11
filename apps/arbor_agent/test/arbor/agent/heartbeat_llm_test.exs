@@ -33,7 +33,7 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       case result do
         {:error, reason} ->
           assert is_atom(reason) or is_tuple(reason),
-            "Expected atom or tuple error reason, got: #{inspect(reason)}"
+                 "Expected atom or tuple error reason, got: #{inspect(reason)}"
 
         {:ok, parsed} ->
           # If AI happens to be available, verify the parsed structure
@@ -77,7 +77,9 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       result = HeartbeatLLM.idle_think(minimal_state())
 
       case result do
-        {:error, _reason} -> :ok
+        {:error, _reason} ->
+          :ok
+
         {:ok, parsed} ->
           assert is_map(parsed)
           assert Map.has_key?(parsed, :thinking)
@@ -99,11 +101,12 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       # We verify the shape by calling parse directly and adding usage
       alias Arbor.Agent.HeartbeatResponse
 
-      json = Jason.encode!(%{
-        "thinking" => "test",
-        "actions" => [],
-        "memory_notes" => []
-      })
+      json =
+        Jason.encode!(%{
+          "thinking" => "test",
+          "actions" => [],
+          "memory_notes" => []
+        })
 
       parsed = HeartbeatResponse.parse(json)
       with_usage = Map.put(parsed, :usage, %{input_tokens: 100, output_tokens: 50})

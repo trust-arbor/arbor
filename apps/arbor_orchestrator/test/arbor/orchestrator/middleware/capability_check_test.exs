@@ -97,12 +97,18 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
 
     test "falls back to type-based URI for nil" do
       node = %Node{id: "test", attrs: %{"type" => "compute"}, capabilities_required: nil}
-      assert CapabilityCheck.capability_resources(node) == ["arbor://orchestrator/execute/compute"]
+
+      assert CapabilityCheck.capability_resources(node) == [
+               "arbor://orchestrator/execute/compute"
+             ]
     end
 
     test "uses 'unknown' when type attr is missing" do
       node = %Node{id: "test", attrs: %{}, capabilities_required: []}
-      assert CapabilityCheck.capability_resources(node) == ["arbor://orchestrator/execute/unknown"]
+
+      assert CapabilityCheck.capability_resources(node) == [
+               "arbor://orchestrator/execute/unknown"
+             ]
     end
 
     test "handles single capability" do

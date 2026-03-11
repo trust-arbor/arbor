@@ -209,8 +209,8 @@ defmodule Arbor.Agent.ManagerTest do
 
     test "spawn_on unreachable node returns error" do
       config = %{id: "test", provider: :test, backend: :api}
-      result = Manager.start_agent(config, spawn_on: :"fake@unreachable")
-      assert {:error, {:node_unreachable, :"fake@unreachable"}} = result
+      result = Manager.start_agent(config, spawn_on: :fake@unreachable)
+      assert {:error, {:node_unreachable, :fake@unreachable}} = result
     end
 
     test "spawn_on with dotted node returns error" do
@@ -230,11 +230,11 @@ defmodule Arbor.Agent.ManagerTest do
 
       result =
         Manager.start_agent(config,
-          spawn_on: :"fake@nowhere",
+          spawn_on: :fake@nowhere,
           requirements: [gpu: true]
         )
 
-      assert {:error, {:node_unreachable, :"fake@nowhere"}} = result
+      assert {:error, {:node_unreachable, :fake@nowhere}} = result
     end
   end
 
@@ -505,7 +505,9 @@ defmodule Arbor.Agent.ManagerTest do
     @describetag :fast
 
     test "returns error when specified agent not found" do
-      result = Manager.chat("hello", "User", agent_id: "nonexistent-chat-#{System.unique_integer()}")
+      result =
+        Manager.chat("hello", "User", agent_id: "nonexistent-chat-#{System.unique_integer()}")
+
       assert {:error, :agent_not_found} = result
     end
 
@@ -649,7 +651,9 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "returns error for non-existent profile" do
-      result = Manager.set_mcp_config("nonexistent-mcp-#{System.unique_integer()}", [%{name: "test"}])
+      result =
+        Manager.set_mcp_config("nonexistent-mcp-#{System.unique_integer()}", [%{name: "test"}])
+
       assert {:error, _} = result
     end
 
