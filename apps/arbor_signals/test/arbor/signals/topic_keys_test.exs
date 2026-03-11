@@ -5,6 +5,11 @@ defmodule Arbor.Signals.TopicKeysTest do
 
   alias Arbor.Signals.TopicKeys
 
+  setup do
+    Arbor.Signals.TestCase.ensure_processes()
+    :ok
+  end
+
   describe "get_or_create/1" do
     test "creates a new key for a topic" do
       {:ok, key_info} = TopicKeys.get_or_create(:test_topic_a)

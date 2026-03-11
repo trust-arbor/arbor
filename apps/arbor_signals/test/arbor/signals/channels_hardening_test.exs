@@ -37,12 +37,12 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
   end
 
   setup do
+    Arbor.Signals.TestCase.ensure_processes()
+
     # Configure mock modules
     Application.put_env(:arbor_signals, :crypto_module, MockCrypto)
     Application.put_env(:arbor_signals, :identity_registry_module, MockRegistry)
     Application.put_env(:arbor_signals, :channel_rotate_on_leave, true)
-
-    # Bus and Channels are already started by the application
 
     on_exit(fn ->
       Application.delete_env(:arbor_signals, :crypto_module)
