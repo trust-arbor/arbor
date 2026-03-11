@@ -34,6 +34,11 @@ defmodule Arbor.Orchestrator.Engine.State do
     outcomes: %{},
     pending: [],
     opts: [],
-    tracking: %{node_durations: %{}, content_hashes: %{}}
+    tracking: %{
+      node_durations: %{},
+      content_hashes: %{},
+      pending_intents: %{},
+      execution_digests: %{}
+    }
   ]
 end

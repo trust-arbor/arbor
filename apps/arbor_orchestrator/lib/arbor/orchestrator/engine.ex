@@ -26,7 +26,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
-  alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Handlers.{Handler, Registry}
   alias Arbor.Orchestrator.Validation.Validator
 
   @type event :: map()
@@ -119,6 +119,12 @@ defmodule Arbor.Orchestrator.Engine do
               %State{}.tracking
           end
 
+        # Restore WAL state from checkpoint on resume
+        tracking =
+          tracking
+          |> Map.put(:pending_intents, Map.get(state, :pending_intents, %{}))
+          |> Map.put(:execution_digests, Map.get(state, :execution_digests, %{}))
+
         engine_state = %State{
           graph: graph,
           node_id: state.next_node_id,
@@ -148,12 +154,18 @@ defmodule Arbor.Orchestrator.Engine do
     if Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) do
       checkpoint_path = Keyword.get(opts, :resume_from, Path.join(logs_root, "checkpoint.json"))
 
-      with {:ok, checkpoint} <- Checkpoint.load(checkpoint_path, run_id: Keyword.get(opts, :run_id)),
+      with {:ok, checkpoint} <-
+             Checkpoint.load(checkpoint_path, run_id: Keyword.get(opts, :run_id)),
            :ok <- maybe_revalidate_capabilities(graph, opts),
+           :ok <- check_indeterminate_intents(checkpoint, graph, opts),
            {:ok, state} <- state_from_checkpoint(graph, checkpoint) do
         emit(opts, Event.pipeline_resumed(checkpoint_path, checkpoint.current_node))
 
-        {:ok, Map.put(state, :content_hashes, checkpoint.content_hashes || %{})}
+        {:ok,
+         state
+         |> Map.put(:content_hashes, checkpoint.content_hashes || %{})
+         |> Map.put(:pending_intents, checkpoint.pending_intents || %{})
+         |> Map.put(:execution_digests, checkpoint.execution_digests || %{})}
       end
     else
       workdir = Keyword.get(opts, :workdir)
@@ -280,7 +292,6 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp loop(%State{} = state) do
     node = Map.fetch!(state.graph.nodes, state.node_id)
-
     fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, state.context)
 
     context =
@@ -294,9 +305,11 @@ defmodule Arbor.Orchestrator.Engine do
     stored_hash = Map.get(state.tracking.content_hashes, node.id)
     handler = Registry.resolve(node)
 
+    cached_outcome = Map.get(state.outcomes, node.id)
+
     skip? =
       stored_hash != nil and
-        ContentHash.can_skip?(node, computed_hash, stored_hash, handler)
+        ContentHash.can_skip?(node, computed_hash, stored_hash, handler, cached_outcome)
 
     if skip? do
       emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
@@ -323,7 +336,9 @@ defmodule Arbor.Orchestrator.Engine do
           state.outcomes,
           content_hashes: tracking.content_hashes,
           run_id: Keyword.get(state.opts, :run_id),
-          graph_hash: Keyword.get(state.opts, :graph_hash)
+          graph_hash: Keyword.get(state.opts, :graph_hash),
+          pending_intents: state.tracking.pending_intents,
+          execution_digests: state.tracking.execution_digests
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -342,10 +357,44 @@ defmodule Arbor.Orchestrator.Engine do
 
       stage_started_at = System.monotonic_time(:millisecond)
 
+      # Determine idempotency class for WAL wrapping
+      idempotency = Handler.idempotency_of(handler)
+      is_side_effecting = idempotency == :side_effecting
+
+      # Generate deterministic execution ID for side-effecting nodes
+      execution_id =
+        if is_side_effecting do
+          Checkpoint.generate_execution_id(
+            Keyword.get(state.opts, :run_id),
+            node.id,
+            computed_hash
+          )
+        else
+          nil
+        end
+
       handler_opts =
         state.opts
         |> Keyword.put_new(:logs_root, state.logs_root)
         |> Keyword.put(:stage_started_at, stage_started_at)
+        |> then(fn opts ->
+          if execution_id, do: Keyword.put(opts, :execution_id, execution_id), else: opts
+        end)
+
+      # WAL: Write PendingIntent before executing side-effecting nodes
+      tracking =
+        if is_side_effecting do
+          intent =
+            Checkpoint.build_pending_intent(
+              to_string(handler),
+              computed_hash,
+              execution_id
+            )
+
+          put_in(state.tracking, [:pending_intents, node.id], intent)
+        else
+          state.tracking
+        end
 
       # Apply fidelity transform only when explicitly set on node/edge/graph
       handler_context =
@@ -368,12 +417,29 @@ defmodule Arbor.Orchestrator.Engine do
       # synthesize SUCCESS so the pipeline continues (spec §4.5)
       outcome = maybe_auto_status(outcome, node)
 
+      # WAL: Promote PendingIntent to ExecutionDigest after successful execution
+      tracking =
+        if is_side_effecting do
+          digest =
+            Checkpoint.build_execution_digest(
+              computed_hash,
+              outcome.status,
+              execution_id
+            )
+
+          tracking
+          |> put_in([:execution_digests, node.id], digest)
+          |> update_in([:pending_intents], &Map.delete(&1, node.id))
+        else
+          tracking
+        end
+
       completed = [node.id | state.completed]
       outcomes = Map.put(state.outcomes, node.id, outcome)
       stage_duration = System.monotonic_time(:millisecond) - stage_started_at
 
       tracking =
-        state.tracking
+        tracking
         |> put_in([:node_durations, node.id], stage_duration)
         |> put_in([:content_hashes, node.id], computed_hash)
 
@@ -391,7 +457,9 @@ defmodule Arbor.Orchestrator.Engine do
         Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
           content_hashes: tracking.content_hashes,
           run_id: Keyword.get(state.opts, :run_id),
-          graph_hash: Keyword.get(state.opts, :graph_hash)
+          graph_hash: Keyword.get(state.opts, :graph_hash),
+          pending_intents: tracking.pending_intents,
+          execution_digests: tracking.execution_digests
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -491,7 +559,7 @@ defmodule Arbor.Orchestrator.Engine do
         retries: %{},
         outcomes: %{},
         pending: [],
-        tracking: %{node_durations: %{}, content_hashes: %{}}
+        tracking: %State{}.tracking
     })
   end
 
@@ -703,6 +771,37 @@ defmodule Arbor.Orchestrator.Engine do
     end
   rescue
     _ -> :ok
+  end
+
+  # Check for orphaned PendingIntents on resume.
+  # If a side-effecting node started but never completed, the pipeline is in an
+  # indeterminate state. Default: halt. Override: force_replay or on_resume="retry".
+  defp check_indeterminate_intents(checkpoint, graph, opts) do
+    orphaned = Checkpoint.orphaned_intents(checkpoint)
+
+    cond do
+      orphaned == [] ->
+        :ok
+
+      Keyword.get(opts, :force_replay, false) ->
+        # force_replay overrides — clear intents and proceed
+        :ok
+
+      true ->
+        # Check if ALL orphaned nodes have on_resume="retry" attribute
+        all_retriable =
+          Enum.all?(orphaned, fn {node_id, _} ->
+            node = Map.get(graph.nodes, node_id)
+            node != nil and Map.get(node.attrs, "on_resume") == "retry"
+          end)
+
+        if all_retriable do
+          :ok
+        else
+          [{node_id, intent} | _] = orphaned
+          {:error, {:indeterminate_side_effect, node_id, intent.execution_id}}
+        end
+    end
   end
 
   @doc "Generates a unique run ID for a pipeline execution."

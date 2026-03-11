@@ -11,6 +11,20 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   different pipelines or modified graphs.
   """
 
+  @type pending_intent :: %{
+          handler: String.t(),
+          input_hash: String.t(),
+          started_at: String.t(),
+          execution_id: String.t()
+        }
+
+  @type execution_digest :: %{
+          input_hash: String.t(),
+          outcome_status: atom(),
+          completed_at: String.t(),
+          execution_id: String.t()
+        }
+
   @type t :: %__MODULE__{
           timestamp: String.t(),
           run_id: String.t() | nil,
@@ -21,7 +35,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           context_values: map(),
           node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()},
           context_lineage: map(),
-          content_hashes: map()
+          content_hashes: map(),
+          pending_intents: %{String.t() => pending_intent()},
+          execution_digests: %{String.t() => execution_digest()}
         }
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
@@ -37,7 +53,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
             context_values: %{},
             node_outcomes: %{},
             context_lineage: %{},
-            content_hashes: %{}
+            content_hashes: %{},
+            pending_intents: %{},
+            execution_digests: %{}
 
   @spec from_state(
           String.t(),
@@ -58,7 +76,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       context_values: Context.snapshot(context),
       node_outcomes: node_outcomes,
       context_lineage: Keyword.get(opts, :context_lineage, Context.lineage(context)),
-      content_hashes: Keyword.get(opts, :content_hashes, %{})
+      content_hashes: Keyword.get(opts, :content_hashes, %{}),
+      pending_intents: Keyword.get(opts, :pending_intents, %{}),
+      execution_digests: Keyword.get(opts, :execution_digests, %{})
     }
   end
 
@@ -98,7 +118,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       {stored_hmac, clean} ->
         derived_key = derive_key(secret, aad_opts)
         canonical = canonical_json(clean)
-        computed = :crypto.mac(:hmac, :sha256, derived_key, canonical) |> Base.encode16(case: :lower)
+
+        computed =
+          :crypto.mac(:hmac, :sha256, derived_key, canonical) |> Base.encode16(case: :lower)
 
         if :crypto.hash_equals(stored_hmac, computed) do
           {:ok, clean}
@@ -191,6 +213,59 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     {:ok, deleted}
   rescue
     _ -> {:ok, 0}
+  end
+
+  @doc """
+  Generate a deterministic execution ID for a node execution.
+
+  Format: `exec_{run_id}_{node_id}_{input_hash_prefix}`
+
+  This can be used by side-effecting handlers as an external idempotency key
+  (e.g., Stripe Idempotency-Key, HTTP If-Match).
+  """
+  @spec generate_execution_id(String.t() | nil, String.t(), String.t()) :: String.t()
+  def generate_execution_id(run_id, node_id, input_hash) do
+    prefix = String.slice(input_hash, 0, 12)
+    "exec_#{run_id || "unknown"}_#{node_id}_#{prefix}"
+  end
+
+  @doc """
+  Build a PendingIntent map for a node about to execute.
+  """
+  @spec build_pending_intent(String.t(), String.t(), String.t()) :: pending_intent()
+  def build_pending_intent(handler_name, input_hash, execution_id) do
+    %{
+      handler: handler_name,
+      input_hash: input_hash,
+      started_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      execution_id: execution_id
+    }
+  end
+
+  @doc """
+  Build an ExecutionDigest map for a completed node execution.
+  """
+  @spec build_execution_digest(String.t(), atom(), String.t()) :: execution_digest()
+  def build_execution_digest(input_hash, outcome_status, execution_id) do
+    %{
+      input_hash: input_hash,
+      outcome_status: outcome_status,
+      completed_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      execution_id: execution_id
+    }
+  end
+
+  @doc """
+  Check for orphaned PendingIntents (intents without matching execution digests).
+
+  Returns a list of `{node_id, pending_intent}` tuples for nodes that started
+  executing but never completed — indicating indeterminate state.
+  """
+  @spec orphaned_intents(t()) :: [{String.t(), pending_intent()}]
+  def orphaned_intents(%__MODULE__{} = checkpoint) do
+    Enum.filter(checkpoint.pending_intents, fn {node_id, _intent} ->
+      not Map.has_key?(checkpoint.execution_digests, node_id)
+    end)
   end
 
   # ---------------------------------------------------------------------------
@@ -313,9 +388,46 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
        context_values: Map.get(decoded, "context_values", %{}),
        node_outcomes: outcomes,
        context_lineage: Map.get(decoded, "context_lineage", %{}),
-       content_hashes: Map.get(decoded, "content_hashes", %{})
+       content_hashes: Map.get(decoded, "content_hashes", %{}),
+       pending_intents: deserialize_intents(Map.get(decoded, "pending_intents", %{})),
+       execution_digests: deserialize_digests(Map.get(decoded, "execution_digests", %{}))
      }}
   end
+
+  # Deserialize pending_intents — atomize known keys within each intent map
+  defp deserialize_intents(intents) when is_map(intents) do
+    Map.new(intents, fn {node_id, intent} ->
+      {node_id,
+       %{
+         handler: Map.get(intent, "handler") || Map.get(intent, :handler),
+         input_hash: Map.get(intent, "input_hash") || Map.get(intent, :input_hash),
+         started_at: Map.get(intent, "started_at") || Map.get(intent, :started_at),
+         execution_id: Map.get(intent, "execution_id") || Map.get(intent, :execution_id)
+       }}
+    end)
+  end
+
+  defp deserialize_intents(_), do: %{}
+
+  # Deserialize execution_digests — atomize known keys within each digest map
+  defp deserialize_digests(digests) when is_map(digests) do
+    Map.new(digests, fn {node_id, digest} ->
+      {node_id,
+       %{
+         input_hash: Map.get(digest, "input_hash") || Map.get(digest, :input_hash),
+         outcome_status:
+           parse_status(
+             to_string(
+               Map.get(digest, "outcome_status") || Map.get(digest, :outcome_status, "success")
+             )
+           ),
+         completed_at: Map.get(digest, "completed_at") || Map.get(digest, :completed_at),
+         execution_id: Map.get(digest, "execution_id") || Map.get(digest, :execution_id)
+       }}
+    end)
+  end
+
+  defp deserialize_digests(_), do: %{}
 
   defp normalize_keys(data) when is_map(data) do
     data
@@ -420,7 +532,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
-  defp parse_timestamp(nil), do: {:error, :nil}
+  defp parse_timestamp(nil), do: {:error, nil}
   defp parse_timestamp(%DateTime{} = dt), do: {:ok, dt}
 
   defp parse_timestamp(s) when is_binary(s) do

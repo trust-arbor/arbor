@@ -45,20 +45,34 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
   @doc """
   Determine if a node can be skipped based on content hash match.
 
-  A node can be skipped only when:
-  1. The computed hash matches the stored hash
-  2. The handler's idempotency class is `:idempotent` or `:read_only`
-  3. The node is not side-effecting (based on Node.side_effecting?/1)
+  Accepts an optional `cached_outcome` (5th arg). When provided, `:idempotent_with_key`
+  nodes are only skipped if the cached outcome was successful — failed outcomes
+  should be re-executed since the handler may produce different results.
+
+  `:side_effecting` handlers are NEVER skipped — they use the WAL pattern instead.
   """
-  @spec can_skip?(Node.t(), String.t(), String.t(), module()) :: boolean()
-  def can_skip?(%Node{} = node, computed_hash, stored_hash, handler_module) do
+  @spec can_skip?(Node.t(), String.t(), String.t(), module(), map() | nil) :: boolean()
+  def can_skip?(node, computed_hash, stored_hash, handler_module, cached_outcome \\ nil)
+
+  def can_skip?(%Node{} = node, computed_hash, stored_hash, handler_module, cached_outcome) do
     hash_match = computed_hash == stored_hash
 
     idempotency = Handler.idempotency_of(handler_module)
-    safe_class = idempotency in [:idempotent, :read_only]
 
-    not_side_effecting = not Node.side_effecting?(node)
+    safe_class =
+      case idempotency do
+        class when class in [:idempotent, :read_only] ->
+          not Node.side_effecting?(node)
 
-    hash_match and safe_class and not_side_effecting
+        :idempotent_with_key ->
+          # Only skip if the cached outcome was successful — re-execute on failure
+          # since the handler may produce different results on retry
+          cached_outcome != nil and cached_outcome.status in [:success, :partial_success]
+
+        _ ->
+          false
+      end
+
+    hash_match and safe_class
   end
 end
