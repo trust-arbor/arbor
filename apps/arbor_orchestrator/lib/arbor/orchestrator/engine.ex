@@ -290,7 +290,13 @@ defmodule Arbor.Orchestrator.Engine do
     {:error, :max_steps_exceeded}
   end
 
+  # Heartbeat interval for distributed liveness detection (30 seconds)
+  @heartbeat_interval_ms 30_000
+
   defp loop(%State{} = state) do
+    # Touch pipeline heartbeat periodically for distributed liveness detection
+    state = maybe_touch_heartbeat(state)
+
     node = Map.fetch!(state.graph.nodes, state.node_id)
     fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, state.context)
 
@@ -584,6 +590,26 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp maybe_auto_status(outcome, _node), do: outcome
+
+  # Touch pipeline heartbeat if enough time has passed since the last one.
+  # Uses monotonic time in tracking to avoid DateTime overhead on every node.
+  defp maybe_touch_heartbeat(%State{} = state) do
+    now = System.monotonic_time(:millisecond)
+    last = Map.get(state.tracking, :last_heartbeat_touch, 0)
+
+    if now - last >= @heartbeat_interval_ms do
+      run_id = Keyword.get(state.opts, :run_id)
+
+      if run_id do
+        Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
+      end
+
+      tracking = Map.put(state.tracking, :last_heartbeat_touch, now)
+      %{state | tracking: tracking}
+    else
+      state
+    end
+  end
 
   # Fan-in aware advancement: uses Router for routing,
   # but also detects implicit fan-out (multiple unconditional edges) and

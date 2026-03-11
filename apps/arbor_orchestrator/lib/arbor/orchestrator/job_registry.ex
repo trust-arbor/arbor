@@ -36,7 +36,11 @@ defmodule Arbor.Orchestrator.JobRegistry do
       :finished_at,
       :duration_ms,
       :failure_reason,
-      :source_node
+      :source_node,
+      # Phase 5: Distributed pipeline durability
+      :owner_node,
+      :origin_trust_zone,
+      :last_heartbeat
     ]
   end
 
@@ -106,6 +110,52 @@ defmodule Arbor.Orchestrator.JobRegistry do
     GenServer.call(__MODULE__, {:mark_recovering, pipeline_id})
   end
 
+  @doc """
+  Updates the heartbeat timestamp for a running pipeline.
+  Called periodically by the engine loop to signal liveness.
+  """
+  def touch_heartbeat(pipeline_id) do
+    GenServer.cast(__MODULE__, {:touch_heartbeat, pipeline_id})
+  end
+
+  @doc """
+  Returns pipelines whose heartbeat has gone stale (older than `max_age_ms`).
+  Used by RecoveryCoordinator to detect hung pipelines.
+  """
+  def list_stale_heartbeats(max_age_ms \\ 90_000) do
+    cutoff = DateTime.add(DateTime.utc_now(), -max_age_ms, :millisecond)
+
+    store_list()
+    |> Enum.filter(fn entry ->
+      entry.status == :running and
+        entry.last_heartbeat != nil and
+        DateTime.compare(entry.last_heartbeat, cutoff) == :lt
+    end)
+  end
+
+  @doc """
+  Returns all entries owned by a specific node.
+  Used by RecoveryCoordinator to find orphaned pipelines after nodedown.
+  """
+  def list_by_owner(node_name) do
+    node_str = to_string(node_name)
+
+    store_list()
+    |> Enum.filter(fn entry ->
+      entry.status in [:running, :interrupted] and
+        to_string(entry.owner_node) == node_str
+    end)
+  end
+
+  @doc """
+  Attempts to atomically claim an interrupted pipeline for recovery.
+  Returns {:ok, entry} if this node wins the claim, {:error, reason} otherwise.
+  On shared Postgres, relies on GenServer serialization + owner_node check.
+  """
+  def claim_for_recovery(pipeline_id, claiming_node \\ Kernel.node()) do
+    GenServer.call(__MODULE__, {:claim_for_recovery, pipeline_id, claiming_node})
+  end
+
   # GenServer callbacks
 
   @impl true
@@ -141,6 +191,8 @@ defmodule Arbor.Orchestrator.JobRegistry do
     pipeline_id = determine_pipeline_id(event)
     run_id = Map.get(event, :run_id)
 
+    now = DateTime.utc_now()
+
     entry = %Entry{
       pipeline_id: pipeline_id,
       run_id: run_id,
@@ -148,7 +200,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
       graph_hash: Map.get(event, :graph_hash),
       dot_source_path: Map.get(event, :dot_source_path),
       logs_root: Map.get(event, :logs_root),
-      started_at: DateTime.utc_now(),
+      started_at: now,
       current_node: nil,
       completed_count: 0,
       total_nodes: Map.get(event, :node_count, 0),
@@ -157,7 +209,10 @@ defmodule Arbor.Orchestrator.JobRegistry do
       finished_at: nil,
       duration_ms: nil,
       failure_reason: nil,
-      source_node: Map.get(event, :source_node, Kernel.node())
+      source_node: Map.get(event, :source_node, Kernel.node()),
+      owner_node: Kernel.node(),
+      origin_trust_zone: resolve_trust_zone(),
+      last_heartbeat: now
     }
 
     put_entry(pipeline_id, entry)
@@ -254,7 +309,11 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   @impl true
   def handle_call({:mark_interrupted, pipeline_id}, _from, state) do
-    result = update_entry(pipeline_id, fn entry -> %{entry | status: :interrupted} end)
+    result =
+      update_entry(pipeline_id, fn entry ->
+        %{entry | status: :interrupted, owner_node: nil}
+      end)
+
     {:reply, result, state}
   end
 
@@ -270,6 +329,53 @@ defmodule Arbor.Orchestrator.JobRegistry do
   def handle_call({:mark_recovering, pipeline_id}, _from, state) do
     result = update_entry(pipeline_id, fn entry -> %{entry | status: :recovering} end)
     {:reply, result, state}
+  end
+
+  def handle_call({:claim_for_recovery, pipeline_id, claiming_node}, _from, state) do
+    result =
+      case Arbor.Persistence.BufferedStore.get(pipeline_id, name: @store_name) do
+        {:ok, %Entry{status: :interrupted, owner_node: nil} = entry} ->
+          updated = %{entry | owner_node: claiming_node, status: :recovering}
+          put_entry(pipeline_id, updated)
+          {:ok, updated}
+
+        {:ok, %Entry{status: :interrupted, owner_node: owner} = entry}
+        when owner == claiming_node ->
+          updated = %{entry | status: :recovering}
+          put_entry(pipeline_id, updated)
+          {:ok, updated}
+
+        {:ok, %Entry{status: :interrupted}} ->
+          {:error, :already_claimed}
+
+        {:ok, %Entry{status: status}} ->
+          {:error, {:invalid_status, status}}
+
+        {:ok, data} when is_map(data) ->
+          entry = entry_from_map(data)
+
+          if entry.status == :interrupted do
+            updated = %{entry | owner_node: claiming_node, status: :recovering}
+            put_entry(pipeline_id, updated)
+            {:ok, updated}
+          else
+            {:error, {:invalid_status, entry.status}}
+          end
+
+        _ ->
+          {:error, :not_found}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_cast({:touch_heartbeat, pipeline_id}, state) do
+    update_entry(pipeline_id, fn entry ->
+      %{entry | last_heartbeat: DateTime.utc_now()}
+    end)
+
+    {:noreply, state}
   end
 
   # Private helpers
@@ -397,7 +503,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
       key = entry.pipeline_id || entry.run_id
 
       if key do
-        updated = %{entry | status: :interrupted}
+        updated = %{entry | status: :interrupted, owner_node: nil}
         put_entry(key, updated)
       end
     end)
@@ -423,8 +529,32 @@ defmodule Arbor.Orchestrator.JobRegistry do
       finished_at: parse_datetime(data["finished_at"] || data[:finished_at]),
       duration_ms: data["duration_ms"] || data[:duration_ms],
       failure_reason: data["failure_reason"] || data[:failure_reason],
-      source_node: data["source_node"] || data[:source_node]
+      source_node: data["source_node"] || data[:source_node],
+      owner_node: parse_node_name(data["owner_node"] || data[:owner_node]),
+      origin_trust_zone: data["origin_trust_zone"] || data[:origin_trust_zone],
+      last_heartbeat: parse_datetime(data["last_heartbeat"] || data[:last_heartbeat])
     }
+  end
+
+  defp parse_node_name(nil), do: nil
+  defp parse_node_name(n) when is_atom(n), do: n
+
+  defp parse_node_name(n) when is_binary(n) do
+    String.to_existing_atom(n)
+  rescue
+    ArgumentError -> String.to_atom(n)
+  end
+
+  defp resolve_trust_zone do
+    mod = Arbor.Cartographer.ClusterKeeper
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :trust_zone, 1) do
+      apply(mod, :trust_zone, [Kernel.node()])
+    else
+      0
+    end
+  rescue
+    _ -> 0
   end
 
   defp parse_status(s) when is_atom(s), do: s
