@@ -405,7 +405,8 @@ defmodule Arbor.Consensus.EventEmitter do
   # Emit a signal to the signal bus for real-time observability.
   # Gracefully handles signal bus unavailability (e.g., in tests).
   defp emit_signal(type, data) when is_atom(type) and is_map(data) do
-    Signals.emit(:consensus, type, data)
+    data = Map.put(data, :origin_node, node())
+    Signals.emit(:consensus, type, data, scope: :cluster)
   rescue
     # Signal bus may not be running in test environments
     _ -> :ok
