@@ -11,7 +11,10 @@ defmodule Arbor.Signals.Config do
         authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
         restricted_topics: [:security, :identity],
         channel_auto_rotate_interval_ms: 86_400_000,
-        channel_rotate_on_leave: true
+        channel_rotate_on_leave: true,
+        relay_enabled: true,
+        relay_batch_interval_ms: 50,
+        relay_max_batch_size: 500
   """
 
   require Logger

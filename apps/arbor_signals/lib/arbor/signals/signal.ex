@@ -43,7 +43,18 @@ defmodule Arbor.Signals.Signal do
     field(:metadata, map(), default: %{})
     # Set server-side by the signal system — cannot be spoofed by callers
     field(:emitter_pid, pid(), enforce: false)
+    # Distribution scope — :local stays on this node, :cluster crosses nodes
+    field(:scope, atom(), default: :local)
+    # Set by the signal system on emit — identifies which node originated this signal
+    field(:origin_node, atom(), enforce: false)
   end
+
+  # Categories that default to :cluster scope (cross node boundaries)
+  @global_categories [:agent, :security, :orchestrator, :consensus, :trust]
+
+  @doc "Returns the list of signal categories that default to cluster scope."
+  @spec global_categories() :: [atom()]
+  def global_categories, do: @global_categories
 
   @doc """
   Create a new signal with the given category, type, and data.
@@ -63,6 +74,10 @@ defmodule Arbor.Signals.Signal do
   """
   @spec new(atom(), atom(), map(), keyword()) :: t()
   def new(category, type, data \\ %{}, opts \\ []) do
+    # Scope defaults based on category: global categories default to :cluster
+    default_scope = if category in @global_categories, do: :cluster, else: :local
+    scope = Keyword.get(opts, :scope, default_scope)
+
     %__MODULE__{
       id: generate_signal_id(),
       category: category,
@@ -72,7 +87,9 @@ defmodule Arbor.Signals.Signal do
       source: Keyword.get(opts, :source),
       cause_id: Keyword.get(opts, :cause_id),
       correlation_id: Keyword.get(opts, :correlation_id),
-      metadata: Keyword.get(opts, :metadata, %{})
+      metadata: Keyword.get(opts, :metadata, %{}),
+      scope: scope,
+      origin_node: Keyword.get(opts, :origin_node, node())
     }
   end
 
