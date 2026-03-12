@@ -24,7 +24,7 @@ defmodule Arbor.Orchestrator.EvalTest do
       names = Eval.grader_names()
       assert "exact_match" in names
       assert "dot_diff" in names
-      assert length(names) == 10
+      assert length(names) == 11
     end
   end
 
