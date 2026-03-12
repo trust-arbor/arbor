@@ -154,7 +154,12 @@ defmodule Arbor.Security.SystemAuthority do
     case load_persisted_keypair() do
       {:ok, identity} ->
         Logger.info("[SystemAuthority] Loaded persistent keypair: #{identity.agent_id}")
-        :ok = Registry.register(Identity.public_only(identity))
+
+        case Registry.register(Identity.public_only(identity)) do
+          :ok -> :ok
+          {:error, {:already_registered, _}} -> :ok
+        end
+
         {:ok, %{identity: identity}}
 
       :not_found ->
