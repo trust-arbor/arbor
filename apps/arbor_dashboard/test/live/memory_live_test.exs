@@ -1,7 +1,6 @@
 defmodule Arbor.Dashboard.Live.MemoryLiveTest do
   use Arbor.Dashboard.ConnCase, async: true
 
-  @tag :fast
   describe "MemoryLive mount without agent_id" do
     @tag :fast
     test "renders memory viewer header", %{conn: conn} do
@@ -27,7 +26,6 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     end
   end
 
-  @tag :fast
   describe "MemoryLive mount with agent_id" do
     @tag :fast
     test "renders memory viewer with agent context", %{conn: conn} do
@@ -58,7 +56,6 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     end
   end
 
-  @tag :fast
   describe "MemoryLive tab navigation" do
     @tag :fast
     test "change-tab to identity", %{conn: conn} do
@@ -126,7 +123,6 @@ defmodule Arbor.Dashboard.Live.MemoryLiveTest do
     end
   end
 
-  @tag :fast
   describe "MemoryLive section toggle" do
     @tag :fast
     test "toggle-section thoughts expands/collapses", %{conn: conn} do

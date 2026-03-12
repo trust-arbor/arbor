@@ -1,7 +1,6 @@
 defmodule Arbor.Dashboard.Live.MonitorLiveTest do
   use Arbor.Dashboard.ConnCase, async: true
 
-  @tag :fast
   describe "MonitorLive mount" do
     @tag :fast
     test "renders monitor dashboard header", %{conn: conn} do
@@ -42,7 +41,6 @@ defmodule Arbor.Dashboard.Live.MonitorLiveTest do
     end
   end
 
-  @tag :fast
   describe "MonitorLive refresh event" do
     @tag :fast
     test "refresh event works", %{conn: conn} do
@@ -62,7 +60,6 @@ defmodule Arbor.Dashboard.Live.MonitorLiveTest do
     end
   end
 
-  @tag :fast
   describe "MonitorLive select_skill event" do
     @tag :fast
     test "select_skill with known atom does not crash", %{conn: conn} do
@@ -85,7 +82,6 @@ defmodule Arbor.Dashboard.Live.MonitorLiveTest do
     end
   end
 
-  @tag :fast
   describe "MonitorLive close_detail event" do
     @tag :fast
     test "close_detail clears selection", %{conn: conn} do

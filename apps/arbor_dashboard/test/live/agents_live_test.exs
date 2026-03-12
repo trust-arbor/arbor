@@ -11,7 +11,6 @@ defmodule Arbor.Dashboard.Live.AgentsLiveTest do
     :ok
   end
 
-  @tag :fast
   describe "AgentsLive mount" do
     @tag :fast
     test "renders agents dashboard header", %{conn: conn} do
@@ -37,7 +36,6 @@ defmodule Arbor.Dashboard.Live.AgentsLiveTest do
     end
   end
 
-  @tag :fast
   describe "AgentsLive select-agent event" do
     @tag :fast
     test "select-agent loads agent detail", %{conn: conn} do
@@ -50,7 +48,6 @@ defmodule Arbor.Dashboard.Live.AgentsLiveTest do
     end
   end
 
-  @tag :fast
   describe "AgentsLive close-detail event" do
     @tag :fast
     test "close-detail clears selection", %{conn: conn} do
@@ -63,7 +60,6 @@ defmodule Arbor.Dashboard.Live.AgentsLiveTest do
     end
   end
 
-  @tag :fast
   describe "AgentsLive stop-agent event" do
     @tag :fast
     test "stop-agent with non-existent agent does not crash", %{conn: conn} do

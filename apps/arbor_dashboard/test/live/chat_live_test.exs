@@ -11,7 +11,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     :ok
   end
 
-  @tag :fast
   describe "ChatLive mount" do
     @tag :fast
     test "renders chat dashboard header", %{conn: conn} do
@@ -31,7 +30,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  @tag :fast
   describe "ChatLive toggle events" do
     @tag :fast
     test "toggle-thinking toggles show_thinking assign", %{conn: conn} do
@@ -128,7 +126,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  @tag :fast
   describe "ChatLive input events" do
     @tag :fast
     test "update-input stores the message value", %{conn: conn} do
@@ -164,7 +161,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  @tag :fast
   describe "ChatLive start-agent with unknown model" do
     @tag :fast
     test "start-agent with unknown model shows error", %{conn: conn} do
@@ -175,7 +171,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  @tag :fast
   describe "ChatLive stop-agent without running agent" do
     @tag :fast
     test "stop-agent with no agent does not crash", %{conn: conn} do
@@ -186,7 +181,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  @tag :fast
   describe "ChatLive heartbeat model events" do
     @tag :fast
     test "set-heartbeat-model with empty string clears selection", %{conn: conn} do
