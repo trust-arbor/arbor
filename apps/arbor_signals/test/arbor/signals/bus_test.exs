@@ -6,6 +6,11 @@ defmodule Arbor.Signals.BusTest do
   alias Arbor.Signals.Bus
   alias Arbor.Signals.Signal
 
+  setup do
+    Arbor.Signals.TestCase.ensure_processes()
+    :ok
+  end
+
   describe "subscribe/3 and publish/1" do
     test "wildcard pattern receives all signals" do
       test_pid = self()
@@ -483,7 +488,10 @@ defmodule Arbor.Signals.BusTest do
       {:ok, sub_id} =
         Bus.subscribe(
           "agent.*",
-          fn sig -> send(test_pid, {:got, sig}); :ok end,
+          fn sig ->
+            send(test_pid, {:got, sig})
+            :ok
+          end,
           async: false
         )
 

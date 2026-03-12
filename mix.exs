@@ -35,7 +35,7 @@ defmodule Arbor.MixProject do
       # jido_sandbox has no Hex release yet
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
-      {:ex_mcp, git: "https://github.com/azmaveth/ex_mcp.git", ref: "06d15d4", override: true},
+      {:ex_mcp, "~> 0.8.0", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

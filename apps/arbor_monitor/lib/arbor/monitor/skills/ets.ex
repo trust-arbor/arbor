@@ -21,8 +21,8 @@ defmodule Arbor.Monitor.Skills.Ets do
         try do
           %{
             name: safe_table_name(tab),
-            size: :ets.info(tab, :size) || 0,
-            memory_words: :ets.info(tab, :memory) || 0,
+            size: safe_integer(:ets.info(tab, :size)),
+            memory_words: safe_integer(:ets.info(tab, :memory)),
             type: :ets.info(tab, :type)
           }
         rescue
@@ -68,6 +68,10 @@ defmodule Arbor.Monitor.Skills.Ets do
       :normal
     end
   end
+
+  # :ets.info returns :undefined for deleted tables, not nil
+  defp safe_integer(n) when is_integer(n), do: n
+  defp safe_integer(_), do: 0
 
   defp safe_table_name(tab) when is_atom(tab), do: tab
   defp safe_table_name(tab) when is_reference(tab), do: inspect(tab)

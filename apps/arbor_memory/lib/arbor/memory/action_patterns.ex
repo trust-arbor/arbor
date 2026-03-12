@@ -91,7 +91,9 @@ defmodule Arbor.Memory.ActionPatterns do
       min_seq_len = Keyword.get(opts, :min_sequence_length, @min_sequence_length)
       max_seq_len = Keyword.get(opts, :max_sequence_length, @max_sequence_length)
 
-      repeated = detect_repeated_sequences(action_history, min_seq_len, max_seq_len, min_occurrences)
+      repeated =
+        detect_repeated_sequences(action_history, min_seq_len, max_seq_len, min_occurrences)
+
       failures = detect_failure_then_success(action_history)
       long = detect_long_sequences(action_history)
 
@@ -109,9 +111,19 @@ defmodule Arbor.Memory.ActionPatterns do
 
   Finds tool combinations that occur multiple times in the history.
   """
-  @spec detect_repeated_sequences([action()], non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec detect_repeated_sequences(
+          [action()],
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           [pattern()]
-  def detect_repeated_sequences(history, min_len \\ @min_sequence_length, max_len \\ @max_sequence_length, min_occurs \\ @min_occurrences) do
+  def detect_repeated_sequences(
+        history,
+        min_len \\ @min_sequence_length,
+        max_len \\ @max_sequence_length,
+        min_occurs \\ @min_occurrences
+      ) do
     tools = Enum.map(history, & &1.tool)
 
     min_len..max_len
@@ -322,7 +334,11 @@ defmodule Arbor.Memory.ActionPatterns do
       "This sequence appears to be a common workflow."
   end
 
-  defp pattern_to_learning(%{type: :failure_then_success, tools: [failed, succeeded], occurrences: count}) do
+  defp pattern_to_learning(%{
+         type: :failure_then_success,
+         tools: [failed, succeeded],
+         occurrences: count
+       }) do
     "Recovery pattern: When #{failed} fails, #{succeeded} often succeeds (#{count} occurrences). " <>
       "Consider trying #{succeeded} directly in similar situations."
   end
@@ -346,7 +362,14 @@ defmodule Arbor.Memory.ActionPatterns do
         parse_llm_learnings(response, patterns, max_learnings)
 
       {:error, reason} ->
-        Logger.warning("LLM synthesis failed, falling back to template learnings: #{inspect(reason)}")
+        Logger.warning(
+          "LLM synthesis failed, falling back to template learnings: #{inspect(reason)}"
+        )
+
+        synthesize_with_templates(patterns)
+
+      :unavailable ->
+        Logger.warning("LLM unavailable, falling back to template learnings")
         synthesize_with_templates(patterns)
     end
   end
@@ -355,9 +378,18 @@ defmodule Arbor.Memory.ActionPatterns do
   def build_synthesis_prompt(patterns) do
     pattern_descriptions =
       [
-        format_pattern_group("Repeated sequences", Enum.filter(patterns, &(&1.type == :repeated_sequence))),
-        format_pattern_group("Failure-then-success recoveries", Enum.filter(patterns, &(&1.type == :failure_then_success))),
-        format_pattern_group("Long action sequences", Enum.filter(patterns, &(&1.type == :long_sequence)))
+        format_pattern_group(
+          "Repeated sequences",
+          Enum.filter(patterns, &(&1.type == :repeated_sequence))
+        ),
+        format_pattern_group(
+          "Failure-then-success recoveries",
+          Enum.filter(patterns, &(&1.type == :failure_then_success))
+        ),
+        format_pattern_group(
+          "Long action sequences",
+          Enum.filter(patterns, &(&1.type == :long_sequence))
+        )
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n\n")
@@ -388,7 +420,10 @@ defmodule Arbor.Memory.ActionPatterns do
       patterns
       |> Enum.take(3)
       |> Enum.map_join("\n", fn p ->
-        desc = Map.get(p, :description) || "#{p.type} (#{p.occurrences}x, #{Float.round(p.confidence * 100, 0)}%)"
+        desc =
+          Map.get(p, :description) ||
+            "#{p.type} (#{p.occurrences}x, #{Float.round(p.confidence * 100, 0)}%)"
+
         "- #{desc}"
       end)
 

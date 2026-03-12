@@ -16,7 +16,7 @@ defmodule Arbor.Comms.Channels.LimitlessTest do
   end
 
   describe "poll/0" do
-    @describetag :integration
+    @describetag :external
 
     test "polls Limitless API" do
       result = Limitless.poll()

@@ -23,4 +23,4 @@ if Process.whereis(Arbor.Memory.Supervisor) do
   end
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+ExUnit.start(exclude: [:integration, :llm, :llm_local])

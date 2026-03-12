@@ -34,6 +34,11 @@ defmodule Arbor.Signals.TestCase do
     for mod <- children do
       ensure_child(mod)
     end
+
+    # Reset Bus state to prevent subscription leakage between test files
+    if Process.whereis(Arbor.Signals.Bus) do
+      Arbor.Signals.Bus.reset()
+    end
   end
 
   defp ensure_child(mod) do
@@ -51,11 +56,16 @@ defmodule Arbor.Signals.TestCase do
 
     if Process.whereis(Arbor.Signals.Supervisor) do
       case Supervisor.start_child(Arbor.Signals.Supervisor, child_spec) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
         {:error, :already_present} ->
           Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
           Supervisor.start_child(Arbor.Signals.Supervisor, child_spec)
+
         {:error, _reason} ->
           # Supervisor rejected it — start standalone
           mod.start_link([])

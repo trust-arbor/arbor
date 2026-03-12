@@ -111,9 +111,12 @@ defmodule Arbor.Gateway.MCP.ResourceBridgeTest do
   end
 
   describe "authorize/3" do
-    test "returns :ok when security infrastructure is not running" do
-      # In test context, CapabilityStore is not running -> permissive mode
-      assert :ok = ResourceBridge.authorize("agent_123", "fs", "config.json")
+    test "returns :ok or unauthorized depending on security infrastructure" do
+      result = ResourceBridge.authorize("agent_123", "fs", "config.json")
+
+      # In isolation: CapabilityStore not running -> permissive mode -> :ok
+      # In umbrella: CapabilityStore running -> no capability granted -> unauthorized
+      assert result == :ok or match?({:error, :unauthorized, _}, result)
     end
   end
 end

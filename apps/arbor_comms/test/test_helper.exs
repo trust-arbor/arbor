@@ -1,1 +1,1 @@
-ExUnit.start(exclude: [:integration, :llm, :llm_local])
+ExUnit.start(exclude: [:integration, :external, :llm, :llm_local])

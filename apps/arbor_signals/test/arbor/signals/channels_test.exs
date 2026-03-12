@@ -62,11 +62,18 @@ defmodule Arbor.Signals.ChannelsTest do
     Arbor.Signals.TestCase.ensure_processes()
 
     # Configure mock modules
+    original_crypto = Application.get_env(:arbor_signals, :crypto_module)
     Application.put_env(:arbor_signals, :crypto_module, MockCrypto)
     Application.put_env(:arbor_signals, :identity_registry_module, MockRegistry)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_signals, :crypto_module)
+      # Restore global MockCrypto (set in test_helper), don't delete
+      if original_crypto do
+        Application.put_env(:arbor_signals, :crypto_module, original_crypto)
+      else
+        Application.delete_env(:arbor_signals, :crypto_module)
+      end
+
       Application.delete_env(:arbor_signals, :identity_registry_module)
     end)
 

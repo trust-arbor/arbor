@@ -79,6 +79,10 @@ defmodule Arbor.Agent.HeartbeatLLM do
       {:error, reason} ->
         Logger.debug("Heartbeat LLM call failed: #{inspect(reason)}")
         {:error, reason}
+
+      :unavailable ->
+        Logger.debug("Heartbeat LLM: AI service unavailable")
+        {:error, :ai_unavailable}
     end
   end
 

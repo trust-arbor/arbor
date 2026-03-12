@@ -121,6 +121,11 @@ defmodule Arbor.Signals.Bus do
     GenServer.call(__MODULE__, :stats)
   end
 
+  @doc "Reset bus state. For testing only."
+  def reset do
+    GenServer.call(__MODULE__, :reset)
+  end
+
   # Server callbacks
 
   @impl true
@@ -207,6 +212,14 @@ defmodule Arbor.Signals.Bus do
   def handle_call(:stats, _from, state) do
     stats = Map.put(state.stats, :active_subscriptions, map_size(state.subscriptions))
     {:reply, stats, state}
+  end
+
+  def handle_call(:reset, _from, _state) do
+    {:reply, :ok,
+     %{
+       subscriptions: %{},
+       stats: %{total_published: 0, total_delivered: 0, total_errors: 0, total_auth_denied: 0}
+     }}
   end
 
   # Private functions — Authorization

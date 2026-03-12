@@ -65,7 +65,7 @@ defmodule Arbor.Comms.Channels.EmailTest do
   end
 
   describe "send_message/3" do
-    @describetag :integration
+    @describetag :external
 
     test "sends a test email" do
       result = Email.send_message("test@example.com", "Test body", subject: "Test")
