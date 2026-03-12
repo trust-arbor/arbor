@@ -47,6 +47,40 @@ defmodule Arbor.Actions.File do
     end
   end
 
+  @doc """
+  Authorize a file operation via FileGuard when facade auth is active.
+
+  When `context[:facade_auth]` is true, checks the agent's capabilities
+  for the given operation and path using `Arbor.Security.FileGuard`.
+  Returns `{:ok, resolved_path}` on success or `{:error, reason}` on denial.
+
+  When facade auth is not active (direct `run/2` calls), passes through.
+  """
+  @spec authorize_file_op(map(), String.t(), atom()) ::
+          {:ok, String.t()} | {:error, term()}
+  def authorize_file_op(context, path, operation) do
+    if context[:facade_auth] do
+      agent_id = context[:agent_id]
+
+      if agent_id && file_guard_available?() do
+        case Arbor.Security.FileGuard.authorize(agent_id, path, operation) do
+          {:ok, resolved_path} -> {:ok, resolved_path}
+          {:error, reason} -> {:error, {:unauthorized, reason}}
+        end
+      else
+        # No agent_id or FileGuard not available — pass through
+        {:ok, path}
+      end
+    else
+      {:ok, path}
+    end
+  end
+
+  defp file_guard_available? do
+    Code.ensure_loaded?(Arbor.Security.FileGuard) and
+      function_exported?(Arbor.Security.FileGuard, :authorize, 3)
+  end
+
   defmodule Read do
     @moduledoc """
     Read content from a file.
@@ -105,7 +139,8 @@ defmodule Arbor.Actions.File do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, context) do
-      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read) do
         Actions.emit_started(__MODULE__, params)
         encoding = params[:encoding] || :utf8
 
@@ -219,7 +254,8 @@ defmodule Arbor.Actions.File do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, content: content} = params, context) do
-      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :write) do
         Actions.emit_started(__MODULE__, %{path: safe_path, size: byte_size(content)})
 
         create_dirs = params[:create_dirs] || false
@@ -307,7 +343,8 @@ defmodule Arbor.Actions.File do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, context) do
-      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :list) do
         Actions.emit_started(__MODULE__, params)
 
         include_hidden = params[:include_hidden] || false
@@ -406,7 +443,8 @@ defmodule Arbor.Actions.File do
       base_path = params[:base_path]
 
       # Validate base_path if provided and workspace is set
-      with {:ok, safe_base} <- validate_base_path(base_path, context) do
+      with {:ok, safe_base} <- validate_base_path(base_path, context),
+           {:ok, safe_base} <- authorize_glob(context, safe_base) do
         Actions.emit_started(__MODULE__, params)
         match_dot = params[:match_dot] || false
 
@@ -436,6 +474,11 @@ defmodule Arbor.Actions.File do
 
     defp validate_base_path(nil, _context), do: {:ok, nil}
     defp validate_base_path(path, context), do: Arbor.Actions.File.validate_path(path, context)
+
+    defp authorize_glob(_context, nil), do: {:ok, nil}
+
+    defp authorize_glob(context, base_path),
+      do: Arbor.Actions.File.authorize_file_op(context, base_path, :read)
   end
 
   defmodule Exists do
@@ -474,7 +517,8 @@ defmodule Arbor.Actions.File do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, context) do
-      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context) do
+      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read) do
         Actions.emit_started(__MODULE__, params)
 
         result =
@@ -568,6 +612,7 @@ defmodule Arbor.Actions.File do
       replace_all = params[:replace_all] || false
 
       with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :write),
            :ok <-
              (
                Actions.emit_started(__MODULE__, %{path: safe_path})
@@ -747,6 +792,7 @@ defmodule Arbor.Actions.File do
       use_regex = params[:regex] || false
 
       with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read),
            :ok <-
              (
                Actions.emit_started(__MODULE__, %{path: safe_path, pattern: pattern})
