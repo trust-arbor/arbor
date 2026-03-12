@@ -126,9 +126,10 @@ defmodule Arbor.Actions.AI do
       opts = build_opts(params)
 
       ai_call =
-        case Map.get(context, :agent_id) do
-          nil -> Arbor.AI.generate_text(prompt, opts)
-          agent_id -> Arbor.AI.authorize_generate(agent_id, prompt, opts)
+        if context[:facade_auth] do
+          Arbor.AI.authorize_generate(context[:agent_id], prompt, opts)
+        else
+          Arbor.AI.generate_text(prompt, opts)
         end
 
       case ai_call do
@@ -275,9 +276,10 @@ defmodule Arbor.Actions.AI do
       opts = build_opts(params)
 
       ai_call =
-        case Map.get(context, :agent_id) do
-          nil -> Arbor.AI.generate_text(prompt, opts)
-          agent_id -> Arbor.AI.authorize_generate(agent_id, prompt, opts)
+        if context[:facade_auth] do
+          Arbor.AI.authorize_generate(context[:agent_id], prompt, opts)
+        else
+          Arbor.AI.generate_text(prompt, opts)
         end
 
       case ai_call do

@@ -364,7 +364,7 @@ defmodule Arbor.Actions.Code do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{module: module_str, source: source} = params, _context) do
+    def run(%{module: module_str, source: source} = params, context) do
       verify_fn = params[:verify_fn]
       timeout = params[:rollback_timeout_ms] || 30_000
 
@@ -372,6 +372,7 @@ defmodule Arbor.Actions.Code do
 
       with {:ok, module} <- parse_module(module_str),
            :ok <- check_not_protected(module),
+           :ok <- authorize_hot_load(context, module_str),
            :ok <- validate_source_safety(source),
            {:ok, original_binary} <- save_original(module),
            {:ok, compiled_module} <- compile_source(source) do
@@ -391,6 +392,32 @@ defmodule Arbor.Actions.Code do
           Actions.emit_failed(__MODULE__, reason)
           {:error, format_error(reason)}
       end
+    end
+
+    defp authorize_hot_load(context, module_str) do
+      if context[:facade_auth] do
+        agent_id = context[:agent_id]
+
+        if agent_id && security_available?() do
+          uri = "arbor://code/hot_load/#{module_str}"
+
+          case Arbor.Security.authorize(agent_id, uri, %{}) do
+            {:ok, :authorized} -> :ok
+            {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+            {:error, reason} -> {:error, {:unauthorized, reason}}
+          end
+        else
+          :ok
+        end
+      else
+        :ok
+      end
+    end
+
+    defp security_available? do
+      Code.ensure_loaded?(Arbor.Security) and
+        function_exported?(Arbor.Security, :authorize, 3) and
+        Process.whereis(Arbor.Security.CapabilityStore) != nil
     end
 
     defp parse_module(module_str) when is_binary(module_str) do
