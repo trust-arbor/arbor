@@ -149,6 +149,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.IntentConformance do
   defp call_judge(provider, model, system_prompt, user_prompt, timeout) do
     alias Arbor.Orchestrator.UnifiedLLM.{Client, Request, Message}
 
+    client = Client.default_client()
+
     request = %Request{
       provider: provider,
       model: model,
@@ -160,7 +162,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.IntentConformance do
       temperature: 0.0
     }
 
-    case Client.chat(request, timeout: timeout) do
+    case Client.complete(client, request, timeout: timeout) do
       {:ok, %{text: text}} -> {:ok, text}
       {:error, reason} -> {:error, reason}
     end
