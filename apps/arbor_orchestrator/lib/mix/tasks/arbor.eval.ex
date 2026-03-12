@@ -47,6 +47,7 @@ defmodule Mix.Tasks.Arbor.Eval do
     - `--limit` — limit number of samples
     - `--stream` — use streaming mode for TTFT measurement
     - `--timeout` — per-request timeout in ms (default: 60000)
+    - `--save-outputs` — save raw model outputs to `.arbor/evals/dot_outputs/<model>/<sample>.dot`
     - `--set key=value` — store metadata (repeatable). Examples:
       - `--set quantization=Q4_K_M --set params=4B --set context_length=8192`
       - `--set gpu=RTX4090 --set vram_used=6.2GB`
@@ -91,6 +92,7 @@ defmodule Mix.Tasks.Arbor.Eval do
           limit: :integer,
           stream: :boolean,
           timeout: :integer,
+          save_outputs: :boolean,
           set: :keep
         ]
       )
@@ -121,6 +123,7 @@ defmodule Mix.Tasks.Arbor.Eval do
     use_stream = Keyword.get(opts, :stream, false)
     limit = Keyword.get(opts, :limit)
     num_runs = Keyword.get(opts, :runs, 1)
+    save_outputs = Keyword.get(opts, :save_outputs, false)
 
     models =
       case Keyword.get(opts, :models) do
@@ -229,6 +232,11 @@ defmodule Mix.Tasks.Arbor.Eval do
           # Also save to JSON RunStore for backwards compat
           save_to_runstore(run_id, model, provider, dataset, graders, metrics, results)
 
+          # Save raw outputs to files for LLM-as-judge evaluation
+          if save_outputs do
+            save_model_outputs(model, domain, results)
+          end
+
           pass_count = Enum.count(results, & &1.passed)
           n = length(results)
 
@@ -317,6 +325,42 @@ defmodule Mix.Tasks.Arbor.Eval do
         tokens_generated: result.tokens_generated
       })
     end)
+  end
+
+  defp save_model_outputs(model, domain, results) do
+    slug = model |> String.replace(~r/[:\/.]+/, "-")
+    date = Date.utc_today() |> Date.to_iso8601()
+    base_dir = Path.join([".arbor", "evals", "#{domain}_outputs", "#{slug}_#{date}"])
+    File.mkdir_p!(base_dir)
+
+    saved =
+      Enum.count(results, fn result ->
+        if result.actual != "" do
+          ext = if domain == "dot_compilation", do: ".dot", else: ".txt"
+          path = Path.join(base_dir, "#{result.id}#{ext}")
+          File.write!(path, result.actual)
+          true
+        else
+          false
+        end
+      end)
+
+    # Also save a summary with scores
+    summary_path = Path.join(base_dir, "_summary.json")
+
+    summary =
+      Enum.map(results, fn r ->
+        %{
+          id: r.id,
+          passed: r.passed,
+          scores: r.scores_map,
+          duration_ms: r.duration_ms,
+          output_length: String.length(r.actual)
+        }
+      end)
+
+    File.write!(summary_path, Jason.encode!(%{model: model, results: summary}, pretty: true))
+    Mix.shell().info("  Saved #{saved} outputs to #{base_dir}/")
   end
 
   defp save_to_runstore(run_id, model, provider, dataset, graders, metrics, results) do
@@ -430,10 +474,13 @@ defmodule Mix.Tasks.Arbor.Eval do
             {"", %{duration_ms: 0, ttft_ms: nil, tokens_generated: nil}}
         end
 
+      # Pass sample input to graders (for intent conformance judging)
+      grader_opts = Keyword.put(subject_opts, :sample_input, input)
+
       scores =
         Enum.map(graders, fn grader_mod ->
           try do
-            grader_mod.grade(actual, expected, subject_opts)
+            grader_mod.grade(actual, expected, grader_opts)
           rescue
             e -> %{score: 0.0, passed: false, detail: "crash: #{Exception.message(e)}"}
           end

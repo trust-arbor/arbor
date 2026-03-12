@@ -11,7 +11,7 @@ if File.exists?(dotenv_path) do
   |> Enum.each(fn line ->
     case String.split(line, "=", parts: 2) do
       [key, value] ->
-        key = String.trim(key)
+        key = key |> String.trim() |> String.replace_leading("export ", "")
         value = value |> String.trim() |> String.trim("\"") |> String.trim("'")
         unless System.get_env(key), do: System.put_env(key, value)
 
