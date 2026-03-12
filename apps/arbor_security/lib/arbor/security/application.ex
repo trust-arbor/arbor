@@ -40,7 +40,8 @@ defmodule Arbor.Security.Application do
           {Arbor.Security.SystemAuthority, []},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []},
-          {Arbor.Security.Reflex.Registry, []}
+          {Arbor.Security.Reflex.Registry, []},
+          {Arbor.Security.UriRegistry, []}
         ]
       else
         []

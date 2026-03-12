@@ -406,8 +406,10 @@ defmodule Arbor.Security do
     # Build reflex check context from the authorization parameters
     reflex_context = build_reflex_context(resource_uri, action, opts)
 
-    # Check reflexes FIRST (instant block before expensive checks)
-    with :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
+    # URI registry check: reject unregistered URIs when enforcement is enabled
+    with :ok <- Arbor.Security.UriRegistry.validate(resource_uri),
+         # Check reflexes (instant block before expensive checks)
+         :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
          :ok <- check_identity_status(principal_id),
          :ok <- maybe_verify_identity(principal_id, opts),
          {:ok, cap} <- find_capability(principal_id, resource_uri),
