@@ -109,18 +109,36 @@ defmodule Arbor.Actions.Memory do
 
       with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
            :ok <- MemoryHelpers.ensure_memory(agent_id),
-           type_atom <- MemoryHelpers.safe_to_atom(params.type),
-           {:ok, node_id} <-
-             Arbor.Memory.add_knowledge(agent_id, %{
-               type: type_atom,
-               content: params.content,
-               relevance: params[:importance] || 0.5,
-               metadata: %{source: :agent_tool}
-             }) do
-        linked = maybe_link_entities(agent_id, node_id, params[:entities] || [])
+           type_atom <- MemoryHelpers.safe_to_atom(params.type) do
+        node_data = %{
+          type: type_atom,
+          content: params.content,
+          relevance: params[:importance] || 0.5,
+          metadata: %{source: :agent_tool}
+        }
 
-        Actions.emit_completed(__MODULE__, %{node_id: node_id})
-        {:ok, %{node_id: node_id, type: type_atom, stored: true, linked_count: linked}}
+        # Use facade auth when called through authorize_and_execute
+        result =
+          if context[:facade_auth] do
+            Arbor.Memory.authorize_add_knowledge(context[:agent_id], agent_id, node_data)
+          else
+            Arbor.Memory.add_knowledge(agent_id, node_data)
+          end
+
+        case result do
+          {:ok, node_id} ->
+            linked = maybe_link_entities(agent_id, node_id, params[:entities] || [])
+
+            Actions.emit_completed(__MODULE__, %{node_id: node_id})
+            {:ok, %{node_id: node_id, type: type_atom, stored: true, linked_count: linked}}
+
+          {:error, {:unauthorized, _} = reason} ->
+            {:error, "Unauthorized: #{inspect(reason)}"}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "Failed to store knowledge: #{inspect(reason)}"}
+        end
       else
         {:error, :missing_agent_id} = err ->
           err
@@ -201,7 +219,15 @@ defmodule Arbor.Actions.Memory do
           [limit: params[:limit] || 10]
           |> maybe_add_types(params[:types])
 
-        case Arbor.Memory.recall(agent_id, params.query, opts) do
+        # Use facade auth when called through authorize_and_execute
+        recall_result =
+          if context[:facade_auth] do
+            Arbor.Memory.authorize_recall(context[:agent_id], agent_id, params.query, opts)
+          else
+            Arbor.Memory.recall(agent_id, params.query, opts)
+          end
+
+        case recall_result do
           {:ok, results} ->
             # Trigger spreading activation on top results if cascade enabled
             cascade_applied =
@@ -230,6 +256,9 @@ defmodule Arbor.Actions.Memory do
                query: params.query,
                cascade_applied: cascade_applied
              }}
+
+          {:error, {:unauthorized, _} = reason} ->
+            {:error, "Unauthorized: #{inspect(reason)}"}
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)

@@ -137,7 +137,7 @@ defmodule Arbor.Actions.Shell do
         |> maybe_add_opt(:env, params[:env])
         |> maybe_add_context_opts(context)
 
-      case Shell.execute(params.command, opts) do
+      case call_shell(params.command, opts, context) do
         {:ok, result} ->
           Actions.emit_completed(__MODULE__, result)
 
@@ -150,9 +150,26 @@ defmodule Arbor.Actions.Shell do
              timed_out: result.timed_out
            }}
 
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+
+        {:error, :unauthorized} ->
+          Actions.emit_failed(__MODULE__, :unauthorized)
+          {:error, "Unauthorized: shell execution denied by facade"}
+
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, format_error(reason)}
+      end
+    end
+
+    # Delegate to facade authorize_and_execute when agent_id is in context,
+    # otherwise call raw execute (system-level callers).
+    defp call_shell(command, opts, context) do
+      if context[:facade_auth] do
+        Shell.authorize_and_execute(context[:agent_id], command, opts)
+      else
+        Shell.execute(command, opts)
       end
     end
 
@@ -271,7 +288,7 @@ defmodule Arbor.Actions.Shell do
           |> maybe_add_opt(:env, params[:env])
           |> maybe_add_context_opts(context)
 
-        case Shell.execute(command, opts) do
+        case call_shell(command, opts, context) do
           {:ok, result} ->
             Actions.emit_completed(__MODULE__, result)
 
@@ -284,6 +301,13 @@ defmodule Arbor.Actions.Shell do
                timed_out: result.timed_out
              }}
 
+          {:ok, :pending_approval, proposal_id} ->
+            {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+
+          {:error, :unauthorized} ->
+            Actions.emit_failed(__MODULE__, :unauthorized)
+            {:error, "Unauthorized: shell execution denied by facade"}
+
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
             {:error, format_error(reason)}
@@ -291,6 +315,15 @@ defmodule Arbor.Actions.Shell do
       after
         # Clean up the temporary script file
         File.rm(script_path)
+      end
+    end
+
+    # Delegate to facade authorize_and_execute when agent_id is in context
+    defp call_shell(command, opts, context) do
+      if context[:facade_auth] do
+        Shell.authorize_and_execute(context[:agent_id], command, opts)
+      else
+        Shell.execute(command, opts)
       end
     end
 
