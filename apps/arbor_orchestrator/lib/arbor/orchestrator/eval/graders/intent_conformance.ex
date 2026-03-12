@@ -212,7 +212,10 @@ defmodule Arbor.Orchestrator.Eval.Graders.IntentConformance do
         }
 
       {:error, _} ->
-        Logger.warning("[IntentConformance] Failed to parse judge JSON: #{String.slice(text, 0..200)}")
+        Logger.warning(
+          "[IntentConformance] Failed to parse judge JSON: #{String.slice(text, 0..200)}"
+        )
+
         %{score: 0.0, passed: false, detail: "JSON parse error: #{String.slice(text, 0..100)}"}
     end
   end
@@ -220,7 +223,9 @@ defmodule Arbor.Orchestrator.Eval.Graders.IntentConformance do
   defp extract_json(text) do
     # Try to find JSON in markdown fences first
     case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do
-      [_, json] -> String.trim(json)
+      [_, json] ->
+        String.trim(json)
+
       nil ->
         # Try to find bare JSON object
         case Regex.run(~r/(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})/s, text) do
