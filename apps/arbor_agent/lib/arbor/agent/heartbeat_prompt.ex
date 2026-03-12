@@ -11,6 +11,28 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   alias Arbor.Common.PromptSanitizer
   alias Arbor.Memory
 
+  # Skill loading helper — shared by system_prompt, directive_section, response_format_section.
+  defp load_skill(name, bindings \\ %{}) do
+    lib = Arbor.Common.SkillLibrary
+    renderer = Arbor.Common.TemplateRenderer
+
+    with true <- Code.ensure_loaded?(lib) and Process.whereis(lib) != nil,
+         {:ok, skill} <- lib.get(name),
+         body when body != "" <- Map.get(skill, :body, "") do
+      if Code.ensure_loaded?(renderer) and map_size(bindings) > 0 do
+        {:ok, renderer.render(body, bindings)}
+      else
+        {:ok, body}
+      end
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
   @prompt_sections [
     :timing,
     :cognitive,
@@ -83,13 +105,20 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   def system_prompt(state) do
     nonce = Map.get(state, :nonce)
 
-    preamble =
+    nonce_preamble =
       if nonce do
         "\n\n" <> PromptSanitizer.preamble(nonce) <> "\n"
       else
         ""
       end
 
+    case load_skill("heartbeat-system-prompt", %{"nonce_preamble" => nonce_preamble}) do
+      {:ok, body} -> body
+      _ -> fallback_system_prompt(nonce_preamble)
+    end
+  end
+
+  defp fallback_system_prompt(preamble) do
     """
     You are an autonomous AI agent running a heartbeat cycle. You have access to
     goals, recent action results, and conversational context.#{preamble}
@@ -517,23 +546,35 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp tool_description(_), do: "Action"
 
   defp directive_section(:goal_pursuit, _state) do
-    """
-    ## Your Turn
-    You have active goals. Focus on making concrete progress toward the highest
-    priority goal. Choose ONE external action that advances a goal, and report
-    your progress via goal_updates. Do not just think — act.
-    """
+    case load_skill("directive-goal-pursuit") do
+      {:ok, body} ->
+        body
+
+      _ ->
+        """
+        ## Your Turn
+        You have active goals. Focus on making concrete progress toward the highest
+        priority goal. Choose ONE external action that advances a goal, and report
+        your progress via goal_updates. Do not just think — act.
+        """
+    end
   end
 
   defp directive_section(:plan_execution, _state) do
-    """
-    ## Your Turn
-    You are in plan execution mode. Decompose the target goal above into
-    1-3 concrete intentions using the "decompositions" array. Each intention
-    must have an action type, params, reasoning, preconditions, and success_criteria.
-    If you can already identify a concrete action to take (e.g. file_read to
-    examine relevant source code), include it in the "actions" array.
-    """
+    case load_skill("directive-plan-execution") do
+      {:ok, body} ->
+        body
+
+      _ ->
+        """
+        ## Your Turn
+        You are in plan execution mode. Decompose the target goal above into
+        1-3 concrete intentions using the "decompositions" array. Each intention
+        must have an action type, params, reasoning, preconditions, and success_criteria.
+        If you can already identify a concrete action to take (e.g. file_read to
+        examine relevant source code), include it in the "actions" array.
+        """
+    end
   end
 
   defp directive_section(:conversation, _state), do: nil
@@ -544,26 +585,38 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
 
     if goals != [] do
-      """
-      ## Note
-      You are in a reflection/maintenance cycle, but you have active goals.
-      You may take an action if something urgent stands out, or focus on the
-      current mode's purpose and pursue goals next cycle.
-      """
+      case load_skill("directive-reflection") do
+        {:ok, body} ->
+          body
+
+        _ ->
+          """
+          ## Note
+          You are in a reflection/maintenance cycle, but you have active goals.
+          You may take an action if something urgent stands out, or focus on the
+          current mode's purpose and pursue goals next cycle.
+          """
+      end
     else
       nil
     end
   end
 
   defp response_format_section do
-    """
-    ## Response Format
-    Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
-    Required keys: "thinking", "actions", "memory_notes", "goal_updates".
-    Optional keys: "new_goals", "concerns", "curiosity", "proposal_decisions", "decompositions", "identity_insights".
-    If you have no active goals, use "new_goals" to create some.
-    In plan_execution mode, use "decompositions" to break goals into executable steps.
-    """
+    case load_skill("heartbeat-response-format") do
+      {:ok, body} ->
+        body
+
+      _ ->
+        """
+        ## Response Format
+        Respond with valid JSON only — no markdown wrapping, no explanation outside the JSON object.
+        Required keys: "thinking", "actions", "memory_notes", "goal_updates".
+        Optional keys: "new_goals", "concerns", "curiosity", "proposal_decisions", "decompositions", "identity_insights".
+        If you have no active goals, use "new_goals" to create some.
+        In plan_execution mode, use "decompositions" to break goals into executable steps.
+        """
+    end
   end
 
   defp self_knowledge_section(state) do

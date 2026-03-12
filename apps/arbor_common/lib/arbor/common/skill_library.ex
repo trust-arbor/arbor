@@ -375,7 +375,7 @@ defmodule Arbor.Common.SkillLibrary do
 
   defp scan_one_dir(resolved) when is_binary(resolved) do
     with true <- File.dir?(resolved),
-         {:ok, count} <- do_index(resolved, overwrite: true) do
+         {:ok, count} <- do_index(resolved, overwrite: false) do
       if count > 0, do: Logger.info("[SkillLibrary] Indexed #{count} skills from #{resolved}")
     else
       false ->

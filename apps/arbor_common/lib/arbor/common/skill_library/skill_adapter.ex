@@ -74,7 +74,9 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
         license: Map.get(fields, "license"),
         compatibility: Map.get(fields, "compatibility"),
         allowed_tools: parse_allowed_tools(Map.get(fields, "allowed-tools")),
-        content_hash: compute_content_hash(trimmed_body)
+        content_hash: compute_content_hash(trimmed_body),
+        version: Map.get(fields, "version"),
+        template_vars: parse_list(Map.get(fields, "template-vars", []))
       }
 
       build_skill(attrs)
@@ -188,7 +190,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
   defp parse_list(_), do: []
 
   # Known frontmatter fields that map to Skill struct fields.
-  @known_fields ~w(name description tags category license compatibility allowed-tools)
+  @known_fields ~w(name description tags category license compatibility allowed-tools version template-vars)
 
   # Extract any fields beyond the known set into metadata.
   defp extra_fields(fields) do

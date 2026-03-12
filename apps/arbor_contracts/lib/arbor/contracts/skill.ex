@@ -39,6 +39,8 @@ defmodule Arbor.Contracts.Skill do
     field(:content_hash, String.t() | nil)
     field(:provenance, map() | nil)
     field(:taint, atom(), default: :trusted)
+    field(:version, String.t() | nil)
+    field(:template_vars, [String.t()], default: [])
   end
 
   @doc """
@@ -75,7 +77,9 @@ defmodule Arbor.Contracts.Skill do
         allowed_tools: Map.get(attrs, :allowed_tools, []),
         content_hash: Map.get(attrs, :content_hash),
         provenance: Map.get(attrs, :provenance),
-        taint: Map.get(attrs, :taint, :trusted)
+        taint: Map.get(attrs, :taint, :trusted),
+        version: Map.get(attrs, :version),
+        template_vars: Map.get(attrs, :template_vars, [])
       }
 
       {:ok, skill}
