@@ -92,6 +92,11 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://consensus/force_approve",
     "arbor://consensus/force_reject",
 
+    # Comms facade
+    "arbor://comms/send",
+    "arbor://comms/poll",
+    "arbor://comms/channel",
+
     # Gateway MCP bridge
     "arbor://mcp/",
 
@@ -116,6 +121,17 @@ defmodule Arbor.Security.UriRegistry do
     # Network operations
     "arbor://net/http",
     "arbor://net/search",
+
+    # Monitor facade
+    "arbor://monitor/read",
+    "arbor://monitor/remediate",
+
+    # Trust facade
+    "arbor://trust/read",
+    "arbor://trust/write",
+
+    # Agent identity
+    "arbor://agent/identity",
 
     # ACP handler
     "arbor://acp/tool",

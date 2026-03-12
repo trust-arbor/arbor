@@ -129,8 +129,9 @@ defmodule Arbor.Actions do
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
     clean_context = maybe_inject_taint_policy(clean_context)
 
-    action_name = action_module_to_name(action_module)
-    resource = "arbor://actions/execute/#{action_name}"
+    # Use canonical facade URI when available, fall back to action-level URI.
+    # Facade URIs are the authoritative check — action-level URIs are deprecated.
+    resource = canonical_uri_for(action_module, params)
 
     # Build auth opts — when a signed_request is present, enable identity
     # verification and resource binding. When absent, fall back to config
@@ -584,6 +585,45 @@ defmodule Arbor.Actions do
 
   defp truncate_value(value), do: value
 
+  @doc """
+  Authorize a facade-level operation when `:facade_auth` is active.
+
+  Used by action modules that don't have a dedicated facade with `authorize_and_*`
+  functions. Calls `Security.authorize/3` with the given canonical URI when
+  `context[:facade_auth]` is true. Passes through when facade auth is not active
+  (direct `run/2` calls from tests/system code).
+
+  ## Examples
+
+      with :ok <- Actions.authorize_facade_op(context, "arbor://comms/send") do
+        # proceed with operation
+      end
+  """
+  @spec authorize_facade_op(map(), String.t()) :: :ok | {:error, term()}
+  def authorize_facade_op(context, resource_uri) do
+    if context[:facade_auth] do
+      agent_id = context[:agent_id]
+
+      if agent_id && security_available?() do
+        case Arbor.Security.authorize(agent_id, resource_uri, %{}) do
+          {:ok, :authorized} -> :ok
+          {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+          {:error, reason} -> {:error, {:unauthorized, reason}}
+        end
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp security_available? do
+    Code.ensure_loaded?(Arbor.Security) and
+      function_exported?(Arbor.Security, :authorize, 3) and
+      Process.whereis(Arbor.Security.CapabilityStore) != nil
+  end
+
   # P0-1: Inject default taint policy from config when not already in context.
   # TaintEnforcement.check reads :taint_policy from context — this ensures
   # the configured default (e.g. :audit_only) is used instead of always :permissive.
@@ -618,5 +658,183 @@ defmodule Arbor.Actions do
     |> Enum.join(".")
     |> Macro.underscore()
     |> String.replace("/", ".")
+  end
+
+  # ===========================================================================
+  # Canonical URI mapping — facade-level URIs replace action-level URIs
+  # ===========================================================================
+
+  # Maps action modules to their canonical facade-level capability URIs.
+  # Actions not in this map fall back to the legacy `arbor://actions/execute/{name}` URI.
+  # Once all actions are mapped, the legacy fallback can be removed.
+  @canonical_uri_map %{
+    # Shell facade — arbor://shell/exec
+    Arbor.Actions.Shell.Execute => "arbor://shell/exec",
+    Arbor.Actions.Shell.ExecuteScript => "arbor://shell/exec",
+
+    # Git — routes through shell
+    Arbor.Actions.Git.Status => "arbor://shell/exec/git",
+    Arbor.Actions.Git.Diff => "arbor://shell/exec/git",
+    Arbor.Actions.Git.Commit => "arbor://shell/exec/git",
+    Arbor.Actions.Git.Log => "arbor://shell/exec/git",
+
+    # File facade — arbor://fs/{operation}
+    Arbor.Actions.File.Read => "arbor://fs/read",
+    Arbor.Actions.File.Write => "arbor://fs/write",
+    Arbor.Actions.File.Edit => "arbor://fs/write",
+    Arbor.Actions.File.List => "arbor://fs/list",
+    Arbor.Actions.File.Glob => "arbor://fs/read",
+    Arbor.Actions.File.Exists => "arbor://fs/read",
+    Arbor.Actions.File.Search => "arbor://fs/read",
+
+    # Historian facade — arbor://historian/query
+    Arbor.Actions.Historian.QueryEvents => "arbor://historian/query",
+    Arbor.Actions.Historian.CausalityTree => "arbor://historian/query",
+    Arbor.Actions.Historian.ReconstructState => "arbor://historian/query",
+    Arbor.Actions.Historian.TaintTrace => "arbor://historian/query",
+
+    # Sandbox facade — arbor://sandbox/{operation}
+    Arbor.Actions.Sandbox.Create => "arbor://sandbox/create",
+    Arbor.Actions.Sandbox.Destroy => "arbor://sandbox/destroy",
+
+    # Consensus facade — arbor://consensus/{operation}
+    Arbor.Actions.Consensus.Propose => "arbor://consensus/propose",
+    Arbor.Actions.Consensus.Ask => "arbor://consensus/ask",
+    Arbor.Actions.Consensus.Await => "arbor://consensus/ask",
+    Arbor.Actions.Consensus.Check => "arbor://consensus/ask",
+    Arbor.Actions.Consensus.Decide => "arbor://consensus/decide",
+    Arbor.Actions.Proposal.Submit => "arbor://consensus/propose",
+    Arbor.Actions.Proposal.Revise => "arbor://consensus/propose",
+
+    # Memory facade — arbor://memory/{operation}
+    Arbor.Actions.Memory.Remember => "arbor://memory/add_knowledge",
+    Arbor.Actions.Memory.Recall => "arbor://memory/recall",
+    Arbor.Actions.Memory.Connect => "arbor://memory/write",
+    Arbor.Actions.Memory.Reflect => "arbor://memory/read",
+    Arbor.Actions.Memory.Consolidate => "arbor://memory/write",
+    Arbor.Actions.Memory.Index => "arbor://memory/index",
+    Arbor.Actions.Memory.LoadWorking => "arbor://memory/read",
+    Arbor.Actions.Memory.SaveWorking => "arbor://memory/write",
+    Arbor.Actions.MemoryIdentity.AddInsight => "arbor://memory/write",
+    Arbor.Actions.MemoryIdentity.ReadSelf => "arbor://memory/read",
+    Arbor.Actions.MemoryIdentity.IntrospectMemory => "arbor://memory/read",
+    Arbor.Actions.MemoryCognitive.AdjustPreference => "arbor://memory/write",
+    Arbor.Actions.MemoryCognitive.PinMemory => "arbor://memory/write",
+    Arbor.Actions.MemoryCognitive.UnpinMemory => "arbor://memory/write",
+    Arbor.Actions.MemoryReview.ReviewQueue => "arbor://memory/read",
+    Arbor.Actions.MemoryReview.ReviewSuggestions => "arbor://memory/read",
+    Arbor.Actions.MemoryReview.AcceptSuggestion => "arbor://memory/write",
+    Arbor.Actions.MemoryReview.RejectSuggestion => "arbor://memory/write",
+    Arbor.Actions.MemoryCode.StoreCode => "arbor://memory/write",
+    Arbor.Actions.MemoryCode.ListCode => "arbor://memory/read",
+    Arbor.Actions.MemoryCode.DeleteCode => "arbor://memory/write",
+    Arbor.Actions.MemoryCode.ViewCode => "arbor://memory/read",
+
+    # AI facade — arbor://ai/generate
+    Arbor.Actions.AI.GenerateText => "arbor://ai/generate",
+    Arbor.Actions.AI.AnalyzeCode => "arbor://ai/generate",
+    Arbor.Actions.Judge.Evaluate => "arbor://ai/generate",
+    Arbor.Actions.Judge.Quick => "arbor://ai/generate",
+    Arbor.Actions.Council.Consult => "arbor://ai/generate",
+    Arbor.Actions.Council.ConsultOne => "arbor://ai/generate",
+
+    # Code facade — arbor://code/{operation}
+    Arbor.Actions.Code.CompileAndTest => "arbor://code/compile",
+    Arbor.Actions.Code.HotLoad => "arbor://code/hot_load",
+
+    # Comms facade — arbor://comms/{operation}
+    Arbor.Actions.Comms.SendMessage => "arbor://comms/send",
+    Arbor.Actions.Comms.PollMessages => "arbor://comms/poll",
+
+    # Channel facade — arbor://comms/channel/{operation}
+    Arbor.Actions.Channel.List => "arbor://comms/channel/list",
+    Arbor.Actions.Channel.Read => "arbor://comms/channel/read",
+    Arbor.Actions.Channel.Send => "arbor://comms/channel/send",
+    Arbor.Actions.Channel.Join => "arbor://comms/channel/join",
+    Arbor.Actions.Channel.Leave => "arbor://comms/channel/leave",
+    Arbor.Actions.Channel.Create => "arbor://comms/channel/create",
+    Arbor.Actions.Channel.Members => "arbor://comms/channel/read",
+    Arbor.Actions.Channel.Update => "arbor://comms/channel/write",
+    Arbor.Actions.Channel.Invite => "arbor://comms/channel/write",
+
+    # Monitor facade — arbor://monitor/{operation}
+    Arbor.Actions.Monitor.Read => "arbor://monitor/read",
+    Arbor.Actions.Monitor.ReadDiagnostics => "arbor://monitor/read",
+    Arbor.Actions.Monitor.ClaimAnomaly => "arbor://monitor/remediate",
+    Arbor.Actions.Monitor.CompleteAnomaly => "arbor://monitor/remediate",
+    Arbor.Actions.Monitor.SuppressFingerprint => "arbor://monitor/remediate",
+    Arbor.Actions.Monitor.ResetBaseline => "arbor://monitor/remediate",
+
+    # Remediation — arbor://monitor/remediate (dangerous operations)
+    Arbor.Actions.Remediation.KillProcess => "arbor://monitor/remediate",
+    Arbor.Actions.Remediation.StopSupervisor => "arbor://monitor/remediate",
+    Arbor.Actions.Remediation.RestartChild => "arbor://monitor/remediate",
+    Arbor.Actions.Remediation.ForceGC => "arbor://monitor/remediate",
+    Arbor.Actions.Remediation.DrainQueue => "arbor://monitor/remediate",
+
+    # Trust facade — arbor://trust/{operation}
+    Arbor.Actions.Trust.ReadProfile => "arbor://trust/read",
+    Arbor.Actions.Trust.ProposeProfile => "arbor://trust/write",
+    Arbor.Actions.Trust.ApplyProfile => "arbor://trust/write",
+    Arbor.Actions.Trust.ExplainMode => "arbor://trust/read",
+    Arbor.Actions.Trust.ListPresets => "arbor://trust/read",
+    Arbor.Actions.Trust.ListAgents => "arbor://trust/read",
+
+    # Network facade — arbor://net/{operation}
+    Arbor.Actions.Web.Browse => "arbor://net/http",
+    Arbor.Actions.Web.Search => "arbor://net/search",
+    Arbor.Actions.Web.Snapshot => "arbor://net/http",
+
+    # Identity — arbor://agent/identity
+    Arbor.Actions.Identity.RequestEndorsement => "arbor://agent/identity",
+    Arbor.Actions.Identity.SignPublicKey => "arbor://agent/identity",
+
+    # ACP — arbor://acp/tool
+    Arbor.Actions.Acp.StartSession => "arbor://acp/tool",
+    Arbor.Actions.Acp.SendMessage => "arbor://acp/tool",
+    Arbor.Actions.Acp.SessionStatus => "arbor://acp/tool",
+    Arbor.Actions.Acp.CloseSession => "arbor://acp/tool",
+
+    # Background checks — routes through shell
+    Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",
+
+    # Pipeline — arbor://orchestrator/execute
+    Arbor.Actions.Pipeline.Run => "arbor://orchestrator/execute",
+    Arbor.Actions.Pipeline.Validate => "arbor://orchestrator/execute",
+
+    # Persistence/relationship — arbor://persistence/{operation}
+    Arbor.Actions.Relationship.Get => "arbor://persistence/read",
+    Arbor.Actions.Relationship.Save => "arbor://persistence/write",
+    Arbor.Actions.Relationship.Moment => "arbor://persistence/write",
+    Arbor.Actions.Relationship.Browse => "arbor://persistence/read",
+    Arbor.Actions.Relationship.Summarize => "arbor://persistence/read",
+
+    # Docs — arbor://code/read
+    Arbor.Actions.Docs.Lookup => "arbor://code/read",
+
+    # Eval — arbor://code/compile (evaluation runs code)
+    Arbor.Actions.Eval.Check => "arbor://code/compile",
+    Arbor.Actions.Eval.ListRuns => "arbor://code/read",
+    Arbor.Actions.Eval.GetRun => "arbor://code/read",
+
+    # Skill — arbor://code/read (skill management)
+    Arbor.Actions.Skill.Search => "arbor://code/read",
+    Arbor.Actions.Skill.Activate => "arbor://code/write",
+    Arbor.Actions.Skill.Deactivate => "arbor://code/write",
+    Arbor.Actions.Skill.ListActive => "arbor://code/read",
+    Arbor.Actions.Skill.Import => "arbor://code/write",
+    Arbor.Actions.Skill.Compile => "arbor://code/compile"
+  }
+
+  defp canonical_uri_for(action_module, _params) do
+    case Map.get(@canonical_uri_map, action_module) do
+      nil ->
+        # Legacy fallback for unmapped actions (Session*, etc.)
+        action_name = action_module_to_name(action_module)
+        "arbor://actions/execute/#{action_name}"
+
+      uri ->
+        uri
+    end
   end
 end
