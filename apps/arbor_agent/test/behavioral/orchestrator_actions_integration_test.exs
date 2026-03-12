@@ -9,29 +9,49 @@ defmodule Arbor.Behavioral.OrchestratorActionsIntegrationTest do
 
   @moduletag :integration
 
-  alias Arbor.Orchestrator.Engine.Context
-  alias Arbor.Orchestrator.Graph
-  alias Arbor.Orchestrator.Graph.Node
-  alias Arbor.Orchestrator.Middleware.{Chain, Token}
+  # Note: We can't use struct syntax for orchestrator modules here because
+  # arbor_agent doesn't have arbor_orchestrator as a compile-time dependency.
+  # Use plain maps with __struct__ keys instead.
 
   defp make_token(attrs, assigns \\ %{}) do
-    node = %Node{id: "integration_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
-    context = %Context{values: %{}}
-    graph = %Graph{nodes: %{"integration_node" => node}, edges: [], attrs: %{}}
-    %Token{node: node, context: context, graph: graph, assigns: assigns}
+    node = %{
+      __struct__: Arbor.Orchestrator.Graph.Node,
+      id: "integration_node",
+      attrs: Map.merge(%{"type" => "compute"}, attrs)
+    }
+
+    context = %{__struct__: Arbor.Orchestrator.Engine.Context, values: %{}}
+
+    graph = %{
+      __struct__: Arbor.Orchestrator.Graph,
+      nodes: %{"integration_node" => node},
+      edges: [],
+      attrs: %{}
+    }
+
+    %{
+      __struct__: Arbor.Orchestrator.Middleware.Token,
+      node: node,
+      context: context,
+      graph: graph,
+      assigns: assigns,
+      halted: false,
+      halt_reason: nil,
+      outcome: nil
+    }
   end
 
   describe "middleware chain construction" do
     test "default mandatory chain is available" do
-      chain = Chain.default_mandatory_chain()
+      chain = Arbor.Orchestrator.Middleware.Chain.default_mandatory_chain()
       assert is_list(chain)
       assert length(chain) > 0
     end
 
     test "chain build includes mandatory middleware" do
-      graph = %Graph{nodes: %{}, edges: [], attrs: %{}}
-      node = %Node{id: "test", attrs: %{}}
-      chain = Chain.build([], graph, node)
+      graph = %{__struct__: Arbor.Orchestrator.Graph, nodes: %{}, edges: [], attrs: %{}}
+      node = %{__struct__: Arbor.Orchestrator.Graph.Node, id: "test", attrs: %{}}
+      chain = Arbor.Orchestrator.Middleware.Chain.build([], graph, node)
       assert is_list(chain)
     end
   end
@@ -39,7 +59,7 @@ defmodule Arbor.Behavioral.OrchestratorActionsIntegrationTest do
   describe "middleware pipeline execution" do
     test "token passes through full mandatory chain without halting" do
       token = make_token(%{}, %{skip_capability_check: true, skip_taint_check: true})
-      chain = Chain.default_mandatory_chain()
+      chain = Arbor.Orchestrator.Middleware.Chain.default_mandatory_chain()
 
       final_token =
         Enum.reduce_while(chain, token, fn middleware, tok ->
@@ -53,7 +73,7 @@ defmodule Arbor.Behavioral.OrchestratorActionsIntegrationTest do
     test "capability check responds to agent_id in assigns", %{agent_id: agent_id} do
       token = make_token(%{"type" => "shell"}, %{agent_id: agent_id})
       result = Arbor.Orchestrator.Middleware.CapabilityCheck.before_node(token)
-      assert is_struct(result, Token)
+      assert is_struct(result, Arbor.Orchestrator.Middleware.Token)
     end
 
     test "safe input blocks path traversal in pipeline context" do

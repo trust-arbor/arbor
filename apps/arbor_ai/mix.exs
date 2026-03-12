@@ -35,7 +35,7 @@ defmodule ArborAi.MixProject do
       # jido_ai and req_llm versions pinned in root mix.exs
       {:jido_ai, "~> 2.0.0-rc.0", override: true},
       {:req_llm, "~> 1.6", override: true},
-      {:ex_mcp, git: "https://github.com/azmaveth/ex_mcp.git", ref: "06d15d4", override: true},
+      {:ex_mcp, "~> 0.8.0", override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end

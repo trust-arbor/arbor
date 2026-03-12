@@ -1,6 +1,10 @@
 # Ensure the arbor_signals application is started
 Application.ensure_all_started(:arbor_signals)
 
+# Use MockCrypto since Arbor.Security.Crypto is not available
+# (arbor_signals and arbor_security are at the same hierarchy level)
+Application.put_env(:arbor_signals, :crypto_module, Arbor.Signals.Test.MockCrypto)
+
 # Add children to the supervisor (start_children: false leaves it empty in test config)
 children = [
   {Arbor.Signals.Store, []},

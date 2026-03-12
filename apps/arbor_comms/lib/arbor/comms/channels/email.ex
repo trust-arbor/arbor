@@ -58,7 +58,7 @@ defmodule Arbor.Comms.Channels.Email do
   @impl Arbor.Contracts.Comms.ChannelSender
   def send_message(recipient, message, opts \\ []) do
     subject = Keyword.get(opts, :subject, "Arbor Notification")
-    from = Keyword.get(opts, :from, config(:from))
+    from = Keyword.get(opts, :from, config(:from)) || "noreply@arbor.local"
     attachments = Keyword.get(opts, :attachments, [])
     formatted = do_format(message)
 

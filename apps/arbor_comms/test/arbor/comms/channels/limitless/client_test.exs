@@ -113,7 +113,7 @@ defmodule Arbor.Comms.Channels.Limitless.ClientTest do
   end
 
   describe "test_connection/0" do
-    @describetag :integration
+    @describetag :external
 
     test "connects to Limitless API" do
       result = Client.test_connection()

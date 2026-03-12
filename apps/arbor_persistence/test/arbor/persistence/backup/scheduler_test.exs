@@ -8,16 +8,24 @@ defmodule Arbor.Persistence.Backup.SchedulerTest do
   describe "init/1" do
     setup do
       # Stop any existing scheduler
-      if Process.whereis(Scheduler) do
-        GenServer.stop(Scheduler)
+      if pid = Process.whereis(Scheduler) do
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end
 
       # Clear any existing config
       Application.delete_env(:arbor_persistence, :backup)
 
       on_exit(fn ->
-        if Process.whereis(Scheduler) do
-          GenServer.stop(Scheduler)
+        if pid = Process.whereis(Scheduler) do
+          try do
+            GenServer.stop(pid)
+          catch
+            :exit, _ -> :ok
+          end
         end
 
         Application.delete_env(:arbor_persistence, :backup)

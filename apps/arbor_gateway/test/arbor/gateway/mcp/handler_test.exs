@@ -94,6 +94,10 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   # ===========================================================================
 
   describe "arbor_actions" do
+    # These tests require Arbor.Actions to be loaded (cross-app dependency).
+    # They pass from umbrella root but not from gateway app in isolation.
+    @describetag :integration
+
     test "lists all categories with no filter", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{}, state)
@@ -126,6 +130,9 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   # ===========================================================================
 
   describe "arbor_help" do
+    # These tests require Arbor.Actions to be loaded (cross-app dependency).
+    @describetag :integration
+
     test "returns schema for known action", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_help", %{"action" => "shell_execute"}, state)
