@@ -1,7 +1,6 @@
 defmodule Arbor.Dashboard.Live.EvalLiveTest do
   use Arbor.Dashboard.ConnCase, async: true
 
-  @tag :fast
   describe "EvalLive mount" do
     @tag :fast
     test "renders eval dashboard header", %{conn: conn} do
@@ -54,7 +53,6 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     end
   end
 
-  @tag :fast
   describe "EvalLive tab navigation" do
     @tag :fast
     test "change-tab to models switches tab", %{conn: conn} do
@@ -77,7 +75,6 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     end
   end
 
-  @tag :fast
   describe "EvalLive filter events" do
     @tag :fast
     test "filter-change with domain updates filters", %{conn: conn} do
@@ -116,7 +113,6 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     end
   end
 
-  @tag :fast
   describe "EvalLive run navigation" do
     @tag :fast
     test "select-run with non-existent id does not crash", %{conn: conn} do
@@ -135,7 +131,6 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     end
   end
 
-  @tag :fast
   describe "EvalLive result toggle" do
     @tag :fast
     test "toggle-result with an id does not crash", %{conn: conn} do
@@ -146,7 +141,6 @@ defmodule Arbor.Dashboard.Live.EvalLiveTest do
     end
   end
 
-  @tag :fast
   describe "EvalLive refresh" do
     @tag :fast
     test "refresh event reloads data", %{conn: conn} do

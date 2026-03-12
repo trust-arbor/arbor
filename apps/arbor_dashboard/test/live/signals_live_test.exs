@@ -1,7 +1,6 @@
 defmodule Arbor.Dashboard.Live.SignalsLiveTest do
   use Arbor.Dashboard.ConnCase, async: true
 
-  @tag :fast
   describe "SignalsLive mount" do
     @tag :fast
     test "renders signal dashboard header", %{conn: conn} do
@@ -43,7 +42,6 @@ defmodule Arbor.Dashboard.Live.SignalsLiveTest do
     end
   end
 
-  @tag :fast
   describe "SignalsLive toggle-pause event" do
     @tag :fast
     test "toggle pause changes button text", %{conn: conn} do
@@ -70,7 +68,6 @@ defmodule Arbor.Dashboard.Live.SignalsLiveTest do
     end
   end
 
-  @tag :fast
   describe "SignalsLive filter events" do
     @tag :fast
     test "toggle-filter-dropdown opens dropdown", %{conn: conn} do
@@ -117,7 +114,6 @@ defmodule Arbor.Dashboard.Live.SignalsLiveTest do
     end
   end
 
-  @tag :fast
   describe "SignalsLive signal detail events" do
     @tag :fast
     test "select-signal with non-existent id does not crash", %{conn: conn} do
