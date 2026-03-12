@@ -115,12 +115,19 @@ defmodule Arbor.Actions.Historian do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(params, _context) do
+    def run(params, context) do
       Actions.emit_started(__MODULE__, sanitize_params(params))
 
       opts = build_opts(params)
 
-      case Arbor.Historian.query(opts) do
+      result =
+        if context[:facade_auth] do
+          Arbor.Historian.authorize_query(context[:agent_id], opts)
+        else
+          Arbor.Historian.query(opts)
+        end
+
+      case result do
         {:ok, events} ->
           result = %{
             events: events,
@@ -129,6 +136,13 @@ defmodule Arbor.Actions.Historian do
 
           Actions.emit_completed(__MODULE__, %{count: length(events)})
           {:ok, result}
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+
+        {:error, {:unauthorized, _} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)

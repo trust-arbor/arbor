@@ -45,7 +45,7 @@ defmodule Arbor.Actions.Consensus do
       ]
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       description = params[:description] || params["description"]
 
       unless description && description != "" do
@@ -53,14 +53,23 @@ defmodule Arbor.Actions.Consensus do
       end
 
       agent_id = params[:agent_id] || params["agent_id"] || "orchestrator"
+      caller_id = context[:agent_id]
       opts = build_opts(params)
+      attrs = %{description: description, proposer_id: agent_id}
 
-      case Arbor.Consensus.propose(
-             %{description: description, proposer_id: agent_id},
-             opts
-           ) do
+      result =
+        if context[:facade_auth] do
+          Arbor.Consensus.authorize_propose(caller_id || agent_id, attrs, opts)
+        else
+          Arbor.Consensus.propose(attrs, opts)
+        end
+
+      case result do
         {:ok, proposal_id} ->
           {:ok, %{proposal_id: to_string(proposal_id), status: "submitted"}}
+
+        {:error, {:unauthorized, _} = reason} ->
+          {:error, "consensus.propose unauthorized: #{inspect(reason)}"}
 
         {:error, reason} ->
           {:error, "consensus.propose failed: #{inspect(reason)}"}
@@ -122,16 +131,24 @@ defmodule Arbor.Actions.Consensus do
       ]
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       question = params[:question] || params["question"]
 
       unless question && question != "" do
         raise ArgumentError, "question is required"
       end
 
+      caller_id = context[:agent_id]
       opts = build_opts(params)
 
-      case Arbor.Consensus.ask(question, opts) do
+      result =
+        if context[:facade_auth] do
+          Arbor.Consensus.authorize_ask(caller_id, question, opts)
+        else
+          Arbor.Consensus.ask(question, opts)
+        end
+
+      case result do
         {:ok, decision} ->
           {:ok,
            %{
@@ -139,6 +156,9 @@ defmodule Arbor.Actions.Consensus do
              recommendation: extract_recommendation(decision),
              status: "decided"
            }}
+
+        {:error, {:unauthorized, _} = reason} ->
+          {:error, "consensus.ask unauthorized: #{inspect(reason)}"}
 
         {:error, reason} ->
           {:error, "consensus.ask failed: #{inspect(reason)}"}

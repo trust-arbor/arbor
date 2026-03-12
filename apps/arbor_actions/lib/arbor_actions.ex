@@ -120,6 +120,11 @@ defmodule Arbor.Actions do
     # Ensure agent_id is available in context for actions that need it
     clean_context = Map.put_new(clean_context, :agent_id, agent_id)
 
+    # Signal to action modules that facade-level auth should be enforced.
+    # Actions check this flag to delegate auth to the facade's authorize_and_*
+    # functions instead of relying on the action-level URI check above.
+    clean_context = Map.put_new(clean_context, :facade_auth, true)
+
     # P0-1: Inject default taint policy from config if not already set in context.
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
     clean_context = maybe_inject_taint_policy(clean_context)

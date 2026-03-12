@@ -112,11 +112,11 @@ defmodule Arbor.Actions.Sandbox do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{agent_id: agent_id} = params, _context) do
+    def run(%{agent_id: agent_id} = params, context) do
       Actions.emit_started(__MODULE__, %{agent_id: agent_id})
 
       with {:ok, opts} <- build_opts(params),
-           {:ok, sandbox} <- Arbor.Sandbox.create(agent_id, opts) do
+           {:ok, sandbox} <- call_create(agent_id, opts, context) do
         result = %{
           sandbox_id: sandbox.id,
           agent_id: sandbox.agent_id,
@@ -176,6 +176,14 @@ defmodule Arbor.Actions.Sandbox do
         {:error,
          "Invalid sandbox level '#{inspect(level)}'. Valid levels: pure, limited, full, container"}
 
+    defp call_create(agent_id, opts, context) do
+      if context[:facade_auth] do
+        Arbor.Sandbox.authorize_create(context[:agent_id], agent_id, opts)
+      else
+        Arbor.Sandbox.create(agent_id, opts)
+      end
+    end
+
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
 
@@ -220,10 +228,17 @@ defmodule Arbor.Actions.Sandbox do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{sandbox_id: sandbox_id}, _context) do
+    def run(%{sandbox_id: sandbox_id}, context) do
       Actions.emit_started(__MODULE__, %{sandbox_id: sandbox_id})
 
-      case Arbor.Sandbox.destroy(sandbox_id) do
+      result =
+        if context[:facade_auth] do
+          Arbor.Sandbox.authorize_destroy(context[:agent_id], sandbox_id)
+        else
+          Arbor.Sandbox.destroy(sandbox_id)
+        end
+
+      case result do
         :ok ->
           result = %{
             sandbox_id: sandbox_id,
@@ -232,6 +247,13 @@ defmodule Arbor.Actions.Sandbox do
 
           Actions.emit_completed(__MODULE__, result)
           {:ok, result}
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+
+        {:error, {:unauthorized, _} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
