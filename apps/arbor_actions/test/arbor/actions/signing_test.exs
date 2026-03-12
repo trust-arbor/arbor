@@ -19,11 +19,11 @@ defmodule Arbor.Actions.SigningTest do
     # Register identity so Verifier can look up the public key
     :ok = Arbor.Security.register_identity(identity)
 
-    # Grant capability for file_read
+    # Grant capability for file read using canonical facade URI
     {:ok, _cap} =
       Arbor.Security.grant(
         principal: agent_id,
-        resource: "arbor://actions/execute/file.read"
+        resource: "arbor://fs/read"
       )
 
     on_exit(fn ->
@@ -42,7 +42,7 @@ defmodule Arbor.Actions.SigningTest do
 
   describe "authorize_and_execute with signed_request" do
     test "succeeds with valid signed request", %{identity: identity, agent_id: agent_id} do
-      resource = "arbor://actions/execute/file.read"
+      resource = "arbor://fs/read"
       {:ok, signed} = SignedRequest.sign(resource, agent_id, identity.private_key)
 
       # Pass signed_request in context — authorize_and_execute extracts it
@@ -94,10 +94,10 @@ defmodule Arbor.Actions.SigningTest do
     end
 
     test "fails with resource mismatch", %{identity: identity, agent_id: agent_id} do
-      # Sign for a different resource
+      # Sign for a different resource (shell instead of fs/read)
       {:ok, signed} =
         SignedRequest.sign(
-          "arbor://actions/execute/shell_execute",
+          "arbor://shell/exec",
           agent_id,
           identity.private_key
         )
@@ -112,7 +112,7 @@ defmodule Arbor.Actions.SigningTest do
           context
         )
 
-      # Resource mismatch: signed for shell_execute, executing file_read
+      # Resource mismatch: signed for shell/exec, executing fs/read
       assert {:error, :unauthorized} = result
     end
 
