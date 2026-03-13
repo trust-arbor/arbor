@@ -366,10 +366,14 @@ defmodule Arbor.Orchestrator.Session do
         ToolDisclosure.resolve_tools(
           config,
           trust_tier,
-          Map.get(state, :discovered_tools, MapSet.new())
+          Map.get(state, :discovered_tools, MapSet.new()),
+          agent_id: agent_id
         )
 
       ToolDisclosure.ensure_tool_capabilities(agent_id, resolved_tools)
+
+      # Subscribe to trust profile changes for reactive tool updates
+      safe_subscribe_profile_signals(agent_id)
 
       state =
         if start_heartbeat do
@@ -579,6 +583,38 @@ defmodule Arbor.Orchestrator.Session do
     else
       # Heartbeat task crashed — reset in_flight flag
       {:noreply, %{state | heartbeat_in_flight: false}}
+    end
+  end
+
+  # Handle trust profile change signals — rebuild tool visibility
+  def handle_info(
+        {:signal_received,
+         %{category: :trust, type: type, data: %{agent_id: signal_agent_id}}},
+        state
+      )
+      when type in [:profile_updated, :profile_changed] do
+    if signal_agent_id == state.agent_id do
+      alias Arbor.Orchestrator.Session.ToolDisclosure
+
+      # Rebuild tool list from updated profile
+      resolved_tools =
+        ToolDisclosure.resolve_tools(
+          state.config,
+          state.trust_tier,
+          state.discovered_tools,
+          agent_id: state.agent_id
+        )
+
+      # Revoke stale JIT-granted capabilities for this session
+      safe_revoke_session_capabilities(state.session_id)
+
+      Logger.debug(
+        "Session #{state.session_id}: rebuilt tools after profile change (#{length(resolved_tools)} tools)"
+      )
+
+      {:noreply, state}
+    else
+      {:noreply, state}
     end
   end
 
@@ -802,5 +838,31 @@ defmodule Arbor.Orchestrator.Session do
     end
 
     :ok
+  end
+
+  # Subscribe to trust profile change signals for reactive tool updates
+  defp safe_subscribe_profile_signals(agent_id) do
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :subscribe, 2) do
+      apply(Arbor.Signals, :subscribe, ["trust.profile_updated", %{agent_id: agent_id}])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Revoke session-scoped capabilities (cleanup after profile change or termination)
+  defp safe_revoke_session_capabilities(session_id) do
+    cap_store = Module.concat([:Arbor, :Security, :CapabilityStore])
+
+    if Code.ensure_loaded?(cap_store) and
+         function_exported?(cap_store, :revoke_by_session, 1) do
+      apply(cap_store, :revoke_by_session, [session_id])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
