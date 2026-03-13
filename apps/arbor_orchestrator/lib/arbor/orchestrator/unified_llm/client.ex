@@ -361,17 +361,23 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
               %{acc | text: acc.text <> to_string(chunk)}
 
             %StreamEvent{type: :tool_call, data: data} ->
-              part = ContentPart.tool_call(
-                data["id"] || "",
-                data["name"] || "",
-                decode_tool_args(data["arguments"])
-              )
+              part =
+                ContentPart.tool_call(
+                  data["id"] || "",
+                  data["name"] || "",
+                  decode_tool_args(data["arguments"])
+                )
+
               %{acc | tool_calls: acc.tool_calls ++ [part]}
 
             %StreamEvent{type: :finish, data: data} ->
               usage = Map.get(data, :usage, Map.get(data, "usage"))
-              %{acc | finish_reason: Map.get(data, :reason, Map.get(data, "reason", :stop)),
-                      usage: usage || acc.usage}
+
+              %{
+                acc
+                | finish_reason: Map.get(data, :reason, Map.get(data, "reason", :stop)),
+                  usage: usage || acc.usage
+              }
 
             %StreamEvent{type: :error, data: data} ->
               %{acc | warnings: acc.warnings ++ [inspect(data)]}
