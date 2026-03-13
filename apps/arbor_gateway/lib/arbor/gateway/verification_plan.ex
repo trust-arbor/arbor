@@ -124,7 +124,9 @@ defmodule Arbor.Gateway.VerificationPlan do
         "  [#{status}] #{r.check.description}#{detail}"
       end)
 
-    header = "Verification: #{passed}/#{total} passed#{if failed > 0, do: " (#{failed} failed)", else: ""}"
+    header =
+      "Verification: #{passed}/#{total} passed#{if failed > 0, do: " (#{failed} failed)", else: ""}"
+
     Enum.join([header | lines], "\n")
   end
 
@@ -142,12 +144,14 @@ defmodule Arbor.Gateway.VerificationPlan do
         [build_file_exists_check(criterion)]
 
       true ->
-        [%{
-          type: :custom,
-          description: criterion,
-          params: %{criterion: criterion},
-          source: :success_criteria
-        }]
+        [
+          %{
+            type: :custom,
+            description: criterion,
+            params: %{criterion: criterion},
+            source: :success_criteria
+          }
+        ]
     end
   end
 
@@ -155,23 +159,42 @@ defmodule Arbor.Gateway.VerificationPlan do
 
   defp constraint_to_checks(constraint) when is_binary(constraint) do
     # Look for "don't modify/change/touch <file>" patterns
-    case Regex.run(~r/(?:don'?t|do not|never)\s+(?:modify|change|touch|alter|edit)\s+(.+)/i, constraint) do
+    case Regex.run(
+           ~r/(?:don'?t|do not|never)\s+(?:modify|change|touch|alter|edit)\s+(.+)/i,
+           constraint
+         ) do
       [_, resource] ->
         path = extract_path(String.trim(resource))
 
         if path do
-          [%{
-            type: :file_unchanged,
-            description: "#{path} should not be modified",
-            params: %{path: path, snapshot_hash: snapshot_file(path)},
-            source: :constraint
-          }]
+          [
+            %{
+              type: :file_unchanged,
+              description: "#{path} should not be modified",
+              params: %{path: path, snapshot_hash: snapshot_file(path)},
+              source: :constraint
+            }
+          ]
         else
-          [%{type: :custom, description: constraint, params: %{constraint: constraint}, source: :constraint}]
+          [
+            %{
+              type: :custom,
+              description: constraint,
+              params: %{constraint: constraint},
+              source: :constraint
+            }
+          ]
         end
 
       _ ->
-        [%{type: :custom, description: constraint, params: %{constraint: constraint}, source: :constraint}]
+        [
+          %{
+            type: :custom,
+            description: constraint,
+            params: %{constraint: constraint},
+            source: :constraint
+          }
+        ]
     end
   end
 
@@ -181,12 +204,14 @@ defmodule Arbor.Gateway.VerificationPlan do
     path = extract_path(resource)
 
     if path && File.exists?(path) do
-      [%{
-        type: :file_exists,
-        description: "#{path} exists",
-        params: %{path: path},
-        source: :resource
-      }]
+      [
+        %{
+          type: :file_exists,
+          description: "#{path} exists",
+          params: %{path: path},
+          source: :resource
+        }
+      ]
     else
       []
     end
@@ -269,7 +294,11 @@ defmodule Arbor.Gateway.VerificationPlan do
     if url do
       # We don't actually make HTTP calls in the verification runner —
       # that's the agent's job. We just record what should be checked.
-      %{check: check, passed: true, detail: "HTTP check deferred: GET #{url} expecting #{expected}"}
+      %{
+        check: check,
+        passed: true,
+        detail: "HTTP check deferred: GET #{url} expecting #{expected}"
+      }
     else
       %{check: check, passed: true, detail: "No URL extracted — manual verification needed"}
     end
@@ -303,7 +332,9 @@ defmodule Arbor.Gateway.VerificationPlan do
   defp extract_path(text) do
     # Match file paths — relative or absolute
     case Regex.run(~r{(?:^|[\s"'`])([/.]?[\w./-]+\.[\w]+)}, text) do
-      [_, path] -> String.trim(path)
+      [_, path] ->
+        String.trim(path)
+
       _ ->
         # Try bare path without extension (e.g. "config/prod")
         case Regex.run(~r{(?:^|[\s"'`])([/.]?(?:[\w-]+/)+[\w.-]+)}, text) do

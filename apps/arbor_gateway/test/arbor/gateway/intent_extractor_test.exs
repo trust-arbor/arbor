@@ -41,13 +41,14 @@ defmodule Arbor.Gateway.IntentExtractorTest do
     # through the public interface with crafted inputs.
 
     test "handles clean JSON response" do
-      json = Jason.encode!(%{
-        "goal" => "Deploy app to staging",
-        "success_criteria" => ["HTTP 200 at /health", "DB migrations complete"],
-        "constraints" => ["Don't touch production"],
-        "resources" => ["config/staging.exs", "staging server"],
-        "risk_level" => "medium"
-      })
+      json =
+        Jason.encode!(%{
+          "goal" => "Deploy app to staging",
+          "success_criteria" => ["HTTP 200 at /health", "DB migrations complete"],
+          "constraints" => ["Don't touch production"],
+          "resources" => ["config/staging.exs", "staging server"],
+          "risk_level" => "medium"
+        })
 
       # Exercise parse through the internal pipeline by testing the shape
       assert {:ok, _} = Jason.decode(json)
@@ -67,10 +68,11 @@ defmodule Arbor.Gateway.IntentExtractorTest do
       """
 
       # Extract JSON from fences
-      json = case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?\s*```/s, text) do
-        [_, j] -> String.trim(j)
-        _ -> String.trim(text)
-      end
+      json =
+        case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?\s*```/s, text) do
+          [_, j] -> String.trim(j)
+          _ -> String.trim(text)
+        end
 
       assert {:ok, map} = Jason.decode(json)
       assert map["goal"] == "Test"
@@ -80,11 +82,12 @@ defmodule Arbor.Gateway.IntentExtractorTest do
   describe "model selection" do
     test "accepts explicit provider/model overrides" do
       # This won't succeed (no LLM running) but verifies opts are accepted
-      result = IntentExtractor.extract("test",
-        provider: :test_provider,
-        model: "test-model",
-        timeout: 5000
-      )
+      result =
+        IntentExtractor.extract("test",
+          provider: :test_provider,
+          model: "test-model",
+          timeout: 5000
+        )
 
       assert {:error, _} = result
     end
@@ -100,9 +103,10 @@ defmodule Arbor.Gateway.IntentExtractorTest do
       }
 
       # Should use sanitized prompt and local model
-      result = IntentExtractor.extract("deploy with -----BEGIN PRIVATE KEY-----",
-        classification: classification
-      )
+      result =
+        IntentExtractor.extract("deploy with -----BEGIN PRIVATE KEY-----",
+          classification: classification
+        )
 
       # Will fail because no LLM running, but should not crash
       assert {:error, _} = result

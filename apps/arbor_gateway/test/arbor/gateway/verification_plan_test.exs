@@ -112,7 +112,12 @@ defmodule Arbor.Gateway.VerificationPlanTest do
       # Use a file we know exists
       plan = %{
         checks: [
-          %{type: :file_exists, description: "mix.exs exists", params: %{path: "mix.exs"}, source: :resource}
+          %{
+            type: :file_exists,
+            description: "mix.exs exists",
+            params: %{path: "mix.exs"},
+            source: :resource
+          }
         ],
         rollback_hint: nil,
         risk_level: :low
@@ -126,7 +131,12 @@ defmodule Arbor.Gateway.VerificationPlanTest do
     test "file_exists fails for missing file" do
       plan = %{
         checks: [
-          %{type: :file_exists, description: "missing", params: %{path: "nonexistent_file_xyz.ex"}, source: :resource}
+          %{
+            type: :file_exists,
+            description: "missing",
+            params: %{path: "nonexistent_file_xyz.ex"},
+            source: :resource
+          }
         ],
         rollback_hint: nil,
         risk_level: :low
@@ -143,7 +153,12 @@ defmodule Arbor.Gateway.VerificationPlanTest do
 
       plan = %{
         checks: [
-          %{type: :file_unchanged, description: "mix.exs unchanged", params: %{path: path, snapshot_hash: hash}, source: :constraint}
+          %{
+            type: :file_unchanged,
+            description: "mix.exs unchanged",
+            params: %{path: path, snapshot_hash: hash},
+            source: :constraint
+          }
         ],
         rollback_hint: nil,
         risk_level: :low
@@ -156,7 +171,12 @@ defmodule Arbor.Gateway.VerificationPlanTest do
     test "http checks are deferred" do
       plan = %{
         checks: [
-          %{type: :http, description: "check health", params: %{url: "https://example.com", expected_status: 200}, source: :success_criteria}
+          %{
+            type: :http,
+            description: "check health",
+            params: %{url: "https://example.com", expected_status: 200},
+            source: :success_criteria
+          }
         ],
         rollback_hint: nil,
         risk_level: :low
