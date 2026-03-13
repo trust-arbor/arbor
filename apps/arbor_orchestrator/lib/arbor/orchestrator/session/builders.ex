@@ -402,16 +402,31 @@ defmodule Arbor.Orchestrator.Session.Builders do
   def emit_heartbeat_signal(_state, _result), do: :ok
 
   @doc false
-  def emit_signal(category, event, data) do
+  def emit_signal(category, event, data, tenant_context \\ nil) do
     if Code.ensure_loaded?(Arbor.Signals) and
          function_exported?(Arbor.Signals, :emit, 4) and
          Process.whereis(Arbor.Signals.Bus) != nil do
       agent_id = data[:agent_id]
       meta = if agent_id, do: %{agent_id: agent_id}, else: %{}
+
+      # Merge tenant context into signal metadata when present
+      meta = merge_tenant_metadata(meta, tenant_context)
+
       apply(Arbor.Signals, :emit, [category, event, data, [metadata: meta]])
     end
   rescue
     _ -> :ok
+  end
+
+  defp merge_tenant_metadata(meta, nil), do: meta
+
+  defp merge_tenant_metadata(meta, tenant_context) do
+    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) and
+         function_exported?(Arbor.Contracts.TenantContext, :to_signal_metadata, 1) do
+      Map.merge(meta, apply(Arbor.Contracts.TenantContext, :to_signal_metadata, [tenant_context]))
+    else
+      meta
+    end
   end
 
   # ── Checkpoint management ───────────────────────────────────────────

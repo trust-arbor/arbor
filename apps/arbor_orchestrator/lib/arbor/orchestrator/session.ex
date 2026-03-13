@@ -125,7 +125,9 @@ defmodule Arbor.Orchestrator.Session do
     # Signer function for identity verification (fn resource -> {:ok, signed_request})
     signer: nil,
     # Progressive tool disclosure: tools discovered via find_tools during session
-    discovered_tools: MapSet.new()
+    discovered_tools: MapSet.new(),
+    # Multi-user: identifies the acting principal (nil = single-user mode)
+    tenant_context: nil
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -304,6 +306,7 @@ defmodule Arbor.Orchestrator.Session do
     trace_id = Keyword.get(opts, :trace_id)
     checkpoint = Keyword.get(opts, :checkpoint)
     signer = Keyword.get(opts, :signer)
+    tenant_context = Keyword.get(opts, :tenant_context)
 
     # Verify trust_tier if a resolver is available (hierarchy constraint bridge).
     # Without a resolver, we trust the caller — but log a warning.
@@ -346,7 +349,8 @@ defmodule Arbor.Orchestrator.Session do
         session_config: session_config,
         session_state: session_state,
         behavior: behavior,
-        signer: signer
+        signer: signer,
+        tenant_context: tenant_context
       }
 
       # Restore from checkpoint if provided (crash recovery)
@@ -588,8 +592,7 @@ defmodule Arbor.Orchestrator.Session do
 
   # Handle trust profile change signals — rebuild tool visibility
   def handle_info(
-        {:signal_received,
-         %{category: :trust, type: type, data: %{agent_id: signal_agent_id}}},
+        {:signal_received, %{category: :trust, type: type, data: %{agent_id: signal_agent_id}}},
         state
       )
       when type in [:profile_updated, :profile_changed] do

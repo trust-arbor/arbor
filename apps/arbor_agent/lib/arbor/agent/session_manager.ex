@@ -219,7 +219,8 @@ defmodule Arbor.Agent.SessionManager do
       start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
       execution_mode: :session,
       signer: Keyword.get(opts, :signer),
-      config: llm_config
+      config: llm_config,
+      tenant_context: Keyword.get(opts, :tenant_context)
     ]
 
     # Add compactor config if context management is enabled
