@@ -445,7 +445,7 @@ defmodule Arbor.Security.CapabilityStore do
     # Check if capability's resource pattern matches the requested resource.
     # The action is encoded in the URI: arbor://{type}/{action}/{path}
     #
-    # Glob support: "arbor://fs/read/**" matches anything under arbor://fs/read/
+    # Glob support: "arbor://fs/read/**" matches "arbor://fs/read" and anything under it
     # Boundary-aware: "arbor://fs/read/home" does NOT match "arbor://fs/read/home_config"
     pattern = cap.resource_uri
 
@@ -454,10 +454,10 @@ defmodule Arbor.Security.CapabilityStore do
       pattern == resource_uri ->
         true
 
-      # Glob wildcard: "arbor://foo/**" matches "arbor://foo/bar" and "arbor://foo/bar/baz"
+      # Glob wildcard: "arbor://foo/**" matches "arbor://foo", "arbor://foo/bar", "arbor://foo/bar/baz"
       String.ends_with?(pattern, "/**") ->
-        prefix = String.trim_trailing(pattern, "**")
-        String.starts_with?(resource_uri, prefix)
+        prefix = String.trim_trailing(pattern, "/**")
+        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
 
       # Prefix + boundary separator
       true ->
