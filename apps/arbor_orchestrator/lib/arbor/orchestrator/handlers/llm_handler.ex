@@ -197,7 +197,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         if use_tools do
           call_llm_with_tools(client, request, node, context, on_stream, opts)
         else
-          call_llm_direct(client, request, call_opts)
+          call_llm_direct(client, request, call_opts, on_stream)
         end
 
       {:error, _} = error ->
@@ -354,10 +354,30 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  defp call_llm_direct(client, request, call_opts) do
+  defp call_llm_direct(client, request, call_opts, nil) do
     case Client.complete(client, request, call_opts) do
       {:ok, response} -> {:ok, response.text}
       {:error, _} = error -> error
+    end
+  end
+
+  defp call_llm_direct(client, request, call_opts, on_stream) do
+    case Client.stream(client, request, call_opts) do
+      {:ok, events} ->
+        events =
+          Stream.each(events, fn event -> on_stream.(event) end)
+
+        case Client.collect_stream(events) do
+          {:ok, response} -> {:ok, response.text}
+          {:error, _} = error -> error
+        end
+
+      {:error, {:stream_not_supported, _}} ->
+        # Fall back to non-streaming for providers that don't support it
+        call_llm_direct(client, request, call_opts, nil)
+
+      {:error, _} = error ->
+        error
     end
   end
 
