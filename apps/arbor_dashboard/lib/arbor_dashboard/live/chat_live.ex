@@ -106,6 +106,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
         selected_heartbeat_model: nil,
+        # Streaming text (real-time LLM output)
+        streaming_text: "",
         # Chat history pagination
         chat_history_cursor: nil,
         chat_has_more: false
@@ -270,7 +272,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           socket =
             socket
             |> stream_insert(:messages, user_msg)
-            |> assign(input: "", loading: true, error: nil)
+            |> assign(input: "", loading: true, error: nil, streaming_text: "")
 
           # Persist to chat history (agent_id is the string ID, not the PID)
           try do
@@ -455,7 +457,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       "[ChatLive] CLI response — thinking: #{thinking_label}, text_len: #{String.length(response.text || "")}"
     )
 
-    socket = process_query_response(socket, socket.assigns.agent, response)
+    socket = socket |> assign(streaming_text: "") |> process_query_response(socket.assigns.agent, response)
     {:noreply, socket}
   end
 
@@ -498,6 +500,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     socket =
       socket
+      |> assign(streaming_text: "")
       |> stream_insert(:messages, assistant_msg)
       |> assign(loading: false, query_count: socket.assigns.query_count + 1)
       |> add_tool_use_actions(tool_uses)

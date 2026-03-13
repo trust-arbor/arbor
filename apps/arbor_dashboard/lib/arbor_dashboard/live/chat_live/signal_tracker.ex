@@ -19,6 +19,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   """
   def process_signal(socket, signal) do
     socket
+    |> maybe_track_stream(signal)
     |> maybe_add_action(signal)
     |> maybe_track_heartbeat(signal)
     |> maybe_refresh_goals(signal)
@@ -26,6 +27,24 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
     |> maybe_track_identity(signal)
     |> maybe_track_cognitive(signal)
     |> maybe_track_code(signal)
+  end
+
+  # ── Stream Delta Tracking ──────────────────────────────────────────
+
+  defp maybe_track_stream(socket, signal) do
+    case signal.type do
+      :stream_delta ->
+        text = flex_get(signal.data, :text) || ""
+        current = socket.assigns[:streaming_text] || ""
+        assign(socket, streaming_text: current <> text)
+
+      :stream_finish ->
+        # Text stays visible until query_result replaces it
+        socket
+
+      _ ->
+        socket
+    end
   end
 
   # ── Identity Tracking ─────────────────────────────────────────────
