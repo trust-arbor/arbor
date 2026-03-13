@@ -82,6 +82,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           raw_finish_reason: (response.raw["choices"] || []) |> List.first() |> then(fn nil -> nil; c -> c["finish_reason"] end)
         })
 
+        if tool_calls == [] and response.finish_reason == :tool_calls do
+          require Logger
+          Logger.warning("[ToolLoop] finish_reason=tool_calls but no tool_call parts! content_parts=#{inspect(response.content_parts)} raw=#{inspect(response.raw, limit: 500)}")
+        end
+
         if response.finish_reason == :tool_calls and tool_calls != [] do
           # Execute each tool call
           {tool_results, state} =
@@ -99,6 +104,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
+
           # Final response — return with accumulated usage
           {:ok,
            %{
@@ -144,6 +150,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp execute_tools(tool_calls, state) do
+    require Logger
+
     results =
       Enum.map(tool_calls, fn tc ->
         args = normalize_args(tc.arguments)
@@ -167,6 +175,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
         result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
         duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        Logger.info("[ToolLoop] tool=#{tc.name} signed=#{signed_request != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms")
+        case result do
+          {:error, reason} -> Logger.warning("[ToolLoop] tool=#{tc.name} ERROR: #{inspect(reason)}")
+          {:ok, text} when is_binary(text) -> Logger.info("[ToolLoop] tool=#{tc.name} result_preview=#{String.slice(text, 0..200)}")
+          _ -> :ok
+        end
 
         emit_tool_loop_signal(:tool_call_completed, %{
           agent_id: state.agent_id,

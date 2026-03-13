@@ -248,6 +248,43 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       assert [%{name: "get_weather", id: "call_abc", arguments: %{"city" => "NYC"}}] = tool_parts
     end
 
+    test "parses tool calls when content key is absent from message" do
+      # Some OpenAI-compatible providers omit the "content" key entirely
+      # when the model only produces tool calls (no text)
+      response_body = %{
+        status: 200,
+        body: %{
+          "choices" => [
+            %{
+              "message" => %{
+                "role" => "assistant",
+                "tool_calls" => [
+                  %{
+                    "id" => "call_xyz",
+                    "type" => "function",
+                    "function" => %{
+                      "name" => "file_read",
+                      "arguments" => ~s({"path": "/tmp/test.txt"})
+                    }
+                  }
+                ]
+              },
+              "finish_reason" => "tool_calls"
+            }
+          ],
+          "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 10, "total_tokens" => 15}
+        },
+        headers: []
+      }
+
+      opts = mock_http(response_body)
+      {:ok, response} = OpenAICompatible.complete(request(), opts, @test_config)
+
+      assert response.finish_reason == :tool_calls
+      tool_parts = Enum.filter(response.content_parts, &(&1.kind == :tool_call))
+      assert [%{name: "file_read", id: "call_xyz"}] = tool_parts
+    end
+
     test "ignores reasoning_content without parse_message hook" do
       response_body = %{
         status: 200,
