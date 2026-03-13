@@ -119,7 +119,9 @@ defmodule Arbor.Common.SafePath do
          normalized_root <- normalize(allowed_root),
          full_path <- build_full_path(path, normalized_root),
          normalized <- normalize(full_path) do
-      if String.starts_with?(normalized, normalized_root <> "/") or normalized == normalized_root do
+      if normalized_root == "/" or
+           String.starts_with?(normalized, normalized_root <> "/") or
+           normalized == normalized_root do
         {:ok, normalized}
       else
         {:error, :path_traversal}
