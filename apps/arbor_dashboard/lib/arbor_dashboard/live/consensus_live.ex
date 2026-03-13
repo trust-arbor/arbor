@@ -18,6 +18,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   def mount(_params, _session, socket) do
     {proposals, decisions, stats, topics} = safe_load_all()
     consultations = safe_consultations()
+    pending_approvals = safe_pending_approvals()
 
     socket =
       socket
@@ -30,13 +31,18 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         selected_events: [],
         selected_consultation: nil,
         status_filter: :all,
-        tab: :proposals
+        tab: :proposals,
+        pending_approval_count: length(pending_approvals)
       )
       |> stream(:proposals, proposals)
       |> stream(:decisions, decisions)
       |> stream(:consultations, consultations)
+      |> stream(:pending_approvals, pending_approvals)
 
     socket = subscribe_signals(socket, "consensus.*", &reload_consensus/1)
+
+    # Ensure the dashboard user has consensus/admin capability for approve/deny
+    ensure_dashboard_approver_capability()
 
     {:ok, socket}
   end
@@ -44,12 +50,14 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   defp reload_consensus(socket) do
     {proposals, decisions, stats, topics} = safe_load_all()
     consultations = safe_consultations()
+    pending_approvals = safe_pending_approvals()
 
     socket
-    |> assign(stats: stats, topics: topics)
+    |> assign(stats: stats, topics: topics, pending_approval_count: length(pending_approvals))
     |> stream(:proposals, proposals, reset: true)
     |> stream(:decisions, decisions, reset: true)
     |> stream(:consultations, consultations, reset: true)
+    |> stream(:pending_approvals, pending_approvals, reset: true)
   end
 
   @impl true
@@ -111,11 +119,47 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     {:noreply, socket}
   end
 
+  def handle_event("approve-proposal", %{"id" => proposal_id}, socket) do
+    case safe_force_approve(proposal_id) do
+      :ok ->
+        socket = reload_consensus(socket)
+        {:noreply, put_flash(socket, :info, "Proposal approved: #{proposal_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("deny-proposal", %{"id" => proposal_id}, socket) do
+    case safe_force_reject(proposal_id) do
+      :ok ->
+        socket = reload_consensus(socket)
+        {:noreply, put_flash(socket, :info, "Proposal denied: #{proposal_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Deny failed: #{inspect(reason)}")}
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
     <.dashboard_header title="Consensus" subtitle="Council deliberation and decisions">
       <:actions>
+        <button
+          phx-click="select-tab"
+          phx-value-tab="approvals"
+          class={"aw-btn #{if @tab == :approvals, do: "aw-btn-primary", else: "aw-btn-default"}"}
+          style="position: relative;"
+        >
+          Approvals
+          <span
+            :if={@pending_approval_count > 0}
+            style="position: absolute; top: -6px; right: -6px; background: var(--aw-error, #e74c3c); color: white; border-radius: 50%; width: 20px; height: 20px; font-size: 0.75em; display: flex; align-items: center; justify-content: center;"
+          >
+            {@pending_approval_count}
+          </span>
+        </button>
         <button
           phx-click="select-tab"
           phx-value-tab="proposals"
@@ -141,11 +185,66 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     </.dashboard_header>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
+      <.stat_card value={@pending_approval_count} label="Pending approvals" color={if @pending_approval_count > 0, do: :error, else: :gray} />
       <.stat_card value={@stats.total_proposals} label="Total proposals" color={:blue} />
       <.stat_card value={@stats.active_councils} label="Active councils" color={:purple} />
       <.stat_card value={@stats.approved_count} label="Approved" color={:green} />
       <.stat_card value={@stats.rejected_count} label="Rejected" color={:error} />
       <.stat_card value={@stats.consultation_count} label="Consultations" color={:blue} />
+    </div>
+
+    <%!-- Approvals tab — pending authorization requests needing human action --%>
+    <div style={if @tab != :approvals, do: "display: none;"}>
+      <div id="approvals-stream" phx-update="stream" style="margin-top: 1rem;">
+        <div
+          :for={{dom_id, proposal} <- @streams.pending_approvals}
+          id={dom_id}
+          style="border: 1px solid var(--aw-border, #333); border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; background: var(--aw-bg-card, #1a1a2e);"
+        >
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
+            <div style="flex: 1;">
+              <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <.badge label="pending" color={:gray} />
+                <strong style="font-size: 0.95em;">{approval_resource(proposal)}</strong>
+              </div>
+              <p style="color: var(--aw-text-muted, #888); font-size: 0.85em; margin: 0;">
+                {proposal.description}
+              </p>
+              <div style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8em; color: var(--aw-text-muted, #666);">
+                <span>Agent: {proposal.proposer}</span>
+                <span>ID: <code>{String.slice(proposal.id, 0..15)}</code></span>
+                <span>{Helpers.format_relative_time(proposal.created_at)}</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 0.5rem; flex-shrink: 0;">
+              <button
+                phx-click="approve-proposal"
+                phx-value-id={proposal.id}
+                class="aw-btn"
+                style="background: var(--aw-green, #27ae60); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
+              >
+                Approve
+              </button>
+              <button
+                phx-click="deny-proposal"
+                phx-value-id={proposal.id}
+                class="aw-btn"
+                style="background: var(--aw-error, #e74c3c); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div :if={@pending_approval_count == 0} style="margin-top: 1rem;">
+        <.empty_state
+          icon="✅"
+          title="No pending approvals"
+          hint="When agents request tools requiring approval, they'll appear here for review."
+        />
+      </div>
     </div>
 
     <%!-- Use display:none instead of :if for stream containers — streams inside
@@ -563,6 +662,15 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     end
   end
 
+  # ── Approval helpers ────────────────────────────────────────────────
+
+  defp approval_resource(proposal) do
+    case Map.get(proposal, :metadata) do
+      %{resource_uri: uri} when is_binary(uri) -> uri
+      _ -> proposal.description
+    end
+  end
+
   # ── Safe API wrappers ───────────────────────────────────────────────
 
   defp safe_load_all do
@@ -686,5 +794,50 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     _ -> []
   catch
     :exit, _ -> []
+  end
+
+  defp safe_pending_approvals do
+    proposals = safe_proposals()
+
+    Enum.filter(proposals, fn p ->
+      p.status == :pending and
+        (p.topic == :authorization_request or
+           get_in(p.metadata, [:original_topic]) == :authorization_request)
+    end)
+  end
+
+  defp safe_force_approve(proposal_id) do
+    # Use "system" as approver; in production this would be the logged-in user
+    Arbor.Consensus.Coordinator.force_approve(proposal_id, "agent_dashboard_user")
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp safe_force_reject(proposal_id) do
+    Arbor.Consensus.Coordinator.force_reject(proposal_id, "agent_dashboard_user")
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  # Grant the dashboard user consensus/admin capability so force_approve/reject work.
+  # This runs once on mount; idempotent if already granted.
+  defp ensure_dashboard_approver_capability do
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :grant, 1) do
+      Arbor.Security.grant(
+        principal: "agent_dashboard_user",
+        resource: "arbor://consensus/admin",
+        constraints: %{},
+        metadata: %{source: :dashboard}
+      )
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
