@@ -175,7 +175,14 @@ defmodule Arbor.Actions.Skill do
         end
 
         Actions.emit_completed(__MODULE__, %{skill_name: skill_name, agent_id: agent_id})
-        {:ok, %{activated: true, name: skill_name, token_estimate: token_estimate}}
+        body = skill_field(skill, :body) || ""
+
+        {:ok, %{
+          activated: true,
+          name: skill_name,
+          token_estimate: token_estimate,
+          content: body
+        }}
       else
         {:lib, false} ->
           {:error, :skill_library_unavailable}
@@ -185,7 +192,15 @@ defmodule Arbor.Actions.Skill do
           {:error, :skill_not_found}
 
         {:error, :already_active} ->
-          {:ok, %{activated: false, name: skill_name, reason: "already active"}}
+          # Re-fetch skill to return content even when already active
+          body =
+            with {:ok, s} <- apply(lib, :get, [skill_name]) do
+              skill_field(s, :body) || ""
+            else
+              _ -> ""
+            end
+
+          {:ok, %{activated: false, name: skill_name, reason: "already active", content: body}}
 
         {:error, :max_skills_reached} ->
           Actions.emit_failed(__MODULE__, %{skill_name: skill_name, reason: :max_skills_reached})

@@ -165,7 +165,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           model: model,
           duration_ms: elapsed,
           response_length: resp_len,
-          response_preview: if(is_binary(response_text), do: String.slice(response_text, 0..200), else: nil),
+          response_preview:
+            if(is_binary(response_text), do: String.slice(response_text, 0..200), else: nil),
           use_tools: use_tools
         })
 
@@ -176,6 +177,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           |> Map.put("last_response", response_text)
           |> maybe_put_perspective_key(node.attrs, response_text)
           |> maybe_put_routing_decision()
+          |> maybe_put_discovered_tools()
 
         %Outcome{
           status: :success,
@@ -379,6 +381,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
     case ToolLoop.run(client, request, tool_loop_opts) do
       {:ok, result} ->
+        # Propagate discovered tool names via process dict so call_llm_and_respond
+        # can include them in context_updates for session persistence
+        if result[:discovered_tools] != nil and result[:discovered_tools] != [] do
+          Process.put(:__discovered_tool_names__, result[:discovered_tools])
+        end
+
         {:ok, result.text}
 
       {:error, {:max_turns_reached, turns, _}} ->
@@ -629,6 +637,22 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     case Process.delete(:__routing_decision__) do
       nil -> updates
       decision -> Map.put(updates, "__routing_decision__", decision)
+    end
+  end
+
+  # Propagate discovered tool names from find_tools calls into context
+  # so the Session can persist them across turns.
+  defp maybe_put_discovered_tools(updates) do
+    case Process.delete(:__discovered_tool_names__) do
+      nil ->
+        updates
+
+      names when is_list(names) and names != [] ->
+        existing = Map.get(updates, "session.discovered_tool_names", [])
+        Map.put(updates, "session.discovered_tool_names", existing ++ names)
+
+      _ ->
+        updates
     end
   end
 

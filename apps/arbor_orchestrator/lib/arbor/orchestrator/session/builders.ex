@@ -104,11 +104,23 @@ defmodule Arbor.Orchestrator.Session.Builders do
     |> maybe_put("session.llm_provider", config["llm_provider"] || config[:llm_provider])
     |> maybe_put("session.llm_model", config["llm_model"] || config[:llm_model])
     |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
-    |> maybe_put("session.tools", config["tools"] || config[:tools])
+    |> Map.put("session.tools", resolve_session_tools(state))
   end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Resolve the effective tool list for this session turn.
+  # Uses ToolDisclosure for progressive tool loading when no explicit tools are set.
+  defp resolve_session_tools(state) do
+    alias Arbor.Orchestrator.Session.ToolDisclosure
+
+    config = state.config || %{}
+    trust_tier = state.trust_tier || :new
+    discovered = Map.get(state, :discovered_tools, MapSet.new())
+
+    ToolDisclosure.resolve_tools(config, trust_tier, discovered)
+  end
 
   @doc false
   def build_engine_opts(state, initial_values) do
@@ -156,15 +168,26 @@ defmodule Arbor.Orchestrator.Session.Builders do
             f when is_function(f, 1) ->
               case f.("arbor://orchestrator/execute") do
                 {:ok, signed} ->
-                  [signed_request: signed, verify_identity: true, expected_resource: "arbor://orchestrator/execute"]
+                  [
+                    signed_request: signed,
+                    verify_identity: true,
+                    expected_resource: "arbor://orchestrator/execute"
+                  ]
+
                 _ ->
                   []
               end
+
             _ ->
               []
           end
 
-        case apply(security_mod, :authorize, [agent_id, "arbor://orchestrator/execute", :execute, auth_opts]) do
+        case apply(security_mod, :authorize, [
+               agent_id,
+               "arbor://orchestrator/execute",
+               :execute,
+               auth_opts
+             ]) do
           {:ok, :authorized} -> :ok
           {:error, reason} -> {:error, reason}
         end

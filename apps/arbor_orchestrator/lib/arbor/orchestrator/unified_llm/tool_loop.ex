@@ -53,7 +53,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       agent_id: agent_id,
       signer: signer,
       turn: 0,
-      total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
+      total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
+      discovered_tools: []
     })
   end
 
@@ -79,18 +80,30 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           text_preview: if(response.text, do: String.slice(response.text, 0..200), else: nil),
           content_parts_count: length(response.content_parts || []),
           content_parts_kinds: Enum.map(response.content_parts || [], & &1.kind),
-          raw_finish_reason: (response.raw["choices"] || []) |> List.first() |> then(fn nil -> nil; c -> c["finish_reason"] end)
+          raw_finish_reason:
+            (response.raw["choices"] || [])
+            |> List.first()
+            |> then(fn
+              nil -> nil
+              c -> c["finish_reason"]
+            end)
         })
 
         if tool_calls == [] and response.finish_reason == :tool_calls do
           require Logger
-          Logger.warning("[ToolLoop] finish_reason=tool_calls but no tool_call parts! content_parts=#{inspect(response.content_parts)} raw=#{inspect(response.raw, limit: 500)}")
+
+          Logger.warning(
+            "[ToolLoop] finish_reason=tool_calls but no tool_call parts! content_parts=#{inspect(response.content_parts)} raw=#{inspect(response.raw, limit: 500)}"
+          )
         end
 
         if response.finish_reason == :tool_calls and tool_calls != [] do
           # Execute each tool call
           {tool_results, state} =
             execute_tools(tool_calls, state)
+
+          # Check if find_tools was called — inject discovered tools
+          {state, new_tool_defs} = extract_discovered_tools(tool_results, state)
 
           # Build the assistant message with its tool calls
           assistant_msg = build_assistant_message(response)
@@ -100,12 +113,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
           # Append to conversation and continue
           updated_messages = request.messages ++ [assistant_msg | tool_msgs]
-          next_request = %{request | messages: updated_messages}
+
+          # Merge discovered tool definitions into request tools for next iteration
+          next_tools = merge_tool_definitions(request.tools, new_tool_defs)
+          next_request = %{request | messages: updated_messages, tools: next_tools}
 
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
-
-          # Final response — return with accumulated usage
+          # Final response — return with accumulated usage and discovered tools
           {:ok,
            %{
              text: response.text,
@@ -113,7 +128,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
              finish_reason: response.finish_reason,
              usage: state.total_usage,
              turns: state.turn + 1,
-             raw: response.raw
+             raw: response.raw,
+             discovered_tools: state.discovered_tools
            }}
         end
 
@@ -176,11 +192,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
         result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
         duration_ms = System.monotonic_time(:millisecond) - start_time
 
-        Logger.info("[ToolLoop] tool=#{tc.name} signed=#{signed_request != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms")
+        Logger.info(
+          "[ToolLoop] tool=#{tc.name} signed=#{signed_request != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
+        )
+
         case result do
-          {:error, reason} -> Logger.warning("[ToolLoop] tool=#{tc.name} ERROR: #{inspect(reason)}")
-          {:ok, text} when is_binary(text) -> Logger.info("[ToolLoop] tool=#{tc.name} result_preview=#{String.slice(text, 0..200)}")
-          _ -> :ok
+          {:error, reason} ->
+            Logger.warning("[ToolLoop] tool=#{tc.name} ERROR: #{inspect(reason)}")
+
+          {:ok, text} when is_binary(text) ->
+            Logger.info("[ToolLoop] tool=#{tc.name} result_preview=#{String.slice(text, 0..200)}")
+
+          _ ->
+            :ok
         end
 
         emit_tool_loop_signal(:tool_call_completed, %{
@@ -315,6 +339,55 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp truncate(other, _), do: inspect(other)
+
+  # ── Progressive Tool Discovery ───────────────────────────────────
+
+  # Extract discovered tool schemas from find_tools results and accumulate names
+  defp extract_discovered_tools(tool_results, state) do
+    {new_tool_defs, new_names} =
+      Enum.reduce(tool_results, {[], []}, fn {_id, name, result}, {defs, names} ->
+        if name == "find_tools" do
+          case result do
+            {:ok, json} when is_binary(json) ->
+              case Jason.decode(json) do
+                {:ok, %{"tools" => tools, "discovered_tool_names" => tool_names}}
+                when is_list(tools) ->
+                  {defs ++ tools, names ++ (tool_names || [])}
+
+                _ ->
+                  {defs, names}
+              end
+
+            _ ->
+              {defs, names}
+          end
+        else
+          {defs, names}
+        end
+      end)
+
+    state = %{state | discovered_tools: (state.discovered_tools || []) ++ new_names}
+    {state, new_tool_defs}
+  end
+
+  # Merge new tool definitions into existing tools, deduplicating by function name
+  defp merge_tool_definitions(existing, []), do: existing
+
+  defp merge_tool_definitions(existing, new_defs) do
+    existing_names =
+      MapSet.new(existing, fn
+        %{"function" => %{"name" => n}} -> n
+        _ -> nil
+      end)
+
+    unique_new =
+      Enum.reject(new_defs, fn
+        %{"function" => %{"name" => n}} -> MapSet.member?(existing_names, n)
+        _ -> true
+      end)
+
+    existing ++ unique_new
+  end
 
   # ── Signal Emission ──────────────────────────────────────────────
 
