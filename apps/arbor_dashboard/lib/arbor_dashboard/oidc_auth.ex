@@ -60,7 +60,11 @@ defmodule Arbor.Dashboard.OidcAuth do
             |> halt()
 
           agent_id ->
-            assign(conn, :current_agent_id, agent_id)
+            display_name = get_session(conn, "user_display_name")
+
+            conn
+            |> assign(:current_agent_id, agent_id)
+            |> assign(:current_user_display_name, display_name)
         end
     end
   end
@@ -126,11 +130,16 @@ defmodule Arbor.Dashboard.OidcAuth do
 
           return_to = get_session(conn, "return_to") || "/"
 
+          # Extract display name from OIDC claims (try common claim names)
+          display_name =
+            claims["name"] || claims["preferred_username"] || claims["email"] || identity.agent_id
+
           conn
           |> delete_session("oidc_state")
           |> delete_session("oidc_code_verifier")
           |> delete_session("return_to")
           |> put_session("agent_id", identity.agent_id)
+          |> put_session("user_display_name", display_name)
           |> redirect_to(return_to)
           |> halt()
         else

@@ -40,11 +40,15 @@ defmodule Arbor.Dashboard.Nav do
   def on_mount(:default, _params, session, socket) do
     current_view = socket.view
     agent_id = session["agent_id"]
+    display_name = session["user_display_name"]
 
     nav_items =
       Enum.map(@nav_entries, fn entry ->
         Map.put(entry, :active, entry.view == current_view)
       end)
+
+    # Build TenantContext for multi-user support (nil when no OIDC session)
+    tenant_context = build_tenant_context(agent_id, display_name)
 
     socket =
       socket
@@ -52,8 +56,19 @@ defmodule Arbor.Dashboard.Nav do
       |> assign(:nav_items, nav_items)
       |> assign(:node_info, node() |> to_string())
       |> assign(:current_agent_id, agent_id)
+      |> assign(:current_user_display_name, display_name)
+      |> assign(:tenant_context, tenant_context)
       |> assign(:authenticated?, agent_id != nil)
 
     {:cont, socket}
+  end
+
+  defp build_tenant_context(nil, _display_name), do: nil
+
+  defp build_tenant_context(agent_id, display_name) do
+    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
+      opts = if display_name, do: [display_name: display_name], else: []
+      apply(Arbor.Contracts.TenantContext, :new, [agent_id, opts])
+    end
   end
 end
