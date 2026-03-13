@@ -559,11 +559,16 @@ defmodule Arbor.Orchestrator.Session do
       |> Map.put(:heartbeat_in_flight, false)
       |> maybe_increment_errors()
 
-    Builders.emit_signal(:agent, :heartbeat_failed, %{
-      agent_id: state.agent_id,
-      session_id: state.session_id,
-      reason: inspect(reason)
-    })
+    Builders.emit_signal(
+      :agent,
+      :heartbeat_failed,
+      %{
+        agent_id: state.agent_id,
+        session_id: state.session_id,
+        reason: inspect(reason)
+      },
+      state.tenant_context
+    )
 
     {:noreply, new_state}
   end

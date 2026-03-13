@@ -105,6 +105,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     |> maybe_put("session.llm_model", config["llm_model"] || config[:llm_model])
     |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
     |> Map.put("session.tools", resolve_session_tools(state))
+    |> maybe_put("session.tenant_context", state.tenant_context)
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -351,16 +352,21 @@ defmodule Arbor.Orchestrator.Session.Builders do
     tool_calls = Map.get(result_ctx, "session.tool_calls", [])
     response = Map.get(result_ctx, "session.response", "")
 
-    emit_signal(:agent, :query_completed, %{
-      id: state.agent_id,
-      agent_id: state.agent_id,
-      session_id: state.session_id,
-      type: :session,
-      model: Map.get(result_ctx, "llm.model", "unknown"),
-      tool_calls_count: length(List.wrap(tool_calls)),
-      response_length: String.length(response),
-      turn_count: get_turn_count(state)
-    })
+    emit_signal(
+      :agent,
+      :query_completed,
+      %{
+        id: state.agent_id,
+        agent_id: state.agent_id,
+        session_id: state.session_id,
+        type: :session,
+        model: Map.get(result_ctx, "llm.model", "unknown"),
+        tool_calls_count: length(List.wrap(tool_calls)),
+        response_length: String.length(response),
+        turn_count: get_turn_count(state)
+      },
+      state.tenant_context
+    )
   end
 
   def emit_turn_signal(_state, _result), do: :ok
@@ -378,25 +384,30 @@ defmodule Arbor.Orchestrator.Session.Builders do
     decompositions = Map.get(result_ctx, "session.decompositions", [])
     proposal_decisions = Map.get(result_ctx, "session.proposal_decisions", [])
 
-    emit_signal(:agent, :heartbeat_complete, %{
-      agent_id: state.agent_id,
-      session_id: state.session_id,
-      cognitive_mode: cognitive_mode,
-      actions: List.wrap(actions),
-      llm_actions: length(List.wrap(actions)),
-      goal_updates_count: length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
-      memory_notes_count: length(List.wrap(memory_notes)),
-      memory_notes: List.wrap(memory_notes),
-      concerns: List.wrap(concerns),
-      curiosity: List.wrap(curiosity),
-      identity_insights: List.wrap(identity_insights),
-      decompositions: List.wrap(decompositions),
-      proposal_decisions: List.wrap(proposal_decisions),
-      goal_updates: List.wrap(goal_updates),
-      new_goals: List.wrap(new_goals),
-      agent_thinking: Map.get(result_ctx, "llm.content"),
-      completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
-    })
+    emit_signal(
+      :agent,
+      :heartbeat_complete,
+      %{
+        agent_id: state.agent_id,
+        session_id: state.session_id,
+        cognitive_mode: cognitive_mode,
+        actions: List.wrap(actions),
+        llm_actions: length(List.wrap(actions)),
+        goal_updates_count: length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
+        memory_notes_count: length(List.wrap(memory_notes)),
+        memory_notes: List.wrap(memory_notes),
+        concerns: List.wrap(concerns),
+        curiosity: List.wrap(curiosity),
+        identity_insights: List.wrap(identity_insights),
+        decompositions: List.wrap(decompositions),
+        proposal_decisions: List.wrap(proposal_decisions),
+        goal_updates: List.wrap(goal_updates),
+        new_goals: List.wrap(new_goals),
+        agent_thinking: Map.get(result_ctx, "llm.content"),
+        completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
+      },
+      state.tenant_context
+    )
   end
 
   def emit_heartbeat_signal(_state, _result), do: :ok
