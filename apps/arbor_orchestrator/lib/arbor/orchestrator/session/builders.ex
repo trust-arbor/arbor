@@ -127,11 +127,42 @@ defmodule Arbor.Orchestrator.Session.Builders do
       authorization: false
     ]
 
-    # Pass signer to engine so LlmHandler/ExecHandler can use it for tool calls
-    if state.signer do
-      Keyword.put(opts, :signer, state.signer)
-    else
-      opts
+    opts =
+      if state.signer do
+        Keyword.put(opts, :signer, state.signer)
+      else
+        opts
+      end
+
+    # Wire streaming callback — emits signals for each stream delta so the
+    # dashboard can show real-time LLM output
+    Keyword.put(opts, :on_stream, build_stream_callback(state))
+  end
+
+  defp build_stream_callback(state) do
+    agent_id = state.agent_id
+    session_id = state.session_id
+
+    fn event ->
+      case event do
+        %{type: :delta, data: data} ->
+          text = Map.get(data, :text) || Map.get(data, "text", "")
+
+          emit_signal(:agent, :stream_delta, %{
+            agent_id: agent_id,
+            session_id: session_id,
+            text: text
+          })
+
+        %{type: :finish} ->
+          emit_signal(:agent, :stream_finish, %{
+            agent_id: agent_id,
+            session_id: session_id
+          })
+
+        _ ->
+          :ok
+      end
     end
   end
 
