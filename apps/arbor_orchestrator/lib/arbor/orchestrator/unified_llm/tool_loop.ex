@@ -291,6 +291,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           {:ok, text} ->
             {@prompt_sanitizer.wrap(truncate(text, 30_000), nonce), false}
 
+          {:ok, :pending_approval, proposal_id} ->
+            {"Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
+               "Waiting for consensus decision.", false}
+
           {:error, reason} ->
             {"Error: #{reason}", true}
         end

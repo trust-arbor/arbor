@@ -98,7 +98,10 @@ defmodule Arbor.Security.Escalation do
       }
     }
 
-    case consensus_module.submit(proposal) do
+    # Submit as human_approval — skips automated council evaluation.
+    # The proposal stays :pending until force_approve/force_reject.
+    # ActionsExecutor.await_approval_and_retry blocks until resolved.
+    case consensus_module.submit(proposal, human_approval: true) do
       {:ok, proposal_id} ->
         {:ok, :pending_approval, proposal_id}
 

@@ -6,7 +6,7 @@ defmodule Arbor.Security.EscalationTest do
 
   # Mock consensus module for testing
   defmodule MockConsensus do
-    def submit(%{} = proposal) when is_map_key(proposal, :proposer) do
+    def submit(%{} = proposal, _opts \\ []) when is_map_key(proposal, :proposer) do
       {:ok, "proposal_#{:erlang.unique_integer([:positive])}"}
     end
 
@@ -14,7 +14,7 @@ defmodule Arbor.Security.EscalationTest do
   end
 
   defmodule FailingConsensus do
-    def submit(_), do: {:error, :test_failure}
+    def submit(_, _opts \\ []), do: {:error, :test_failure}
     def healthy?, do: true
   end
 
@@ -107,7 +107,7 @@ defmodule Arbor.Security.EscalationTest do
     test "creates proposal with correct structure", %{capability: cap} do
       # Use a module that captures the proposal
       defmodule CapturingConsensus do
-        def submit(proposal) do
+        def submit(proposal, _opts \\ []) do
           send(self(), {:proposal, proposal})
           {:ok, "proposal_123"}
         end

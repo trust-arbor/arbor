@@ -78,6 +78,16 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                  params,
                  context
                ]) do
+            {:ok, :pending_approval, proposal_id} ->
+              await_approval_and_retry(
+                proposal_id,
+                agent_id,
+                action_module,
+                params,
+                context,
+                name
+              )
+
             {:ok, result} ->
               {:ok, format_result(result)}
 
@@ -112,9 +122,158 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end) || %{}
   end
 
+  # Default timeout for synchronous approval waits (in milliseconds).
+  # When a tool call requires approval, the executor blocks for up to this
+  # duration waiting for consensus. Default: 60 seconds.
+  @approval_timeout_ms 60_000
+
   # ============================================================================
   # Private
   # ============================================================================
+
+  # Wait synchronously for approval, then retry execution on success.
+  # On denial or timeout, return an error message to the LLM.
+  defp await_approval_and_retry(proposal_id, agent_id, action_module, params, context, name) do
+    consensus_mod = Module.concat([:Arbor, :Consensus])
+
+    if Code.ensure_loaded?(consensus_mod) and
+         function_exported?(consensus_mod, :await, 2) do
+      timeout = approval_timeout()
+
+      Logger.info(
+        "[ActionsExecutor] Awaiting approval for #{name} (proposal: #{proposal_id}, timeout: #{timeout}ms)"
+      )
+
+      case apply(consensus_mod, :await, [proposal_id, [timeout: timeout]]) do
+        {:ok, decision} when is_map(decision) ->
+          handle_approval_decision(decision, agent_id, action_module, params, context, name)
+
+        {:ok, :approved} ->
+          # Simple approval atom (some paths return this)
+          retry_execution(agent_id, action_module, params, context, name)
+
+        {:error, :timeout} ->
+          Logger.info("[ActionsExecutor] Approval timed out for #{name} (proposal: #{proposal_id})")
+
+          {:error,
+           "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
+             "Proposal ID: #{proposal_id}. Ask the user to approve it and try again."}
+
+        {:error, reason} ->
+          Logger.info(
+            "[ActionsExecutor] Approval failed for #{name}: #{inspect(reason)} (proposal: #{proposal_id})"
+          )
+
+          {:error,
+           "Action #{name} requires approval. Proposal ID: #{proposal_id}. Status: #{inspect(reason)}"}
+      end
+    else
+      # Consensus not available — return pending info to LLM
+      {:error,
+       "Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
+         "The approval system is not available to wait synchronously."}
+    end
+  rescue
+    e ->
+      Logger.warning("[ActionsExecutor] await_approval_and_retry crashed: #{inspect(e)}")
+      {:error, "Action #{name} requires approval. Proposal ID: #{proposal_id}"}
+  catch
+    :exit, reason ->
+      Logger.warning("[ActionsExecutor] await_approval_and_retry exit: #{inspect(reason)}")
+      {:error, "Action #{name} requires approval. Proposal ID: #{proposal_id}"}
+  end
+
+  defp handle_approval_decision(decision, agent_id, action_module, params, context, name) do
+    status = Map.get(decision, :decision) || Map.get(decision, :status)
+
+    case status do
+      :approved ->
+        Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
+        retry_execution(agent_id, action_module, params, context, name)
+
+      :rejected ->
+        {:error,
+         "Action #{name} was denied by consensus. " <>
+           format_denial_reason(decision)}
+
+      :deadlock ->
+        {:error,
+         "Action #{name} approval resulted in deadlock (no consensus reached). " <>
+           "Ask the user to decide."}
+
+      other ->
+        {:error, "Action #{name} approval returned unexpected status: #{inspect(other)}"}
+    end
+  end
+
+  # Re-execute the action after approval. Grant a clean capability (no
+  # requires_approval constraint) so the retry doesn't trigger escalation again.
+  defp retry_execution(agent_id, action_module, params, context, name) do
+    # Grant a clean capability for this resource so retry succeeds
+    grant_approved_capability(agent_id, action_module, context)
+
+    case apply(@actions_mod, :authorize_and_execute, [
+           agent_id,
+           action_module,
+           params,
+           context
+         ]) do
+      {:ok, result} ->
+        {:ok, format_result(result)}
+
+      {:ok, :pending_approval, _proposal_id} ->
+        # Shouldn't happen after approval, but handle gracefully
+        {:error, "Action #{name} still requires approval after consensus granted it. This is a bug."}
+
+      {:error, reason} ->
+        {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp format_denial_reason(decision) do
+    concerns = Map.get(decision, :primary_concerns, [])
+
+    if concerns != [] do
+      "Concerns: #{Enum.join(concerns, "; ")}"
+    else
+      ""
+    end
+  end
+
+  defp approval_timeout do
+    Application.get_env(:arbor_orchestrator, :approval_timeout_ms, @approval_timeout_ms)
+  end
+
+  # Grant a clean capability (no requires_approval) after consensus approval.
+  # This ensures the retry won't trigger escalation again.
+  defp grant_approved_capability(agent_id, action_module, context) do
+    security_mod = Module.concat([:Arbor, :Security])
+
+    if Code.ensure_loaded?(security_mod) and function_exported?(security_mod, :grant, 1) do
+      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+
+      # Extract session_id from context if available
+      session_id =
+        Map.get(context, :session_id) ||
+          Map.get(context, "session_id")
+
+      grant_opts = [
+        principal: agent_id,
+        resource: resource,
+        constraints: %{},
+        metadata: %{source: :approval_granted}
+      ]
+
+      grant_opts =
+        if session_id, do: Keyword.put(grant_opts, :session_id, session_id), else: grant_opts
+
+      apply(security_mod, :grant, [grant_opts])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   # Resolve an action name via ActionRegistry (O(1) ETS lookup).
   defp resolve_via_registry(name) do

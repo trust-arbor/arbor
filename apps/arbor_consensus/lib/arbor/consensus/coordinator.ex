@@ -301,8 +301,14 @@ defmodule Arbor.Consensus.Coordinator do
          :ok <- check_invariants(proposal),
          :ok <- check_agent_quota_unless_advisory(state, proposal),
          :ok <- maybe_authorize(state.authorizer, proposal) do
+      # Human-approval proposals skip council evaluation — stay :pending
+      # until force_approve/force_reject. Used by Security.Escalation for
+      # tool approval flows where the agent blocks waiting for human action.
+      human_approval? = Keyword.get(opts, :human_approval, false)
+
       # Register proposal
-      proposal = Proposal.update_status(proposal, :evaluating)
+      initial_status = if human_approval?, do: :pending, else: :evaluating
+      proposal = Proposal.update_status(proposal, initial_status)
       fingerprint = compute_fingerprint(proposal)
 
       # Phase 5: Track routing stats for organic topic creation
@@ -324,54 +330,60 @@ defmodule Arbor.Consensus.Coordinator do
         agent_id: proposal.proposer,
         data: %{
           topic: proposal.topic,
-          description: proposal.description
+          description: proposal.description,
+          human_approval: human_approval?
         }
       })
 
-      # Get council configuration from TopicRegistry
-      {resolved_evaluators, resolved_quorum} = TopicRouting.resolve_council_config(proposal, state.config)
+      if human_approval? do
+        # No council — await force_approve/force_reject from human
+        {:reply, {:ok, proposal.id}, state}
+      else
+        # Get council configuration from TopicRegistry
+        {resolved_evaluators, resolved_quorum} = TopicRouting.resolve_council_config(proposal, state.config)
 
-      # Allow override via opts (for testing), otherwise use resolved evaluators
-      # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
-      evaluators =
-        case {Keyword.get(opts, :evaluators), Keyword.get(opts, :evaluator_backend)} do
-          {override, _} when override != nil -> override
-          {nil, backend} when backend != nil -> [backend]
-          {nil, nil} ->
-            # Use state.evaluator_backend if different from default, otherwise use resolved
-            if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
-              [state.evaluator_backend]
-            else
-              resolved_evaluators
-            end
-        end
+        # Allow override via opts (for testing), otherwise use resolved evaluators
+        # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
+        evaluators =
+          case {Keyword.get(opts, :evaluators), Keyword.get(opts, :evaluator_backend)} do
+            {override, _} when override != nil -> override
+            {nil, backend} when backend != nil -> [backend]
+            {nil, nil} ->
+              # Use state.evaluator_backend if different from default, otherwise use resolved
+              if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
+                [state.evaluator_backend]
+              else
+                resolved_evaluators
+              end
+          end
 
-      # Extract perspectives from evaluators
-      perspectives = Voting.resolve_perspectives_from_evaluators(evaluators)
+        # Extract perspectives from evaluators
+        perspectives = Voting.resolve_perspectives_from_evaluators(evaluators)
 
-      # Recalculate quorum based on actual perspectives available
-      # This prevents mismatches where resolved quorum exceeds available perspectives
-      quorum =
-        if proposal.mode == :advisory do
-          nil
-        else
-          council_size = length(perspectives)
-          # Use the minimum of resolved quorum or simple majority of actual perspectives
-          # This ensures quorum is achievable while respecting topic rules when possible
-          min(resolved_quorum, div(council_size, 2) + 1)
-        end
+        # Recalculate quorum based on actual perspectives available
+        # This prevents mismatches where resolved quorum exceeds available perspectives
+        quorum =
+          if proposal.mode == :advisory do
+            nil
+          else
+            council_size = length(perspectives)
+            # Use the minimum of resolved quorum or simple majority of actual perspectives
+            # This ensures quorum is achievable while respecting topic rules when possible
+            min(resolved_quorum, div(council_size, 2) + 1)
+          end
 
-      # Emit evaluation started event
-      EventEmitter.evaluation_started(
-        proposal.id,
-        perspectives,
-        length(perspectives),
-        quorum
-      )
+        # Emit evaluation started event
+        EventEmitter.evaluation_started(
+          proposal.id,
+          perspectives,
+          length(perspectives),
+          quorum
+        )
 
-      state = Voting.spawn_council(state, proposal, evaluators, quorum)
+        state = Voting.spawn_council(state, proposal, evaluators, quorum)
 
-      {:reply, {:ok, proposal.id}, state}
+        {:reply, {:ok, proposal.id}, state}
+      end
     else
       {:error, _} = error ->
         {:reply, error, state}
@@ -480,9 +492,19 @@ defmodule Arbor.Consensus.Coordinator do
       state = kill_active_council(state, proposal_id)
       proposal = Proposal.update_status(proposal, :approved)
 
+      decision = %{
+        decision: :approved,
+        status: :approved,
+        proposal_id: proposal_id,
+        override: true,
+        approver: approver_id,
+        decided_at: DateTime.utc_now()
+      }
+
       state = %{
         state
         | proposals: Map.put(state.proposals, proposal_id, proposal),
+          decisions: Map.put(state.decisions, proposal_id, decision),
           proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
       }
 
@@ -492,6 +514,9 @@ defmodule Arbor.Consensus.Coordinator do
         decision: :approved,
         data: %{override: true, approver: approver_id}
       })
+
+      # Notify any processes waiting via await/2
+      state = notify_force_waiters(state, proposal_id, decision)
 
       # Execute if configured
       state = Voting.maybe_execute(state, proposal, nil)
@@ -511,9 +536,19 @@ defmodule Arbor.Consensus.Coordinator do
       state = kill_active_council(state, proposal_id)
       proposal = Proposal.update_status(proposal, :rejected)
 
+      decision = %{
+        decision: :rejected,
+        status: :rejected,
+        proposal_id: proposal_id,
+        override: true,
+        rejector: rejector_id,
+        decided_at: DateTime.utc_now()
+      }
+
       state = %{
         state
         | proposals: Map.put(state.proposals, proposal_id, proposal),
+          decisions: Map.put(state.decisions, proposal_id, decision),
           proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
       }
 
@@ -523,6 +558,9 @@ defmodule Arbor.Consensus.Coordinator do
         decision: :rejected,
         data: %{override: true, rejector: rejector_id}
       })
+
+      # Notify any processes waiting via await/2
+      state = notify_force_waiters(state, proposal_id, decision)
 
       {:reply, :ok, state}
     else
@@ -891,6 +929,22 @@ defmodule Arbor.Consensus.Coordinator do
 
   defp update_waiters_for_proposal(state, proposal_id, new_waiters) do
     %{state | waiters: Map.put(state.waiters, proposal_id, new_waiters)}
+  end
+
+  # Notify waiters for force_approve/force_reject (mirrors Voting.notify_waiters)
+  defp notify_force_waiters(state, proposal_id, decision) do
+    case Map.get(state.waiters, proposal_id) do
+      nil ->
+        state
+
+      waiters ->
+        Enum.each(waiters, fn {pid, ref} ->
+          Process.demonitor(ref, [:flush])
+          send(pid, {:consensus_result, proposal_id, decision})
+        end)
+
+        %{state | waiters: Map.delete(state.waiters, proposal_id)}
+    end
   end
 
   # ============================================================================
