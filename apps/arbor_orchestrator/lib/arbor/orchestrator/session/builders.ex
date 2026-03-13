@@ -124,7 +124,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
       logs_root: logs_root,
       max_steps: 100,
       initial_values: initial_values,
-      authorization: false
+      authorization: true,
+      authorizer: build_authorizer(state)
     ]
 
     opts =
@@ -137,6 +138,41 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # Wire streaming callback — emits signals for each stream delta so the
     # dashboard can show real-time LLM output
     Keyword.put(opts, :on_stream, build_stream_callback(state))
+  end
+
+  defp build_authorizer(state) do
+    agent_id = state.agent_id
+    signer = state.signer
+
+    fn ^agent_id, _handler_type ->
+      # All engine handler types (compute, exec, transform, etc.) are gated by
+      # arbor://orchestrator/execute. The signer produces a fresh SignedRequest
+      # per check so nonce/timestamp are unique.
+      security_mod = Module.concat([:Arbor, :Security])
+
+      if Code.ensure_loaded?(security_mod) do
+        auth_opts =
+          case signer do
+            f when is_function(f, 1) ->
+              case f.("arbor://orchestrator/execute") do
+                {:ok, signed} ->
+                  [signed_request: signed, verify_identity: true, expected_resource: "arbor://orchestrator/execute"]
+                _ ->
+                  []
+              end
+            _ ->
+              []
+          end
+
+        case apply(security_mod, :authorize, [agent_id, "arbor://orchestrator/execute", :execute, auth_opts]) do
+          {:ok, :authorized} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        # Security module not available — allow (permissive fallback)
+        :ok
+      end
+    end
   end
 
   defp build_stream_callback(state) do
