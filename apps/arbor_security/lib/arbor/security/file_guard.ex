@@ -89,13 +89,21 @@ defmodule Arbor.Security.FileGuard do
   @spec authorize(String.t(), String.t(), operation()) :: authorize_result()
   def authorize(agent_id, requested_path, operation) when operation in @fs_operations do
     with {:ok, capability} <- find_fs_capability(agent_id, operation, requested_path),
-         :ok <- check_expiration(capability),
-         {:ok, root} <- extract_root_from_capability(capability),
-         {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
-         :ok <- check_pattern_constraints(resolved, capability.constraints),
-         :ok <- check_exclude_constraints(resolved, capability.constraints),
-         :ok <- check_depth_constraints(resolved, root, capability.constraints) do
-      {:ok, resolved}
+         :ok <- check_expiration(capability) do
+      if wildcard_capability?(capability) do
+        # Wildcard fs capability (arbor://fs/**) — grants all operations on all paths.
+        # Skip root-based path validation since there is no root constraint.
+        # Still resolve to absolute path to prevent relative path tricks.
+        {:ok, Path.expand(requested_path)}
+      else
+        with {:ok, root} <- extract_root_from_capability(capability),
+             {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
+             :ok <- check_pattern_constraints(resolved, capability.constraints),
+             :ok <- check_exclude_constraints(resolved, capability.constraints),
+             :ok <- check_depth_constraints(resolved, root, capability.constraints) do
+          {:ok, resolved}
+        end
+      end
     end
   end
 
@@ -130,13 +138,18 @@ defmodule Arbor.Security.FileGuard do
           {:ok, String.t(), Capability.t()} | {:error, term()}
   def authorize_with_capability(agent_id, requested_path, operation) do
     with {:ok, capability} <- find_fs_capability(agent_id, operation, requested_path),
-         :ok <- check_expiration(capability),
-         {:ok, root} <- extract_root_from_capability(capability),
-         {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
-         :ok <- check_pattern_constraints(resolved, capability.constraints),
-         :ok <- check_exclude_constraints(resolved, capability.constraints),
-         :ok <- check_depth_constraints(resolved, root, capability.constraints) do
-      {:ok, resolved, capability}
+         :ok <- check_expiration(capability) do
+      if wildcard_capability?(capability) do
+        {:ok, Path.expand(requested_path), capability}
+      else
+        with {:ok, root} <- extract_root_from_capability(capability),
+             {:ok, resolved} <- resolve_and_validate_path(requested_path, root),
+             :ok <- check_pattern_constraints(resolved, capability.constraints),
+             :ok <- check_exclude_constraints(resolved, capability.constraints),
+             :ok <- check_depth_constraints(resolved, root, capability.constraints) do
+          {:ok, resolved, capability}
+        end
+      end
     end
   end
 
@@ -252,6 +265,8 @@ defmodule Arbor.Security.FileGuard do
     end
   end
 
+  defp extract_root_from_capability(%Capability{resource_uri: "arbor://fs/**"}), do: {:ok, "/"}
+
   defp extract_root_from_capability(%Capability{resource_uri: uri}) do
     case parse_resource_uri(uri) do
       {:ok, _operation, path} -> {:ok, path}
@@ -331,6 +346,14 @@ defmodule Arbor.Security.FileGuard do
 
   defp fs_capability?(%Capability{resource_uri: "arbor://fs/" <> _}), do: true
   defp fs_capability?(_), do: false
+
+  defp wildcard_capability?(%Capability{resource_uri: "arbor://fs/**"}), do: true
+  defp wildcard_capability?(_), do: false
+
+  defp path_covered_by_capability?(%Capability{resource_uri: "arbor://fs/**"}, _operation, _requested_path) do
+    # Wildcard capability grants all operations on all paths
+    true
+  end
 
   defp path_covered_by_capability?(cap, operation, requested_path) do
     case parse_resource_uri(cap.resource_uri) do

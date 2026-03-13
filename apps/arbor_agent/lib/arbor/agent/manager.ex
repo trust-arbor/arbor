@@ -107,7 +107,11 @@ defmodule Arbor.Agent.Manager do
 
   defp do_start_agent(model_config, opts) do
     display_name = Keyword.get(opts, :display_name, default_display_name(model_config))
-    template = Keyword.get(opts, :template) || resolve_template(model_config)
+
+    template =
+      Keyword.get(opts, :template) ||
+        Map.get(model_config, :template) ||
+        resolve_template(model_config)
 
     lifecycle_opts =
       [template: template] ++
@@ -143,7 +147,7 @@ defmodule Arbor.Agent.Manager do
             Lifecycle.start(
               agent_id,
               Keyword.merge(opts,
-                model: model_config[:id] || model_config["id"],
+                model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
                 provider: model_config[:provider] || model_config["provider"]
               )
             )
@@ -211,7 +215,7 @@ defmodule Arbor.Agent.Manager do
             Lifecycle.start(
               agent_id,
               Keyword.merge(opts,
-                model: model_config[:id] || model_config["id"],
+                model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
                 provider: model_config[:provider] || model_config["provider"]
               )
             )
@@ -575,14 +579,15 @@ defmodule Arbor.Agent.Manager do
 
   defp build_start_opts(agent_id, display_name, %{backend: :api} = config) do
     module = Map.get(config, :module, APIAgent)
+    model = config[:id] || config[:model]
 
     {module,
      [
        id: agent_id,
        display_name: display_name,
-       model: config[:id],
+       model: model,
        provider: config[:provider],
-       model_id: config[:id]
+       model_id: model
      ]}
   end
 
@@ -624,7 +629,8 @@ defmodule Arbor.Agent.Manager do
   defp default_display_name(_), do: "Agent"
 
   defp resolve_template(%{backend: :cli}), do: "cli_agent"
-  defp resolve_template(_), do: "cli_agent"
+  defp resolve_template(%{backend: :api}), do: "api_agent"
+  defp resolve_template(_), do: "api_agent"
 
   defp atomize_model_config(config) when is_map(config) do
     known_keys = ~w(id label provider backend module name start_opts)
