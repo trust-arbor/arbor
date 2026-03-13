@@ -9,7 +9,7 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
     test "produces valid tool schema" do
       tool = FindTools.to_tool()
 
-      assert tool.name == "find_tools"
+      assert tool.name == "tool_find_tools"
       assert is_binary(tool.description)
       assert tool.description =~ "Search for additional tools"
     end

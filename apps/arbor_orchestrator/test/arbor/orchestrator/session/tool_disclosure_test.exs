@@ -6,25 +6,27 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   alias Arbor.Orchestrator.Session.ToolDisclosure
 
   describe "core_tools/1" do
-    test "base tier includes find_tools and core file/shell/memory/skill/git tools" do
+    test "base tier includes find_tools and core file/memory/skill/git tools" do
       tools = ToolDisclosure.core_tools(:new)
 
-      assert "find_tools" in tools
+      assert "tool_find_tools" in tools
       assert "file_read" in tools
       assert "file_write" in tools
       assert "file_edit" in tools
-      assert "shell_execute" in tools
       assert "memory_recall" in tools
       assert "memory_remember" in tools
       assert "skill_search" in tools
       assert "skill_activate" in tools
       assert "git_status" in tools
       assert "git_diff" in tools
+      # shell_execute requires established tier
+      refute "shell_execute" in tools
     end
 
     test "base tier does not include elevated tools" do
       tools = ToolDisclosure.core_tools(:new)
 
+      refute "shell_execute" in tools
       refute "code_compile_and_test" in tools
       refute "ai_generate_text" in tools
       refute "git_commit" in tools
@@ -32,9 +34,10 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       refute "code_hot_load" in tools
     end
 
-    test "established tier adds code/ai/git_commit tools" do
+    test "established tier adds shell/code/ai/git_commit tools" do
       tools = ToolDisclosure.core_tools(:established)
 
+      assert "shell_execute" in tools
       assert "code_compile_and_test" in tools
       assert "ai_generate_text" in tools
       assert "git_commit" in tools
@@ -50,8 +53,9 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
         assert "shell_execute_script" in tools, "#{tier} missing shell_execute_script"
         assert "code_hot_load" in tools, "#{tier} missing code_hot_load"
+        assert "shell_execute" in tools
         assert "code_compile_and_test" in tools
-        assert "find_tools" in tools
+        assert "tool_find_tools" in tools
       end
     end
 
@@ -65,7 +69,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     test "returns core tools when no explicit config" do
       config = %{}
       tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
-      assert "find_tools" in tools
+      assert "tool_find_tools" in tools
       assert "file_read" in tools
     end
 
@@ -75,14 +79,23 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
       assert "custom_tool_a" in tools
       assert "custom_tool_b" in tools
-      assert "find_tools" in tools
+      assert "tool_find_tools" in tools
     end
 
     test "explicit config with find_tools already present doesn't duplicate" do
+      config = %{"tools" => ["tool_find_tools", "custom_tool"]}
+      tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
+
+      assert Enum.count(tools, &(&1 == "tool_find_tools")) == 1
+    end
+
+    test "explicit config with legacy find_tools name doesn't add duplicate" do
       config = %{"tools" => ["find_tools", "custom_tool"]}
       tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
 
-      assert Enum.count(tools, &(&1 == "find_tools")) == 1
+      # find_tools is recognized as a valid name, so tool_find_tools is NOT added
+      refute "tool_find_tools" in tools
+      assert "find_tools" in tools
     end
 
     test "merges discovered tools with core tools" do
@@ -137,6 +150,26 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   describe "max_discovered_tools/0" do
     test "returns 40" do
       assert ToolDisclosure.max_discovered_tools() == 40
+    end
+  end
+
+  describe "ensure_tool_capabilities/2" do
+    test "returns :ok without crashing even when modules unavailable" do
+      # In test env, Security/Actions may not be running, but it should not crash
+      assert :ok ==
+               ToolDisclosure.ensure_tool_capabilities("test_agent", [
+                 "file_read",
+                 "memory_recall"
+               ])
+    end
+
+    test "handles empty tool list" do
+      assert :ok == ToolDisclosure.ensure_tool_capabilities("test_agent", [])
+    end
+
+    test "handles unknown tool names gracefully" do
+      assert :ok ==
+               ToolDisclosure.ensure_tool_capabilities("test_agent", ["nonexistent_tool_xyz"])
     end
   end
 end

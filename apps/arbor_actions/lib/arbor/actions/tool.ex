@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Tool do
     """
 
     use Jido.Action,
-      name: "find_tools",
+      name: "tool_find_tools",
       description:
         "Search for additional tools by query. Returns full tool schemas you can use immediately. " <>
           "Use when you need a capability not in your current tool set.",

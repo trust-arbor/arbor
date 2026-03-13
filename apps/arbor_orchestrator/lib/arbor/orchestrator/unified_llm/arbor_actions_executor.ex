@@ -53,18 +53,28 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
     end) || []
   end
 
-  # Resolve via ActionRegistry first, fall back to build_action_map for
-  # backwards compatibility when registry is not running.
+  # Resolve via ActionRegistry first, then fall back to build_action_map.
+  # The registry uses module-derived canonical names (e.g. "tool.find_tools")
+  # while the action map also indexes by Jido name (e.g. "find_tools").
   defp resolve_action(registry, name) do
-    if Process.whereis(registry) do
-      registry.resolve_by_name(name)
-    else
-      action_map = ActionsExecutor.build_action_map()
-
-      case Map.get(action_map, name) do
-        nil -> {:error, :not_found}
-        module -> {:ok, module}
+    registry_result =
+      if Process.whereis(registry) do
+        registry.resolve_by_name(name)
+      else
+        {:error, :not_found}
       end
+
+    case registry_result do
+      {:ok, _module} = ok ->
+        ok
+
+      {:error, :not_found} ->
+        action_map = ActionsExecutor.build_action_map()
+
+        case Map.get(action_map, name) do
+          nil -> {:error, :not_found}
+          module -> {:ok, module}
+        end
     end
   end
 
