@@ -2,6 +2,10 @@
 
 Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrella project with capability-based security and contract-first design.
 
+## Always Learning
+
+Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section.
+
 ## Library Hierarchy
 
 ```
@@ -63,10 +67,10 @@ Quick reference:
 - `:integration` — crosses boundaries
 - `:database`, `:external`, `:llm` — external dependencies
 
-## Edit Tool Pitfalls
-
-**Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
-
 ## Roadmap
 
 Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` → `2-planned/` → `3-in-progress/` → `5-completed/`). Design decisions go in `.arbor/decisions/`.
+
+## Applied Learning
+
+**Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.

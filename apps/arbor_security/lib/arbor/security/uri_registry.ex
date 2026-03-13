@@ -130,8 +130,9 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://trust/read",
     "arbor://trust/write",
 
-    # Agent identity
+    # Agent identity and profile
     "arbor://agent/identity",
+    "arbor://agent/profile",
 
     # ACP handler
     "arbor://acp/tool",

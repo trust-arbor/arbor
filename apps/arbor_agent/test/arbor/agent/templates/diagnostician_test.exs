@@ -128,35 +128,37 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
     test "includes monitor read access" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "monitor.read"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://monitor/read"))
     end
 
     test "includes proposal submission capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "proposal.submit"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://consensus/propose"))
     end
 
     test "includes code hot load capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "code.hot_load"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://code/hot_load"))
     end
 
     test "includes file read/write capabilities" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "file.read"))
-      assert Enum.any?(resources, &(&1 =~ "file.write"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://fs/read"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://fs/write"))
     end
 
-    test "all capabilities use canonical URI format" do
+    test "all capabilities use facade URI format" do
       caps = Diagnostician.required_capabilities()
 
       Enum.each(caps, fn cap ->
-        assert cap.resource =~ "arbor://actions/execute/" or
-                 cap.resource == "arbor://orchestrator/execute",
-               "Expected canonical URI, got: #{cap.resource}"
+        assert String.starts_with?(cap.resource, "arbor://"),
+               "Expected facade URI, got: #{cap.resource}"
+
+        refute cap.resource =~ "arbor://actions/execute/",
+               "Should use facade URIs, not action URIs: #{cap.resource}"
       end)
     end
   end

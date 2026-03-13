@@ -80,7 +80,7 @@ defmodule Arbor.Agent.Templates.ResearcherTest do
     test "includes DOT pipeline capabilities" do
       caps = Researcher.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "pipeline"))
+      assert Enum.any?(resources, &(&1 =~ "orchestrator"))
     end
   end
 

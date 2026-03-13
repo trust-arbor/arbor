@@ -67,6 +67,8 @@ digraph SessionTurn {
   // -- LLM call with internal tool loop ------------------------------
   // CodergenHandler reads prompt, system prompt, and messages from context keys.
   // use_tools="true" enables the internal ToolLoop — no separate dispatch node needed.
+  // Tools resolved dynamically: session.tools from agent config (set at session start),
+  // falling back to CodingTools if no session tools configured.
   // Provider/model fall back to session.llm_provider and session.llm_model from context.
   call_llm [
     type="compute",
@@ -74,8 +76,7 @@ digraph SessionTurn {
     prompt_context_key="session.user_prompt",
     system_prompt_context_key="session.system_prompt",
     messages_context_key="session.messages",
-    use_tools="true",
-    tools="file_read,file_search,file_glob,file_list,shell_execute"
+    use_tools="true"
   ]
 
   // -- Format: copy LLM response to session.response ----------------

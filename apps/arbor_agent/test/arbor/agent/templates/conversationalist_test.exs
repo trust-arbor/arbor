@@ -70,7 +70,7 @@ defmodule Arbor.Agent.Templates.ConversationalistTest do
       caps = Conversationalist.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
       assert Enum.any?(resources, &(&1 =~ "memory"))
-      assert Enum.any?(resources, &(&1 =~ "relationship"))
+      assert Enum.any?(resources, &(&1 =~ "persistence"))
     end
   end
 

@@ -72,15 +72,12 @@ defmodule Arbor.Agent.Templates.Conversationalist do
   def required_capabilities do
     [
       %{resource: "arbor://orchestrator/execute"},
-      %{resource: "arbor://actions/execute/memory.recall"},
-      %{resource: "arbor://actions/execute/memory.remember"},
-      %{resource: "arbor://actions/execute/memory.reflect"},
-      %{resource: "arbor://actions/execute/memory.add_insight"},
-      %{resource: "arbor://actions/execute/relationship.get"},
-      %{resource: "arbor://actions/execute/relationship.save"},
-      %{resource: "arbor://actions/execute/relationship.moment"},
-      %{resource: "arbor://actions/execute/relationship.browse"},
-      %{resource: "arbor://actions/execute/relationship.summarize"}
+      %{resource: "arbor://memory/recall"},
+      %{resource: "arbor://memory/add_knowledge"},
+      %{resource: "arbor://memory/read"},
+      %{resource: "arbor://memory/write"},
+      %{resource: "arbor://persistence/read"},
+      %{resource: "arbor://persistence/write"}
     ]
   end
 

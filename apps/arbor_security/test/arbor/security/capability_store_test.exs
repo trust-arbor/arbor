@@ -120,19 +120,19 @@ defmodule Arbor.Security.CapabilityStoreTest do
     end
 
     test "matches glob wildcard /** patterns", %{agent_id: agent_id} do
-      {:ok, cap} = build_capability(agent_id, "arbor://actions/execute/**")
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
       {:ok, :stored} = CapabilityStore.put(cap)
 
-      # Should match any subpath
+      # Should match any subpath under fs/read
       assert {:ok, _} =
-               CapabilityStore.find_authorizing(agent_id, "arbor://actions/execute/memory_recall")
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home/file.txt")
 
       assert {:ok, _} =
-               CapabilityStore.find_authorizing(agent_id, "arbor://actions/execute/shell_execute")
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/tmp/output.txt")
 
-      # Should NOT match different root
+      # Should NOT match different prefix
       assert {:error, :not_found} =
-               CapabilityStore.find_authorizing(agent_id, "arbor://actions/delete/something")
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/write/tmp/output.txt")
     end
 
     test "glob /** does not match partial path segments", %{agent_id: agent_id} do

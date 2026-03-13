@@ -286,7 +286,7 @@ defmodule Arbor.Trust.Policy do
   ## Examples
 
       {baseline, rules} = Policy.preset_rules(:balanced)
-      #=> {:ask, %{"arbor://actions/execute/file.read" => :auto, ...}}
+      #=> {:ask, %{"arbor://fs/read" => :auto, ...}}
   """
   @spec preset_rules(atom()) :: {mode(), map()}
   def preset_rules(preset_name) do

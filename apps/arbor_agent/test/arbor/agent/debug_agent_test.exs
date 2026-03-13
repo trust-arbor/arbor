@@ -27,52 +27,57 @@ defmodule Arbor.Agent.DiagnosticianTemplateTest do
       assert Enum.all?(goals, &Map.has_key?(&1, :description))
     end
 
-    test "required_capabilities include monitor actions" do
+    test "required_capabilities include monitor facade URIs" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
 
-      # Monitor actions
-      assert "arbor://actions/execute/monitor.read" in resources
-      assert "arbor://actions/execute/monitor.claim_anomaly" in resources
-      assert "arbor://actions/execute/monitor.complete_anomaly" in resources
-      assert "arbor://actions/execute/monitor.suppress_fingerprint" in resources
-      assert "arbor://actions/execute/monitor.reset_baseline" in resources
-      assert "arbor://actions/execute/monitor.read_diagnostics" in resources
+      # Monitor read and remediate (facade URIs)
+      assert "arbor://monitor/read" in resources
+      assert "arbor://monitor/remediate" in resources
     end
 
-    test "required_capabilities include remediation actions" do
+    test "required_capabilities include remediation via monitor facade" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
 
-      assert "arbor://actions/execute/remediation.force_gc" in resources
-      assert "arbor://actions/execute/remediation.kill_process" in resources
-      assert "arbor://actions/execute/remediation.stop_supervisor" in resources
-      assert "arbor://actions/execute/remediation.restart_child" in resources
+      # Remediation actions are covered by the monitor/remediate facade URI
+      assert "arbor://monitor/remediate" in resources
     end
 
-    test "dangerous actions require approval" do
+    test "required_capabilities include fs facade URIs" do
       caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
 
-      kill_cap =
-        Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.kill_process"))
-
-      stop_cap =
-        Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.stop_supervisor"))
-
-      assert kill_cap[:requires_approval] == true
-      assert stop_cap[:requires_approval] == true
+      assert "arbor://fs/read" in resources
+      assert "arbor://fs/write" in resources
+      assert "arbor://fs/list" in resources
     end
 
-    test "safe actions do not require approval" do
+    test "required_capabilities include memory facade URIs" do
       caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
 
-      gc_cap = Enum.find(caps, &(&1.resource == "arbor://actions/execute/remediation.force_gc"))
+      assert "arbor://memory/recall" in resources
+      assert "arbor://memory/add_knowledge" in resources
+      assert "arbor://memory/read" in resources
+      assert "arbor://memory/write" in resources
+    end
 
-      suppress_cap =
-        Enum.find(caps, &(&1.resource == "arbor://actions/execute/monitor.suppress_fingerprint"))
+    test "required_capabilities include comms facade URIs" do
+      caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
 
-      assert gc_cap[:requires_approval] != true
-      assert suppress_cap[:requires_approval] != true
+      assert "arbor://comms/send" in resources
+      assert "arbor://comms/poll" in resources
+    end
+
+    test "required_capabilities include governance and code facade URIs" do
+      caps = Diagnostician.required_capabilities()
+      resources = Enum.map(caps, & &1.resource)
+
+      assert "arbor://consensus/propose" in resources
+      assert "arbor://code/hot_load" in resources
+      assert "arbor://shell/exec" in resources
     end
 
     test "domain_context includes remediation playbook" do

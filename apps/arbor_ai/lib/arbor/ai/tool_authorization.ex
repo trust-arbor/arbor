@@ -56,7 +56,7 @@ defmodule Arbor.AI.ToolAuthorization do
           :authorized | :unauthorized | :pending_approval
   defp check_tool_authorization(agent_id, tool_name) do
     if Code.ensure_loaded?(Arbor.Security) do
-      resource = "arbor://actions/execute/#{tool_name}"
+      resource = resolve_tool_uri(tool_name)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Arbor.Security, :authorize, [agent_id, resource, :execute, []]) do
@@ -99,6 +99,22 @@ defmodule Arbor.AI.ToolAuthorization do
       )
 
       :unauthorized
+  end
+
+  # Resolve a tool name to its canonical facade URI via Arbor.Actions.
+  # arbor_ai is standalone — must use Code.ensure_loaded?/apply bridge.
+  defp resolve_tool_uri(tool_name) do
+    mod = Module.concat([:Arbor, :Actions])
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :tool_name_to_canonical_uri, 1) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(mod, :tool_name_to_canonical_uri, [tool_name]) do
+        {:ok, uri} -> uri
+        :error -> "arbor://actions/execute/#{tool_name}"
+      end
+    else
+      "arbor://actions/execute/#{tool_name}"
+    end
   end
 
   defp emit_tool_authorization_denied(agent_id, denied_tool_names) do

@@ -21,8 +21,8 @@ defmodule Arbor.Actions.Identity do
 
   ## Authorization
 
-  - RequestEndorsement: `arbor://actions/execute/identity.request_endorsement`
-  - SignPublicKey: `arbor://actions/execute/identity.sign_public_key`
+  - RequestEndorsement: `arbor://agent/identity`
+  - SignPublicKey: `arbor://agent/identity`
   """
 
   defmodule RequestEndorsement do

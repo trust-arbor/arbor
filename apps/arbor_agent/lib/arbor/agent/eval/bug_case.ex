@@ -49,8 +49,8 @@ defmodule Arbor.Agent.Eval.BugCase do
   CapabilityStore glob wildcard bug.
 
   `authorizes_resource?/2` didn't handle `/**` glob patterns — capability URIs
-  like `arbor://actions/execute/**` failed to match specific action URIs like
-  `arbor://actions/execute/memory_recall`.
+  like `arbor://fs/**` failed to match specific action URIs like
+  `arbor://memory/recall`.
   """
   def glob_wildcard do
     %__MODULE__{
@@ -61,8 +61,8 @@ defmodule Arbor.Agent.Eval.BugCase do
       file: "apps/arbor_security/lib/arbor/security/capability_store.ex",
       function: "authorizes_resource?/2",
       symptom:
-        "Capability URIs with /** glob wildcards (e.g. arbor://actions/execute/**) " <>
-          "fail to match specific action URIs (e.g. arbor://actions/execute/memory_recall). " <>
+        "Capability URIs with /** glob wildcards (e.g. arbor://fs/**) " <>
+          "fail to match specific action URIs (e.g. arbor://memory/recall). " <>
           "All agent tool calls are denied even though the agent has wildcard capabilities granted.",
       root_cause:
         "The authorizes_resource?/2 function only checks exact match and prefix+separator. " <>
@@ -76,8 +76,8 @@ defmodule Arbor.Agent.Eval.BugCase do
       You are investigating a bug in the Arbor security system.
 
       SYMPTOM: Agent tool execution is being denied even though capabilities are granted.
-      Specifically, wildcard capability URIs like "arbor://actions/execute/**" fail to
-      authorize specific URIs like "arbor://actions/execute/memory_recall".
+      Specifically, wildcard capability URIs like "arbor://fs/**" fail to
+      authorize specific URIs like "arbor://memory/recall".
 
       The bug is in the codebase at: {WORKTREE_PATH}
 

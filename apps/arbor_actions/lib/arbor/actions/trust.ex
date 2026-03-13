@@ -19,7 +19,7 @@ defmodule Arbor.Actions.Trust do
 
   ## Authorization
 
-  All actions require `arbor://actions/execute/trust.*` capability.
+  All actions require `arbor://trust/read` or `arbor://trust/write` capability.
   The InterviewAgent template grants only these actions.
   """
 

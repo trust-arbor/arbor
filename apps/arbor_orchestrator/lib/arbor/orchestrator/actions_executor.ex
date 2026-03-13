@@ -241,8 +241,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp sign_for_module(nil, _action_module), do: nil
 
   defp sign_for_module(signer, action_module) when is_function(signer, 1) do
-    canonical_name = apply(@actions_mod, :action_module_to_name, [action_module])
-    resource = "arbor://actions/execute/#{canonical_name}"
+    resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
 
     case signer.(resource) do
       {:ok, signed_request} -> signed_request

@@ -40,8 +40,8 @@ defmodule Arbor.Actions.Council do
 
   ## Authorization
 
-  - Consult: `arbor://actions/execute/council.consult`
-  - ConsultOne: `arbor://actions/execute/council.consult_one`
+  - Consult: `arbor://ai/generate`
+  - ConsultOne: `arbor://ai/generate`
   """
 
   alias Arbor.Common.SafeAtom

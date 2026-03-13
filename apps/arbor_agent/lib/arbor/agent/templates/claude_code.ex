@@ -104,8 +104,21 @@ defmodule Arbor.Agent.Templates.ClaudeCode do
       %{resource: "arbor://consensus/evaluate", description: "Participate in evaluation"},
       # MCP tool use
       %{resource: "arbor://tool/use/**", description: "MCP tool invocation"},
-      # Actions - full access to all action categories
-      %{resource: "arbor://actions/execute/**", description: "Execute all actions"}
+      # Actions - full access to all facade categories
+      %{resource: "arbor://fs/**", description: "File system operations"},
+      %{resource: "arbor://shell/**", description: "Shell execution"},
+      %{resource: "arbor://memory/**", description: "Memory operations"},
+      %{resource: "arbor://monitor/**", description: "Monitor and remediation"},
+      %{resource: "arbor://comms/**", description: "Communications"},
+      %{resource: "arbor://code/**", description: "Code operations"},
+      %{resource: "arbor://ai/**", description: "AI generation"},
+      %{resource: "arbor://trust/**", description: "Trust operations"},
+      %{resource: "arbor://net/**", description: "Network/web operations"},
+      %{resource: "arbor://historian/**", description: "Event history"},
+      %{resource: "arbor://sandbox/**", description: "Sandbox management"},
+      %{resource: "arbor://persistence/**", description: "Persistence operations"},
+      %{resource: "arbor://acp/**", description: "ACP tool sessions"},
+      %{resource: "arbor://agent/**", description: "Agent operations"}
     ]
   end
 

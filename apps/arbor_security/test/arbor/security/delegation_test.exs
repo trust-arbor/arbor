@@ -28,7 +28,7 @@ defmodule Arbor.Security.DelegationTest do
     {:ok, cap_exec} =
       Security.grant(
         principal: parent.agent_id,
-        resource: "arbor://actions/execute/**",
+        resource: "arbor://shell/exec/**",
         delegation_depth: 3
       )
 
@@ -44,7 +44,7 @@ defmodule Arbor.Security.DelegationTest do
       {:ok, delegated} =
         Security.delegate_to_agent(parent.agent_id, agent.agent_id,
           delegator_private_key: parent.private_key,
-          resources: ["arbor://fs/read/**", "arbor://actions/execute/**"]
+          resources: ["arbor://fs/read/**", "arbor://shell/exec/**"]
         )
 
       assert length(delegated) == 2

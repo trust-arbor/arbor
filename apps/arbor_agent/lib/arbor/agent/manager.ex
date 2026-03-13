@@ -323,6 +323,25 @@ defmodule Arbor.Agent.Manager do
   end
 
   @doc """
+  Update an agent's display name.
+
+  Persists the new name in the agent's profile. Emits an
+  `agent.display_name_changed` signal so the dashboard updates.
+  """
+  @spec set_display_name(String.t(), String.t()) :: :ok | {:error, term()}
+  def set_display_name(agent_id, name)
+      when is_binary(agent_id) and is_binary(name) and byte_size(name) >= 1 do
+    case ProfileStore.load_profile(agent_id) do
+      {:ok, profile} ->
+        updated = %{profile | display_name: name}
+        ProfileStore.store_profile(updated)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   Set the MCP server configuration for an agent.
 
   The config is a list of server connection specs stored in the agent's

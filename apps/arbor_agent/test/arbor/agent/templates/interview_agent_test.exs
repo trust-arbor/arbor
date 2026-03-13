@@ -89,31 +89,27 @@ defmodule Arbor.Agent.Templates.InterviewAgentTest do
   end
 
   describe "required_capabilities/0" do
-    test "has exactly 6 trust action capabilities" do
+    test "has trust read and write capabilities" do
       caps = InterviewAgent.required_capabilities()
-      assert length(caps) == 6
+      assert length(caps) == 2
     end
 
-    test "all capabilities are trust actions only" do
+    test "all capabilities are trust facade URIs only" do
       caps = InterviewAgent.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
 
       Enum.each(resources, fn uri ->
-        assert uri =~ "arbor://actions/execute/trust.",
-               "Expected trust action URI, got: #{uri}"
+        assert uri =~ "arbor://trust/",
+               "Expected trust facade URI, got: #{uri}"
       end)
     end
 
-    test "includes read, propose, apply, explain, list_presets, list_agents" do
+    test "includes trust read and trust write" do
       caps = InterviewAgent.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
 
-      assert Enum.any?(resources, &(&1 =~ "read_profile"))
-      assert Enum.any?(resources, &(&1 =~ "propose_profile"))
-      assert Enum.any?(resources, &(&1 =~ "apply_profile"))
-      assert Enum.any?(resources, &(&1 =~ "explain_mode"))
-      assert Enum.any?(resources, &(&1 =~ "list_presets"))
-      assert Enum.any?(resources, &(&1 =~ "list_agents"))
+      assert "arbor://trust/read" in resources
+      assert "arbor://trust/write" in resources
     end
 
     test "does NOT include shell, fs, network, or code capabilities" do
@@ -173,7 +169,7 @@ defmodule Arbor.Agent.Templates.InterviewAgentTest do
       assert %Character{} = config[:character]
       assert config[:trust_tier] == :trusted
       assert length(config[:initial_goals]) == 2
-      assert length(config[:required_capabilities]) == 6
+      assert length(config[:required_capabilities]) == 2
       assert config[:domain_context] =~ ":block"
       assert config[:description] =~ "trust"
       assert config[:nature] =~ "Relational"

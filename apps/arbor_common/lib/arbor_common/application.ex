@@ -20,7 +20,8 @@ defmodule Arbor.Common.Application do
           Arbor.Common.WriteableRegistry,
           Arbor.Common.ComputeRegistry,
           Arbor.Common.PipelineResolver,
-          Arbor.Common.ActionRegistry
+          Arbor.Common.ActionRegistry,
+          {Arbor.Common.SkillLibrary, skill_dirs: [".arbor/skills"]}
         ]
       else
         []

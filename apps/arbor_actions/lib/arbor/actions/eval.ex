@@ -35,9 +35,9 @@ defmodule Arbor.Actions.Eval do
 
   ## Authorization
 
-  - Check: `arbor://actions/execute/eval.check`
-  - ListRuns: `arbor://actions/execute/eval.list`
-  - GetRun: `arbor://actions/execute/eval.get`
+  - Check: `arbor://code/compile`
+  - ListRuns: `arbor://code/read`
+  - GetRun: `arbor://code/read`
   """
 
   alias Arbor.Common.SafePath

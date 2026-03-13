@@ -49,7 +49,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             Arbor.Security.authorize(
               "test_nonexistent_agent",
-              "arbor://actions/execute/test_tool",
+              "arbor://actions/test_tool",
               :execute,
               []
             )
@@ -66,10 +66,10 @@ defmodule Arbor.AI.ToolAuthorizationTest do
 
     test "tool resource URI follows expected format" do
       # The URI format used in check_tool_authorization must match
-      # what capabilities are granted against
+      # what capabilities are granted against — facade URIs
       tool_name = "shell_execute"
-      expected_uri = "arbor://actions/execute/#{tool_name}"
-      assert expected_uri == "arbor://actions/execute/shell_execute"
+      expected_uri = "arbor://shell/exec"
+      assert expected_uri == "arbor://shell/exec"
     end
 
     test "filter_authorized_tools passes all tools when agent_id is nil" do
@@ -108,7 +108,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             apply(Arbor.Security, :authorize, [
               "test_agent_bridge",
-              "arbor://actions/execute/test_tool",
+              "arbor://actions/test_tool",
               :execute,
               []
             ])
@@ -147,7 +147,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             Arbor.Security.authorize(
               "",
-              "arbor://actions/execute/test",
+              "arbor://actions/test",
               :execute,
               []
             )
@@ -211,7 +211,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             Arbor.Security.authorize(
               "test_agent",
-              "arbor://actions/execute/memory_recall",
+              "arbor://memory/recall",
               :execute,
               []
             )
@@ -250,7 +250,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             apply(Arbor.Security, :authorize, [
               "test_agent",
-              "arbor://actions/execute/dangerous_tool",
+              "arbor://actions/dangerous_tool",
               :execute,
               []
             ])
@@ -283,7 +283,7 @@ defmodule Arbor.AI.ToolAuthorizationTest do
           try do
             Arbor.Security.authorize(
               "completely_nonexistent_agent_#{System.unique_integer([:positive])}",
-              "arbor://actions/execute/shell_execute",
+              "arbor://shell/exec",
               :execute,
               []
             )

@@ -35,8 +35,8 @@ defmodule Arbor.Actions.Pipeline do
 
   ## Authorization
 
-  - Run: `arbor://actions/execute/pipeline.run`
-  - Validate: `arbor://actions/execute/pipeline.validate`
+  - Run: `arbor://orchestrator/execute`
+  - Validate: `arbor://orchestrator/execute`
   """
 
   alias Arbor.Common.SafePath

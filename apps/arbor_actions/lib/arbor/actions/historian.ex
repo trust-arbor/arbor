@@ -32,7 +32,7 @@ defmodule Arbor.Actions.Historian do
 
   ## Authorization
 
-  Capability URIs follow the pattern `arbor://actions/execute/historian.query_events`.
+  Capability URIs follow the pattern `arbor://historian/query`.
   Sensitive categories like `:security` may require additional capabilities.
   """
 
@@ -448,7 +448,7 @@ defmodule Arbor.Actions.Historian do
 
     ## Authorization
 
-    Capability URI: `arbor://actions/execute/historian.taint_trace`
+    Capability URI: `arbor://historian/query`
     Queries access the security stream, which may require additional capabilities.
     """
 

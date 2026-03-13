@@ -184,11 +184,30 @@ defmodule Arbor.Agent.SessionManager do
     # Provider must be a string to match UnifiedLLM adapter keys.
     provider = Keyword.get(opts, :provider)
 
+    # Convert tool modules to action name strings for the session config.
+    # Lifecycle passes module atoms (e.g. Arbor.Actions.File.Read);
+    # resolve_tools in LlmHandler expects action name strings.
+    tool_names =
+      case Keyword.get(opts, :tools) do
+        nil ->
+          nil
+
+        tools when is_list(tools) ->
+          Enum.map(tools, fn
+            mod when is_atom(mod) ->
+              if function_exported?(mod, :name, 0), do: mod.name(), else: inspect(mod)
+
+            name when is_binary(name) ->
+              name
+          end)
+      end
+
     llm_config =
       %{}
       |> maybe_put_config("llm_provider", if(provider, do: to_string(provider)))
       |> maybe_put_config("llm_model", Keyword.get(opts, :model))
       |> maybe_put_config("system_prompt", Keyword.get(opts, :system_prompt))
+      |> maybe_put_config("tools", tool_names)
 
     base = [
       session_id: session_id,

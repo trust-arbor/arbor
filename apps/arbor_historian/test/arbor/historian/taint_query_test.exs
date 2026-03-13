@@ -131,7 +131,7 @@ defmodule Arbor.Historian.TaintQueryTest do
       timestamp: DateTime.add(DateTime.utc_now(), 6, :second),
       source: "arbor://test/auth",
       data: %{
-        resource: "arbor://actions/execute/shell",
+        resource: "arbor://shell/exec",
         action: :execute,
         granted: true
       },

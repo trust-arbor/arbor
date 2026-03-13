@@ -46,8 +46,8 @@ defmodule Arbor.Actions.Proposal do
 
   ## Authorization
 
-  - Submit: `arbor://actions/execute/proposal.submit`
-  - Revise: `arbor://actions/execute/proposal.revise`
+  - Submit: `arbor://consensus/propose`
+  - Revise: `arbor://consensus/propose`
   """
 
   defmodule Submit do

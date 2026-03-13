@@ -121,7 +121,7 @@ defmodule Arbor.Agent.Lifecycle do
   ## Example
 
       {:ok, signer} = Lifecycle.build_signer(agent_id)
-      {:ok, signed} = signer.("arbor://actions/execute/file_read")
+      {:ok, signed} = signer.("arbor://fs/read")
   """
   @spec build_signer(String.t()) ::
           {:ok, (binary() -> {:ok, term()} | {:error, term()})} | {:error, term()}
