@@ -361,6 +361,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       Map.get(node.attrs, "agent_id") ||
         Context.get(context, "session.agent_id", "system")
 
+    # Annotate ask-mode tools with "(requires approval)" in description
+    tool_defs = annotate_ask_mode_tools(tool_defs, agent_id)
+
     # Extract signer from context — allows cryptographic identity verification
     # for every tool call executed within the pipeline
     signer =
@@ -475,6 +478,39 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       end
 
     name_defs ++ maps
+  end
+
+  # Annotate tool definitions for tools that require approval (`:ask` mode in trust profile).
+  # Appends "(requires approval)" to the description so the LLM knows to explain
+  # why it needs the tool before calling it.
+  defp annotate_ask_mode_tools(tool_defs, agent_id) do
+    alias Arbor.Orchestrator.Session.ToolDisclosure
+
+    ask_tools = ToolDisclosure.ask_mode_tools(agent_id)
+
+    if MapSet.size(ask_tools) == 0 do
+      tool_defs
+    else
+      Enum.map(tool_defs, fn tool_def ->
+        name = get_in(tool_def, ["function", "name"])
+
+        if name && MapSet.member?(ask_tools, name) do
+          update_in(tool_def, ["function", "description"], fn desc ->
+            desc = desc || ""
+
+            if String.contains?(desc, "(requires approval)") do
+              desc
+            else
+              desc <> " (requires approval)"
+            end
+          end)
+        else
+          tool_def
+        end
+      end)
+    end
+  rescue
+    _ -> tool_defs
   end
 
   defp maybe_add_stream_callback(opts, nil), do: opts
