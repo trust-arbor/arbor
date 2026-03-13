@@ -361,6 +361,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     text_parts ++ tool_parts
   end
 
+  # Handle tool_calls without content field (common in OpenAI-compatible APIs)
+  defp default_parse_message(%{"tool_calls" => tool_calls})
+       when is_list(tool_calls) and tool_calls != [] do
+    Enum.map(tool_calls, &parse_tool_call/1)
+  end
+
   defp default_parse_message(%{"content" => content}) when is_binary(content) do
     [ContentPart.text(content)]
   end
