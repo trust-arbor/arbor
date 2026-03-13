@@ -141,6 +141,109 @@ defmodule Arbor.AI.UnifiedBridge do
       {:error, {:bridge_exit, reason}}
   end
 
+  @doc """
+  Stream text generation, returning an enumerable of stream events.
+
+  Each event is a `%StreamEvent{type: type, data: data}` where type is one of:
+  `:start`, `:delta`, `:tool_call`, `:tool_result`, `:step_finish`, `:finish`, `:error`.
+
+  ## Options
+
+  Same as `generate_text/2` plus:
+  - `:on_event` — optional callback `(StreamEvent.t() -> any())` invoked for each event
+  - `:collect` — if `true` (default), consumes the stream and returns `{:ok, response}`.
+    If `false`, returns `{:ok, stream_enumerable}` for lazy consumption.
+
+  When `:collect` is true (default), this behaves like `generate_text/2` but with
+  optional event callbacks for real-time observation.
+  """
+  def generate_text_stream(prompt, opts) do
+    if available?() do
+      do_generate_stream(prompt, opts)
+    else
+      :unavailable
+    end
+  end
+
+  defp do_generate_stream(prompt, opts) do
+    provider_string = resolve_provider(opts)
+    model = Keyword.fetch!(opts, :model)
+    system_prompt = Keyword.get(opts, :system_prompt)
+    max_tokens = Keyword.get(opts, :max_tokens, 1024)
+    temperature = Keyword.get(opts, :temperature, 0.7)
+    thinking_enabled = Keyword.get(opts, :thinking, false)
+    on_event = Keyword.get(opts, :on_event)
+    collect? = Keyword.get(opts, :collect, true)
+
+    client = get_client()
+
+    message_mod = Module.concat(@base_module, Message)
+    request_mod = Module.concat(@base_module, Request)
+
+    messages =
+      if system_prompt do
+        [
+          apply(message_mod, :new, [:system, system_prompt]),
+          apply(message_mod, :new, [:user, prompt])
+        ]
+      else
+        [apply(message_mod, :new, [:user, prompt])]
+      end
+
+    request = %{
+      __struct__: request_mod,
+      provider: provider_string,
+      model: model,
+      messages: messages,
+      tools: [],
+      tool_choice: nil,
+      max_tokens: max_tokens,
+      temperature: temperature,
+      reasoning_effort: nil,
+      provider_options: Keyword.get(opts, :provider_options, %{})
+    }
+
+    request =
+      if thinking_enabled do
+        Map.put(request, :reasoning_effort, "high")
+      else
+        request
+      end
+
+    case apply(@client_module, :stream, [client, request, []]) do
+      {:ok, events} ->
+        # Wrap with optional callback
+        events =
+          if on_event do
+            Stream.each(events, fn event -> on_event.(event) end)
+          else
+            events
+          end
+
+        if collect? do
+          # Consume stream and return collected response
+          case apply(@client_module, :collect_stream, [events]) do
+            {:ok, response} -> {:ok, format_response(response, opts)}
+            {:error, _} = err -> err
+          end
+        else
+          {:ok, events}
+        end
+
+      {:error, reason} ->
+        Logger.warning("UnifiedBridge stream failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  rescue
+    e ->
+      Logger.warning("UnifiedBridge stream exception: #{inspect(e)}")
+      {:error, {:bridge_exception, Exception.message(e)}}
+  catch
+    :exit, reason ->
+      Logger.warning("UnifiedBridge stream exit: #{inspect(reason)}")
+      {:error, {:bridge_exit, reason}}
+  end
+
   defp do_generate(prompt, opts) do
     provider_string = resolve_provider(opts)
     model = Keyword.fetch!(opts, :model)

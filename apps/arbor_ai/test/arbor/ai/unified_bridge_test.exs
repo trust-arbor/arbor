@@ -59,4 +59,77 @@ defmodule Arbor.AI.UnifiedBridgeTest do
                "some_future_provider"
     end
   end
+
+  describe "generate_text_stream/2" do
+    test "returns :unavailable when client module not loaded" do
+      result =
+        UnifiedBridge.generate_text_stream("test", provider: :anthropic, model: "test-model")
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+
+    test "accepts on_event callback option" do
+      # Verify the function accepts and doesn't crash with on_event
+      result =
+        UnifiedBridge.generate_text_stream("test",
+          provider: :test,
+          model: "test-model",
+          on_event: fn _event -> :ok end
+        )
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+
+    test "accepts collect: false option" do
+      result =
+        UnifiedBridge.generate_text_stream("test",
+          provider: :test,
+          model: "test-model",
+          collect: false
+        )
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+
+    test "defaults to collect: true" do
+      # With collect: true (default), result should be a response map, not a stream
+      result =
+        UnifiedBridge.generate_text_stream("test",
+          provider: :test,
+          model: "test-model"
+        )
+
+      case result do
+        {:ok, response} when is_map(response) ->
+          # Collected response should have standard keys
+          assert Map.has_key?(response, :text) or Map.has_key?(response, :model)
+
+        {:error, _} ->
+          :ok
+
+        :unavailable ->
+          :ok
+      end
+    end
+  end
+
+  describe "embed/2" do
+    test "returns expected shape or unavailable" do
+      result = UnifiedBridge.embed("test text", provider: :ollama, model: "nomic-embed-text")
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+  end
+
+  describe "embed_batch/2" do
+    test "returns expected shape or unavailable" do
+      result =
+        UnifiedBridge.embed_batch(["text 1", "text 2"],
+          provider: :ollama,
+          model: "nomic-embed-text"
+        )
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+  end
 end

@@ -144,6 +144,42 @@ defmodule Arbor.AI do
   end
 
   @doc """
+  Stream text generation with optional real-time event callbacks.
+
+  By default, collects the stream and returns the same response format as
+  `generate_text/2`. Pass `collect: false` to get a lazy stream enumerable.
+
+  ## Additional Options (beyond `generate_text/2`)
+
+  - `:on_event` — callback `(StreamEvent.t() -> any())` invoked per event.
+    Use this for real-time UI updates, TTFT measurement, or logging.
+  - `:collect` — if `true` (default), consumes stream and returns response.
+    If `false`, returns `{:ok, stream_enumerable}` for lazy consumption.
+
+  ## Examples
+
+      # Collected (same return shape as generate_text)
+      {:ok, response} = Arbor.AI.stream_text("hello", provider: :openrouter, model: "...")
+
+      # With event callback for real-time observation
+      {:ok, response} = Arbor.AI.stream_text("hello",
+        provider: :openrouter, model: "...",
+        on_event: fn event -> IO.write(event.data["text"] || "") end
+      )
+
+      # Lazy stream for manual consumption
+      {:ok, stream} = Arbor.AI.stream_text("hello",
+        provider: :openrouter, model: "...",
+        collect: false
+      )
+  """
+  @spec stream_text(String.t(), keyword()) :: {:ok, map() | Enumerable.t()} | {:error, term()}
+  def stream_text(prompt, opts \\ []) do
+    opts = snapshot_config(opts)
+    UnifiedBridge.generate_text_stream(prompt, opts)
+  end
+
+  @doc """
   Generate text using the API backend with tool/action support.
 
   Uses jido_ai's CallWithTools for an agentic loop where the LLM receives
