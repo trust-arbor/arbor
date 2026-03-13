@@ -412,7 +412,7 @@ defmodule Arbor.Security do
          :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
          :ok <- check_identity_status(principal_id),
          :ok <- maybe_verify_identity(principal_id, opts),
-         {:ok, cap} <- find_capability(principal_id, resource_uri),
+         {:ok, cap} <- find_capability(principal_id, resource_uri, opts),
          :ok <- check_scope_binding(cap, opts),
          :ok <- maybe_verify_delegation_chain(cap),
          :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
@@ -829,10 +829,14 @@ defmodule Arbor.Security do
     end
   end
 
-  defp find_capability(principal_id, resource_uri) do
+  defp find_capability(principal_id, resource_uri, opts) do
     case CapabilityStore.find_authorizing(principal_id, resource_uri) do
-      {:ok, cap} -> {:ok, cap}
-      {:error, :not_found} -> {:error, :unauthorized}
+      {:ok, cap} ->
+        {:ok, cap}
+
+      {:error, :not_found} ->
+        # JIT: check trust profile and auto-grant if allowed
+        Arbor.Security.PolicyEnforcer.check(principal_id, resource_uri, opts)
     end
   end
 
