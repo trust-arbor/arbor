@@ -62,7 +62,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp loop(client, request, opts, state) do
-    case Client.complete(client, request, opts) do
+    case call_llm(client, request, opts) do
       {:ok, response} ->
         state = merge_usage(state, response.usage)
 
@@ -100,6 +100,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  # Use streaming when a stream_callback is provided, otherwise Client.complete
+  defp call_llm(client, request, opts) do
+    case Keyword.get(opts, :stream_callback) do
+      nil ->
+        Client.complete(client, request, opts)
+
+      callback ->
+        case Client.stream(client, request, opts) do
+          {:ok, events} ->
+            events = Stream.each(events, fn event -> callback.(event) end)
+            Client.collect_stream(events)
+
+          {:error, {:stream_not_supported, _}} ->
+            Client.complete(client, request, opts)
+
+          {:error, _} = error ->
+            error
+        end
     end
   end
 
