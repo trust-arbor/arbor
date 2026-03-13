@@ -27,60 +27,65 @@ defmodule Arbor.Gateway.PromptClassifier do
           sanitized_prompt: String.t(),
           overall_sensitivity: sensitivity(),
           routing_recommendation: routing(),
-          taint_tags: %{pii: boolean(), credentials: boolean(), code: boolean(), internal: boolean()},
+          taint_tags: %{
+            pii: boolean(),
+            credentials: boolean(),
+            code: boolean(),
+            internal: boolean()
+          },
           element_count: non_neg_integer()
         }
 
   @restricted_labels MapSet.new([
-    "Private Key",
-    "AWS Secret Key",
-    "Database Connection String",
-    "US Social Security Number",
-    "Credit Card Number"
-  ])
+                       "Private Key",
+                       "AWS Secret Key",
+                       "Database Connection String",
+                       "US Social Security Number",
+                       "Credit Card Number"
+                     ])
 
   @confidential_labels MapSet.new([
-    "Password in Config",
-    "AWS Access Key",
-    "Anthropic API Key",
-    "OpenAI API Key",
-    "Stripe Key",
-    "GitHub Token",
-    "GitHub Fine-Grained PAT",
-    "GitLab PAT",
-    "Slack Token",
-    "JWT Token",
-    "High-Entropy Base64"
-  ])
+                         "Password in Config",
+                         "AWS Access Key",
+                         "Anthropic API Key",
+                         "OpenAI API Key",
+                         "Stripe Key",
+                         "GitHub Token",
+                         "GitHub Fine-Grained PAT",
+                         "GitLab PAT",
+                         "Slack Token",
+                         "JWT Token",
+                         "High-Entropy Base64"
+                       ])
 
   @pii_labels MapSet.new([
-    "Email Address",
-    "Phone Number",
-    "Credit Card Number",
-    "US Social Security Number",
-    "IP Address",
-    "Hardcoded User Path"
-  ])
+                "Email Address",
+                "Phone Number",
+                "Credit Card Number",
+                "US Social Security Number",
+                "IP Address",
+                "Hardcoded User Path"
+              ])
 
   @credential_labels MapSet.new([
-    "AWS Access Key",
-    "AWS Secret Key",
-    "Anthropic API Key",
-    "OpenAI API Key",
-    "GitHub Token",
-    "GitHub Fine-Grained PAT",
-    "GitLab PAT",
-    "Slack Token",
-    "Google API Key",
-    "Stripe Key",
-    "Private Key",
-    "JWT Token",
-    "Database Connection String",
-    "Bearer Token",
-    "Password in Config",
-    "API Key/Token",
-    "High-Entropy Base64"
-  ])
+                       "AWS Access Key",
+                       "AWS Secret Key",
+                       "Anthropic API Key",
+                       "OpenAI API Key",
+                       "GitHub Token",
+                       "GitHub Fine-Grained PAT",
+                       "GitLab PAT",
+                       "Slack Token",
+                       "Google API Key",
+                       "Stripe Key",
+                       "Private Key",
+                       "JWT Token",
+                       "Database Connection String",
+                       "Bearer Token",
+                       "Password in Config",
+                       "API Key/Token",
+                       "High-Entropy Base64"
+                     ])
 
   @doc """
   Classify a prompt for sensitive data, returning findings, sanitized text,

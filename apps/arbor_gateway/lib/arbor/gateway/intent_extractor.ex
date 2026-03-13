@@ -115,7 +115,9 @@ defmodule Arbor.Gateway.IntentExtractor do
   @spec extract_or_default(String.t(), keyword()) :: intent()
   def extract_or_default(prompt, opts \\ []) do
     case extract(prompt, opts) do
-      {:ok, intent} -> intent
+      {:ok, intent} ->
+        intent
+
       {:error, reason} ->
         Logger.warning("[IntentExtractor] Falling back to default intent: #{inspect(reason)}")
         default_intent(prompt)
@@ -185,9 +187,11 @@ defmodule Arbor.Gateway.IntentExtractor do
 
   defp select_model(:any, opts) do
     # Use cheap fast model — haiku class
-    fast = Application.get_env(:arbor_gateway, :intent_llm,
-      provider: :anthropic, model: "claude-haiku-4-5-20251001"
-    )
+    fast =
+      Application.get_env(:arbor_gateway, :intent_llm,
+        provider: :anthropic,
+        model: "claude-haiku-4-5-20251001"
+      )
 
     opts |> Keyword.put(:provider, fast[:provider]) |> Keyword.put(:model, fast[:model])
   end

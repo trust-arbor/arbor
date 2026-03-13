@@ -22,23 +22,25 @@ defmodule Arbor.Gateway.PreprocessingLogTest do
 
   describe "record/1" do
     test "records an entry and returns id" do
-      assert {:ok, id} = PreprocessingLog.record(%{
-        prompt_hash: "abc123",
-        classification: %{overall_sensitivity: :public},
-        outcome: :pending
-      })
+      assert {:ok, id} =
+               PreprocessingLog.record(%{
+                 prompt_hash: "abc123",
+                 classification: %{overall_sensitivity: :public},
+                 outcome: :pending
+               })
 
       assert is_binary(id)
       assert String.starts_with?(id, "preproc_")
     end
 
     test "recorded entry can be retrieved" do
-      {:ok, id} = PreprocessingLog.record(%{
-        prompt_hash: "abc123",
-        classification: %{overall_sensitivity: :confidential},
-        intent: %{goal: "deploy"},
-        outcome: :pending
-      })
+      {:ok, id} =
+        PreprocessingLog.record(%{
+          prompt_hash: "abc123",
+          classification: %{overall_sensitivity: :confidential},
+          intent: %{goal: "deploy"},
+          outcome: :pending
+        })
 
       assert {:ok, entry} = PreprocessingLog.get(id)
       assert entry.prompt_hash == "abc123"
@@ -52,11 +54,12 @@ defmodule Arbor.Gateway.PreprocessingLogTest do
     test "updates an existing entry" do
       {:ok, id} = PreprocessingLog.record(%{outcome: :pending})
 
-      assert :ok = PreprocessingLog.update(id, %{
-        outcome: :success,
-        duration_ms: 1500,
-        verification_results: [%{passed: true}]
-      })
+      assert :ok =
+               PreprocessingLog.update(id, %{
+                 outcome: :success,
+                 duration_ms: 1500,
+                 verification_results: [%{passed: true}]
+               })
 
       {:ok, entry} = PreprocessingLog.get(id)
       assert entry.outcome == :success
@@ -77,9 +80,14 @@ defmodule Arbor.Gateway.PreprocessingLogTest do
 
   describe "recent/1" do
     test "returns entries newest first" do
-      {:ok, _} = PreprocessingLog.record(%{prompt_hash: "first", timestamp: ~U[2026-01-01 00:00:00Z]})
-      {:ok, _} = PreprocessingLog.record(%{prompt_hash: "second", timestamp: ~U[2026-01-02 00:00:00Z]})
-      {:ok, _} = PreprocessingLog.record(%{prompt_hash: "third", timestamp: ~U[2026-01-03 00:00:00Z]})
+      {:ok, _} =
+        PreprocessingLog.record(%{prompt_hash: "first", timestamp: ~U[2026-01-01 00:00:00Z]})
+
+      {:ok, _} =
+        PreprocessingLog.record(%{prompt_hash: "second", timestamp: ~U[2026-01-02 00:00:00Z]})
+
+      {:ok, _} =
+        PreprocessingLog.record(%{prompt_hash: "third", timestamp: ~U[2026-01-03 00:00:00Z]})
 
       entries = PreprocessingLog.recent(limit: 3)
       hashes = Enum.map(entries, & &1.prompt_hash)
@@ -183,14 +191,15 @@ defmodule Arbor.Gateway.PreprocessingLogTest do
 
       outcome = if VerificationPlan.all_passed?(results), do: :success, else: :failure
 
-      {:ok, id} = PreprocessingLog.record(%{
-        prompt_hash: prompt_hash,
-        classification: classification,
-        intent: intent,
-        verification_results: results,
-        duration_ms: duration,
-        outcome: outcome
-      })
+      {:ok, id} =
+        PreprocessingLog.record(%{
+          prompt_hash: prompt_hash,
+          classification: classification,
+          intent: intent,
+          verification_results: results,
+          duration_ms: duration,
+          outcome: outcome
+        })
 
       {:ok, entry} = PreprocessingLog.get(id)
       assert entry.outcome == :success

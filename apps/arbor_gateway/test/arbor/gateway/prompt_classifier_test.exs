@@ -110,7 +110,8 @@ defmodule Arbor.Gateway.PromptClassifierTest do
     end
 
     test "returns :local_preferred for confidential content" do
-      assert PromptClassifier.routing_for(~s(key: sk-ant-api1234567890abcdefghij)) == :local_preferred
+      assert PromptClassifier.routing_for(~s(key: sk-ant-api1234567890abcdefghij)) ==
+               :local_preferred
     end
   end
 end

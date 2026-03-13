@@ -195,9 +195,7 @@ defmodule Arbor.Common.CapabilityIndexTest do
 
     test "filters by kind" do
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "action:read", name: "Read", kind: :action})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "action:read", name: "Read", kind: :action}))
 
       :ok =
         CapabilityIndex.index(
@@ -290,14 +288,10 @@ defmodule Arbor.Common.CapabilityIndexTest do
 
     test "filters by trust tier" do
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "a", name: "A", trust_required: :new})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "a", name: "A", trust_required: :new}))
 
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "b", name: "B", trust_required: :trusted})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "b", name: "B", trust_required: :trusted}))
 
       assert length(CapabilityIndex.list(trust_tier: :new)) == 1
       assert length(CapabilityIndex.list(trust_tier: :trusted)) == 2
@@ -316,14 +310,10 @@ defmodule Arbor.Common.CapabilityIndexTest do
 
     test "filters by provider" do
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "a", name: "A", provider: MyProvider})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "a", name: "A", provider: MyProvider}))
 
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "b", name: "B", provider: OtherProvider})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "b", name: "B", provider: OtherProvider}))
 
       assert length(CapabilityIndex.list(provider: MyProvider)) == 1
       assert length(CapabilityIndex.list(provider: OtherProvider)) == 1
@@ -445,9 +435,7 @@ defmodule Arbor.Common.CapabilityIndexTest do
 
     test "all match results have tier 1" do
       :ok =
-        CapabilityIndex.index(
-          make_descriptor(%{id: "a", name: "Test", description: "test"})
-        )
+        CapabilityIndex.index(make_descriptor(%{id: "a", name: "Test", description: "test"}))
 
       results = CapabilityIndex.search("test")
       assert Enum.all?(results, &(&1.tier == 1))
