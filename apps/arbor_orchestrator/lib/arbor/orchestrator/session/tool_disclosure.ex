@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   Progressive tool disclosure for agent sessions.
 
   Instead of loading all ~149 action tools into the LLM context at once,
-  sessions start with a small core tool set (~12-15 tools) plus a `find_tools`
+  sessions start with a small core tool set (~12-15 tools) plus a `tool_find_tools`
   meta-tool. Agents discover additional tools on demand via `find_tools(query)`,
   which are then available for the rest of the session.
 
@@ -23,14 +23,13 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
 
   @base_tools ~w(
     file_read file_write file_edit file_list file_search
-    shell_execute
     memory_recall memory_remember
     skill_search skill_activate
     git_status git_diff
-    find_tools
+    tool_find_tools
   )
 
-  @established_extras ~w(code_compile_and_test ai_generate_text git_commit git_log)
+  @established_extras ~w(shell_execute code_compile_and_test ai_generate_text git_commit git_log)
 
   @trusted_extras ~w(shell_execute_script code_hot_load)
 
@@ -98,14 +97,50 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     end
   end
 
+  @doc """
+  Ensure the agent has security capabilities for all resolved tools.
+
+  Called once at session start or when tools change. Grants capabilities
+  for each tool's canonical URI so the security layer authorizes execution.
+  Skips tools that can't be resolved (e.g. custom/external tools).
+  """
+  @spec ensure_tool_capabilities(String.t(), [String.t()]) :: :ok
+  def ensure_tool_capabilities(agent_id, tool_names) do
+    actions_mod = Module.concat([:Arbor, :Actions])
+    security_mod = Module.concat([:Arbor, :Security])
+
+    if Code.ensure_loaded?(actions_mod) and
+         function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) and
+         Code.ensure_loaded?(security_mod) and
+         function_exported?(security_mod, :grant, 1) do
+      tool_names
+      |> Enum.each(fn name ->
+        with {:ok, uri} <- apply(actions_mod, :tool_name_to_canonical_uri, [name]) do
+          apply(security_mod, :grant, [
+            [
+              principal: agent_id,
+              resource: uri,
+              constraints: %{},
+              metadata: %{source: :progressive_disclosure}
+            ]
+          ])
+        end
+      end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   defp ensure_find_tools(tools) do
     has_find_tools =
       Enum.any?(tools, fn
-        t when is_binary(t) -> t == "find_tools"
-        t when is_atom(t) -> t == :find_tools
+        t when is_binary(t) -> t in ["find_tools", "tool_find_tools", "tool.find_tools"]
+        t when is_atom(t) -> t in [:find_tools, :tool_find_tools]
         _ -> false
       end)
 
-    if has_find_tools, do: tools, else: tools ++ ["find_tools"]
+    if has_find_tools, do: tools, else: tools ++ ["tool_find_tools"]
   end
 end

@@ -357,6 +357,20 @@ defmodule Arbor.Orchestrator.Session do
           state
         end
 
+      # Grant security capabilities for the session's resolved tool set.
+      # Tools are determined by trust tier via ToolDisclosure; the agent
+      # needs matching capabilities for Security.authorize to succeed.
+      alias Arbor.Orchestrator.Session.ToolDisclosure
+
+      resolved_tools =
+        ToolDisclosure.resolve_tools(
+          config,
+          trust_tier,
+          Map.get(state, :discovered_tools, MapSet.new())
+        )
+
+      ToolDisclosure.ensure_tool_capabilities(agent_id, resolved_tools)
+
       state =
         if start_heartbeat do
           schedule_heartbeat(state)
@@ -588,6 +602,9 @@ defmodule Arbor.Orchestrator.Session do
     if new_names == [] do
       state
     else
+      # Grant security capabilities for newly discovered tools
+      ToolDisclosure.ensure_tool_capabilities(state.agent_id, new_names)
+
       merged = ToolDisclosure.merge_discovered(state.discovered_tools, new_names)
       %{state | discovered_tools: merged}
     end
