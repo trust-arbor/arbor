@@ -20,9 +20,9 @@ defmodule Arbor.Actions.Web do
   ## Authorization
 
   Capability URIs:
-  - `arbor://actions/execute/web.browse`
-  - `arbor://actions/execute/web.search`
-  - `arbor://actions/execute/web.snapshot`
+  - `arbor://net/http`
+  - `arbor://net/search`
+  - `arbor://net/http`
 
   ## Security
 

@@ -9,7 +9,7 @@ defmodule Arbor.Contracts.Security.CapabilityTaintTest do
     test "returns policy from constraints" do
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://actions/execute/shell_execute",
+          resource_uri: "arbor://shell/exec",
           principal_id: "agent_001",
           constraints: %{taint_policy: :strict}
         )
@@ -20,7 +20,7 @@ defmodule Arbor.Contracts.Security.CapabilityTaintTest do
     test "returns :permissive policy from constraints" do
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://actions/execute/shell_execute",
+          resource_uri: "arbor://shell/exec",
           principal_id: "agent_001",
           constraints: %{taint_policy: :permissive}
         )
@@ -31,7 +31,7 @@ defmodule Arbor.Contracts.Security.CapabilityTaintTest do
     test "returns :audit_only policy from constraints" do
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://actions/execute/shell_execute",
+          resource_uri: "arbor://shell/exec",
           principal_id: "agent_001",
           constraints: %{taint_policy: :audit_only}
         )
@@ -42,7 +42,7 @@ defmodule Arbor.Contracts.Security.CapabilityTaintTest do
     test "defaults to :permissive when not set" do
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://actions/execute/shell_execute",
+          resource_uri: "arbor://shell/exec",
           principal_id: "agent_001"
         )
 
@@ -52,7 +52,7 @@ defmodule Arbor.Contracts.Security.CapabilityTaintTest do
     test "defaults to :permissive when constraints has other keys" do
       {:ok, cap} =
         Capability.new(
-          resource_uri: "arbor://actions/execute/shell_execute",
+          resource_uri: "arbor://shell/exec",
           principal_id: "agent_001",
           constraints: %{max_requests: 100}
         )

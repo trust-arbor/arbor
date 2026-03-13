@@ -70,7 +70,7 @@ defmodule Arbor.Agent.Templates.ClaudeCodeTest do
       assert Enum.any?(resources, &(&1 =~ "fs/write"))
       assert Enum.any?(resources, &(&1 =~ "memory"))
       assert Enum.any?(resources, &(&1 =~ "shell"))
-      assert Enum.any?(resources, &(&1 =~ "actions/execute"))
+      assert Enum.any?(resources, &(&1 =~ "arbor://ai/**"))
     end
   end
 

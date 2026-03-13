@@ -18,6 +18,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   import Arbor.Orchestrator.Handlers.Helpers
 
+  alias Arbor.Orchestrator.Session.Builders
+
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
   @impl true
@@ -122,13 +124,25 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     agent_id = Context.get(context, "session.agent_id", "?")
     prompt_len = if is_binary(prompt), do: String.length(prompt), else: 0
     msgs_count = context |> Context.get("session.messages", []) |> length()
+    provider = Context.get(context, "session.llm_provider")
+    model = Context.get(context, "session.llm_model")
+    use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
 
     Logger.info(
       "[LlmHandler] #{node.id} for #{agent_id}: " <>
         "prompt=#{prompt_len} chars, messages=#{msgs_count}, " <>
-        "provider=#{Context.get(context, "session.llm_provider")}, " <>
-        "model=#{Context.get(context, "session.llm_model")}"
+        "provider=#{provider}, model=#{model}"
     )
+
+    emit_llm_signal(:llm_call_started, %{
+      agent_id: agent_id,
+      node_id: node.id,
+      provider: provider,
+      model: model,
+      prompt_length: prompt_len,
+      message_count: msgs_count,
+      use_tools: use_tools
+    })
 
     # Clear any stale routing decision from process dict
     Process.delete(:__routing_decision__)
@@ -143,6 +157,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           "[LlmHandler] #{node.id} for #{agent_id}: " <>
             "OK in #{elapsed}ms, response=#{resp_len} chars"
         )
+
+        emit_llm_signal(:llm_call_completed, %{
+          agent_id: agent_id,
+          node_id: node.id,
+          provider: provider,
+          model: model,
+          duration_ms: elapsed,
+          response_length: resp_len,
+          response_preview: if(is_binary(response_text), do: String.slice(response_text, 0..200), else: nil),
+          use_tools: use_tools
+        })
 
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
@@ -165,6 +190,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           "[LlmHandler] #{node.id} for #{agent_id}: " <>
             "FAILED in #{elapsed}ms, reason=#{inspect(reason)}"
         )
+
+        emit_llm_signal(:llm_call_failed, %{
+          agent_id: agent_id,
+          node_id: node.id,
+          provider: provider,
+          model: model,
+          duration_ms: elapsed,
+          error: inspect(reason),
+          use_tools: use_tools
+        })
 
         %Outcome{
           status: :fail,
@@ -390,7 +425,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         case Context.get(context, "session.tools") do
           session_tools when is_list(session_tools) and session_tools != [] ->
             executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
-            {session_tools, executor}
+            defs = resolve_tool_list(session_tools)
+            {defs, executor}
 
           _ ->
             executor = Keyword.get(opts, :tool_executor, CodingTools)
@@ -402,6 +438,35 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
         {ArborActionsExecutor.definitions(action_names), executor}
     end
+  end
+
+  # Convert a list of tool items to OpenAI-format definitions.
+  # Accepts action name strings, module atoms, or already-formatted maps.
+  defp resolve_tool_list(tools) do
+    {names, maps} =
+      Enum.split_with(tools, fn
+        item when is_binary(item) -> true
+        item when is_atom(item) -> true
+        _ -> false
+      end)
+
+    name_defs =
+      if names != [] do
+        string_names =
+          Enum.map(names, fn
+            mod when is_atom(mod) ->
+              if function_exported?(mod, :name, 0), do: mod.name(), else: inspect(mod)
+
+            name ->
+              name
+          end)
+
+        ArborActionsExecutor.definitions(string_names)
+      else
+        []
+      end
+
+    name_defs ++ maps
   end
 
   defp maybe_add_stream_callback(opts, nil), do: opts
@@ -579,6 +644,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp parse_score(_), do: nil
+
+  # ── Signal Emission ──────────────────────────────────────────────
+
+  defp emit_llm_signal(event, data) do
+    Builders.emit_signal(:agent, event, data)
+  rescue
+    _ -> :ok
+  end
 
   defp write_stage_artifacts(opts, node_id, prompt, response) do
     case Keyword.get(opts, :logs_root) do

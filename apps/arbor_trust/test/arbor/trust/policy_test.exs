@@ -116,8 +116,8 @@ defmodule Arbor.Trust.PolicyTest do
 
     test "returns mode from profile rules", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
-      # balanced preset has "arbor://actions/execute/file.read" => :auto
-      assert Policy.effective_mode(agent_id, "arbor://actions/execute/file.read") == :auto
+      # balanced preset has "arbor://fs/read" => :auto
+      assert Policy.effective_mode(agent_id, "arbor://fs/read") == :auto
     end
 
     test "returns baseline for unmatched URIs", %{agent_id: agent_id} do
@@ -203,13 +203,13 @@ defmodule Arbor.Trust.PolicyTest do
     test "returns false for :auto mode", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       # balanced has file.read => :auto
-      assert Policy.requires_approval?(agent_id, "arbor://actions/execute/file.read") == false
+      assert Policy.requires_approval?(agent_id, "arbor://fs/read") == false
     end
 
     test "returns false for :allow mode", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       # balanced has file.write => :allow
-      assert Policy.requires_approval?(agent_id, "arbor://actions/execute/file.write") == false
+      assert Policy.requires_approval?(agent_id, "arbor://fs/write") == false
     end
 
     test "returns error for :block mode", %{agent_id: agent_id} do
@@ -226,7 +226,7 @@ defmodule Arbor.Trust.PolicyTest do
     test "auto for auto-mode capability", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       # balanced has file.read => :auto
-      assert Policy.confirmation_mode(agent_id, "arbor://actions/execute/file.read") == :auto
+      assert Policy.confirmation_mode(agent_id, "arbor://fs/read") == :auto
     end
 
     test "gated for ask-mode capability", %{agent_id: agent_id} do
@@ -258,7 +258,7 @@ defmodule Arbor.Trust.PolicyTest do
     test "auto for allow-mode capability", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       # balanced has file.write => :allow → maps to :auto
-      assert Policy.confirmation_mode(agent_id, "arbor://actions/execute/file.write") == :auto
+      assert Policy.confirmation_mode(agent_id, "arbor://fs/write") == :auto
     end
   end
 

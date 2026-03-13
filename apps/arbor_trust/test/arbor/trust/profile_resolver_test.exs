@@ -213,13 +213,13 @@ defmodule Arbor.Trust.ProfileResolverTest do
       preset = ProfileResolver.preset(:cautious)
       assert preset.baseline == :ask
       assert preset.rules["arbor://shell"] == :block
-      assert preset.rules["arbor://actions/execute/file.read"] == :auto
+      assert preset.rules["arbor://fs/read"] == :auto
     end
 
     test ":balanced allows file writes, asks for git" do
       preset = ProfileResolver.preset(:balanced)
       assert preset.baseline == :ask
-      assert preset.rules["arbor://actions/execute/file.write"] == :allow
+      assert preset.rules["arbor://fs/write"] == :allow
       assert preset.rules["arbor://shell/exec/git"] == :ask
     end
 

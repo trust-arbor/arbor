@@ -100,47 +100,27 @@ defmodule Arbor.Agent.Templates.Diagnostician do
       # Orchestrator session execution
       %{resource: "arbor://orchestrator/execute"},
       # File operations for code analysis and investigation
-      %{resource: "arbor://actions/execute/file.read"},
-      %{resource: "arbor://actions/execute/file.write"},
-      %{resource: "arbor://actions/execute/file.exists"},
-      %{resource: "arbor://actions/execute/file.glob"},
-      %{resource: "arbor://actions/execute/file.search"},
-      %{resource: "arbor://actions/execute/file.list"},
+      %{resource: "arbor://fs/read"},
+      %{resource: "arbor://fs/write"},
+      %{resource: "arbor://fs/list"},
       # Memory for tracking patterns and past incidents
-      %{resource: "arbor://actions/execute/memory.recall"},
-      %{resource: "arbor://actions/execute/memory.remember"},
-      %{resource: "arbor://actions/execute/memory.reflect"},
-      %{resource: "arbor://actions/execute/memory_identity.read_self"},
-      %{resource: "arbor://actions/execute/memory_identity.add_insight"},
-      %{resource: "arbor://actions/execute/memory_identity.introspect_memory"},
+      %{resource: "arbor://memory/recall"},
+      %{resource: "arbor://memory/add_knowledge"},
+      %{resource: "arbor://memory/read"},
+      %{resource: "arbor://memory/write"},
       # Communication for ops room collaboration
-      %{resource: "arbor://actions/execute/comms.send_message"},
-      %{resource: "arbor://actions/execute/comms.poll_messages"},
+      %{resource: "arbor://comms/send"},
+      %{resource: "arbor://comms/poll"},
       # Governance proposals
-      %{resource: "arbor://actions/execute/proposal.submit"},
-      %{resource: "arbor://actions/execute/proposal.revise"},
+      %{resource: "arbor://consensus/propose"},
       # Hot reload (requires council approval)
-      %{resource: "arbor://actions/execute/code.hot_load"},
+      %{resource: "arbor://code/hot_load"},
       # Monitor read operations
-      %{resource: "arbor://actions/execute/monitor.read"},
-      # Anomaly queue operations
-      %{resource: "arbor://actions/execute/monitor.claim_anomaly"},
-      %{resource: "arbor://actions/execute/monitor.complete_anomaly"},
-      %{resource: "arbor://actions/execute/monitor.suppress_fingerprint"},
-      %{resource: "arbor://actions/execute/monitor.reset_baseline"},
-      # Runtime diagnostics
-      %{resource: "arbor://actions/execute/monitor.read_diagnostics"},
-      # Safe remediation actions (auto-approved at :established tier)
-      %{resource: "arbor://actions/execute/remediation.force_gc"},
-      %{resource: "arbor://actions/execute/remediation.drain_queue"},
-      %{resource: "arbor://actions/execute/remediation.restart_child"},
-      # Dangerous remediation actions (require council approval)
-      %{resource: "arbor://actions/execute/remediation.kill_process", requires_approval: true},
-      %{resource: "arbor://actions/execute/remediation.stop_supervisor", requires_approval: true},
-      # Shell access for diagnostics (recon, observer)
-      %{resource: "arbor://actions/execute/shell.execute"},
-      # Background health checks
-      %{resource: "arbor://actions/execute/background_checks.run"}
+      %{resource: "arbor://monitor/read"},
+      # Monitor remediation (includes anomaly queue + safe remediation)
+      %{resource: "arbor://monitor/remediate"},
+      # Shell access for diagnostics (recon, observer, background checks)
+      %{resource: "arbor://shell/exec"}
     ]
   end
 

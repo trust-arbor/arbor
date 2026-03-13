@@ -33,7 +33,7 @@ defmodule Arbor.Agent.ClaudeTest do
       assert "arbor://fs/read/**" in resources
       assert "arbor://memory/read/**" in resources
       assert "arbor://ai/generate/**" in resources
-      assert "arbor://actions/execute/**" in resources
+      assert "arbor://shell/execute/**" in resources
     end
 
     test "provides metadata" do

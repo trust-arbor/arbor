@@ -35,7 +35,7 @@ defmodule Arbor.Actions.AI do
   ## Authorization
 
   When using `Arbor.Actions.authorize_and_execute/4`, the capability URI
-  is `arbor://actions/execute/ai.generate_text` or `arbor://actions/execute/ai.analyze_code`.
+  is `arbor://ai/generate`.
   """
 
   defmodule GenerateText do

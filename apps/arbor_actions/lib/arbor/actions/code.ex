@@ -37,7 +37,7 @@ defmodule Arbor.Actions.Code do
 
   ## Authorization
 
-  - CompileAndTest: `arbor://actions/execute/code.compile_and_test`
+  - CompileAndTest: `arbor://code/compile`
   - HotLoad: `arbor://code/hot_load/{module}` (requires Trusted tier or above)
   """
 

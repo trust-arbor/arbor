@@ -31,7 +31,7 @@ defmodule Arbor.Actions.Sandbox do
   ## Authorization
 
   When using `Arbor.Actions.authorize_and_execute/4`, the capability URI
-  is `arbor://actions/execute/sandbox.create` or `arbor://actions/execute/sandbox.destroy`.
+  is `arbor://sandbox/create` or `arbor://sandbox/destroy`.
   """
 
   defmodule Create do

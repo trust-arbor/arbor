@@ -389,13 +389,14 @@ defmodule Arbor.Agent.Executor do
   # constraints, escalation, audit). Shadow mode removed — can?/3 is only
   # for UI hints, not security decisions.
   #
-  # URI unification: use the canonical dotted name format matching ToolBridge
-  # (e.g., "arbor://actions/execute/file.read" instead of "arbor://agent/action/file_read").
-  # Falls back to old format for actions without a discoverable module.
+  # URI unification: use Arbor.Actions.canonical_uri_for/2 which maps action
+  # modules to facade URIs (e.g., "arbor://fs/read" instead of
+  # "arbor://actions/execute/file.read"). Falls back to legacy format for
+  # actions without a discoverable module.
   defp check_capabilities(%Intent{action: action}, state) do
     resource =
-      case ActionDispatch.canonical_action_name(action) do
-        {:ok, name} -> "arbor://actions/execute/#{name}"
+      case ActionDispatch.resolve_action_module(action) do
+        {:ok, module} -> Arbor.Actions.canonical_uri_for(module, %{})
         :error -> "arbor://agent/action/#{action}"
       end
 

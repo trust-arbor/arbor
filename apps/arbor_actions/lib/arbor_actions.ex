@@ -83,7 +83,7 @@ defmodule Arbor.Actions do
   @doc """
   Execute an action with authorization check.
 
-  Verifies the agent has the `arbor://actions/execute/{action_name}` capability
+  Verifies the agent has the canonical facade capability (e.g. `arbor://fs/read`)
   before running the action. Use this for agent-initiated action execution
   where authorization should be enforced.
 
@@ -294,6 +294,9 @@ defmodule Arbor.Actions do
       identity: [
         Arbor.Actions.Identity.RequestEndorsement,
         Arbor.Actions.Identity.SignPublicKey
+      ],
+      agent_profile: [
+        Arbor.Actions.AgentProfile.SetDisplayName
       ],
       acp: [
         Arbor.Actions.Acp.StartSession,
@@ -789,6 +792,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Identity.RequestEndorsement => "arbor://agent/identity",
     Arbor.Actions.Identity.SignPublicKey => "arbor://agent/identity",
 
+    # Agent Profile — arbor://agent/profile (self-service, any trust level)
+    Arbor.Actions.AgentProfile.SetDisplayName => "arbor://agent/profile",
+
     # ACP — arbor://acp/tool
     Arbor.Actions.Acp.StartSession => "arbor://acp/tool",
     Arbor.Actions.Acp.SendMessage => "arbor://acp/tool",
@@ -826,7 +832,23 @@ defmodule Arbor.Actions do
     Arbor.Actions.Skill.Compile => "arbor://code/compile"
   }
 
-  defp canonical_uri_for(action_module, _params) do
+  @doc """
+  Look up the canonical facade URI for an action module.
+
+  Returns the facade-scoped URI from `@canonical_uri_map` when available,
+  falling back to the legacy `arbor://actions/execute/{name}` format for
+  unmapped actions (Session*, etc.).
+
+  ## Examples
+
+      iex> Arbor.Actions.canonical_uri_for(Arbor.Actions.File.Read, %{})
+      "arbor://fs/read"
+
+      iex> Arbor.Actions.canonical_uri_for(Arbor.Actions.AgentProfile.SetDisplayName, %{agent_id: "x"})
+      "arbor://agent/profile/x"
+  """
+  @spec canonical_uri_for(module(), map()) :: String.t()
+  def canonical_uri_for(action_module, params) do
     case Map.get(@canonical_uri_map, action_module) do
       nil ->
         # Legacy fallback for unmapped actions (Session*, etc.)
@@ -834,7 +856,70 @@ defmodule Arbor.Actions do
         "arbor://actions/execute/#{action_name}"
 
       uri ->
-        uri
+        # Parameterize URI with agent_id when the capability uses /self/ scoping.
+        # E.g. "arbor://agent/profile" + agent_id "x" -> "arbor://agent/profile/x"
+        # so it matches the granted capability "arbor://agent/profile/x/*".
+        parameterize_uri(uri, params)
+    end
+  end
+
+  @doc """
+  Resolve an LLM tool name string to its canonical facade URI.
+
+  Tool names are strings like `"file_read"` (Jido underscore format) or
+  `"file.read"` (canonical dot format). Resolves to the action module,
+  then looks up the facade URI in `@canonical_uri_map`.
+
+  ## Examples
+
+      iex> Arbor.Actions.tool_name_to_canonical_uri("file_read")
+      {:ok, "arbor://fs/read"}
+
+      iex> Arbor.Actions.tool_name_to_canonical_uri("shell_execute")
+      {:ok, "arbor://shell/exec"}
+
+      iex> Arbor.Actions.tool_name_to_canonical_uri("nonexistent")
+      :error
+  """
+  @spec tool_name_to_canonical_uri(String.t()) :: {:ok, String.t()} | :error
+  def tool_name_to_canonical_uri(tool_name) when is_binary(tool_name) do
+    case resolve_module_by_tool_name(tool_name) do
+      {:ok, module} ->
+        case Map.get(@canonical_uri_map, module) do
+          nil -> :error
+          uri -> {:ok, uri}
+        end
+
+      {:error, _} ->
+        :error
+    end
+  end
+
+  # Resolve a tool name to its action module.
+  # Tries ActionRegistry (O(1) ETS) first, falls back to name_to_module/1.
+  defp resolve_module_by_tool_name(tool_name) do
+    registry = Arbor.Common.ActionRegistry
+
+    if Process.whereis(registry) do
+      case registry.resolve(tool_name) do
+        {:ok, module} -> {:ok, module}
+        {:error, _} -> name_to_module(tool_name)
+      end
+    else
+      name_to_module(tool_name)
+    end
+  end
+
+  # URIs that use /self/ scoping in capability templates need the agent_id
+  # appended to match the granted capability (e.g. arbor://agent/profile/x/*).
+  @self_scoped_uri_prefixes ["arbor://agent/profile"]
+
+  defp parameterize_uri(uri, params) do
+    if uri in @self_scoped_uri_prefixes do
+      agent_id = Map.get(params, :agent_id) || Map.get(params, "agent_id")
+      if agent_id, do: "#{uri}/#{agent_id}", else: uri
+    else
+      uri
     end
   end
 end

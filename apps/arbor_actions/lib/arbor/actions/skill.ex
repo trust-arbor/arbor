@@ -30,12 +30,12 @@ defmodule Arbor.Actions.Skill do
 
   ## Authorization
 
-  - Search: `arbor://actions/execute/skill.search`
-  - Activate: `arbor://actions/execute/skill.activate`
-  - Deactivate: `arbor://actions/execute/skill.deactivate`
-  - ListActive: `arbor://actions/execute/skill.list_active`
-  - Import: `arbor://actions/execute/skill.import`
-  - Compile: `arbor://actions/execute/skill.compile`
+  - Search: `arbor://code/read`
+  - Activate: `arbor://code/write`
+  - Deactivate: `arbor://code/write`
+  - ListActive: `arbor://code/read`
+  - Import: `arbor://code/write`
+  - Compile: `arbor://code/compile`
   """
 
   # -- Search ----------------------------------------------------------------
@@ -214,7 +214,12 @@ defmodule Arbor.Actions.Skill do
       if Code.ensure_loaded?(security_mod) and function_exported?(security_mod, :authorize, 4) do
         unauthorized =
           Enum.reject(tools, fn tool ->
-            resource = "arbor://actions/execute/#{tool}"
+            resource =
+              case Arbor.Actions.tool_name_to_canonical_uri(tool) do
+                {:ok, uri} -> uri
+                :error -> "arbor://actions/execute/#{tool}"
+              end
+
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
             case apply(security_mod, :authorize, [agent_id, resource, :execute, []]) do
               {:ok, :authorized} -> true

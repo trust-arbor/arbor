@@ -103,6 +103,9 @@ defmodule Arbor.Agent do
   @doc "Set auto_start flag on an agent's persisted profile."
   defdelegate set_auto_start(agent_id, enabled), to: Arbor.Agent.Manager
 
+  @doc "Update an agent's display name."
+  defdelegate set_display_name(agent_id, name), to: Arbor.Agent.Manager
+
   @doc "Set MCP server configuration for an agent."
   defdelegate set_mcp_config(agent_id, servers), to: Arbor.Agent.Manager
 
@@ -157,7 +160,7 @@ defmodule Arbor.Agent do
   @doc """
   Execute an action on a running agent with authorization check.
 
-  Verifies the caller has the `arbor://actions/execute/{action_name}` capability
+  Verifies the caller has the canonical facade capability (e.g. `arbor://fs/read`)
   before executing. Use this when an agent is executing actions on behalf of
   another agent or external request.
 
@@ -180,8 +183,8 @@ defmodule Arbor.Agent do
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | :not_found | any()}
   def authorize_action(caller_id, agent_id, action, timeout \\ 5000) do
-    action_name = extract_action_name(action)
-    resource = "arbor://actions/execute/#{action_name}"
+    action_module = extract_action_module(action)
+    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
 
     case Arbor.Security.authorize(caller_id, resource, :execute) do
       {:ok, :authorized} ->
@@ -519,13 +522,12 @@ defmodule Arbor.Agent do
     Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 
-  # Extract the action name from an action spec (module or {module, params} tuple)
-  # Uses the canonical dotted format matching ToolBridge (e.g., "file.read")
-  defp extract_action_name({action_module, _params}) when is_atom(action_module) do
-    Arbor.Agent.Executor.ActionDispatch.module_to_dotted_name(action_module)
+  # Extract the action module from an action spec (module or {module, params} tuple)
+  defp extract_action_module({action_module, _params}) when is_atom(action_module) do
+    action_module
   end
 
-  defp extract_action_name(action_module) when is_atom(action_module) do
-    Arbor.Agent.Executor.ActionDispatch.module_to_dotted_name(action_module)
+  defp extract_action_module(action_module) when is_atom(action_module) do
+    action_module
   end
 end

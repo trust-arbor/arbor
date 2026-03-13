@@ -137,7 +137,7 @@ defmodule Arbor.Security do
 
       {:ok, caps} = Security.delegate_to_agent(human_id, agent_id,
         delegator_private_key: key,
-        resources: ["arbor://fs/read/**", "arbor://actions/execute/**"]
+        resources: ["arbor://fs/read/**", "arbor://fs/**"]
       )
   """
   @spec delegate_to_agent(String.t(), String.t(), keyword()) ::
@@ -689,7 +689,7 @@ defmodule Arbor.Security do
   ## Example
 
       {:ok, signer} = Arbor.Security.make_signer(agent_id, private_key)
-      {:ok, signed} = signer.("arbor://actions/execute/file_read")
+      {:ok, signed} = signer.("arbor://fs/read")
   """
   @spec make_signer(String.t(), binary()) ::
           (binary() -> {:ok, SignedRequest.t()} | {:error, term()})

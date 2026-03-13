@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Docs do
 
   ## Authorization
 
-  - Lookup: `arbor://actions/execute/docs.lookup`
+  - Lookup: `arbor://code/read`
   """
 
   defmodule Lookup do

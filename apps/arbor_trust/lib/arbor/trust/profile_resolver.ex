@@ -221,8 +221,7 @@ defmodule Arbor.Trust.ProfileResolver do
       rules: %{
         # Reads are frictionless
         "arbor://code/read" => :auto,
-        "arbor://actions/execute/file.read" => :auto,
-        "arbor://actions/execute/code.read" => :auto,
+        "arbor://fs/read" => :auto,
         "arbor://historian/query" => :auto,
         # Writes blocked (too risky for cautious users)
         "arbor://code/write" => :block,
@@ -238,12 +237,11 @@ defmodule Arbor.Trust.ProfileResolver do
       rules: %{
         # Reads are frictionless
         "arbor://code/read" => :auto,
-        "arbor://actions/execute/file.read" => :auto,
-        "arbor://actions/execute/code.read" => :auto,
+        "arbor://fs/read" => :auto,
         "arbor://historian/query" => :auto,
         # Writes are gated
         "arbor://code/write" => :ask,
-        "arbor://actions/execute/file.write" => :allow,
+        "arbor://fs/write" => :allow,
         # Shell gated for specific commands
         "arbor://shell/exec/git" => :ask
       }

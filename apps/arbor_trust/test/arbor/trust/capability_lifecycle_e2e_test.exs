@@ -54,23 +54,23 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
   describe "grant and use" do
     test "agent with granted capability is authorized", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://actions/execute/test_action")
+      grant_capability(agent_id, "arbor://test/execute")
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/test_action", :execute)
+               Security.authorize(agent_id, "arbor://test/execute", :execute)
     end
 
     test "agent without capability is unauthorized", %{agent_id: agent_id} do
       # No capability granted
       assert {:error, :unauthorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/test_action", :execute)
+               Security.authorize(agent_id, "arbor://test/execute", :execute)
     end
 
     test "capability for one resource does not authorize another", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://actions/execute/allowed_action")
+      grant_capability(agent_id, "arbor://test/allowed")
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/allowed_action", :execute)
+               Security.authorize(agent_id, "arbor://test/allowed", :execute)
 
       assert {:error, :unauthorized} =
                Security.authorize(agent_id, "arbor://fs/read/secret", :read)
@@ -115,7 +115,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_expired_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/expired_action",
+        resource_uri: "arbor://test/expired",
         principal_id: agent_id,
         granted_at: past_granted,
         expires_at: past_expires,
@@ -129,7 +129,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       # Should fail because capability has expired
       assert {:error, :unauthorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/expired_action", :execute)
+               Security.authorize(agent_id, "arbor://test/expired", :execute)
     end
 
     test "capability with future expiry is authorized", %{agent_id: agent_id} do
@@ -137,7 +137,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_future_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/future_action",
+        resource_uri: "arbor://test/future",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: future_expires,
@@ -150,7 +150,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, :stored} = CapabilityStore.put(cap)
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/future_action", :execute)
+               Security.authorize(agent_id, "arbor://test/future", :execute)
     end
   end
 
@@ -162,7 +162,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     test "capability with max_uses is auto-revoked after limit", %{agent_id: agent_id} do
       cap = %Capability{
         id: "cap_maxuses_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/limited_action",
+        resource_uri: "arbor://test/limited",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
@@ -177,26 +177,26 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       # First use — should succeed
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/limited_action", :execute)
+               Security.authorize(agent_id, "arbor://test/limited", :execute)
 
       # Second use — should succeed (and trigger auto-revoke since count reaches max)
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/limited_action", :execute)
+               Security.authorize(agent_id, "arbor://test/limited", :execute)
 
       # Third use — should fail because capability was auto-revoked
       assert {:error, :unauthorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/limited_action", :execute)
+               Security.authorize(agent_id, "arbor://test/limited", :execute)
     end
 
     test "capability without max_uses allows unlimited authorizations", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://actions/execute/unlimited_action")
+      grant_capability(agent_id, "arbor://test/unlimited")
 
       # Authorize many times — all should succeed
       for _ <- 1..10 do
         assert {:ok, :authorized} =
                  Security.authorize(
                    agent_id,
-                   "arbor://actions/execute/unlimited_action",
+                   "arbor://test/unlimited",
                    :execute
                  )
       end
@@ -213,7 +213,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_notbefore_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/future_start",
+        resource_uri: "arbor://test/future_start",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
@@ -230,7 +230,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       # Capability.valid?/1 checks not_before_passed?, which causes
       # find_authorizing to skip this capability
       assert {:error, :unauthorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/future_start", :execute)
+               Security.authorize(agent_id, "arbor://test/future_start", :execute)
     end
 
     test "capability with past not_before is valid", %{agent_id: agent_id} do
@@ -238,7 +238,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_notbefore_past_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/past_start",
+        resource_uri: "arbor://test/past_start",
         principal_id: agent_id,
         granted_at: DateTime.add(DateTime.utc_now(), -7200, :second),
         expires_at: nil,
@@ -252,7 +252,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, :stored} = CapabilityStore.put(cap)
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/past_start", :execute)
+               Security.authorize(agent_id, "arbor://test/past_start", :execute)
     end
   end
 
@@ -284,15 +284,15 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     end
 
     test "exact match does not match unrelated resources", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://actions/execute/specific_tool")
+      grant_capability(agent_id, "arbor://test/specific_tool")
 
       # Exact resource should work
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/specific_tool", :execute)
+               Security.authorize(agent_id, "arbor://test/specific_tool", :execute)
 
       # Different resource should not match
       assert {:error, :unauthorized} =
-               Security.authorize(agent_id, "arbor://actions/execute/other_tool", :execute)
+               Security.authorize(agent_id, "arbor://test/other_tool", :execute)
     end
 
     test "prefix match is boundary-aware", %{agent_id: agent_id} do
@@ -320,7 +320,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://actions/execute/delegated_action",
+          resource: "arbor://test/delegated",
           delegation_depth: 1
         )
 
@@ -335,7 +335,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:ok, :authorized} =
                Security.authorize(
                  delegatee_id,
-                 "arbor://actions/execute/delegated_action",
+                 "arbor://test/delegated",
                  :execute
                )
 
@@ -351,7 +351,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://actions/execute/nondelegatable",
+          resource: "arbor://test/nondelegatable",
           delegation_depth: 0
         )
 
@@ -369,7 +369,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://actions/execute/cascade_test",
+          resource: "arbor://test/cascade",
           delegation_depth: 2
         )
 
@@ -385,7 +385,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:ok, :authorized} =
                Security.authorize(
                  delegatee_id,
-                 "arbor://actions/execute/cascade_test",
+                 "arbor://test/cascade",
                  :execute
                )
     end
@@ -396,7 +396,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, parent_cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://actions/execute/cascade_full",
+          resource: "arbor://test/cascade_full",
           delegation_depth: 2
         )
 
@@ -413,14 +413,14 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:error, :unauthorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/cascade_full",
+                 "arbor://test/cascade_full",
                  :execute
                )
 
       assert {:error, :unauthorized} =
                Security.authorize(
                  delegatee_id,
-                 "arbor://actions/execute/cascade_full",
+                 "arbor://test/cascade_full",
                  :execute
                )
     end
@@ -436,7 +436,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_session_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/session_action",
+        resource_uri: "arbor://test/session",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
@@ -453,7 +453,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:ok, :authorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/session_action",
+                 "arbor://test/session",
                  :execute,
                  session_id: session_id
                )
@@ -465,7 +465,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_session_wrong_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/session_locked",
+        resource_uri: "arbor://test/session_locked",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
@@ -482,7 +482,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:error, :scope_mismatch} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/session_locked",
+                 "arbor://test/session_locked",
                  :execute,
                  session_id: wrong_session
                )
@@ -493,7 +493,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
 
       cap = %Capability{
         id: "cap_session_none_#{:erlang.unique_integer([:positive])}",
-        resource_uri: "arbor://actions/execute/session_required",
+        resource_uri: "arbor://test/session_required",
         principal_id: agent_id,
         granted_at: DateTime.utc_now(),
         expires_at: nil,
@@ -510,19 +510,19 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:error, :scope_mismatch} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/session_required",
+                 "arbor://test/session_required",
                  :execute
                )
     end
 
     test "unscoped capability works regardless of session context", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://actions/execute/unscoped_action")
+      grant_capability(agent_id, "arbor://test/unscoped")
 
       # Works without session
       assert {:ok, :authorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/unscoped_action",
+                 "arbor://test/unscoped",
                  :execute
                )
 
@@ -530,7 +530,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:ok, :authorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/unscoped_action",
+                 "arbor://test/unscoped",
                  :execute,
                  session_id: "session_any"
                )
@@ -547,17 +547,17 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       {:ok, cap} =
         Security.grant(
           principal: agent_id,
-          resource: "arbor://actions/execute/lifecycle_test"
+          resource: "arbor://test/lifecycle"
         )
 
       assert cap.principal_id == agent_id
-      assert cap.resource_uri == "arbor://actions/execute/lifecycle_test"
+      assert cap.resource_uri == "arbor://test/lifecycle"
 
       # Step 2: Authorize (should succeed)
       assert {:ok, :authorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/lifecycle_test",
+                 "arbor://test/lifecycle",
                  :execute
                )
 
@@ -572,7 +572,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
       assert {:error, :unauthorized} =
                Security.authorize(
                  agent_id,
-                 "arbor://actions/execute/lifecycle_test",
+                 "arbor://test/lifecycle",
                  :execute
                )
 

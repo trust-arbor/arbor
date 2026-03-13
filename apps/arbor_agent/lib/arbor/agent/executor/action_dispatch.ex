@@ -14,8 +14,9 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @doc """
   Resolve an action atom to its canonical dotted name for capability URIs.
 
-  The canonical format matches what ToolBridge/arbor_actions uses:
-  `arbor://actions/execute/<dotted_name>`.
+  The canonical format uses facade URIs (e.g., `arbor://fs/read`,
+  `arbor://shell/exec`). For full URI resolution, use `resolve_action_module/1`
+  with `Arbor.Actions.canonical_uri_for/2`.
 
   ## Examples
 
@@ -50,6 +51,35 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     case find_action_module_from_string(action) do
       nil -> :error
       module -> {:ok, module_to_dotted_name(module)}
+    end
+  end
+
+  @doc """
+  Resolve an action atom to its concrete module, if discoverable.
+
+  Returns `{:ok, module}` when a matching action module is found via naming
+  convention, or `:error` for inline-handled actions and unknown names.
+
+  ## Examples
+
+      iex> ActionDispatch.resolve_action_module(:file_read)
+      {:ok, Arbor.Actions.File.Read}
+
+      iex> ActionDispatch.resolve_action_module(:unknown_thing)
+      :error
+  """
+  @spec resolve_action_module(atom() | String.t()) :: {:ok, module()} | :error
+  def resolve_action_module(action) when is_atom(action) do
+    case find_action_module(action) do
+      nil -> :error
+      module -> {:ok, module}
+    end
+  end
+
+  def resolve_action_module(action) when is_binary(action) do
+    case find_action_module_from_string(action) do
+      nil -> :error
+      module -> {:ok, module}
     end
   end
 

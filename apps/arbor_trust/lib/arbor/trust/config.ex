@@ -146,7 +146,8 @@ defmodule Arbor.Trust.Config do
   @default_tier_capabilities %{
     untrusted: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
-      %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 10}}
+      %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 10}},
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     probationary: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -156,7 +157,8 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://roadmap/read/self/*", constraints: %{}},
       %{resource_uri: "arbor://roadmap/write/self/brainstorming/*", constraints: %{}},
       %{resource_uri: "arbor://git/read/self/log", constraints: %{}},
-      %{resource_uri: "arbor://activity/emit/self", constraints: %{rate_limit: 100}}
+      %{resource_uri: "arbor://activity/emit/self", constraints: %{rate_limit: 100}},
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     trusted: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -174,7 +176,8 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://activity/emit/self", constraints: %{rate_limit: 100}},
       %{resource_uri: "arbor://config/write/self/*", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://test/write/self/*", constraints: %{}}
+      %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     veteran: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -194,7 +197,8 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://config/write/self/*", constraints: %{}},
       %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
       %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://install/execute/self", constraints: %{requires_approval: true}}
+      %{resource_uri: "arbor://install/execute/self", constraints: %{requires_approval: true}},
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     autonomous: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -217,7 +221,8 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
       %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
       %{resource_uri: "arbor://install/execute/self", constraints: %{}},
-      %{resource_uri: "arbor://governance/change/self/*", constraints: %{requires_approval: true}}
+      %{resource_uri: "arbor://governance/change/self/*", constraints: %{requires_approval: true}},
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ]
   }
 

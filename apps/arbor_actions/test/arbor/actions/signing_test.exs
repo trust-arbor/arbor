@@ -70,7 +70,7 @@ defmodule Arbor.Actions.SigningTest do
       # Sign with the correct key but a different agent_id
       other_agent_id = "agent_impersonator_#{:erlang.unique_integer([:positive])}"
 
-      resource = "arbor://actions/execute/file.read"
+      resource = "arbor://fs/read"
       # Sign as the real identity
       {:ok, signed} = SignedRequest.sign(resource, identity.agent_id, identity.private_key)
 
@@ -138,10 +138,10 @@ defmodule Arbor.Actions.SigningTest do
       signer = Arbor.Security.make_signer(agent_id, identity.private_key)
       assert is_function(signer, 1)
 
-      {:ok, signed} = signer.("arbor://actions/execute/file.read")
+      {:ok, signed} = signer.("arbor://fs/read")
       assert %SignedRequest{} = signed
       assert signed.agent_id == agent_id
-      assert signed.payload == "arbor://actions/execute/file.read"
+      assert signed.payload == "arbor://fs/read"
     end
 
     test "each call produces unique nonce", %{identity: identity, agent_id: agent_id} do

@@ -72,23 +72,17 @@ defmodule Arbor.Agent.Templates.Researcher do
         description: "Consult advisory council perspectives"
       },
       %{
-        resource: "arbor://actions/execute/pipeline.run",
+        resource: "arbor://orchestrator/execute",
         description: "Run DOT orchestrator pipelines"
       },
       %{
-        resource: "arbor://actions/execute/pipeline.validate",
-        description: "Validate DOT orchestrator pipelines"
-      },
-      %{
-        resource: "arbor://actions/execute/docs.lookup",
+        resource: "arbor://code/read",
         description: "Look up module/function documentation"
       },
       %{
-        resource: "arbor://actions/execute/eval.check",
-        description: "Run code quality checks"
-      },
-      %{resource: "arbor://actions/execute/eval.list", description: "List past eval runs"},
-      %{resource: "arbor://actions/execute/eval.get", description: "Get eval run details"}
+        resource: "arbor://code/compile",
+        description: "Run code quality checks and evaluations"
+      }
     ]
   end
 

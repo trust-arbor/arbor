@@ -33,7 +33,7 @@ defmodule Arbor.Actions.Acp do
 
   ## Authorization
 
-  Capability URIs follow the pattern `arbor://actions/execute/acp.start_session`.
+  Capability URIs follow the pattern `arbor://acp/tool`.
   """
 
   @allowed_providers [:claude, :codex, :gemini, :opencode, :goose]

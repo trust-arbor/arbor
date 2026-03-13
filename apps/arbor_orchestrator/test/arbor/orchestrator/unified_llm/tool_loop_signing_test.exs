@@ -101,9 +101,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
       # Let me use a different approach — test the execute_tools path directly.
 
       # For now, verify the signer function produces correct signed requests
-      {:ok, signed} = signer.("arbor://actions/execute/file_read")
+      {:ok, signed} = signer.("arbor://fs/read")
       assert %SignedRequest{} = signed
-      assert signed.payload == "arbor://actions/execute/file_read"
+      assert signed.payload == "arbor://fs/read"
       assert signed.agent_id == agent_id
     end
 
@@ -121,8 +121,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
         SignedRequest.sign(payload, agent_id, priv)
       end
 
-      {:ok, signed1} = signer.("arbor://actions/execute/file_read")
-      {:ok, signed2} = signer.("arbor://actions/execute/file_read")
+      {:ok, signed1} = signer.("arbor://fs/read")
+      {:ok, signed2} = signer.("arbor://fs/read")
 
       # Each call must produce a unique nonce (replay prevention)
       refute signed1.nonce == signed2.nonce
@@ -137,8 +137,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
         SignedRequest.sign(payload, agent_id, priv)
       end
 
-      {:ok, signed} = signer.("arbor://actions/execute/shell_execute")
-      assert signed.payload == "arbor://actions/execute/shell_execute"
+      {:ok, signed} = signer.("arbor://shell/exec")
+      assert signed.payload == "arbor://shell/exec"
 
       # Verify the signature is valid for this payload
       message = SignedRequest.signing_payload(signed)

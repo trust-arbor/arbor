@@ -413,7 +413,7 @@ defmodule Arbor.Contracts.Security.Capability do
   ## Examples
 
       iex> {:ok, cap} = Capability.new(
-      ...>   resource_uri: "arbor://actions/execute/shell_execute",
+      ...>   resource_uri: "arbor://shell/exec",
       ...>   principal_id: "agent_001",
       ...>   constraints: %{taint_policy: :strict}
       ...> )
@@ -421,7 +421,7 @@ defmodule Arbor.Contracts.Security.Capability do
       :strict
 
       iex> {:ok, cap} = Capability.new(
-      ...>   resource_uri: "arbor://actions/execute/shell_execute",
+      ...>   resource_uri: "arbor://shell/exec",
       ...>   principal_id: "agent_001"
       ...> )
       iex> Capability.taint_policy(cap)

@@ -92,12 +92,8 @@ defmodule Arbor.Agent.Templates.InterviewAgent do
   @impl true
   def required_capabilities do
     [
-      %{resource: "arbor://actions/execute/trust.read_profile"},
-      %{resource: "arbor://actions/execute/trust.propose_profile"},
-      %{resource: "arbor://actions/execute/trust.apply_profile"},
-      %{resource: "arbor://actions/execute/trust.explain_mode"},
-      %{resource: "arbor://actions/execute/trust.list_presets"},
-      %{resource: "arbor://actions/execute/trust.list_agents"}
+      %{resource: "arbor://trust/read"},
+      %{resource: "arbor://trust/write"}
     ]
   end
 

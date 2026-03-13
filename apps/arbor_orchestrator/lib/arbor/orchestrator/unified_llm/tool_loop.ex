@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   """
 
   alias Arbor.Orchestrator.UnifiedLLM.{Client, CodingTools, ContentPart, Message, Request}
+  alias Arbor.Orchestrator.Session.Builders
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
@@ -69,6 +70,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
         tool_calls =
           Enum.filter(response.content_parts, &(&1.kind == :tool_call))
 
+        emit_tool_loop_signal(:tool_loop_response, %{
+          agent_id: state.agent_id,
+          turn: state.turn,
+          finish_reason: response.finish_reason,
+          tool_call_count: length(tool_calls),
+          text_length: if(response.text, do: String.length(response.text), else: 0),
+          text_preview: if(response.text, do: String.slice(response.text, 0..200), else: nil),
+          content_parts_count: length(response.content_parts || []),
+          content_parts_kinds: Enum.map(response.content_parts || [], & &1.kind),
+          raw_finish_reason: (response.raw["choices"] || []) |> List.first() |> then(fn nil -> nil; c -> c["finish_reason"] end)
+        })
+
         if response.finish_reason == :tool_calls and tool_calls != [] do
           # Execute each tool call
           {tool_results, state} =
@@ -99,6 +112,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
         end
 
       {:error, _} = error ->
+        emit_tool_loop_signal(:tool_loop_error, %{
+          agent_id: state.agent_id,
+          turn: state.turn,
+          error: inspect(error)
+        })
+
         error
     end
   end
@@ -129,6 +148,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       Enum.map(tool_calls, fn tc ->
         args = normalize_args(tc.arguments)
 
+        emit_tool_loop_signal(:tool_call_started, %{
+          agent_id: state.agent_id,
+          tool: tc.name,
+          args: args,
+          turn: state.turn
+        })
+
+        start_time = System.monotonic_time(:millisecond)
+
         # Sign the tool call if a signer function is available.
         # Each tool call gets a fresh SignedRequest (unique nonce + timestamp).
         signed_request = sign_tool_call(state.signer, tc.name)
@@ -138,6 +166,20 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           |> maybe_add_signed_request(signed_request)
 
         result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        emit_tool_loop_signal(:tool_call_completed, %{
+          agent_id: state.agent_id,
+          tool: tc.name,
+          success: match?({:ok, _}, result),
+          duration_ms: duration_ms,
+          result_preview:
+            case result do
+              {:ok, text} when is_binary(text) -> String.slice(text, 0..200)
+              {:error, reason} -> "ERROR: #{inspect(reason)}"
+              _ -> inspect(result) |> String.slice(0..200)
+            end
+        })
 
         if state.on_tool_call do
           state.on_tool_call.(tc.name, args, result)
@@ -154,11 +196,27 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   defp sign_tool_call(nil, _tool_name), do: nil
 
   defp sign_tool_call(signer, tool_name) when is_function(signer, 1) do
-    resource = "arbor://actions/execute/#{tool_name}"
+    resource = resolve_canonical_uri(tool_name)
 
     case signer.(resource) do
       {:ok, signed_request} -> signed_request
       {:error, _} -> nil
+    end
+  end
+
+  # Resolve a tool name to its canonical facade URI via Arbor.Actions.
+  # Falls back to legacy URI format when the actions module isn't available.
+  defp resolve_canonical_uri(tool_name) do
+    actions_mod = Module.concat([:Arbor, :Actions])
+
+    if Code.ensure_loaded?(actions_mod) and
+         function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) do
+      case apply(actions_mod, :tool_name_to_canonical_uri, [tool_name]) do
+        {:ok, uri} -> uri
+        :error -> "arbor://actions/execute/#{tool_name}"
+      end
+    else
+      "arbor://actions/execute/#{tool_name}"
     end
   end
 
@@ -242,4 +300,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp truncate(other, _), do: inspect(other)
+
+  # ── Signal Emission ──────────────────────────────────────────────
+
+  defp emit_tool_loop_signal(event, data) do
+    Builders.emit_signal(:agent, event, data)
+  rescue
+    _ -> :ok
+  end
 end

@@ -29,9 +29,9 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
   @shell_exec "arbor://shell/exec/bash"
   @shell_git "arbor://shell/exec/git"
   @shell_git_status "arbor://shell/exec/git/status"
-  @file_read "arbor://actions/execute/file.read"
-  @file_write "arbor://actions/execute/file.write"
-  @code_read "arbor://actions/execute/code.read"
+  @file_read "arbor://fs/read"
+  @file_write "arbor://fs/write"
+  @code_read "arbor://code/read"
   @memory_read "arbor://memory/read"
   @memory_write "arbor://memory/write"
   @governance_vote "arbor://governance/vote"
@@ -47,7 +47,7 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
           "arbor://shell" => :block,
           "arbor://shell/exec/git" => :ask,
           "arbor://shell/exec/git/status" => :auto,
-          "arbor://actions/execute/file.read" => :auto,
+          "arbor://fs/read" => :auto,
           "arbor://memory" => :allow
         }
       })
@@ -155,9 +155,9 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
     test "model constraint further restricts beyond user preference and ceiling" do
       profile = build_profile(%{
         baseline: :allow,
-        rules: %{"arbor://actions/execute/file.write" => :allow},
+        rules: %{"arbor://fs/write" => :allow},
         model_constraints: %{
-          {:local_small, "arbor://actions/execute/file.write"} => :ask
+          {:local_small, "arbor://fs/write"} => :ask
         }
       })
 
@@ -409,17 +409,17 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
         baseline: :block,
         rules: %{
           "arbor://" => :block,
-          "arbor://actions" => :ask,
-          "arbor://actions/execute" => :allow,
-          "arbor://actions/execute/file.read" => :auto
+          "arbor://fs" => :ask,
+          "arbor://fs/read" => :allow,
+          "arbor://fs/read/home" => :auto
         }
       })
 
       # Each level gets more specific and more permissive
       assert ProfileResolver.effective_mode(profile, "arbor://unknown", security_ceilings: %{}) == :block
-      assert ProfileResolver.effective_mode(profile, "arbor://actions/list", security_ceilings: %{}) == :ask
-      assert ProfileResolver.effective_mode(profile, "arbor://actions/execute/code.eval", security_ceilings: %{}) == :allow
-      assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :auto
+      assert ProfileResolver.effective_mode(profile, "arbor://fs/write", security_ceilings: %{}) == :ask
+      assert ProfileResolver.effective_mode(profile, "arbor://fs/read/tmp", security_ceilings: %{}) == :allow
+      assert ProfileResolver.effective_mode(profile, "arbor://fs/read/home/file.txt", security_ceilings: %{}) == :auto
     end
 
     test "nil model_class means model constraints are ignored" do
@@ -523,7 +523,7 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
         baseline: preset.baseline,
         rules: preset.rules,
         model_constraints: %{
-          {:local_small, "arbor://actions/execute/file.write"} => :ask
+          {:local_small, "arbor://fs/write"} => :ask
         }
       })
 
