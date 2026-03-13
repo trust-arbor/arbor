@@ -391,6 +391,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.Web.Search,
         Arbor.Actions.Web.Snapshot
       ],
+      tool: [
+        Arbor.Actions.Tool.FindTools
+      ],
       browser: [
         Arbor.Actions.Browser.StartSession,
         Arbor.Actions.Browser.EndSession,
@@ -822,6 +825,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Eval.Check => "arbor://code/compile",
     Arbor.Actions.Eval.ListRuns => "arbor://code/read",
     Arbor.Actions.Eval.GetRun => "arbor://code/read",
+
+    # Tool discovery — arbor://actions/find_tools
+    Arbor.Actions.Tool.FindTools => "arbor://actions/find_tools",
 
     # Skill — arbor://code/read (skill management)
     Arbor.Actions.Skill.Search => "arbor://code/read",

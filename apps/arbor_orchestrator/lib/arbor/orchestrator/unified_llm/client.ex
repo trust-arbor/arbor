@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   alias Arbor.Orchestrator.UnifiedLLM.{
     AbortError,
     ConfigurationError,
+    ContentPart,
     Message,
     Request,
     RequestTimeoutError,
@@ -348,30 +349,69 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
   @spec collect_stream(Enumerable.t()) :: {:ok, Response.t()} | {:error, term()}
   def collect_stream(events) do
     result =
-      Enum.reduce(events, %{text: "", finish_reason: :other, warnings: []}, fn event, acc ->
-        case normalize_event(event) do
-          %StreamEvent{type: :delta, data: %{"text" => chunk}} ->
-            %{acc | text: acc.text <> to_string(chunk)}
+      Enum.reduce(
+        events,
+        %{text: "", finish_reason: :other, warnings: [], tool_calls: [], usage: nil},
+        fn event, acc ->
+          case normalize_event(event) do
+            %StreamEvent{type: :delta, data: %{"text" => chunk}} ->
+              %{acc | text: acc.text <> to_string(chunk)}
 
-          %StreamEvent{type: :delta, data: %{text: chunk}} ->
-            %{acc | text: acc.text <> to_string(chunk)}
+            %StreamEvent{type: :delta, data: %{text: chunk}} ->
+              %{acc | text: acc.text <> to_string(chunk)}
 
-          %StreamEvent{type: :finish, data: data} ->
-            %{acc | finish_reason: Map.get(data, :reason, Map.get(data, "reason", :stop))}
+            %StreamEvent{type: :tool_call, data: data} ->
+              part = ContentPart.tool_call(
+                data["id"] || "",
+                data["name"] || "",
+                decode_tool_args(data["arguments"])
+              )
+              %{acc | tool_calls: acc.tool_calls ++ [part]}
 
-          %StreamEvent{type: :error, data: data} ->
-            %{acc | warnings: acc.warnings ++ [inspect(data)]}
+            %StreamEvent{type: :finish, data: data} ->
+              usage = Map.get(data, :usage, Map.get(data, "usage"))
+              %{acc | finish_reason: Map.get(data, :reason, Map.get(data, "reason", :stop)),
+                      usage: usage || acc.usage}
 
-          _ ->
-            acc
+            %StreamEvent{type: :error, data: data} ->
+              %{acc | warnings: acc.warnings ++ [inspect(data)]}
+
+            _ ->
+              acc
+          end
         end
-      end)
+      )
+
+    text_parts = if result.text != "", do: [ContentPart.text(result.text)], else: []
+    content_parts = text_parts ++ result.tool_calls
+
+    finish_reason =
+      cond do
+        result.tool_calls != [] and result.finish_reason == :other -> :tool_calls
+        true -> result.finish_reason
+      end
 
     {:ok,
-     %Response{text: result.text, finish_reason: result.finish_reason, warnings: result.warnings}}
+     %Response{
+       text: result.text,
+       finish_reason: finish_reason,
+       content_parts: content_parts,
+       warnings: result.warnings,
+       usage: result.usage
+     }}
   rescue
     exception -> {:error, exception}
   end
+
+  defp decode_tool_args(args) when is_binary(args) do
+    case Jason.decode(args) do
+      {:ok, map} when is_map(map) -> map
+      _ -> %{"raw" => args}
+    end
+  end
+
+  defp decode_tool_args(args) when is_map(args), do: args
+  defp decode_tool_args(_), do: %{}
 
   defp normalize_event(%StreamEvent{} = event), do: event
   defp normalize_event(%{type: type, data: data}), do: %StreamEvent{type: type, data: data}

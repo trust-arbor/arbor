@@ -123,7 +123,9 @@ defmodule Arbor.Orchestrator.Session do
     turn_from: nil,
     turn_task_ref: nil,
     # Signer function for identity verification (fn resource -> {:ok, signed_request})
-    signer: nil
+    signer: nil,
+    # Progressive tool disclosure: tools discovered via find_tools during session
+    discovered_tools: MapSet.new()
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -160,7 +162,8 @@ defmodule Arbor.Orchestrator.Session do
           compactor: struct() | nil,
           session_config: struct() | nil,
           session_state: struct() | nil,
-          behavior: struct() | nil
+          behavior: struct() | nil,
+          discovered_tools: MapSet.t()
         }
 
   # ── Public API ───────────────────────────────────────────────────────
@@ -470,6 +473,7 @@ defmodule Arbor.Orchestrator.Session do
       state
       |> transition_phase(:processing, :complete, :idle)
       |> Builders.apply_turn_result(message, result)
+      |> persist_discovered_tools(result)
       |> Builders.maybe_checkpoint()
 
     response = Map.get(result.context, "session.response", "")
@@ -567,6 +571,27 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  # Persist tools discovered via find_tools during this turn into session state.
+  # The ToolLoop returns discovered tool names in its result; the LlmHandler
+  # propagates them into the engine context as "session.discovered_tool_names".
+  defp persist_discovered_tools(state, result) do
+    alias Arbor.Orchestrator.Session.ToolDisclosure
+
+    # Check engine context for discovered tool names from LlmHandler/ToolLoop
+    new_names =
+      case Map.get(result.context, "session.discovered_tool_names") do
+        names when is_list(names) and names != [] -> names
+        _ -> []
+      end
+
+    if new_names == [] do
+      state
+    else
+      merged = ToolDisclosure.merge_discovered(state.discovered_tools, new_names)
+      %{state | discovered_tools: merged}
+    end
+  end
 
   # Reply to a caller safely — the caller may have timed out and died
   defp safe_reply(nil, _reply), do: :ok
