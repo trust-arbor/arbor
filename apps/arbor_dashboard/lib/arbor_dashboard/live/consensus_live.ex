@@ -185,7 +185,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     </.dashboard_header>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
-      <.stat_card value={@pending_approval_count} label="Pending approvals" color={if @pending_approval_count > 0, do: :error, else: :gray} />
+      <.stat_card
+        value={@pending_approval_count}
+        label="Pending approvals"
+        color={if @pending_approval_count > 0, do: :error, else: :gray}
+      />
       <.stat_card value={@stats.total_proposals} label="Total proposals" color={:blue} />
       <.stat_card value={@stats.active_councils} label="Active councils" color={:purple} />
       <.stat_card value={@stats.approved_count} label="Approved" color={:green} />

@@ -457,7 +457,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       "[ChatLive] CLI response — thinking: #{thinking_label}, text_len: #{String.length(response.text || "")}"
     )
 
-    socket = socket |> assign(streaming_text: "") |> process_query_response(socket.assigns.agent, response)
+    socket =
+      socket
+      |> assign(streaming_text: "")
+      |> process_query_response(socket.assigns.agent, response)
+
     {:noreply, socket}
   end
 

@@ -97,7 +97,8 @@ defmodule Arbor.Actions.AgentProfile do
       end
     end
 
-    defp validate_name(name) when is_binary(name) and byte_size(name) >= 1 and byte_size(name) <= 100 do
+    defp validate_name(name)
+         when is_binary(name) and byte_size(name) >= 1 and byte_size(name) <= 100 do
       :ok
     end
 

@@ -588,7 +588,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         :if={@loading}
         style="padding: 0.75rem; border-top: 1px solid var(--aw-border, #333); flex-shrink: 0;"
       >
-        <div :if={@streaming_text != ""} style="margin-bottom: 0.5rem; padding: 0.6rem; border-radius: 6px; background: var(--aw-surface-hover, #1a1a2e);">
+        <div
+          :if={@streaming_text != ""}
+          style="margin-bottom: 0.5rem; padding: 0.6rem; border-radius: 6px; background: var(--aw-surface-hover, #1a1a2e);"
+        >
           <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
             <strong style="font-size: 0.9em;">
               {if @display_name, do: @display_name, else: "Assistant"}
@@ -597,7 +600,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           </div>
           <div style="white-space: pre-wrap; font-size: 0.9em;">{@streaming_text}</div>
         </div>
-        <span :if={@streaming_text == ""} style="color: var(--aw-text-muted, #888);">🤔 Thinking...</span>
+        <span :if={@streaming_text == ""} style="color: var(--aw-text-muted, #888);">
+          🤔 Thinking...
+        </span>
       </div>
 
       <%!-- Error display --%>

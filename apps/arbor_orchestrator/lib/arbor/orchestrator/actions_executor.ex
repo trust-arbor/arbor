@@ -153,7 +153,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           retry_execution(agent_id, action_module, params, context, name)
 
         {:error, :timeout} ->
-          Logger.info("[ActionsExecutor] Approval timed out for #{name} (proposal: #{proposal_id})")
+          Logger.info(
+            "[ActionsExecutor] Approval timed out for #{name} (proposal: #{proposal_id})"
+          )
 
           {:error,
            "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
@@ -223,7 +225,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       {:ok, :pending_approval, _proposal_id} ->
         # Shouldn't happen after approval, but handle gracefully
-        {:error, "Action #{name} still requires approval after consensus granted it. This is a bug."}
+        {:error,
+         "Action #{name} still requires approval after consensus granted it. This is a bug."}
 
       {:error, reason} ->
         {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}

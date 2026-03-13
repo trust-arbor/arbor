@@ -147,7 +147,9 @@ defmodule Arbor.Agent.Manager do
             Lifecycle.start(
               agent_id,
               Keyword.merge(opts,
-                model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+                model:
+                  model_config[:id] || model_config["id"] || model_config[:model] ||
+                    model_config["model"],
                 provider: model_config[:provider] || model_config["provider"]
               )
             )
@@ -215,7 +217,9 @@ defmodule Arbor.Agent.Manager do
             Lifecycle.start(
               agent_id,
               Keyword.merge(opts,
-                model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+                model:
+                  model_config[:id] || model_config["id"] || model_config[:model] ||
+                    model_config["model"],
                 provider: model_config[:provider] || model_config["provider"]
               )
             )

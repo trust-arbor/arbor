@@ -177,12 +177,13 @@ defmodule Arbor.Actions.Skill do
         Actions.emit_completed(__MODULE__, %{skill_name: skill_name, agent_id: agent_id})
         body = skill_field(skill, :body) || ""
 
-        {:ok, %{
-          activated: true,
-          name: skill_name,
-          token_estimate: token_estimate,
-          content: body
-        }}
+        {:ok,
+         %{
+           activated: true,
+           name: skill_name,
+           token_estimate: token_estimate,
+           content: body
+         }}
       else
         {:lib, false} ->
           {:error, :skill_library_unavailable}
