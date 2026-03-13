@@ -829,7 +829,25 @@ defmodule Arbor.Actions do
     Arbor.Actions.Skill.Deactivate => "arbor://code/write",
     Arbor.Actions.Skill.ListActive => "arbor://code/read",
     Arbor.Actions.Skill.Import => "arbor://code/write",
-    Arbor.Actions.Skill.Compile => "arbor://code/compile"
+    Arbor.Actions.Skill.Compile => "arbor://code/compile",
+
+    # Session pipeline actions — internal to DOT engine execution.
+    # Authorized via arbor://orchestrator/execute (the pipeline gate).
+    Arbor.Actions.Session.Classify => "arbor://orchestrator/execute",
+    Arbor.Actions.Session.ModeSelect => "arbor://orchestrator/execute",
+    Arbor.Actions.Session.ProcessResults => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionExecution.ExecuteActions => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionExecution.RouteActions => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionGoals.ProcessProposalDecisions => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionGoals.StoreDecompositions => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionGoals.StoreIdentity => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionGoals.UpdateGoals => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionLlm.BuildPrompt => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionMemory.Checkpoint => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionMemory.Consolidate => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionMemory.Recall => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionMemory.Update => "arbor://orchestrator/execute",
+    Arbor.Actions.SessionMemory.UpdateWorkingMemory => "arbor://orchestrator/execute"
   }
 
   @doc """
