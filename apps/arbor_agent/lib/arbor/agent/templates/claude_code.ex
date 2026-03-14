@@ -84,41 +84,7 @@ defmodule Arbor.Agent.Templates.ClaudeCode do
   @impl true
   def required_capabilities do
     [
-      # Orchestrator session execution
-      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"},
-      # File system access — read/write/execute scoped
-      %{resource: "arbor://fs/read/**", description: "Read project files"},
-      %{resource: "arbor://fs/write/**", description: "Write project files"},
-      # Memory system
-      %{resource: "arbor://memory/read/**", description: "Read memory"},
-      %{resource: "arbor://memory/write/**", description: "Write memory"},
-      # Shell access (sandboxed)
-      %{resource: "arbor://shell/execute/**", description: "Shell command execution"},
-      # AI subsystem
-      %{resource: "arbor://ai/generate/**", description: "AI generation and routing"},
-      # Signals
-      %{resource: "arbor://signals/emit/**", description: "Signal emission"},
-      %{resource: "arbor://signals/subscribe/**", description: "Signal subscription"},
-      # Consensus proposals
-      %{resource: "arbor://consensus/propose", description: "Submit proposals"},
-      %{resource: "arbor://consensus/evaluate", description: "Participate in evaluation"},
-      # MCP tool use
-      %{resource: "arbor://tool/use/**", description: "MCP tool invocation"},
-      # Actions - full access to all facade categories
-      %{resource: "arbor://fs/**", description: "File system operations"},
-      %{resource: "arbor://shell/**", description: "Shell execution"},
-      %{resource: "arbor://memory/**", description: "Memory operations"},
-      %{resource: "arbor://monitor/**", description: "Monitor and remediation"},
-      %{resource: "arbor://comms/**", description: "Communications"},
-      %{resource: "arbor://code/**", description: "Code operations"},
-      %{resource: "arbor://ai/**", description: "AI generation"},
-      %{resource: "arbor://trust/**", description: "Trust operations"},
-      %{resource: "arbor://net/**", description: "Network/web operations"},
-      %{resource: "arbor://historian/**", description: "Event history"},
-      %{resource: "arbor://sandbox/**", description: "Sandbox management"},
-      %{resource: "arbor://persistence/**", description: "Persistence operations"},
-      %{resource: "arbor://acp/**", description: "ACP tool sessions"},
-      %{resource: "arbor://agent/**", description: "Agent operations"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 

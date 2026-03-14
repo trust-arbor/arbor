@@ -59,30 +59,7 @@ defmodule Arbor.Agent.Templates.Researcher do
   @impl true
   def required_capabilities do
     [
-      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"},
-      %{resource: "arbor://fs/read/**", description: "Read all project files"},
-      %{resource: "arbor://memory/**", description: "Full memory access"},
-      %{resource: "arbor://shell/safe", description: "Safe shell commands (grep, find, test)"},
-      %{
-        resource: "arbor://orchestrator/run",
-        description: "Run DOT pipelines for structured research"
-      },
-      %{
-        resource: "arbor://council/consult",
-        description: "Consult advisory council perspectives"
-      },
-      %{
-        resource: "arbor://orchestrator/execute",
-        description: "Run DOT orchestrator pipelines"
-      },
-      %{
-        resource: "arbor://code/read",
-        description: "Look up module/function documentation"
-      },
-      %{
-        resource: "arbor://code/compile",
-        description: "Run code quality checks and evaluations"
-      }
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 
