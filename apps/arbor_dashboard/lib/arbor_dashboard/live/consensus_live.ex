@@ -410,16 +410,16 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
               color={:gray}
             />
             <.stat_card
-              value={format_confidence(@selected_decision.average_confidence)}
+              value={format_confidence(Map.get(@selected_decision, :average_confidence, 0))}
               label="Confidence"
               color={:blue}
             />
           </div>
 
-          <div :if={@selected_decision.evaluations != []} style="margin-top: 1rem;">
+          <div :if={Map.get(@selected_decision, :evaluations, []) != []} style="margin-top: 1rem;">
             <h4 style="margin-bottom: 0.75rem;">Evaluations</h4>
             <div
-              :for={eval <- @selected_decision.evaluations}
+              :for={eval <- Map.get(@selected_decision, :evaluations, [])}
               style="border: 1px solid var(--aw-border, #333); border-radius: 4px; padding: 0.75rem; margin-bottom: 0.5rem;"
             >
               <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
@@ -593,8 +593,12 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   end
 
   defp decision_subtitle(decision) do
-    quorum = if decision.quorum_met, do: "quorum met", else: "no quorum"
-    "#{quorum}, confidence: #{format_confidence(decision.average_confidence)}"
+    if decision[:override] do
+      "override by #{decision[:approver] || "system"}"
+    else
+      quorum = if decision[:quorum_met], do: "quorum met", else: "no quorum"
+      "#{quorum}, confidence: #{format_confidence(decision[:average_confidence] || 0)}"
+    end
   end
 
   defp format_proposal_subtitle(proposal) do
