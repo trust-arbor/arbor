@@ -394,9 +394,21 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         <div :if={@selected_decision} style="margin-top: 1.5rem;">
           <h4 style="margin-bottom: 0.75rem;">Decision</h4>
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; margin-bottom: 1rem;">
-            <.stat_card value={@selected_decision.approve_count} label="Approve" color={:green} />
-            <.stat_card value={@selected_decision.reject_count} label="Reject" color={:error} />
-            <.stat_card value={@selected_decision.abstain_count} label="Abstain" color={:gray} />
+            <.stat_card
+              value={Map.get(@selected_decision, :approve_count, 0)}
+              label="Approve"
+              color={:green}
+            />
+            <.stat_card
+              value={Map.get(@selected_decision, :reject_count, 0)}
+              label="Reject"
+              color={:error}
+            />
+            <.stat_card
+              value={Map.get(@selected_decision, :abstain_count, 0)}
+              label="Abstain"
+              color={:gray}
+            />
             <.stat_card
               value={format_confidence(@selected_decision.average_confidence)}
               label="Confidence"
@@ -573,7 +585,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   defp decision_icon(_), do: "📋"
 
   defp decision_title(decision) do
-    "#{decision.decision} (#{decision.approve_count}/#{decision.reject_count}/#{decision.abstain_count})"
+    if Map.has_key?(decision, :approve_count) do
+      "#{decision.decision} (#{decision.approve_count}/#{decision.reject_count}/#{decision.abstain_count})"
+    else
+      "#{decision.decision}#{if decision[:override], do: " (override)", else: ""}"
+    end
   end
 
   defp decision_subtitle(decision) do
