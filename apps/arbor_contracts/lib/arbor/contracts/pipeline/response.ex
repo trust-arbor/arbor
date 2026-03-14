@@ -160,7 +160,14 @@ end
 if Code.ensure_loaded?(Phoenix.HTML.Safe) do
   defimpl Phoenix.HTML.Safe, for: Arbor.Contracts.Pipeline.Response do
     def to_iodata(%{content: content}) when is_binary(content) do
-      Plug.HTML.html_escape(content)
+      # Use Phoenix.HTML.Engine.html_escape or manual escaping
+      # since Plug.HTML may not be available at Level 0
+      content
+      |> String.replace("&", "&amp;")
+      |> String.replace("<", "&lt;")
+      |> String.replace(">", "&gt;")
+      |> String.replace("\"", "&quot;")
+      |> String.replace("'", "&#39;")
     end
 
     def to_iodata(_), do: ""

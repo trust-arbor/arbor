@@ -119,7 +119,7 @@ defmodule Arbor.Agent.SimpleAgent do
         _other -> Keyword.get(opts, :tools, @default_tools)
       end
 
-    context_mode = Keyword.get(opts, :context_management, :none)
+    context_mode = Keyword.get(opts, :context_management, :full)
 
     system_prompt =
       Keyword.get_lazy(opts, :system_prompt, fn ->
