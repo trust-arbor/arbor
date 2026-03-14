@@ -64,9 +64,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       action_entry = %{
         id: "act-#{System.unique_integer([:positive])}",
         name: get_action_name(signal),
+        event: to_string(signal.type),
         outcome: get_action_outcome(signal),
         timestamp: signal.timestamp,
-        details: signal.metadata
+        details: Map.merge(signal.metadata || %{}, signal.data || %{})
       }
 
       stream_insert(socket, :actions, action_entry)
@@ -76,18 +77,19 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   end
 
   defp get_action_name(signal) do
-    case signal.metadata do
-      %{action: name} -> to_string(name)
-      %{"action" => name} -> to_string(name)
-      %{tool: name} -> to_string(name)
-      %{"tool" => name} -> to_string(name)
-      %{capability: cap, op: op} -> "#{cap}.#{op}"
-      %{"capability" => cap, "op" => op} -> "#{cap}.#{op}"
-      %{name: name} -> to_string(name)
-      %{"name" => name} -> to_string(name)
-      _ -> to_string(signal.type)
-    end
+    # Check both metadata and data — tool loop signals put tool name in data
+    extract_name(signal.metadata) || extract_name(signal.data) || to_string(signal.type)
   end
+
+  defp extract_name(%{action: name}) when is_binary(name), do: name
+  defp extract_name(%{"action" => name}) when is_binary(name), do: name
+  defp extract_name(%{tool: name}) when is_binary(name), do: name
+  defp extract_name(%{"tool" => name}) when is_binary(name), do: name
+  defp extract_name(%{capability: cap, op: op}), do: "#{cap}.#{op}"
+  defp extract_name(%{"capability" => cap, "op" => op}), do: "#{cap}.#{op}"
+  defp extract_name(%{name: name}) when is_binary(name), do: name
+  defp extract_name(%{"name" => name}) when is_binary(name), do: name
+  defp extract_name(_), do: nil
 
   defp get_action_outcome(signal) do
     extract_outcome(signal.metadata)
