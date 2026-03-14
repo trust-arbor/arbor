@@ -242,9 +242,13 @@ defmodule Arbor.Orchestrator.Session.Builders do
       "timestamp" => now_iso
     }
 
+    # Only add assistant message if response has actual content
+    # Empty responses pollute the history and teach the LLM to respond with nothing
+    response_str = if is_binary(response), do: String.trim(response), else: ""
+
     assistant_msg =
-      if response != "" do
-        %{"role" => "assistant", "content" => response, "timestamp" => now_iso}
+      if response_str != "" do
+        %{"role" => "assistant", "content" => response_str, "timestamp" => now_iso}
       end
 
     updated_messages =
