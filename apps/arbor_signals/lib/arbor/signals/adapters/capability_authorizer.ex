@@ -41,9 +41,11 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
     resource_uri = "arbor://signals/subscribe/#{topic}"
 
     if Code.ensure_loaded?(security_module) and
-         function_exported?(security_module, :authorize, 3) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe]) do
+         function_exported?(security_module, :authorize, 4) do
+      # Human users are OIDC-authenticated, not crypto-signed — skip verification
+      opts = if String.starts_with?(to_string(principal_id), "human_"), do: [verify_identity: false], else: []
+
+      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, opts]) do
         {:ok, :authorized} -> {:ok, :authorized}
         {:ok, :pending_approval, _} -> {:error, :pending_approval}
         {:error, _reason} -> {:error, :no_capability}
