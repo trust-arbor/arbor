@@ -105,7 +105,8 @@ config :arbor_agent, :auto_start_agents, [
 config :arbor_security,
   identity_verification: true,
   capability_signing_required: true,
-  policy_enforcer_enabled: true
+  policy_enforcer_enabled: true,
+  consensus_escalation_enabled: true
 
 # OIDC — Human identity authentication for CLI and orchestration.
 # Uncomment and configure for your OIDC provider (Zitadel, Google, GitHub, etc.)
