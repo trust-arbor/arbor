@@ -65,12 +65,13 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     |> repo.insert(
       on_conflict: [
         set: [
+          id: scoped_attrs.id,
           data: attrs.data,
           metadata: attrs.metadata,
           updated_at: now
         ]
       ],
-      conflict_target: :id
+      conflict_target: [:namespace, :key]
     )
     |> case do
       {:ok, _schema} -> :ok
