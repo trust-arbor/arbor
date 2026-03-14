@@ -154,8 +154,17 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
             )
           end
 
-          # Use final response text, or fall back to accumulated text from tool rounds
-          final_text = response.text || Map.get(state, :accumulated_text) || ""
+          # Combine accumulated text from intermediate rounds with final response
+          accumulated = Map.get(state, :accumulated_text) || ""
+          final_response = if is_binary(response.text), do: String.trim(response.text), else: ""
+
+          final_text =
+            case {accumulated, final_response} do
+              {"", ""} -> ""
+              {"", text} -> text
+              {acc, ""} -> acc
+              {acc, text} -> acc <> "\n\n" <> text
+            end
 
           {:ok,
            %PipelineResponse{
