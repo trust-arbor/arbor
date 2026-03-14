@@ -29,7 +29,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     {existing_agent, socket} =
       if connected?(socket) do
-        {Manager.find_first_agent(), socket}
+        {find_agent_for_session(socket), socket}
       else
         {:not_found, socket}
       end
@@ -813,12 +813,21 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Agent already exists — just reconnect to the running instance
   defp reconnect_existing_agent(socket) do
-    case Manager.find_first_agent() do
+    case find_agent_for_session(socket) do
       {:ok, agent_id, pid, metadata} ->
         reconnect_to_agent(socket, agent_id, pid, metadata)
 
       :not_found ->
         assign(socket, error: "Agent reported running but not found")
+    end
+  end
+
+  # Find agent scoped to current user's tenant context when available.
+  # Falls back to global find_first_agent for backward compatibility.
+  defp find_agent_for_session(socket) do
+    case Map.get(socket.assigns, :current_agent_id) do
+      nil -> Manager.find_first_agent()
+      principal_id -> Manager.find_agent_for_principal(principal_id)
     end
   end
 

@@ -2,6 +2,7 @@ defmodule Arbor.Contracts.TenantContextTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.TenantContext
+  alias Arbor.Contracts.Security.Capability
 
   @moduletag :fast
 
@@ -74,6 +75,94 @@ defmodule Arbor.Contracts.TenantContextTest do
       decoded = Jason.decode!(json)
       assert decoded["principal_id"] == "human_abc123"
       assert decoded["display_name"] == "Alice"
+    end
+  end
+
+  describe "Capability principal_scope integration" do
+    test "capability with principal_scope matches correct principal" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/workspace",
+          principal_id: "agent_abc",
+          principal_scope: "human_abc123"
+        )
+
+      assert cap.principal_scope == "human_abc123"
+      assert Capability.scope_matches?(cap, principal_scope: "human_abc123")
+      refute Capability.scope_matches?(cap, principal_scope: "human_other")
+    end
+
+    test "capability without principal_scope matches any principal" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/workspace",
+          principal_id: "agent_abc"
+        )
+
+      assert cap.principal_scope == nil
+      assert Capability.scope_matches?(cap, principal_scope: "human_abc123")
+      assert Capability.scope_matches?(cap, principal_scope: "human_other")
+      assert Capability.scope_matches?(cap, [])
+    end
+
+    test "delegated capability inherits principal_scope" do
+      {:ok, parent} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/workspace",
+          principal_id: "agent_abc",
+          principal_scope: "human_abc123",
+          delegation_depth: 3
+        )
+
+      {:ok, child} = Capability.delegate(parent, "agent_sub1")
+      assert child.principal_scope == "human_abc123"
+      assert child.delegation_depth == 2
+    end
+
+    test "delegated capability cannot remove principal_scope" do
+      {:ok, parent} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/workspace",
+          principal_id: "agent_abc",
+          principal_scope: "human_abc123",
+          delegation_depth: 3
+        )
+
+      # Even if opts try to clear it, parent's scope is inherited
+      {:ok, child} = Capability.delegate(parent, "agent_sub1", principal_scope: nil)
+      assert child.principal_scope == "human_abc123"
+    end
+
+    test "scope_matches? checks all three dimensions" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/workspace",
+          principal_id: "agent_abc",
+          session_id: "session_1",
+          task_id: "task_1",
+          principal_scope: "human_abc123"
+        )
+
+      # All match
+      assert Capability.scope_matches?(cap,
+               session_id: "session_1",
+               task_id: "task_1",
+               principal_scope: "human_abc123"
+             )
+
+      # Principal mismatch
+      refute Capability.scope_matches?(cap,
+               session_id: "session_1",
+               task_id: "task_1",
+               principal_scope: "human_other"
+             )
+
+      # Session mismatch
+      refute Capability.scope_matches?(cap,
+               session_id: "session_2",
+               task_id: "task_1",
+               principal_scope: "human_abc123"
+             )
     end
   end
 end

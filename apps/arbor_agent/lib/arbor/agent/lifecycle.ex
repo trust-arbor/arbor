@@ -780,10 +780,28 @@ defmodule Arbor.Agent.Lifecycle do
         endorsement: endorsement
       },
       keychain_ref: keychain.agent_id,
-      metadata: Keyword.get(opts, :metadata, %{}),
+      metadata: build_profile_metadata(opts),
       created_at: DateTime.utc_now(),
       version: 1
     }
+  end
+
+  defp build_profile_metadata(opts) do
+    base = Keyword.get(opts, :metadata, %{})
+
+    # Inject created_by from tenant_context if present
+    case Keyword.get(opts, :tenant_context) do
+      nil ->
+        base
+
+      ctx ->
+        principal_id =
+          if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
+            apply(Arbor.Contracts.TenantContext, :principal_id, [ctx])
+          end
+
+        if principal_id, do: Map.put(base, :created_by, principal_id), else: base
+    end
   end
 
   # Re-register identity and capabilities on resume.
