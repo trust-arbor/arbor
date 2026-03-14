@@ -474,6 +474,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     normalized = PipelineResponse.normalize(response)
     text = normalized.content
 
+    # If the final response is empty but we have streamed text, use the streamed text.
+    # This preserves partial responses when the LLM stream completes without a final message.
+    text =
+      if text == "" and is_binary(socket.assigns[:streaming_text]) and
+           socket.assigns[:streaming_text] != "" do
+        socket.assigns[:streaming_text]
+      else
+        text
+      end
+
     Logger.info(
       "[ChatLive] API response received: " <>
         "text=#{String.length(to_string(text))} chars, " <>
