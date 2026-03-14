@@ -366,129 +366,93 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
     """
   end
 
-  # ── Left Panel: Code Modules ───────────────────────────────────────
+  # ── Left Panel: Approvals ─────────────────────────────────────────
 
-  @doc "Code modules panel."
-  def code_panel(assigns) do
+  @doc "Tool authorization approvals panel."
+  def approvals_panel(assigns) do
     ~H"""
-    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_code, do: "1", else: "0 0 auto"};"}>
+    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_approvals, do: "1", else: "0 0 auto"};"}>
       <div
-        phx-click="toggle-code"
+        phx-click="toggle-approvals"
         style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
       >
-        <strong style="font-size: 0.85em;">💻 Code</strong>
+        <strong style="font-size: 0.85em;">🔐 Approvals</strong>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <.badge :if={@code_modules != []} label={"#{length(@code_modules)}"} color={:green} />
+          <span
+            :if={!stream_empty?(@streams.approvals)}
+            style="background: #ef4444; color: white; font-size: 0.7em; padding: 0.1rem 0.4rem; border-radius: 8px; font-weight: 600;"
+          >
+            pending
+          </span>
           <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-            {if @show_code, do: "▼", else: "▶"}
+            {if @show_approvals, do: "▼", else: "▶"}
           </span>
         </div>
       </div>
-      <div :if={@show_code} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
+      <div
+        :if={@show_approvals}
+        id="approvals-container"
+        phx-update="stream"
+        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+      >
         <div
-          :for={mod <- @code_modules}
-          style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(34, 197, 94, 0.1); font-size: 0.8em;"
+          :for={{dom_id, approval} <- @streams.approvals}
+          id={dom_id}
+          style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); font-size: 0.8em;"
         >
-          <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
-            <span style="font-weight: 500;">{mod[:name] || "unnamed"}</span>
-            <.badge
-              :if={mod[:sandbox_level]}
-              label={to_string(mod[:sandbox_level])}
-              color={:yellow}
-            />
+          <div style="margin-bottom: 0.2rem; font-weight: 500; color: var(--aw-text, #e0e0e0); word-break: break-all;">
+            {approval_resource_uri(approval)}
           </div>
-          <span :if={mod[:purpose]} style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
-            {WebHelpers.truncate(mod[:purpose], 100)}
-          </span>
+          <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.3rem; font-size: 0.85em; color: var(--aw-text-muted, #888);">
+            <span>Agent: {String.slice(to_string(approval.proposer), 0..11)}...</span>
+            <span style="margin-left: auto;">{H.format_time(approval.created_at)}</span>
+          </div>
+          <div style="display: flex; gap: 0.3rem;">
+            <button
+              phx-click="approve-tool"
+              phx-value-id={approval.id}
+              phx-value-agent={approval.proposer}
+              phx-value-resource={approval_resource_uri(approval)}
+              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
+            >
+              Approve
+            </button>
+            <button
+              phx-click="always-allow-tool"
+              phx-value-id={approval.id}
+              phx-value-agent={approval.proposer}
+              phx-value-resource={approval_resource_uri(approval)}
+              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #3b82f6; color: white; cursor: pointer; font-size: 0.8em;"
+            >
+              Always Allow
+            </button>
+            <button
+              phx-click="deny-tool"
+              phx-value-id={approval.id}
+              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
+            >
+              Deny
+            </button>
+          </div>
         </div>
+      </div>
+      <div :if={@show_approvals} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
         <.empty_state
-          :if={@code_modules == []}
-          icon="💻"
-          title="No code modules"
-          hint="Code appears when the agent creates modules"
+          :if={stream_empty?(@streams.approvals)}
+          icon="🔐"
+          title="No pending approvals"
+          hint="Tool approvals appear here when agent actions need your permission"
         />
       </div>
     </div>
     """
   end
 
-  # ── Left Panel: Proposals ──────────────────────────────────────────
+  defp approval_resource_uri(proposal) do
+    meta = Map.get(proposal, :metadata) || %{}
 
-  @doc "Proposals panel with accept/reject/defer actions."
-  def proposals_panel(assigns) do
-    ~H"""
-    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_proposals, do: "1", else: "0 0 auto"};"}>
-      <div
-        phx-click="toggle-proposals"
-        style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-      >
-        <strong style="font-size: 0.85em;">📋 Proposals</strong>
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <.badge :if={@proposals != []} label={"#{length(@proposals)}"} color={:yellow} />
-          <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-            {if @show_proposals, do: "▼", else: "▶"}
-          </span>
-        </div>
-      </div>
-      <div
-        :if={@show_proposals}
-        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
-      >
-        <div
-          :for={proposal <- @proposals}
-          style="margin-bottom: 0.4rem; padding: 0.4rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
-        >
-          <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.2rem;">
-            <.badge
-              :if={Map.get(proposal, :type)}
-              label={to_string(Map.get(proposal, :type))}
-              color={:yellow}
-            />
-            <.badge
-              :if={Map.get(proposal, :confidence)}
-              label={"#{round(Map.get(proposal, :confidence) * 100)}%"}
-              color={:blue}
-            />
-          </div>
-          <p style="color: var(--aw-text-muted, #888); margin: 0 0 0.3rem 0; white-space: pre-wrap;">
-            {WebHelpers.truncate(
-              Map.get(proposal, :content) || Map.get(proposal, :description) || "",
-              200
-            )}
-          </p>
-          <div style="display: flex; gap: 0.3rem;">
-            <button
-              phx-click="accept-proposal"
-              phx-value-id={Map.get(proposal, :id)}
-              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #22c55e; color: white; cursor: pointer; font-size: 0.8em;"
-            >
-              Accept
-            </button>
-            <button
-              phx-click="reject-proposal"
-              phx-value-id={Map.get(proposal, :id)}
-              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #ff4a4a; color: white; cursor: pointer; font-size: 0.8em;"
-            >
-              Reject
-            </button>
-            <button
-              phx-click="defer-proposal"
-              phx-value-id={Map.get(proposal, :id)}
-              style="padding: 0.2rem 0.5rem; border: none; border-radius: 3px; background: #888; color: white; cursor: pointer; font-size: 0.8em;"
-            >
-              Defer
-            </button>
-          </div>
-        </div>
-        <.empty_state
-          :if={@proposals == []}
-          icon="📋"
-          title="No pending proposals"
-          hint="Proposals appear from reflection & analysis"
-        />
-      </div>
-    </div>
-    """
+    Map.get(meta, :resource_uri) || Map.get(meta, "resource_uri") ||
+      Map.get(proposal, :description, "")
   end
 
   # ── Center Panel: Chat ─────────────────────────────────────────────
@@ -873,42 +837,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
     """
   end
 
-  # ── Right Panel: Working Thoughts ──────────────────────────────────
-
-  @doc "Working memory thoughts panel."
-  def thoughts_panel(assigns) do
-    ~H"""
-    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_thoughts, do: "1", else: "0 0 auto"};"}>
-      <div
-        phx-click="toggle-thoughts"
-        style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-      >
-        <strong style="font-size: 0.85em;">💭 Working Thoughts</strong>
-        <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-          {if @show_thoughts, do: "▼", else: "▶"}
-        </span>
-      </div>
-      <div :if={@show_thoughts} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
-        <div
-          :for={thought <- @working_thoughts}
-          style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(255, 165, 0, 0.1); font-size: 0.8em;"
-        >
-          <span>💭</span>
-          <span style="color: var(--aw-text-muted, #888); white-space: pre-wrap;">
-            {WebHelpers.truncate(thought.content, 200)}
-          </span>
-        </div>
-        <.empty_state
-          :if={@working_thoughts == []}
-          icon="💭"
-          title="Waiting for activity..."
-          hint=""
-        />
-      </div>
-    </div>
-    """
-  end
-
   # ── Right Panel: Memory Notes ──────────────────────────────────────
 
   @doc "Recalled memory notes panel."
@@ -954,144 +882,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           icon="📝"
           title="No memories recalled"
           hint="Relevant memories appear here"
-        />
-      </div>
-    </div>
-    """
-  end
-
-  # ── Right Panel: Identity Evolution ────────────────────────────────
-
-  @doc "Identity evolution panel with self-insights and changes."
-  def identity_panel(assigns) do
-    ~H"""
-    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_identity, do: "1", else: "0 0 auto"};"}>
-      <div
-        phx-click="toggle-identity"
-        style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-      >
-        <strong style="font-size: 0.85em;">🪞 Identity</strong>
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <.badge :if={@self_insights != []} label={"#{length(@self_insights)}"} color={:purple} />
-          <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-            {if @show_identity, do: "▼", else: "▶"}
-          </span>
-        </div>
-      </div>
-      <div :if={@show_identity} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
-        <div :if={@self_insights != []} style="margin-bottom: 0.5rem;">
-          <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
-            Self Insights
-          </div>
-          <div
-            :for={insight <- Enum.take(@self_insights, 5)}
-            style="margin-bottom: 0.35rem; padding: 0.35rem; border-radius: 4px; background: rgba(168, 85, 247, 0.1); font-size: 0.8em;"
-          >
-            <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.15rem;">
-              <.badge
-                :if={insight[:category]}
-                label={to_string(insight[:category])}
-                color={:purple}
-              />
-              <.badge
-                :if={insight[:confidence]}
-                label={"#{round(insight[:confidence] * 100)}%"}
-                color={:blue}
-              />
-            </div>
-            <span style="color: var(--aw-text-muted, #888);">
-              {WebHelpers.truncate(insight[:content] || "", 150)}
-            </span>
-          </div>
-        </div>
-        <div :if={@identity_changes != []} style="margin-bottom: 0.5rem;">
-          <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
-            Identity Changes
-          </div>
-          <div
-            :for={change <- Enum.take(@identity_changes, 5)}
-            style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(234, 179, 8, 0.1); font-size: 0.8em;"
-          >
-            <.badge :if={change[:field]} label={to_string(change[:field])} color={:yellow} />
-            <.badge
-              :if={change[:change_type]}
-              label={to_string(change[:change_type])}
-              color={:gray}
-            />
-            <span
-              :if={change[:reason]}
-              style="color: var(--aw-text-muted, #888); font-size: 0.9em;"
-            >
-              {WebHelpers.truncate(change[:reason], 100)}
-            </span>
-          </div>
-        </div>
-        <div
-          :if={@last_consolidation}
-          style="font-size: 0.75em; color: var(--aw-text-muted, #888); padding: 0.3rem; background: rgba(128,128,128,0.1); border-radius: 4px;"
-        >
-          Last consolidation: promoted {Map.get(@last_consolidation, :promoted, 0)}, deferred {Map.get(
-            @last_consolidation,
-            :deferred,
-            0
-          )}
-        </div>
-        <.empty_state
-          :if={@self_insights == [] && @identity_changes == [] && @last_consolidation == nil}
-          icon="🪞"
-          title="No identity data"
-          hint="Identity changes appear as the agent evolves"
-        />
-      </div>
-    </div>
-    """
-  end
-
-  # ── Right Panel: Cognitive Preferences ─────────────────────────────
-
-  @doc "Cognitive preferences and adjustments panel."
-  def cognitive_panel(assigns) do
-    ~H"""
-    <div style={"border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; flex: #{if @show_cognitive, do: "1", else: "0 0 auto"};"}>
-      <div
-        phx-click="toggle-cognitive"
-        style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-      >
-        <strong style="font-size: 0.85em;">🧠 Cognitive</strong>
-        <span style="color: var(--aw-text-muted, #888); font-size: 0.8em;">
-          {if @show_cognitive, do: "▼", else: "▶"}
-        </span>
-      </div>
-      <div
-        :if={@show_cognitive}
-        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
-      >
-        <div :if={@cognitive_prefs} style="margin-bottom: 0.4rem;">
-          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem;">
-            <.badge label={"Decay: #{Map.get(@cognitive_prefs, :decay_rate, "—")}"} color={:blue} />
-            <.badge
-              label={"Threshold: #{Map.get(@cognitive_prefs, :retrieval_threshold, "—")}"}
-              color={:green}
-            />
-            <.badge :if={@pinned_count > 0} label={"Pinned: #{@pinned_count}"} color={:purple} />
-          </div>
-        </div>
-        <div :if={@cognitive_adjustments != []}>
-          <div style="font-size: 0.7em; color: var(--aw-text-muted, #888); margin-bottom: 0.2rem; font-weight: 600;">
-            Adjustments
-          </div>
-          <div
-            :for={adj <- Enum.take(@cognitive_adjustments, 5)}
-            style="margin-bottom: 0.25rem; padding: 0.3rem; border-radius: 4px; background: rgba(74, 158, 255, 0.05); font-size: 0.8em;"
-          >
-            <span style="color: var(--aw-text-muted, #888);">{inspect(adj)}</span>
-          </div>
-        </div>
-        <.empty_state
-          :if={@cognitive_prefs == nil && @cognitive_adjustments == []}
-          icon="🧠"
-          title="No cognitive data"
-          hint="Preferences appear as the agent adapts"
         />
       </div>
     </div>
