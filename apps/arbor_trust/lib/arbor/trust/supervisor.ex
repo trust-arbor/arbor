@@ -129,6 +129,16 @@ defmodule Arbor.Trust.Supervisor do
 
     # Core components (always started)
     children = [
+      # BufferedStore for durable trust profile persistence
+      Supervisor.child_spec(
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_trust_profiles,
+         backend: trust_profile_backend(),
+         backend_opts: [repo: persistence_repo()],
+         write_mode: :sync,
+         collection: "trust_profiles"},
+        id: :arbor_trust_profiles
+      ),
       {Store, []},
       {EventStore, []},
       {Manager,
@@ -172,6 +182,22 @@ defmodule Arbor.Trust.Supervisor do
       end
 
     children
+  end
+
+  defp trust_profile_backend do
+    if Code.ensure_loaded?(Arbor.Persistence.QueryableStore.Postgres) do
+      Arbor.Persistence.QueryableStore.Postgres
+    else
+      nil
+    end
+  end
+
+  defp persistence_repo do
+    if Code.ensure_loaded?(Arbor.Persistence.Repo) do
+      Arbor.Persistence.Repo
+    else
+      nil
+    end
   end
 
   defp process_status(name) do
