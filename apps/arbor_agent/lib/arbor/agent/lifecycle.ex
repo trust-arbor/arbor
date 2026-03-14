@@ -71,6 +71,7 @@ defmodule Arbor.Agent.Lifecycle do
          agent_id = identity.agent_id,
          :ok <- persist_signing_key(agent_id, identity),
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
+         :ok <- grant_workspace_capabilities(agent_id, opts),
          :ok <- maybe_delegate_from_parent(agent_id, opts),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
@@ -579,6 +580,45 @@ defmodule Arbor.Agent.Lifecycle do
     granted = Enum.count(results, &(&1 == :ok))
     Logger.info("Granted #{granted}/#{length(capabilities)} capabilities", agent_id: agent_id)
     :ok
+  end
+
+  # Grant workspace-scoped fs capabilities when tenant_context provides a workspace root.
+  # This ensures agents can access their user's workspace directory.
+  defp grant_workspace_capabilities(agent_id, opts) do
+    tenant_context = Keyword.get(opts, :tenant_context)
+
+    workspace_root =
+      if tenant_context && Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
+        apply(Arbor.Contracts.TenantContext, :effective_workspace_root, [tenant_context])
+      end
+
+    if workspace_root do
+      principal_id =
+        apply(Arbor.Contracts.TenantContext, :principal_id, [tenant_context])
+
+      for op <- [:read, :write, :list] do
+        resource = "arbor://fs/#{op}/#{String.trim_leading(workspace_root, "/")}"
+
+        case Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource,
+               principal_scope: principal_id
+             ) do
+          {:ok, _cap} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to grant workspace capability #{resource}: #{inspect(reason)}",
+              agent_id: agent_id
+            )
+        end
+      end
+
+      :ok
+    else
+      :ok
+    end
   end
 
   # Delegate capabilities from a parent (human or agent) to the newly created agent.
