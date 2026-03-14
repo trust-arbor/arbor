@@ -1,6 +1,6 @@
 defmodule Mix.Tasks.Arbor.User do
   @moduledoc """
-  Manage Arbor users.
+  Manage Arbor users via RPC to the running server.
 
   Users are identified by their OIDC-derived agent IDs (`human_<hash>`).
   This task provides visibility into known users and their workspaces.
@@ -15,14 +15,20 @@ defmodule Mix.Tasks.Arbor.User do
 
   use Mix.Task
 
+  alias Mix.Tasks.Arbor.Helpers, as: Config
+
   @shortdoc "Manage Arbor users"
 
   @impl Mix.Task
   def run(args) do
     {_opts, args, _} = OptionParser.parse(args, strict: [])
 
-    # Start the app to access stores
-    Mix.Task.run("app.start", [])
+    Config.ensure_distribution()
+
+    unless Config.server_running?() do
+      Mix.shell().error("Arbor server is not running. Start it with: mix arbor.start")
+      exit({:shutdown, 1})
+    end
 
     case args do
       [] -> list_users()
@@ -42,17 +48,21 @@ defmodule Mix.Tasks.Arbor.User do
       Mix.shell().info("Known users (#{length(users)}):\n")
 
       for user <- users do
-        workspace = Arbor.Contracts.TenantContext.default_workspace_root(user.id)
+        workspace = rpc!(Arbor.Contracts.TenantContext, :default_workspace_root, [user.id])
         workspace_exists = File.dir?(workspace)
 
         status =
           if workspace_exists, do: "workspace: #{workspace}", else: "no workspace"
 
         agent_count =
-          if Code.ensure_loaded?(Arbor.Agent.Manager) do
-            length(Arbor.Agent.Manager.list_agents_for_principal(user.id))
-          else
-            "?"
+          case Config.rpc(
+                 Config.full_node_name(),
+                 Arbor.Agent.Manager,
+                 :list_agents_for_principal,
+                 [user.id]
+               ) do
+            agents when is_list(agents) -> length(agents)
+            _ -> "?"
           end
 
         Mix.shell().info(
@@ -64,25 +74,43 @@ defmodule Mix.Tasks.Arbor.User do
   end
 
   defp show_user(user_id) do
-    workspace = Arbor.Contracts.TenantContext.default_workspace_root(user_id)
+    workspace = rpc!(Arbor.Contracts.TenantContext, :default_workspace_root, [user_id])
 
     Mix.shell().info("User: #{user_id}")
     Mix.shell().info("  Workspace: #{workspace}")
     Mix.shell().info("  Workspace exists: #{File.dir?(workspace)}")
 
-    if Code.ensure_loaded?(Arbor.Agent.Manager) do
-      agents = Arbor.Agent.Manager.list_agents_for_principal(user_id)
-      Mix.shell().info("  Agents: #{length(agents)}")
+    case Config.rpc(Config.full_node_name(), Arbor.Agent.Manager, :list_agents_for_principal, [
+           user_id
+         ]) do
+      agents when is_list(agents) ->
+        Mix.shell().info("  Agents: #{length(agents)}")
 
-      for agent <- agents do
-        display = Map.get(agent.metadata, :display_name, agent.agent_id)
-        Mix.shell().info("    - #{agent.agent_id} (#{display})")
-      end
+        for agent <- agents do
+          display = Map.get(agent.metadata || %{}, :display_name, agent.agent_id)
+          Mix.shell().info("    - #{agent.agent_id} (#{display})")
+        end
+
+      _ ->
+        Mix.shell().info("  Agents: ?")
+    end
+
+    case Config.rpc(Config.full_node_name(), Arbor.Agent.UserConfig, :get_all, [user_id]) do
+      config when is_map(config) and map_size(config) > 0 ->
+        Mix.shell().info("  Config:")
+
+        Enum.each(config, fn {k, v} ->
+          display = if k == :api_keys, do: "(#{map_size(v || %{})} keys)", else: inspect(v)
+          Mix.shell().info("    #{k}: #{display}")
+        end)
+
+      _ ->
+        :ok
     end
   end
 
   defp setup_user(user_id) do
-    workspace = Arbor.Contracts.TenantContext.default_workspace_root(user_id)
+    workspace = rpc!(Arbor.Contracts.TenantContext, :default_workspace_root, [user_id])
 
     case File.mkdir_p(workspace) do
       :ok ->
@@ -93,64 +121,50 @@ defmodule Mix.Tasks.Arbor.User do
     end
   end
 
-  # Discover users from profile metadata and identity registry
+  # Discover users from profile metadata and identity registry via RPC
   defp discover_users do
-    profile_users = discover_from_profiles()
-    identity_users = discover_from_identities()
-
-    # Merge and deduplicate
-    all_ids = MapSet.new(Enum.map(profile_users ++ identity_users, & &1.id))
+    node = Config.full_node_name()
+    profile_users = discover_from_profiles(node)
+    identity_users = discover_from_identities(node)
 
     Enum.uniq_by(profile_users ++ identity_users, & &1.id)
-    |> Enum.filter(fn u -> MapSet.member?(all_ids, u.id) end)
     |> Enum.sort_by(& &1.id)
   end
 
-  defp discover_from_profiles do
-    if Code.ensure_loaded?(Arbor.Agent.ProfileStore) do
-      try do
-        case Arbor.Agent.ProfileStore.list_profiles() do
-          {:ok, profiles} ->
-            profiles
-            |> Enum.map(fn p -> Map.get(p.metadata || %{}, :created_by) end)
-            |> Enum.reject(&is_nil/1)
-            |> Enum.uniq()
-            |> Enum.map(&%{id: &1, display_name: nil, source: :profile})
+  defp discover_from_profiles(node) do
+    case Config.rpc(node, Arbor.Agent.ProfileStore, :list_profiles, []) do
+      profiles when is_list(profiles) ->
+        profiles
+        |> Enum.map(fn p -> Map.get(p.metadata || %{}, :created_by) end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+        |> Enum.map(&%{id: &1, display_name: nil, source: :profile})
 
-          _ ->
-            []
-        end
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-    else
-      []
+      {:ok, profiles} when is_list(profiles) ->
+        profiles
+        |> Enum.map(fn p -> Map.get(p.metadata || %{}, :created_by) end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+        |> Enum.map(&%{id: &1, display_name: nil, source: :profile})
+
+      _ ->
+        []
     end
   end
 
-  defp discover_from_identities do
-    # Look for human_* entries in the identity registry
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :list_identities, 0) do
-      try do
-        case apply(Arbor.Security, :list_identities, []) do
-          {:ok, identities} ->
-            identities
-            |> Enum.filter(fn id -> String.starts_with?(id.agent_id, "human_") end)
-            |> Enum.map(&%{id: &1.agent_id, display_name: &1.name, source: :identity})
+  defp discover_from_identities(node) do
+    case Config.rpc(node, Arbor.Security, :list_identities, []) do
+      {:ok, identities} when is_list(identities) ->
+        identities
+        |> Enum.filter(fn id -> String.starts_with?(id.agent_id, "human_") end)
+        |> Enum.map(&%{id: &1.agent_id, display_name: &1.name, source: :identity})
 
-          _ ->
-            []
-        end
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-    else
-      []
+      _ ->
+        []
     end
+  end
+
+  defp rpc!(mod, fun, args) do
+    Config.rpc!(Config.full_node_name(), mod, fun, args)
   end
 end
