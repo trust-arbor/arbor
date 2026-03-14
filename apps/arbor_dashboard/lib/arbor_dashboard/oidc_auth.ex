@@ -215,6 +215,16 @@ defmodule Arbor.Dashboard.OidcAuth do
         {:error, reason} ->
           Logger.warning("[OidcAuth] Role assignment failed: #{inspect(reason)}")
       end
+
+      # Grant dashboard-specific capabilities for signal subscriptions and approvals
+      for resource <- [
+            "arbor://signals/subscribe/security",
+            "arbor://consensus/admin"
+          ] do
+        apply(Arbor.Security, :grant, [
+          [principal: agent_id, resource: resource, metadata: %{source: :oidc_login}]
+        ])
+      end
     end
   rescue
     _ -> :ok
