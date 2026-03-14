@@ -219,6 +219,8 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
+        # Orchestrator required for all agents to function
+        "arbor://orchestrator" => :auto,
         # Reads are frictionless
         "arbor://code/read" => :auto,
         "arbor://fs/read" => :auto,
@@ -235,6 +237,8 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
+        # Orchestrator required for all agents to function
+        "arbor://orchestrator" => :auto,
         # Reads are frictionless
         "arbor://code/read" => :auto,
         "arbor://fs/read" => :auto,
@@ -252,6 +256,8 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :allow,
       rules: %{
+        # Orchestrator required for all agents to function
+        "arbor://orchestrator" => :auto,
         # Reads and writes are automatic
         "arbor://code/read" => :auto,
         "arbor://code/write" => :auto,
@@ -266,6 +272,8 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :auto,
       rules: %{
+        # Orchestrator required for all agents to function
+        "arbor://orchestrator" => :auto,
         # Shell and governance always gated (security ceiling)
         "arbor://shell" => :ask,
         "arbor://governance" => :ask
