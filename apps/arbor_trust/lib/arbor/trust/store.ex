@@ -94,6 +94,45 @@ defmodule Arbor.Trust.Store do
   end
 
   @doc """
+  Promote a URI prefix to :auto in an agent's trust profile.
+
+  Used by "Always Allow" in the approval UI to permanently auto-authorize
+  a specific resource URI prefix for an agent.
+  """
+  @spec always_allow(String.t(), String.t()) :: {:ok, Profile.t()} | {:error, term()}
+  def always_allow(agent_id, resource_uri) do
+    # Find the best matching prefix to use as the rule key
+    uri_prefix = best_rule_prefix(resource_uri)
+
+    update_profile(agent_id, fn profile ->
+      %{profile | rules: Map.put(profile.rules || %{}, uri_prefix, :auto)}
+    end)
+  end
+
+  @doc """
+  Demote a URI prefix back to :ask in an agent's trust profile.
+  """
+  @spec revoke_always_allow(String.t(), String.t()) :: {:ok, Profile.t()} | {:error, term()}
+  def revoke_always_allow(agent_id, resource_uri) do
+    uri_prefix = best_rule_prefix(resource_uri)
+
+    update_profile(agent_id, fn profile ->
+      %{profile | rules: Map.put(profile.rules || %{}, uri_prefix, :ask)}
+    end)
+  end
+
+  # Extract a reasonable rule prefix from a full resource URI.
+  # e.g., "arbor://fs/read/workspace/file.ex" → "arbor://fs/read"
+  #        "arbor://memory/recall" → "arbor://memory"
+  defp best_rule_prefix(uri) do
+    case String.split(uri, "/") do
+      ["arbor:", "", domain, operation | _] -> "arbor://#{domain}/#{operation}"
+      ["arbor:", "", domain | _] -> "arbor://#{domain}"
+      _ -> uri
+    end
+  end
+
+  @doc """
   Update a profile with a function.
   """
   @spec update_profile(String.t(), (Profile.t() -> Profile.t())) ::

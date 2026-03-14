@@ -42,7 +42,12 @@ defmodule Arbor.Security.PolicyEnforcer do
           auto_grant(principal_id, resource_uri, opts, %{})
 
         :ask ->
-          auto_grant(principal_id, resource_uri, opts, %{requires_approval: true})
+          # Check if this URI has graduated via ConfirmationTracker
+          if confirmation_graduated?(principal_id, resource_uri) do
+            auto_grant(principal_id, resource_uri, opts, %{})
+          else
+            auto_grant(principal_id, resource_uri, opts, %{requires_approval: true})
+          end
 
         :block ->
           {:error, :unauthorized}
@@ -121,6 +126,20 @@ defmodule Arbor.Security.PolicyEnforcer do
     _ -> :block
   catch
     :exit, _ -> :block
+  end
+
+  defp confirmation_graduated?(principal_id, resource_uri) do
+    tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
+
+    if Code.ensure_loaded?(tracker) and function_exported?(tracker, :graduated?, 2) do
+      apply(tracker, :graduated?, [principal_id, resource_uri])
+    else
+      false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp trust_policy_available? do
