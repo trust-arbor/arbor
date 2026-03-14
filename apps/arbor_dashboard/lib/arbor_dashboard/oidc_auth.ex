@@ -38,6 +38,7 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   def call(%{request_path: "/auth/logout"} = conn, _opts) do
+    # Accept both GET and DELETE (Phoenix <.link method="delete"> sends DELETE)
     handle_logout(conn)
   end
 
@@ -159,11 +160,32 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp handle_logout(conn) do
+    Logger.info("[OidcAuth] Logout requested, dropping session")
+
+    conn = fetch_session(conn)
+
+    # Build OIDC end-session URL to also log out of the provider
+    logout_url = build_end_session_url(conn)
+
     conn
-    |> fetch_session()
     |> configure_session(drop: true)
-    |> redirect_to("/")
+    |> redirect_to(logout_url)
     |> halt()
+  end
+
+  defp build_end_session_url(conn) do
+    case oidc_provider() do
+      nil ->
+        "/"
+
+      provider ->
+        issuer = provider[:issuer] || provider["issuer"]
+        # Zitadel and most OIDC providers support the end_session_endpoint
+        end_session = "#{issuer}/oidc/v1/end_session"
+        post_logout = "#{conn.scheme}://#{conn.host}#{port_suffix(conn.scheme, conn.port)}/"
+
+        "#{end_session}?post_logout_redirect_uri=#{URI.encode_www_form(post_logout)}"
+    end
   end
 
   # --- Helpers ---
