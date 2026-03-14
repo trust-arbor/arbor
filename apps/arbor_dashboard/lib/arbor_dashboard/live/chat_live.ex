@@ -108,10 +108,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # Subscribe to signals with backpressure (raw mode — we use individual signals)
     socket =
       if connected?(socket) do
+        # Pass principal_id for restricted topic subscriptions (security.*)
+        principal_id = socket.assigns[:current_agent_id]
+        security_opts = if principal_id, do: [principal_id: principal_id], else: []
+
         socket
         |> SignalLive.subscribe_raw("agent.*")
         |> SignalLive.subscribe_raw("memory.*")
-        |> SignalLive.subscribe_raw("security.authorization_pending")
+        |> SignalLive.subscribe_raw("security.authorization_pending", security_opts)
       else
         socket
       end
