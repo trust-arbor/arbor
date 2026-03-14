@@ -1,5 +1,5 @@
 defmodule Arbor.Security.SubagentIsolationTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Security.CapabilityStore

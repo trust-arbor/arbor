@@ -525,16 +525,16 @@ defmodule Arbor.SecurityTest do
       original_module = Application.get_env(:arbor_security, :consensus_module)
 
       on_exit(fn ->
-        if original_enabled do
-          Application.put_env(:arbor_security, :consensus_escalation_enabled, original_enabled)
-        else
+        if is_nil(original_enabled) do
           Application.delete_env(:arbor_security, :consensus_escalation_enabled)
+        else
+          Application.put_env(:arbor_security, :consensus_escalation_enabled, original_enabled)
         end
 
-        if original_module do
-          Application.put_env(:arbor_security, :consensus_module, original_module)
-        else
+        if is_nil(original_module) do
           Application.delete_env(:arbor_security, :consensus_module)
+        else
+          Application.put_env(:arbor_security, :consensus_module, original_module)
         end
       end)
 

@@ -1,5 +1,5 @@
 defmodule Arbor.Security.PolicyEnforcerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -25,10 +25,10 @@ defmodule Arbor.Security.PolicyEnforcerTest do
         Application.put_env(:arbor_security, :policy_enforcer_enabled, true)
         assert PolicyEnforcer.enabled?()
       after
-        if prev do
-          Application.put_env(:arbor_security, :policy_enforcer_enabled, prev)
-        else
+        if is_nil(prev) do
           Application.delete_env(:arbor_security, :policy_enforcer_enabled)
+        else
+          Application.put_env(:arbor_security, :policy_enforcer_enabled, prev)
         end
       end
     end
@@ -40,10 +40,10 @@ defmodule Arbor.Security.PolicyEnforcerTest do
       Application.put_env(:arbor_security, :policy_enforcer_enabled, true)
 
       on_exit(fn ->
-        if prev do
-          Application.put_env(:arbor_security, :policy_enforcer_enabled, prev)
-        else
+        if is_nil(prev) do
           Application.delete_env(:arbor_security, :policy_enforcer_enabled)
+        else
+          Application.put_env(:arbor_security, :policy_enforcer_enabled, prev)
         end
       end)
 
@@ -77,10 +77,10 @@ defmodule Arbor.Security.PolicyEnforcerTest do
               {:policy_enforcer_enabled, prev_enforcer},
               {:capability_signing_required, prev_signing}
             ] do
-          if prev do
-            Application.put_env(:arbor_security, key, prev)
-          else
+          if is_nil(prev) do
             Application.delete_env(:arbor_security, key)
+          else
+            Application.put_env(:arbor_security, key, prev)
           end
         end
       end)
