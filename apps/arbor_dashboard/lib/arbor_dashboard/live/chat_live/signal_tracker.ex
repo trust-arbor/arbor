@@ -39,9 +39,11 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   defp maybe_track_stream(socket, signal) do
     case signal.type do
       :stream_delta ->
-        # Only show streaming text when user has an active query (loading: true).
-        # Heartbeat deltas arrive in the background without a user query.
-        if socket.assigns[:loading] do
+        # Only show turn deltas in chat streaming, not heartbeat deltas.
+        source = flex_get(signal.data, :source)
+        is_turn = source == :turn or source == "turn"
+
+        if socket.assigns[:loading] and is_turn do
           text = flex_get(signal.data, :text) || ""
           current = socket.assigns[:streaming_text] || ""
           assign(socket, streaming_text: current <> text)
