@@ -109,9 +109,9 @@ defmodule Arbor.Web.SignalLive do
   `handle_info/2`. Can be called multiple times for different patterns.
   """
   @spec subscribe_raw(Phoenix.LiveView.Socket.t(), String.t()) :: Phoenix.LiveView.Socket.t()
-  def subscribe_raw(socket, pattern) do
+  def subscribe_raw(socket, pattern, opts \\ []) do
     pid = self()
-    sub_id = safe_subscribe(pattern, pid)
+    sub_id = safe_subscribe(pattern, pid, opts)
     append_sub_id(socket, sub_id)
   end
 
@@ -136,7 +136,7 @@ defmodule Arbor.Web.SignalLive do
     Phoenix.Component.assign(socket, __signal_sub_ids__: [sub_id | existing])
   end
 
-  defp safe_subscribe(pattern, pid) do
+  defp safe_subscribe(pattern, pid, opts \\ []) do
     if signals_available?() do
       handler = fn signal ->
         case Process.info(pid, :message_queue_len) do
@@ -150,7 +150,7 @@ defmodule Arbor.Web.SignalLive do
         :ok
       end
 
-      case apply(Arbor.Signals, :subscribe, [pattern, handler]) do
+      case apply(Arbor.Signals, :subscribe, [pattern, handler, opts]) do
         {:ok, id} -> id
         _ -> nil
       end
