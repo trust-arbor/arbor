@@ -457,6 +457,7 @@ defmodule Arbor.Security do
            allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
            session_id: Keyword.get(opts, :session_id),
            task_id: Keyword.get(opts, :task_id),
+           principal_scope: Keyword.get(opts, :principal_scope),
            metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
