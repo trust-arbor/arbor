@@ -794,9 +794,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     <.token_bar {assigns} />
 
     <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
-    <div style="display: grid; grid-template-columns: 20% 1fr 30%; gap: 0.75rem; margin-top: 0.5rem; height: calc(100vh - 160px); min-height: 400px;">
+    <div
+      id="chat-grid"
+      phx-hook="ResizableColumns"
+      data-col-min="150"
+      style="display: grid; grid-template-columns: 20% 1fr 30%; margin-top: 0.5rem; height: calc(100vh - 160px); min-height: 400px;"
+    >
       <%!-- LEFT PANEL: Approvals + Actions + Heartbeat + Signals --%>
-      <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden;">
+      <div
+        id="left-panels"
+        phx-hook="ResizableRows"
+        data-row-min="40"
+        style="display: flex; flex-direction: column; overflow: hidden;"
+      >
         <.approvals_panel {assigns} />
         <.actions_panel {assigns} />
         <.heartbeat_panel {assigns} />
@@ -807,7 +817,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       <.chat_panel {assigns} />
 
       <%!-- RIGHT PANEL: Goals + Memories + Thinking --%>
-      <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; min-height: 0;">
+      <div
+        id="right-panels"
+        phx-hook="ResizableRows"
+        data-row-min="40"
+        style="display: flex; flex-direction: column; overflow: hidden; min-height: 0;"
+      >
         <.goals_panel {assigns} />
         <.memories_panel {assigns} />
         <.thinking_panel {assigns} />
