@@ -1,6 +1,6 @@
 defmodule Mix.Tasks.Arbor.User.Config do
   @moduledoc """
-  Manage per-user configuration settings.
+  Manage per-user configuration via RPC to the running server.
 
   ## Usage
 
@@ -20,13 +20,20 @@ defmodule Mix.Tasks.Arbor.User.Config do
 
   use Mix.Task
 
+  alias Mix.Tasks.Arbor.Helpers, as: Config
+
   @shortdoc "Manage per-user configuration"
 
   @impl Mix.Task
   def run(args) do
     {_opts, args, _} = OptionParser.parse(args, strict: [])
 
-    Mix.Task.run("app.start", [])
+    Config.ensure_distribution()
+
+    unless Config.server_running?() do
+      Mix.shell().error("Arbor server is not running. Start it with: mix arbor.start")
+      exit({:shutdown, 1})
+    end
 
     case args do
       ["list", user_id] ->
@@ -52,7 +59,7 @@ defmodule Mix.Tasks.Arbor.User.Config do
   end
 
   defp list_config(user_id) do
-    config = Arbor.Agent.UserConfig.get_all(user_id)
+    config = rpc!(Arbor.Agent.UserConfig, :get_all, [user_id])
 
     if config == %{} do
       Mix.shell().info("No configuration for #{user_id}")
@@ -71,10 +78,9 @@ defmodule Mix.Tasks.Arbor.User.Config do
   defp get_config(user_id, key) do
     atom_key = safe_to_atom(key)
 
-    case Arbor.Agent.UserConfig.get(user_id, atom_key) do
+    case rpc!(Arbor.Agent.UserConfig, :get, [user_id, atom_key]) do
       nil ->
-        # Show effective value with cascade
-        effective = Arbor.Agent.UserConfig.get_effective(user_id, atom_key)
+        effective = rpc!(Arbor.Agent.UserConfig, :get_effective, [user_id, atom_key])
 
         if effective do
           Mix.shell().info("#{key} = #{inspect(effective)} (from app config)")
@@ -91,7 +97,7 @@ defmodule Mix.Tasks.Arbor.User.Config do
     atom_key = safe_to_atom(key)
     parsed_value = parse_value(value)
 
-    case Arbor.Agent.UserConfig.put(user_id, atom_key, parsed_value) do
+    case rpc!(Arbor.Agent.UserConfig, :put, [user_id, atom_key, parsed_value]) do
       :ok ->
         Mix.shell().info("Set #{key} = #{inspect(parsed_value)} for #{user_id}")
 
@@ -103,7 +109,7 @@ defmodule Mix.Tasks.Arbor.User.Config do
   defp delete_config(user_id, key) do
     atom_key = safe_to_atom(key)
 
-    case Arbor.Agent.UserConfig.delete(user_id, atom_key) do
+    case rpc!(Arbor.Agent.UserConfig, :delete, [user_id, atom_key]) do
       :ok ->
         Mix.shell().info("Deleted #{key} for #{user_id}")
 
@@ -115,7 +121,7 @@ defmodule Mix.Tasks.Arbor.User.Config do
   defp set_api_key(user_id, provider, api_key) do
     provider_atom = safe_to_atom(provider)
 
-    case Arbor.Agent.UserConfig.put_api_key(user_id, provider_atom, api_key) do
+    case rpc!(Arbor.Agent.UserConfig, :put_api_key, [user_id, provider_atom, api_key]) do
       :ok ->
         masked = String.slice(api_key, 0, 8) <> "..." <> String.slice(api_key, -4, 4)
         Mix.shell().info("Set #{provider} API key for #{user_id}: #{masked}")
@@ -123,6 +129,10 @@ defmodule Mix.Tasks.Arbor.User.Config do
       {:error, reason} ->
         Mix.shell().error("Failed: #{inspect(reason)}")
     end
+  end
+
+  defp rpc!(mod, fun, args) do
+    Config.rpc!(Config.full_node_name(), mod, fun, args)
   end
 
   # Mask API keys in display
@@ -154,15 +164,11 @@ defmodule Mix.Tasks.Arbor.User.Config do
     end
   end
 
-  # Use existing atoms only for safety
   defp safe_to_atom(str) do
-    if Code.ensure_loaded?(Arbor.Common.SafeAtom) do
-      case apply(Arbor.Common.SafeAtom, :to_existing, [str]) do
-        {:ok, atom} -> atom
-        {:error, _} -> String.to_atom(str)
-      end
-    else
-      String.to_atom(str)
+    try do
+      String.to_existing_atom(str)
+    rescue
+      ArgumentError -> String.to_atom(str)
     end
   end
 end
