@@ -469,14 +469,22 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:query_result, :api, {:ok, response}}, socket) do
     model_config = socket.assigns.current_model || %{}
 
-    raw_text = response[:text] || response.text
+    raw_text = Map.get(response, :text) || Map.get(response, "text", "")
 
     text =
       case raw_text do
-        %{text: t} when is_binary(t) -> t
-        %{"text" => t} when is_binary(t) -> t
-        t when is_binary(t) -> t
-        _ -> ""
+        %{text: t} when is_binary(t) ->
+          t
+
+        %{"text" => t} when is_binary(t) ->
+          t
+
+        t when is_binary(t) ->
+          t
+
+        other ->
+          Logger.warning("[ChatLive] Unexpected text type: #{inspect(other, limit: 200)}")
+          ""
       end
 
     Logger.info(
