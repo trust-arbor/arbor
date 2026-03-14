@@ -90,6 +90,33 @@ defmodule Arbor.Contracts.TenantContext do
   def workspace_root(%__MODULE__{workspace_root: root}), do: root
 
   @doc """
+  Derive the default workspace root for a principal.
+
+  Uses the configured arbor home (default `~/.arbor`) with a per-user
+  subdirectory. Returns an absolute path.
+
+  ## Examples
+
+      iex> TenantContext.default_workspace_root("human_abc123")
+      # => "<ARBOR_HOME>/workspace/human_abc123"
+  """
+  @spec default_workspace_root(String.t()) :: String.t()
+  def default_workspace_root(principal_id) when is_binary(principal_id) do
+    arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
+    Path.join([arbor_home, "workspace", principal_id])
+  end
+
+  @doc """
+  Get the effective workspace root — explicit if set, otherwise derived from principal_id.
+  """
+  @spec effective_workspace_root(t() | nil) :: String.t() | nil
+  def effective_workspace_root(nil), do: nil
+
+  def effective_workspace_root(%__MODULE__{workspace_root: root, principal_id: pid}) do
+    root || default_workspace_root(pid)
+  end
+
+  @doc """
   Convert context to a metadata map suitable for signal emission.
 
   Returns an empty map for nil context, so signal metadata merging
