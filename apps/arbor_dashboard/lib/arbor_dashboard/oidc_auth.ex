@@ -128,6 +128,9 @@ defmodule Arbor.Dashboard.OidcAuth do
           # Ensure human has capabilities via role assignment
           ensure_role(identity.agent_id)
 
+          # Ensure user workspace directory exists
+          ensure_workspace(identity.agent_id)
+
           return_to = get_session(conn, "return_to") || "/"
 
           # Extract display name from OIDC claims (try common claim names)
@@ -192,6 +195,15 @@ defmodule Arbor.Dashboard.OidcAuth do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  defp ensure_workspace(agent_id) do
+    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
+      workspace = apply(Arbor.Contracts.TenantContext, :default_workspace_root, [agent_id])
+      File.mkdir_p(workspace)
+    end
+  rescue
+    _ -> :ok
   end
 
   defp oidc_provider do

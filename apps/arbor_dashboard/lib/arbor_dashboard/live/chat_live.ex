@@ -174,7 +174,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
 
       config ->
-        case Manager.start_agent(config) do
+        # Pass tenant_context so agent gets associated with the creating user
+        start_opts =
+          case Map.get(socket.assigns, :tenant_context) do
+            nil -> []
+            ctx -> [tenant_context: ctx]
+          end
+
+        case Manager.start_agent(config, start_opts) do
           {:ok, agent_id, pid} ->
             metadata = %{model_config: config, backend: config.backend}
             socket = reconnect_to_agent(socket, agent_id, pid, metadata)
