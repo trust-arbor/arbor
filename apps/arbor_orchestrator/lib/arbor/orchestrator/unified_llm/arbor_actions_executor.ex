@@ -11,7 +11,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
 
       node [type="codergen" use_tools="true" tools="file_read,file_search,shell_execute"]
 
-  If `tools` is omitted, falls back to `CodingTools` (5 built-in tools).
+  If `tools` is omitted, all available actions are used.
   """
 
   alias Arbor.Orchestrator.ActionsExecutor

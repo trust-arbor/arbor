@@ -3,7 +3,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
   alias Arbor.Orchestrator.UnifiedLLM.{
     Client,
-    CodingTools,
     ContentPart,
     Message,
     Request,
@@ -274,101 +273,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
         )
 
       assert_received {:tool_called, "read_file", %{"path" => "hello.txt"}, {:ok, "data"}}
-    end
-  end
-
-  describe "CodingTools.definitions/0" do
-    test "returns 5 tool definitions" do
-      defs = CodingTools.definitions()
-      assert length(defs) == 5
-      names = Enum.map(defs, & &1["function"]["name"])
-      assert "read_file" in names
-      assert "write_file" in names
-      assert "list_files" in names
-      assert "search_content" in names
-      assert "shell_exec" in names
-    end
-
-    test "all definitions have required OpenAI schema fields" do
-      for tool <- CodingTools.definitions() do
-        assert tool["type"] == "function"
-        assert is_map(tool["function"])
-        assert is_binary(tool["function"]["name"])
-        assert is_binary(tool["function"]["description"])
-        assert is_map(tool["function"]["parameters"])
-      end
-    end
-  end
-
-  describe "CodingTools.execute/3" do
-    @tag :tmp_dir
-    test "read_file reads a file", %{tmp_dir: tmp_dir} do
-      File.write!(Path.join(tmp_dir, "test.txt"), "content here")
-
-      assert {:ok, "content here"} =
-               CodingTools.execute("read_file", %{"path" => "test.txt"}, tmp_dir)
-    end
-
-    @tag :tmp_dir
-    test "read_file returns error for missing file", %{tmp_dir: tmp_dir} do
-      assert {:error, msg} = CodingTools.execute("read_file", %{"path" => "nope.txt"}, tmp_dir)
-      assert msg =~ "Cannot read"
-    end
-
-    @tag :tmp_dir
-    test "write_file creates file and dirs", %{tmp_dir: tmp_dir} do
-      assert {:ok, msg} =
-               CodingTools.execute(
-                 "write_file",
-                 %{
-                   "path" => "sub/dir/file.ex",
-                   "content" => "defmodule Test, do: nil"
-                 },
-                 tmp_dir
-               )
-
-      assert msg =~ "Wrote"
-      assert File.read!(Path.join(tmp_dir, "sub/dir/file.ex")) == "defmodule Test, do: nil"
-    end
-
-    @tag :tmp_dir
-    test "list_files matches glob patterns", %{tmp_dir: tmp_dir} do
-      File.mkdir_p!(Path.join(tmp_dir, "lib"))
-      File.write!(Path.join(tmp_dir, "lib/a.ex"), "")
-      File.write!(Path.join(tmp_dir, "lib/b.ex"), "")
-      File.write!(Path.join(tmp_dir, "mix.exs"), "")
-
-      {:ok, result} = CodingTools.execute("list_files", %{"pattern" => "lib/*.ex"}, tmp_dir)
-      assert result =~ "lib/a.ex"
-      assert result =~ "lib/b.ex"
-      refute result =~ "mix.exs"
-    end
-
-    @tag :tmp_dir
-    test "search_content finds matching lines", %{tmp_dir: tmp_dir} do
-      File.write!(Path.join(tmp_dir, "code.ex"), "defmodule Foo do\n  def bar, do: :ok\nend\n")
-
-      {:ok, result} =
-        CodingTools.execute(
-          "search_content",
-          %{
-            "pattern" => "defmodule"
-          },
-          tmp_dir
-        )
-
-      assert result =~ "code.ex:1:"
-      assert result =~ "defmodule Foo"
-    end
-
-    @tag :tmp_dir
-    test "shell_exec runs commands", %{tmp_dir: tmp_dir} do
-      {:ok, result} = CodingTools.execute("shell_exec", %{"command" => "echo hello"}, tmp_dir)
-      assert String.trim(result) == "hello"
-    end
-
-    test "unknown tool returns error" do
-      assert {:error, "Unknown tool: nope"} = CodingTools.execute("nope", %{}, ".")
     end
   end
 end

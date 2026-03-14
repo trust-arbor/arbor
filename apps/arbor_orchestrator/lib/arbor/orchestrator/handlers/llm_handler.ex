@@ -10,7 +10,6 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   alias Arbor.Orchestrator.UnifiedLLM.{
     ArborActionsExecutor,
     Client,
-    CodingTools,
     Message,
     Request,
     ToolLoop
@@ -428,25 +427,23 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   # Resolve which tools and executor to use based on node attributes.
-  # Priority: node attrs "tools" > session.tools from context > CodingTools default.
+  # Priority: node attrs "tools" > session.tools from context > all actions default.
   # The `tool_executor` opt allows test injection.
   defp resolve_tools(node, context, opts) do
+    executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
+
     case Map.get(node.attrs, "tools") do
       nil ->
         case Context.get(context, "session.tools") do
           session_tools when is_list(session_tools) and session_tools != [] ->
-            executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
-            defs = resolve_tool_list(session_tools)
-            {defs, executor}
+            {resolve_tool_list(session_tools), executor}
 
           _ ->
-            executor = Keyword.get(opts, :tool_executor, CodingTools)
-            {CodingTools.definitions(), executor}
+            {ArborActionsExecutor.definitions(), executor}
         end
 
       tools_str when is_binary(tools_str) ->
         action_names = String.split(tools_str, ",", trim: true)
-        executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
         {ArborActionsExecutor.definitions(action_names), executor}
     end
   end
