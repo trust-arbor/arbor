@@ -70,7 +70,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
         details: Map.merge(signal.metadata || %{}, signal.data || %{})
       }
 
-      stream_insert(socket, :actions, action_entry)
+      socket
+      |> stream_insert(:actions, action_entry)
+      |> assign(:action_count, (socket.assigns[:action_count] || 0) + 1)
     else
       socket
     end
