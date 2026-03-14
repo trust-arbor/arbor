@@ -115,7 +115,13 @@ defmodule Arbor.Agent.Manager do
 
     lifecycle_opts =
       [template: template] ++
-        Keyword.take(opts, [:capabilities, :initial_goals, :delegator_id, :delegator_private_key])
+        Keyword.take(opts, [
+          :capabilities,
+          :initial_goals,
+          :delegator_id,
+          :delegator_private_key,
+          :tenant_context
+        ])
 
     with {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume
@@ -130,16 +136,21 @@ defmodule Arbor.Agent.Manager do
       agent_id = updated_profile.agent_id
       {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
 
+      # Include created_by from profile metadata for multi-user agent scoping
+      registry_metadata =
+        %{
+          model_config: model_config,
+          backend: model_config[:backend] || Map.get(model_config, :backend),
+          display_name: display_name,
+          started_at: System.system_time(:millisecond)
+        }
+        |> maybe_put_created_by(updated_profile)
+
       case Arbor.Agent.Supervisor.start_child(
              agent_id: agent_id,
              module: module,
              start_opts: start_opts,
-             metadata: %{
-               model_config: model_config,
-               backend: model_config[:backend] || Map.get(model_config, :backend),
-               display_name: display_name,
-               started_at: System.system_time(:millisecond)
-             }
+             metadata: registry_metadata
            ) do
         {:ok, pid} ->
           # Start lifecycle (executor, session, host) for the new agent
@@ -448,6 +459,63 @@ defmodule Arbor.Agent.Manager do
       {:ok, [entry | _]} -> {:ok, entry.agent_id, entry.pid, entry.metadata}
       {:ok, []} -> :not_found
       _ -> :not_found
+    end
+  end
+
+  @doc """
+  Find the first running agent belonging to a specific principal.
+
+  Checks registry metadata for `created_by` matching the principal_id.
+  Falls back to `find_first_agent/0` if no principal-scoped agents are found,
+  ensuring backward compatibility during migration to multi-user.
+
+  Returns `{:ok, agent_id, pid, metadata}` or `:not_found`.
+  """
+  @spec find_agent_for_principal(String.t()) ::
+          {:ok, String.t(), pid(), map()} | :not_found
+  def find_agent_for_principal(principal_id) when is_binary(principal_id) do
+    case Arbor.Agent.Registry.list() do
+      {:ok, entries} ->
+        # First try: find agents created by this principal
+        case Enum.find(entries, fn e ->
+               Map.get(e.metadata, :created_by) == principal_id or
+                 Map.get(e.metadata, "created_by") == principal_id
+             end) do
+          %{agent_id: id, pid: pid, metadata: meta} ->
+            {:ok, id, pid, meta}
+
+          nil ->
+            # Fallback: if no agents have created_by set (pre-multi-user agents),
+            # return the first one for backward compatibility
+            case entries do
+              [entry | _] -> {:ok, entry.agent_id, entry.pid, entry.metadata}
+              [] -> :not_found
+            end
+        end
+
+      _ ->
+        :not_found
+    end
+  end
+
+  @doc """
+  List all running agents belonging to a specific principal.
+
+  Returns agents whose metadata `created_by` matches the principal_id,
+  plus any agents without a `created_by` field (pre-multi-user agents).
+  """
+  @spec list_agents_for_principal(String.t()) :: [map()]
+  def list_agents_for_principal(principal_id) when is_binary(principal_id) do
+    case Arbor.Agent.Registry.list() do
+      {:ok, entries} ->
+        Enum.filter(entries, fn e ->
+          created_by = Map.get(e.metadata, :created_by) || Map.get(e.metadata, "created_by")
+          # Include if created by this principal OR if no creator set (legacy)
+          created_by == principal_id or created_by == nil
+        end)
+
+      _ ->
+        []
     end
   end
 
@@ -791,5 +859,12 @@ defmodule Arbor.Agent.Manager do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  defp maybe_put_created_by(metadata, profile) do
+    case Map.get(profile.metadata || %{}, :created_by) do
+      nil -> metadata
+      created_by -> Map.put(metadata, :created_by, created_by)
+    end
   end
 end

@@ -52,6 +52,8 @@ defmodule Arbor.Contracts.Security.Capability do
     field(:allowed_delegatees, [binary()], enforce: false)
     field(:session_id, binary(), enforce: false)
     field(:task_id, binary(), enforce: false)
+    # Multi-user: binds this capability to a specific user principal (nil = any user)
+    field(:principal_scope, binary(), enforce: false)
     field(:constraints, map(), default: %{})
     field(:signature, binary(), enforce: false)
     field(:issuer_id, Types.agent_id(), enforce: false)
@@ -76,6 +78,7 @@ defmodule Arbor.Contracts.Security.Capability do
   - `:allowed_delegatees` - List of agent IDs this cap can be delegated to (nil = anyone)
   - `:session_id` - Bind capability to a specific session (nil = any session)
   - `:task_id` - Bind capability to a specific task/pipeline execution (nil = any task)
+  - `:principal_scope` - Bind capability to a specific user principal (nil = any user)
   - `:constraints` - Additional constraints on capability usage
   - `:metadata` - Additional metadata
 
@@ -110,6 +113,7 @@ defmodule Arbor.Contracts.Security.Capability do
       allowed_delegatees: attrs[:allowed_delegatees],
       session_id: attrs[:session_id],
       task_id: attrs[:task_id],
+      principal_scope: attrs[:principal_scope],
       constraints: attrs[:constraints] || %{},
       issuer_id: attrs[:issuer_id],
       issuer_signature: attrs[:issuer_signature],
@@ -152,6 +156,7 @@ defmodule Arbor.Contracts.Security.Capability do
   A capability matches if:
   - Its `session_id` is nil (unbound) or matches `context[:session_id]`
   - Its `task_id` is nil (unbound) or matches `context[:task_id]`
+  - Its `principal_scope` is nil (unbound) or matches `context[:principal_scope]`
 
   Returns `true` if scope matches, `false` otherwise.
   """
@@ -159,7 +164,11 @@ defmodule Arbor.Contracts.Security.Capability do
   def scope_matches?(%__MODULE__{} = cap, context \\ []) do
     session_ok = cap.session_id == nil or cap.session_id == context[:session_id]
     task_ok = cap.task_id == nil or cap.task_id == context[:task_id]
-    session_ok and task_ok
+
+    principal_ok =
+      cap.principal_scope == nil or cap.principal_scope == context[:principal_scope]
+
+    session_ok and task_ok and principal_ok
   end
 
   @doc """
@@ -195,9 +204,10 @@ defmodule Arbor.Contracts.Security.Capability do
             record -> parent.delegation_chain ++ [record]
           end
 
-        # Scope binding: inherit parent's session/task binding (can't unbind)
+        # Scope binding: inherit parent's session/task/principal binding (can't unbind)
         session_id = opts[:session_id] || parent.session_id
         task_id = opts[:task_id] || parent.task_id
+        principal_scope = opts[:principal_scope] || parent.principal_scope
 
         # Attenuation: delegated caps can only restrict, never expand
         new(
@@ -211,6 +221,7 @@ defmodule Arbor.Contracts.Security.Capability do
           allowed_delegatees: opts[:allowed_delegatees] || parent.allowed_delegatees,
           session_id: session_id,
           task_id: task_id,
+          principal_scope: principal_scope,
           constraints: new_constraints,
           delegation_chain: delegation_chain,
           metadata: opts[:metadata] || %{}
