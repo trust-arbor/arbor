@@ -220,14 +220,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           </div>
         </details>
       </div>
-      <div :if={@show_actions} style="padding: 0.4rem; text-align: center;">
-        <.empty_state
-          :if={stream_empty?(@streams.actions)}
-          icon="⚡"
-          title="No actions yet"
-          hint=""
-        />
-      </div>
     </div>
     """
   end

@@ -56,6 +56,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_thinking: true,
         show_memories: false,
         show_actions: true,
+        action_count: 0,
         show_goals: true,
         show_completed_goals: false,
         show_llm_panel: false,
