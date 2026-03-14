@@ -239,7 +239,7 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp build_compactor_config(opts) do
-    context_management = Keyword.get(opts, :context_management, :none)
+    context_management = Keyword.get(opts, :context_management, :full)
 
     if context_management != :none do
       compactor_module = Arbor.Agent.ContextCompactor
