@@ -541,6 +541,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
 
   defp agent_name(profile) do
     case profile do
+      %{display_name: name} when is_binary(name) and name != "" -> name
       %{character: %{name: name}} when is_binary(name) and name != "" -> name
       %{agent_id: id} -> id
       _ -> "Unknown"
