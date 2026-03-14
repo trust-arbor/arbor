@@ -81,6 +81,7 @@ defmodule Arbor.Agent.Lifecycle do
 
       case persist_profile(profile) do
         :ok ->
+          ensure_trust_profile(agent_id)
           emit_created_signal(profile)
           {:ok, profile}
 
@@ -937,6 +938,23 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp persist_profile(%Profile{} = profile) do
     ProfileStore.store_profile(profile)
+  end
+
+  # Create a trust profile for the agent if the Trust system is available.
+  # Uses the default preset which will be customized by the trust preset system later.
+  defp ensure_trust_profile(agent_id) do
+    trust = Arbor.Trust
+
+    if Code.ensure_loaded?(trust) and function_exported?(trust, :create_trust_profile, 1) do
+      case apply(trust, :get_trust_profile, [agent_id]) do
+        {:ok, _} -> :ok
+        {:error, :not_found} -> apply(trust, :create_trust_profile, [agent_id])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp emit_created_signal(%Profile{} = profile) do
