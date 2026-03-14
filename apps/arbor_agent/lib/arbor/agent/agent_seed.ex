@@ -253,7 +253,7 @@ defmodule Arbor.Agent.AgentSeed do
   @spec finalize_query(String.t(), String.t(), map()) :: map()
   def finalize_query(prompt, response_text, state) do
     prompt = to_string(prompt || "")
-    response_text = to_string(response_text || "")
+    response_text = extract_text(response_text)
     state = TimingContext.on_agent_output(state)
 
     if state.memory_initialized do
@@ -264,6 +264,13 @@ defmodule Arbor.Agent.AgentSeed do
     state = maybe_consolidate(state)
     add_to_context_window(state, prompt, response_text)
   end
+
+  # Handle response_text that may be a map from tool execution loop
+  defp extract_text(%{text: text}) when is_binary(text), do: text
+  defp extract_text(%{"text" => text}) when is_binary(text), do: text
+  defp extract_text(text) when is_binary(text), do: text
+  defp extract_text(nil), do: ""
+  defp extract_text(_other), do: ""
 
   # ============================================================================
   # Signal Emission
