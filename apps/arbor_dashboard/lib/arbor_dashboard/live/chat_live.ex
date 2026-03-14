@@ -56,18 +56,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         show_thinking: true,
         show_memories: false,
         show_actions: true,
-        show_thoughts: true,
         show_goals: true,
         show_completed_goals: false,
         show_llm_panel: false,
-        show_identity: false,
-        show_cognitive: false,
-        show_code: false,
-        show_proposals: false,
+        show_approvals: true,
         # Memory state
         memory_stats: nil,
-        # Working memory thoughts
-        working_thoughts: [],
         # Token tracking
         input_tokens: 0,
         output_tokens: 0,
@@ -91,18 +85,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         hb_input_tokens: 0,
         hb_output_tokens: 0,
         hb_cached_tokens: 0,
-        # Identity evolution
-        self_insights: [],
-        identity_changes: [],
-        last_consolidation: nil,
-        # Cognitive preferences
-        cognitive_prefs: nil,
-        cognitive_adjustments: [],
-        pinned_count: 0,
-        # Code modules
-        code_modules: [],
-        # Proposals
-        proposals: [],
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
         selected_heartbeat_model: nil,
@@ -119,6 +101,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       |> stream(:memories, [])
       |> stream(:actions, [])
       |> stream(:llm_interactions, [])
+      |> stream(:approvals, [])
 
     # Subscribe to signals with backpressure (raw mode — we use individual signals)
     socket =
@@ -126,6 +109,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         socket
         |> SignalLive.subscribe_raw("agent.*")
         |> SignalLive.subscribe_raw("memory.*")
+        |> SignalLive.subscribe_raw("security.*")
       else
         socket
       end
@@ -314,8 +298,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, assign(socket, show_actions: !socket.assigns.show_actions)}
   end
 
-  def handle_event("toggle-thoughts", _params, socket) do
-    {:noreply, assign(socket, show_thoughts: !socket.assigns.show_thoughts)}
+  def handle_event("toggle-approvals", _params, socket) do
+    {:noreply, assign(socket, show_approvals: !socket.assigns.show_approvals)}
   end
 
   def handle_event("toggle-goals", _params, socket) do
@@ -332,22 +316,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   def handle_event("toggle-llm-panel", _params, socket) do
     {:noreply, assign(socket, show_llm_panel: !socket.assigns.show_llm_panel)}
-  end
-
-  def handle_event("toggle-identity", _params, socket) do
-    {:noreply, assign(socket, show_identity: !socket.assigns.show_identity)}
-  end
-
-  def handle_event("toggle-cognitive", _params, socket) do
-    {:noreply, assign(socket, show_cognitive: !socket.assigns.show_cognitive)}
-  end
-
-  def handle_event("toggle-code", _params, socket) do
-    {:noreply, assign(socket, show_code: !socket.assigns.show_code)}
-  end
-
-  def handle_event("toggle-proposals", _params, socket) do
-    {:noreply, assign(socket, show_proposals: !socket.assigns.show_proposals)}
   end
 
   def handle_event("load-more-messages", _params, socket) do
@@ -393,25 +361,51 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  def handle_event("accept-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.accept_proposal(agent_id, proposal_id) end)
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-    {:noreply, assign(socket, proposals: proposals)}
+  def handle_event("approve-tool", %{"id" => proposal_id}, socket) do
+    actor_id = socket.assigns[:current_agent_id] || "system"
+
+    case safe_consensus_approve(proposal_id, actor_id) do
+      :ok ->
+        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
+    end
   end
 
-  def handle_event("reject-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.reject_proposal(agent_id, proposal_id) end)
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-    {:noreply, assign(socket, proposals: proposals)}
+  def handle_event(
+        "always-allow-tool",
+        %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
+        socket
+      ) do
+    actor_id = socket.assigns[:current_agent_id] || "system"
+
+    case safe_consensus_approve(proposal_id, actor_id) do
+      :ok ->
+        # Update trust profile to auto-allow
+        store = Arbor.Trust.Store
+
+        if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
+          apply(store, :always_allow, [agent_id, resource])
+        end
+
+        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
+    end
   end
 
-  def handle_event("defer-proposal", %{"id" => proposal_id}, socket) do
-    agent_id = socket.assigns.agent_id
-    safe_call(fn -> Arbor.Memory.defer_proposal(agent_id, proposal_id) end)
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
-    {:noreply, assign(socket, proposals: proposals)}
+  def handle_event("deny-tool", %{"id" => proposal_id}, socket) do
+    actor_id = socket.assigns[:current_agent_id] || "system"
+
+    case safe_consensus_reject(proposal_id, actor_id) do
+      :ok ->
+        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Deny failed: #{inspect(reason)}")}
+    end
   end
 
   def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
@@ -530,6 +524,30 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:signal_received, %{category: :agent, type: type} = signal}, socket)
       when type in [:started, :stopped, :chat_message] do
     handle_agent_signal(signal, socket)
+  end
+
+  # Signal: security authorization pending (tool approval requests)
+  def handle_info(
+        {:signal_received, %{category: :security, type: :authorization_pending} = signal},
+        socket
+      ) do
+    agent_id = socket.assigns.agent_id
+    signal_agent = get_in(signal.data, [:principal_id]) || get_in(signal.data, ["principal_id"])
+
+    if agent_id && signal_agent do
+      approval = %{
+        id:
+          signal.data[:proposal_id] || signal.data["proposal_id"] ||
+            "prop-#{System.unique_integer([:positive])}",
+        proposer: signal_agent,
+        metadata: signal.data,
+        created_at: signal.timestamp || DateTime.utc_now()
+      }
+
+      {:noreply, stream_insert(socket, :approvals, approval)}
+    else
+      {:noreply, socket}
+    end
   end
 
   # Signal: all other signals (agent activity, heartbeat, etc.)
@@ -745,7 +763,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     socket
     |> assign(memory_stats: get_memory_stats(agent))
     |> assign(query_count: socket.assigns.query_count + 1)
-    |> assign(working_thoughts: get_working_thoughts(agent))
   end
 
   @impl true
@@ -758,26 +775,22 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     <%!-- 3-column layout: 20% left | 50% center | 30% right --%>
     <div style="display: grid; grid-template-columns: 20% 1fr 30%; gap: 0.75rem; margin-top: 0.5rem; height: calc(100vh - 160px); min-height: 400px;">
-      <%!-- LEFT PANEL: Signals + Actions + Heartbeat + Code + Proposals --%>
+      <%!-- LEFT PANEL: Approvals + Actions + Heartbeat + Signals --%>
       <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden;">
-        <.signals_panel {assigns} />
+        <.approvals_panel {assigns} />
         <.actions_panel {assigns} />
         <.heartbeat_panel {assigns} />
-        <.code_panel {assigns} />
-        <.proposals_panel {assigns} />
+        <.signals_panel {assigns} />
       </div>
 
       <%!-- CENTER: Chat Panel --%>
       <.chat_panel {assigns} />
 
-      <%!-- RIGHT PANEL: Goals + Thinking + Thoughts + Memory + Identity + Cognitive --%>
+      <%!-- RIGHT PANEL: Goals + Memories + Thinking --%>
       <div style="display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; min-height: 0;">
         <.goals_panel {assigns} />
-        <.thinking_panel {assigns} />
-        <.thoughts_panel {assigns} />
         <.memories_panel {assigns} />
-        <.identity_panel {assigns} />
-        <.cognitive_panel {assigns} />
+        <.thinking_panel {assigns} />
       </div>
     </div>
 
@@ -948,10 +961,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     memory_stats = get_memory_stats(pid)
     tokens = ChatState.get_tokens(agent_id)
-    identity = ChatState.get_identity_state(agent_id)
-    cognitive = ChatState.get_cognitive_state(agent_id)
-    code = ChatState.get_code_modules(agent_id)
-    proposals = unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end))
     ChatState.touch_agent(agent_id)
 
     socket
@@ -966,7 +975,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     )
     |> assign(
       query_count: 0,
-      working_thoughts: [],
       agent_goals:
         SignalTracker.fetch_goals(agent_id, socket.assigns[:show_completed_goals] || false),
       llm_call_count: tokens.count,
@@ -985,14 +993,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       hb_input_tokens: 0,
       hb_output_tokens: 0,
       hb_cached_tokens: 0,
-      self_insights: identity.insights,
-      identity_changes: identity.identity_changes,
-      last_consolidation: identity.last_consolidation,
-      cognitive_prefs: cognitive.current_prefs,
-      cognitive_adjustments: cognitive.adjustments,
-      pinned_count: cognitive.pinned_count,
-      code_modules: code,
-      proposals: proposals,
       selected_heartbeat_model: nil
     )
     |> then(fn socket ->
@@ -1032,6 +1032,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> stream(:memories, [], reset: true)
     |> stream(:actions, [], reset: true)
     |> stream(:llm_interactions, [], reset: true)
+    |> stream(:approvals, [], reset: true)
   end
 
   defp clear_agent_assigns(socket) do
@@ -1148,42 +1149,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     )
   end
 
-  defp get_working_thoughts(agent) do
-    case Claude.get_working_memory(agent) do
-      {:ok, nil} -> []
-      {:ok, working_memory} -> extract_thoughts(working_memory)
-      {:error, _} -> []
+  # ── Approval Helpers ──────────────────────────────────────────────
+
+  defp safe_consensus_approve(proposal_id, actor_id) do
+    coordinator = Arbor.Consensus.Coordinator
+
+    if Code.ensure_loaded?(coordinator) and function_exported?(coordinator, :force_approve, 2) do
+      apply(coordinator, :force_approve, [proposal_id, actor_id])
+    else
+      {:error, :consensus_unavailable}
     end
   rescue
-    _ -> []
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
-  defp extract_thoughts(working_memory) when is_map(working_memory) do
-    thoughts = get_thoughts_list(working_memory)
+  defp safe_consensus_reject(proposal_id, actor_id) do
+    coordinator = Arbor.Consensus.Coordinator
 
-    thoughts
-    |> Enum.take(10)
-    |> Enum.map(&format_thought/1)
-  end
-
-  defp extract_thoughts(_), do: []
-
-  defp get_thoughts_list(wm) do
-    cond do
-      Map.has_key?(wm, :recent_thoughts) -> wm.recent_thoughts || []
-      Map.has_key?(wm, :thoughts) -> wm.thoughts || []
-      true -> []
+    if Code.ensure_loaded?(coordinator) and function_exported?(coordinator, :force_reject, 2) do
+      apply(coordinator, :force_reject, [proposal_id, actor_id])
+    else
+      {:error, :consensus_unavailable}
     end
-  end
-
-  defp format_thought(t) when is_map(t) do
-    %{
-      content: t[:content] || Map.get(t, :content) || inspect(t),
-      timestamp: t[:timestamp] || Map.get(t, :timestamp) || DateTime.utc_now()
-    }
-  end
-
-  defp format_thought(t) do
-    %{content: to_string(t), timestamp: DateTime.utc_now()}
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
   end
 end

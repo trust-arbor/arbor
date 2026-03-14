@@ -3,14 +3,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   Signal tracking and processing extracted from ChatLive.
 
   Helper module (not a LiveComponent) — receives socket, returns socket.
-  Handles identity, cognitive, code, heartbeat, action, goal, and memory
-  note signals from the Arbor signal bus.
+  Handles heartbeat, action, goal, and memory note signals from the
+  Arbor signal bus.
   """
 
   import Phoenix.LiveView
   import Phoenix.Component, only: [assign: 2]
-
-  alias Arbor.Dashboard.ChatState
 
   @doc """
   Process a signal that matches the current agent.
@@ -24,9 +22,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
     |> maybe_track_heartbeat(signal)
     |> maybe_refresh_goals(signal)
     |> maybe_track_memory_note(signal)
-    |> maybe_track_identity(signal)
-    |> maybe_track_cognitive(signal)
-    |> maybe_track_code(signal)
   end
 
   # ── Stream Delta Tracking ──────────────────────────────────────────
@@ -45,104 +40,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       _ ->
         socket
     end
-  end
-
-  # ── Identity Tracking ─────────────────────────────────────────────
-
-  defp maybe_track_identity(socket, signal) do
-    case to_string(signal.type) do
-      "memory_self_insight_created" -> track_self_insight(socket, signal)
-      "memory_identity_change" -> track_identity_change(socket, signal)
-      "memory_consolidation_completed" -> track_consolidation(socket, signal)
-      _ -> socket
-    end
-  end
-
-  defp track_self_insight(socket, signal) do
-    insight = %{
-      content: signal_field(signal, :content) || "",
-      category: signal_field(signal, :category),
-      confidence: signal_field(signal, :confidence),
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.add_insight(agent_id, insight)
-    assign(socket, self_insights: ChatState.get_identity_state(agent_id).insights)
-  end
-
-  defp track_identity_change(socket, signal) do
-    change = %{
-      field: signal_field(signal, :field),
-      change_type: signal_field(signal, :change_type),
-      reason: signal_field(signal, :reason),
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.add_identity_change(agent_id, change)
-    assign(socket, identity_changes: ChatState.get_identity_state(agent_id).identity_changes)
-  end
-
-  defp track_consolidation(socket, signal) do
-    data = signal.data || signal.metadata || %{}
-
-    consolidation = %{
-      promoted: data[:promoted] || data["promoted"] || 0,
-      deferred: data[:deferred] || data["deferred"] || 0,
-      timestamp: signal.timestamp
-    }
-
-    agent_id = socket.assigns.agent_id
-    ChatState.set_consolidation(agent_id, consolidation)
-    assign(socket, last_consolidation: consolidation)
-  end
-
-  # ── Cognitive Tracking ────────────────────────────────────────────
-
-  defp maybe_track_cognitive(socket, signal) do
-    event = to_string(signal.type)
-    agent_id = socket.assigns.agent_id
-
-    if event == "memory_cognitive_adjustment" do
-      data = signal.data || signal.metadata || %{}
-
-      adjustment = %{
-        field: data[:field] || data["field"],
-        old_value: data[:old_value] || data["old_value"],
-        new_value: data[:new_value] || data["new_value"],
-        timestamp: signal.timestamp
-      }
-
-      ChatState.add_cognitive_adjustment(agent_id, adjustment)
-      assign(socket, cognitive_adjustments: ChatState.get_cognitive_state(agent_id).adjustments)
-    else
-      socket
-    end
-  end
-
-  # ── Code Module Tracking ──────────────────────────────────────────
-
-  defp maybe_track_code(socket, signal) do
-    if to_string(signal.type) in ["code_created", "memory_code_loaded"] do
-      module_info = build_code_module_info(signal)
-      agent_id = socket.assigns.agent_id
-      ChatState.add_code_module(agent_id, module_info)
-      assign(socket, code_modules: ChatState.get_code_modules(agent_id))
-    else
-      socket
-    end
-  end
-
-  defp build_code_module_info(signal) do
-    data = signal.data || signal.metadata || %{}
-
-    %{
-      name: flex_get(data, :name) || flex_get(data, :module) || "unnamed",
-      purpose: flex_get(data, :purpose) || "",
-      sandbox_level: flex_get(data, :sandbox_level),
-      created_at: signal.timestamp
-    }
   end
 
   # ── Action Tracking ───────────────────────────────────────────────
@@ -366,10 +263,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   end
 
   # ── Shared Helpers ────────────────────────────────────────────────
-
-  defp signal_field(signal, key) do
-    get_in(signal.data, [key]) || get_in(signal.metadata, [key])
-  end
 
   defp flex_get(map, atom_key) when is_atom(atom_key) do
     map[atom_key] || map[Atom.to_string(atom_key)]
