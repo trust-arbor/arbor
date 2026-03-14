@@ -203,7 +203,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end
   end
 
-  defp build_stream_callback(state, source \\ :turn) do
+  defp build_stream_callback(state, source) do
     agent_id = state.agent_id
     session_id = state.session_id
 
