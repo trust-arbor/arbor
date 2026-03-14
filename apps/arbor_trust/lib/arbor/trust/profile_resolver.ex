@@ -227,8 +227,9 @@ defmodule Arbor.Trust.ProfileResolver do
         "arbor://historian/query" => :auto,
         # Writes blocked (too risky for cautious users)
         "arbor://code/write" => :block,
-        # Shell blocked
-        "arbor://shell" => :block
+        # Shell blocked by default, but single commands can be approved
+        "arbor://shell" => :block,
+        "arbor://shell/exec" => :ask
       }
     }
   end
@@ -246,8 +247,9 @@ defmodule Arbor.Trust.ProfileResolver do
         # Writes are gated
         "arbor://code/write" => :ask,
         "arbor://fs/write" => :allow,
-        # Shell gated for specific commands
-        "arbor://shell/exec/git" => :ask
+        # Shell blocked by default, but single commands can be approved
+        "arbor://shell" => :block,
+        "arbor://shell/exec" => :ask
       }
     }
   end
