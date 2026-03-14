@@ -97,30 +97,7 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   @impl true
   def required_capabilities do
     [
-      # Orchestrator session execution
-      %{resource: "arbor://orchestrator/execute"},
-      # File operations for code analysis and investigation
-      %{resource: "arbor://fs/read"},
-      %{resource: "arbor://fs/write"},
-      %{resource: "arbor://fs/list"},
-      # Memory for tracking patterns and past incidents
-      %{resource: "arbor://memory/recall"},
-      %{resource: "arbor://memory/add_knowledge"},
-      %{resource: "arbor://memory/read"},
-      %{resource: "arbor://memory/write"},
-      # Communication for ops room collaboration
-      %{resource: "arbor://comms/send"},
-      %{resource: "arbor://comms/poll"},
-      # Governance proposals
-      %{resource: "arbor://consensus/propose"},
-      # Hot reload (requires council approval)
-      %{resource: "arbor://code/hot_load"},
-      # Monitor read operations
-      %{resource: "arbor://monitor/read"},
-      # Monitor remediation (includes anomaly queue + safe remediation)
-      %{resource: "arbor://monitor/remediate"},
-      # Shell access for diagnostics (recon, observer, background checks)
-      %{resource: "arbor://shell/exec"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 

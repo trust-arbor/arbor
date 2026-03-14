@@ -92,8 +92,7 @@ defmodule Arbor.Agent.Templates.InterviewAgent do
   @impl true
   def required_capabilities do
     [
-      %{resource: "arbor://trust/read"},
-      %{resource: "arbor://trust/write"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 

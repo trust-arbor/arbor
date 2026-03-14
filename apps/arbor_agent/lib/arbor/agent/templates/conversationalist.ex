@@ -71,13 +71,7 @@ defmodule Arbor.Agent.Templates.Conversationalist do
   @impl true
   def required_capabilities do
     [
-      %{resource: "arbor://orchestrator/execute"},
-      %{resource: "arbor://memory/recall"},
-      %{resource: "arbor://memory/add_knowledge"},
-      %{resource: "arbor://memory/read"},
-      %{resource: "arbor://memory/write"},
-      %{resource: "arbor://persistence/read"},
-      %{resource: "arbor://persistence/write"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 

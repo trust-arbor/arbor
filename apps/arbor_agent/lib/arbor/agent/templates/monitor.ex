@@ -70,16 +70,7 @@ defmodule Arbor.Agent.Templates.Monitor do
   @impl true
   def required_capabilities do
     [
-      # Orchestrator session execution
-      %{resource: "arbor://orchestrator/execute"},
-      # Read monitor metrics and anomalies
-      %{resource: "arbor://monitor/read/**"},
-      # Query collected metrics
-      %{resource: "arbor://monitor/query"},
-      # Emit signals for anomaly reporting and escalation
-      %{resource: "arbor://signals/emit"},
-      # Subscribe to monitor anomaly signals
-      %{resource: "arbor://signals/subscribe"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 

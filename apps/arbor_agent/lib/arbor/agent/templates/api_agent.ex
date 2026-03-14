@@ -46,42 +46,7 @@ defmodule Arbor.Agent.Templates.ApiAgent do
   @impl true
   def required_capabilities do
     [
-      # Orchestrator
-      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"},
-      # File system
-      %{resource: "arbor://fs/**", description: "File system operations"},
-      # Shell
-      %{resource: "arbor://shell/**", description: "Shell execution"},
-      # Memory
-      %{resource: "arbor://memory/**", description: "Memory operations"},
-      # Monitor & remediation
-      %{resource: "arbor://monitor/**", description: "Monitor and remediation"},
-      # Communications
-      %{resource: "arbor://comms/**", description: "Communications"},
-      # Code operations
-      %{resource: "arbor://code/**", description: "Code operations"},
-      # AI generation
-      %{resource: "arbor://ai/**", description: "AI generation"},
-      # Trust
-      %{resource: "arbor://trust/**", description: "Trust operations"},
-      # Network/web
-      %{resource: "arbor://net/**", description: "Network/web operations"},
-      # Event history
-      %{resource: "arbor://historian/**", description: "Event history"},
-      # Sandbox
-      %{resource: "arbor://sandbox/**", description: "Sandbox management"},
-      # Persistence
-      %{resource: "arbor://persistence/**", description: "Persistence operations"},
-      # ACP tool sessions
-      %{resource: "arbor://acp/**", description: "ACP tool sessions"},
-      # Agent operations (identity, profile, lifecycle)
-      %{resource: "arbor://agent/**", description: "Agent operations"},
-      # Consensus
-      %{resource: "arbor://consensus/**", description: "Consensus operations"},
-      # Signals
-      %{resource: "arbor://signals/**", description: "Signal emission and subscription"},
-      # MCP tools
-      %{resource: "arbor://tool/use/**", description: "MCP tool invocation"}
+      %{resource: "arbor://orchestrator/execute", description: "Run DOT session pipelines"}
     ]
   end
 
