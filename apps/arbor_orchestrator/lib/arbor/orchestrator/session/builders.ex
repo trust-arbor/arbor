@@ -120,7 +120,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     trust_tier = state.trust_tier || :new
     discovered = Map.get(state, :discovered_tools, MapSet.new())
 
-    ToolDisclosure.resolve_tools(config, trust_tier, discovered)
+    ToolDisclosure.resolve_tools(config, trust_tier, discovered, agent_id: state.agent_id)
   end
 
   @doc false
