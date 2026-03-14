@@ -8,7 +8,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   """
 
   import Phoenix.LiveView
-  import Phoenix.Component, only: [assign: 2]
+  import Phoenix.Component, only: [assign: 2, assign: 3]
 
   @doc """
   Process a signal that matches the current agent.
