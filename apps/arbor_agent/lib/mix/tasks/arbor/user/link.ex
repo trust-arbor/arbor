@@ -4,14 +4,16 @@ defmodule Mix.Tasks.Arbor.User.Link do
 
   ## Usage
 
-      mix arbor.user.link <secondary_id> <primary_id>   # link secondary → primary
-      mix arbor.user.link --unlink <secondary_id>        # remove a link
-      mix arbor.user.link --list <primary_id>             # list linked identities
+      mix arbor.user.link <new_login_id> --to <existing_id>  # link new login → existing account
+      mix arbor.user.link --unlink <id>                       # remove a link
+      mix arbor.user.link --list <id>                         # list linked identities
 
   ## Examples
 
-      # Link a new Zitadel account to your existing identity
-      mix arbor.user.link human_abc123 human_def456
+      # You have an existing account (human_def456) with agents and data.
+      # You created a new OIDC login that generates human_abc123.
+      # Link the new login to your existing account:
+      mix arbor.user.link human_abc123 --to human_def456
 
       # See what's linked to an identity
       mix arbor.user.link --list human_def456
@@ -27,6 +29,7 @@ defmodule Mix.Tasks.Arbor.User.Link do
   @shortdoc "Link OIDC identities to a primary Arbor identity"
 
   @switches [
+    to: :string,
     unlink: :string,
     list: :string
   ]
@@ -49,16 +52,19 @@ defmodule Mix.Tasks.Arbor.User.Link do
       opts[:unlink] ->
         unlink(opts[:unlink])
 
-      length(args) == 2 ->
-        [secondary_id, primary_id] = args
-        link(secondary_id, primary_id)
+      length(args) == 1 and opts[:to] ->
+        [new_login_id] = args
+        link(new_login_id, opts[:to])
 
       true ->
         Mix.shell().error("""
         Usage:
-          mix arbor.user.link <secondary_id> <primary_id>
-          mix arbor.user.link --unlink <secondary_id>
-          mix arbor.user.link --list <primary_id>
+          mix arbor.user.link <new_login_id> --to <existing_id>
+          mix arbor.user.link --unlink <id>
+          mix arbor.user.link --list <id>
+
+        The <new_login_id> is the ID from your new OIDC login.
+        The <existing_id> is your current account (with agents, data, etc).
         """)
     end
   end
