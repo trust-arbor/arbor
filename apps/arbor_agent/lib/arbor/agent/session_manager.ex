@@ -385,7 +385,13 @@ defmodule Arbor.Agent.SessionManager do
       ])
 
     if entries != [] do
-      messages = entries_to_messages(entries)
+      messages =
+        entries_to_messages(entries)
+        |> Enum.reject(fn msg ->
+          # Filter out empty assistant messages that pollute the context
+          msg["role"] == "assistant" and String.trim(msg["content"] || "") == ""
+        end)
+
       user_count = Enum.count(entries, fn e -> e.role == "user" end)
       {:ok, %{"messages" => messages, "turn_count" => user_count}}
     else
