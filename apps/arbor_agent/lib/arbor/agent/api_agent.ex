@@ -309,7 +309,16 @@ defmodule Arbor.Agent.APIAgent do
 
     case execute_query(enhanced_prompt, state, opts) do
       {:ok, response, new_state} ->
-        text = response[:text] || ""
+        raw_text = response[:text]
+
+        text =
+          case raw_text do
+            %{text: t} when is_binary(t) -> t
+            %{"text" => t} when is_binary(t) -> t
+            t when is_binary(t) -> t
+            _ -> ""
+          end
+
         tool_calls = response[:tool_calls] || []
 
         if text == "" and tool_calls == [] do
