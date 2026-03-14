@@ -41,8 +41,8 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
 
     socket = subscribe_signals(socket, "consensus.*", &reload_consensus/1)
 
-    # Ensure the dashboard user has consensus/admin capability for approve/deny
-    ensure_dashboard_approver_capability()
+    # Ensure the logged-in user has consensus/admin capability for approve/deny
+    ensure_dashboard_approver_capability(socket)
 
     {:ok, socket}
   end
@@ -120,7 +120,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   end
 
   def handle_event("approve-proposal", %{"id" => proposal_id}, socket) do
-    case safe_force_approve(proposal_id) do
+    case safe_force_approve(proposal_id, socket) do
       :ok ->
         socket = reload_consensus(socket)
         {:noreply, put_flash(socket, :info, "Proposal approved: #{proposal_id}")}
@@ -131,7 +131,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   end
 
   def handle_event("deny-proposal", %{"id" => proposal_id}, socket) do
-    case safe_force_reject(proposal_id) do
+    case safe_force_reject(proposal_id, socket) do
       :ok ->
         socket = reload_consensus(socket)
         {:noreply, put_flash(socket, :info, "Proposal denied: #{proposal_id}")}
@@ -810,30 +810,39 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     end)
   end
 
-  defp safe_force_approve(proposal_id) do
-    # Use "system" as approver; in production this would be the logged-in user
-    Arbor.Consensus.Coordinator.force_approve(proposal_id, "agent_dashboard_user")
+  defp safe_force_approve(proposal_id, socket) do
+    actor_id = approval_actor_id(socket)
+    Arbor.Consensus.Coordinator.force_approve(proposal_id, actor_id)
   rescue
     e -> {:error, Exception.message(e)}
   catch
     :exit, reason -> {:error, reason}
   end
 
-  defp safe_force_reject(proposal_id) do
-    Arbor.Consensus.Coordinator.force_reject(proposal_id, "agent_dashboard_user")
+  defp safe_force_reject(proposal_id, socket) do
+    actor_id = approval_actor_id(socket)
+    Arbor.Consensus.Coordinator.force_reject(proposal_id, actor_id)
   rescue
     e -> {:error, Exception.message(e)}
   catch
     :exit, reason -> {:error, reason}
   end
 
-  # Grant the dashboard user consensus/admin capability so force_approve/reject work.
+  # Use the logged-in user's identity for approval actions.
+  # Falls back to "system" if no OIDC session (dev/test without auth).
+  defp approval_actor_id(socket) do
+    Map.get(socket.assigns, :current_agent_id) || "system"
+  end
+
+  # Grant the logged-in user consensus/admin capability so force_approve/reject work.
   # This runs once on mount; idempotent if already granted.
-  defp ensure_dashboard_approver_capability do
-    if Code.ensure_loaded?(Arbor.Security) and
+  defp ensure_dashboard_approver_capability(socket) do
+    actor_id = approval_actor_id(socket)
+
+    if actor_id != "system" and Code.ensure_loaded?(Arbor.Security) and
          function_exported?(Arbor.Security, :grant, 1) do
       Arbor.Security.grant(
-        principal: "agent_dashboard_user",
+        principal: actor_id,
         resource: "arbor://consensus/admin",
         constraints: %{},
         metadata: %{source: :dashboard}
