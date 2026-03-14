@@ -902,7 +902,14 @@ defmodule Arbor.Agent.Lifecycle do
     end
 
     # Re-grant capabilities from template or stored list
-    capabilities = resolve_capabilities_for_regrant(profile)
+    # Filter out actions/execute/* — facade auth replaced action-level auth
+    capabilities =
+      resolve_capabilities_for_regrant(profile)
+      |> Enum.reject(fn cap ->
+        resource = cap[:resource] || cap["resource"] || ""
+        String.starts_with?(resource, "arbor://actions/execute/")
+      end)
+
     grant_capabilities(agent_id, capabilities)
   end
 
