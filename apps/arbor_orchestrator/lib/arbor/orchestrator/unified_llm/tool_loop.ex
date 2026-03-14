@@ -190,21 +190,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
         case Client.stream(client, request, opts) do
           {:ok, events} ->
             events = Stream.each(events, fn event -> callback.(event) end)
-
-            case Client.collect_stream(events) do
-              {:ok, %{text: "", content_parts: [], finish_reason: :other} = _empty} ->
-                # Stream returned nothing — fall back to non-streaming
-                require Logger
-
-                Logger.warning(
-                  "[ToolLoop] Streaming returned empty, falling back to non-streaming"
-                )
-
-                Client.complete(client, request, opts)
-
-              result ->
-                result
-            end
+            Client.collect_stream(events)
 
           {:error, {:stream_not_supported, _}} ->
             Client.complete(client, request, opts)
