@@ -9,6 +9,8 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   use Phoenix.LiveView
   use Arbor.Dashboard.Live.SignalSubscription
 
+  require Logger
+
   import Arbor.Web.Components
 
   alias Arbor.Consensus.TopicRegistry
@@ -131,6 +133,31 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     end
   end
 
+  def handle_event(
+        "always-allow-proposal",
+        %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
+        socket
+      ) do
+    # 1. Approve the current proposal
+    case safe_force_approve(proposal_id, socket) do
+      :ok ->
+        # 2. Update trust profile to always allow this resource
+        update_trust_profile_to_auto(agent_id, resource)
+
+        socket = reload_consensus(socket)
+
+        {:noreply,
+         put_flash(
+           socket,
+           :info,
+           "Always allowed #{resource} for #{String.slice(agent_id, 0..20)}..."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
+    end
+  end
+
   def handle_event("deny-proposal", %{"id" => proposal_id}, socket) do
     case safe_force_reject(proposal_id, socket) do
       :ok ->
@@ -229,6 +256,17 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
                 style="background: var(--aw-green, #27ae60); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
               >
                 Approve
+              </button>
+              <button
+                phx-click="always-allow-proposal"
+                phx-value-id={proposal.id}
+                phx-value-agent={proposal.proposer}
+                phx-value-resource={approval_resource(proposal)}
+                class="aw-btn"
+                style="background: var(--aw-blue, #3498db); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
+                title="Approve and permanently auto-allow this action for this agent"
+              >
+                Always Allow
               </button>
               <button
                 phx-click="deny-proposal"
@@ -847,6 +885,26 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     e -> {:error, Exception.message(e)}
   catch
     :exit, reason -> {:error, reason}
+  end
+
+  defp update_trust_profile_to_auto(agent_id, resource_uri) do
+    store = Arbor.Trust.Store
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
+      case apply(store, :always_allow, [agent_id, resource_uri]) do
+        {:ok, _profile} ->
+          Logger.info(
+            "[ConsensusLive] Updated trust profile: #{resource_uri} → :auto for #{agent_id}"
+          )
+
+        {:error, reason} ->
+          Logger.warning("[ConsensusLive] Failed to update trust profile: #{inspect(reason)}")
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp decision_dom_id(%{id: id}), do: "decision-#{id}"

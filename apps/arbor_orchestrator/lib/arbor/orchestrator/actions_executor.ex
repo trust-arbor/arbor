@@ -150,6 +150,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
         {:ok, :approved} ->
           # Simple approval atom (some paths return this)
+          track_approval(agent_id, action_module)
           retry_execution(agent_id, action_module, params, context, name)
 
         {:error, :timeout} ->
@@ -191,9 +192,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     case status do
       :approved ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
+        track_approval(agent_id, action_module)
         retry_execution(agent_id, action_module, params, context, name)
 
       :rejected ->
+        track_rejection(agent_id, action_module)
+
         {:error,
          "Action #{name} was denied by consensus. " <>
            format_denial_reason(decision)}
@@ -271,6 +275,33 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         if session_id, do: Keyword.put(grant_opts, :session_id, session_id), else: grant_opts
 
       apply(security_mod, :grant, [grant_opts])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Record approval/rejection with ConfirmationTracker for graduation tracking.
+  defp track_approval(agent_id, action_module) do
+    tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
+
+    if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
+      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+      apply(tracker, :record_approval, [agent_id, resource])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp track_rejection(agent_id, action_module) do
+    tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
+
+    if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
+      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+      apply(tracker, :record_rejection, [agent_id, resource])
     end
   rescue
     _ -> :ok
