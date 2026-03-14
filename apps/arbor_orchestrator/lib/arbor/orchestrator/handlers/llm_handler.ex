@@ -5,6 +5,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   require Logger
 
+  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   alias Arbor.Orchestrator.UnifiedLLM.{
@@ -148,26 +150,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     start_time = System.monotonic_time(:millisecond)
 
     case call_llm(prompt, node, context, graph, opts) do
-      {:ok, response_text} ->
-        # Extract text from tool loop result map if needed
-        response_text =
-          case response_text do
-            %{text: t} when is_binary(t) ->
-              t
-
-            %{"text" => t} when is_binary(t) ->
-              t
-
-            t when is_binary(t) ->
-              t
-
-            other ->
-              Logger.warning(
-                "[LlmHandler] Non-string response_text: #{inspect(other, limit: 200)}"
-              )
-
-              ""
-          end
+      {:ok, raw_response} ->
+        response = PipelineResponse.normalize(raw_response)
+        response_text = response.content
 
         elapsed = System.monotonic_time(:millisecond) - start_time
         resp_len = String.length(response_text)
@@ -402,14 +387,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> maybe_add_stream_callback(on_stream)
 
     case ToolLoop.run(client, request, tool_loop_opts) do
-      {:ok, result} ->
+      {:ok, %PipelineResponse{} = result} ->
         # Propagate discovered tool names via process dict so call_llm_and_respond
         # can include them in context_updates for session persistence
-        if result[:discovered_tools] != nil and result[:discovered_tools] != [] do
-          Process.put(:__discovered_tool_names__, result[:discovered_tools])
+        if result.discovered_tools != nil and result.discovered_tools != [] do
+          Process.put(:__discovered_tool_names__, result.discovered_tools)
         end
 
-        {:ok, result.text}
+        {:ok, result}
 
       {:error, {:max_turns_reached, turns, _}} ->
         {:error, "Tool loop hit #{turns} turn limit without completing"}

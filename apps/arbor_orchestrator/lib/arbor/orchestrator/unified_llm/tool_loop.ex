@@ -26,6 +26,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       {:ok, response} = ToolLoop.run(client, request, workdir: "/path/to/project")
   """
 
+  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+
   alias Arbor.Orchestrator.UnifiedLLM.{
     ArborActionsExecutor,
     Client,
@@ -127,14 +129,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
-          # Final response — return with accumulated usage and discovered tools
+          # Final response — return as normalized PipelineResponse
           {:ok,
-           %{
-             text: response.text,
-             content_parts: response.content_parts,
+           %PipelineResponse{
+             content: response.text || "",
+             content_parts: response.content_parts || [],
              finish_reason: response.finish_reason,
              usage: state.total_usage,
-             turns: state.turn + 1,
+             tool_rounds: state.turn + 1,
              raw: response.raw,
              discovered_tools: state.discovered_tools
            }}
