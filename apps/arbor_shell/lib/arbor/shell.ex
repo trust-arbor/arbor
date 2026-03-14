@@ -543,7 +543,9 @@ defmodule Arbor.Shell do
     command_name = extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
 
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd)]
+    # Skip identity verification — the caller (authorize_and_execute in Actions)
+    # already verified the signed request. Facade auth is a policy check only.
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
 
     case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
