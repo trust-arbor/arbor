@@ -148,13 +148,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
         opts
       end
 
-    # Wire streaming callback for turns only (not heartbeats).
-    # Heartbeat results go to the heartbeat panel via their own signals.
-    unless Keyword.get(opts_overrides, :skip_stream, false) do
-      Keyword.put(opts, :on_stream, build_stream_callback(state, :turn))
-    else
-      opts
-    end
+    # Wire streaming callback with source tag so the dashboard can
+    # route turn deltas to chat and heartbeat deltas to the heartbeat panel.
+    source = Keyword.get(opts_overrides, :source, :turn)
+    Keyword.put(opts, :on_stream, build_stream_callback(state, source))
   end
 
   defp build_authorizer(state) do
