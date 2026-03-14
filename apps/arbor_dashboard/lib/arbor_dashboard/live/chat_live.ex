@@ -16,6 +16,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Dashboard.Live.ChatLive.Components
 
   alias Arbor.Agent.{APIAgent, Claude, Lifecycle, Manager}
+  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Dashboard.ChatState
   alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
   alias Arbor.Dashboard.Live.ChatLive.Helpers, as: ChatHelpers
@@ -470,23 +471,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:query_result, :api, {:ok, response}}, socket) do
     model_config = socket.assigns.current_model || %{}
 
-    raw_text = Map.get(response, :text) || Map.get(response, "text", "")
-
-    text =
-      case raw_text do
-        %{text: t} when is_binary(t) ->
-          t
-
-        %{"text" => t} when is_binary(t) ->
-          t
-
-        t when is_binary(t) ->
-          t
-
-        other ->
-          Logger.warning("[ChatLive] Unexpected text type: #{inspect(other, limit: 200)}")
-          ""
-      end
+    normalized = PipelineResponse.normalize(response)
+    text = normalized.content
 
     Logger.info(
       "[ChatLive] API response received: " <>

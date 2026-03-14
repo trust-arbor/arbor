@@ -71,6 +71,8 @@ defmodule Arbor.Orchestrator.Session do
 
   require Logger
 
+  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
 
@@ -514,7 +516,14 @@ defmodule Arbor.Orchestrator.Session do
     # Phase 3: notify ActionCycleServer of chat percept
     maybe_enqueue_chat_percept(state.agent_id, message)
 
-    reply = {:ok, %{text: response, tool_history: tool_history, tool_rounds: tool_rounds}}
+    reply =
+      {:ok,
+       PipelineResponse.normalize(%{
+         text: response,
+         tool_history: tool_history,
+         tool_rounds: tool_rounds
+       })}
+
     safe_reply(state.turn_from, reply)
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])

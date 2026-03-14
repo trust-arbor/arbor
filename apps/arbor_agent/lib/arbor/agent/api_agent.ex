@@ -28,6 +28,7 @@ defmodule Arbor.Agent.APIAgent do
   require Logger
 
   alias Arbor.Agent.{APIConfig, SessionManager}
+  alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
 
   @type option ::
           {:id, String.t()}
@@ -236,7 +237,10 @@ defmodule Arbor.Agent.APIAgent do
     recalled = if recall, do: recalled, else: []
 
     case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
-      {:ok, %{text: text, tool_history: tool_history, tool_rounds: tool_rounds}} ->
+      {:ok, raw_response} ->
+        normalized = PipelineResponse.normalize(raw_response)
+        text = normalized.content
+
         new_state =
           if index do
             finalize_query(prompt, text, state)
@@ -247,35 +251,11 @@ defmodule Arbor.Agent.APIAgent do
         response = %{
           text: text,
           thinking: nil,
-          usage: %{},
+          usage: normalized.usage,
           model: to_string(state.model),
           provider: to_string(state.provider),
-          tool_calls: tool_history,
-          tool_rounds: tool_rounds,
-          recalled_memories: recalled,
-          session_id: state.id,
-          type: :session
-        }
-
-        new_state = %{new_state | recalled_memories: recalled, query_count: state.query_count + 1}
-        {:reply, {:ok, response}, new_state}
-
-      {:ok, text} when is_binary(text) ->
-        # Backward compatibility for old Session return format
-        new_state =
-          if index do
-            finalize_query(prompt, text, state)
-          else
-            state
-          end
-
-        response = %{
-          text: text,
-          thinking: nil,
-          usage: %{},
-          model: to_string(state.model),
-          provider: to_string(state.provider),
-          tool_calls: [],
+          tool_calls: normalized.tool_history,
+          tool_rounds: normalized.tool_rounds,
           recalled_memories: recalled,
           session_id: state.id,
           type: :session
@@ -309,16 +289,8 @@ defmodule Arbor.Agent.APIAgent do
 
     case execute_query(enhanced_prompt, state, opts) do
       {:ok, response, new_state} ->
-        raw_text = response[:text]
-
-        text =
-          case raw_text do
-            %{text: t} when is_binary(t) -> t
-            %{"text" => t} when is_binary(t) -> t
-            t when is_binary(t) -> t
-            _ -> ""
-          end
-
+        normalized = PipelineResponse.normalize(response)
+        text = normalized.content
         tool_calls = response[:tool_calls] || []
 
         if text == "" and tool_calls == [] do
