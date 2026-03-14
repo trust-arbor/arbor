@@ -22,6 +22,16 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
     |> maybe_track_heartbeat(signal)
     |> maybe_refresh_goals(signal)
     |> maybe_track_memory_note(signal)
+  rescue
+    e ->
+      require Logger
+
+      Logger.warning(
+        "[SignalTracker] Signal processing crashed: #{Exception.message(e)} " <>
+          "signal=#{inspect(signal.type, limit: 50)}"
+      )
+
+      socket
   end
 
   # ── Stream Delta Tracking ──────────────────────────────────────────
@@ -183,9 +193,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
 
   defp sort_goals(goals) do
     Enum.sort_by(goals, fn goal ->
-      case goal.status do
-        :active -> {0, -goal.priority}
-        _ -> {1, goal.achieved_at || goal.created_at}
+      case Map.get(goal, :status) do
+        :active -> {0, -(Map.get(goal, :priority, 0) || 0)}
+        _ -> {1, Map.get(goal, :achieved_at) || Map.get(goal, :created_at)}
       end
     end)
   end

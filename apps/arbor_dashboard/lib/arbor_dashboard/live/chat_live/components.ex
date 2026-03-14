@@ -507,13 +507,19 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
                 else: H.role_label(msg.role)}
             </strong>
             <span
-              title={if msg.timestamp, do: Calendar.strftime(msg.timestamp, "%Y-%m-%d %H:%M:%S")}
+              title={
+                if is_struct(msg.timestamp, DateTime),
+                  do: Calendar.strftime(msg.timestamp, "%Y-%m-%d %H:%M:%S")
+              }
               style="color: var(--aw-text-muted, #888); font-size: 0.8em;"
             >
               {H.format_time(msg.timestamp)}
             </span>
           </div>
-          <div :if={msg.content != ""} style="white-space: pre-wrap; font-size: 0.9em;">
+          <div
+            :if={is_binary(msg.content) and msg.content != ""}
+            style="white-space: pre-wrap; font-size: 0.9em;"
+          >
             {msg.content}
           </div>
           <%!-- Tool use count (details in Actions panel) --%>
