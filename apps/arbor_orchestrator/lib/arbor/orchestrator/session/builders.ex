@@ -124,7 +124,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   end
 
   @doc false
-  def build_engine_opts(state, initial_values) do
+  def build_engine_opts(state, initial_values, opts_overrides \\ []) do
     logs_root =
       Path.join([
         System.tmp_dir!(),
@@ -148,9 +148,13 @@ defmodule Arbor.Orchestrator.Session.Builders do
         opts
       end
 
-    # Wire streaming callback — emits signals for each stream delta so the
-    # dashboard can show real-time LLM output
-    Keyword.put(opts, :on_stream, build_stream_callback(state))
+    # Wire streaming callback for turns only (not heartbeats).
+    # Heartbeat results go to the heartbeat panel via their own signals.
+    unless Keyword.get(opts_overrides, :skip_stream, false) do
+      Keyword.put(opts, :on_stream, build_stream_callback(state, :turn))
+    else
+      opts
+    end
   end
 
   defp build_authorizer(state) do
@@ -199,7 +203,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     end
   end
 
-  defp build_stream_callback(state) do
+  defp build_stream_callback(state, source \\ :turn) do
     agent_id = state.agent_id
     session_id = state.session_id
 
@@ -211,13 +215,15 @@ defmodule Arbor.Orchestrator.Session.Builders do
           emit_signal(:agent, :stream_delta, %{
             agent_id: agent_id,
             session_id: session_id,
-            text: text
+            text: text,
+            source: source
           })
 
         %{type: :finish} ->
           emit_signal(:agent, :stream_finish, %{
             agent_id: agent_id,
-            session_id: session_id
+            session_id: session_id,
+            source: source
           })
 
         _ ->
