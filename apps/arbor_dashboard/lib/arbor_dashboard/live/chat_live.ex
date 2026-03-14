@@ -592,6 +592,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     else
       {:noreply, socket}
     end
+  rescue
+    e ->
+      Logger.warning("[ChatLive] Signal handler crashed: #{Exception.message(e)}")
+      {:noreply, socket}
   end
 
   # Process monitor: agent crashed or was killed
@@ -610,15 +614,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # Another tab started an agent — reconnect if we have none
   defp handle_agent_signal(%{type: :started} = signal, socket) do
     if socket.assigns[:agent] == nil do
-      %{agent_id: agent_id, model_config: model_config} = signal.data
+      agent_id = Map.get(signal.data, :agent_id)
+      model_config = Map.get(signal.data, :model_config, %{})
       pid = Map.get(signal.data, :pid)
 
-      metadata = %{
-        model_config: model_config,
-        backend: model_config[:backend] || Map.get(model_config, :backend)
-      }
+      if agent_id && pid && Process.alive?(pid) do
+        metadata = %{
+          model_config: model_config,
+          backend: model_config[:backend] || Map.get(model_config, :backend)
+        }
 
-      if pid && Process.alive?(pid) do
         {:noreply, reconnect_to_agent(socket, agent_id, pid, metadata)}
       else
         {:noreply, socket}
@@ -635,7 +640,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # External chat message (e.g., from Claude Code via Manager.chat/3)
   defp handle_agent_signal(%{type: :chat_message} = signal, socket) do
-    %{role: role, content: content} = signal.data
+    role = Map.get(signal.data, :role, :assistant)
+    content = Map.get(signal.data, :content, "")
     sender = Map.get(signal.data, :sender, "External")
 
     msg = %{
