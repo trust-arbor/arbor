@@ -6,6 +6,15 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 
 Don't perform actions just to unblock something immediately so you can move on. Always fix the root cause.
 
+## Testing While Server is Running
+
+**Never run `mix test` directly in the main project while the Arbor server is running.** Compilation and Application config changes can crash the live dashboard. Instead, use worktree-based testing:
+
+- Spawn a subagent with `isolation: "worktree"` to run tests in an isolated copy
+- Or use `mix test` only when the server is stopped
+
+This ensures test runs don't interfere with the user's live session.
+
 ## Always Learning
 
 Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section.
