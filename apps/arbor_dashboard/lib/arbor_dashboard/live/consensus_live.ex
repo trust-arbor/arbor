@@ -35,6 +35,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         pending_approval_count: length(pending_approvals)
       )
       |> stream(:proposals, proposals)
+      |> stream_configure(:decisions, dom_id: &decision_dom_id/1)
       |> stream(:decisions, decisions)
       |> stream(:consultations, consultations)
       |> stream(:pending_approvals, pending_approvals)
@@ -827,6 +828,10 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   catch
     :exit, reason -> {:error, reason}
   end
+
+  defp decision_dom_id(%{id: id}), do: "decision-#{id}"
+  defp decision_dom_id(%{proposal_id: id}), do: "decision-#{id}"
+  defp decision_dom_id(d), do: "decision-#{:erlang.phash2(d)}"
 
   # Use the logged-in user's identity for approval actions.
   # Falls back to "system" if no OIDC session (dev/test without auth).
