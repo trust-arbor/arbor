@@ -647,25 +647,32 @@ defmodule Arbor.Trust.Store do
     if Process.whereis(@buffered_store) do
       case Arbor.Persistence.BufferedStore.list(name: @buffered_store) do
         {:ok, keys} ->
+          Logger.info("[Trust.Store] Loading #{length(keys)} persisted profiles from BufferedStore")
+
           Enum.count(keys, fn key ->
             case load_profile_from_db(key, state) do
               {:ok, profile} ->
                 put_profile_in_cache(profile, state)
                 true
 
-              _ ->
+              other ->
+                Logger.warning("[Trust.Store] Failed to load profile #{key}: #{inspect(other)}")
                 false
             end
           end)
 
-        _ ->
+        other ->
+          Logger.warning("[Trust.Store] Unexpected list result from BufferedStore: #{inspect(other)}")
           0
       end
     else
+      Logger.warning("[Trust.Store] BufferedStore :arbor_trust_profiles not running on init")
       0
     end
   rescue
-    _ -> 0
+    e ->
+      Logger.warning("[Trust.Store] load_persisted_profiles crashed: #{inspect(e)}")
+      0
   end
 
   defp persist_profile(profile, _state) do
@@ -677,10 +684,17 @@ defmodule Arbor.Trust.Store do
         metadata: %{}
       }
 
-      Arbor.Persistence.BufferedStore.put(profile.agent_id, record, name: @buffered_store)
+      case Arbor.Persistence.BufferedStore.put(profile.agent_id, record, name: @buffered_store) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("[Trust.Store] persist failed: #{inspect(reason)}")
+        other -> Logger.warning("[Trust.Store] persist unexpected: #{inspect(other)}")
+      end
+    else
+      Logger.warning("[Trust.Store] BufferedStore :arbor_trust_profiles not running, skipping persist")
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Trust.Store] persist_profile crashed: #{inspect(e)}")
   end
 
   defp load_profile_from_db(agent_id, _state) do

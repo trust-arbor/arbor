@@ -57,8 +57,11 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
         updated_at: now
       })
 
+    # Scope the id to the namespace to prevent cross-namespace pkey collisions
+    scoped_attrs = %{attrs_with_timestamps | id: "#{namespace}:#{attrs.key}"}
+
     %RecordSchema{}
-    |> RecordSchema.changeset(attrs_with_timestamps)
+    |> RecordSchema.changeset(scoped_attrs)
     |> repo.insert(
       on_conflict: [
         set: [
@@ -67,7 +70,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
           updated_at: now
         ]
       ],
-      conflict_target: [:namespace, :key]
+      conflict_target: :id
     )
     |> case do
       {:ok, _schema} -> :ok
