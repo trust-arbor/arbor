@@ -26,6 +26,16 @@ defmodule Arbor.Agent.Application do
              collection: "agent_profiles"},
             id: :arbor_agent_profiles
           ),
+          # User config store (per-user settings, API keys, preferences)
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: :arbor_user_config,
+             backend: profile_backend(),
+             backend_opts: [repo: Arbor.Persistence.Repo],
+             write_mode: :sync,
+             collection: "user_config"},
+            id: :arbor_user_config
+          ),
           # Named processes
           Arbor.Agent.Registry,
           Arbor.Agent.SummaryCache,
