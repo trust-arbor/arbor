@@ -560,25 +560,43 @@ defmodule Arbor.Agent.Lifecycle do
   defp grant_capabilities(_agent_id, []), do: :ok
 
   defp grant_capabilities(agent_id, capabilities) do
+    # Check which capabilities the agent already has to avoid duplicates
+    existing_uris =
+      case Arbor.Security.CapabilityStore.list_for_principal(agent_id) do
+        {:ok, caps} -> MapSet.new(caps, & &1.resource_uri)
+        _ -> MapSet.new()
+      end
+
     results =
       Enum.map(capabilities, fn cap ->
         resource = cap[:resource] || cap["resource"]
 
-        case Arbor.Security.grant(principal: agent_id, resource: resource) do
-          {:ok, _cap} ->
-            :ok
+        if MapSet.member?(existing_uris, resource) do
+          :skipped
+        else
+          case Arbor.Security.grant(principal: agent_id, resource: resource) do
+            {:ok, _cap} ->
+              :ok
 
-          {:error, reason} ->
-            Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
-              agent_id: agent_id
-            )
+            {:error, reason} ->
+              Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
+                agent_id: agent_id
+              )
 
-            {:error, reason}
+              {:error, reason}
+          end
         end
       end)
 
     granted = Enum.count(results, &(&1 == :ok))
-    Logger.info("Granted #{granted}/#{length(capabilities)} capabilities", agent_id: agent_id)
+    skipped = Enum.count(results, &(&1 == :skipped))
+
+    if granted > 0 do
+      Logger.info("Granted #{granted} capabilities (#{skipped} already existed)",
+        agent_id: agent_id
+      )
+    end
+
     :ok
   end
 
