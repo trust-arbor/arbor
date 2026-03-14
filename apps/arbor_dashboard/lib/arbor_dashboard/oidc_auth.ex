@@ -126,23 +126,26 @@ defmodule Arbor.Dashboard.OidcAuth do
              {:ok, claims} <-
                TokenVerifier.verify(token_response["id_token"], provider),
              {:ok, identity, _status} <- IdentityStore.load_or_create(claims) do
+          # Resolve identity aliases (secondary OIDC logins → primary identity)
+          agent_id = resolve_identity_alias(identity.agent_id)
+
           # Ensure human has capabilities via role assignment
-          ensure_role(identity.agent_id)
+          ensure_role(agent_id)
 
           # Ensure user workspace directory exists
-          ensure_workspace(identity.agent_id)
+          ensure_workspace(agent_id)
 
           return_to = get_session(conn, "return_to") || "/"
 
           # Extract display name from OIDC claims (try common claim names)
           display_name =
-            claims["name"] || claims["preferred_username"] || claims["email"] || identity.agent_id
+            claims["name"] || claims["preferred_username"] || claims["email"] || agent_id
 
           conn
           |> delete_session("oidc_state")
           |> delete_session("oidc_code_verifier")
           |> delete_session("return_to")
-          |> put_session("agent_id", identity.agent_id)
+          |> put_session("agent_id", agent_id)
           |> put_session("user_display_name", display_name)
           |> redirect_to(return_to)
           |> halt()
@@ -226,6 +229,18 @@ defmodule Arbor.Dashboard.OidcAuth do
     end
   rescue
     _ -> :ok
+  end
+
+  defp resolve_identity_alias(agent_id) do
+    if Code.ensure_loaded?(Arbor.Agent.IdentityAliases) do
+      apply(Arbor.Agent.IdentityAliases, :resolve, [agent_id])
+    else
+      agent_id
+    end
+  rescue
+    _ -> agent_id
+  catch
+    :exit, _ -> agent_id
   end
 
   defp oidc_provider do
