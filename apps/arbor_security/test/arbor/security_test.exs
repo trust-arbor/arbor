@@ -512,7 +512,7 @@ defmodule Arbor.SecurityTest do
   describe "authorize/4 with requires_approval constraint" do
     # Mock consensus module for testing
     defmodule MockConsensus do
-      def submit(%{proposer: _} = _proposal) do
+      def submit(%{proposer: _} = _proposal, _opts \\ []) do
         {:ok, "proposal_#{:erlang.unique_integer([:positive])}"}
       end
 
