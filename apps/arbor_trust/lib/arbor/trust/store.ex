@@ -422,6 +422,9 @@ defmodule Arbor.Trust.Store do
     persist_profile(profile, state)
     emit_distributed_signal(:profile_updated, profile.agent_id)
 
+    # Sync capabilities to match the new trust profile rules
+    sync_capabilities_async(profile.agent_id)
+
     new_stats = update_stats(state.cache_stats, :writes, 1)
     {:reply, :ok, %{state | cache_stats: new_stats}}
   end
@@ -479,6 +482,11 @@ defmodule Arbor.Trust.Store do
         end
 
         emit_distributed_signal(:profile_updated, agent_id)
+
+        # Sync capabilities if rules changed
+        if profile.rules != updated.rules do
+          sync_capabilities_async(agent_id)
+        end
 
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
@@ -639,6 +647,22 @@ defmodule Arbor.Trust.Store do
 
   defp maybe_filter_by_tier(profiles, tier) do
     Enum.filter(profiles, &(&1.tier == tier))
+  end
+
+  # Async capability sync — revokes stale capabilities after trust profile changes.
+  # Runs in a Task to avoid blocking the GenServer.
+  defp sync_capabilities_async(agent_id) do
+    enforcer = Arbor.Security.PolicyEnforcer
+
+    if Code.ensure_loaded?(enforcer) and function_exported?(enforcer, :sync_capabilities, 1) do
+      Task.start(fn ->
+        apply(enforcer, :sync_capabilities, [agent_id])
+      end)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @buffered_store :arbor_trust_profiles

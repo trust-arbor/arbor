@@ -50,6 +50,80 @@ defmodule Arbor.Security.PolicyEnforcer do
     end
   end
 
+  @doc """
+  Audit and re-sync capabilities for an agent after a trust profile change.
+
+  Revokes capabilities whose constraints no longer match the current trust
+  profile mode. For example, if a capability has `requires_approval: true`
+  but the profile now says `:auto` for that URI, the stale capability is
+  revoked so PolicyEnforcer re-grants a clean one on next access.
+  """
+  @spec sync_capabilities(String.t()) :: :ok
+  def sync_capabilities(principal_id) do
+    if not enabled?() or not trust_policy_available?() do
+      :ok
+    else
+      do_sync_capabilities(principal_id)
+    end
+  end
+
+  defp do_sync_capabilities(principal_id) do
+    cap_store = Module.concat([:Arbor, :Security, :CapabilityStore])
+    security_mod = Module.concat([:Arbor, :Security])
+
+    with true <- Code.ensure_loaded?(cap_store),
+         {:ok, caps} <- apply(cap_store, :list_for_principal, [principal_id]) do
+      # Only audit PolicyEnforcer-granted caps (source: :policy_enforcer)
+      pe_caps =
+        Enum.filter(caps, fn c ->
+          Map.get(c.metadata || %{}, :source) == :policy_enforcer or
+            Map.get(c.metadata || %{}, "source") == "policy_enforcer"
+        end)
+
+      revoked =
+        Enum.count(pe_caps, fn cap ->
+          current_mode = get_effective_mode(principal_id, cap.resource_uri)
+          has_approval = cap.constraints[:requires_approval] == true
+
+          stale? =
+            cond do
+              # Was :ask (requires_approval), now :auto/:allow → stale
+              has_approval and current_mode in [:auto, :allow] -> true
+              # Was :auto (no requires_approval), now :block → stale
+              not has_approval and current_mode == :block -> true
+              # Was :auto, now :ask → stale (needs requires_approval added)
+              not has_approval and current_mode == :ask -> true
+              true -> false
+            end
+
+          if stale? do
+            apply(security_mod, :revoke, [cap.id])
+            true
+          else
+            false
+          end
+        end)
+
+      if revoked > 0 do
+        Logger.info(
+          "[PolicyEnforcer] Synced #{revoked} stale capabilities for #{principal_id}",
+          principal_id: principal_id,
+          revoked: revoked
+        )
+      end
+
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[PolicyEnforcer] sync_capabilities crashed: #{inspect(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   @doc "Whether the PolicyEnforcer is enabled."
   @spec enabled?() :: boolean()
   def enabled? do
