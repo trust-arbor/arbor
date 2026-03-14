@@ -10,6 +10,7 @@ defmodule Mix.Tasks.Arbor.Agent do
       mix arbor.agent                           # list running agents
       mix arbor.agent list                      # same (running only)
       mix arbor.agent list --all                # running + stopped
+      mix arbor.agent templates                 # list available templates
       mix arbor.agent start <template>          # create & start from template
       mix arbor.agent resume <name|id>          # resume persisted agent
       mix arbor.agent stop <name|id>            # stop running agent
@@ -55,6 +56,7 @@ defmodule Mix.Tasks.Arbor.Agent do
     case args do
       [] -> do_list(opts)
       ["list"] -> do_list(opts)
+      ["templates"] -> do_list_templates()
       ["start"] -> do_start_usage()
       ["start", template | _] -> do_start(template, opts)
       ["resume", ref | _] -> do_resume(ref, opts)
@@ -196,6 +198,11 @@ defmodule Mix.Tasks.Arbor.Agent do
         Mix.shell().error("Template '#{template_name}' not found.")
         print_available_templates()
     end
+  end
+
+  defp do_list_templates do
+    ensure_server!()
+    print_available_templates()
   end
 
   defp do_start_usage do
