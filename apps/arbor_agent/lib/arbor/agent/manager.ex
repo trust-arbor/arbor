@@ -146,7 +146,7 @@ defmodule Arbor.Agent.Manager do
         }
         |> maybe_put_created_by(updated_profile)
 
-      case Arbor.Agent.Supervisor.start_child(
+      case supervised_start_child(
              agent_id: agent_id,
              module: module,
              start_opts: start_opts,
@@ -209,18 +209,22 @@ defmodule Arbor.Agent.Manager do
       display_name = profile.display_name || profile.character.name || "Agent"
       {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
 
-      # Start the agent under supervision
-      case Arbor.Agent.Supervisor.start_child(
+      # Start the agent under supervision (routes through UserSupervisor if principal known)
+      resume_metadata =
+        %{
+          model_config: model_config,
+          backend: model_config[:backend] || Map.get(model_config, "backend", :api),
+          display_name: display_name,
+          started_at: System.system_time(:millisecond),
+          resumed: true
+        }
+        |> maybe_put_created_by(profile)
+
+      case supervised_start_child(
              agent_id: agent_id,
              module: module,
              start_opts: start_opts,
-             metadata: %{
-               model_config: model_config,
-               backend: model_config[:backend] || Map.get(model_config, "backend", :api),
-               display_name: display_name,
-               started_at: System.system_time(:millisecond),
-               resumed: true
-             }
+             metadata: resume_metadata
            ) do
         {:ok, pid} ->
           # Also start the lifecycle (executor, session) if not already running
@@ -866,5 +870,23 @@ defmodule Arbor.Agent.Manager do
       nil -> metadata
       created_by -> Map.put(metadata, :created_by, created_by)
     end
+  end
+
+  # Route agent start through UserSupervisor when a principal_id is available,
+  # otherwise fall back to global Supervisor (single-user backward compat).
+  defp supervised_start_child(opts) do
+    principal_id = extract_principal_id(opts[:metadata])
+
+    if principal_id && Process.whereis(Arbor.Agent.UserSupervisor) != nil do
+      Arbor.Agent.UserSupervisor.start_child(Keyword.put(opts, :principal_id, principal_id))
+    else
+      Arbor.Agent.Supervisor.start_child(opts)
+    end
+  end
+
+  defp extract_principal_id(nil), do: nil
+
+  defp extract_principal_id(metadata) when is_map(metadata) do
+    Map.get(metadata, :created_by) || Map.get(metadata, :principal_id)
   end
 end

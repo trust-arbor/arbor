@@ -44,8 +44,9 @@ defmodule Arbor.Agent.Application do
           # Dynamic supervisors (Phase 3: three-loop architecture)
           Arbor.Agent.ActionCycleSupervisor,
           Arbor.Agent.MaintenanceSupervisor,
-          # Agent supervisor
+          # Agent supervisors (global + per-user)
           Arbor.Agent.Supervisor,
+          Arbor.Agent.UserSupervisor,
           # Bootstrap (self-defers via Process.send_after, must be after Supervisor)
           Arbor.Agent.Bootstrap
         ]
