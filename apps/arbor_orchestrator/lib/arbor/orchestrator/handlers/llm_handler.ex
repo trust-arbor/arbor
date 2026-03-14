@@ -149,8 +149,28 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
     case call_llm(prompt, node, context, graph, opts) do
       {:ok, response_text} ->
+        # Extract text from tool loop result map if needed
+        response_text =
+          case response_text do
+            %{text: t} when is_binary(t) ->
+              t
+
+            %{"text" => t} when is_binary(t) ->
+              t
+
+            t when is_binary(t) ->
+              t
+
+            other ->
+              Logger.warning(
+                "[LlmHandler] Non-string response_text: #{inspect(other, limit: 200)}"
+              )
+
+              ""
+          end
+
         elapsed = System.monotonic_time(:millisecond) - start_time
-        resp_len = if is_binary(response_text), do: String.length(response_text), else: 0
+        resp_len = String.length(response_text)
 
         Logger.info(
           "[LlmHandler] #{node.id} for #{agent_id}: " <>
