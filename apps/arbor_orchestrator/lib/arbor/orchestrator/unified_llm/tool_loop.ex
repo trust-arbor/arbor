@@ -26,7 +26,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       {:ok, response} = ToolLoop.run(client, request, workdir: "/path/to/project")
   """
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, CodingTools, ContentPart, Message, Request}
+  alias Arbor.Orchestrator.UnifiedLLM.{
+    ArborActionsExecutor,
+    Client,
+    ContentPart,
+    Message,
+    Request
+  }
+
   alias Arbor.Orchestrator.Session.Builders
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
@@ -38,11 +45,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
     workdir = Keyword.get(opts, :workdir, ".")
     on_tool_call = Keyword.get(opts, :on_tool_call)
-    tool_executor = Keyword.get(opts, :tool_executor, CodingTools)
+    tool_executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
     agent_id = Keyword.get(opts, :agent_id, "system")
 
     signer = Keyword.get(opts, :signer)
-    tools = Keyword.get(opts, :tools, CodingTools.definitions())
+    tools = Keyword.get(opts, :tools, ArborActionsExecutor.definitions())
     request = %{request | tools: tools}
 
     loop(client, request, opts, %{

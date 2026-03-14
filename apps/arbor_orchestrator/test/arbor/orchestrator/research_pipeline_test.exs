@@ -139,7 +139,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
       assert %Outcome{status: :success} = result
     end
 
-    test "codergen without tools attr falls back to CodingTools" do
+    test "codergen without tools attr falls back to ArborActionsExecutor" do
       node =
         make_node("code", %{
           "type" => "codergen",

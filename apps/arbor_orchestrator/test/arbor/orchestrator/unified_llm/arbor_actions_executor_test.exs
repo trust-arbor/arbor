@@ -3,7 +3,6 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
-  alias Arbor.Orchestrator.UnifiedLLM.CodingTools
 
   # Arbor.Actions is only available when running in the umbrella context.
   # When running standalone (cd apps/arbor_orchestrator && mix test), it's not loaded.
@@ -167,39 +166,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
     end
   end
 
-  describe "integration with CodingTools interface" do
-    @tag :skip_unless_actions
-    test "definitions format matches CodingTools.definitions format" do
-      if @actions_available do
-        arbor_defs = ArborActionsExecutor.definitions(["file_read"])
-        coding_defs = CodingTools.definitions()
-
-        # Both should have same top-level structure
-        arbor_first = hd(arbor_defs)
-        coding_first = hd(coding_defs)
-
-        assert Map.keys(arbor_first) == Map.keys(coding_first)
-        assert Map.keys(arbor_first["function"]) == Map.keys(coding_first["function"])
-      else
-        IO.puts("  [skipped] Arbor.Actions not available (standalone orchestrator)")
-        assert true
-      end
-    end
-
+  describe "execute/4 calling convention" do
     test "execute/4 is compatible with ToolLoop's calling convention" do
       # ToolLoop calls executor.execute(name, args, workdir, agent_id: agent_id)
-      # Both CodingTools and ArborActionsExecutor must accept this signature
-      coding_result =
-        CodingTools.execute(
-          "read_file",
-          %{"path" => "mix.exs"},
-          ".",
-          agent_id: "test"
-        )
-
-      assert match?({:ok, _}, coding_result)
-
-      arbor_result =
+      result =
         ArborActionsExecutor.execute(
           "file_read",
           %{"path" => "mix.exs"},
@@ -207,7 +177,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
           agent_id: "test"
         )
 
-      assert match?({:ok, _}, arbor_result) or match?({:error, _}, arbor_result)
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
   end
 end
