@@ -29,9 +29,15 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   defp maybe_track_stream(socket, signal) do
     case signal.type do
       :stream_delta ->
-        text = flex_get(signal.data, :text) || ""
-        current = socket.assigns[:streaming_text] || ""
-        assign(socket, streaming_text: current <> text)
+        # Only show streaming text when user has an active query (loading: true).
+        # Heartbeat deltas arrive in the background without a user query.
+        if socket.assigns[:loading] do
+          text = flex_get(signal.data, :text) || ""
+          current = socket.assigns[:streaming_text] || ""
+          assign(socket, streaming_text: current <> text)
+        else
+          socket
+        end
 
       :stream_finish ->
         # Text stays visible until query_result replaces it
