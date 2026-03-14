@@ -8,7 +8,7 @@ defmodule Arbor.Actions.Tool do
 
   ## Authorization
 
-  - FindTools: `arbor://actions/find_tools`
+  - FindTools: `arbor://agent/discover_tools`
   """
 
   defmodule FindTools do

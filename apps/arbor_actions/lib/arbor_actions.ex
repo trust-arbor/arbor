@@ -826,8 +826,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.Eval.ListRuns => "arbor://code/read",
     Arbor.Actions.Eval.GetRun => "arbor://code/read",
 
-    # Tool discovery — arbor://actions/find_tools
-    Arbor.Actions.Tool.FindTools => "arbor://actions/find_tools",
+    # Tool discovery — agent self-discovery of available tools
+    Arbor.Actions.Tool.FindTools => "arbor://agent/discover_tools",
 
     # Skill — arbor://code/read (skill management)
     Arbor.Actions.Skill.Search => "arbor://code/read",
