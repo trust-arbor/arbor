@@ -154,6 +154,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         response = PipelineResponse.normalize(raw_response)
         response_text = response.content
 
+        if response_text == "" do
+          Logger.warning(
+            "[LlmHandler] Empty response after normalize. " <>
+              "raw_type=#{inspect(Map.get(raw_response, :__struct__, :plain_map), limit: 50) |> String.slice(0..80)} " <>
+              "raw_content=#{inspect(Map.get(raw_response, :content, :no_content_key), limit: 200)} " <>
+              "raw_text=#{inspect(Map.get(raw_response, :text, :no_text_key), limit: 200)} " <>
+              "tool_rounds=#{inspect(response.tool_rounds)}"
+          )
+        end
+
         elapsed = System.monotonic_time(:millisecond) - start_time
         resp_len = String.length(response_text)
 
