@@ -2,6 +2,10 @@
 
 Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrella project with capability-based security and contract-first design.
 
+## Fix the Root Cause
+
+Don't perform actions just to unblock something immediately so you can move on. Always fix the root cause.
+
 ## Always Learning
 
 Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section.
