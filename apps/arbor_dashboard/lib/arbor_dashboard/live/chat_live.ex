@@ -109,7 +109,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         socket
         |> SignalLive.subscribe_raw("agent.*")
         |> SignalLive.subscribe_raw("memory.*")
-        |> SignalLive.subscribe_raw("security.*")
+        |> SignalLive.subscribe_raw("security.authorization_pending")
       else
         socket
       end
@@ -570,7 +570,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:signal_received, signal}, socket) do
     agent_id = socket.assigns.agent_id
 
-    if agent_id && signal_matches_agent?(signal, agent_id) do
+    # Backpressure: drop signals when message queue is overloaded
+    {:message_queue_len, queue_len} = Process.info(self(), :message_queue_len)
+
+    if agent_id && queue_len < 500 && signal_matches_agent?(signal, agent_id) do
       signal_entry = %{
         id: "sig-#{System.unique_integer([:positive])}",
         category: signal.category,
