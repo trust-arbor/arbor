@@ -280,13 +280,9 @@ defmodule Arbor.Agent.Lifecycle do
     mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
 
     if mode in [:session, :graph] do
-      # Include all available actions as tools unless explicitly provided
-      tools =
-        Keyword.get_lazy(opts, :tools, fn ->
-          if Code.ensure_loaded?(Arbor.Actions),
-            do: apply(Arbor.Actions, :all_actions, []),
-            else: []
-        end)
+      # Use progressive tool disclosure — start with core tools + find_tools.
+      # Only pass explicit tools if the caller provides them.
+      tools = Keyword.get(opts, :tools)
 
       # Build the stable system prompt for this agent (identity, character, tools)
       # so the Session's LLM adapter has proper context for heartbeat calls.
