@@ -63,7 +63,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       signer: signer,
       turn: 0,
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
-      discovered_tools: []
+      discovered_tools: [],
+      accumulated_text: ""
     })
   end
 
@@ -114,6 +115,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           # Check if find_tools was called — inject discovered tools
           {state, new_tool_defs} = extract_discovered_tools(tool_results, state)
 
+          # Preserve non-empty text from intermediate rounds
+          state =
+            if response.text && response.text != "" do
+              Map.update(state, :accumulated_text, response.text, fn prev ->
+                if prev == "" or is_nil(prev),
+                  do: response.text,
+                  else: prev <> "\n" <> response.text
+              end)
+            else
+              state
+            end
+
           # Build the assistant message with its tool calls
           assistant_msg = build_assistant_message(response)
 
@@ -130,9 +143,23 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
           # Final response — return as normalized PipelineResponse
+          if (response.text || "") == "" do
+            require Logger
+
+            Logger.warning(
+              "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
+                "finish_reason=#{inspect(response.finish_reason)} " <>
+                "content_parts=#{inspect(Enum.map(response.content_parts || [], & &1.kind))} " <>
+                "text=#{inspect(response.text, limit: 100)}"
+            )
+          end
+
+          # Use final response text, or fall back to accumulated text from tool rounds
+          final_text = response.text || Map.get(state, :accumulated_text) || ""
+
           {:ok,
            %PipelineResponse{
-             content: response.text || "",
+             content: final_text,
              content_parts: response.content_parts || [],
              finish_reason: response.finish_reason,
              usage: state.total_usage,
