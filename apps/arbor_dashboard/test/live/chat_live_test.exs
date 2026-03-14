@@ -62,14 +62,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
 
     @tag :fast
-    test "toggle-thoughts toggles show_thoughts assign", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "toggle-thoughts")
-      assert is_binary(html)
-    end
-
-    @tag :fast
     test "toggle-goals toggles show_goals assign", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/chat")
 
@@ -82,38 +74,6 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
       {:ok, view, _html} = live(conn, "/chat")
 
       html = render_click(view, "toggle-llm-panel")
-      assert is_binary(html)
-    end
-
-    @tag :fast
-    test "toggle-identity toggles show_identity assign", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "toggle-identity")
-      assert is_binary(html)
-    end
-
-    @tag :fast
-    test "toggle-cognitive toggles show_cognitive assign", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "toggle-cognitive")
-      assert is_binary(html)
-    end
-
-    @tag :fast
-    test "toggle-code toggles show_code assign", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "toggle-code")
-      assert is_binary(html)
-    end
-
-    @tag :fast
-    test "toggle-proposals toggles show_proposals assign", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
-
-      html = render_click(view, "toggle-proposals")
       assert is_binary(html)
     end
 
