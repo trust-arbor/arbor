@@ -19,6 +19,7 @@
       title={"Logged in as #{assigns[:current_agent_id]}"}
     >
       <%= display_name %>
+      <a href="/auth/logout" style="margin-left: 0.4rem; opacity: 0.7; text-decoration: none;" title="Sign out">&#x2715;</a>
     </span>
     <span :if={node_info = assigns[:node_info]} class="aw-node-badge">
       <%= node_info %>
