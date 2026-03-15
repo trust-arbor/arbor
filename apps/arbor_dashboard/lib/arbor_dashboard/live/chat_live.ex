@@ -581,9 +581,17 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     # Drop high-frequency signals that don't add value to the chat UI
     if signal.type in [:stream_delta, :stream_finish, :checkpoint_saved, :fidelity_resolved] do
-      # Stream deltas handled by maybe_track_stream in the authorization_pending handler above
-      # These signals are too frequent for the signals panel
-      socket = SignalTracker.process_signal(socket, signal)
+      # Only process turn stream deltas (for streaming text display).
+      # Heartbeat deltas and other high-frequency signals are dropped entirely.
+      source = get_in(signal.data, [:source]) || get_in(signal.data, ["source"])
+
+      socket =
+        if signal.type == :stream_delta and source == :turn and socket.assigns[:loading] do
+          SignalTracker.process_signal(socket, signal)
+        else
+          socket
+        end
+
       {:noreply, socket}
     else
       # Backpressure: drop signals when message queue is building up
