@@ -1104,53 +1104,20 @@ defmodule Arbor.Agent.Lifecycle do
     })
   end
 
-  # Dual-emit for agent lifecycle events: durable EventLog + ephemeral Signal.
-  # Follows the pattern from Security.Events and Memory.Events.
+  # Emit durable lifecycle signal via centralized Signals.durable_emit/4.
+  # This handles: signal bus emit + EventLog ETS write + async Postgres write.
+  # Falls back to plain emit if durable_emit is not yet available.
   @lifecycle_stream_id "agent:lifecycle"
 
   defp dual_emit_lifecycle(event_type, data) do
-    # Signal for real-time notifications
-    Arbor.Signals.emit(:agent, event_type, data)
-
-    # EventLog for durable audit trail via Historian
-    # Async because the Historian may not be started yet during bootstrap
-    # (arbor_agent starts before arbor_historian in the app supervision tree)
-    Task.start(fn ->
-      persist_lifecycle_event(event_type, data, _retries = 3)
-    end)
+    if function_exported?(Arbor.Signals, :durable_emit, 4) do
+      Arbor.Signals.durable_emit(:agent, event_type, data, stream_id: @lifecycle_stream_id)
+    else
+      Arbor.Signals.emit(:agent, event_type, data)
+    end
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
-  end
-
-  defp persist_lifecycle_event(_event_type, _data, 0), do: :ok
-
-  defp persist_lifecycle_event(event_type, data, retries) do
-    event_log = Arbor.Historian.EventLog.ETS
-    persistence_event = Arbor.Persistence.Event
-
-    if Process.whereis(event_log) and Code.ensure_loaded?(persistence_event) do
-      event =
-        apply(persistence_event, :new, [
-          @lifecycle_stream_id,
-          "agent.#{event_type}",
-          Map.put(data, :timestamp, DateTime.utc_now()),
-          [metadata: %{source_node: node()}]
-        ])
-
-      apply(Arbor.Persistence, :append, [
-        event_log,
-        Arbor.Persistence.EventLog.ETS,
-        @lifecycle_stream_id,
-        event
-      ])
-    else
-      # Historian not ready yet — wait and retry
-      Process.sleep(1_000)
-      persist_lifecycle_event(event_type, data, retries - 1)
-    end
-  rescue
-    _ -> :ok
   end
 end

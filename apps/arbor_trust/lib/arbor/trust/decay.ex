@@ -275,10 +275,18 @@ defmodule Arbor.Trust.Decay do
   # Signal emission helper
 
   defp emit_decay_applied(agent_id, old_score, new_score) do
-    Signals.emit(:trust, :decay_applied, %{
-      agent_id: agent_id,
-      old_score: old_score,
-      new_score: new_score
-    })
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:trust, :decay_applied, %{
+        agent_id: agent_id,
+        old_score: old_score,
+        new_score: new_score
+      }, stream_id: "trust:events")
+    else
+      Signals.emit(:trust, :decay_applied, %{
+        agent_id: agent_id,
+        old_score: old_score,
+        new_score: new_score
+      })
+    end
   end
 end

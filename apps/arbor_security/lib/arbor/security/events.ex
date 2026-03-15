@@ -321,72 +321,18 @@ defmodule Arbor.Security.Events do
   # Private Helpers
   # ============================================================================
 
-  # Dual-emit: write to EventLog AND emit on signal bus.
-  # Uses apply/3 for Persistence calls since arbor_persistence depends on
-  # arbor_security — adding the reverse would create a dependency cycle.
+  # Emit durable signal via centralized Signals.durable_emit/4.
+  # This handles: signal bus emit + EventLog ETS write + async Postgres write.
+  # Falls back to plain emit if durable_emit is not yet available.
   #
-  # Persistence is best-effort: if the EventLog backend isn't started,
-  # the signal still emits. Security operations must not fail because
-  # the audit log is unavailable.
+  # Security operations must not fail because the audit log is unavailable.
   defp dual_emit(event_type, data) do
-    # Write to EventLog (durable, best-effort)
-    persist_event(event_type, data)
-
-    # Emit on signal bus (real-time notification)
-    Arbor.Signals.emit(
-      :security,
-      event_type,
-      Map.put(data, :permanent, true)
-    )
-
-    :ok
-  end
-
-  # apply/3 is intentional: arbor_persistence depends on arbor_security,
-  # so we use runtime resolution to avoid a dependency cycle.
-  defp persist_event(event_type, data) do
-    event =
-      apply(Arbor.Persistence.Event, :new, [
-        @stream_id,
-        to_string(event_type),
-        Map.put(data, :timestamp, DateTime.utc_now()),
-        [metadata: %{source_node: node()}]
-      ])
-
-    # Write to ETS (Historian's EventLog) for fast queries
-    if Process.whereis(@event_log_name) do
-      apply(Arbor.Persistence, :append, [
-        @event_log_name,
-        @event_log_backend,
-        @stream_id,
-        event
-      ])
-    end
-
-    # Write to Postgres for durable audit trail
-    postgres_mod = Arbor.Persistence.EventLog.Postgres
-    repo_mod = Arbor.Persistence.Repo
-
-    if Code.ensure_loaded?(postgres_mod) and Process.whereis(repo_mod) do
-      Task.start(fn ->
-        try do
-          apply(postgres_mod, :append, [@stream_id, event, [repo: repo_mod]])
-        rescue
-          _ -> :ok
-        end
-      end)
+    if function_exported?(Arbor.Signals, :durable_emit, 4) do
+      Arbor.Signals.durable_emit(:security, event_type, data, stream_id: @stream_id)
+    else
+      Arbor.Signals.emit(:security, event_type, Map.put(data, :permanent, true))
     end
 
     :ok
-  rescue
-    e ->
-      require Logger
-      Logger.error("Security audit event persistence failed: #{Exception.message(e)}")
-      {:error, :audit_persistence_failed}
-  catch
-    :exit, reason ->
-      require Logger
-      Logger.error("Security audit event persistence crashed: #{inspect(reason)}")
-      {:error, :audit_persistence_failed}
   end
 end

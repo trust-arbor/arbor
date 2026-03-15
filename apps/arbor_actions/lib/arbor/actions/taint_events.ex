@@ -50,7 +50,7 @@ defmodule Arbor.Actions.TaintEvents do
   """
   @spec emit_taint_blocked(module(), atom(), atom(), atom(), map()) :: :ok
   def emit_taint_blocked(action_module, param, taint_level, role, context) do
-    Signals.emit(:security, :taint_blocked, %{
+    data = %{
       action: action_module_to_string(action_module),
       parameter: to_string(param),
       parameter_role: role,
@@ -59,7 +59,13 @@ defmodule Arbor.Actions.TaintEvents do
       agent_id: Map.get(context, :agent_id),
       taint_policy: Map.get(context, :taint_policy, :permissive),
       blocked_value_preview: nil
-    })
+    }
+
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:security, :taint_blocked, data, stream_id: "security:events")
+    else
+      Signals.emit(:security, :taint_blocked, data)
+    end
   end
 
   @doc """
@@ -88,12 +94,18 @@ defmodule Arbor.Actions.TaintEvents do
   """
   @spec emit_taint_reduced(atom(), atom(), atom(), map()) :: :ok
   def emit_taint_reduced(from_level, to_level, reason, context) do
-    Signals.emit(:security, :taint_reduced, %{
+    data = %{
       from_level: from_level,
       to_level: to_level,
       reason: reason,
       agent_id: Map.get(context, :agent_id)
-    })
+    }
+
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
+    else
+      Signals.emit(:security, :taint_reduced, data)
+    end
   end
 
   @doc """

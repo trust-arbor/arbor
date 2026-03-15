@@ -91,15 +91,15 @@ defmodule Arbor.Signals do
     emit(category, type, Map.put(data, :permanent, true), opts)
 
     # EventLog + Postgres (durable)
-    persist_to_historian(category, type, data)
+    stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
+    persist_to_historian(stream_id, type, data)
 
     :ok
   end
 
   # Write to Historian's EventLog (ETS) + Postgres (async).
   # Uses runtime bridges to avoid dependency cycles.
-  defp persist_to_historian(category, type, data) do
-    stream_id = "#{category}_events"
+  defp persist_to_historian(stream_id, type, data) do
     event_mod = Arbor.Persistence.Event
     persistence_mod = Arbor.Persistence
     event_log_name = Arbor.Historian.EventLog.ETS

@@ -402,11 +402,20 @@ defmodule Arbor.Consensus.EventEmitter do
     Config.event_log()
   end
 
-  # Emit a signal to the signal bus for real-time observability.
+  # Emit a durable signal to the signal bus + EventLog for real-time observability
+  # and queryable history. Falls back to plain emit if durable_emit is unavailable.
   # Gracefully handles signal bus unavailability (e.g., in tests).
   defp emit_signal(type, data) when is_atom(type) and is_map(data) do
     data = Map.put(data, :origin_node, node())
-    Signals.emit(:consensus, type, data, scope: :cluster)
+
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:consensus, type, data,
+        stream_id: Config.event_stream(),
+        scope: :cluster
+      )
+    else
+      Signals.emit(:consensus, type, data, scope: :cluster)
+    end
   rescue
     # Signal bus may not be running in test environments
     _ -> :ok

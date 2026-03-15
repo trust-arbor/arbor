@@ -339,9 +339,16 @@ defmodule Arbor.Trust.CircuitBreaker do
   # Signal emission helper
 
   defp emit_circuit_breaker_triggered(agent_id, reason) do
-    Signals.emit(:trust, :circuit_breaker_triggered, %{
-      agent_id: agent_id,
-      reason: reason
-    })
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:trust, :circuit_breaker_triggered, %{
+        agent_id: agent_id,
+        reason: reason
+      }, stream_id: "trust:events")
+    else
+      Signals.emit(:trust, :circuit_breaker_triggered, %{
+        agent_id: agent_id,
+        reason: reason
+      })
+    end
   end
 end
