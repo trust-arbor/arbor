@@ -152,8 +152,16 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
         end)
         |> Enum.map(fn {name, _uri} -> to_string(name) end)
 
-      # Always include find_tools
-      tools = ensure_find_tools(tools)
+      # Include find_tools only if the profile allows it
+      discover_mode = get_effective_mode(agent_id, "arbor://agent/discover_tools")
+
+      tools =
+        if discover_mode != :block do
+          ensure_find_tools(tools)
+        else
+          tools
+        end
+
       {:ok, tools}
     else
       :fallback

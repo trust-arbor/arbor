@@ -251,8 +251,14 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     store = Arbor.Trust.Store
 
     if Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
-      # Block spawn_worker on the subagent (no recursive spawning)
-      rules = Map.put(scoped_rules, "arbor://agent/spawn_worker", :block)
+      rules =
+        scoped_rules
+        # Workers need tool discovery to find their scoped tools
+        |> Map.put("arbor://agent/discover_tools", :auto)
+        # Workers need orchestrator access for the session pipeline
+        |> Map.put("arbor://orchestrator", :auto)
+        # Block spawn_worker (no recursive spawning)
+        |> Map.put("arbor://agent/spawn_worker", :block)
 
       apply(store, :update_profile, [
         worker_id,
@@ -272,10 +278,17 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         ctx -> "\n\n## Context\n#{ctx}"
       end
 
+    cwd = File.cwd!()
+
     """
     You are a focused research worker. Complete the assigned task thoroughly
     and return your findings. Use your available tools to gather evidence.
     Be specific — cite file paths, line numbers, and exact code when relevant.
+
+    ## Environment
+    - Working directory: #{cwd}
+    - Use relative paths (e.g., "apps/arbor_agent/lib/..."), not absolute paths
+    - The project is an Elixir umbrella with apps in the apps/ directory
     #{context_section}
     """
   end
