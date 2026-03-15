@@ -60,24 +60,17 @@ defmodule Arbor.Actions.File do
           {:ok, String.t()} | {:error, term()}
   def authorize_file_op(context, path, operation) do
     if context[:agent_id] do
-      agent_id = context[:agent_id]
+      # Agent-scoped: authorize via Security + FileGuard
+      resource_uri = "arbor://fs/#{operation}"
 
-      if agent_id do
-        # FileGuard is now integrated into Security.authorize via the
-        # :file_path option. Passing it here triggers path validation
-        # as part of the main auth chain.
-        resource_uri = "arbor://fs/#{operation}"
-
-        case Arbor.Security.authorize(agent_id, resource_uri, :execute, file_path: path) do
-          {:ok, :authorized, resolved_path} -> {:ok, resolved_path}
-          {:ok, :authorized} -> {:ok, path}
-          {:error, reason} -> {:error, {:unauthorized, reason}}
-          _ -> {:ok, path}
-        end
-      else
-        {:ok, path}
+      case Arbor.Security.authorize(context[:agent_id], resource_uri, :execute, file_path: path) do
+        {:ok, :authorized, resolved_path} -> {:ok, resolved_path}
+        {:ok, :authorized} -> {:ok, path}
+        {:error, reason} -> {:error, {:unauthorized, reason}}
+        _ -> {:ok, path}
       end
     else
+      # No agent_id — system-level call, pass through
       {:ok, path}
     end
   end

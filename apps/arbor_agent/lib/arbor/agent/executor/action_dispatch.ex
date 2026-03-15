@@ -112,6 +112,10 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @doc """
   Dispatch an action with the given parameters.
 
+  When `agent_id` is provided, routes through `authorize_and_execute`
+  for full security enforcement. When nil, calls actions directly
+  (system-level dispatch only).
+
   Returns `{:ok, result}` or `{:error, reason}`.
   """
   @spec dispatch(atom() | term(), map()) :: {:ok, map()} | {:error, term()}
@@ -223,10 +227,26 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   defp run_discovered_action(action_module, action, params) do
-    case safe_call(fn -> action_module.run(params, %{}) end) do
-      {:ok, result} -> {:ok, result}
-      {:error, reason} -> {:error, {action, reason}}
-      nil -> {:error, {:action_failed, action}}
+    # Use authorize_and_execute when agent_id available in process dictionary.
+    # The Executor stores its agent_id there so dispatch can enforce auth
+    # without threading it through every hardcoded clause.
+    agent_id = Process.get(:arbor_executor_agent_id)
+    actions_mod = Module.concat([:Arbor, :Actions])
+
+    if agent_id && Code.ensure_loaded?(actions_mod) &&
+         function_exported?(actions_mod, :authorize_and_execute, 4) do
+      case apply(actions_mod, :authorize_and_execute, [agent_id, action_module, params, %{}]) do
+        {:ok, :pending_approval, _} -> {:error, {:pending_approval, action}}
+        {:error, :unauthorized} -> {:error, {:unauthorized, action}}
+        result -> result
+      end
+    else
+      # System-level dispatch (no agent_id) — direct call
+      case safe_call(fn -> action_module.run(params, %{}) end) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, {action, reason}}
+        nil -> {:error, {:action_failed, action}}
+      end
     end
   end
 

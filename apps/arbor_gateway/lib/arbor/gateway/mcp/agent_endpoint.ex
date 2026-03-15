@@ -241,26 +241,23 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       {:error, {:exit, reason}}
   end
 
-  # Try authorized execution first, fall back to direct if security isn't available
-  # or returns unauthorized (no capability grants for agent-to-agent yet)
+  # Execute action through authorize_and_execute — no unauthenticated fallback.
+  # If auth fails, the error propagates to the MCP client.
   defp execute_action(action_module, params, agent_id) do
     if authorized_execution_available?() do
-      case apply(Arbor.Actions, :authorize_and_execute, [agent_id, action_module, params, %{}]) do
-        {:error, :unauthorized} ->
-          # Fall back to direct execution when no capability grants exist
-          # (agent-to-agent MCP uses endpoint-level trust, not per-action caps)
-          action_module.run(params, %{})
-
-        other ->
-          other
-      end
+      apply(Arbor.Actions, :authorize_and_execute, [agent_id, action_module, params, %{}])
     else
-      action_module.run(params, %{})
+      # Security not available — use agent_id in context for facade-level auth
+      action_module.run(params, %{agent_id: agent_id})
     end
   rescue
-    _ -> action_module.run(params, %{})
+    e ->
+      Logger.warning("[MCP AgentEndpoint] Action execution error: #{Exception.message(e)}")
+      {:error, {:execution_error, Exception.message(e)}}
   catch
-    :exit, _ -> action_module.run(params, %{})
+    :exit, reason ->
+      Logger.warning("[MCP AgentEndpoint] Action execution exit: #{inspect(reason)}")
+      {:error, {:execution_exit, reason}}
   end
 
   # -- Helpers --
