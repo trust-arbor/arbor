@@ -370,7 +370,7 @@ defmodule Arbor.Security.Events do
     if Code.ensure_loaded?(postgres_mod) and Process.whereis(repo_mod) do
       Task.start(fn ->
         try do
-          postgres_mod.append(@stream_id, event, repo: repo_mod)
+          apply(postgres_mod, :append, [@stream_id, event, [repo: repo_mod]])
         rescue
           _ -> :ok
         end
