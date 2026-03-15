@@ -1121,7 +1121,7 @@ defmodule Arbor.Orchestrator.SessionTest do
         )
 
       # ── Turn 1 ──
-      assert {:ok, %{text: text1}} = Session.send_message(pid, "Hello")
+      assert {:ok, %{content: text1}} = Session.send_message(pid, "Hello")
       # Simulated response contains "[Simulated]" prefix
       assert text1 =~ "Simulated"
 
@@ -1135,7 +1135,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert msg2["role"] == "assistant"
 
       # ── Turn 2 ──
-      assert {:ok, %{text: text2}} = Session.send_message(pid, "How are you?")
+      assert {:ok, %{content: text2}} = Session.send_message(pid, "How are you?")
       assert text2 =~ "Simulated"
 
       state2 = Session.get_state(pid)
@@ -1247,7 +1247,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       end)
 
       # Send a message
-      assert {:ok, %{text: _text}} =
+      assert {:ok, %{content: _text}} =
                Arbor.Orchestrator.Session.send_message(pid, "hello")
 
       # After the turn completes, check that the session is functional
@@ -1334,7 +1334,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert {:ok, result} = Arbor.Orchestrator.Session.send_message(pid, "hello")
 
       # Even without tool calls, the return type should have these fields
-      assert %{text: _, tool_history: [], tool_rounds: 0} = result
+      assert %{content: _, tool_history: [], tool_rounds: 0} = result
 
       GenServer.stop(pid)
     end
