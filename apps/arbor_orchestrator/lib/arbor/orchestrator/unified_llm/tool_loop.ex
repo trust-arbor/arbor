@@ -68,22 +68,58 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     })
   end
 
-  defp loop(_client, _request, _opts, %{turn: turn, max_turns: max} = state)
+  defp loop(client, request, _opts, %{turn: turn, max_turns: max} = state)
        when turn >= max do
-    accumulated = Map.get(state, :accumulated_text, "")
+    # Tool loop exhausted — make one final text-only call so the LLM
+    # MUST respond with text instead of more tool calls
+    require Logger
 
-    if accumulated != "" do
-      # Return accumulated text from intermediate rounds instead of failing
-      {:ok,
-       %PipelineResponse{
-         content: accumulated,
-         usage: state.total_usage,
-         tool_rounds: turn,
-         finish_reason: :max_turns,
-         discovered_tools: state.discovered_tools
-       }}
-    else
-      {:error, {:max_turns_reached, turn, state.total_usage}}
+    Logger.info(
+      "[ToolLoop] Hit #{max} turn limit. Making final text-only call for agent #{state.agent_id}"
+    )
+
+    # Strip tools from the request so the LLM can only generate text
+    text_only_request = %{request | tools: []}
+
+    case call_llm(client, text_only_request, []) do
+      {:ok, response} ->
+        final_text = response.text || ""
+        accumulated = Map.get(state, :accumulated_text, "")
+
+        content =
+          case {accumulated, final_text} do
+            {"", ""} -> ""
+            {"", text} -> text
+            {acc, ""} -> acc
+            {acc, text} -> acc <> "\n\n" <> text
+          end
+
+        {:ok,
+         %PipelineResponse{
+           content: content,
+           content_parts: response.content_parts || [],
+           usage: merge_usage_maps(state.total_usage, response.usage),
+           tool_rounds: turn,
+           finish_reason: :max_turns,
+           discovered_tools: state.discovered_tools
+         }}
+
+      {:error, _} ->
+        # Final call failed — fall back to accumulated text
+        accumulated = Map.get(state, :accumulated_text, "")
+
+        if accumulated != "" do
+          {:ok,
+           %PipelineResponse{
+             content: accumulated,
+             usage: state.total_usage,
+             tool_rounds: turn,
+             finish_reason: :max_turns,
+             discovered_tools: state.discovered_tools
+           }}
+        else
+          {:error, {:max_turns_reached, turn, state.total_usage}}
+        end
     end
   end
 
@@ -376,6 +412,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp normalize_args(_), do: %{}
+
+  defp merge_usage_maps(a, nil), do: a
+  defp merge_usage_maps(nil, b), do: b
+
+  defp merge_usage_maps(a, b) when is_map(a) and is_map(b) do
+    %{
+      prompt_tokens: (a[:prompt_tokens] || 0) + (b["prompt_tokens"] || b[:prompt_tokens] || 0),
+      completion_tokens:
+        (a[:completion_tokens] || 0) + (b["completion_tokens"] || b[:completion_tokens] || 0),
+      total_tokens: (a[:total_tokens] || 0) + (b["total_tokens"] || b[:total_tokens] || 0)
+    }
+  end
 
   defp merge_usage(state, nil), do: state
 
