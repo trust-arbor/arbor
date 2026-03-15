@@ -151,7 +151,7 @@ defmodule Arbor.Actions.Shell do
            }}
 
         {:ok, :pending_approval, proposal_id} ->
-          {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+          {:ok, :pending_approval, proposal_id}
 
         {:error, :unauthorized} ->
           Actions.emit_failed(__MODULE__, :unauthorized)
@@ -302,7 +302,7 @@ defmodule Arbor.Actions.Shell do
              }}
 
           {:ok, :pending_approval, proposal_id} ->
-            {:ok, %{status: "pending_approval", proposal_id: proposal_id}}
+            {:ok, :pending_approval, proposal_id}
 
           {:error, :unauthorized} ->
             Actions.emit_failed(__MODULE__, :unauthorized)
