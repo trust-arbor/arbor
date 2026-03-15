@@ -656,6 +656,7 @@ defmodule Arbor.Trust.Manager do
   defp broadcast_trust_event(agent_id, event_type, metadata) do
     pubsub = Config.pubsub()
 
+    # PubSub for real-time LiveView updates
     Phoenix.PubSub.broadcast(
       pubsub,
       "trust:events",
@@ -667,6 +668,9 @@ defmodule Arbor.Trust.Manager do
       "trust:#{agent_id}",
       {:trust_event, agent_id, event_type, metadata}
     )
+
+    # Signal for queryable history via Historian
+    Arbor.Signals.emit(:trust, event_type, Map.merge(metadata, %{agent_id: agent_id}))
   rescue
     _ -> :ok
   end

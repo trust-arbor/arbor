@@ -873,7 +873,7 @@ defmodule Arbor.Trust.Store do
     key = {event.timestamp, event.id}
     :ets.insert(state.events_table, {{event.agent_id, key}, event})
 
-    # Broadcast via PubSub if available
+    # Broadcast via PubSub for real-time LiveView updates
     try do
       Phoenix.PubSub.broadcast(
         Config.pubsub(),
@@ -883,6 +883,15 @@ defmodule Arbor.Trust.Store do
     rescue
       _ -> :ok
     end
+
+    # Signal for queryable history via Historian
+    Arbor.Signals.emit(:trust, :tier_changed, %{
+      agent_id: new_profile.agent_id,
+      old_tier: old_profile.tier,
+      new_tier: new_profile.tier,
+      old_score: old_profile.trust_score,
+      new_score: new_profile.trust_score
+    })
 
     Logger.info(
       "Trust tier changed for #{new_profile.agent_id}: #{old_profile.tier} -> #{new_profile.tier}",
