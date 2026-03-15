@@ -110,6 +110,10 @@ defmodule Arbor.Agent.Executor do
 
     Logger.info("[Executor] Starting for agent #{agent_id}, trust_tier=#{trust_tier}")
 
+    # Store agent_id in process dictionary so ActionDispatch can route
+    # through authorize_and_execute without threading it through every clause
+    Process.put(:arbor_executor_agent_id, agent_id)
+
     state = %{
       agent_id: agent_id,
       status: :running,
@@ -276,7 +280,7 @@ defmodule Arbor.Agent.Executor do
   defp execute_intent(%Intent{} = intent, state, start_time) do
     sandbox_level = TrustBounds.sandbox_for_tier(state.trust_tier)
 
-    result = do_execute(intent, sandbox_level)
+    result = do_execute(intent, sandbox_level, state.agent_id)
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -342,13 +346,13 @@ defmodule Arbor.Agent.Executor do
     |> Map.put(:current_intent, nil)
   end
 
-  defp do_execute(%Intent{type: :think} = intent, _sandbox_level) do
+  defp do_execute(%Intent{type: :think} = intent, _sandbox_level, _agent_id) do
     {:ok, %{thought: intent.reasoning}}
   end
 
   # H5: Enforce sandbox level on action execution. The sandbox_level computed
   # from the agent's trust tier is passed into the action dispatch context.
-  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level) do
+  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level, _agent_id) do
     Logger.info("Executor: dispatching action=#{inspect(action)} sandbox=#{sandbox_level}")
 
     # Inject sandbox level into params so actions can respect it
@@ -356,19 +360,19 @@ defmodule Arbor.Agent.Executor do
     ActionDispatch.dispatch(action, params_with_sandbox)
   end
 
-  defp do_execute(%Intent{type: :wait}, _sandbox_level) do
+  defp do_execute(%Intent{type: :wait}, _sandbox_level, _agent_id) do
     {:ok, %{status: :waiting}}
   end
 
-  defp do_execute(%Intent{type: :reflect} = intent, _sandbox_level) do
+  defp do_execute(%Intent{type: :reflect} = intent, _sandbox_level, _agent_id) do
     {:ok, %{reflection: intent.reasoning}}
   end
 
-  defp do_execute(%Intent{type: :internal} = intent, _sandbox_level) do
+  defp do_execute(%Intent{type: :internal} = intent, _sandbox_level, _agent_id) do
     {:ok, %{internal: intent.params}}
   end
 
-  defp do_execute(%Intent{}, _sandbox_level) do
+  defp do_execute(%Intent{}, _sandbox_level, _agent_id) do
     {:error, :unknown_intent_type}
   end
 
