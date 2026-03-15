@@ -174,6 +174,10 @@ defmodule Arbor.Actions do
     emit_started(action_module, params)
 
     case action_module.run(params, context) do
+      {:ok, :pending_approval, proposal_id} ->
+        # Bubble up pending approval from facade-level authorization
+        {:ok, :pending_approval, proposal_id}
+
       {:ok, result} ->
         emit_completed(action_module, result)
         {:ok, result}
