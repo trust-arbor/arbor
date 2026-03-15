@@ -2,23 +2,32 @@ defmodule Arbor.AI.LLMTrace do
   @moduledoc """
   Structured tracing for LLM calls.
 
-  Logs entry/exit for every LLM call with consistent metadata:
-  trace_id, provider, model, agent_id, prompt size, response size,
-  duration, cost, and tool rounds.
+  Logs entry/exit for every LLM call with consistent metadata and
+  emits events to the Historian for durable querying.
 
-  ## Example log output
+  ## Log format
 
       [LLM] trace=abc123 START provider=openrouter model=gemini-3-flash agent=agent_x prompt=2048 chars
-      [LLM] trace=abc123 OK    provider=openrouter model=gemini-3-flash agent=agent_x duration=1234ms tokens=456 cost=$0.0023 tools=0
+      [LLM] trace=abc123 OK    provider=openrouter model=gemini-3-flash agent=agent_x duration=1234ms tokens=456 cost=$0.0023
+
+  ## Historian events
+
+  Each completed call emits an `llm.call_completed` or `llm.call_failed`
+  signal via dual_emit (ETS EventLog + Postgres). Query with:
+
+      Arbor.Historian.for_category(:llm)
+      Arbor.Historian.for_agent("agent_x")
 
   ## Usage
 
-      trace_id = LLMTrace.start(:generate_text, provider, model, agent_id, prompt)
+      trace = LLMTrace.start(:generate_text, provider, model, agent_id, prompt)
       result = do_llm_call(...)
-      LLMTrace.finish(trace_id, result)
+      LLMTrace.finish(trace, result)
   """
 
   require Logger
+
+  @signals_mod Arbor.Signals
 
   @doc "Generate a trace ID and log the start of an LLM call."
   def start(call_type, provider, model, agent_id, prompt) do
@@ -37,21 +46,23 @@ defmodule Arbor.AI.LLMTrace do
       provider: provider,
       model: model,
       agent_id: agent,
+      prompt_len: prompt_len,
       start_time: System.monotonic_time(:millisecond)
     }
   end
 
-  @doc "Log the completion of an LLM call."
+  @doc "Log the completion of an LLM call and emit to Historian."
   def finish(trace, {:ok, response}) when is_map(response) do
     duration = System.monotonic_time(:millisecond) - trace.start_time
 
-    # Extract metrics from various response formats
     text = response[:text] || response[:content] || Map.get(response, :text, "")
     text_len = if is_binary(text), do: String.length(text), else: 0
 
     usage = response[:usage] || Map.get(response, :usage, %{})
     tokens = Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens", 0)
     cost = Map.get(usage, :cost)
+    input_tokens = Map.get(usage, :input_tokens) || Map.get(usage, :prompt_tokens, 0)
+    output_tokens = Map.get(usage, :output_tokens) || Map.get(usage, :completion_tokens, 0)
 
     tool_rounds = response[:tool_rounds] || Map.get(response, :tool_rounds, 0)
 
@@ -63,6 +74,24 @@ defmodule Arbor.AI.LLMTrace do
         "provider=#{trace.provider} model=#{trace.model} agent=#{trace.agent_id} " <>
         "duration=#{duration}ms response=#{text_len} chars tokens=#{tokens}#{cost_str}#{tools_str}"
     )
+
+    # Emit to Historian for durable querying
+    emit_event(:call_completed, %{
+      trace_id: trace.trace_id,
+      call_type: to_string(trace.call_type),
+      provider: to_string(trace.provider),
+      model: to_string(trace.model),
+      agent_id: trace.agent_id,
+      duration_ms: duration,
+      prompt_chars: trace.prompt_len,
+      response_chars: text_len,
+      input_tokens: input_tokens,
+      output_tokens: output_tokens,
+      total_tokens: tokens,
+      cost: cost,
+      tool_rounds: tool_rounds,
+      status: :ok
+    })
 
     trace.trace_id
   end
@@ -76,10 +105,22 @@ defmodule Arbor.AI.LLMTrace do
         "duration=#{duration}ms error=#{inspect(reason)}"
     )
 
+    emit_event(:call_failed, %{
+      trace_id: trace.trace_id,
+      call_type: to_string(trace.call_type),
+      provider: to_string(trace.provider),
+      model: to_string(trace.model),
+      agent_id: trace.agent_id,
+      duration_ms: duration,
+      prompt_chars: trace.prompt_len,
+      error: inspect(reason),
+      status: :error
+    })
+
     trace.trace_id
   end
 
-  def finish(trace, other) do
+  def finish(trace, _other) do
     duration = System.monotonic_time(:millisecond) - trace.start_time
 
     Logger.info(
@@ -89,5 +130,17 @@ defmodule Arbor.AI.LLMTrace do
     )
 
     trace.trace_id
+  end
+
+  # Emit to Historian via dual_emit pattern (ETS EventLog + Postgres).
+  # Non-fatal — tracing never blocks or crashes the LLM call path.
+  defp emit_event(type, data) do
+    if Code.ensure_loaded?(@signals_mod) do
+      apply(@signals_mod, :emit, [:llm, type, data])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
