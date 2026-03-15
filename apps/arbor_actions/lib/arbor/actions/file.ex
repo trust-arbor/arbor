@@ -62,23 +62,24 @@ defmodule Arbor.Actions.File do
     if context[:facade_auth] do
       agent_id = context[:agent_id]
 
-      if agent_id && file_guard_available?() do
-        case Arbor.Security.FileGuard.authorize(agent_id, path, operation) do
-          {:ok, resolved_path} -> {:ok, resolved_path}
+      if agent_id do
+        # FileGuard is now integrated into Security.authorize via the
+        # :file_path option. Passing it here triggers path validation
+        # as part of the main auth chain.
+        resource_uri = "arbor://fs/#{operation}"
+
+        case Arbor.Security.authorize(agent_id, resource_uri, :execute, file_path: path) do
+          {:ok, :authorized, resolved_path} -> {:ok, resolved_path}
+          {:ok, :authorized} -> {:ok, path}
           {:error, reason} -> {:error, {:unauthorized, reason}}
+          _ -> {:ok, path}
         end
       else
-        # No agent_id or FileGuard not available — pass through
         {:ok, path}
       end
     else
       {:ok, path}
     end
-  end
-
-  defp file_guard_available? do
-    Code.ensure_loaded?(Arbor.Security.FileGuard) and
-      function_exported?(Arbor.Security.FileGuard, :authorize, 3)
   end
 
   defmodule Read do
