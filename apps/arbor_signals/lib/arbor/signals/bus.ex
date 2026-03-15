@@ -164,7 +164,7 @@ defmodule Arbor.Signals.Bus do
     restricted_topics = Config.restricted_topics()
     overlapping_topics = restricted_topics_for_pattern(pattern, restricted_topics)
 
-    case authorize_subscription(principal_id, overlapping_topics) do
+    case authorize_subscription(principal_id, overlapping_topics, opts) do
       {:ok, authorized_topics} ->
         sub_id = generate_subscription_id()
 
@@ -257,22 +257,26 @@ defmodule Arbor.Signals.Bus do
   end
 
   # No restricted topics overlap — no auth needed
-  defp authorize_subscription(_principal_id, []) do
+  defp authorize_subscription(_principal_id, [], _opts) do
     {:ok, MapSet.new()}
   end
 
   # Restricted topics overlap but no principal — deny
-  defp authorize_subscription(nil, _restricted_topics) do
+  defp authorize_subscription(nil, _restricted_topics, _opts) do
     {:error, :unauthorized}
   end
 
   # Check authorization for each restricted topic
-  defp authorize_subscription(principal_id, restricted_topics) do
+  defp authorize_subscription(principal_id, restricted_topics, opts) do
     authorizer = Config.authorizer()
 
     results =
       Enum.map(restricted_topics, fn topic ->
-        {topic, authorizer.authorize_subscription(principal_id, topic)}
+        if function_exported?(authorizer, :authorize_subscription, 3) do
+          {topic, authorizer.authorize_subscription(principal_id, topic, opts)}
+        else
+          {topic, authorizer.authorize_subscription(principal_id, topic)}
+        end
       end)
 
     authorized =

@@ -141,12 +141,16 @@ defmodule Arbor.Dashboard.OidcAuth do
           display_name =
             claims["name"] || claims["preferred_username"] || claims["email"] || agent_id
 
+          # Generate signed session token for human identity verification
+          session_token = generate_session_token(agent_id)
+
           conn
           |> delete_session("oidc_state")
           |> delete_session("oidc_code_verifier")
           |> delete_session("return_to")
           |> put_session("agent_id", agent_id)
           |> put_session("user_display_name", display_name)
+          |> put_session("session_token", session_token)
           |> redirect_to(return_to)
           |> halt()
         else
@@ -251,6 +255,19 @@ defmodule Arbor.Dashboard.OidcAuth do
     _ -> agent_id
   catch
     :exit, _ -> agent_id
+  end
+
+  defp generate_session_token(agent_id) do
+    if Code.ensure_loaded?(Arbor.Security.SessionToken) do
+      case apply(Arbor.Security.SessionToken, :generate, [agent_id]) do
+        {:ok, token} -> token
+        {:error, _} -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp oidc_provider do

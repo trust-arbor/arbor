@@ -731,7 +731,7 @@ defmodule Arbor.Consensus.Coordinator do
   # Human users (OIDC-authenticated) skip crypto verification since they're
   # already authenticated at the session level.
   defp check_force_authorization(actor_id) do
-    # Human users are already authenticated via OIDC session — skip crypto verification
+    # Human users are authenticated via OIDC session token, not crypto signing
     opts = if String.starts_with?(actor_id, "human_"), do: [verify_identity: false], else: []
 
     case Arbor.Security.authorize(actor_id, "arbor://consensus/admin", :force, opts) do
