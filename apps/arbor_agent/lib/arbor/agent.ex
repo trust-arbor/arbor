@@ -318,15 +318,11 @@ defmodule Arbor.Agent do
   - `{:error, reason}` on failure
   """
   @spec start(String.t(), module(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
-  def start(agent_id, agent_module, initial_state \\ %{}, opts \\ []) do
-    server_opts =
-      Keyword.merge(opts,
-        agent_id: agent_id,
-        agent_module: agent_module,
-        initial_state: initial_state
-      )
-
-    Supervisor.start_agent(server_opts)
+  def start(_agent_id, _agent_module, _initial_state \\ %{}, _opts \\ []) do
+    # Legacy Jido agent path — Agent.Server was removed.
+    # Use Lifecycle.create + Lifecycle.start for all agent creation.
+    Logger.warning("Arbor.Agent.start/4 is deprecated. Use Lifecycle.create + Lifecycle.start instead.")
+    {:error, :deprecated_use_lifecycle}
   end
 
   @doc """

@@ -73,13 +73,16 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert "file_read" in tools
     end
 
-    test "uses explicit config when set, but ensures find_tools included" do
+    test "uses explicit config when set, returns exactly those tools" do
       config = %{"tools" => ["custom_tool_a", "custom_tool_b"]}
       tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
 
       assert "custom_tool_a" in tools
       assert "custom_tool_b" in tools
-      assert "tool_find_tools" in tools
+      # Explicit tool lists are used as-is — find_tools is NOT force-injected.
+      # This allows workers with scoped trust profiles to get exactly the tools
+      # they need without discovery overhead.
+      assert length(tools) == 2
     end
 
     test "explicit config with find_tools already present doesn't duplicate" do
