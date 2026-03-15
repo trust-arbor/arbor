@@ -78,6 +78,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     nonce = Keyword.get(opts, :nonce)
 
     sections = [
+      build_environment_section(),
       truncate_section(wrap_section(build_goals_section(agent_id), nonce), budgets.goals),
       truncate_section(
         wrap_section(build_working_memory_section(agent_id), nonce),
@@ -424,6 +425,27 @@ defmodule Arbor.AI.SystemPromptBuilder do
       "" -> nil
       text -> "## Knowledge\n#{text}"
     end
+  end
+
+  defp build_environment_section do
+    now = DateTime.utc_now()
+    date = Calendar.strftime(now, "%Y-%m-%d")
+    time = Calendar.strftime(now, "%H:%M:%S UTC")
+    cwd = File.cwd!()
+    hostname = node() |> to_string()
+
+    {os_family, _} = :os.type()
+
+    """
+    ## Environment
+    - Current date: #{date}
+    - Current time: #{time}
+    - Working directory: #{cwd}
+    - Platform: #{os_family}
+    - Node: #{hostname}\
+    """
+  rescue
+    _ -> nil
   end
 
   defp build_timing_section(opts) do
