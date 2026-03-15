@@ -420,10 +420,24 @@ defmodule Arbor.Security do
            Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
       case escalation_result do
         :ok ->
-          Events.record_authorization_granted(principal_id, resource_uri, opts)
-          maybe_check_max_uses(cap)
-          maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
-          {:ok, :authorized}
+          # For fs:// URIs with a file_path option, verify path via FileGuard
+          case maybe_check_file_guard(principal_id, resource_uri, opts) do
+            :ok ->
+              Events.record_authorization_granted(principal_id, resource_uri, opts)
+              maybe_check_max_uses(cap)
+              maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+              {:ok, :authorized}
+
+            {:ok, resolved_path} ->
+              Events.record_authorization_granted(principal_id, resource_uri, opts)
+              maybe_check_max_uses(cap)
+              maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+              {:ok, :authorized, resolved_path}
+
+            {:error, reason} ->
+              Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+              {:error, reason}
+          end
 
         {:ok, :pending_approval, proposal_id} ->
           Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
@@ -920,6 +934,36 @@ defmodule Arbor.Security do
       :ok
     end
   end
+
+  # When authorizing arbor://fs/* URIs with a file_path option,
+  # verify the path via FileGuard. This integrates path-scoped
+  # authorization into the main auth chain instead of requiring
+  # callers to call FileGuard separately.
+  defp maybe_check_file_guard(principal_id, resource_uri, opts) do
+    file_path = Keyword.get(opts, :file_path)
+
+    if file_path && String.starts_with?(resource_uri, "arbor://fs/") do
+      if Code.ensure_loaded?(Arbor.Security.FileGuard) do
+        operation = infer_fs_operation(resource_uri)
+        Arbor.Security.FileGuard.authorize(principal_id, file_path, operation)
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp infer_fs_operation("arbor://fs/read" <> _), do: :read
+  defp infer_fs_operation("arbor://fs/write" <> _), do: :write
+  defp infer_fs_operation("arbor://fs/execute" <> _), do: :execute
+  defp infer_fs_operation("arbor://fs/delete" <> _), do: :delete
+  defp infer_fs_operation("arbor://fs/list" <> _), do: :list
+  defp infer_fs_operation(_), do: :read
 
   # Reflex checking — instant safety blocks before expensive authorization
   defp check_reflexes(principal_id, context, resource_uri, action, _opts) do
