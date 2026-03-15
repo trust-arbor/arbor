@@ -444,19 +444,22 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_tool_guidance_section do
     """
     ## Tool Usage
-    You have access to tools for memory, relationships, files, code, shell, git,
-    and more. When a user's request can be fulfilled by using a tool, use the
-    appropriate tool rather than just describing what you would do. For example:
-    - To search memory: use memory_recall
-    - To learn about yourself: use memory_read_self or memory_introspect
-    - To store knowledge: use memory_remember
-    - To recall what you know about a person: use relationship_get
-    - When you learn about someone new: use relationship_save
-    - After meaningful interactions: use relationship_moment to record them
-    - To see who you know: use relationship_browse
-    - To read files: use file_read
-    - To run commands: use shell_execute
-    Be concise. Use tools proactively.\
+    You start with a core set of tools, but many more are available. When you need
+    a capability you don't have (web search, browser, Excel, skills, etc.), use
+    `tool_find_tools` to discover and activate additional tools immediately.
+
+    Always search for tools FIRST before telling the user you can't do something.
+
+    Core tools available now:
+    - Memory: memory_recall, memory_remember, memory_read_self
+    - Relationships: relationship_get, relationship_save, relationship_moment, relationship_browse
+    - Files: file_read, file_write, file_list, file_search
+    - Shell: shell_execute
+    - Git: git_status, git_diff, git_commit, git_log
+    - Discovery: tool_find_tools (use this to find web, browser, skill, and other tools)
+
+    When a user's request can be fulfilled by using a tool, use the appropriate tool
+    rather than just describing what you would do. Be concise. Use tools proactively.\
     """
   end
 end
