@@ -1130,9 +1130,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp maybe_extract_api_usage(socket, response) do
-    usage = response[:usage] || %{}
-    input = usage[:input_tokens] || usage["input_tokens"] || 0
-    output = usage[:output_tokens] || usage["output_tokens"] || 0
+    usage =
+      case response do
+        %{usage: u} when is_map(u) and map_size(u) > 0 -> u
+        _ -> response[:usage] || %{}
+      end
+
+    input =
+      usage[:input_tokens] || usage["input_tokens"] || usage[:prompt_tokens] ||
+        usage["prompt_tokens"] || 0
+
+    output =
+      usage[:output_tokens] || usage["output_tokens"] || usage[:completion_tokens] ||
+        usage["completion_tokens"] || 0
 
     if input > 0 or output > 0 do
       agent_id = socket.assigns.agent_id
