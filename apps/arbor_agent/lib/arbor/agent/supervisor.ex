@@ -44,39 +44,11 @@ defmodule Arbor.Agent.Supervisor do
   end
 
   @doc """
-  Start an agent under this supervisor.
-
-  ## Options
-
-  All options are passed through to `Arbor.Agent.Server.start_link/1`.
-  See that module for available options.
-
-  ## Returns
-
-  - `{:ok, pid}` on success
-  - `{:error, reason}` on failure
+  Deprecated: Agent.Server was removed. Use Lifecycle.create + Lifecycle.start.
   """
   @spec start_agent(keyword()) :: {:ok, pid()} | {:error, term()}
-  def start_agent(opts) do
-    agent_id = Keyword.fetch!(opts, :agent_id)
-    Logger.debug("Supervisor starting agent: #{agent_id}")
-
-    child_spec = %{
-      id: agent_id,
-      start: {Arbor.Agent.Server, :start_link, [opts]},
-      restart: Keyword.get(opts, :restart, :transient),
-      type: :worker
-    }
-
-    case DynamicSupervisor.start_child(__MODULE__, child_spec) do
-      {:ok, pid} ->
-        Logger.info("Agent started: #{agent_id} (pid: #{inspect(pid)})")
-        {:ok, pid}
-
-      {:error, reason} = error ->
-        Logger.error("Failed to start agent #{agent_id}: #{inspect(reason)}")
-        error
-    end
+  def start_agent(_opts) do
+    {:error, :deprecated_use_lifecycle}
   end
 
   @doc """
