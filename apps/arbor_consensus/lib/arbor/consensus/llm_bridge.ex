@@ -57,6 +57,16 @@ defmodule Arbor.Consensus.LLMBridge do
           {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}} | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
     backend = Keyword.get(opts, :backend)
+    provider = Keyword.get(opts, :provider, "unknown")
+    model = Keyword.get(opts, :model, "unknown")
+    trace_id = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+    prompt_len = String.length(user_prompt)
+
+    Logger.info(
+      "[LLM] trace=#{trace_id} START llm_bridge " <>
+        "provider=#{provider} model=#{model} prompt=#{prompt_len} chars"
+    )
+
     start = System.monotonic_time(:millisecond)
 
     result =
@@ -77,9 +87,35 @@ defmodule Arbor.Consensus.LLMBridge do
     duration_ms = System.monotonic_time(:millisecond) - start
 
     case result do
-      {:ok, text, usage} -> {:ok, %{text: text, duration_ms: duration_ms, usage: usage}}
-      {:ok, text} -> {:ok, %{text: text, duration_ms: duration_ms, usage: %{}}}
-      error -> error
+      {:ok, text, usage} ->
+        tokens = Map.get(usage, :total_tokens, 0)
+        cost = Map.get(usage, :cost)
+        cost_str = if cost, do: " cost=$#{Float.round(cost * 1.0, 4)}", else: ""
+
+        Logger.info(
+          "[LLM] trace=#{trace_id} OK    llm_bridge " <>
+            "provider=#{provider} model=#{model} " <>
+            "duration=#{duration_ms}ms tokens=#{tokens}#{cost_str}"
+        )
+
+        {:ok, %{text: text, duration_ms: duration_ms, usage: usage}}
+
+      {:ok, text} ->
+        Logger.info(
+          "[LLM] trace=#{trace_id} OK    llm_bridge " <>
+            "provider=#{provider} model=#{model} duration=#{duration_ms}ms"
+        )
+
+        {:ok, %{text: text, duration_ms: duration_ms, usage: %{}}}
+
+      error ->
+        Logger.warning(
+          "[LLM] trace=#{trace_id} FAIL  llm_bridge " <>
+            "provider=#{provider} model=#{model} " <>
+            "duration=#{duration_ms}ms error=#{inspect(error)}"
+        )
+
+        error
     end
   catch
     :exit, reason ->
