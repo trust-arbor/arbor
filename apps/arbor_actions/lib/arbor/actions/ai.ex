@@ -126,7 +126,7 @@ defmodule Arbor.Actions.AI do
       opts = build_opts(params)
 
       ai_call =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.AI.authorize_generate(context[:agent_id], prompt, opts)
         else
           Arbor.AI.generate_text(prompt, opts)
@@ -276,7 +276,7 @@ defmodule Arbor.Actions.AI do
       opts = build_opts(params)
 
       ai_call =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.AI.authorize_generate(context[:agent_id], prompt, opts)
         else
           Arbor.AI.generate_text(prompt, opts)

@@ -117,13 +117,10 @@ defmodule Arbor.Actions do
     # Extract signing data from context (if present) before passing to action
     {signed_request, clean_context} = Map.pop(context, :signed_request)
 
-    # Ensure agent_id is available in context for actions that need it
+    # Ensure agent_id is available in context for actions that need it.
+    # Actions use agent_id to decide whether to enforce facade-level auth
+    # (authorized agent calls) or pass through (system-level calls).
     clean_context = Map.put_new(clean_context, :agent_id, agent_id)
-
-    # Signal to action modules that facade-level auth should be enforced.
-    # Actions check this flag to delegate auth to the facade's authorize_and_*
-    # functions instead of relying on the action-level URI check above.
-    clean_context = Map.put_new(clean_context, :facade_auth, true)
 
     # P0-1: Inject default taint policy from config if not already set in context.
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
@@ -598,12 +595,11 @@ defmodule Arbor.Actions do
   defp truncate_value(value), do: value
 
   @doc """
-  Authorize a facade-level operation when `:facade_auth` is active.
+  Authorize a facade-level operation when an agent_id is in context.
 
   Used by action modules that don't have a dedicated facade with `authorize_and_*`
   functions. Calls `Security.authorize/3` with the given canonical URI when
-  `context[:facade_auth]` is true. Passes through when facade auth is not active
-  (direct `run/2` calls from tests/system code).
+  an agent_id is available. Passes through for system-level calls (no agent_id).
 
   ## Examples
 
@@ -613,7 +609,7 @@ defmodule Arbor.Actions do
   """
   @spec authorize_facade_op(map(), String.t()) :: :ok | {:error, term()}
   def authorize_facade_op(context, resource_uri) do
-    if context[:facade_auth] do
+    if context[:agent_id] do
       agent_id = context[:agent_id]
 
       if agent_id && security_available?() do

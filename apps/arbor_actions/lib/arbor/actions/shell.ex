@@ -168,7 +168,7 @@ defmodule Arbor.Actions.Shell do
     # Delegate to facade authorize_and_execute when agent_id is in context,
     # otherwise call raw execute (system-level callers).
     defp call_shell(command, opts, context) do
-      if context[:facade_auth] do
+      if context[:agent_id] do
         Shell.authorize_and_execute(context[:agent_id], command, opts)
       else
         Shell.execute(command, opts)
@@ -331,7 +331,7 @@ defmodule Arbor.Actions.Shell do
 
     # Delegate to facade authorize_and_execute when agent_id is in context
     defp call_shell(command, opts, context) do
-      if context[:facade_auth] do
+      if context[:agent_id] do
         Shell.authorize_and_execute(context[:agent_id], command, opts)
       else
         Shell.execute(command, opts)

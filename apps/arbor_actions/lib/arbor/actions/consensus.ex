@@ -66,7 +66,7 @@ defmodule Arbor.Actions.Consensus do
       attrs = %{description: description, proposer_id: agent_id}
 
       result =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.Consensus.authorize_propose(caller_id || agent_id, attrs, opts)
         else
           Arbor.Consensus.propose(attrs, opts)
@@ -153,7 +153,7 @@ defmodule Arbor.Actions.Consensus do
       opts = build_opts(params)
 
       result =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.Consensus.authorize_ask(caller_id, question, opts)
         else
           Arbor.Consensus.ask(question, opts)

@@ -395,7 +395,7 @@ defmodule Arbor.Actions.Code do
     end
 
     defp authorize_hot_load(context, module_str) do
-      if context[:facade_auth] do
+      if context[:agent_id] do
         agent_id = context[:agent_id]
 
         if agent_id && security_available?() do
