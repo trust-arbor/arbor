@@ -20,7 +20,7 @@ defmodule Arbor.Security.PolicyEnforcer do
   ## Configuration
 
       config :arbor_security,
-        policy_enforcer_enabled: false  # default: false during migration
+        policy_enforcer_enabled: true  # default: true
   """
 
   require Logger

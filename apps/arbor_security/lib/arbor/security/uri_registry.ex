@@ -220,7 +220,7 @@ defmodule Arbor.Security.UriRegistry do
   @doc "Check if enforcement is enabled."
   @spec enforcement_enabled?() :: boolean()
   def enforcement_enabled? do
-    Application.get_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.get_env(:arbor_security, :uri_registry_enforcement, true)
   end
 
   # =========================================================================

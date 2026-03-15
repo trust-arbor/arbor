@@ -36,20 +36,20 @@ config :arbor_security,
   # Disable file persistence in tests — everything in-memory only
   storage_backend: nil,
   # Tests that bypass Security.grant/1 create unsigned capabilities.
-  # Only the grant facade signs via SystemAuthority — direct CapabilityStore.put
-  # stores unsigned caps. Require signing in prod, not in tests.
   capability_signing_required: false,
-  # Disable identity verification by default in tests — most tests don't have
-  # crypto infrastructure. Tests that specifically test identity verification
-  # opt in with verify_identity: true.
+  # Most tests don't have crypto infrastructure.
   identity_verification: false,
-  # P0-3: Permissive identity mode in tests — most tests don't register identities.
-  # Production uses strict mode (unknown identities rejected).
+  # Most tests don't register identities.
   strict_identity_mode: false,
-  # Disable reflex checking in tests — reflex infrastructure (ETS tables, GenServers)
-  # isn't started when start_children: false. Without this, authorize/4 fails closed
-  # with {:reflex_check_failed, :exception} on every call.
+  # Reflex infrastructure not started when start_children: false.
   reflex_checking_enabled: false,
+  # PolicyEnforcer needs Trust system running — disable in tests.
+  # Tests that need it opt in explicitly.
+  policy_enforcer_enabled: false,
+  # ApprovalGuard needs Consensus + Trust — disable in tests.
+  approval_guard_enabled: false,
+  # URI registry enforcement needs the GenServer running.
+  uri_registry_enforcement: false,
   # Use ephemeral keypair in tests — no persistence side effects
   system_authority_mode: :ephemeral
 

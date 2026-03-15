@@ -100,12 +100,14 @@ config :arbor_agent, :auto_start_agents, [
   }
 ]
 
-# Security — identity verification and capability signing enabled.
-# Session tool dispatch now wires signed requests via Lifecycle.build_signer.
+# Security — all features enabled in dev.
+# Tests disable what they need; dev should match prod behavior.
 config :arbor_security,
   identity_verification: true,
   capability_signing_required: true,
   policy_enforcer_enabled: true,
+  approval_guard_enabled: true,
+  uri_registry_enforcement: true,
   consensus_escalation_enabled: true,
   session_token_secret: "arbor-dev-session-token-secret-change-in-prod"
 

@@ -34,7 +34,7 @@ defmodule Arbor.Security.ApprovalGuard do
   ## Configuration
 
       config :arbor_security,
-        approval_guard_enabled: true  # default: false (opt-in)
+        approval_guard_enabled: true  # default: true
 
   When disabled, falls through to the existing `Escalation.maybe_escalate`
   behavior (checks `requires_approval` constraint only).
@@ -77,7 +77,7 @@ defmodule Arbor.Security.ApprovalGuard do
   """
   @spec enabled?() :: boolean()
   def enabled? do
-    Application.get_env(:arbor_security, :approval_guard_enabled, false)
+    Application.get_env(:arbor_security, :approval_guard_enabled, true)
   end
 
   # ===========================================================================
