@@ -360,3 +360,14 @@ if daily_budget = System.get_env("ARBOR_DAILY_BUDGET") do
     :error -> :skip
   end
 end
+
+# ============================================================================
+# Brave Search API (jido_browser)
+# ============================================================================
+
+# Map BRAVE_API_KEY to the key jido_browser expects
+brave_key = System.get_env("BRAVE_SEARCH_API_KEY") || System.get_env("BRAVE_API_KEY")
+
+if brave_key do
+  config :jido_browser, brave_api_key: brave_key
+end
