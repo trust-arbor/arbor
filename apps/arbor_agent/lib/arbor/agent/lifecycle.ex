@@ -187,11 +187,8 @@ defmodule Arbor.Agent.Lifecycle do
         # Re-register identity and capabilities (ETS-only, lost on restart)
         ensure_identity_and_capabilities(profile)
 
-        # Re-initialize memory (knowledge graph ETS, index supervisor)
-        init_memory(agent_id, [])
-
-        # Reload persisted goals and intents into ETS
-        reload_persisted_memory(agent_id)
+        # Re-initialize memory + reload persisted goals/intents from Postgres
+        init_memory(agent_id, reload_persisted: true)
 
         # Build child opts for the BranchSupervisor
         host_opts = build_host_opts(agent_id, profile, opts)
@@ -777,15 +774,6 @@ defmodule Arbor.Agent.Lifecycle do
     :exit, reason ->
       Logger.warning("Memory init exit for #{agent_id}: #{inspect(reason)}")
       {:ok, :memory_init_failed}
-  end
-
-  defp reload_persisted_memory(agent_id) do
-    Arbor.Memory.GoalStore.reload_for_agent(agent_id)
-    Arbor.Memory.IntentStore.reload_for_agent(agent_id)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   defp set_initial_goals(_agent_id, []), do: :ok

@@ -59,10 +59,12 @@ defmodule Arbor.Memory do
 
   alias Arbor.Memory.{
     GoalIntentOps,
+    GoalStore,
     GraphOps,
     IdentityOps,
     IndexOps,
     IndexSupervisor,
+    IntentStore,
     KnowledgeGraph,
     KnowledgeOps,
     SessionOps,
@@ -89,11 +91,13 @@ defmodule Arbor.Memory do
   - `:decay_rate` - How fast knowledge graph nodes decay
   - `:index_enabled` - Whether to enable vector index (default: true)
   - `:graph_enabled` - Whether to enable knowledge graph (default: true)
+  - `:reload_persisted` - Reload goals/intents from Postgres (default: false).
+    Use `true` when restarting an existing agent to restore persisted state.
 
   ## Examples
 
       {:ok, pid} = Arbor.Memory.init_for_agent("agent_001")
-      {:ok, pid} = Arbor.Memory.init_for_agent("agent_001", max_entries: 5000)
+      {:ok, pid} = Arbor.Memory.init_for_agent("agent_001", reload_persisted: true)
   """
   @spec init_for_agent(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def init_for_agent(agent_id, opts \\ []) do
@@ -112,12 +116,20 @@ defmodule Arbor.Memory do
     if graph_enabled do
       case GraphOps.load_persisted_graph(agent_id) do
         {:ok, graph} ->
+          # Restore from Postgres into ETS for runtime access
           GraphOps.save_graph(agent_id, graph)
 
         {:error, _} ->
           graph = KnowledgeGraph.new(agent_id, opts)
           GraphOps.save_graph(agent_id, graph)
       end
+    end
+
+    # Optionally reload persisted goals/intents from Postgres into ETS.
+    # Used on agent restart — fresh creates don't need this.
+    if Keyword.get(opts, :reload_persisted, false) do
+      GoalStore.reload_for_agent(agent_id)
+      IntentStore.reload_for_agent(agent_id)
     end
 
     Signals.emit_memory_initialized(agent_id, %{
