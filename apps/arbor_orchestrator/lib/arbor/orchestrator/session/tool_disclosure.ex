@@ -284,6 +284,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     :ok
   rescue
     _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp get_effective_mode(agent_id, resource_uri) do

@@ -39,15 +39,10 @@ defmodule Arbor.Agent.TemplateTest do
       assert Enum.all?(goals, &Map.has_key?(&1, :description))
     end
 
-    test "required_capabilities include read access and memory" do
+    test "required_capabilities include orchestrator execute" do
       caps = Researcher.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert "arbor://fs/read/**" in resources
-      assert "arbor://memory/**" in resources
-      assert "arbor://shell/safe" in resources
       assert "arbor://orchestrator/execute" in resources
-      assert "arbor://code/read" in resources
-      assert "arbor://code/compile" in resources
     end
 
     test "character renders to valid system prompt" do
@@ -103,11 +98,10 @@ defmodule Arbor.Agent.TemplateTest do
       assert length(char.traits) == 2
     end
 
-    test "has minimal capabilities (read-only + orchestrator)" do
+    test "has minimal capabilities (orchestrator execute)" do
       caps = Scout.required_capabilities()
-      assert length(caps) == 2
+      assert length(caps) == 1
       resources = Enum.map(caps, & &1.resource)
-      assert "arbor://fs/read/**" in resources
       assert "arbor://orchestrator/execute" in resources
     end
 

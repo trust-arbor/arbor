@@ -303,7 +303,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "diagnostician" in names
       assert "cli_agent" in names
       assert "api_agent" in names
-      assert length(names) == 9
+      assert length(names) == 10
     end
   end
 

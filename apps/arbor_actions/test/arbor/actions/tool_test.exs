@@ -11,7 +11,7 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
 
       assert tool.name == "tool_find_tools"
       assert is_binary(tool.description)
-      assert tool.description =~ "Search for additional tools"
+      assert tool.description =~ "IMPORTANT: You start with a small set of core tools"
     end
 
     test "has query parameter" do
@@ -73,7 +73,7 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
 
     test "has canonical URI mapping" do
       uri = Arbor.Actions.canonical_uri_for(Arbor.Actions.Tool.FindTools, %{})
-      assert uri == "arbor://actions/find_tools"
+      assert uri == "arbor://agent/discover_tools"
     end
   end
 end
