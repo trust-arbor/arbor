@@ -51,11 +51,8 @@ defmodule Arbor.AI do
     Backends.TestEmbedding,
     BudgetTracker,
     Config,
-    ResponseNormalizer,
-    SessionBridge,
     SessionReader,
     SystemPromptBuilder,
-    ToolAuthorization,
     ToolSignals,
     UnifiedBridge,
     UsageStats
@@ -63,9 +60,6 @@ defmodule Arbor.AI do
 
   # Note: Arbor.Memory.* and Arbor.Actions are higher in the hierarchy than arbor_ai (Standalone).
   # All calls use Code.ensure_loaded?/apply to avoid compile-time dependency.
-
-  alias Jido.AI.Actions.ToolCalling.CallWithTools
-  alias Jido.AI.ToolAdapter
 
   require Logger
 
@@ -208,100 +202,93 @@ defmodule Arbor.AI do
     provider = Keyword.fetch!(opts, :provider)
     model = Keyword.fetch!(opts, :model)
 
-    # Arbor layer: signal + timing
+    # ACP providers handle tool calling on the CLI agent side
+    if provider == :acp do
+      start_time = System.monotonic_time(:millisecond)
+      ToolSignals.emit_started(provider, model, String.length(prompt))
+      fallback_via_unified_bridge(prompt, opts, start_time, provider, model)
+    else
+      generate_with_tool_loop(prompt, provider, model, opts)
+    end
+  end
+
+  # Route all tool-calling through UnifiedLLM's ToolLoop.
+  # Single path: Client → ToolLoop → provider adapters. No fallbacks.
+  defp generate_with_tool_loop(prompt, provider, model, opts) do
+    agent_id = Keyword.get(opts, :agent_id)
+
     ToolSignals.emit_started(provider, model, String.length(prompt))
     start_time = System.monotonic_time(:millisecond)
 
-    # Build jido_ai tools map from Arbor.Actions
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    default_tools =
-      if Code.ensure_loaded?(Arbor.Actions), do: apply(Arbor.Actions, :all_actions, []), else: []
-
-    action_modules = Keyword.get(opts, :tools, default_tools)
-    tools_map = ToolAdapter.to_action_map(action_modules)
-
-    # SECURITY: Filter tools map to only include tools the agent is authorized
-    # to execute. This prevents the confused deputy attack where the LLM acting
-    # as the agent's deputy could call tools the agent itself lacks capability for.
-    # Pre-flight authorization ensures the LLM never even sees unauthorized tools.
-    agent_id = Keyword.get(opts, :agent_id)
-    tools_map = ToolAuthorization.filter_authorized_tools(agent_id, tools_map)
-
-    # Auto-build rich system prompt if none provided and agent_id is available
+    # Auto-build rich system prompt if none provided
     system_prompt =
       case Keyword.get(opts, :system_prompt) do
-        nil ->
-          if agent_id, do: build_rich_system_prompt(agent_id, opts), else: nil
-
-        prompt ->
-          prompt
+        nil -> if agent_id, do: build_rich_system_prompt(agent_id, opts), else: nil
+        p -> p
       end
 
-    # CallWithTools.resolve_model expects a string or atom, not a struct.
-    # Pass the model string directly — the struct is only needed for
-    # req_llm/LLMDB-based paths, not the Jido.AI action path.
-    params = %{
-      model: model,
-      prompt: prompt,
-      system_prompt: system_prompt,
-      max_tokens: Keyword.get(opts, :max_tokens, 16_384),
-      temperature: Keyword.get(opts, :temperature, 0.7),
-      auto_execute: Keyword.get(opts, :auto_execute, true),
-      max_turns: Keyword.get(opts, :max_turns, 10)
-    }
+    # Get the UnifiedLLM client and build request
+    client_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Client])
+    request_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Request])
+    message_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Message])
+    tool_loop_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :ToolLoop])
 
-    # Build execution context — agent_id needed for memory actions
-    extra_context = Keyword.get(opts, :context, %{})
+    unless Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(tool_loop_mod) do
+      Logger.warning("UnifiedLLM not available for tool-calling")
+      {:error, :unified_llm_unavailable}
+    else
+      client = apply(client_mod, :default_client, [])
 
-    context =
-      %{tools: tools_map}
-      |> maybe_put(:agent_id, agent_id)
-      |> Map.merge(extra_context)
-
-    # ── SessionBridge (strangler fig) ──────────────────────────────
-    # Try the Session path first. If unavailable, fall back to CallWithTools.
-    # The Session path runs the turn.dot graph which handles tool loops
-    # internally via graph cycles (dispatch_tools → call_llm).
-    session_opts =
-      opts
-      |> Keyword.put(:system_prompt, system_prompt)
-      |> Keyword.put(:tools, action_modules)
-
-    case SessionBridge.try_session_call(prompt, session_opts) do
-      {:ok, response} ->
-        # Session path succeeded — response is already in the right format
-        duration_ms = System.monotonic_time(:millisecond) - start_time
-        ToolSignals.emit_completed(provider, model, duration_ms, response)
-        ToolSignals.record_budget_usage(provider, opts, response)
-        ToolSignals.record_usage_success(provider, opts, response, duration_ms)
-        {:ok, response}
-
-      {:unavailable, _reason} ->
-        # ACP providers handle tool calling on the CLI agent side,
-        # so route through UnifiedBridge directly (bypasses Jido.AI).
-        if provider == :acp do
-          fallback_via_unified_bridge(prompt, opts, start_time, provider, model)
-        else
-          # Fall back to CallWithTools (the legacy path)
-          result = CallWithTools.run(params, context)
-          duration_ms = System.monotonic_time(:millisecond) - start_time
-
-          case result do
-            {:ok, raw_result} ->
-              response = format_tools_response(raw_result, provider, model)
-              ToolSignals.emit_completed(provider, model, duration_ms, response)
-              ToolSignals.record_budget_usage(provider, opts, response)
-              ToolSignals.record_usage_success(provider, opts, response, duration_ms)
-              {:ok, response}
-
-            {:error, reason} ->
-              duration_ms_err = System.monotonic_time(:millisecond) - start_time
-              ToolSignals.emit_failed(provider, model, reason)
-              ToolSignals.record_usage_failure(provider, opts, reason, duration_ms_err)
-              Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
-              {:error, reason}
-          end
+      # Build messages
+      messages =
+        case system_prompt do
+          nil -> [apply(message_mod, :new, [:user, prompt])]
+          sys -> [apply(message_mod, :new, [:system, sys]), apply(message_mod, :new, [:user, prompt])]
         end
+
+      request = struct!(request_mod, %{
+        provider: to_string(provider),
+        model: model,
+        messages: messages,
+        max_tokens: Keyword.get(opts, :max_tokens, 16_384),
+        temperature: Keyword.get(opts, :temperature, 0.7)
+      })
+
+      # ToolLoop options
+      tool_loop_opts = [
+        max_turns: Keyword.get(opts, :max_turns, 10),
+        agent_id: agent_id || "system",
+        signer: Keyword.get(opts, :signer),
+        on_tool_call: Keyword.get(opts, :on_tool_call)
+      ]
+
+      # Run ToolLoop — single path through UnifiedLLM
+      case apply(tool_loop_mod, :run, [client, request, tool_loop_opts]) do
+        {:ok, response} ->
+          duration_ms = System.monotonic_time(:millisecond) - start_time
+          result = %{
+            text: response.content,
+            thinking: nil,
+            usage: response.usage,
+            model: model,
+            provider: to_string(provider),
+            tool_calls: response.tool_history,
+            tool_rounds: response.tool_rounds,
+            type: :tool_loop
+          }
+
+          ToolSignals.emit_completed(provider, model, duration_ms, result)
+          ToolSignals.record_budget_usage(provider, opts, result)
+          ToolSignals.record_usage_success(provider, opts, result, duration_ms)
+          {:ok, result}
+
+        {:error, reason} ->
+          duration_ms = System.monotonic_time(:millisecond) - start_time
+          ToolSignals.emit_failed(provider, model, reason)
+          ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
+          Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
+          {:error, reason}
+      end
     end
   end
 
@@ -835,13 +822,6 @@ defmodule Arbor.AI do
   # ===========================================================================
 
   # ── Tool-calling helpers ──
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp format_tools_response(result, provider, model) do
-    ResponseNormalizer.format_tools_response(result, provider, model)
-  end
 
   # SECURITY: Snapshot provider and model from Application config at the call boundary.
   # This prevents TOCTOU races where another process could change the global config
