@@ -134,45 +134,19 @@ defmodule Arbor.Agent.Manager do
       end
 
       agent_id = updated_profile.agent_id
-      {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
 
-      # Include created_by from profile metadata for multi-user agent scoping
-      registry_metadata =
-        %{
-          model_config: model_config,
-          backend: model_config[:backend] || Map.get(model_config, :backend),
-          display_name: display_name,
-          started_at: System.system_time(:millisecond)
-        }
-        |> maybe_put_created_by(updated_profile)
+      # Start via Lifecycle — creates BranchSupervisor with all sub-processes
+      # and registers in Agent.Registry
+      start_opts =
+        Keyword.merge(opts,
+          model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+          provider: model_config[:provider] || model_config["provider"],
+          model_config: model_config
+        )
 
-      case supervised_start_child(
-             agent_id: agent_id,
-             module: module,
-             start_opts: start_opts,
-             metadata: registry_metadata
-           ) do
+      case Lifecycle.start(agent_id, start_opts) do
         {:ok, pid} ->
-          # Start lifecycle (executor, session, host) for the new agent
-          try do
-            Lifecycle.start(
-              agent_id,
-              Keyword.merge(opts,
-                model:
-                  model_config[:id] || model_config["id"] || model_config[:model] ||
-                    model_config["model"],
-                provider: model_config[:provider] || model_config["provider"]
-              )
-            )
-          rescue
-            _ -> :ok
-          catch
-            :exit, _ -> :ok
-          end
-
-          # Auto-connect configured MCP servers
           connect_mcp_servers(agent_id)
-
           safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
@@ -200,53 +174,23 @@ defmodule Arbor.Agent.Manager do
           get_in(profile.metadata, ["last_model_config"]) ||
           default_model_config()
 
-      # Persisted configs have string keys — atomize for build_start_opts
+      # Persisted configs have string keys — atomize
       model_config = atomize_model_config(model_config)
 
       # Sync model config to profile if it changed (prevents stale provider bugs)
       sync_model_config(agent_id, profile, model_config)
 
-      display_name = profile.display_name || profile.character.name || "Agent"
-      {module, start_opts} = build_start_opts(agent_id, display_name, model_config)
+      # Start via Lifecycle — creates BranchSupervisor with all sub-processes
+      start_opts =
+        Keyword.merge(opts,
+          model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+          provider: model_config[:provider] || model_config["provider"],
+          model_config: model_config
+        )
 
-      # Start the agent under supervision (routes through UserSupervisor if principal known)
-      resume_metadata =
-        %{
-          model_config: model_config,
-          backend: model_config[:backend] || Map.get(model_config, "backend", :api),
-          display_name: display_name,
-          started_at: System.system_time(:millisecond),
-          resumed: true
-        }
-        |> maybe_put_created_by(profile)
-
-      case supervised_start_child(
-             agent_id: agent_id,
-             module: module,
-             start_opts: start_opts,
-             metadata: resume_metadata
-           ) do
+      case Lifecycle.start(agent_id, start_opts) do
         {:ok, pid} ->
-          # Also start the lifecycle (executor, session) if not already running
-          try do
-            Lifecycle.start(
-              agent_id,
-              Keyword.merge(opts,
-                model:
-                  model_config[:id] || model_config["id"] || model_config[:model] ||
-                    model_config["model"],
-                provider: model_config[:provider] || model_config["provider"]
-              )
-            )
-          rescue
-            _ -> :ok
-          catch
-            :exit, _ -> :ok
-          end
-
-          # Auto-connect configured MCP servers
           connect_mcp_servers(agent_id)
-
           safe_emit(:started, %{agent_id: agent_id, pid: pid, model_config: model_config})
           {:ok, agent_id, pid}
 
@@ -660,62 +604,6 @@ defmodule Arbor.Agent.Manager do
     }
   end
 
-  defp build_start_opts(agent_id, display_name, %{backend: :cli} = config) do
-    model_atom =
-      case config.id do
-        id when is_atom(id) -> id
-        id when is_binary(id) -> String.to_existing_atom(id)
-      end
-
-    {Claude,
-     [id: agent_id, display_name: display_name, model: model_atom, capture_thinking: true]}
-  end
-
-  defp build_start_opts(agent_id, display_name, %{backend: :api} = config) do
-    module = Map.get(config, :module, APIAgent)
-    model = config[:id] || config[:model]
-
-    {module,
-     [
-       id: agent_id,
-       display_name: display_name,
-       model: model,
-       provider: config[:provider],
-       model_id: model
-     ]}
-  end
-
-  # ACP provider — CLI agents (Claude, Gemini, Codex) as LLM backends
-  # Uses APIAgent since LLM routing happens at the Arbor.AI level
-  defp build_start_opts(agent_id, display_name, %{provider: :acp} = config) do
-    {APIAgent,
-     [
-       id: agent_id,
-       display_name: display_name,
-       model: config[:id],
-       provider: :acp,
-       provider_options: config[:provider_options] || %{},
-       model_id: config[:id]
-     ]}
-  end
-
-  # Fallback for configs with :module but no :backend
-  defp build_start_opts(agent_id, display_name, %{module: module} = config) do
-    extra_opts = Map.get(config, :start_opts, [])
-
-    {module,
-     Keyword.merge(
-       [
-         id: agent_id,
-         agent_id: agent_id,
-         display_name: display_name,
-         model: config[:id],
-         provider: config[:provider],
-         model_config: config
-       ],
-       extra_opts
-     )}
-  end
 
   defp default_display_name(%{name: name}) when is_binary(name), do: name
   defp default_display_name(%{id: id}) when is_binary(id), do: id
@@ -816,18 +704,40 @@ defmodule Arbor.Agent.Manager do
     Arbor.Agent.TemplateStore.module_to_name(mod)
   end
 
-  defp dispatch_query(pid, metadata, input, opts) do
+  defp dispatch_query(_pid, metadata, input, opts) do
+    # Use host_pid from BranchSupervisor metadata (new path),
+    # fall back to direct PID lookup for backward compatibility.
+    host_pid = metadata[:host_pid]
+
     backend =
-      metadata[:backend] || metadata[:model_config][:backend] ||
+      metadata[:backend] || get_in(metadata, [:model_config, :backend]) ||
         infer_backend(metadata[:model_config])
 
-    result = query_backend(backend, pid, input, opts)
-    handle_query_result(result)
+    query_pid =
+      cond do
+        host_pid && Process.alive?(host_pid) -> host_pid
+        # Fallback: look up via ExecutorRegistry (council agents, legacy)
+        true ->
+          agent_id = metadata[:agent_id]
+          if agent_id do
+            case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:host, agent_id}) do
+              [{pid, _}] -> pid
+              [] -> nil
+            end
+          end
+      end
+
+    if query_pid do
+      result = query_backend(backend, query_pid, input, opts)
+      handle_query_result(result)
+    else
+      {:error, :agent_host_not_found}
+    end
   end
 
   # ACP provider uses APIAgent, so route to :api backend
   defp infer_backend(%{provider: :acp}), do: :api
-  defp infer_backend(_), do: nil
+  defp infer_backend(_), do: :api
 
   defp query_backend(:cli, pid, input, opts) do
     Claude.query(pid, input,
@@ -837,7 +747,7 @@ defmodule Arbor.Agent.Manager do
   end
 
   defp query_backend(:api, pid, input, _opts), do: APIAgent.query(pid, input)
-  defp query_backend(_, _pid, _input, _opts), do: {:error, :unknown_backend}
+  defp query_backend(_, pid, input, _opts), do: APIAgent.query(pid, input)
 
   defp handle_query_result({:ok, response}) do
     text = response[:text] || response.text || ""
@@ -883,28 +793,4 @@ defmodule Arbor.Agent.Manager do
     :exit, _ -> :ok
   end
 
-  defp maybe_put_created_by(metadata, profile) do
-    case Map.get(profile.metadata || %{}, :created_by) do
-      nil -> metadata
-      created_by -> Map.put(metadata, :created_by, created_by)
-    end
-  end
-
-  # Route agent start through UserSupervisor when a principal_id is available,
-  # otherwise fall back to global Supervisor (single-user backward compat).
-  defp supervised_start_child(opts) do
-    principal_id = extract_principal_id(opts[:metadata])
-
-    if principal_id && Process.whereis(Arbor.Agent.UserSupervisor) != nil do
-      Arbor.Agent.UserSupervisor.start_child(Keyword.put(opts, :principal_id, principal_id))
-    else
-      Arbor.Agent.Supervisor.start_child(opts)
-    end
-  end
-
-  defp extract_principal_id(nil), do: nil
-
-  defp extract_principal_id(metadata) when is_map(metadata) do
-    Map.get(metadata, :created_by) || Map.get(metadata, :principal_id)
-  end
 end
