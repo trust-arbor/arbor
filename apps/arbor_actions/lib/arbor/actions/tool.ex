@@ -30,8 +30,9 @@ defmodule Arbor.Actions.Tool do
     use Jido.Action,
       name: "tool_find_tools",
       description:
-        "Search for additional tools by query. Returns full tool schemas you can use immediately. " <>
-          "Use when you need a capability not in your current tool set.",
+        "IMPORTANT: You start with a small set of core tools. Use this to discover additional tools " <>
+          "for ANY task you can't accomplish with your current tools (web search, file operations, " <>
+          "shell commands, skills, etc.). Returns full tool schemas you can use immediately in the same turn.",
       category: "tool",
       tags: ["tool", "discovery", "search", "progressive"],
       schema: [
