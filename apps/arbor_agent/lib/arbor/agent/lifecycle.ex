@@ -971,8 +971,21 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Signals.emit(:agent, event_type, data)
 
     # EventLog for durable audit trail via Historian
+    # Async because the Historian may not be started yet during bootstrap
+    # (arbor_agent starts before arbor_historian in the app supervision tree)
+    Task.start(fn ->
+      persist_lifecycle_event(event_type, data, _retries = 3)
+    end)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp persist_lifecycle_event(_event_type, _data, 0), do: :ok
+
+  defp persist_lifecycle_event(event_type, data, retries) do
     event_log = Arbor.Historian.EventLog.ETS
-    event_log_backend = Arbor.Persistence.EventLog.ETS
     persistence_event = Arbor.Persistence.Event
 
     if Process.whereis(event_log) and Code.ensure_loaded?(persistence_event) do
@@ -986,14 +999,16 @@ defmodule Arbor.Agent.Lifecycle do
 
       apply(Arbor.Persistence, :append, [
         event_log,
-        event_log_backend,
+        Arbor.Persistence.EventLog.ETS,
         @lifecycle_stream_id,
         event
       ])
+    else
+      # Historian not ready yet — wait and retry
+      Process.sleep(1_000)
+      persist_lifecycle_event(event_type, data, retries - 1)
     end
   rescue
     _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 end
