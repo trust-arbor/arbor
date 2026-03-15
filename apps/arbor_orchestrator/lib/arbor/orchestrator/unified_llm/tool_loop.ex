@@ -78,12 +78,24 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
       "[ToolLoop] Hit #{max} turn limit. Making final text-only call for agent #{state.agent_id}"
     )
 
-    # Strip tools from the request so the LLM can only generate text
-    text_only_request = %{request | tools: []}
+    # Strip tools and add instruction to respond with text only
+    wrap_up_msg =
+      Message.new(
+        :system,
+        "You have used all available tool call rounds. You MUST now respond with a text " <>
+          "summary of what you accomplished and any remaining issues. Do NOT output any " <>
+          "tool calls or JSON — respond in plain text only."
+      )
+
+    text_only_request = %{
+      request
+      | tools: [],
+        messages: request.messages ++ [wrap_up_msg]
+    }
 
     case call_llm(client, text_only_request, []) do
       {:ok, response} ->
-        final_text = response.text || ""
+        final_text = clean_tool_markup(response.text || "")
         accumulated = Map.get(state, :accumulated_text, "")
 
         content =
@@ -412,6 +424,17 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp normalize_args(_), do: %{}
+
+  # Strip any tool call markup that the LLM outputs as plain text
+  # when tools have been removed from the request
+  defp clean_tool_markup(text) when is_binary(text) do
+    text
+    |> String.replace(~r/<tool_call>.*?<\/tool_call>/s, "")
+    |> String.replace(~r/```json\s*\{[^}]*"name"\s*:.*?\}```/s, "")
+    |> String.trim()
+  end
+
+  defp clean_tool_markup(other), do: other
 
   defp merge_usage_maps(a, nil), do: a
   defp merge_usage_maps(nil, b), do: b
