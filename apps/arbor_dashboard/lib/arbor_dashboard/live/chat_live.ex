@@ -579,26 +579,34 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   def handle_info({:signal_received, signal}, socket) do
     agent_id = socket.assigns.agent_id
 
-    # Backpressure: drop signals when message queue is overloaded
-    {:message_queue_len, queue_len} = Process.info(self(), :message_queue_len)
-
-    if agent_id && queue_len < 500 && signal_matches_agent?(signal, agent_id) do
-      signal_entry = %{
-        id: "sig-#{System.unique_integer([:positive])}",
-        category: signal.category,
-        event: signal.type,
-        timestamp: signal.timestamp,
-        metadata: signal.metadata
-      }
-
-      socket =
-        socket
-        |> stream_insert(:signals, signal_entry)
-        |> SignalTracker.process_signal(signal)
-
+    # Drop high-frequency signals that don't add value to the chat UI
+    if signal.type in [:stream_delta, :stream_finish, :checkpoint_saved, :fidelity_resolved] do
+      # Stream deltas handled by maybe_track_stream in the authorization_pending handler above
+      # These signals are too frequent for the signals panel
+      socket = SignalTracker.process_signal(socket, signal)
       {:noreply, socket}
     else
-      {:noreply, socket}
+      # Backpressure: drop signals when message queue is building up
+      {:message_queue_len, queue_len} = Process.info(self(), :message_queue_len)
+
+      if agent_id && queue_len < 100 && signal_matches_agent?(signal, agent_id) do
+        signal_entry = %{
+          id: "sig-#{System.unique_integer([:positive])}",
+          category: signal.category,
+          event: signal.type,
+          timestamp: signal.timestamp,
+          metadata: signal.metadata
+        }
+
+        socket =
+          socket
+          |> stream_insert(:signals, signal_entry)
+          |> SignalTracker.process_signal(signal)
+
+        {:noreply, socket}
+      else
+        {:noreply, socket}
+      end
     end
   rescue
     e ->
