@@ -833,6 +833,9 @@ defmodule Arbor.Actions do
     # Tool discovery — agent self-discovery of available tools
     Arbor.Actions.Tool.FindTools => "arbor://agent/discover_tools",
 
+    # Subagent spawning — ephemeral workers with scoped trust
+    Arbor.Actions.Agent.SpawnWorker => "arbor://agent/spawn_worker",
+
     # Skill — arbor://code/read (skill management)
     Arbor.Actions.Skill.Search => "arbor://code/read",
     Arbor.Actions.Skill.Activate => "arbor://code/write",

@@ -162,12 +162,12 @@ defmodule Arbor.Agent.APIAgent do
 
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
-    # Route through persistent Session
-    case SessionManager.get_session(state.id) do
+    # Route through Session — check SessionManager first, then BranchSupervisor
+    case find_session(state.id) do
       {:ok, session_pid} ->
         handle_session_query(prompt, opts, state, session_pid)
 
-      {:error, _} ->
+      :not_found ->
         # No session available — use direct API query
         handle_direct_query(prompt, opts, state)
     end
@@ -223,6 +223,31 @@ defmodule Arbor.Agent.APIAgent do
 
   defp handle_host_info(_msg, state) do
     {:noreply, state}
+  end
+
+  # ============================================================================
+  # Private: Session Discovery
+  # ============================================================================
+
+  defp find_session(agent_id) do
+    # Try SessionManager first (legacy path)
+    case SessionManager.get_session(agent_id) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, _} ->
+        # Try BranchSupervisor (new path — session as supervised child)
+        branch_sup = Arbor.Agent.BranchSupervisor
+
+        if Code.ensure_loaded?(branch_sup) do
+          case branch_sup.child_pids(agent_id) do
+            %{session: pid} when is_pid(pid) -> {:ok, pid}
+            _ -> :not_found
+          end
+        else
+          :not_found
+        end
+    end
   end
 
   # ============================================================================
