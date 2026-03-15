@@ -220,6 +220,10 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         # Build system prompt
         system_prompt = params[:system_prompt] || default_worker_prompt(params)
 
+        # Resolve the scoped URIs to explicit tool names so the worker
+        # gets exactly the right tools without needing tool discovery
+        explicit_tools = resolve_tools_for_uris(Map.keys(scoped_rules))
+
         # Start with session (for tool loop) but no heartbeat
         {default_provider, default_model} = resolve_defaults()
 
@@ -228,6 +232,7 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
           model: default_model,
           start_heartbeat: false,
           system_prompt: system_prompt,
+          tools: explicit_tools,
           session_timeout: 30_000,
           spawn_depth: spawn_depth + 1
         ]
@@ -253,8 +258,6 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     if Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
       rules =
         scoped_rules
-        # Workers need tool discovery to find their scoped tools
-        |> Map.put("arbor://agent/discover_tools", :auto)
         # Workers need orchestrator access for the session pipeline
         |> Map.put("arbor://orchestrator", :auto)
         # Block spawn_worker (no recursive spawning)
@@ -401,6 +404,39 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   end
 
   defp format_error(other), do: inspect(other)
+
+  # Map capability URIs to the tool names that fall under them.
+  # Uses the ActionRegistry (name → module) + canonical URI map (module → URI).
+  defp resolve_tools_for_uris(uris) do
+    actions_mod = Module.concat([:Arbor, :Actions])
+    registry_mod = Module.concat([:Arbor, :Common, :ActionRegistry])
+
+    if Code.ensure_loaded?(actions_mod) and Code.ensure_loaded?(registry_mod) and
+         function_exported?(registry_mod, :list_all, 0) and
+         function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) do
+      apply(registry_mod, :list_all, [])
+      |> Enum.filter(fn {name, _mod, _meta} ->
+        # Skip underscore aliases (Jido format) — use dot format only
+        String.contains?(name, ".")
+      end)
+      |> Enum.filter(fn {name, _mod, _meta} ->
+        case apply(actions_mod, :tool_name_to_canonical_uri, [name]) do
+          {:ok, tool_uri} ->
+            Enum.any?(uris, fn uri ->
+              tool_uri == uri or String.starts_with?(tool_uri, uri)
+            end)
+
+          _ ->
+            false
+        end
+      end)
+      |> Enum.map(fn {name, _mod, _meta} -> name end)
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
 
   # Runtime bridge for LLMDefaults (Level 2 module)
   defp resolve_defaults do
