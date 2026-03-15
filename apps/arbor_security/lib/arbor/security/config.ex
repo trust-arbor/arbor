@@ -185,11 +185,10 @@ defmodule Arbor.Security.Config do
 
   When `true`, `authorize/4` consults the trust profile on capability miss
   and auto-grants session-scoped capabilities based on the profile mode.
-  Default: `false` during migration — flip to `true` once validated.
   """
   @spec policy_enforcer_enabled?() :: boolean()
   def policy_enforcer_enabled? do
-    Application.get_env(@app, :policy_enforcer_enabled, false)
+    Application.get_env(@app, :policy_enforcer_enabled, true)
   end
 
   @doc """
