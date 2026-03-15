@@ -87,7 +87,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     explicit = config["tools"] || config[:tools]
 
     if is_list(explicit) and explicit != [] do
-      ensure_find_tools(explicit)
+      explicit
     else
       agent_id = Keyword.get(opts, :agent_id)
 
