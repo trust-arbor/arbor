@@ -830,8 +830,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Eval.ListRuns => "arbor://code/read",
     Arbor.Actions.Eval.GetRun => "arbor://code/read",
 
-    # Tool discovery — agent self-discovery of available tools
+    # Tool discovery and documentation
     Arbor.Actions.Tool.FindTools => "arbor://agent/discover_tools",
+    Arbor.Actions.Tool.Help => "arbor://agent/discover_tools",
 
     # Subagent spawning — ephemeral workers with scoped trust
     Arbor.Actions.Agent.SpawnWorker => "arbor://agent/spawn_worker",
