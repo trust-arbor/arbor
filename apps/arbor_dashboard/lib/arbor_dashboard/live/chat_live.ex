@@ -70,6 +70,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         cached_tokens: 0,
         last_duration_ms: nil,
         total_tokens: 0,
+        total_cost: 0.0,
         query_count: 0,
         # Goals
         agent_goals: [],
@@ -1144,15 +1145,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       usage[:output_tokens] || usage["output_tokens"] || usage[:completion_tokens] ||
         usage["completion_tokens"] || 0
 
+    cached =
+      usage[:cache_read_tokens] || usage["cache_read_tokens"] ||
+        usage[:cache_read_input_tokens] || usage["cache_read_input_tokens"] || 0
+
+    cost = usage[:cost] || usage["cost"]
+
     if input > 0 or output > 0 do
       agent_id = socket.assigns.agent_id
-      tokens = ChatState.add_tokens(agent_id, input, output, nil)
+      tokens = ChatState.add_tokens(agent_id, input, output, cached)
 
-      assign(socket,
-        input_tokens: tokens.input,
-        output_tokens: tokens.output,
-        total_tokens: tokens.input + tokens.output,
-        llm_call_count: tokens.count
+      cost_assigns =
+        if cost do
+          prev_cost = socket.assigns[:total_cost] || 0.0
+          [total_cost: prev_cost + cost]
+        else
+          []
+        end
+
+      assign(
+        socket,
+        [
+          input_tokens: tokens.input,
+          output_tokens: tokens.output,
+          cached_tokens: tokens.cached,
+          total_tokens: tokens.input + tokens.output,
+          llm_call_count: tokens.count
+        ] ++ cost_assigns
       )
     else
       assign(socket, llm_call_count: socket.assigns.llm_call_count + 1)
