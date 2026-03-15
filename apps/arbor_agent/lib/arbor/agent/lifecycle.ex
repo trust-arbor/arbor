@@ -144,7 +144,7 @@ defmodule Arbor.Agent.Lifecycle do
   def restore(agent_id) do
     case ProfileStore.load_profile(agent_id) do
       {:ok, profile} ->
-        Arbor.Signals.emit(:agent, :restored, %{
+        dual_emit_lifecycle(:restored, %{
           agent_id: agent_id,
           version: profile.version
         })
@@ -185,7 +185,7 @@ defmodule Arbor.Agent.Lifecycle do
           {:ok, pid} ->
             maybe_start_session(agent_id, profile, opts)
             maybe_start_api_agent(agent_id, profile, opts)
-            Arbor.Signals.emit(:agent, :started, %{agent_id: agent_id})
+            dual_emit_lifecycle(:started, %{agent_id: agent_id})
             {:ok, pid}
 
           {:error, {:already_started, pid}} ->
@@ -226,7 +226,7 @@ defmodule Arbor.Agent.Lifecycle do
 
     result = Executor.stop(agent_id)
 
-    Arbor.Signals.emit(:agent, :stopped, %{
+    dual_emit_lifecycle(:stopped, %{
       agent_id: agent_id,
       reason: :normal
     })
@@ -270,7 +270,7 @@ defmodule Arbor.Agent.Lifecycle do
     # Remove profile from store (and legacy JSON)
     ProfileStore.delete_profile(agent_id)
 
-    Arbor.Signals.emit(:agent, :destroyed, %{agent_id: agent_id})
+    dual_emit_lifecycle(:destroyed, %{agent_id: agent_id})
     :ok
   end
 
@@ -954,11 +954,46 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp emit_created_signal(%Profile{} = profile) do
-    Arbor.Signals.emit(:agent, :created, %{
+    dual_emit_lifecycle(:created, %{
       agent_id: profile.agent_id,
       name: profile.character.name,
       template: profile.template,
       trust_tier: profile.trust_tier
     })
+  end
+
+  # Dual-emit for agent lifecycle events: durable EventLog + ephemeral Signal.
+  # Follows the pattern from Security.Events and Memory.Events.
+  @lifecycle_stream_id "agent:lifecycle"
+
+  defp dual_emit_lifecycle(event_type, data) do
+    # Signal for real-time notifications
+    Arbor.Signals.emit(:agent, event_type, data)
+
+    # EventLog for durable audit trail via Historian
+    event_log = Arbor.Historian.EventLog.ETS
+    event_log_backend = Arbor.Persistence.EventLog.ETS
+    persistence_event = Arbor.Persistence.Event
+
+    if Process.whereis(event_log) and Code.ensure_loaded?(persistence_event) do
+      event =
+        apply(persistence_event, :new, [
+          @lifecycle_stream_id,
+          "agent.#{event_type}",
+          Map.put(data, :timestamp, DateTime.utc_now()),
+          [metadata: %{source_node: node()}]
+        ])
+
+      apply(Arbor.Persistence, :append, [
+        event_log,
+        event_log_backend,
+        @lifecycle_stream_id,
+        event
+      ])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
