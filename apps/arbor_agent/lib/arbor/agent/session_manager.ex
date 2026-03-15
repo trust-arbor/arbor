@@ -33,7 +33,8 @@ defmodule Arbor.Agent.SessionManager do
   """
   @spec ensure_session(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure_session(agent_id, opts \\ []) do
-    GenServer.call(__MODULE__, {:ensure_session, agent_id, opts})
+    timeout = Keyword.get(opts, :session_timeout, 30_000)
+    GenServer.call(__MODULE__, {:ensure_session, agent_id, opts}, timeout)
   end
 
   @doc """

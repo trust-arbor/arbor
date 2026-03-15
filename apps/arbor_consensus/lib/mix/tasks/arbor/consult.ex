@@ -20,6 +20,9 @@ defmodule Mix.Tasks.Arbor.Consult do
     * `--adversarial` / `-r`   — Shorthand for --perspective adversarial (red team)
     * `--all` / `-a`          — Ask all perspectives (expensive: N LLM calls)
     * `--multi-model` / `-m`  — Same perspective across all unique providers
+    * `--research`            — Enable research mode: each perspective uses a persistent
+                                agent with read-only tools (file search, web, historian)
+                                to verify claims before responding
     * `--save` / `-s`         — Save results to .arbor/council/<slug>/
     * `--docs` / `-d`         — Reference doc paths (comma-separated or repeated)
     * `--context` / `-c`      — Extra context as key:value pairs (comma-separated)
@@ -63,6 +66,8 @@ defmodule Mix.Tasks.Arbor.Consult do
   """
   use Mix.Task
 
+  require Logger
+
   alias Arbor.Common.SafeAtom
   alias Arbor.Consensus.Evaluators.AdvisoryLLM
   alias Arbor.Consensus.Evaluators.Consult
@@ -75,6 +80,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     adversarial: :boolean,
     all: :boolean,
     multi_model: :boolean,
+    research: :boolean,
     save: :boolean,
     docs: [:string],
     context: :string,
@@ -109,6 +115,7 @@ defmodule Mix.Tasks.Arbor.Consult do
       -r, --adversarial        Shorthand for --perspective adversarial (red team)
       -a, --all                Ask all perspectives
       -m, --multi-model        Same perspective, all unique providers (use with -p)
+          --research           Enable research mode (agent-backed with tools)
       -s, --save               Save results to .arbor/council/
       -d, --docs PATH          Reference doc paths
       -c, --context KV         Context as key:value pairs
@@ -141,10 +148,13 @@ defmodule Mix.Tasks.Arbor.Consult do
         opts
       end
 
-    # Start only what the council needs: AI backends, consensus config, and logger.
-    # Using app.start boots the entire application tree including gateway/dashboard
-    # HTTP servers, which fails with :eaddrinuse if they're already running.
-    ensure_minimal_deps()
+    # Start dependencies. Research mode needs the full agent system;
+    # standard mode only needs AI backends.
+    if opts[:research] do
+      ensure_full_deps()
+    else
+      ensure_minimal_deps()
+    end
 
     context = build_context(opts)
     eval_opts = build_eval_opts(opts)
@@ -604,6 +614,14 @@ defmodule Mix.Tasks.Arbor.Consult do
         t -> Keyword.put(eval_opts, :timeout, t * 1_000)
       end
 
+    # --research enables agent-based evaluation with read-only tools
+    eval_opts =
+      if opts[:research] do
+        Keyword.put(eval_opts, :research, true)
+      else
+        eval_opts
+      end
+
     # --backend cli|api forces CLI agents (can read source code) or API providers
     case opts[:backend] do
       nil ->
@@ -697,6 +715,39 @@ defmodule Mix.Tasks.Arbor.Consult do
         apply(client_mod, :default_client, [])
       rescue
         _ -> :ok
+      end
+    end
+  end
+
+  # Research mode needs agent lifecycle, security, trust, memory, and orchestrator.
+  # We can't use app.start because it also starts gateway/dashboard which bind ports.
+  # Instead, start the specific apps needed for agent-based evaluation.
+  defp ensure_full_deps do
+    ensure_minimal_deps()
+
+    # Start the apps needed for agent creation and execution, in dependency order.
+    # These are safe to start even if the server is already running — they use
+    # named GenServers that will return {:already_started, pid} if already up.
+    research_apps = [
+      :arbor_signals,
+      :arbor_persistence,
+      :arbor_persistence_ecto,
+      :arbor_security,
+      :arbor_historian,
+      :arbor_trust,
+      :arbor_memory,
+      :arbor_consensus,
+      :arbor_actions,
+      :arbor_agent,
+      :arbor_orchestrator
+    ]
+
+    for app <- research_apps do
+      case Application.ensure_all_started(app) do
+        {:ok, _} -> :ok
+        {:error, {_app, {:already_started, _pid}}} -> :ok
+        {:error, reason} ->
+          Logger.debug("Council research: could not start #{app}: #{inspect(reason)}")
       end
     end
   end

@@ -429,28 +429,57 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   defp merge_usage_maps(nil, b), do: b
 
   defp merge_usage_maps(a, b) when is_map(a) and is_map(b) do
-    %{
-      prompt_tokens: (a[:prompt_tokens] || 0) + (b["prompt_tokens"] || b[:prompt_tokens] || 0),
-      completion_tokens:
-        (a[:completion_tokens] || 0) + (b["completion_tokens"] || b[:completion_tokens] || 0),
-      total_tokens: (a[:total_tokens] || 0) + (b["total_tokens"] || b[:total_tokens] || 0)
+    # Merge standard token counts (accumulated across tool rounds)
+    base = %{
+      prompt_tokens: add_usage_val(a, b, :prompt_tokens),
+      completion_tokens: add_usage_val(a, b, :completion_tokens),
+      total_tokens: add_usage_val(a, b, :total_tokens)
     }
+
+    # Preserve provider-specific fields (cost, input_tokens, cache, etc.)
+    # Cost may be a direct key or nested inside raw (OpenRouter)
+    cost_b = Map.get(b, :cost) || get_in(b, [:raw, "cost"])
+    cost_a = Map.get(a, :cost) || 0
+
+    base
+    |> then(fn m -> if cost_b, do: Map.put(m, :cost, (cost_a || 0) + cost_b), else: m end)
+    |> add_optional(a, b, :input_tokens)
+    |> add_optional(a, b, :output_tokens)
+    |> add_optional(a, b, :cache_read_tokens)
+    |> add_optional(a, b, :cache_write_tokens)
+    |> add_optional(a, b, :reasoning_tokens)
+    |> maybe_keep(b, :raw)
   end
 
   defp merge_usage(state, nil), do: state
 
   defp merge_usage(state, usage) when is_map(usage) do
-    merged = %{
-      prompt_tokens:
-        state.total_usage.prompt_tokens + (usage["prompt_tokens"] || usage[:prompt_tokens] || 0),
-      completion_tokens:
-        state.total_usage.completion_tokens +
-          (usage["completion_tokens"] || usage[:completion_tokens] || 0),
-      total_tokens:
-        state.total_usage.total_tokens + (usage["total_tokens"] || usage[:total_tokens] || 0)
-    }
+    %{state | total_usage: merge_usage_maps(state.total_usage, usage)}
+  end
 
-    %{state | total_usage: merged}
+  defp add_usage_val(a, b, key) do
+    str_key = to_string(key)
+    (Map.get(a, key, 0) || 0) + (Map.get(b, key) || Map.get(b, str_key) || 0)
+  end
+
+  # Accumulate numeric usage fields that may be present in provider responses
+  defp add_optional(map, a, b, key) do
+    str_key = to_string(key)
+    val_a = Map.get(a, key, 0) || 0
+    val_b = Map.get(b, key) || Map.get(b, str_key)
+
+    cond do
+      val_b != nil -> Map.put(map, key, val_a + val_b)
+      val_a > 0 -> Map.put(map, key, val_a)
+      true -> map
+    end
+  end
+
+  defp maybe_keep(map, source, key) do
+    case Map.get(source, key) do
+      nil -> map
+      val -> Map.put(map, key, val)
+    end
   end
 
   defp truncate(text, max_len) when is_binary(text) do

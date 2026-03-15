@@ -25,7 +25,8 @@ defmodule Arbor.Agent.TemplateStore do
     Arbor.Agent.Templates.Diagnostician => "diagnostician",
     Arbor.Agent.Templates.Conversationalist => "conversationalist",
     Arbor.Agent.Templates.InterviewAgent => "interview_agent",
-    Arbor.Agent.Templates.ApiAgent => "api_agent"
+    Arbor.Agent.Templates.ApiAgent => "api_agent",
+    Arbor.Agent.Templates.CouncilEvaluator => "council_evaluator"
   }
 
   @builtin_names Map.values(@builtin_modules)
@@ -36,7 +37,11 @@ defmodule Arbor.Agent.TemplateStore do
   def ensure_table do
     case :ets.whereis(@ets_table) do
       :undefined ->
-        :ets.new(@ets_table, [:named_table, :set, :public, read_concurrency: true])
+        try do
+          :ets.new(@ets_table, [:named_table, :set, :public, read_concurrency: true])
+        rescue
+          ArgumentError -> @ets_table
+        end
 
       _ref ->
         @ets_table
