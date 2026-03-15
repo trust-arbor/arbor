@@ -94,6 +94,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         <span :if={@last_duration_ms} style="color: #eab308;">
           LAST: <strong>{format_duration(@last_duration_ms)}</strong>
         </span>
+        <span :if={@total_cost > 0} style="color: #f59e0b;">
+          COST: <strong>{"$#{Float.round(@total_cost * 1.0, 4)}"}</strong>
+        </span>
       </div>
       <%!-- Heartbeat tokens (right) --%>
       <div :if={@heartbeat_count > 0} style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
