@@ -57,9 +57,19 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
     end
   end
 
+  @actions_mod Arbor.Actions
+
   @doc false
   def module_to_descriptor(canonical_name, module, metadata) do
     {description, tags} = extract_module_info(module)
+
+    # Include the canonical capability URI from the actions facade.
+    # This enables intent-based delegation: resolver results carry their
+    # authorization URI, so trust profile intersection can work directly.
+    metadata =
+      metadata
+      |> Map.put(:module, module)
+      |> Map.put(:capability_uri, resolve_capability_uri(module))
 
     %CapabilityDescriptor{
       id: "action:#{canonical_name}",
@@ -70,8 +80,20 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
       trust_required: :new,
       provider: __MODULE__,
       source_ref: canonical_name,
-      metadata: Map.put(metadata, :module, module)
+      metadata: metadata
     }
+  end
+
+  # Runtime bridge to Arbor.Actions.canonical_uri_for/2 (Level 2).
+  defp resolve_capability_uri(module) do
+    if Code.ensure_loaded?(@actions_mod) and
+         function_exported?(@actions_mod, :canonical_uri_for, 2) do
+      apply(@actions_mod, :canonical_uri_for, [module, %{}])
+    else
+      nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp parse_action_id("action:" <> name), do: {:ok, name}
