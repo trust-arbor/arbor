@@ -35,11 +35,6 @@ defmodule Arbor.Security.Application do
              collection: "signing_keys"},
             id: :arbor_security_signing_keys
           ),
-          # Security EventLog — durable audit trail for auth decisions
-          Supervisor.child_spec(
-            {Arbor.Persistence.EventLog.ETS, name: :security_events, max_events: 10_000},
-            id: :security_events
-          ),
           {Arbor.Security.Identity.Registry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
