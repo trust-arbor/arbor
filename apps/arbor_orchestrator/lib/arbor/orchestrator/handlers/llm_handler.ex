@@ -189,6 +189,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         updates =
           base_updates
           |> Map.put("last_response", response_text)
+          |> Map.put("session.usage", response.usage)
+          |> Map.put("session.tool_round_count", response.tool_rounds)
           |> maybe_put_perspective_key(node.attrs, response_text)
           |> maybe_put_routing_decision()
           |> maybe_put_discovered_tools()

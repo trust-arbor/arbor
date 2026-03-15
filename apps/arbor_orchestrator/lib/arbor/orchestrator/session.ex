@@ -516,12 +516,15 @@ defmodule Arbor.Orchestrator.Session do
     # Phase 3: notify ActionCycleServer of chat percept
     maybe_enqueue_chat_percept(state.agent_id, message)
 
+    usage = Map.get(result.context, "session.usage", %{})
+
     reply =
       {:ok,
        PipelineResponse.normalize(%{
          text: response,
          tool_history: tool_history,
-         tool_rounds: tool_rounds
+         tool_rounds: tool_rounds,
+         usage: usage
        })}
 
     safe_reply(state.turn_from, reply)
