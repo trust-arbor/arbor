@@ -30,7 +30,9 @@ defmodule Arbor.Security.Events do
       {:ok, denied} = Arbor.Security.Events.get_by_type(:authorization_denied)
   """
 
-  @event_log_name :security_events
+  # Write to the Historian's EventLog so security events are queryable
+  # via Arbor.Historian.for_category(:security), etc.
+  @event_log_name Arbor.Historian.EventLog.ETS
   @event_log_backend Arbor.Persistence.EventLog.ETS
   @stream_id "security:events"
 
