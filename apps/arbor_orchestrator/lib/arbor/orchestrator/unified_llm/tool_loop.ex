@@ -70,7 +70,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
   defp loop(_client, _request, _opts, %{turn: turn, max_turns: max} = state)
        when turn >= max do
-    {:error, {:max_turns_reached, turn, state.total_usage}}
+    accumulated = Map.get(state, :accumulated_text, "")
+
+    if accumulated != "" do
+      # Return accumulated text from intermediate rounds instead of failing
+      {:ok,
+       %PipelineResponse{
+         content: accumulated,
+         usage: state.total_usage,
+         tool_rounds: turn,
+         finish_reason: :max_turns,
+         discovered_tools: state.discovered_tools
+       }}
+    else
+      {:error, {:max_turns_reached, turn, state.total_usage}}
+    end
   end
 
   defp loop(client, request, opts, state) do
