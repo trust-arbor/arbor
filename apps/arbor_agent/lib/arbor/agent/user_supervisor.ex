@@ -114,6 +114,20 @@ defmodule Arbor.Agent.UserSupervisor do
   end
 
   @doc """
+  Start a raw child spec under a user's supervisor (for BranchSupervisor).
+
+  Unlike `start_child/1`, this accepts a pre-built child spec and does NOT
+  register in Agent.Registry (registration is handled by the caller).
+  """
+  @spec start_child_spec(String.t(), map()) :: {:ok, pid()} | {:error, term()}
+  def start_child_spec(principal_id, child_spec) do
+    with {:ok, user_sup} <- ensure_user_supervisor(principal_id),
+         :ok <- check_quota(user_sup, principal_id) do
+      DynamicSupervisor.start_child(user_sup, child_spec)
+    end
+  end
+
+  @doc """
   List all agent PIDs supervised under a specific user.
   """
   @spec which_agents(String.t()) :: [pid()]

@@ -29,7 +29,7 @@ defmodule Arbor.Agent.Lifecycle do
   """
 
   alias Arbor.Agent.{
-    APIAgent,
+    BranchSupervisor,
     Character,
     Executor,
     Profile,
@@ -157,42 +157,65 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   @doc """
-  Start an agent's execution (create executor, subscribe to intents).
+  Start an agent's execution via a supervised BranchSupervisor.
+
+  Creates a per-agent supervisor (rest_for_one) containing the APIAgent host,
+  Executor, and optionally a Session. All sub-processes are supervised — if any
+  crashes, dependent processes are restarted too.
+
+  After the supervisor confirms all children are up, registers the agent in
+  Agent.Registry with all child PIDs as metadata.
+
+  Idempotent — calling twice for the same agent returns the existing supervisor.
   """
   @spec start(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start(agent_id, opts \\ []) do
+    # Idempotent: if branch supervisor already running, return it
+    case BranchSupervisor.whereis(agent_id) do
+      pid when is_pid(pid) ->
+        {:ok, pid}
+
+      nil ->
+        do_start(agent_id, opts)
+    end
+  end
+
+  defp do_start(agent_id, opts) do
     case restore(agent_id) do
       {:ok, profile} ->
         # Re-register identity and capabilities (ETS-only, lost on restart)
         ensure_identity_and_capabilities(profile)
 
         # Re-initialize memory (knowledge graph ETS, index supervisor)
-        # These are in-memory only and lost on restart
         init_memory(agent_id, [])
 
         # Reload persisted goals and intents into ETS
-        # (GoalStore/IntentStore load all agents on GenServer init, but may
-        #  have missed this agent if MemoryStore wasn't available at startup)
         reload_persisted_memory(agent_id)
 
-        executor_opts =
-          Keyword.merge(opts,
-            agent_id: agent_id,
-            trust_tier: profile.trust_tier
-          )
+        # Build child opts for the BranchSupervisor
+        host_opts = build_host_opts(agent_id, profile, opts)
+        executor_opts = build_executor_opts(agent_id, profile, opts)
+        session_opts = build_branch_session_opts(agent_id, profile, opts)
+        start_session = Keyword.get(opts, :start_session, true)
 
-        case Executor.start(agent_id, executor_opts) do
-          {:ok, pid} ->
-            maybe_start_session(agent_id, profile, opts)
-            maybe_start_api_agent(agent_id, profile, opts)
+        branch_opts = [
+          agent_id: agent_id,
+          host_opts: host_opts,
+          executor_opts: executor_opts,
+          session_opts: session_opts,
+          start_session: start_session
+        ]
+
+        # Start the branch supervisor under the global DynamicSupervisor
+        case start_branch_supervised(agent_id, branch_opts, opts) do
+          {:ok, sup_pid} ->
+            # Register in Agent.Registry AFTER supervision is confirmed
+            register_in_agent_registry(agent_id, sup_pid, profile, opts)
             dual_emit_lifecycle(:started, %{agent_id: agent_id})
-            {:ok, pid}
+            {:ok, sup_pid}
 
-          {:error, {:already_started, pid}} ->
-            # Executor already running — still ensure session and host are started
-            maybe_start_session(agent_id, profile, opts)
-            maybe_start_api_agent(agent_id, profile, opts)
-            {:ok, pid}
+          {:error, {:already_started, sup_pid}} ->
+            {:ok, sup_pid}
 
           {:error, reason} ->
             {:error, reason}
@@ -203,18 +226,254 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
+  # Start the BranchSupervisor under the appropriate DynamicSupervisor
+  # (UserSupervisor for multi-user, global Supervisor otherwise).
+  defp start_branch_supervised(agent_id, branch_opts, opts) do
+    child_spec = %{
+      id: {:branch, agent_id},
+      start: {BranchSupervisor, :start_link, [branch_opts]},
+      restart: :transient,
+      type: :supervisor
+    }
+
+    principal_id = extract_principal_id(opts)
+
+    result =
+      if principal_id && user_supervisor_available?() do
+        try do
+          apply(Arbor.Agent.UserSupervisor, :start_child_spec, [principal_id, child_spec])
+        rescue
+          _ -> :fallback
+        catch
+          :exit, _ -> :fallback
+        end
+      else
+        :fallback
+      end
+
+    case result do
+      :fallback -> DynamicSupervisor.start_child(Arbor.Agent.Supervisor, child_spec)
+      other -> other
+    end
+  end
+
+  defp extract_principal_id(opts) do
+    Keyword.get(opts, :principal_id) ||
+      get_in(opts, [:tenant_context, :principal_id])
+  end
+
+  defp user_supervisor_available? do
+    Process.whereis(Arbor.Agent.UserSupervisor) != nil
+  end
+
+  # Register the agent and all its child PIDs in the discovery registry.
+  # This happens AFTER supervision is confirmed — no zombie entries.
+  defp register_in_agent_registry(agent_id, sup_pid, profile, opts) do
+    child_pids = BranchSupervisor.child_pids(agent_id)
+
+    metadata = %{
+      host_pid: child_pids.host,
+      executor_pid: child_pids.executor,
+      session_pid: child_pids.session,
+      supervisor_pid: sup_pid,
+      display_name: profile.display_name,
+      model_config: extract_model_config(profile, opts),
+      backend: :api,
+      started_at: System.system_time(:millisecond)
+    }
+
+    metadata =
+      case Map.get(profile.metadata || %{}, :created_by) do
+        nil -> metadata
+        created_by -> Map.put(metadata, :created_by, created_by)
+      end
+
+    Arbor.Agent.Registry.register(agent_id, sup_pid, metadata)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp extract_model_config(profile, opts) do
+    Keyword.get(opts, :model_config) ||
+      get_in(profile.metadata || %{}, [:last_model_config]) ||
+      %{}
+  end
+
+  # Build opts for the APIAgent host child
+  defp build_host_opts(agent_id, profile, opts) do
+    [
+      id: agent_id,
+      display_name: profile.display_name || agent_id,
+      model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
+      provider:
+        Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+    ]
+  end
+
+  # Build opts for the Executor child
+  defp build_executor_opts(agent_id, _profile, opts) do
+    Keyword.merge(opts,
+      agent_id: agent_id,
+      trust_tier: Keyword.get(opts, :trust_tier, :established)
+    )
+  end
+
+  # Build session opts for the BranchSupervisor (or nil to skip session).
+  # This replaces the old maybe_start_session + SessionManager.ensure_session flow.
+  defp build_branch_session_opts(agent_id, profile, opts) do
+    mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
+
+    if mode in [:session, :graph] do
+      tools = Keyword.get(opts, :tools)
+
+      system_prompt =
+        Keyword.get_lazy(opts, :system_prompt, fn ->
+          build_session_system_prompt(agent_id, profile, opts)
+        end)
+
+      template_meta = extract_template_metadata(profile)
+
+      signer =
+        case build_signer(agent_id) do
+          {:ok, signer_fn} -> signer_fn
+          {:error, _} -> nil
+        end
+
+      session_opts =
+        Keyword.merge(opts,
+          trust_tier: profile.trust_tier,
+          tools: tools,
+          system_prompt: system_prompt,
+          start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
+          signer: signer
+        )
+
+      session_opts = merge_template_opts(session_opts, template_meta, opts)
+
+      # Build the full session init opts (same as SessionManager.build_session_opts)
+      build_session_init_opts(agent_id, session_opts)
+    else
+      nil
+    end
+  end
+
+  # Build the keyword list that Session.init expects.
+  # Previously this was inside SessionManager.build_session_opts.
+  defp build_session_init_opts(agent_id, opts) do
+    trust_tier = Keyword.get(opts, :trust_tier, :established)
+    provider = Keyword.get(opts, :provider)
+
+    tool_names =
+      case Keyword.get(opts, :tools) do
+        nil -> nil
+        tools when is_list(tools) ->
+          Enum.map(tools, fn
+            mod when is_atom(mod) ->
+              if function_exported?(mod, :name, 0), do: mod.name(), else: inspect(mod)
+            name when is_binary(name) -> name
+          end)
+      end
+
+    llm_config =
+      %{}
+      |> maybe_put_config("llm_provider", if(provider, do: to_string(provider)))
+      |> maybe_put_config("llm_model", Keyword.get(opts, :model))
+      |> maybe_put_config("system_prompt", Keyword.get(opts, :system_prompt))
+      |> maybe_put_config("tools", tool_names)
+
+    [
+      session_id: "agent-session-#{agent_id}",
+      agent_id: agent_id,
+      trust_tier: trust_tier,
+      adapters: %{},
+      turn_dot: session_turn_dot_path(),
+      heartbeat_dot: Keyword.get(opts, :heartbeat_dot, session_heartbeat_dot_path()),
+      start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
+      execution_mode: :session,
+      signer: Keyword.get(opts, :signer),
+      config: llm_config,
+      tenant_context: Keyword.get(opts, :tenant_context)
+    ]
+  end
+
+  defp maybe_put_config(map, _key, nil), do: map
+  defp maybe_put_config(map, key, value), do: Map.put(map, key, value)
+
+  defp session_turn_dot_path do
+    Application.get_env(:arbor_ai, :session_turn_dot, default_turn_dot())
+  end
+
+  defp session_heartbeat_dot_path do
+    Application.get_env(:arbor_ai, :session_heartbeat_dot, default_heartbeat_dot())
+  end
+
+  defp default_turn_dot do
+    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "turn.dot"])
+  end
+
+  defp default_heartbeat_dot do
+    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "heartbeat.dot"])
+  end
+
+  defp orchestrator_app_dir do
+    cwd = File.cwd!()
+    candidates = [
+      Path.join([cwd, "apps", "arbor_orchestrator"]),
+      Path.join([cwd, "..", "arbor_orchestrator"]) |> Path.expand(),
+      cwd
+    ]
+
+    case Enum.find(candidates, fn path ->
+           File.dir?(path) and File.exists?(Path.join(path, "specs"))
+         end) do
+      nil ->
+        case :code.priv_dir(:arbor_orchestrator) do
+          {:error, _} -> List.first(candidates)
+          priv_dir -> Path.dirname(to_string(priv_dir))
+        end
+      path -> path
+    end
+  end
+
   @doc """
   Stop an agent cleanly.
+
+  If a BranchSupervisor is running, stops the entire supervised tree.
+  Falls back to stopping individual processes for backward compatibility.
   """
   @spec stop(String.t()) :: :ok | {:error, term()}
   def stop(agent_id) do
+    # Try stopping via BranchSupervisor first (new path)
+    case BranchSupervisor.whereis(agent_id) do
+      sup_pid when is_pid(sup_pid) ->
+        # Unregister from Agent.Registry before stopping
+        Arbor.Agent.Registry.unregister(agent_id)
+
+        # Stop the supervisor — this terminates all children (host, executor, session)
+        try do
+          Supervisor.stop(sup_pid, :normal, 10_000)
+        catch
+          :exit, _ -> :ok
+        end
+
+      nil ->
+        # Fallback: stop individual processes (legacy path)
+        stop_individual_processes(agent_id)
+    end
+
+    dual_emit_lifecycle(:stopped, %{agent_id: agent_id, reason: :normal})
+    :ok
+  end
+
+  defp stop_individual_processes(agent_id) do
     try do
       SessionManager.stop_session(agent_id)
     catch
       :exit, _ -> :ok
     end
 
-    # Stop APIAgent host if running
     try do
       case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:host, agent_id}) do
         [{pid, _}] -> GenServer.stop(pid, :normal, 5_000)
@@ -224,14 +483,7 @@ defmodule Arbor.Agent.Lifecycle do
       :exit, _ -> :ok
     end
 
-    result = Executor.stop(agent_id)
-
-    dual_emit_lifecycle(:stopped, %{
-      agent_id: agent_id,
-      reason: :normal
-    })
-
-    result
+    Executor.stop(agent_id)
   end
 
   @doc """
@@ -275,58 +527,6 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # -- Private helpers --
-
-  defp maybe_start_session(agent_id, profile, opts) do
-    mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
-
-    if mode in [:session, :graph] do
-      # Use progressive tool disclosure — start with core tools + find_tools.
-      # Only pass explicit tools if the caller provides them.
-      tools = Keyword.get(opts, :tools)
-
-      # Build the stable system prompt for this agent (identity, character, tools)
-      # so the Session's LLM adapter has proper context for heartbeat calls.
-      system_prompt =
-        Keyword.get_lazy(opts, :system_prompt, fn ->
-          build_session_system_prompt(agent_id, profile, opts)
-        end)
-
-      # Extract context_management from template metadata if available
-      template_meta = extract_template_metadata(profile)
-
-      # Build signer function for identity-verified tool calls.
-      # The signer produces fresh SignedRequests for each tool invocation.
-      signer =
-        case build_signer(agent_id) do
-          {:ok, signer_fn} -> signer_fn
-          {:error, _} -> nil
-        end
-
-      session_opts =
-        Keyword.merge(opts,
-          trust_tier: profile.trust_tier,
-          tools: tools,
-          system_prompt: system_prompt,
-          start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
-          signer: signer
-        )
-
-      # Merge template-derived options (context_management, model, provider)
-      # without overriding explicitly provided opts
-      session_opts = merge_template_opts(session_opts, template_meta, opts)
-
-      case SessionManager.ensure_session(agent_id, session_opts) do
-        {:ok, _pid} ->
-          Logger.info("Session started for agent #{agent_id}", mode: mode)
-
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to start session for agent #{agent_id}: #{inspect(reason)}",
-            mode: mode
-          )
-      end
-    end
-  end
 
   # Build a system prompt for Session LLM calls via Arbor.AI runtime bridge.
   # Falls back to template/character-based prompt if Arbor.AI is unavailable.
@@ -419,28 +619,6 @@ defmodule Arbor.Agent.Lifecycle do
     end)
   end
 
-  defp maybe_start_api_agent(agent_id, profile, opts) do
-    if Keyword.get(opts, :start_host, true) do
-      host_opts = [
-        id: agent_id,
-        name: {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:host, agent_id}}},
-        display_name: profile.display_name || agent_id,
-        model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
-        provider:
-          Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
-      ]
-
-      case APIAgent.start_link(host_opts) do
-        {:ok, _pid} ->
-          Logger.info("APIAgent host started for agent #{agent_id}")
-
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to start APIAgent host for agent #{agent_id}: #{inspect(reason)}"
-          )
-      end
-    end
-  end
 
   defp resolve_template(opts) do
     case Keyword.get(opts, :template) do
