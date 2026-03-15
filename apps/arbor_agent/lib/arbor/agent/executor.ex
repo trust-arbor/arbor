@@ -49,6 +49,14 @@ defmodule Arbor.Agent.Executor do
   end
 
   @doc """
+  Start an executor linked to the calling process (for supervision).
+  """
+  @spec start_link(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def start_link(agent_id, opts \\ []) do
+    GenServer.start_link(__MODULE__, {agent_id, opts}, name: via(agent_id))
+  end
+
+  @doc """
   Pause intent processing. Intents are queued but not executed.
   """
   @spec pause(String.t()) :: :ok | {:error, :not_running | :not_found}

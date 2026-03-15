@@ -121,8 +121,13 @@ defmodule Arbor.Agent.AgentSeed do
     # Initialize context window
     {:ok, context_window} = ContextManager.init_context(id, opts)
 
-    # Start Executor
-    executor_pid = start_agent_executor(id)
+    # Start Executor (unless managed externally by BranchSupervisor)
+    executor_pid =
+      if Keyword.get(opts, :skip_executor, false) do
+        nil
+      else
+        start_agent_executor(id)
+      end
 
     seed_state = %{
       id: id,
