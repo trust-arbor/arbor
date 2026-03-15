@@ -71,6 +71,9 @@ defmodule Arbor.Actions.MemoryCognitive do
            current: Arbor.Memory.inspect_preferences(agent_id)
          }}
       else
+        {:error, :missing_agent_id} = err ->
+          err
+
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, format_reason(reason)}
@@ -133,6 +136,9 @@ defmodule Arbor.Actions.MemoryCognitive do
         Actions.emit_completed(__MODULE__, %{node_id: params.node_id})
         {:ok, %{node_id: params.node_id, pinned: true}}
       else
+        {:error, :missing_agent_id} = err ->
+          err
+
         {:error, :max_pins_reached} ->
           Actions.emit_failed(__MODULE__, :max_pins_reached)
 
@@ -193,6 +199,9 @@ defmodule Arbor.Actions.MemoryCognitive do
         Actions.emit_completed(__MODULE__, %{node_id: params.node_id})
         {:ok, %{node_id: params.node_id, unpinned: true}}
       else
+        {:error, :missing_agent_id} = err ->
+          err
+
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, format_reason(reason)}

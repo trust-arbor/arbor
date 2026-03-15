@@ -842,7 +842,19 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp init_memory(agent_id, opts) do
-    Arbor.Memory.init_for_agent(agent_id, opts)
+    if Process.whereis(Arbor.Memory.Registry) do
+      Arbor.Memory.init_for_agent(agent_id, opts)
+    else
+      {:ok, :memory_not_available}
+    end
+  rescue
+    e ->
+      Logger.warning("Memory init failed for #{agent_id}: #{Exception.message(e)}")
+      {:ok, :memory_init_failed}
+  catch
+    :exit, reason ->
+      Logger.warning("Memory init exit for #{agent_id}: #{inspect(reason)}")
+      {:ok, :memory_init_failed}
   end
 
   defp reload_persisted_memory(agent_id) do

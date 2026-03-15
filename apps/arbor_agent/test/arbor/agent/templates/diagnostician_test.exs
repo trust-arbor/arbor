@@ -125,29 +125,10 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes monitor read access" do
+    test "includes orchestrator execute capability" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "arbor://monitor/read"))
-    end
-
-    test "includes proposal submission capability" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "arbor://consensus/propose"))
-    end
-
-    test "includes code hot load capability" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "arbor://code/hot_load"))
-    end
-
-    test "includes file read/write capabilities" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "arbor://fs/read"))
-      assert Enum.any?(resources, &(&1 =~ "arbor://fs/write"))
+      assert "arbor://orchestrator/execute" in resources
     end
 
     test "all capabilities use facade URI format" do

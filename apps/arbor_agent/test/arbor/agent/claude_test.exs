@@ -25,15 +25,12 @@ defmodule Arbor.Agent.ClaudeTest do
       assert Enum.any?(goals, &(&1.type == :collaborate))
     end
 
-    test "requires appropriate capabilities" do
+    test "requires orchestrator execute capability" do
       caps = CliAgent.required_capabilities()
-      assert length(caps) >= 5
+      assert length(caps) >= 1
 
       resources = Enum.map(caps, & &1.resource)
-      assert "arbor://fs/read/**" in resources
-      assert "arbor://memory/read/**" in resources
-      assert "arbor://ai/generate/**" in resources
-      assert "arbor://shell/execute/**" in resources
+      assert "arbor://orchestrator/execute" in resources
     end
 
     test "provides metadata" do

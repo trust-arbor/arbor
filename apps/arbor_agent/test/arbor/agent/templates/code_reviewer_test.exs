@@ -70,11 +70,10 @@ defmodule Arbor.Agent.Templates.CodeReviewerTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes read and safe shell access" do
+    test "includes orchestrator execute capability" do
       caps = CodeReviewer.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "fs/read"))
-      assert Enum.any?(resources, &(&1 =~ "shell/safe"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 

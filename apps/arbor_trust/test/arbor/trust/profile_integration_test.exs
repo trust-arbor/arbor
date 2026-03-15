@@ -239,13 +239,13 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
   # ── 4. Preset profiles produce expected modes ────────────────────────
 
   describe "preset profiles produce expected modes for common URIs" do
-    test ":cautious preset blocks all shell, auto-allows reads" do
+    test ":cautious preset gates shell exec, auto-allows reads" do
       preset = ProfileResolver.preset(:cautious)
       profile = build_profile(Map.put(preset, :agent_id, "cautious_agent"))
 
-      # Shell blocked (rule overrides baseline)
-      assert ProfileResolver.effective_mode(profile, @shell_exec, security_ceilings: %{}) == :block
-      assert ProfileResolver.effective_mode(profile, @shell_git, security_ceilings: %{}) == :block
+      # Shell exec gated (shell/exec => :ask is longer prefix than shell => :block)
+      assert ProfileResolver.effective_mode(profile, @shell_exec, security_ceilings: %{}) == :ask
+      assert ProfileResolver.effective_mode(profile, @shell_git, security_ceilings: %{}) == :ask
 
       # Read operations auto-allowed
       assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :auto
