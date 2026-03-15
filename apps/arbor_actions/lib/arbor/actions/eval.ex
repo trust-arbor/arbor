@@ -320,7 +320,7 @@ defmodule Arbor.Actions.Eval do
         end
 
       true ->
-        {:error, :code_or_file_required}
+        {:error, "Either 'code' or 'file' parameter is required."}
     end
   end
 
@@ -335,10 +335,11 @@ defmodule Arbor.Actions.Eval do
           {:error, _} = error -> error
         end
       catch
-        :exit, reason -> {:error, {:eval_unavailable, reason}}
+        :exit, reason ->
+          {:error, "Eval system crashed: #{inspect(reason)}. It may need to be restarted."}
       end
     else
-      {:error, :eval_not_available}
+      {:error, "Eval system is not available. It may not be configured in this environment."}
     end
   end
 
@@ -348,10 +349,12 @@ defmodule Arbor.Actions.Eval do
       try do
         apply(@persistence_bridge, :list_runs, [filters])
       catch
-        :exit, reason -> {:error, {:persistence_unavailable, reason}}
+        :exit, reason ->
+          {:error,
+           "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
       end
     else
-      {:error, :eval_persistence_not_available}
+      {:error, "Eval persistence is not available. It may not be configured in this environment."}
     end
   end
 
@@ -361,10 +364,12 @@ defmodule Arbor.Actions.Eval do
       try do
         apply(@persistence_bridge, :get_run, [run_id])
       catch
-        :exit, reason -> {:error, {:persistence_unavailable, reason}}
+        :exit, reason ->
+          {:error,
+           "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
       end
     else
-      {:error, :eval_persistence_not_available}
+      {:error, "Eval persistence is not available. It may not be configured in this environment."}
     end
   end
 

@@ -92,7 +92,22 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               {:ok, format_result(result)}
 
             {:error, reason} ->
-              {:error, "Action #{name} failed: #{inspect(reason)}"}
+              msg =
+                case reason do
+                  :unauthorized ->
+                    "Action #{name} unauthorized. You may need additional permissions."
+
+                  {:unauthorized, detail} ->
+                    "Action #{name} unauthorized: #{detail}"
+
+                  reason when is_binary(reason) ->
+                    reason
+
+                  reason ->
+                    "Action #{name} failed: #{inspect(reason)}"
+                end
+
+              {:error, msg}
           end
       end
     end) || {:error, "Arbor.Actions not available"}
@@ -231,6 +246,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         # Shouldn't happen after approval, but handle gracefully
         {:error,
          "Action #{name} still requires approval after consensus granted it. This is a bug."}
+
+      {:error, reason} when is_binary(reason) ->
+        {:error, reason}
 
       {:error, reason} ->
         {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}

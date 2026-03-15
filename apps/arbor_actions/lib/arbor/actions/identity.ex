@@ -288,13 +288,20 @@ defmodule Arbor.Actions.Identity do
       end
     end
 
-    defp format_error(:cannot_sign_own_key), do: "Cannot sign your own public key"
-    defp format_error(:signer_not_found), do: "Signer identity not found in registry"
-    defp format_error(:not_found), do: "Target identity not found in registry"
+    defp format_error(:cannot_sign_own_key),
+      do: "Cannot sign your own public key. Provide a different agent's key to sign."
+
+    defp format_error(:signer_not_found), do: "Signing agent not found in the identity registry."
+
+    defp format_error(:not_found),
+      do:
+        "Target agent identity not found in the registry. Ensure the target agent has a registered identity."
 
     defp format_error(:signer_private_key_required),
-      do: "Signer's private key must be provided in execution context (:signer_private_key)"
+      do:
+        "Signer's private key is required for key signing operations. Provide it in the execution context via :signer_private_key."
 
+    defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Public key signing failed: #{inspect(reason)}"
   end
 end
