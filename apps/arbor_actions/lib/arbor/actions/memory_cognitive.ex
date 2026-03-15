@@ -73,9 +73,16 @@ defmodule Arbor.Actions.MemoryCognitive do
       else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, format_reason(reason)}
       end
     end
+
+    defp format_reason(reason) when is_binary(reason), do: reason
+
+    defp format_reason(reason) when is_atom(reason),
+      do: "Preference adjustment failed: #{reason}."
+
+    defp format_reason(reason), do: "Preference adjustment failed: #{inspect(reason)}"
   end
 
   # ============================================================================
@@ -126,15 +133,22 @@ defmodule Arbor.Actions.MemoryCognitive do
         Actions.emit_completed(__MODULE__, %{node_id: params.node_id})
         {:ok, %{node_id: params.node_id, pinned: true}}
       else
-        {:error, :max_pins_reached} = error ->
+        {:error, :max_pins_reached} ->
           Actions.emit_failed(__MODULE__, :max_pins_reached)
-          error
+
+          {:error,
+           "Maximum pins reached (limit 10). Unpin an existing memory first with memory_unpin."}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, format_reason(reason)}
       end
     end
+
+    defp format_reason(reason) when is_binary(reason), do: reason
+    defp format_reason(:not_found), do: "Memory node not found. Verify the node_id is correct."
+    defp format_reason(reason) when is_atom(reason), do: "Pin memory failed: #{reason}."
+    defp format_reason(reason), do: "Pin memory failed: #{inspect(reason)}"
   end
 
   # ============================================================================
@@ -181,8 +195,13 @@ defmodule Arbor.Actions.MemoryCognitive do
       else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, format_reason(reason)}
       end
     end
+
+    defp format_reason(reason) when is_binary(reason), do: reason
+    defp format_reason(:not_found), do: "Memory node not found. Verify the node_id is correct."
+    defp format_reason(reason) when is_atom(reason), do: "Unpin memory failed: #{reason}."
+    defp format_reason(reason), do: "Unpin memory failed: #{inspect(reason)}"
   end
 end

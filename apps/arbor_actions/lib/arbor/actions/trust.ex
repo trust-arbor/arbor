@@ -23,6 +23,15 @@ defmodule Arbor.Actions.Trust do
   The InterviewAgent template grants only these actions.
   """
 
+  @doc false
+  def format_reason(reason) when is_binary(reason), do: reason
+
+  def format_reason(:trust_unavailable),
+    do: "Trust system is not available. It may still be starting up — try again in a moment."
+
+  def format_reason(reason) when is_atom(reason), do: "#{reason}"
+  def format_reason(reason), do: inspect(reason)
+
   defmodule ReadProfile do
     @moduledoc """
     Read an agent's trust profile including baseline, rules, and tier.
@@ -67,8 +76,12 @@ defmodule Arbor.Actions.Trust do
         {:error, :not_found} ->
           {:error, "No trust profile found for agent #{agent_id}"}
 
+        {:error, :trust_unavailable} ->
+          {:error,
+           "Trust system is not available. It may still be starting up — try again in a moment."}
+
         {:error, reason} ->
-          {:error, "Failed to read trust profile: #{inspect(reason)}"}
+          {:error, "Failed to read trust profile: #{Arbor.Actions.Trust.format_reason(reason)}"}
       end
     end
 
@@ -314,17 +327,25 @@ defmodule Arbor.Actions.Trust do
              message: "Trust profile updated successfully."
            }}
 
+        {:error, :trust_unavailable} ->
+          {:error,
+           "Trust system is not available. It may still be starting up — try again in a moment."}
+
         {:error, reason} ->
-          {:error, "Failed to apply profile changes: #{inspect(reason)}"}
+          {:error,
+           "Failed to apply profile changes: #{Arbor.Actions.Trust.format_reason(reason)}"}
       end
     end
 
     defp update_trust_profile(agent_id, baseline, rules) do
       if Code.ensure_loaded?(Arbor.Trust.Store) and
            function_exported?(Arbor.Trust.Store, :update_profile, 2) do
-        Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-          %{profile | baseline: baseline, rules: rules}
-        end)
+        apply(Arbor.Trust.Store, :update_profile, [
+          agent_id,
+          fn profile ->
+            %{profile | baseline: baseline, rules: rules}
+          end
+        ])
       else
         {:error, :trust_unavailable}
       end
@@ -385,7 +406,8 @@ defmodule Arbor.Actions.Trust do
       else
         %{
           resource_uri: resource_uri,
-          error: :trust_unavailable,
+          error:
+            "Trust system is not available. It may still be starting up — try again in a moment.",
           effective_mode: :ask
         }
       end
@@ -489,8 +511,12 @@ defmodule Arbor.Actions.Trust do
 
           {:ok, %{agents: summaries, count: length(summaries)}}
 
+        {:error, :trust_unavailable} ->
+          {:error,
+           "Trust system is not available. It may still be starting up — try again in a moment."}
+
         {:error, reason} ->
-          {:error, "Failed to list agents: #{inspect(reason)}"}
+          {:error, "Failed to list agents: #{Arbor.Actions.Trust.format_reason(reason)}"}
       end
     end
 

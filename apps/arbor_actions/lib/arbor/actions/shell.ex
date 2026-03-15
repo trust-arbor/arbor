@@ -155,7 +155,9 @@ defmodule Arbor.Actions.Shell do
 
         {:error, :unauthorized} ->
           Actions.emit_failed(__MODULE__, :unauthorized)
-          {:error, "Unauthorized: shell execution denied by facade"}
+
+          {:error,
+           "Shell execution requires approval. The command will be submitted for user review. Try again and the user will be prompted to approve."}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -185,6 +187,13 @@ defmodule Arbor.Actions.Shell do
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"
     defp format_error({:dangerous_flags, flags}), do: "Dangerous flags blocked: #{inspect(flags)}"
+    defp format_error(:eacces), do: "Shell execution failed: permission denied."
+
+    defp format_error({:shell_metacharacters, chars}),
+      do:
+        "Shell metacharacters #{inspect(chars)} are not allowed. Use individual commands without chaining (no ;, &&, ||, |, etc.)."
+
+    defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Shell execution failed: #{inspect(reason)}"
   end
 
@@ -306,7 +315,9 @@ defmodule Arbor.Actions.Shell do
 
           {:error, :unauthorized} ->
             Actions.emit_failed(__MODULE__, :unauthorized)
-            {:error, "Unauthorized: shell execution denied by facade"}
+
+            {:error,
+             "Shell execution requires approval. The command will be submitted for user review. Try again and the user will be prompted to approve."}
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
@@ -364,6 +375,13 @@ defmodule Arbor.Actions.Shell do
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"
     defp format_error({:dangerous_flags, flags}), do: "Dangerous flags blocked: #{inspect(flags)}"
+    defp format_error(:eacces), do: "Script execution failed: permission denied."
+
+    defp format_error({:shell_metacharacters, chars}),
+      do:
+        "Shell metacharacters #{inspect(chars)} are not allowed. Use individual commands without chaining (no ;, &&, ||, |, etc.)."
+
+    defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Script execution failed: #{inspect(reason)}"
   end
 end

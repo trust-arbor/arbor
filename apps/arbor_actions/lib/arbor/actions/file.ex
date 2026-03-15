@@ -639,11 +639,20 @@ defmodule Arbor.Actions.File do
 
     defp read_file(path) do
       case File.read(path) do
-        {:ok, content} -> {:ok, content}
-        {:error, :enoent} -> {:error, "File not found: #{path}"}
-        {:error, :eacces} -> {:error, "Permission denied: #{path}"}
-        {:error, :eisdir} -> {:error, "Path is a directory: #{path}"}
-        {:error, reason} -> {:error, "Failed to read file: #{inspect(reason)}"}
+        {:ok, content} ->
+          {:ok, content}
+
+        {:error, :enoent} ->
+          {:error, "File not found: #{path}"}
+
+        {:error, :eacces} ->
+          {:error, "Permission denied: #{path}"}
+
+        {:error, :eisdir} ->
+          {:error, "Path is a directory: #{path}"}
+
+        {:error, reason} ->
+          {:error, "Failed to read file '#{path}': #{format_posix_error(reason)}"}
       end
     end
 
@@ -684,11 +693,20 @@ defmodule Arbor.Actions.File do
 
     defp write_file(path, content) do
       case File.write(path, content) do
-        :ok -> :ok
-        {:error, :eacces} -> {:error, "Permission denied: #{path}"}
-        {:error, :enospc} -> {:error, "No space left on device"}
-        {:error, :erofs} -> {:error, "Read-only file system"}
-        {:error, reason} -> {:error, "Failed to write file: #{inspect(reason)}"}
+        :ok ->
+          :ok
+
+        {:error, :eacces} ->
+          {:error, "Permission denied: #{path}"}
+
+        {:error, :enospc} ->
+          {:error, "No space left on device"}
+
+        {:error, :erofs} ->
+          {:error, "Read-only file system"}
+
+        {:error, reason} ->
+          {:error, "Failed to write file '#{path}': #{format_posix_error(reason)}"}
       end
     end
 
@@ -710,6 +728,14 @@ defmodule Arbor.Actions.File do
     end
 
     defp truncate(string, _max_len), do: string
+
+    defp format_posix_error(:enoent), do: "file not found"
+    defp format_posix_error(:eacces), do: "permission denied"
+    defp format_posix_error(:eisdir), do: "is a directory"
+    defp format_posix_error(:enospc), do: "no space left on device"
+    defp format_posix_error(:erofs), do: "read-only file system"
+    defp format_posix_error(:enomem), do: "not enough memory"
+    defp format_posix_error(reason), do: inspect(reason)
   end
 
   defmodule Search do

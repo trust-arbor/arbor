@@ -17,6 +17,14 @@ defmodule Arbor.Actions.Consensus do
   | `Decide` | Tally votes from parallel results into a CouncilDecision |
   """
 
+  @doc false
+  def format_reason(reason) when is_binary(reason), do: reason
+  def format_reason(:not_found), do: "Proposal not found. Verify the proposal_id is correct."
+  def format_reason(:timeout), do: "Operation timed out. Try again or increase the timeout."
+  def format_reason({:unauthorized, detail}), do: "Unauthorized: #{inspect(detail)}"
+  def format_reason(reason) when is_atom(reason), do: "#{reason}"
+  def format_reason(reason), do: inspect(reason)
+
   # ============================================================================
   # Propose
   # ============================================================================
@@ -68,16 +76,19 @@ defmodule Arbor.Actions.Consensus do
         {:ok, proposal_id} ->
           {:ok, %{proposal_id: to_string(proposal_id), status: "submitted"}}
 
-        {:error, {:unauthorized, _} = reason} ->
-          {:error, "consensus.propose unauthorized: #{inspect(reason)}"}
+        {:error, {:unauthorized, _}} ->
+          {:error,
+           "Consensus propose unauthorized. You may not have the required trust level for this operation."}
 
         {:error, reason} ->
-          {:error, "consensus.propose failed: #{inspect(reason)}"}
+          {:error, "Consensus propose failed: #{Arbor.Actions.Consensus.format_reason(reason)}"}
       end
     rescue
-      e -> {:error, "consensus.propose error: #{Exception.message(e)}"}
+      e -> {:error, "Consensus propose error: #{Exception.message(e)}"}
     catch
-      :exit, reason -> {:error, "consensus.propose unavailable: #{inspect(reason)}"}
+      :exit, _reason ->
+        {:error,
+         "Consensus system is not available. It may still be starting up — try again in a moment."}
     end
 
     defp build_opts(params) do
@@ -157,16 +168,19 @@ defmodule Arbor.Actions.Consensus do
              status: "decided"
            }}
 
-        {:error, {:unauthorized, _} = reason} ->
-          {:error, "consensus.ask unauthorized: #{inspect(reason)}"}
+        {:error, {:unauthorized, _}} ->
+          {:error,
+           "Consensus ask unauthorized. You may not have the required trust level for this operation."}
 
         {:error, reason} ->
-          {:error, "consensus.ask failed: #{inspect(reason)}"}
+          {:error, "Consensus ask failed: #{Arbor.Actions.Consensus.format_reason(reason)}"}
       end
     rescue
-      e -> {:error, "consensus.ask error: #{Exception.message(e)}"}
+      e -> {:error, "Consensus ask error: #{Exception.message(e)}"}
     catch
-      :exit, reason -> {:error, "consensus.ask unavailable: #{inspect(reason)}"}
+      :exit, _reason ->
+        {:error,
+         "Consensus system is not available. It may still be starting up — try again in a moment."}
     end
 
     defp extract_recommendation(%{recommendation: rec}), do: to_string(rec)
@@ -243,12 +257,14 @@ defmodule Arbor.Actions.Consensus do
           {:ok, %{status: "pending"}}
 
         {:error, reason} ->
-          {:error, "consensus.await failed: #{inspect(reason)}"}
+          {:error, "Consensus await failed: #{Arbor.Actions.Consensus.format_reason(reason)}"}
       end
     rescue
-      e -> {:error, "consensus.await error: #{Exception.message(e)}"}
+      e -> {:error, "Consensus await error: #{Exception.message(e)}"}
     catch
-      :exit, reason -> {:error, "consensus.await unavailable: #{inspect(reason)}"}
+      :exit, _reason ->
+        {:error,
+         "Consensus system is not available. It may still be starting up — try again in a moment."}
     end
 
     defp extract_recommendation(%{recommendation: rec}), do: to_string(rec)
@@ -290,12 +306,14 @@ defmodule Arbor.Actions.Consensus do
           {:ok, %{status: to_string(status)}}
 
         {:error, reason} ->
-          {:error, "consensus.check failed: #{inspect(reason)}"}
+          {:error, "Consensus check failed: #{Arbor.Actions.Consensus.format_reason(reason)}"}
       end
     rescue
-      e -> {:error, "consensus.check error: #{Exception.message(e)}"}
+      e -> {:error, "Consensus check error: #{Exception.message(e)}"}
     catch
-      :exit, reason -> {:error, "consensus.check unavailable: #{inspect(reason)}"}
+      :exit, _reason ->
+        {:error,
+         "Consensus system is not available. It may still be starting up — try again in a moment."}
     end
   end
 
@@ -381,7 +399,7 @@ defmodule Arbor.Actions.Consensus do
              }}
 
           {:error, reason} ->
-            {:error, "consensus.decide failed: #{inspect(reason)}"}
+            {:error, "Consensus decide failed: #{Arbor.Actions.Consensus.format_reason(reason)}"}
         end
       end
     end
