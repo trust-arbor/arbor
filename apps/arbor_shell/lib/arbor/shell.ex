@@ -498,7 +498,7 @@ defmodule Arbor.Shell do
   # Signal emission
 
   defp emit_started(command, execution_id, opts) do
-    Signals.emit(:shell, :command_started, %{
+    durable_shell_emit(:command_started, %{
       command: truncate_command(command),
       execution_id: execution_id,
       sandbox: Keyword.get(opts, :sandbox, @default_sandbox),
@@ -507,7 +507,7 @@ defmodule Arbor.Shell do
   end
 
   defp emit_completed(execution_id, result) do
-    Signals.emit(:shell, :command_completed, %{
+    durable_shell_emit(:command_completed, %{
       execution_id: execution_id,
       exit_code: result.exit_code,
       duration_ms: result.duration_ms,
@@ -516,17 +516,25 @@ defmodule Arbor.Shell do
   end
 
   defp emit_failed(execution_id, reason) do
-    Signals.emit(:shell, :command_failed, %{
+    durable_shell_emit(:command_failed, %{
       execution_id: execution_id,
       reason: inspect(reason)
     })
   end
 
   defp emit_blocked(command, reason) do
-    Signals.emit(:shell, :command_blocked, %{
+    durable_shell_emit(:command_blocked, %{
       command: truncate_command(command),
       reason: inspect(reason)
     })
+  end
+
+  defp durable_shell_emit(type, data) do
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:shell, type, data, stream_id: "shell:execution")
+    else
+      Signals.emit(:shell, type, data)
+    end
   end
 
   defp truncate_command(command) do

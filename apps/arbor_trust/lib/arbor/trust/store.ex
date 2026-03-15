@@ -827,10 +827,17 @@ defmodule Arbor.Trust.Store do
 
   defp emit_distributed_signal(type, agent_id) do
     if Code.ensure_loaded?(Arbor.Signals) do
-      Arbor.Signals.emit(:trust, type, %{
-        agent_id: agent_id,
-        origin_node: node()
-      }, scope: :cluster)
+      if function_exported?(Arbor.Signals, :durable_emit, 4) do
+        Arbor.Signals.durable_emit(:trust, type, %{
+          agent_id: agent_id,
+          origin_node: node()
+        }, stream_id: "trust:events")
+      else
+        Arbor.Signals.emit(:trust, type, %{
+          agent_id: agent_id,
+          origin_node: node()
+        }, scope: :cluster)
+      end
     end
 
     :ok
@@ -884,14 +891,24 @@ defmodule Arbor.Trust.Store do
       _ -> :ok
     end
 
-    # Signal for queryable history via Historian
-    Arbor.Signals.emit(:trust, :tier_changed, %{
-      agent_id: new_profile.agent_id,
-      old_tier: old_profile.tier,
-      new_tier: new_profile.tier,
-      old_score: old_profile.trust_score,
-      new_score: new_profile.trust_score
-    })
+    # Signal for queryable history via Historian (durable for audit trail)
+    if function_exported?(Arbor.Signals, :durable_emit, 4) do
+      Arbor.Signals.durable_emit(:trust, :tier_changed, %{
+        agent_id: new_profile.agent_id,
+        old_tier: old_profile.tier,
+        new_tier: new_profile.tier,
+        old_score: old_profile.trust_score,
+        new_score: new_profile.trust_score
+      }, stream_id: "trust:events")
+    else
+      Arbor.Signals.emit(:trust, :tier_changed, %{
+        agent_id: new_profile.agent_id,
+        old_tier: old_profile.tier,
+        new_tier: new_profile.tier,
+        old_score: old_profile.trust_score,
+        new_score: new_profile.trust_score
+      })
+    end
 
     Logger.info(
       "Trust tier changed for #{new_profile.agent_id}: #{old_profile.tier} -> #{new_profile.tier}",

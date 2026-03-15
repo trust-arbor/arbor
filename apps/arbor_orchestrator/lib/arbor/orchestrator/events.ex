@@ -42,11 +42,16 @@ defmodule Arbor.Orchestrator.Events do
     run_id = Keyword.get(opts, :run_id)
     stream_id = stream_id(run_id)
 
-    # Persist to EventLog
-    persist_event(stream_id, event_type, event, opts)
-
-    # Emit on signal bus
-    emit_signal(event_type, event)
+    if function_exported?(Arbor.Signals, :durable_emit, 4) do
+      # Use centralized durable_emit for signal bus + EventLog + Postgres
+      Arbor.Signals.durable_emit(:orchestrator, event_type, sanitize_data(event),
+        stream_id: stream_id
+      )
+    else
+      # Fallback: persist to EventLog + emit on signal bus separately
+      persist_event(stream_id, event_type, event, opts)
+      emit_signal(event_type, event)
+    end
 
     :ok
   end
