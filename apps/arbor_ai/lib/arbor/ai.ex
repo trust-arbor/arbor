@@ -51,6 +51,7 @@ defmodule Arbor.AI do
     Backends.TestEmbedding,
     BudgetTracker,
     Config,
+    LLMTrace,
     SessionReader,
     SystemPromptBuilder,
     ToolSignals,
@@ -126,15 +127,15 @@ defmodule Arbor.AI do
   @spec generate_text(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.AI.result()} | {:error, term()}
   def generate_text(prompt, opts \\ []) do
-    # SECURITY: Snapshot config at entry point to prevent TOCTOU race.
-    # Another process could change Application env between our read and use.
     opts = snapshot_config(opts)
-
     provider = Keyword.fetch!(opts, :provider)
-    Logger.debug("Arbor.AI generating with provider #{inspect(provider)}")
+    model = Keyword.fetch!(opts, :model)
+    agent_id = Keyword.get(opts, :agent_id)
 
-    # All providers (CLI + API) are handled by the orchestrator's UnifiedLLM layer.
-    UnifiedBridge.generate_text(prompt, opts)
+    trace = LLMTrace.start(:generate_text, provider, model, agent_id, prompt)
+    result = UnifiedBridge.generate_text(prompt, opts)
+    LLMTrace.finish(trace, result)
+    result
   end
 
   @doc """
@@ -217,6 +218,7 @@ defmodule Arbor.AI do
   defp generate_with_tool_loop(prompt, provider, model, opts) do
     agent_id = Keyword.get(opts, :agent_id)
 
+    trace = LLMTrace.start(:generate_with_tools, provider, model, agent_id, prompt)
     ToolSignals.emit_started(provider, model, String.length(prompt))
     start_time = System.monotonic_time(:millisecond)
 
@@ -280,13 +282,14 @@ defmodule Arbor.AI do
           ToolSignals.emit_completed(provider, model, duration_ms, result)
           ToolSignals.record_budget_usage(provider, opts, result)
           ToolSignals.record_usage_success(provider, opts, result, duration_ms)
+          LLMTrace.finish(trace, {:ok, result})
           {:ok, result}
 
         {:error, reason} ->
           duration_ms = System.monotonic_time(:millisecond) - start_time
           ToolSignals.emit_failed(provider, model, reason)
           ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
-          Logger.warning("Arbor.AI tool-calling generation failed: #{inspect(reason)}")
+          LLMTrace.finish(trace, {:error, reason})
           {:error, reason}
       end
     end
