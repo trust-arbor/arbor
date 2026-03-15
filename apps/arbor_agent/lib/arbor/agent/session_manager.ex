@@ -20,7 +20,6 @@ defmodule Arbor.Agent.SessionManager do
   require Logger
 
   @session_module Arbor.Orchestrator.Session
-  @adapters_module Arbor.Orchestrator.Session.Adapters
   @table __MODULE__
 
   # ── Public API ──────────────────────────────────────────────────
@@ -172,108 +171,9 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp build_session_opts(agent_id, opts) do
-    trust_tier = Keyword.get(opts, :trust_tier, :established)
-    adapters = build_adapters(agent_id, trust_tier, opts)
-
-    turn = turn_dot_path()
-    hb = Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path())
-
-    session_id = "agent-session-#{agent_id}"
-
-    # Build config map so the Session's turn/heartbeat builders can inject
-    # session.llm_provider and session.llm_model into engine context.
-    # Provider must be a string to match UnifiedLLM adapter keys.
-    provider = Keyword.get(opts, :provider)
-
-    # Convert tool modules to action name strings for the session config.
-    # Lifecycle passes module atoms (e.g. Arbor.Actions.File.Read);
-    # resolve_tools in LlmHandler expects action name strings.
-    tool_names =
-      case Keyword.get(opts, :tools) do
-        nil ->
-          nil
-
-        tools when is_list(tools) ->
-          Enum.map(tools, fn
-            mod when is_atom(mod) ->
-              if function_exported?(mod, :name, 0), do: mod.name(), else: inspect(mod)
-
-            name when is_binary(name) ->
-              name
-          end)
-      end
-
-    llm_config =
-      %{}
-      |> maybe_put_config("llm_provider", if(provider, do: to_string(provider)))
-      |> maybe_put_config("llm_model", Keyword.get(opts, :model))
-      |> maybe_put_config("system_prompt", Keyword.get(opts, :system_prompt))
-      |> maybe_put_config("tools", tool_names)
-
-    base = [
-      session_id: session_id,
-      agent_id: agent_id,
-      trust_tier: trust_tier,
-      adapters: adapters,
-      turn_dot: turn,
-      heartbeat_dot: hb,
-      start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
-      execution_mode: :session,
-      signer: Keyword.get(opts, :signer),
-      config: llm_config,
-      tenant_context: Keyword.get(opts, :tenant_context)
-    ]
-
-    # Add compactor config if context management is enabled
-    base =
-      case build_compactor_config(opts) do
-        nil -> base
-        config -> Keyword.put(base, :compactor, config)
-      end
-
-    # Load saved session entries for recovery (restores messages from Postgres)
-    # Falls back to checkpoint-based recovery if session store unavailable
-    case load_session_entries(session_id) do
-      {:ok, checkpoint} -> Keyword.put(base, :checkpoint, checkpoint)
-      :none -> load_checkpoint_fallback(base, session_id)
-    end
-  end
-
-  defp build_compactor_config(opts) do
-    context_management = Keyword.get(opts, :context_management, :full)
-
-    if context_management != :none do
-      compactor_module = Arbor.Agent.ContextCompactor
-
-      compactor_opts = [
-        effective_window: Keyword.get(opts, :effective_window, 75_000),
-        model: Keyword.get(opts, :model),
-        enable_llm_compaction: context_management == :full
-      ]
-
-      {compactor_module, compactor_opts}
-    end
-  end
-
-  defp maybe_put_config(map, _key, nil), do: map
-  defp maybe_put_config(map, key, value), do: Map.put(map, key, value)
-
-  defp build_adapters(agent_id, trust_tier, opts) do
-    if Code.ensure_loaded?(@adapters_module) do
-      apply(@adapters_module, :build, [
-        [
-          agent_id: agent_id,
-          trust_tier: trust_tier,
-          llm_provider: Keyword.get(opts, :provider),
-          llm_model: Keyword.get(opts, :model),
-          system_prompt: Keyword.get(opts, :system_prompt),
-          tools: Keyword.get(opts, :tools, []),
-          signer: Keyword.get(opts, :signer)
-        ]
-      ])
-    else
-      %{}
-    end
+    # Use shared SessionConfig builder — single source of truth
+    # SessionManager adds session recovery for persistent sessions
+    Arbor.Agent.SessionConfig.build(agent_id, Keyword.put(opts, :recover_session, true))
   end
 
   defp do_stop_session(agent_id, state) do
@@ -363,101 +263,6 @@ defmodule Arbor.Agent.SessionManager do
 
   @session_store Arbor.Persistence.SessionStore
 
-  defp load_session_entries(session_id) do
-    if session_store_available?() do
-      case apply(@session_store, :get_session, [session_id]) do
-        {:ok, session} -> build_checkpoint_from_entries(session)
-        {:error, _} -> :none
-      end
-    else
-      :none
-    end
-  rescue
-    _ -> :none
-  catch
-    :exit, _ -> :none
-  end
-
-  defp build_checkpoint_from_entries(session) do
-    entries =
-      apply(@session_store, :load_entries, [
-        session.id,
-        [entry_types: ["user", "assistant"]]
-      ])
-
-    if entries != [] do
-      messages =
-        entries_to_messages(entries)
-        |> Enum.reject(fn msg ->
-          # Filter out empty assistant messages that pollute the context
-          msg["role"] == "assistant" and String.trim(msg["content"] || "") == ""
-        end)
-
-      user_count = Enum.count(entries, fn e -> e.role == "user" end)
-      {:ok, %{"messages" => messages, "turn_count" => user_count}}
-    else
-      :none
-    end
-  end
-
-  defp entries_to_messages(entries) do
-    Enum.map(entries, fn entry ->
-      content =
-        case entry.content do
-          items when is_list(items) ->
-            # Extract text from content array
-            items
-            |> Enum.filter(fn item -> item["type"] == "text" end)
-            |> Enum.map_join("\n", fn item -> item["text"] || "" end)
-
-          text when is_binary(text) ->
-            text
-
-          _ ->
-            ""
-        end
-
-      %{
-        "role" => entry.role || entry.entry_type,
-        "content" => content,
-        "timestamp" => format_timestamp(entry.timestamp)
-      }
-    end)
-  end
-
-  defp format_timestamp(nil), do: nil
-  defp format_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-
-  defp load_checkpoint_fallback(base, session_id) do
-    case load_checkpoint(session_id) do
-      nil -> base
-      checkpoint -> Keyword.put(base, :checkpoint, checkpoint)
-    end
-  end
-
-  defp load_checkpoint(session_id) do
-    checkpoint_mod = Arbor.Persistence.Checkpoint
-
-    if Code.ensure_loaded?(checkpoint_mod) and
-         function_exported?(checkpoint_mod, :load, 2) do
-      store =
-        Application.get_env(
-          :arbor_persistence,
-          :checkpoint_store,
-          Arbor.Persistence.Checkpoint.Store.ETS
-        )
-
-      case apply(checkpoint_mod, :load, [session_id, store]) do
-        {:ok, checkpoint} when is_map(checkpoint) -> checkpoint
-        _ -> nil
-      end
-    end
-  rescue
-    _ -> nil
-  catch
-    :exit, _ -> nil
-  end
-
   defp ensure_persistent_session(agent_id, opts) do
     if session_store_available?() do
       session_id = "agent-session-#{agent_id}"
@@ -501,56 +306,6 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   defp orchestrator_available? do
-    # Session.Adapters was replaced by Jido actions (2026-02-25 extraction).
-    # Only Session module is required for orchestrator availability.
     Code.ensure_loaded?(@session_module)
-  end
-
-  defp turn_dot_path do
-    Application.get_env(:arbor_agent, :session_turn_dot, default_turn_dot())
-  end
-
-  defp heartbeat_dot_path do
-    Application.get_env(:arbor_agent, :session_heartbeat_dot, default_heartbeat_dot())
-  end
-
-  defp default_turn_dot do
-    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "turn.dot"])
-  end
-
-  defp default_heartbeat_dot do
-    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "heartbeat.dot"])
-  end
-
-  defp orchestrator_app_dir do
-    # In an umbrella, specs/ lives in the source tree (not _build).
-    # Try multiple resolution strategies since CWD varies:
-    # - From umbrella root: CWD = /umbrella/
-    # - From app tests: CWD = /umbrella/apps/arbor_orchestrator/
-    # - In release mode: specs must be in priv/
-    cwd = File.cwd!()
-
-    candidates = [
-      # Direct: CWD is umbrella root
-      Path.join([cwd, "apps", "arbor_orchestrator"]),
-      # Sibling: CWD is an app dir (e.g., apps/arbor_orchestrator or apps/arbor_agent)
-      Path.join([cwd, "..", "arbor_orchestrator"]) |> Path.expand(),
-      # Self: CWD IS the orchestrator dir
-      cwd
-    ]
-
-    case Enum.find(candidates, fn path ->
-           File.dir?(path) and File.exists?(Path.join(path, "specs"))
-         end) do
-      nil ->
-        # Fallback for release mode
-        case :code.priv_dir(:arbor_orchestrator) do
-          {:error, _} -> List.first(candidates)
-          priv_dir -> Path.dirname(to_string(priv_dir))
-        end
-
-      path ->
-        path
-    end
   end
 end

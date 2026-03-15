@@ -34,6 +34,7 @@ defmodule Arbor.Agent.Lifecycle do
     Executor,
     Profile,
     ProfileStore,
+    SessionConfig,
     SessionManager,
     TemplateStore
   }
@@ -321,7 +322,6 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # Build session opts for the BranchSupervisor (or nil to skip session).
-  # This replaces the old maybe_start_session + SessionManager.ensure_session flow.
   defp build_branch_session_opts(agent_id, profile, opts) do
     mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
 
@@ -352,88 +352,10 @@ defmodule Arbor.Agent.Lifecycle do
 
       session_opts = merge_template_opts(session_opts, template_meta, opts)
 
-      # Build the full session init opts (same as SessionManager.build_session_opts)
-      build_session_init_opts(agent_id, session_opts)
+      # Single shared builder for session init opts
+      SessionConfig.build(agent_id, session_opts)
     else
       nil
-    end
-  end
-
-  # Build the keyword list that Session.init expects.
-  # Previously this was inside SessionManager.build_session_opts.
-  defp build_session_init_opts(agent_id, opts) do
-    trust_tier = Keyword.get(opts, :trust_tier, :established)
-    provider = Keyword.get(opts, :provider)
-
-    tool_names =
-      case Keyword.get(opts, :tools) do
-        nil -> nil
-        tools when is_list(tools) ->
-          Enum.map(tools, fn
-            mod when is_atom(mod) ->
-              if function_exported?(mod, :name, 0), do: mod.name(), else: inspect(mod)
-            name when is_binary(name) -> name
-          end)
-      end
-
-    llm_config =
-      %{}
-      |> maybe_put_config("llm_provider", if(provider, do: to_string(provider)))
-      |> maybe_put_config("llm_model", Keyword.get(opts, :model))
-      |> maybe_put_config("system_prompt", Keyword.get(opts, :system_prompt))
-      |> maybe_put_config("tools", tool_names)
-
-    [
-      session_id: "agent-session-#{agent_id}",
-      agent_id: agent_id,
-      trust_tier: trust_tier,
-      adapters: %{},
-      turn_dot: session_turn_dot_path(),
-      heartbeat_dot: Keyword.get(opts, :heartbeat_dot, session_heartbeat_dot_path()),
-      start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
-      execution_mode: :session,
-      signer: Keyword.get(opts, :signer),
-      config: llm_config,
-      tenant_context: Keyword.get(opts, :tenant_context)
-    ]
-  end
-
-  defp maybe_put_config(map, _key, nil), do: map
-  defp maybe_put_config(map, key, value), do: Map.put(map, key, value)
-
-  defp session_turn_dot_path do
-    Application.get_env(:arbor_ai, :session_turn_dot, default_turn_dot())
-  end
-
-  defp session_heartbeat_dot_path do
-    Application.get_env(:arbor_ai, :session_heartbeat_dot, default_heartbeat_dot())
-  end
-
-  defp default_turn_dot do
-    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "turn.dot"])
-  end
-
-  defp default_heartbeat_dot do
-    Path.join([orchestrator_app_dir(), "specs", "pipelines", "session", "heartbeat.dot"])
-  end
-
-  defp orchestrator_app_dir do
-    cwd = File.cwd!()
-    candidates = [
-      Path.join([cwd, "apps", "arbor_orchestrator"]),
-      Path.join([cwd, "..", "arbor_orchestrator"]) |> Path.expand(),
-      cwd
-    ]
-
-    case Enum.find(candidates, fn path ->
-           File.dir?(path) and File.exists?(Path.join(path, "specs"))
-         end) do
-      nil ->
-        case :code.priv_dir(:arbor_orchestrator) do
-          {:error, _} -> List.first(candidates)
-          priv_dir -> Path.dirname(to_string(priv_dir))
-        end
-      path -> path
     end
   end
 
