@@ -148,11 +148,22 @@ defmodule Mix.Tasks.Arbor.Consult do
         opts
       end
 
-    # Start dependencies. Research mode needs the full agent system;
-    # standard mode only needs AI backends.
-    if opts[:research] do
-      ensure_full_deps()
+    # Try to connect to the running server for event persistence and agent access.
+    # Falls back to local execution if server isn't running.
+    server_node = try_connect_server()
+
+    if server_node do
+      Mix.shell().info("Connected to Arbor server (#{server_node})")
     else
+      if opts[:research] do
+        Mix.shell().error("""
+        Research mode requires the Arbor server to be running.
+        Start it with: mix arbor.start
+        """)
+
+        exit({:shutdown, 1})
+      end
+
       ensure_minimal_deps()
     end
 
@@ -162,7 +173,11 @@ defmodule Mix.Tasks.Arbor.Consult do
     save? = opts[:save] || false
 
     {results, mode} =
-      dispatch_consultation(opts, question, context, eval_opts, provider_model_display)
+      if server_node do
+        dispatch_via_server(server_node, opts, question, context, eval_opts, provider_model_display)
+      else
+        dispatch_consultation(opts, question, context, eval_opts, provider_model_display)
+      end
 
     if save? and results != :error do
       save_results(question, results, opts, provider_model_display, mode)
@@ -719,36 +734,118 @@ defmodule Mix.Tasks.Arbor.Consult do
     end
   end
 
-  # Research mode needs agent lifecycle, security, trust, memory, and orchestrator.
-  # We can't use app.start because it also starts gateway/dashboard which bind ports.
-  # Instead, start the specific apps needed for agent-based evaluation.
-  defp ensure_full_deps do
-    ensure_minimal_deps()
+  # ============================================================================
+  # Server Connection
+  # ============================================================================
 
-    # Start the apps needed for agent creation and execution, in dependency order.
-    # These are safe to start even if the server is already running — they use
-    # named GenServers that will return {:already_started, pid} if already up.
-    research_apps = [
-      :arbor_signals,
-      :arbor_persistence,
-      :arbor_persistence_ecto,
-      :arbor_security,
-      :arbor_historian,
-      :arbor_trust,
-      :arbor_memory,
-      :arbor_consensus,
-      :arbor_actions,
-      :arbor_agent,
-      :arbor_orchestrator
-    ]
+  @helpers Mix.Tasks.Arbor.Helpers
 
-    for app <- research_apps do
-      case Application.ensure_all_started(app) do
-        {:ok, _} -> :ok
-        {:error, {_app, {:already_started, _pid}}} -> :ok
-        {:error, reason} ->
-          Logger.debug("Council research: could not start #{app}: #{inspect(reason)}")
+  # Try to connect to the running Arbor server via distributed Erlang.
+  # Returns the server node name on success, nil if not running.
+  defp try_connect_server do
+    @helpers.ensure_distribution()
+
+    if @helpers.server_running?() do
+      @helpers.full_node_name()
+    else
+      nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Dispatch consultation via RPC to the running server.
+  # The server has all apps running — agents, sessions, historian, etc.
+  defp dispatch_via_server(node, opts, question, context, eval_opts, provider_model_display) do
+    if opts[:multi_model] do
+      perspective = parse_perspective(opts[:perspective] || "brainstorming")
+      {rpc_ask_multi_model(node, question, perspective, context, eval_opts), :multi_model}
+    else
+      if opts[:all] do
+        {rpc_ask_all(node, question, context, eval_opts, provider_model_display), :standard}
+      else
+        perspective = parse_perspective(opts[:perspective] || "brainstorming")
+        {rpc_ask_one(node, question, perspective, context, eval_opts, provider_model_display), :standard}
       end
+    end
+  end
+
+  defp rpc_ask_all(node, question, context, eval_opts, provider_model_display) do
+    count = length(@perspectives)
+    Mix.shell().info("Consulting all #{count} perspectives via server...\n")
+
+    case :rpc.call(node, Consult, :ask, [AdvisoryLLM, question, [context: context] ++ eval_opts], 600_000) do
+      {:ok, results} ->
+        {successes, failures} =
+          Enum.split_with(results, fn
+            {_, {:error, _}} -> false
+            _ -> true
+          end)
+
+        Enum.each(successes, fn {perspective, eval} ->
+          print_evaluation(perspective, eval, provider_model_display)
+        end)
+
+        Enum.each(failures, fn {perspective, {:error, reason}} ->
+          Mix.shell().error("=== #{perspective} === ERROR: #{inspect(reason)}\n")
+        end)
+
+        Mix.shell().info(
+          "--- Done: #{length(successes)}/#{count} perspectives responded" <>
+            if(failures != [], do: ", #{length(failures)} failed", else: "") <>
+            " ---"
+        )
+
+        successes
+
+      {:badrpc, reason} ->
+        Mix.shell().error("RPC failed: #{inspect(reason)}")
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp rpc_ask_one(node, question, perspective, context, eval_opts, provider_model_display) do
+    Mix.shell().info("Consulting :#{perspective} via server...\n")
+
+    case :rpc.call(node, Consult, :ask_one, [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts], 300_000) do
+      {:ok, eval} ->
+        print_evaluation(perspective, eval, provider_model_display)
+        [{perspective, eval}]
+
+      {:error, reason} ->
+        Mix.shell().error("Error: #{inspect(reason)}")
+        exit({:shutdown, 1})
+
+      {:badrpc, reason} ->
+        Mix.shell().error("RPC failed: #{inspect(reason)}")
+        exit({:shutdown, 1})
+    end
+  end
+
+  defp rpc_ask_multi_model(node, question, perspective, context, eval_opts) do
+    Mix.shell().info("Consulting :#{perspective} across all unique providers via server...\n")
+
+    case :rpc.call(node, Consult, :ask_multi_model, [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts], 300_000) do
+      {:ok, results} ->
+        {successes, failures} =
+          Enum.split_with(results, fn
+            {_, {:error, _}} -> false
+            _ -> true
+          end)
+
+        Enum.each(successes, fn {provider_model, eval} ->
+          print_multi_model_evaluation(perspective, provider_model, eval)
+        end)
+
+        Enum.each(failures, fn {provider_model, {:error, reason}} ->
+          Mix.shell().error("=== #{provider_model} === ERROR: #{inspect(reason)}\n")
+        end)
+
+        successes
+
+      {:badrpc, reason} ->
+        Mix.shell().error("RPC failed: #{inspect(reason)}")
+        exit({:shutdown, 1})
     end
   end
 end

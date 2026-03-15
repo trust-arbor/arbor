@@ -163,6 +163,32 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
   end
 
+  @doc """
+  Ensure the Arbor server is running and distribution is started.
+
+  Call this at the top of any mix task that needs the running server.
+  Returns the server node name for RPC calls. Exits with error if
+  the server isn't running.
+  """
+  def require_server! do
+    ensure_distribution()
+
+    unless server_running?() do
+      Mix.shell().error("""
+      Arbor server is not running. Start it first:
+
+          mix arbor.start
+
+      This task requires the running server for event persistence,
+      agent management, and security enforcement.
+      """)
+
+      exit({:shutdown, 1})
+    end
+
+    full_node_name()
+  end
+
   @doc "Makes an RPC call, raising on failure."
   def rpc!(node, mod, fun, args) do
     case :rpc.call(node, mod, fun, args) do
