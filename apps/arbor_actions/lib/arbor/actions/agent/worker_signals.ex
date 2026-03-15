@@ -23,10 +23,14 @@ defmodule Arbor.Actions.Agent.WorkerSignals do
 
   @signals_mod Arbor.Signals
 
-  @doc "Emit a worker lifecycle signal."
+  @doc "Emit a worker lifecycle signal (durable — persisted to Historian)."
   def emit(type, data) do
-    if Code.ensure_loaded?(@signals_mod) do
-      apply(@signals_mod, :emit, [:worker, type, data])
+    if Code.ensure_loaded?(@signals_mod) and function_exported?(@signals_mod, :durable_emit, 3) do
+      apply(@signals_mod, :durable_emit, [:worker, type, data])
+    else
+      if Code.ensure_loaded?(@signals_mod) do
+        apply(@signals_mod, :emit, [:worker, type, data])
+      end
     end
   rescue
     _ -> :ok

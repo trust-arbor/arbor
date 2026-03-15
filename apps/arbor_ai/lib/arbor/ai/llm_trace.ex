@@ -135,8 +135,12 @@ defmodule Arbor.AI.LLMTrace do
   # Emit to Historian via dual_emit pattern (ETS EventLog + Postgres).
   # Non-fatal — tracing never blocks or crashes the LLM call path.
   defp emit_event(type, data) do
-    if Code.ensure_loaded?(@signals_mod) do
-      apply(@signals_mod, :emit, [:llm, type, data])
+    if Code.ensure_loaded?(@signals_mod) and function_exported?(@signals_mod, :durable_emit, 3) do
+      apply(@signals_mod, :durable_emit, [:llm, type, data])
+    else
+      if Code.ensure_loaded?(@signals_mod) do
+        apply(@signals_mod, :emit, [:llm, type, data])
+      end
     end
   rescue
     _ -> :ok

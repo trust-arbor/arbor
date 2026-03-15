@@ -76,6 +76,70 @@ defmodule Arbor.Signals do
     do: emit_signal_for_category_and_type(category, type, data, opts)
 
   @doc """
+  Emit a durable signal — both signal bus AND Historian EventLog + Postgres.
+
+  Use this for events that must survive restarts and be queryable later:
+  LLM call traces, worker lifecycle, security audit events.
+
+  Same API as `emit/4` but additionally writes to the Historian's
+  EventLog (ETS) and Postgres (async). Best-effort: the signal always
+  emits even if persistence fails.
+  """
+  @spec durable_emit(atom(), atom(), map(), keyword()) :: :ok
+  def durable_emit(category, type, data, opts \\ []) do
+    # Signal bus (real-time)
+    emit(category, type, Map.put(data, :permanent, true), opts)
+
+    # EventLog + Postgres (durable)
+    persist_to_historian(category, type, data)
+
+    :ok
+  end
+
+  # Write to Historian's EventLog (ETS) + Postgres (async).
+  # Uses runtime bridges to avoid dependency cycles.
+  defp persist_to_historian(category, type, data) do
+    stream_id = "#{category}_events"
+    event_mod = Arbor.Persistence.Event
+    persistence_mod = Arbor.Persistence
+    event_log_name = Arbor.Historian.EventLog.ETS
+    event_log_backend = Arbor.Persistence.EventLog.ETS
+
+    if Code.ensure_loaded?(event_mod) do
+      event =
+        apply(event_mod, :new, [
+          stream_id,
+          to_string(type),
+          Map.put(data, :timestamp, DateTime.utc_now()),
+          [metadata: %{source_node: node()}]
+        ])
+
+      # ETS write (fast, in-memory)
+      if Process.whereis(event_log_name) and Code.ensure_loaded?(persistence_mod) do
+        apply(persistence_mod, :append, [event_log_name, event_log_backend, stream_id, event])
+      end
+
+      # Postgres write (durable, async)
+      postgres_mod = Arbor.Persistence.EventLog.Postgres
+      repo_mod = Arbor.Persistence.Repo
+
+      if Code.ensure_loaded?(postgres_mod) and Process.whereis(repo_mod) do
+        Task.start(fn ->
+          try do
+            apply(postgres_mod, :append, [stream_id, event])
+          rescue
+            _ -> :ok
+          end
+        end)
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Emit a signal with taint metadata attached.
 
   This is like `emit/4` but automatically adds taint tracking metadata to the signal.
