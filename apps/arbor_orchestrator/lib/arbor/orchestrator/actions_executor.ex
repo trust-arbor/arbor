@@ -63,7 +63,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             |> maybe_inject_workdir(workdir)
 
           # Sign with the canonical module-derived resource URI.
-          signed_request = signed_request || sign_for_module(signer, action_module)
+          # Params are passed so self-scoped URIs include the agent_id,
+          # matching what authorize_and_execute will verify.
+          signed_request = signed_request || sign_for_module(signer, action_module, params)
 
           context =
             if signed_request do
@@ -449,10 +451,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   def format_result(result), do: inspect(result, pretty: true)
 
   # Sign a tool call using the canonical module-derived resource URI.
-  defp sign_for_module(nil, _action_module), do: nil
+  # Params are included so self-scoped URIs (arbor://agent/profile/{id})
+  # match the URI that authorize_and_execute will verify against.
+  defp sign_for_module(nil, _action_module, _params), do: nil
 
-  defp sign_for_module(signer, action_module) when is_function(signer, 1) do
-    resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+  defp sign_for_module(signer, action_module, params) when is_function(signer, 1) do
+    resource = apply(@actions_mod, :canonical_uri_for, [action_module, params])
 
     case signer.(resource) do
       {:ok, signed_request} -> signed_request
@@ -460,7 +464,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  defp sign_for_module(_, _), do: nil
+  defp sign_for_module(_, _, _), do: nil
 
   # Runtime bridge — don't crash if arbor_actions isn't loaded
   @doc false
