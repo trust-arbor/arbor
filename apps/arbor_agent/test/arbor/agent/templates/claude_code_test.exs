@@ -62,15 +62,10 @@ defmodule Arbor.Agent.Templates.ClaudeCodeTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes broad access capabilities" do
+    test "includes orchestrator execute capability" do
       caps = ClaudeCode.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "orchestrator/execute"))
-      assert Enum.any?(resources, &(&1 =~ "fs/read"))
-      assert Enum.any?(resources, &(&1 =~ "fs/write"))
-      assert Enum.any?(resources, &(&1 =~ "memory"))
-      assert Enum.any?(resources, &(&1 =~ "shell"))
-      assert Enum.any?(resources, &(&1 =~ "arbor://ai/**"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 

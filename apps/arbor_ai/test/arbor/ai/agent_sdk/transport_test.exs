@@ -31,6 +31,7 @@ defmodule Arbor.AI.AgentSDK.TransportTest do
     done
     """
 
+    File.mkdir_p!(Path.dirname(@mock_cli_script))
     File.write!(@mock_cli_script, script)
     File.chmod!(@mock_cli_script, 0o755)
 

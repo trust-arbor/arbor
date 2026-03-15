@@ -76,27 +76,27 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizerTest do
   # Mock modules for testing
 
   defmodule MockSecurityAllows do
-    def authorize(_principal, _resource, _action), do: {:ok, :authorized}
+    def authorize(_principal, _resource, _action, _opts \\ []), do: {:ok, :authorized}
   end
 
   defmodule MockSecurityDenies do
-    def authorize(_principal, _resource, _action), do: {:error, :denied}
+    def authorize(_principal, _resource, _action, _opts \\ []), do: {:error, :denied}
   end
 
   defmodule MockSecurityCapture do
-    def authorize(principal, resource, action) do
+    def authorize(principal, resource, action, _opts \\ []) do
       send(self(), {:authorize_check, principal, resource, action})
       {:ok, :authorized}
     end
   end
 
   defmodule MockSecurityNoAuthorize do
-    # Intentionally does not implement authorize/3
+    # Intentionally does not implement authorize/4
     def some_other_function, do: :ok
   end
 
   defmodule MockSecurityRaises do
-    def authorize(_principal, _resource, _action) do
+    def authorize(_principal, _resource, _action, _opts \\ []) do
       raise "security module error"
     end
   end

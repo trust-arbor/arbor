@@ -69,18 +69,10 @@ defmodule Arbor.Agent.Templates.ResearcherTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes read-only file access and memory" do
+    test "includes orchestrator execute capability" do
       caps = Researcher.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "fs/read"))
-      assert Enum.any?(resources, &(&1 =~ "memory"))
-      assert Enum.any?(resources, &(&1 =~ "shell/safe"))
-    end
-
-    test "includes DOT pipeline capabilities" do
-      caps = Researcher.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "orchestrator"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 

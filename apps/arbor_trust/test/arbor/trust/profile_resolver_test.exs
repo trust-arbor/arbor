@@ -216,11 +216,12 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert preset.rules["arbor://fs/read"] == :auto
     end
 
-    test ":balanced allows file writes, asks for git" do
+    test ":balanced allows file writes, asks for shell exec" do
       preset = ProfileResolver.preset(:balanced)
       assert preset.baseline == :ask
       assert preset.rules["arbor://fs/write"] == :allow
-      assert preset.rules["arbor://shell/exec/git"] == :ask
+      # Shell exec covered by shell/exec => :ask (covers all exec subcommands)
+      assert preset.rules["arbor://shell/exec"] == :ask
     end
 
     test ":hands_off allows most, asks for shell and governance" do

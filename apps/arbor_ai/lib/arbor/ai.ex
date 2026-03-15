@@ -365,6 +365,12 @@ defmodule Arbor.AI do
       {:error, {:unknown_provider, _}} ->
         embed_via_legacy(text, opts)
 
+      {:error, {:bridge_exception, _}} ->
+        embed_via_legacy(text, opts)
+
+      {:error, {:bridge_exit, _}} ->
+        embed_via_legacy(text, opts)
+
       {:error, _} = error ->
         error
     end
@@ -402,6 +408,12 @@ defmodule Arbor.AI do
         embed_batch_via_legacy(texts, opts)
 
       {:error, {:unknown_provider, _}} ->
+        embed_batch_via_legacy(texts, opts)
+
+      {:error, {:bridge_exception, _}} ->
+        embed_batch_via_legacy(texts, opts)
+
+      {:error, {:bridge_exit, _}} ->
         embed_batch_via_legacy(texts, opts)
 
       {:error, _} = error ->

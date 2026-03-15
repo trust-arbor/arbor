@@ -122,22 +122,10 @@ defmodule Arbor.Agent.Templates.MonitorTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes monitor read access" do
+    test "includes orchestrator execute capability" do
       caps = Monitor.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "monitor"))
-    end
-
-    test "includes signal emit capability" do
-      caps = Monitor.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "signals/emit"))
-    end
-
-    test "includes signal subscribe capability" do
-      caps = Monitor.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "signals/subscribe"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 

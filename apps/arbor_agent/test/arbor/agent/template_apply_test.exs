@@ -14,7 +14,7 @@ defmodule Arbor.Agent.TemplateApplyTest do
       assert config[:character].name == "CLI Agent"
       assert config[:trust_tier] == :established
       assert length(config[:initial_goals]) == 3
-      assert length(config[:required_capabilities]) >= 5
+      assert length(config[:required_capabilities]) >= 1
 
       # Optional callbacks present on CliAgent
       assert is_binary(config[:nature])

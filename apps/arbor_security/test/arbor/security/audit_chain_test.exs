@@ -15,7 +15,8 @@ defmodule Arbor.Security.AuditChainTest do
 
   setup do
     # Start EventLog ETS backend for event queries
-    name = :security_events
+    # Must match @event_log_name in Events module (Arbor.Historian.EventLog.ETS)
+    name = Arbor.Historian.EventLog.ETS
     backend = Arbor.Persistence.EventLog.ETS
 
     case apply(backend, :start_link, [[name: name]]) do

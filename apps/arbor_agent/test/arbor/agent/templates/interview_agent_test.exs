@@ -89,27 +89,15 @@ defmodule Arbor.Agent.Templates.InterviewAgentTest do
   end
 
   describe "required_capabilities/0" do
-    test "has trust read and write capabilities" do
+    test "has single orchestrator capability" do
       caps = InterviewAgent.required_capabilities()
-      assert length(caps) == 2
+      assert length(caps) == 1
     end
 
-    test "all capabilities are trust facade URIs only" do
+    test "includes orchestrator execute capability" do
       caps = InterviewAgent.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-
-      Enum.each(resources, fn uri ->
-        assert uri =~ "arbor://trust/",
-               "Expected trust facade URI, got: #{uri}"
-      end)
-    end
-
-    test "includes trust read and trust write" do
-      caps = InterviewAgent.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      assert "arbor://trust/read" in resources
-      assert "arbor://trust/write" in resources
+      assert "arbor://orchestrator/execute" in resources
     end
 
     test "does NOT include shell, fs, network, or code capabilities" do
@@ -169,7 +157,7 @@ defmodule Arbor.Agent.Templates.InterviewAgentTest do
       assert %Character{} = config[:character]
       assert config[:trust_tier] == :trusted
       assert length(config[:initial_goals]) == 2
-      assert length(config[:required_capabilities]) == 2
+      assert length(config[:required_capabilities]) == 1
       assert config[:domain_context] =~ ":block"
       assert config[:description] =~ "trust"
       assert config[:nature] =~ "Relational"

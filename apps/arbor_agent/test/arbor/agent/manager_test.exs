@@ -514,50 +514,62 @@ defmodule Arbor.Agent.ManagerTest do
     test "dispatches to registered agent with :api backend" do
       agent_id = "chat-api-#{System.unique_integer([:positive])}"
 
-      {:ok, _pid} =
-        Arbor.Agent.Supervisor.start_child(
-          agent_id: agent_id,
-          module: FakeAgent,
-          start_opts: [],
-          metadata: %{backend: :api, model_config: %{backend: :api}}
-        )
+      # Start FakeAgent manually and register with host_pid in metadata
+      {:ok, pid} = FakeAgent.start_link([])
 
-      on_exit(fn -> cleanup_agent(agent_id) end)
+      Registry.register(agent_id, pid, %{
+        backend: :api,
+        model_config: %{backend: :api},
+        host_pid: pid,
+        module: FakeAgent
+      })
+
+      on_exit(fn ->
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
 
       # APIAgent.query sends {:query, input, opts} which FakeAgent handles
       result = Manager.chat("hello", "Tester", agent_id: agent_id)
       assert {:ok, "echo: hello"} = result
     end
 
-    test "dispatches to registered agent with nil backend returns :unknown_backend" do
+    test "dispatches to registered agent with nil backend defaults to API query" do
       agent_id = "chat-nil-#{System.unique_integer([:positive])}"
 
-      {:ok, _pid} =
-        Arbor.Agent.Supervisor.start_child(
-          agent_id: agent_id,
-          module: FakeAgent,
-          start_opts: [],
-          metadata: %{model_config: %{}}
-        )
+      {:ok, pid} = FakeAgent.start_link([])
 
-      on_exit(fn -> cleanup_agent(agent_id) end)
+      Registry.register(agent_id, pid, %{
+        model_config: %{},
+        host_pid: pid,
+        module: FakeAgent
+      })
 
+      on_exit(fn ->
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      # nil backend falls through to catch-all which uses APIAgent.query
       result = Manager.chat("hello", "User", agent_id: agent_id)
-      assert {:error, :unknown_backend} = result
+      assert {:ok, "echo: hello"} = result
     end
 
     test "infers :api backend for ACP provider" do
       agent_id = "chat-acp-#{System.unique_integer([:positive])}"
 
-      {:ok, _pid} =
-        Arbor.Agent.Supervisor.start_child(
-          agent_id: agent_id,
-          module: FakeAgent,
-          start_opts: [],
-          metadata: %{model_config: %{provider: :acp}}
-        )
+      {:ok, pid} = FakeAgent.start_link([])
 
-      on_exit(fn -> cleanup_agent(agent_id) end)
+      Registry.register(agent_id, pid, %{
+        model_config: %{provider: :acp},
+        host_pid: pid,
+        module: FakeAgent
+      })
+
+      on_exit(fn ->
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
 
       result = Manager.chat("hello", "User", agent_id: agent_id)
       # ACP → :api backend, which sends {:query, "hello", []} to FakeAgent

@@ -7,7 +7,8 @@ defmodule Arbor.Security.EventsTest do
   alias Arbor.Security.Events
 
   setup do
-    name = :security_events
+    # Must match @event_log_name in Events module (Arbor.Historian.EventLog.ETS)
+    name = Arbor.Historian.EventLog.ETS
     backend = Arbor.Persistence.EventLog.ETS
 
     case apply(backend, :start_link, [[name: name]]) do
@@ -150,7 +151,7 @@ defmodule Arbor.Security.EventsTest do
 
   describe "resilience" do
     test "dual_emit succeeds even without EventLog (signal still emits)" do
-      GenServer.stop(:security_events)
+      GenServer.stop(Arbor.Historian.EventLog.ETS)
       Process.sleep(50)
 
       assert :ok = Events.record_authorization_granted("agent_resilient", "arbor://test")

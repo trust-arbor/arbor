@@ -10,7 +10,7 @@ defmodule Arbor.Security.ApprovalGuardTest do
   # ===========================================================================
 
   describe "enabled?/0" do
-    test "disabled by default" do
+    test "disabled by default in test env" do
       refute ApprovalGuard.enabled?()
     end
 
@@ -21,7 +21,7 @@ defmodule Arbor.Security.ApprovalGuardTest do
         Application.put_env(:arbor_security, :approval_guard_enabled, true)
         assert ApprovalGuard.enabled?()
       after
-        if original do
+        if original != nil do
           Application.put_env(:arbor_security, :approval_guard_enabled, original)
         else
           Application.delete_env(:arbor_security, :approval_guard_enabled)
@@ -31,11 +31,10 @@ defmodule Arbor.Security.ApprovalGuardTest do
   end
 
   describe "check/3 when disabled" do
-    test "falls through to escalation (returns :ok for non-approval caps)" do
+    test "falls through (returns :ok when disabled)" do
       cap = make_capability("arbor://code/read/agent_test/file.ex")
 
-      # When disabled, delegates to Escalation which returns :ok
-      # if requires_approval is not set
+      # Test env has approval_guard_enabled: false, so it returns :ok
       assert :ok = ApprovalGuard.check(cap, "agent_test", "arbor://code/read/agent_test/file.ex")
     end
   end
@@ -71,13 +70,13 @@ defmodule Arbor.Security.ApprovalGuardTest do
       agent_id = "agent_guard_test_#{System.unique_integer([:positive])}"
 
       on_exit(fn ->
-        if original_guard do
+        if original_guard != nil do
           Application.put_env(:arbor_security, :approval_guard_enabled, original_guard)
         else
           Application.delete_env(:arbor_security, :approval_guard_enabled)
         end
 
-        if original_escalation do
+        if original_escalation != nil do
           Application.put_env(:arbor_security, :consensus_escalation_enabled, original_escalation)
         else
           Application.delete_env(:arbor_security, :consensus_escalation_enabled)
@@ -118,11 +117,12 @@ defmodule Arbor.Security.ApprovalGuardTest do
       assert :ok = ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
     end
 
-    test "denies shell exec for restricted agent", %{agent_id: agent_id} do
+    test "gates shell exec for restricted agent (cautious allows exec with approval)", %{agent_id: agent_id} do
       create_profile_at_tier(agent_id, :untrusted)
       cap = make_capability("arbor://shell/exec/ls")
 
-      assert {:error, :policy_denied} =
+      # Cautious preset: shell/exec => :ask (gated) -> delegates to escalation
+      assert {:error, :escalation_disabled} =
                ApprovalGuard.check(cap, agent_id, "arbor://shell/exec/ls")
     end
 
@@ -167,13 +167,13 @@ defmodule Arbor.Security.ApprovalGuardTest do
       agent_id = "agent_grad_test_#{System.unique_integer([:positive])}"
 
       on_exit(fn ->
-        if original_guard do
+        if original_guard != nil do
           Application.put_env(:arbor_security, :approval_guard_enabled, original_guard)
         else
           Application.delete_env(:arbor_security, :approval_guard_enabled)
         end
 
-        if original_escalation do
+        if original_escalation != nil do
           Application.put_env(:arbor_security, :consensus_escalation_enabled, original_escalation)
         else
           Application.delete_env(:arbor_security, :consensus_escalation_enabled)

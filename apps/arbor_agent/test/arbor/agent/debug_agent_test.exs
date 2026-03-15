@@ -27,57 +27,10 @@ defmodule Arbor.Agent.DiagnosticianTemplateTest do
       assert Enum.all?(goals, &Map.has_key?(&1, :description))
     end
 
-    test "required_capabilities include monitor facade URIs" do
+    test "required_capabilities include orchestrator execute" do
       caps = Diagnostician.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-
-      # Monitor read and remediate (facade URIs)
-      assert "arbor://monitor/read" in resources
-      assert "arbor://monitor/remediate" in resources
-    end
-
-    test "required_capabilities include remediation via monitor facade" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      # Remediation actions are covered by the monitor/remediate facade URI
-      assert "arbor://monitor/remediate" in resources
-    end
-
-    test "required_capabilities include fs facade URIs" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      assert "arbor://fs/read" in resources
-      assert "arbor://fs/write" in resources
-      assert "arbor://fs/list" in resources
-    end
-
-    test "required_capabilities include memory facade URIs" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      assert "arbor://memory/recall" in resources
-      assert "arbor://memory/add_knowledge" in resources
-      assert "arbor://memory/read" in resources
-      assert "arbor://memory/write" in resources
-    end
-
-    test "required_capabilities include comms facade URIs" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      assert "arbor://comms/send" in resources
-      assert "arbor://comms/poll" in resources
-    end
-
-    test "required_capabilities include governance and code facade URIs" do
-      caps = Diagnostician.required_capabilities()
-      resources = Enum.map(caps, & &1.resource)
-
-      assert "arbor://consensus/propose" in resources
-      assert "arbor://code/hot_load" in resources
-      assert "arbor://shell/exec" in resources
+      assert "arbor://orchestrator/execute" in resources
     end
 
     test "domain_context includes remediation playbook" do

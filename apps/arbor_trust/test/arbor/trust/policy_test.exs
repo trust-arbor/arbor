@@ -140,11 +140,11 @@ defmodule Arbor.Trust.PolicyTest do
              ) == :ask
     end
 
-    test "cautious preset blocks shell", %{agent_id: agent_id} do
+    test "cautious preset gates shell exec", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :cautious)
-      # Cautious preset: shell → :block, but security ceiling is :ask
-      # most_restrictive(:block, :ask) = :block
-      assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :block
+      # Cautious preset: shell/exec => :ask (longer prefix than shell => :block)
+      # security ceiling for shell is :ask, most_restrictive(:ask, :ask) = :ask
+      assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :ask
     end
 
     test "hands_off preset auto-approves writes", %{agent_id: agent_id} do
@@ -168,10 +168,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.allowed?(agent_id, "arbor://code/read/self/*")
     end
 
-    test "returns false when profile blocks", %{agent_id: agent_id} do
+    test "returns true for cautious shell exec (ask mode is allowed but gated)", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :cautious)
-      # Cautious blocks shell
-      refute Policy.allowed?(agent_id, "arbor://shell/exec/ls")
+      # Cautious: shell/exec => :ask (longest prefix match), which is allowed but gated
+      assert Policy.allowed?(agent_id, "arbor://shell/exec/ls")
     end
 
     test "returns true for ask mode (allowed but gated)", %{agent_id: agent_id} do
@@ -212,11 +212,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.requires_approval?(agent_id, "arbor://fs/write") == false
     end
 
-    test "returns error for :block mode", %{agent_id: agent_id} do
+    test "returns true for :ask mode on shell exec (cautious allows exec with approval)", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :cautious)
-      # cautious blocks shell
-      assert {:error, :denied} =
-               Policy.requires_approval?(agent_id, "arbor://shell/exec/rm")
+      # cautious: shell/exec => :ask (longest prefix), requires approval
+      assert Policy.requires_approval?(agent_id, "arbor://shell/exec/rm") == true
     end
   end
 
@@ -241,10 +240,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/anything") == :gated
     end
 
-    test "deny when profile blocks", %{agent_id: agent_id} do
+    test "gated when cautious profile asks for shell exec", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :cautious)
-      # Cautious blocks shell
-      assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :deny
+      # Cautious: shell/exec => :ask -> :gated
+      assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :gated
     end
 
     test "gated for unknown agent (fail closed)" do
@@ -413,10 +412,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :gated
     end
 
-    test "shell blocked at cautious preset", %{agent_id: agent_id} do
+    test "shell exec gated at cautious preset", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :cautious)
-      # Cautious blocks shell → :deny
-      assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :deny
+      # Cautious: shell/exec => :ask -> :gated
+      assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :gated
     end
 
     test "governance always gated even at full_trust", %{agent_id: agent_id} do

@@ -66,11 +66,10 @@ defmodule Arbor.Agent.Templates.ConversationalistTest do
   end
 
   describe "required_capabilities/0" do
-    test "includes memory and relationship capabilities" do
+    test "includes orchestrator execute capability" do
       caps = Conversationalist.required_capabilities()
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "memory"))
-      assert Enum.any?(resources, &(&1 =~ "persistence"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 

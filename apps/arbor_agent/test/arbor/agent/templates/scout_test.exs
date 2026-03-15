@@ -69,11 +69,10 @@ defmodule Arbor.Agent.Templates.ScoutTest do
   describe "required_capabilities/0" do
     test "has minimal capabilities" do
       caps = Scout.required_capabilities()
-      assert length(caps) == 2
+      assert length(caps) == 1
 
       resources = Enum.map(caps, & &1.resource)
-      assert Enum.any?(resources, &(&1 =~ "orchestrator/execute"))
-      assert Enum.any?(resources, &(&1 =~ "fs/read"))
+      assert "arbor://orchestrator/execute" in resources
     end
   end
 
