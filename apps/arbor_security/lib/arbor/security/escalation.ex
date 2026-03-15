@@ -105,6 +105,11 @@ defmodule Arbor.Security.Escalation do
       {:ok, proposal_id} ->
         {:ok, :pending_approval, proposal_id}
 
+      {:error, :duplicate_proposal} ->
+        # A proposal for this resource is already pending — reuse it
+        Logger.info("Escalation: reusing existing pending proposal for #{resource_uri}")
+        {:ok, :pending_approval, "existing"}
+
       {:error, reason} ->
         {:error, {:consensus_submission_failed, reason}}
     end
