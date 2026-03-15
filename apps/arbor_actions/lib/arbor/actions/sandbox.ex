@@ -177,7 +177,7 @@ defmodule Arbor.Actions.Sandbox do
          "Invalid sandbox level '#{inspect(level)}'. Valid levels: pure, limited, full, container"}
 
     defp call_create(agent_id, opts, context) do
-      if context[:facade_auth] do
+      if context[:agent_id] do
         Arbor.Sandbox.authorize_create(context[:agent_id], agent_id, opts)
       else
         Arbor.Sandbox.create(agent_id, opts)
@@ -232,7 +232,7 @@ defmodule Arbor.Actions.Sandbox do
       Actions.emit_started(__MODULE__, %{sandbox_id: sandbox_id})
 
       result =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.Sandbox.authorize_destroy(context[:agent_id], sandbox_id)
         else
           Arbor.Sandbox.destroy(sandbox_id)

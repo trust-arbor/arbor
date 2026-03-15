@@ -48,18 +48,18 @@ defmodule Arbor.Actions.File do
   end
 
   @doc """
-  Authorize a file operation via FileGuard when facade auth is active.
+  Authorize a file operation via Security.authorize + FileGuard.
 
-  When `context[:facade_auth]` is true, checks the agent's capabilities
-  for the given operation and path using `Arbor.Security.FileGuard`.
+  When an `agent_id` is in context, checks the agent's capabilities
+  and validates the path via FileGuard (integrated into Security.authorize).
   Returns `{:ok, resolved_path}` on success or `{:error, reason}` on denial.
 
-  When facade auth is not active (direct `run/2` calls), passes through.
+  When no agent_id (system-level calls), passes through.
   """
   @spec authorize_file_op(map(), String.t(), atom()) ::
           {:ok, String.t()} | {:error, term()}
   def authorize_file_op(context, path, operation) do
-    if context[:facade_auth] do
+    if context[:agent_id] do
       agent_id = context[:agent_id]
 
       if agent_id do

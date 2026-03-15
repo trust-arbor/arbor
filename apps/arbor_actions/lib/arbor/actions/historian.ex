@@ -121,7 +121,7 @@ defmodule Arbor.Actions.Historian do
       opts = build_opts(params)
 
       result =
-        if context[:facade_auth] do
+        if context[:agent_id] do
           Arbor.Historian.authorize_query(context[:agent_id], opts)
         else
           Arbor.Historian.query(opts)
