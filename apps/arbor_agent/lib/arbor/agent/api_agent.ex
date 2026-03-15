@@ -74,13 +74,13 @@ defmodule Arbor.Agent.APIAgent do
 
   ## Options
 
-  - `:timeout` - Response timeout in ms (default: 300_000)
+  - `:timeout` - Response timeout in ms (default: 600_000 / 10 minutes)
   - `:recall_memories` - Whether to recall memories (default: true)
   - `:index_response` - Whether to index response facts (default: true)
   """
   @spec query(t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def query(agent, prompt, opts \\ []) do
-    GenServer.call(agent, {:query, prompt, opts}, Keyword.get(opts, :timeout, 300_000))
+    GenServer.call(agent, {:query, prompt, opts}, Keyword.get(opts, :timeout, 600_000))
   end
 
   @doc "Get the agent's ID."
@@ -236,7 +236,7 @@ defmodule Arbor.Agent.APIAgent do
     {_enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
     recalled = if recall, do: recalled, else: []
 
-    case GenServer.call(session_pid, {:send_message, prompt}, 300_000) do
+    case GenServer.call(session_pid, {:send_message, prompt}, 600_000) do
       {:ok, raw_response} ->
         normalized = PipelineResponse.normalize(raw_response)
         text = normalized.content

@@ -40,7 +40,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
-  @default_max_turns 15
+  @default_max_turns 50
 
   @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do

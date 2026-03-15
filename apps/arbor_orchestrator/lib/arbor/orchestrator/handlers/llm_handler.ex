@@ -369,7 +369,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   defp call_llm_with_tools(client, request, node, context, on_stream, opts) do
     workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
-    max_turns = parse_int(Map.get(node.attrs, "max_turns"), 15)
+    max_turns = parse_int(Map.get(node.attrs, "max_turns"), 50)
 
     {tool_defs, executor} = resolve_tools(node, context, opts)
 
