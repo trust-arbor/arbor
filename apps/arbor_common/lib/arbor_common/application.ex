@@ -21,7 +21,12 @@ defmodule Arbor.Common.Application do
           Arbor.Common.ComputeRegistry,
           Arbor.Common.PipelineResolver,
           Arbor.Common.ActionRegistry,
-          {Arbor.Common.SkillLibrary, skill_dirs: [".arbor/skills"]}
+          {Arbor.Common.SkillLibrary, skill_dirs: [".arbor/skills"]},
+          {Arbor.Common.CapabilityIndex,
+           providers: [
+             Arbor.Common.CapabilityProviders.ActionProvider,
+             Arbor.Common.CapabilityProviders.SkillProvider
+           ]}
         ]
       else
         []

@@ -48,7 +48,7 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry, Server, Supervisor}
+  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry, Supervisor}
 
   require Logger
 
@@ -362,56 +362,54 @@ defmodule Arbor.Agent do
   """
   @spec run_action(String.t(), module() | {module(), map()}, timeout()) ::
           {:ok, any()} | {:error, any()}
-  def run_action(agent_id, action, timeout \\ 5000) do
-    with {:ok, pid} <- Registry.whereis(agent_id) do
-      Server.run_action(pid, action, timeout)
+  def run_action(agent_id, action, _timeout \\ 5000) do
+    # Route through APIAgent.execute_action if host is running
+    case Arbor.Agent.BranchSupervisor.child_pids(agent_id) do
+      %{host: pid} when is_pid(pid) ->
+        {action_module, params} =
+          case action do
+            {mod, p} -> {mod, p}
+            mod when is_atom(mod) -> {mod, %{}}
+          end
+
+        Arbor.Agent.APIAgent.execute_action(pid, action_module, params)
+
+      _ ->
+        {:error, :not_found}
     end
   end
 
   @doc """
   Get the current state of an agent.
 
-  ## Returns
-
-  - `{:ok, state_map}` on success
-  - `{:error, :not_found}` if agent is not running
+  Returns the agent's metadata from the registry.
   """
   @spec get_state(String.t()) :: {:ok, map()} | {:error, :not_found}
   def get_state(agent_id) do
-    with {:ok, pid} <- Registry.whereis(agent_id) do
-      Server.get_state(pid)
+    case Registry.lookup(agent_id) do
+      {:ok, entry} -> {:ok, entry.metadata}
+      {:error, :not_found} -> {:error, :not_found}
     end
   end
 
   @doc """
   Get metadata for a running agent.
-
-  ## Returns
-
-  - `{:ok, metadata_map}` on success
-  - `{:error, :not_found}` if agent is not running
   """
   @spec get_metadata(String.t()) :: {:ok, map()} | {:error, :not_found}
   def get_metadata(agent_id) do
-    with {:ok, pid} <- Registry.whereis(agent_id) do
-      {:ok, Server.get_metadata(pid)}
+    case Registry.lookup(agent_id) do
+      {:ok, entry} -> {:ok, entry.metadata}
+      {:error, :not_found} -> {:error, :not_found}
     end
   end
 
   @doc """
   Manually trigger a checkpoint save for an agent.
-
-  ## Returns
-
-  - `:ok` on success
-  - `{:error, :not_found}` if agent is not running
-  - `{:error, reason}` on save failure
   """
   @spec checkpoint(String.t()) :: :ok | {:error, term()}
-  def checkpoint(agent_id) do
-    with {:ok, pid} <- Registry.whereis(agent_id) do
-      Server.save_checkpoint(pid)
-    end
+  def checkpoint(_agent_id) do
+    # Checkpointing is now handled by Session persistence, not Agent.Server
+    :ok
   end
 
   @doc """
