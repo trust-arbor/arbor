@@ -212,9 +212,6 @@ defmodule Arbor.AI do
     ToolSignals.emit_started(provider, model, String.length(prompt))
     start_time = System.monotonic_time(:millisecond)
 
-    # Build model struct (bypasses LLMDB lookup, avoids base_url bug)
-    model_struct = build_model_spec(provider, model)
-
     # Build jido_ai tools map from Arbor.Actions
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     default_tools =
@@ -240,8 +237,11 @@ defmodule Arbor.AI do
           prompt
       end
 
+    # CallWithTools.resolve_model expects a string or atom, not a struct.
+    # Pass the model string directly — the struct is only needed for
+    # req_llm/LLMDB-based paths, not the Jido.AI action path.
     params = %{
-      model: model_struct,
+      model: model,
       prompt: prompt,
       system_prompt: system_prompt,
       max_tokens: Keyword.get(opts, :max_tokens, 16_384),
@@ -852,19 +852,6 @@ defmodule Arbor.AI do
     opts
     |> Keyword.put_new_lazy(:provider, fn -> Config.default_provider() end)
     |> Keyword.put_new_lazy(:model, fn -> Config.default_model() end)
-  end
-
-  defp build_model_spec(provider, model) do
-    # Build raw LLMDB.Model struct to bypass LLMDB lookup.
-    # This allows using models not yet in the database.
-    # Note: Map.put adds :base_url to work around req_llm accessing
-    # model.base_url even though LLMDB.Model doesn't define that field.
-    %LLMDB.Model{
-      provider: provider,
-      model: model,
-      id: model
-    }
-    |> Map.put(:base_url, nil)
   end
 
   # ===========================================================================

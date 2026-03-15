@@ -205,6 +205,99 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # ============================================================================
 
   defp do_evaluate(proposal, perspective, opts) do
+    if Keyword.get(opts, :research, false) and agent_system_available?() do
+      do_evaluate_with_agent(proposal, perspective, opts)
+    else
+      do_evaluate_one_shot(proposal, perspective, opts)
+    end
+  end
+
+  # Agent-based evaluation: creates/finds a persistent council agent for this
+  # perspective, then queries it. The agent has read-only research tools
+  # (file read, web search, historian) and can verify claims before responding.
+  defp do_evaluate_with_agent(proposal, perspective, opts) do
+    timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
+    evaluator_id = generate_evaluator_id(perspective)
+
+    system_prompt = load_system_prompt(perspective)
+    doc_paths = collect_doc_paths(proposal, perspective)
+    user_prompt = format_proposal(proposal, perspective, doc_paths)
+
+    {provider, model} = resolve_provider_model(perspective, opts)
+
+    Logger.info(
+      "Advisory LLM evaluating #{perspective} with research agent " <>
+        "(provider: #{provider}, model: #{model}, timeout: #{timeout}ms)"
+    )
+
+    agent_name = "council-#{perspective}"
+
+    case ensure_council_agent(agent_name, perspective, provider, model) do
+      {:ok, agent_id} ->
+        # Build the research prompt: system context + user question
+        research_prompt = """
+        #{system_prompt}
+
+        ---
+
+        #{user_prompt}
+
+        ---
+
+        IMPORTANT: Before responding, use your research tools to verify any claims you make.
+        Search the codebase for relevant code, check the Historian for past decisions,
+        and search the web if external context would help. Cite specific files and evidence.
+
+        Respond with valid JSON only:
+        {
+          "analysis": "your detailed analysis from this perspective",
+          "considerations": ["key points to think about"],
+          "alternatives": ["other approaches worth considering"],
+          "recommendation": "what this perspective suggests"
+        }
+        """
+
+        start_time = System.monotonic_time(:millisecond)
+
+        task = Task.async(fn ->
+          query_council_agent(agent_id, research_prompt, timeout)
+        end)
+
+        llm_meta = %{
+          provider: provider, model: model,
+          system_prompt: system_prompt, user_prompt: user_prompt,
+          research: true, agent_id: agent_id
+        }
+
+        case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+          {:ok, {:ok, %{text: response_text, usage: usage}}} ->
+            duration_ms = System.monotonic_time(:millisecond) - start_time
+            result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
+            llm_meta = Map.merge(llm_meta, %{
+              duration_ms: duration_ms,
+              raw_response: response_text,
+              usage: usage,
+              cost: Map.get(usage, :cost)
+            })
+            with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+            result
+
+          {:ok, {:error, reason}} ->
+            Logger.warning("Council agent #{agent_name} error: #{inspect(reason)}, falling back to one-shot")
+            do_evaluate_one_shot(proposal, perspective, opts)
+
+          nil ->
+            Logger.warning("Council agent #{agent_name} timed out, falling back to one-shot")
+            do_evaluate_one_shot(proposal, perspective, opts)
+        end
+
+      {:error, reason} ->
+        Logger.warning("Failed to ensure council agent for #{perspective}: #{inspect(reason)}, falling back to one-shot")
+        do_evaluate_one_shot(proposal, perspective, opts)
+    end
+  end
+
+  defp do_evaluate_one_shot(proposal, perspective, opts) do
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
     evaluator_id = generate_evaluator_id(perspective)
 
@@ -796,4 +889,184 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp generate_evaluator_id(perspective) do
     "advisory_llm_#{perspective}_" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
   end
+
+  # ============================================================================
+  # Council Agent Management (runtime bridge to arbor_agent)
+  # ============================================================================
+
+  @lifecycle_mod Arbor.Agent.Lifecycle
+  @manager_mod Arbor.Agent.Manager
+  @template_mod Arbor.Agent.Templates.CouncilEvaluator
+
+  @doc false
+  def agent_system_available? do
+    Code.ensure_loaded?(@lifecycle_mod) and
+      function_exported?(@lifecycle_mod, :create, 2) and
+      Code.ensure_loaded?(@manager_mod) and
+      function_exported?(@manager_mod, :chat, 3)
+  end
+
+  @doc """
+  Pre-create and start all council agents sequentially.
+
+  Call this before parallel evaluation to avoid SessionManager contention
+  when 13 agents try to create sessions simultaneously through a single GenServer.
+  """
+  def ensure_all_council_agents(opts \\ []) do
+    if agent_system_available?() do
+      Enum.each(@perspectives, fn perspective ->
+        agent_name = "council-#{perspective}"
+        {p, m} = resolve_provider_model(perspective, opts)
+        provider_atom = parse_provider_atom(p)
+
+        case find_council_agent(agent_name, provider_atom, m) do
+          {:ok, _} -> :ok
+          :not_found ->
+            case create_council_agent(agent_name, perspective, p, m) do
+              {:ok, _} -> Logger.info("Council agent ready: #{agent_name}")
+              {:error, reason} -> Logger.warning("Failed to prepare #{agent_name}: #{inspect(reason)}")
+            end
+        end
+      end)
+    end
+  end
+
+  # Ensure a persistent council agent exists for the given perspective.
+  # Creates the agent on first use via Lifecycle.create with the CouncilEvaluator template.
+  # Returns {:ok, agent_id} if the agent is running or was successfully started.
+  defp ensure_council_agent(agent_name, perspective, provider, model) do
+    provider_atom = parse_provider_atom(provider)
+
+    # Check if an agent with this name already exists
+    case find_council_agent(agent_name, provider_atom, model) do
+      {:ok, agent_id} ->
+        {:ok, agent_id}
+
+      :not_found ->
+        create_council_agent(agent_name, perspective, provider, model)
+    end
+  end
+
+  @api_agent_mod Arbor.Agent.APIAgent
+  @executor_registry Arbor.Agent.ExecutorRegistry
+
+  defp find_council_agent(agent_name, provider_atom, model) do
+    if function_exported?(@manager_mod, :find_agent_by_name, 1) do
+      case apply(@manager_mod, :find_agent_by_name, [agent_name]) do
+        {:ok, agent_id} ->
+          # Profile exists — check if APIAgent host is running
+          case Registry.lookup(@executor_registry, {:host, agent_id}) do
+            [{_pid, _}] ->
+              {:ok, agent_id}
+
+            [] ->
+              # Profile persisted but not running — start it
+              start_council_agent(agent_id, provider_atom, model)
+          end
+
+        _ ->
+          :not_found
+      end
+    else
+      :not_found
+    end
+  end
+
+  defp start_council_agent(agent_id, provider_atom, model) do
+    # Council agents need a session (for ToolLoop/tool execution) but
+    # don't need heartbeat (they're query-only, not autonomous).
+    # Use a longer session timeout since multiple agents may be creating
+    # sessions sequentially through the single SessionManager GenServer.
+    start_opts = [
+      provider: provider_atom,
+      model: model,
+      start_heartbeat: false,
+      session_timeout: 60_000
+    ]
+
+    case apply(@lifecycle_mod, :start, [agent_id, start_opts]) do
+      {:ok, _pid} -> {:ok, agent_id}
+      {:error, {:already_started, _pid}} -> {:ok, agent_id}
+      _ -> :not_found
+    end
+  end
+
+  defp create_council_agent(agent_name, perspective, provider, model) do
+    Logger.info("Creating council agent: #{agent_name} (#{perspective})")
+
+    provider_atom = parse_provider_atom(provider)
+
+    create_opts = [
+      template: @template_mod,
+      perspective: perspective,
+      model_config: %{
+        provider: provider_atom,
+        model: model,
+        backend: :api
+      }
+    ]
+
+    case apply(@lifecycle_mod, :create, [agent_name, create_opts]) do
+      {:ok, profile} ->
+        agent_id = profile.agent_id
+
+        # Start the agent with a session (for ToolLoop) but no heartbeat.
+        # Pass model explicitly so APIAgent uses the perspective's model.
+        start_opts = [
+          provider: provider_atom,
+          model: model,
+          start_heartbeat: false,
+          session_timeout: 60_000
+        ]
+
+        case apply(@lifecycle_mod, :start, [agent_id, start_opts]) do
+          {:ok, _pid} ->
+            {:ok, agent_id}
+
+          {:error, {:already_started, _pid}} ->
+            {:ok, agent_id}
+
+          {:error, reason} ->
+            {:error, {:start_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:create_failed, reason}}
+    end
+  end
+
+  # Query the council agent directly via APIAgent, bypassing Manager.chat
+  # which requires Agent.Registry registration. Council agents only have
+  # an APIAgent host (via ExecutorRegistry), no full registry entry.
+  # Returns {:ok, %{text: ..., usage: ...}} to preserve cost tracking data.
+  defp query_council_agent(agent_id, prompt, _timeout) do
+    case Registry.lookup(@executor_registry, {:host, agent_id}) do
+      [{pid, _}] ->
+        case apply(@api_agent_mod, :query, [pid, prompt]) do
+          {:ok, response} ->
+            text = response[:text] || Map.get(response, :text, "")
+            usage = response[:usage] || Map.get(response, :usage, %{})
+            {:ok, %{text: text, usage: usage}}
+
+          {:error, _} = error ->
+            error
+        end
+
+      [] ->
+        {:error, :agent_not_found}
+    end
+  end
+
+  @known_providers ~w(openrouter anthropic openai gemini ollama)a
+
+  defp parse_provider_atom(provider) when is_binary(provider) do
+    case Enum.find(@known_providers, fn p -> Atom.to_string(p) == provider end) do
+      nil -> String.to_existing_atom(provider)
+      atom -> atom
+    end
+  rescue
+    ArgumentError -> :openrouter
+  end
+
+  defp parse_provider_atom(provider) when is_atom(provider), do: provider
 end

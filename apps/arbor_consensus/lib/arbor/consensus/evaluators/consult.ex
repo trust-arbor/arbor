@@ -53,6 +53,14 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     context = Keyword.get(opts, :context, %{})
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
+    # Pre-create council agents sequentially when research mode is enabled.
+    # This avoids SessionManager contention when 13 agents try to create
+    # sessions simultaneously through a single GenServer.
+    if Keyword.get(opts, :research, false) and
+         function_exported?(evaluator_module, :ensure_all_council_agents, 1) do
+      evaluator_module.ensure_all_council_agents(opts)
+    end
+
     with {:ok, proposal} <- build_advisory_proposal(description, context) do
       perspectives = evaluator_module.perspectives()
 

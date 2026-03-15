@@ -453,6 +453,24 @@ defmodule Arbor.Agent.Manager do
   end
 
   @doc """
+  Find an agent by display name (searches persisted profiles).
+
+  Returns `{:ok, agent_id}` if a profile with that display_name exists,
+  or `:not_found`. The agent may or may not be running.
+  """
+  @spec find_agent_by_name(String.t()) :: {:ok, String.t()} | :not_found
+  def find_agent_by_name(display_name) when is_binary(display_name) do
+    profiles = Arbor.Agent.Lifecycle.list_agents()
+
+    case Enum.find(profiles, fn p -> p.display_name == display_name end) do
+      %{agent_id: agent_id} -> {:ok, agent_id}
+      nil -> :not_found
+    end
+  rescue
+    _ -> :not_found
+  end
+
+  @doc """
   Find the first running agent (any ID).
 
   Returns `{:ok, agent_id, pid, metadata}` or `:not_found`.

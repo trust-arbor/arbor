@@ -81,7 +81,7 @@ defmodule Arbor.Agent.Lifecycle do
 
       case persist_profile(profile) do
         :ok ->
-          ensure_trust_profile(agent_id)
+          ensure_trust_profile(agent_id, opts)
           emit_created_signal(profile)
           {:ok, profile}
 
@@ -307,7 +307,7 @@ defmodule Arbor.Agent.Lifecycle do
           trust_tier: profile.trust_tier,
           tools: tools,
           system_prompt: system_prompt,
-          start_heartbeat: true,
+          start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
           signer: signer
         )
 
@@ -489,6 +489,7 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put(:template, name)
               |> Keyword.put(:template_data, data)
+              |> Keyword.put_new(:template_module, template_mod)
 
             {:ok, character, opts}
 
@@ -937,14 +938,43 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # Create a trust profile for the agent if the Trust system is available.
-  # Uses the default preset which will be customized by the trust preset system later.
-  defp ensure_trust_profile(agent_id) do
+  # If the template module exports trust_preset/0, apply those rules after creation.
+  defp ensure_trust_profile(agent_id, opts) do
     trust = Arbor.Trust
 
     if Code.ensure_loaded?(trust) and function_exported?(trust, :create_trust_profile, 1) do
       case apply(trust, :get_trust_profile, [agent_id]) do
         {:ok, _} -> :ok
         {:error, :not_found} -> apply(trust, :create_trust_profile, [agent_id])
+      end
+
+      # Apply template-specific trust preset if available
+      apply_template_trust_preset(agent_id, opts)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # If the template module exports trust_preset/0, override the default trust profile
+  # with the template's custom rules. This allows templates like CouncilEvaluator
+  # to define restrictive read-only profiles.
+  defp apply_template_trust_preset(agent_id, opts) do
+    template_mod = Keyword.get(opts, :template_module)
+    store = Arbor.Trust.Store
+
+    if template_mod && Code.ensure_loaded?(template_mod) &&
+         function_exported?(template_mod, :trust_preset, 0) do
+      preset = template_mod.trust_preset()
+      baseline = Map.get(preset, :baseline, :block)
+      rules = Map.get(preset, :rules, %{})
+
+      if Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
+        apply(store, :update_profile, [
+          agent_id,
+          fn profile -> %{profile | baseline: baseline, rules: rules} end
+        ])
       end
     end
   rescue
