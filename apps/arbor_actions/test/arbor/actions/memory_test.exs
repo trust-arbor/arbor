@@ -2,11 +2,13 @@ defmodule Arbor.Actions.MemoryTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Actions.Memory
+  alias Arbor.Contracts.Security.Capability
 
   @moduletag :fast
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
 
     # Ensure ETS tables exist (test env uses start_children: false)
     for table <- [
@@ -36,6 +38,14 @@ defmodule Arbor.Actions.MemoryTest do
       Supervisor.start_child(Arbor.Memory.Supervisor, child)
     end
 
+    # Ensure CapabilityStore is running for authorization
+    if Process.whereis(Arbor.Security.Supervisor) do
+      Supervisor.start_child(Arbor.Security.Supervisor, Arbor.Security.CapabilityStore)
+    end
+
+    # Disable capability signing requirement for tests
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+
     :ok
   end
 
@@ -43,11 +53,38 @@ defmodule Arbor.Actions.MemoryTest do
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
     {:ok, _pid} = Arbor.Memory.init_for_agent(agent_id)
 
+    # Grant memory read/write capabilities for the test agent
+    grant_memory_capabilities(agent_id)
+
     on_exit(fn ->
       Arbor.Memory.cleanup_for_agent(agent_id)
     end)
 
     {:ok, agent_id: agent_id, context: %{agent_id: agent_id}}
+  end
+
+  defp grant_memory_capabilities(agent_id) do
+    for uri <- [
+          "arbor://memory/read/#{agent_id}",
+          "arbor://memory/write/#{agent_id}",
+          "arbor://memory/read",
+          "arbor://memory/write"
+        ] do
+      cap = %Capability{
+        id: "cap_test_#{agent_id}_#{URI.encode(uri)}",
+        resource_uri: uri,
+        principal_id: agent_id,
+        granted_at: DateTime.utc_now(),
+        expires_at: nil,
+        constraints: %{},
+        delegation_depth: 0,
+        metadata: %{test: true}
+      }
+
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        Arbor.Security.CapabilityStore.put(cap)
+      end
+    end
   end
 
   # ============================================================================
