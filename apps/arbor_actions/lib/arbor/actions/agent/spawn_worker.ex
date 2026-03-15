@@ -57,6 +57,8 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   require Logger
 
+  alias Arbor.Actions.Agent.WorkerSignals
+
   @lifecycle_mod Arbor.Agent.Lifecycle
   @api_agent_mod Arbor.Agent.APIAgent
   @resolver_mod Arbor.Common.CapabilityResolver
@@ -83,10 +85,13 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     with :ok <- check_depth(context),
          :ok <- check_resolver_available(),
          {:ok, scoped_rules} <- resolve_and_intersect(agent_id, capability_intents),
-         {:ok, worker_id, _worker_sup} <- create_worker(scoped_rules, params, context),
-         {:ok, report} <- query_worker(worker_id, task, params, timeout) do
+         {:ok, worker_id, _worker_sup, _tools} <- create_worker(scoped_rules, params, context),
+         :ok <- WorkerSignals.started(agent_id, worker_id, task),
+         {:ok, report} <- query_worker(worker_id, task, params, timeout, agent_id) do
+      WorkerSignals.completed(agent_id, worker_id, report)
+
       # Async cleanup — don't block the parent on teardown
-      cleanup_worker(worker_id)
+      cleanup_worker(worker_id, agent_id)
 
       Arbor.Actions.emit_completed(__MODULE__, %{
         worker_id: worker_id,
@@ -97,6 +102,7 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
       {:ok, format_report(report)}
     else
       {:error, reason} ->
+        WorkerSignals.failed(agent_id, nil, reason)
         Arbor.Actions.emit_failed(__MODULE__, %{reason: inspect(reason)})
         {:error, format_error(reason)}
     end
@@ -239,7 +245,8 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
         case apply(@lifecycle_mod, :start, [worker_id, start_opts]) do
           {:ok, sup_pid} ->
-            {:ok, worker_id, sup_pid}
+            WorkerSignals.spawned(parent_id, worker_id, Map.keys(scoped_rules), explicit_tools)
+            {:ok, worker_id, sup_pid, explicit_tools}
 
           {:error, reason} ->
             # Cleanup failed start
@@ -298,7 +305,7 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   # ── Query ────────────────────────────────────────────────────────
 
-  defp query_worker(worker_id, task, params, timeout) do
+  defp query_worker(worker_id, task, params, timeout, _parent_id) do
     max_tokens = params[:max_tokens] || 8000
 
     # Find the APIAgent host via ExecutorRegistry
@@ -349,11 +356,12 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   # ── Cleanup ──────────────────────────────────────────────────────
 
-  defp cleanup_worker(worker_id) do
+  defp cleanup_worker(worker_id, parent_id) do
     # Async cleanup — destroy the ephemeral agent without blocking the parent
     Task.start(fn ->
       try do
         apply(@lifecycle_mod, :destroy, [worker_id])
+        WorkerSignals.destroyed(parent_id, worker_id)
         Logger.debug("[SpawnWorker] Cleaned up worker #{worker_id}")
       rescue
         e -> Logger.warning("[SpawnWorker] Cleanup failed for #{worker_id}: #{Exception.message(e)}")
