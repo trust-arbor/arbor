@@ -7,7 +7,8 @@ defmodule Arbor.Dashboard.Router do
   def live_session_data(conn) do
     %{
       "agent_id" => Plug.Conn.get_session(conn, "agent_id"),
-      "user_display_name" => Plug.Conn.get_session(conn, "user_display_name")
+      "user_display_name" => Plug.Conn.get_session(conn, "user_display_name"),
+      "session_token" => Plug.Conn.get_session(conn, "session_token")
     }
   end
 

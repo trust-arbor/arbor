@@ -36,16 +36,31 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
   @default_security_module Arbor.Security
 
   @impl true
-  def authorize_subscription(principal_id, topic) do
+  def authorize_subscription(principal_id, topic, opts \\ []) do
     security_module = security_module()
     resource_uri = "arbor://signals/subscribe/#{topic}"
 
     if Code.ensure_loaded?(security_module) and
          function_exported?(security_module, :authorize, 4) do
-      # Human users are OIDC-authenticated, not crypto-signed — skip verification
-      opts = if String.starts_with?(to_string(principal_id), "human_"), do: [verify_identity: false], else: []
+      # Verify identity via session token (humans) or signed request (agents)
+      session_token = Keyword.get(opts, :session_token)
+      token_mod = Arbor.Security.SessionToken
 
-      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, opts]) do
+      auth_opts =
+        cond do
+          session_token && Code.ensure_loaded?(token_mod) ->
+            # Verify the session token proves this principal
+            case apply(token_mod, :verify, [session_token]) do
+              {:ok, ^principal_id} -> [verify_identity: false]
+              {:ok, _other} -> []
+              {:error, _} -> []
+            end
+
+          true ->
+            []
+        end
+
+      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, auth_opts]) do
         {:ok, :authorized} -> {:ok, :authorized}
         {:ok, :pending_approval, _} -> {:error, :pending_approval}
         {:error, _reason} -> {:error, :no_capability}
