@@ -337,12 +337,65 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
             {:error, {:worker_query_failed, reason}}
 
           nil ->
-            {:error, {:worker_timeout, timeout}}
+            # Timeout — try to salvage partial results from the session
+            duration_ms = System.monotonic_time(:millisecond) - start_time
+            partial = extract_partial_results(worker_id)
+
+            if partial != "" do
+              Logger.info("[SpawnWorker] Worker timed out after #{timeout}ms, returning partial results")
+
+              {:ok, %{
+                result: partial <> "\n\n[Worker timed out after #{div(timeout, 1000)}s — returning partial results]",
+                tool_calls: [],
+                usage: %{},
+                duration_ms: duration_ms,
+                worker_id: worker_id,
+                partial: true
+              }}
+            else
+              {:error, {:worker_timeout, timeout}}
+            end
         end
 
       [] ->
         {:error, :worker_host_not_found}
     end
+  end
+
+  # Try to extract partial results from a timed-out worker's session.
+  # The session stores assistant messages from completed tool rounds.
+  @branch_sup Arbor.Agent.BranchSupervisor
+
+  defp extract_partial_results(worker_id) do
+    if Code.ensure_loaded?(@branch_sup) do
+      case apply(@branch_sup, :child_pids, [worker_id]) do
+        %{session: session_pid} when is_pid(session_pid) and node(session_pid) == node() ->
+          try do
+            state = GenServer.call(session_pid, :get_state, 5_000)
+            messages = Map.get(state, :messages, [])
+
+            # Extract assistant messages (the worker's intermediate responses)
+            messages
+            |> Enum.filter(fn msg ->
+              Map.get(msg, :role) == :assistant or Map.get(msg, "role") == "assistant"
+            end)
+            |> Enum.map(fn msg ->
+              Map.get(msg, :content) || Map.get(msg, "content") || ""
+            end)
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join("\n\n")
+          catch
+            :exit, _ -> ""
+          end
+
+        _ ->
+          ""
+      end
+    else
+      ""
+    end
+  rescue
+    _ -> ""
   end
 
   defp normalize_tool_calls(calls) when is_list(calls) do
