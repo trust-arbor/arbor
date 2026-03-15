@@ -454,7 +454,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   rescue
     e ->
-      Logger.warning("ActionsExecutor: #{inspect(e)}")
+      Logger.warning(
+        "ActionsExecutor: #{Exception.message(e)}\n  #{Exception.format_stacktrace(__STACKTRACE__) |> String.slice(0..500)}"
+      )
+
       nil
   end
 end
