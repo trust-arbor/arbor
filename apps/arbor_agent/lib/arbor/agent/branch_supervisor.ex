@@ -63,7 +63,11 @@ defmodule Arbor.Agent.BranchSupervisor do
 
   Returns a map with keys :host, :executor, :session (session may be nil).
   """
-  @spec child_pids(String.t()) :: %{host: pid() | nil, executor: pid() | nil, session: pid() | nil}
+  @spec child_pids(String.t()) :: %{
+          host: pid() | nil,
+          executor: pid() | nil,
+          session: pid() | nil
+        }
   def child_pids(agent_id) do
     case whereis(agent_id) do
       nil ->
