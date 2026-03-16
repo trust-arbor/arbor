@@ -244,17 +244,21 @@ defmodule Arbor.AI do
       # Build messages
       messages =
         case system_prompt do
-          nil -> [apply(message_mod, :new, [:user, prompt])]
-          sys -> [apply(message_mod, :new, [:system, sys]), apply(message_mod, :new, [:user, prompt])]
+          nil ->
+            [apply(message_mod, :new, [:user, prompt])]
+
+          sys ->
+            [apply(message_mod, :new, [:system, sys]), apply(message_mod, :new, [:user, prompt])]
         end
 
-      request = struct!(request_mod, %{
-        provider: to_string(provider),
-        model: model,
-        messages: messages,
-        max_tokens: Keyword.get(opts, :max_tokens, 16_384),
-        temperature: Keyword.get(opts, :temperature, 0.7)
-      })
+      request =
+        struct!(request_mod, %{
+          provider: to_string(provider),
+          model: model,
+          messages: messages,
+          max_tokens: Keyword.get(opts, :max_tokens, 16_384),
+          temperature: Keyword.get(opts, :temperature, 0.7)
+        })
 
       # ToolLoop options
       tool_loop_opts = [
@@ -268,6 +272,7 @@ defmodule Arbor.AI do
       case apply(tool_loop_mod, :run, [client, request, tool_loop_opts]) do
         {:ok, response} ->
           duration_ms = System.monotonic_time(:millisecond) - start_time
+
           result = %{
             text: response.content,
             thinking: nil,

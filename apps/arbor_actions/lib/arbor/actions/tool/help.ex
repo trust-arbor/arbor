@@ -22,7 +22,11 @@ defmodule Arbor.Actions.Tool.Help do
     category: "tool",
     tags: ["tool", "help", "documentation", "schema"],
     schema: [
-      tool_name: [type: :string, required: true, doc: "Tool name (e.g., 'file_read', 'shell_execute')"]
+      tool_name: [
+        type: :string,
+        required: true,
+        doc: "Tool name (e.g., 'file_read', 'shell_execute')"
+      ]
     ]
 
   require Logger
@@ -36,10 +40,11 @@ defmodule Arbor.Actions.Tool.Help do
         {:ok, format_help(tool_name, module, spec)}
 
       {:error, :not_found} ->
-        {:ok, %{
-          error: "Tool '#{tool_name}' not found.",
-          suggestion: "Use tool_find_tools to search for available tools."
-        }}
+        {:ok,
+         %{
+           error: "Tool '#{tool_name}' not found.",
+           suggestion: "Use tool_find_tools to search for available tools."
+         }}
     end
   end
 
@@ -49,10 +54,16 @@ defmodule Arbor.Actions.Tool.Help do
     if Code.ensure_loaded?(registry) and function_exported?(registry, :resolve_by_name, 1) do
       # Try canonical (dot) format first, then underscore
       case apply(registry, :resolve_by_name, [name]) do
-        {:ok, module} -> get_spec(module)
+        {:ok, module} ->
+          get_spec(module)
+
         {:error, _} ->
           # Try alternate format
-          alt = if String.contains?(name, "."), do: String.replace(name, ".", "_"), else: String.replace(name, "_", ".")
+          alt =
+            if String.contains?(name, "."),
+              do: String.replace(name, ".", "_"),
+              else: String.replace(name, "_", ".")
+
           case apply(registry, :resolve_by_name, [alt]) do
             {:ok, module} -> get_spec(module)
             {:error, _} -> {:error, :not_found}

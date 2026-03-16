@@ -68,8 +68,15 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   @max_spawn_depth 1
 
   def taint_roles do
-    %{task: :control, capabilities: :control, system_prompt: :control,
-      context: :data, max_tokens: :data, timeout: :data, max_turns: :data}
+    %{
+      task: :control,
+      capabilities: :control,
+      system_prompt: :control,
+      context: :data,
+      max_tokens: :data,
+      timeout: :data,
+      max_turns: :data
+    }
   end
 
   @impl true
@@ -250,7 +257,12 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
           {:error, reason} ->
             # Cleanup failed start
-            try do apply(@lifecycle_mod, :destroy, [worker_id]) rescue _ -> :ok end
+            try do
+              apply(@lifecycle_mod, :destroy, [worker_id])
+            rescue
+              _ -> :ok
+            end
+
             {:error, {:worker_start_failed, reason}}
         end
 
@@ -314,9 +326,10 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         start_time = System.monotonic_time(:millisecond)
 
         # Query with timeout
-        task_ref = Task.async(fn ->
-          apply(@api_agent_mod, :query, [pid, task, [max_tokens: max_tokens]])
-        end)
+        task_ref =
+          Task.async(fn ->
+            apply(@api_agent_mod, :query, [pid, task, [max_tokens: max_tokens]])
+          end)
 
         case Task.yield(task_ref, timeout) || Task.shutdown(task_ref, :brutal_kill) do
           {:ok, {:ok, response}} ->
@@ -325,13 +338,14 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
             usage = response[:usage] || Map.get(response, :usage, %{})
             tool_calls = response[:tool_calls] || Map.get(response, :tool_calls, [])
 
-            {:ok, %{
-              result: text,
-              tool_calls: normalize_tool_calls(tool_calls),
-              usage: usage,
-              duration_ms: duration_ms,
-              worker_id: worker_id
-            }}
+            {:ok,
+             %{
+               result: text,
+               tool_calls: normalize_tool_calls(tool_calls),
+               usage: usage,
+               duration_ms: duration_ms,
+               worker_id: worker_id
+             }}
 
           {:ok, {:error, reason}} ->
             {:error, {:worker_query_failed, reason}}
@@ -342,16 +356,21 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
             partial = extract_partial_results(worker_id)
 
             if partial != "" do
-              Logger.info("[SpawnWorker] Worker timed out after #{timeout}ms, returning partial results")
+              Logger.info(
+                "[SpawnWorker] Worker timed out after #{timeout}ms, returning partial results"
+              )
 
-              {:ok, %{
-                result: partial <> "\n\n[Worker timed out after #{div(timeout, 1000)}s — returning partial results]",
-                tool_calls: [],
-                usage: %{},
-                duration_ms: duration_ms,
-                worker_id: worker_id,
-                partial: true
-              }}
+              {:ok,
+               %{
+                 result:
+                   partial <>
+                     "\n\n[Worker timed out after #{div(timeout, 1000)}s — returning partial results]",
+                 tool_calls: [],
+                 usage: %{},
+                 duration_ms: duration_ms,
+                 worker_id: worker_id,
+                 partial: true
+               }}
             else
               {:error, {:worker_timeout, timeout}}
             end
@@ -400,11 +419,17 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   defp normalize_tool_calls(calls) when is_list(calls) do
     Enum.map(calls, fn
-      %{name: name} = call -> %{tool: name, args: Map.get(call, :args, %{})}
-      call when is_map(call) -> %{tool: Map.get(call, "name", "unknown"), args: Map.get(call, "args", %{})}
-      _ -> %{tool: "unknown", args: %{}}
+      %{name: name} = call ->
+        %{tool: name, args: Map.get(call, :args, %{})}
+
+      call when is_map(call) ->
+        %{tool: Map.get(call, "name", "unknown"), args: Map.get(call, "args", %{})}
+
+      _ ->
+        %{tool: "unknown", args: %{}}
     end)
   end
+
   defp normalize_tool_calls(_), do: []
 
   # ── Cleanup ──────────────────────────────────────────────────────
@@ -417,7 +442,8 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         WorkerSignals.destroyed(parent_id, worker_id)
         Logger.debug("[SpawnWorker] Cleaned up worker #{worker_id}")
       rescue
-        e -> Logger.warning("[SpawnWorker] Cleanup failed for #{worker_id}: #{Exception.message(e)}")
+        e ->
+          Logger.warning("[SpawnWorker] Cleanup failed for #{worker_id}: #{Exception.message(e)}")
       catch
         :exit, _ -> :ok
       end

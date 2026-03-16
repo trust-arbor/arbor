@@ -538,7 +538,6 @@ defmodule Arbor.Agent.Lifecycle do
     end)
   end
 
-
   defp resolve_template(opts) do
     case Keyword.get(opts, :template) do
       nil ->

@@ -141,8 +141,9 @@ defmodule Arbor.Actions do
       end
 
     case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      result when result == {:ok, :authorized} or
-                  (is_tuple(result) and elem(result, 0) == :ok and elem(result, 1) == :authorized) ->
+      result
+      when result == {:ok, :authorized} or
+             (is_tuple(result) and elem(result, 0) == :ok and elem(result, 1) == :authorized) ->
         # Authorized (with or without resolved file path)
         # Check taint before executing
         case TaintEnforcement.check(action_module, params, clean_context) do

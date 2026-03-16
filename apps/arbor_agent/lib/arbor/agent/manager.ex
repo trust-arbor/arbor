@@ -139,7 +139,9 @@ defmodule Arbor.Agent.Manager do
       # and registers in Agent.Registry
       start_opts =
         Keyword.merge(opts,
-          model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+          model:
+            model_config[:id] || model_config["id"] || model_config[:model] ||
+              model_config["model"],
           provider: model_config[:provider] || model_config["provider"],
           model_config: model_config
         )
@@ -183,7 +185,9 @@ defmodule Arbor.Agent.Manager do
       # Start via Lifecycle — creates BranchSupervisor with all sub-processes
       start_opts =
         Keyword.merge(opts,
-          model: model_config[:id] || model_config["id"] || model_config[:model] || model_config["model"],
+          model:
+            model_config[:id] || model_config["id"] || model_config[:model] ||
+              model_config["model"],
           provider: model_config[:provider] || model_config["provider"],
           model_config: model_config
         )
@@ -604,7 +608,6 @@ defmodule Arbor.Agent.Manager do
     }
   end
 
-
   defp default_display_name(%{name: name}) when is_binary(name), do: name
   defp default_display_name(%{id: id}) when is_binary(id), do: id
   defp default_display_name(%{id: id}) when is_atom(id), do: Atom.to_string(id)
@@ -715,10 +718,13 @@ defmodule Arbor.Agent.Manager do
 
     query_pid =
       cond do
-        host_pid && Process.alive?(host_pid) -> host_pid
+        host_pid && Process.alive?(host_pid) ->
+          host_pid
+
         # Fallback: look up via ExecutorRegistry (council agents, legacy)
         true ->
           agent_id = metadata[:agent_id]
+
           if agent_id do
             case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:host, agent_id}) do
               [{pid, _}] -> pid
@@ -792,5 +798,4 @@ defmodule Arbor.Agent.Manager do
   catch
     :exit, _ -> :ok
   end
-
 end
