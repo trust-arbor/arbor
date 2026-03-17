@@ -115,7 +115,7 @@ defmodule Arbor.Signals do
         ])
 
       # ETS write (fast, in-memory)
-      if Process.whereis(event_log_name) and Code.ensure_loaded?(persistence_mod) do
+      if Process.whereis(event_log_name) && Code.ensure_loaded?(persistence_mod) do
         apply(persistence_mod, :append, [event_log_name, event_log_backend, stream_id, event])
       end
 
@@ -123,7 +123,7 @@ defmodule Arbor.Signals do
       postgres_mod = Arbor.Persistence.EventLog.Postgres
       repo_mod = Arbor.Persistence.Repo
 
-      if Code.ensure_loaded?(postgres_mod) and Process.whereis(repo_mod) do
+      if Code.ensure_loaded?(postgres_mod) && Process.whereis(repo_mod) do
         Task.start(fn ->
           try do
             apply(postgres_mod, :append, [stream_id, event])

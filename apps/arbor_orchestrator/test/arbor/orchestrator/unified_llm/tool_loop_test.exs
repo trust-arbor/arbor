@@ -194,8 +194,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
       # Tool results are wrapped in <data_NONCE> tags for prompt injection defense.
       # The mock adapter echoes content verbatim, so tags appear in output.
-      assert result.text =~ ~r/File contains: <data_[0-9a-f]{16}>world<\/data_[0-9a-f]{16}>/
-      assert result.turns == 2
+      assert result.content =~ ~r/File contains: <data_[0-9a-f]{16}>world<\/data_[0-9a-f]{16}>/
+      assert result.tool_rounds == 2
       assert result.finish_reason == :stop
     end
 
@@ -210,8 +210,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
         )
 
       # Tool results are wrapped in <data_NONCE> tags for prompt injection defense.
-      assert result.text =~ ~r/Verified: <data_[0-9a-f]{16}>hello world<\/data_[0-9a-f]{16}>/
-      assert result.turns == 3
+      assert result.content =~ ~r/Verified: <data_[0-9a-f]{16}>hello world<\/data_[0-9a-f]{16}>/
+      assert result.tool_rounds == 3
 
       # Verify file was actually written
       assert File.read!(Path.join(tmp_dir, "output.txt")) == "hello world"
@@ -223,12 +223,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
       client = build_client(MaxTurnsAdapter)
 
-      {:error, {:max_turns_reached, 3, _usage}} =
+      {:ok, result} =
         ToolLoop.run(client, request("max_turns_test"),
           workdir: tmp_dir,
           max_turns: 3,
           tool_executor: MockTools
         )
+
+      assert result.finish_reason == :max_turns
     end
 
     test "no tool calls returns immediately" do
@@ -236,8 +238,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
       {:ok, result} = ToolLoop.run(client, request("no_tools_test"))
 
-      assert result.text == "Direct answer"
-      assert result.turns == 1
+      assert result.content == "Direct answer"
+      assert result.tool_rounds == 1
     end
 
     @tag :tmp_dir
