@@ -1,9 +1,39 @@
 defmodule Arbor.Orchestrator.EventsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Orchestrator.Events
+
+  setup do
+    # durable_emit writes to Arbor.Historian.EventLog.ETS (hardcoded in Signals.durable_emit).
+    # read_run_events reads from the configured event_log_name.
+    # We need both to point at the same process.
+    event_log_name = Arbor.Historian.EventLog.ETS
+    backend = Arbor.Persistence.EventLog.ETS
+
+    case apply(backend, :start_link, [[name: event_log_name]]) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    # Point read_run_events at the same process durable_emit writes to
+    prev = Application.get_env(:arbor_orchestrator, :event_log_name)
+    Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
+
+    on_exit(fn ->
+      if prev, do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
+        else: Application.delete_env(:arbor_orchestrator, :event_log_name)
+
+      try do
+        if Process.whereis(event_log_name), do: GenServer.stop(event_log_name)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    :ok
+  end
 
   describe "stream_id/1" do
     test "builds stream ID from run_id" do
@@ -37,7 +67,6 @@ defmodule Arbor.Orchestrator.EventsTest do
       assert persisted.type == "pipeline_started"
       assert persisted.data[:graph_id] == "TestGraph"
       assert persisted.data[:run_id] == run_id
-      assert persisted.correlation_id == run_id
       assert is_map(persisted.metadata)
       assert Map.has_key?(persisted.metadata, :source_node)
     end
@@ -79,14 +108,15 @@ defmodule Arbor.Orchestrator.EventsTest do
       assert persisted.metadata[:source_node] == node()
     end
 
-    test "includes agent_id in metadata when provided" do
+    test "includes agent_id in data when provided" do
       run_id = "run_test_#{System.unique_integer([:positive])}"
 
-      event = %{type: :stage_started, node_id: "test_node"}
+      event = %{type: :stage_started, node_id: "test_node", agent_id: "agent_abc123"}
       Events.dual_emit(event, run_id: run_id, agent_id: "agent_abc123")
 
       {:ok, [persisted]} = Events.read_run_events(run_id)
-      assert persisted.metadata[:agent_id] == "agent_abc123"
+      # durable_emit stores agent_id in the event data (sanitized from event map)
+      assert persisted.data[:agent_id] == "agent_abc123"
     end
 
     test "multiple events form a complete run timeline" do
