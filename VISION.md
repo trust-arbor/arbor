@@ -104,7 +104,7 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 ### A Distributed AI Agent Orchestration System
 - BEAM/OTP foundation for fault-tolerance and concurrency
 - Multi-agent coordination with diverse capabilities
-- Event-sourced state for complete history and recovery
+- Signal-based observability with durable event logging
 - Capability-based security with zero-trust architecture
 
 ### A Production-Ready Platform for AI Autonomy
@@ -129,32 +129,6 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 - **Not human gatekeeping** (consensus replaces approval loops)
 - **Not capability-first** (relationship comes first)
 - **Not fragile** (self-healing makes production stability achievable)
-
----
-
-## Current Phase (February 2026)
-
-### What's Working
-- Multi-Claude architecture (Mind/Hands with git worktree isolation)
-- Event sourcing with signal-based observability
-- Capability-based security kernel (audited against OpenClaw attack vectors)
-- Advisory consensus council (12 perspectives, 4 LLM providers, persistent evaluator agents)
-- SDLC pipeline (automated planning, expansion, Hand spawning, quality gates)
-- Signal integration for async human communication
-- Memory and journal continuity across sessions
-- Dashboard infrastructure (Phoenix LiveView on arbor_web foundation)
-
-### What's Next
-- Trust tiers with interview-first onboarding (conversation-based, not bundle selection)
-- Organic growth — agents propose and build code guided by the vision and consensus council, the human directs and prunes, shaping the system into something that represents both parties
-- Self-extending capabilities — agents that build their own tools when they need them
-
-### Current Focus
-Building trust as the 2026 theme:
-- Security hardening (capability enforcement at action boundaries)
-- Trust tiers (earned autonomy through demonstrated reliability)
-- Human-AI partnership tooling (advisory council, autonomous Hands)
-- Dashboard and observability (signals → visualization)
 
 ---
 
@@ -206,7 +180,7 @@ Building trust as the 2026 theme:
 
 ### Scope Constraints
 - Self-healing makes production viable from the start
-- Elixir ecosystem (Jido, Horde)
+- Elixir ecosystem (Jido, ExMCP)
 - Single maintainer sustainability (for now)
 
 ---
@@ -249,5 +223,5 @@ The philosophy wasn't designed top-down. It grew organically from asking the rig
 
 ---
 
-*Last updated: 2026-02-03*
+*Last updated: 2026-03-17*
 *Contributors: Hysun, Claude*
