@@ -25,7 +25,8 @@ defmodule Arbor.AI.AcpSession.Config do
     goose: %{command: ["goose", "--acp"]},
     copilot: %{command: ["github-copilot", "--acp"]},
     kiro: %{command: ["kiro", "--acp"]},
-    qwen_code: %{command: ["qwen-code", "--acp"]}
+    qwen_code: %{command: ["qwen-code", "--acp"]},
+    hermes: %{command: ["hermes", "acp"]}
   }
 
   @adapted_providers %{
