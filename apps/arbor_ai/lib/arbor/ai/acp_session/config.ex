@@ -38,6 +38,11 @@ defmodule Arbor.AI.AcpSession.Config do
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.Codex,
       adapter_opts: []
+    },
+    pi: %{
+      transport_mod: ExMCP.ACP.AdapterTransport,
+      adapter: ExMCP.ACP.Adapters.Pi,
+      adapter_opts: []
     }
   }
 
