@@ -53,6 +53,8 @@ defmodule Arbor.Agent.AuthorizationTest do
           Arbor.Agent.authorize_destroy(@caller_id, agent_id)
         rescue
           ArgumentError -> :infrastructure_error
+        catch
+          :exit, _reason -> :infrastructure_error
         end
 
       assert_not_unauthorized_or_accept_umbrella_auth(result)

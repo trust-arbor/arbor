@@ -61,6 +61,17 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       start_supervised!({EndpointRegistry, []})
     end
 
+    # In umbrella context, CapabilityStore may be running which causes
+    # authorize_and_execute to deny test agents lacking capabilities.
+    # Stop it so AgentEndpoint falls back to direct action execution.
+    if pid = Process.whereis(Arbor.Security.CapabilityStore) do
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
     :ok
   end
 

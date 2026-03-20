@@ -1,10 +1,11 @@
 defmodule Arbor.Agent.SimpleAgentTest do
   use ExUnit.Case, async: true
-  @moduletag :fast
 
   alias Arbor.Agent.SimpleAgent
 
   describe "run/2 defaults" do
+    @describetag :fast
+
     test "returns max_turns with default model" do
       {:ok, result} = SimpleAgent.run("test", max_turns: 0)
 
@@ -28,6 +29,8 @@ defmodule Arbor.Agent.SimpleAgentTest do
   end
 
   describe "system prompt" do
+    @describetag :fast
+
     test "includes working directory" do
       # The system prompt is built internally, but we can verify
       # the run function accepts a custom one
@@ -42,6 +45,8 @@ defmodule Arbor.Agent.SimpleAgentTest do
   end
 
   describe "tool call tracking" do
+    @describetag :fast
+
     test "records tool call entries with timing" do
       entry = %{
         turn: 1,
@@ -60,6 +65,8 @@ defmodule Arbor.Agent.SimpleAgentTest do
   end
 
   describe "result structure" do
+    @describetag :fast
+
     test "completed result has all fields" do
       {:ok, result} = SimpleAgent.run("test", max_turns: 0)
 
