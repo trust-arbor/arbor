@@ -61,16 +61,34 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       start_supervised!({EndpointRegistry, []})
     end
 
-    # In umbrella context, CapabilityStore may be running which causes
-    # authorize_and_execute to deny test agents lacking capabilities.
-    # Stop it so AgentEndpoint falls back to direct action execution.
-    if pid = Process.whereis(Arbor.Security.CapabilityStore) do
+    # These tests verify MCP protocol behavior, not security.
+    # In umbrella context, CapabilityStore blocks test agents lacking capabilities.
+    # Disable identity verification so authorize/4 falls through to permissive mode.
+    prev_identity = Application.get_env(:arbor_security, :identity_verification)
+    prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
+    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+
+    # Also stop CapabilityStore if running to prevent capability lookup failures
+    cap_pid = Process.whereis(Arbor.Security.CapabilityStore)
+
+    if cap_pid && Process.alive?(cap_pid) do
       try do
-        GenServer.stop(pid)
+        GenServer.stop(cap_pid, :normal, 1000)
       catch
         :exit, _ -> :ok
       end
     end
+
+    on_exit(fn ->
+      Application.put_env(:arbor_security, :identity_verification, prev_identity || true)
+
+      Application.put_env(
+        :arbor_security,
+        :capability_signing_required,
+        prev_signing || false
+      )
+    end)
 
     :ok
   end

@@ -853,6 +853,10 @@ defmodule Arbor.Security do
         # JIT: check trust profile and auto-grant if allowed
         Arbor.Security.PolicyEnforcer.check(principal_id, resource_uri, opts)
     end
+  catch
+    :exit, {:noproc, _} ->
+      # CapabilityStore not running — fall through to PolicyEnforcer
+      Arbor.Security.PolicyEnforcer.check(principal_id, resource_uri, opts)
   end
 
   defp maybe_emit_receipt(cap, principal_id, resource_uri, action, result, opts) do
