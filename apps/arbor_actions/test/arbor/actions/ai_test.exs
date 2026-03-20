@@ -3,12 +3,12 @@ defmodule Arbor.Actions.AITest do
 
   alias Arbor.Actions.AI
 
-  @moduletag :fast
-
   # We use Mox for mocking - need to check if Arbor.AI is set up with a behaviour
   # For now, we'll use a simple approach with process dictionary to inject responses
 
   describe "GenerateText" do
+    @describetag :fast
+
     test "schema validates correctly" do
       # Test that schema rejects missing required fields
       assert {:error, _} = AI.GenerateText.validate_params(%{})
@@ -33,6 +33,8 @@ defmodule Arbor.Actions.AITest do
   end
 
   describe "AnalyzeCode" do
+    @describetag :fast
+
     test "schema validates correctly" do
       # Test that schema rejects missing required fields
       assert {:error, _} = AI.AnalyzeCode.validate_params(%{})
@@ -62,7 +64,7 @@ defmodule Arbor.Actions.AITest do
   end
 
   describe "GenerateText integration" do
-    # These tests would call the real AI service - marked as :llm for filtering
+    # These tests call the real AI service - excluded from fast runs
     @describetag :llm
 
     test "generates text with real provider" do
@@ -103,6 +105,8 @@ defmodule Arbor.Actions.AITest do
   end
 
   describe "suggestion extraction" do
+    @describetag :fast
+
     # Test the internal suggestion extraction logic via the module
     # We can't easily test run/2 without mocking Arbor.AI,
     # but we can test that the schema is correct and the action compiles
