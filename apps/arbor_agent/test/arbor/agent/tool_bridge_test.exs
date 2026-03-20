@@ -1,7 +1,5 @@
 defmodule Arbor.Agent.ToolBridgeTest do
   use ExUnit.Case, async: true
-  @moduletag :fast
-
   alias Arbor.Agent.ToolBridge
   alias Arbor.AI.AgentSDK.ToolServer
 
@@ -12,6 +10,7 @@ defmodule Arbor.Agent.ToolBridgeTest do
   end
 
   describe "register_actions/4" do
+    @describetag :fast
     test "registers all actions as tools", %{server: server} do
       :ok = ToolBridge.register_actions(server, "test_agent", %{})
 
@@ -62,6 +61,7 @@ defmodule Arbor.Agent.ToolBridgeTest do
   end
 
   describe "unregister_actions/2" do
+    @describetag :fast
     test "removes all action tools", %{server: server} do
       :ok = ToolBridge.register_actions(server, "test_agent", %{})
       assert ToolServer.has_tool?("file_read", server)
@@ -86,6 +86,7 @@ defmodule Arbor.Agent.ToolBridgeTest do
   end
 
   describe "register_action/4" do
+    @describetag :fast
     test "registers a single action", %{server: server} do
       :ok =
         ToolBridge.register_action(
@@ -119,6 +120,7 @@ defmodule Arbor.Agent.ToolBridgeTest do
   end
 
   describe "handler construction" do
+    @describetag :fast
     test "builds handler that wraps action", %{server: server} do
       :ok =
         ToolBridge.register_action(
