@@ -402,13 +402,28 @@ defmodule Arbor.Memory.Events do
   # Private Helpers
   # ============================================================================
 
-  # Emit durable signal via centralized Signals.durable_emit/4.
-  # This handles: signal bus emit + EventLog ETS write + async Postgres write.
-  # Falls back to plain emit if durable_emit is not yet available.
+  # Dual-emit: write to the local :memory_events EventLog (for queries)
+  # AND emit on the signal bus (for real-time + historian persistence).
   defp dual_emit(agent_id, event_type, data) do
     enriched_data = Map.put(data, :agent_id, agent_id)
     stream_id = stream_id(agent_id)
 
+    # Write to the memory-local EventLog so get_history/get_by_type/etc. can read it back.
+    if Code.ensure_loaded?(Arbor.Persistence.Event) do
+      event =
+        Arbor.Persistence.Event.new(
+          stream_id,
+          to_string(event_type),
+          enriched_data,
+          metadata: %{source_node: node()}
+        )
+
+      if Process.whereis(@event_log_name) do
+        Arbor.Persistence.append(@event_log_name, @event_log_backend, stream_id, event)
+      end
+    end
+
+    # Signal bus emit (real-time notification + historian/Postgres persistence)
     if function_exported?(Arbor.Signals, :durable_emit, 4) do
       Arbor.Signals.durable_emit(:memory, event_type, enriched_data, stream_id: stream_id)
     else
