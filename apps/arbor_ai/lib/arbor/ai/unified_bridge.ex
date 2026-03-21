@@ -429,8 +429,8 @@ defmodule Arbor.AI.UnifiedBridge do
     error_info = Arbor.AI.LLMError.classify(reason)
     signals_mod = Arbor.Signals
 
-    if Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
-      apply(signals_mod, :emit, [:ai, :llm_bridge_error, error_info])
+    if Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :durable_emit, 3) do
+      apply(signals_mod, :durable_emit, [:ai, :llm_bridge_error, error_info])
     end
   rescue
     _ -> :ok

@@ -968,10 +968,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     signals_mod = Arbor.Signals
 
     if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) and
-         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
+         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :durable_emit, 3) do
       error_info = apply(llm_error_mod, :classify, [reason])
 
-      apply(signals_mod, :emit, [
+      apply(signals_mod, :durable_emit, [
         :ai,
         :llm_retry,
         Map.merge(error_info, %{
@@ -993,10 +993,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     signals_mod = Arbor.Signals
 
     if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) and
-         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
+         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :durable_emit, 3) do
       error_info = apply(llm_error_mod, :classify, [reason])
 
-      apply(signals_mod, :emit, [
+      apply(signals_mod, :durable_emit, [
         :ai,
         :llm_retries_exhausted,
         Map.merge(error_info, %{
