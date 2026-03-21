@@ -456,6 +456,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
                   attempt: meta.attempt,
                   delay_ms: meta.delay_ms
                 })
+
+                # Emit structured retry signal for observability
+                emit_retry_signal(reason, meta, request)
               end,
               sleep_fn: Keyword.get(opts, :sleep_fn, fn ms -> Process.sleep(ms) end)
             ],
@@ -514,6 +517,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
           end
 
         {:error, reason} ->
+          # Emit retry-exhausted signal when all retries have failed
+          emit_retry_exhausted_signal(reason, request)
           {:error, reason}
       end
     end
@@ -955,4 +960,54 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
   defp blank_to_nil(value), do: to_string(value)
+
+  # ── Structured Error Signals ──────────────────────────────────────
+
+  defp emit_retry_signal(reason, meta, request) do
+    llm_error_mod = Arbor.AI.LLMError
+    signals_mod = Arbor.Signals
+
+    if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) and
+         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
+      error_info = apply(llm_error_mod, :classify, [reason])
+
+      apply(signals_mod, :emit, [
+        :ai,
+        :llm_retry,
+        Map.merge(error_info, %{
+          attempt: meta.attempt,
+          delay_ms: meta.delay_ms,
+          provider: request.provider,
+          model: request.model
+        })
+      ])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp emit_retry_exhausted_signal(reason, request) do
+    llm_error_mod = Arbor.AI.LLMError
+    signals_mod = Arbor.Signals
+
+    if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) and
+         Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
+      error_info = apply(llm_error_mod, :classify, [reason])
+
+      apply(signals_mod, :emit, [
+        :ai,
+        :llm_retries_exhausted,
+        Map.merge(error_info, %{
+          provider: request.provider,
+          model: request.model
+        })
+      ])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 end

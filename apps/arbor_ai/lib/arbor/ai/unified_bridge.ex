@@ -133,12 +133,16 @@ defmodule Arbor.AI.UnifiedBridge do
     end
   rescue
     e ->
+      error_tuple = {:bridge_exception, Exception.message(e)}
       Logger.warning("UnifiedBridge embed exception: #{inspect(e)}")
-      {:error, {:bridge_exception, Exception.message(e)}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   catch
     :exit, reason ->
+      error_tuple = {:bridge_exit, reason}
       Logger.warning("UnifiedBridge embed exit: #{inspect(reason)}")
-      {:error, {:bridge_exit, reason}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   end
 
   @doc """
@@ -236,12 +240,16 @@ defmodule Arbor.AI.UnifiedBridge do
     end
   rescue
     e ->
+      error_tuple = {:bridge_exception, Exception.message(e)}
       Logger.warning("UnifiedBridge stream exception: #{inspect(e)}")
-      {:error, {:bridge_exception, Exception.message(e)}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   catch
     :exit, reason ->
+      error_tuple = {:bridge_exit, reason}
       Logger.warning("UnifiedBridge stream exit: #{inspect(reason)}")
-      {:error, {:bridge_exit, reason}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   end
 
   defp do_generate(prompt, opts) do
@@ -303,12 +311,16 @@ defmodule Arbor.AI.UnifiedBridge do
     end
   rescue
     e ->
+      error_tuple = {:bridge_exception, Exception.message(e)}
       Logger.warning("UnifiedBridge exception: #{inspect(e)}")
-      {:error, {:bridge_exception, Exception.message(e)}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   catch
     :exit, reason ->
+      error_tuple = {:bridge_exit, reason}
       Logger.warning("UnifiedBridge exit: #{inspect(reason)}")
-      {:error, {:bridge_exit, reason}}
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
   end
 
   @doc """
@@ -409,6 +421,21 @@ defmodule Arbor.AI.UnifiedBridge do
         Map.get(usage, :total_tokens) ||
           Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
     }
+  end
+
+  # Emit a structured bridge error signal for observability.
+  # Non-fatal — never crashes the caller.
+  defp safe_emit_bridge_error(reason) do
+    error_info = Arbor.AI.LLMError.classify(reason)
+    signals_mod = Arbor.Signals
+
+    if Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :emit, 3) do
+      apply(signals_mod, :emit, [:ai, :llm_bridge_error, error_info])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Get or create a default client using from_env

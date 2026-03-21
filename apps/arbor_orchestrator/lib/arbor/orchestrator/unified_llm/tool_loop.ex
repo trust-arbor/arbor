@@ -240,11 +240,18 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
            }}
         end
 
-      {:error, _} = error ->
+      {:error, reason} = error ->
+        error_info = classify_error(reason)
+
         emit_tool_loop_signal(:tool_loop_error, %{
           agent_id: state.agent_id,
           turn: state.turn,
-          error: inspect(error)
+          error_type: error_info.type,
+          error_message: error_info.message,
+          http_status: error_info.status,
+          retryable: error_info.retryable,
+          # Backward compat
+          error: error_info.message
         })
 
         error
@@ -282,7 +289,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
         emit_tool_loop_signal(:tool_call_started, %{
           agent_id: state.agent_id,
           tool: tc.name,
-          args: args,
+          arg_keys: Map.keys(args || %{}),
           turn: state.turn
         })
 
@@ -322,7 +329,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           result_preview:
             case result do
               {:ok, text} when is_binary(text) -> String.slice(text, 0..200)
-              {:error, reason} -> "ERROR: #{inspect(reason)}"
+              {:error, reason} ->
+                err = classify_error(reason)
+                "ERROR [#{err.type}]: #{err.message}"
               _ -> inspect(result) |> String.slice(0..200)
             end
         })
@@ -542,6 +551,25 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   # ── Signal Emission ──────────────────────────────────────────────
+
+  # Classify errors using Arbor.AI.LLMError when available, fallback to basic map.
+  defp classify_error(reason) do
+    llm_error_mod = Arbor.AI.LLMError
+
+    if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) do
+      apply(llm_error_mod, :classify, [reason])
+    else
+      %{
+        type: :unknown,
+        message: inspect(reason) |> String.slice(0..200),
+        status: nil,
+        code: nil,
+        retryable: false,
+        retry_after_ms: nil,
+        provider: nil
+      }
+    end
+  end
 
   defp emit_tool_loop_signal(event, data) do
     Builders.emit_signal(:agent, event, data)

@@ -203,10 +203,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
       {:error, reason} ->
         elapsed = System.monotonic_time(:millisecond) - start_time
+        error_info = classify_error(reason)
 
         Logger.warning(
           "[LlmHandler] #{node.id} for #{agent_id}: " <>
-            "FAILED in #{elapsed}ms, reason=#{inspect(reason)}"
+            "FAILED in #{elapsed}ms, error_type=#{error_info.type} error=#{error_info.message}"
         )
 
         emit_llm_signal(:llm_call_failed, %{
@@ -215,13 +216,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           provider: provider,
           model: model,
           duration_ms: elapsed,
-          error: inspect(reason),
+          error_type: error_info.type,
+          error_message: error_info.message,
+          http_status: error_info.status,
+          error_code: error_info.code,
+          retryable: error_info.retryable,
+          retry_after_ms: error_info.retry_after_ms,
+          # Backward compat
+          error: error_info.message,
           use_tools: use_tools
         })
 
         %Outcome{
           status: :fail,
-          failure_reason: "LLM call failed: #{inspect(reason)}",
+          failure_reason: "LLM call failed: #{error_info.message}",
           context_updates: Map.put(base_updates, "last_response", nil)
         }
     end
@@ -725,6 +733,25 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     Builders.emit_signal(:agent, event, data)
   rescue
     _ -> :ok
+  end
+
+  # Classify errors using Arbor.AI.LLMError when available, fallback to basic map.
+  defp classify_error(reason) do
+    llm_error_mod = Arbor.AI.LLMError
+
+    if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) do
+      apply(llm_error_mod, :classify, [reason])
+    else
+      %{
+        type: :unknown,
+        message: inspect(reason) |> String.slice(0..200),
+        status: nil,
+        code: nil,
+        retryable: false,
+        retry_after_ms: nil,
+        provider: nil
+      }
+    end
   end
 
   defp write_stage_artifacts(opts, node_id, prompt, response) do
