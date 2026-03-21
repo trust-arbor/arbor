@@ -143,8 +143,14 @@ defmodule Arbor.Agent.ContextCompactor do
 
     config = %{
       effective_window: effective_window,
-      compaction_model: Keyword.get(opts, :compaction_model, "anthropic/claude-3-5-haiku-latest"),
-      compaction_provider: Keyword.get(opts, :compaction_provider, :openrouter),
+      compaction_model:
+        Keyword.get_lazy(opts, :compaction_model, fn ->
+          Application.get_env(:arbor_ai, :default_model, "anthropic/claude-3-5-haiku-latest")
+        end),
+      compaction_provider:
+        Keyword.get_lazy(opts, :compaction_provider, fn ->
+          Application.get_env(:arbor_ai, :default_provider, :openrouter)
+        end),
       enable_llm_compaction: Keyword.get(opts, :enable_llm_compaction, false)
     }
 

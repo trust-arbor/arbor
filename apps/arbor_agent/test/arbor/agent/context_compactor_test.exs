@@ -770,9 +770,7 @@ defmodule Arbor.Agent.ContextCompactorTest do
       c =
         ContextCompactor.new(
           effective_window: 50,
-          enable_llm_compaction: true,
-          compaction_model: "arcee-ai/trinity-large-preview:free",
-          compaction_provider: :openrouter
+          enable_llm_compaction: true
         )
 
       c = ContextCompactor.append(c, %{role: :system, content: "System"})

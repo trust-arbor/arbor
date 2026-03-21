@@ -70,7 +70,7 @@ defmodule Arbor.Actions.AITest do
     test "generates text with real provider" do
       assert {:ok, result} =
                AI.GenerateText.run(
-                 %{prompt: "Say hello in one word", max_tokens: 10, provider: "openrouter"},
+                 %{prompt: "Say hello in one word", max_tokens: 10},
                  %{}
                )
 
@@ -93,8 +93,7 @@ defmodule Arbor.Actions.AITest do
                  %{
                    code: code,
                    question: "What does this function compute?",
-                   language: "elixir",
-                   provider: "openrouter"
+                   language: "elixir"
                  },
                  %{}
                )

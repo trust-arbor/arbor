@@ -56,6 +56,15 @@ config :arbor_security,
 config :arbor_common, start_children: false
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
+
+# Default LLM provider and model for :llm tagged tests.
+# Uses a free model to avoid costs in CI. Individual tests can override.
+# Set UNIFIED_LLM_DEFAULT_PROVIDER / UNIFIED_LLM_DEFAULT_MODEL env vars to change.
+config :arbor_ai,
+  default_provider:
+    (System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter") |> String.to_atom(),
+  default_model:
+    System.get_env("UNIFIED_LLM_DEFAULT_MODEL") || "arcee-ai/trinity-large-preview:free"
 config :arbor_consensus, start_children: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
