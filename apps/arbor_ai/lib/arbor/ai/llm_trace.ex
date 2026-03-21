@@ -98,11 +98,12 @@ defmodule Arbor.AI.LLMTrace do
 
   def finish(trace, {:error, reason}) do
     duration = System.monotonic_time(:millisecond) - trace.start_time
+    error_info = Arbor.AI.LLMError.classify(reason)
 
     Logger.warning(
       "[LLM] trace=#{trace.trace_id} FAIL  #{trace.call_type} " <>
         "provider=#{trace.provider} model=#{trace.model} agent=#{trace.agent_id} " <>
-        "duration=#{duration}ms error=#{inspect(reason)}"
+        "duration=#{duration}ms error_type=#{error_info.type} error=#{error_info.message}"
     )
 
     emit_event(:call_failed, %{
@@ -113,7 +114,16 @@ defmodule Arbor.AI.LLMTrace do
       agent_id: trace.agent_id,
       duration_ms: duration,
       prompt_chars: trace.prompt_len,
-      error: inspect(reason),
+      # Structured error fields
+      error_type: error_info.type,
+      error_message: error_info.message,
+      http_status: error_info.status,
+      error_code: error_info.code,
+      retryable: error_info.retryable,
+      retry_after_ms: error_info.retry_after_ms,
+      error_provider: error_info.provider,
+      # Backward compat
+      error: error_info.message,
       status: :error
     })
 
