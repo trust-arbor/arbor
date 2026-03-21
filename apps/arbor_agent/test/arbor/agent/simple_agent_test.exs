@@ -91,8 +91,6 @@ defmodule Arbor.Agent.SimpleAgentTest do
         {:ok, result} =
           SimpleAgent.run(
             "Read the file at #{test_file} and tell me what it says.",
-            provider: :openrouter,
-            model: "arcee-ai/trinity-large-preview:free",
             working_dir: tmp_dir,
             max_turns: 5
           )
