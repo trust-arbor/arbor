@@ -12,7 +12,9 @@ defmodule Arbor.Monitor.Application do
           Arbor.Monitor.HealingSupervisor,
           # Core monitoring components
           Arbor.Monitor.MetricsStore,
-          Arbor.Monitor.Poller
+          Arbor.Monitor.Poller,
+          # Supervisor health monitoring
+          Arbor.Monitor.SupervisorMonitor
         ]
       else
         []

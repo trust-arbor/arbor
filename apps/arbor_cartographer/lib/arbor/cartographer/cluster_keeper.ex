@@ -99,6 +99,13 @@ defmodule Arbor.Cartographer.ClusterKeeper do
       {:noreply, state}
     else
       Logger.info("ClusterKeeper: node connected — #{node}")
+
+      emit_cluster_signal(:node_connected, %{
+        node: node,
+        cluster_size: length(Node.list()) + 1,
+        known_nodes: MapSet.size(state.known) + 1
+      })
+
       {:noreply, %{state | known: MapSet.put(state.known, node)}}
     end
   end
@@ -106,6 +113,13 @@ defmodule Arbor.Cartographer.ClusterKeeper do
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
     Logger.warning("ClusterKeeper: node disconnected — #{node}")
+
+    emit_cluster_signal(:node_disconnected, %{
+      node: node,
+      cluster_size: length(Node.list()) + 1,
+      remaining_nodes: Node.list()
+    })
+
     {:noreply, state}
   end
 
@@ -113,6 +127,15 @@ defmodule Arbor.Cartographer.ClusterKeeper do
   def handle_info(:reconnect, state) do
     connected = MapSet.new(Node.list())
     disconnected = MapSet.difference(state.known, connected)
+
+    # Detect potential netsplit — multiple nodes disconnected simultaneously
+    if MapSet.size(disconnected) > 1 do
+      emit_cluster_signal(:netsplit_suspected, %{
+        disconnected_nodes: MapSet.to_list(disconnected),
+        disconnected_count: MapSet.size(disconnected),
+        connected_nodes: Node.list()
+      })
+    end
 
     unless MapSet.size(disconnected) == 0 do
       for node <- disconnected do
@@ -133,6 +156,9 @@ defmodule Arbor.Cartographer.ClusterKeeper do
       end
     end
 
+    # Check distribution health for connected nodes
+    check_dist_health()
+
     schedule_reconnect(state.interval)
     {:noreply, state}
   end
@@ -144,4 +170,34 @@ defmodule Arbor.Cartographer.ClusterKeeper do
   defp ephemeral_node?(node) do
     node |> Atom.to_string() |> String.starts_with?("arbor_mix_")
   end
+
+  defp check_dist_health do
+    for node <- Node.list() do
+      case :rpc.call(node, :erlang, :node, [], 2000) do
+        ^node ->
+          :ok
+
+        {:badrpc, reason} ->
+          emit_cluster_signal(:node_unhealthy, %{
+            node: node,
+            reason: sanitize_reason(reason)
+          })
+      end
+    end
+  end
+
+  defp emit_cluster_signal(type, data) do
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :durable_emit, 3) do
+      apply(Arbor.Signals, :durable_emit, [:cluster, type, data])
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp sanitize_reason(:timeout), do: "timeout"
+  defp sanitize_reason(:nodedown), do: "nodedown"
+  defp sanitize_reason({:EXIT, _}), do: "exit"
+  defp sanitize_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp sanitize_reason(_reason), do: "unknown"
 end

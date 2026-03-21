@@ -213,13 +213,23 @@ defmodule Arbor.Agent.Registry do
   end
 
   @impl GenServer
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+  def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
     # Clean up entries for dead processes
     case :ets.match_object(@table, {:_, %{pid: pid}}) do
       entries when is_list(entries) ->
-        for {agent_id, _entry} <- entries do
+        for {agent_id, entry} <- entries do
           :ets.delete(@table, agent_id)
           Logger.debug("Registry cleaned up dead agent: #{agent_id}")
+
+          # Emit crash signal for non-normal shutdowns
+          unless reason in [:normal, :shutdown] or match?({:shutdown, _}, reason) do
+            emit_agent_signal(:process_crashed, %{
+              agent_id: agent_id,
+              reason: sanitize_crash_reason(reason),
+              module: Map.get(entry, :module),
+              registered_at: Map.get(entry, :registered_at)
+            })
+          end
         end
 
       _ ->
@@ -274,6 +284,29 @@ defmodule Arbor.Agent.Registry do
       :exit, _ -> []
     end
   end
+
+  defp emit_agent_signal(type, data) do
+    if Code.ensure_loaded?(Arbor.Signals) and
+         function_exported?(Arbor.Signals, :durable_emit, 3) do
+      apply(Arbor.Signals, :durable_emit, [:agent, type, data])
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp sanitize_crash_reason({error_type, _stacktrace}) when is_atom(error_type) do
+    Atom.to_string(error_type)
+  end
+
+  defp sanitize_crash_reason({%{__struct__: struct_mod}, _stacktrace}) do
+    inspect(struct_mod)
+  end
+
+  defp sanitize_crash_reason(reason) when is_atom(reason) do
+    Atom.to_string(reason)
+  end
+
+  defp sanitize_crash_reason(_reason), do: "unknown"
 
   defp find_agent_id_for_pid(pid) do
     # Query the local or remote registry for this pid's agent_id
