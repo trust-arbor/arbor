@@ -105,7 +105,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.LMStudio do
   @doc false
   def parse_structured_message(%{"content" => content} = msg)
       when is_binary(content) do
-    api_reasoning = non_empty(msg["reasoning"])
+    api_reasoning = non_empty(msg["reasoning_content"]) || non_empty(msg["reasoning"])
     trimmed = String.trim(content)
 
     extracted =
