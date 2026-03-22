@@ -811,9 +811,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  defp update_agent_state(socket, agent) do
+  defp update_agent_state(socket, _agent) do
+    # Use host_pid for GenServer calls — agent may be the BranchSupervisor
+    host = socket.assigns[:host_pid] || socket.assigns[:agent]
+
     socket
-    |> assign(memory_stats: get_memory_stats(agent))
+    |> assign(memory_stats: get_memory_stats(host))
     |> assign(query_count: socket.assigns.query_count + 1)
   end
 
@@ -1026,13 +1029,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     backend = metadata[:backend] || model_config[:backend]
     display_name = metadata[:display_name]
 
-    memory_stats = get_memory_stats(pid)
+    # Use host_pid for GenServer calls — pid may be the BranchSupervisor
+    host_pid = metadata[:host_pid] || pid
+    memory_stats = get_memory_stats(host_pid)
     tokens = ChatState.get_tokens(agent_id)
     ChatState.touch_agent(agent_id)
 
     socket
     |> assign(
       agent: pid,
+      host_pid: host_pid,
       agent_id: agent_id,
       display_name: display_name,
       error: nil,

@@ -171,9 +171,10 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec start(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start(agent_id, opts \\ []) do
-    # Idempotent: if branch supervisor already running, return it
+    # Idempotent: if branch supervisor already running, ensure registered and return
     case BranchSupervisor.whereis(agent_id) do
       pid when is_pid(pid) ->
+        ensure_registered(agent_id, pid, opts)
         {:ok, pid}
 
       nil ->
@@ -257,11 +258,36 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp extract_principal_id(opts) do
     Keyword.get(opts, :principal_id) ||
-      get_in(opts, [:tenant_context, :principal_id])
+      case Keyword.get(opts, :tenant_context) do
+        %{principal_id: pid} when is_binary(pid) -> pid
+        _ -> nil
+      end
   end
 
   defp user_supervisor_available? do
     Process.whereis(Arbor.Agent.UserSupervisor) != nil
+  end
+
+  # Ensure an already-running agent is in the Registry (idempotent path).
+  # Handles the case where supervision survived but Registry entry was lost
+  # (e.g., hot code reload cleared ETS, or initial registration failed).
+  defp ensure_registered(agent_id, sup_pid, opts) do
+    case Arbor.Agent.Registry.lookup(agent_id) do
+      {:ok, _} ->
+        :ok
+
+      {:error, :not_found} ->
+        Logger.info("[Lifecycle] Re-registering already-running agent #{agent_id}")
+
+        case restore(agent_id) do
+          {:ok, profile} -> register_in_agent_registry(agent_id, sup_pid, profile, opts)
+          _ -> :ok
+        end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Register the agent and all its child PIDs in the discovery registry.
@@ -288,9 +314,11 @@ defmodule Arbor.Agent.Lifecycle do
 
     Arbor.Agent.Registry.register(agent_id, sup_pid, metadata)
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Lifecycle] Registry registration failed for #{agent_id}: #{Exception.message(e)}")
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("[Lifecycle] Registry registration exit for #{agent_id}: #{inspect(reason)}")
   end
 
   defp extract_model_config(profile, opts) do
