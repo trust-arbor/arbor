@@ -352,13 +352,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     end
   end
 
-  defp default_parse_message(%{"content" => content, "tool_calls" => tool_calls})
+  defp default_parse_message(%{"content" => content, "tool_calls" => tool_calls} = msg)
        when is_list(tool_calls) and tool_calls != [] do
+    reasoning_parts = extract_reasoning(msg)
+
     text_parts =
       if is_binary(content) and content != "", do: [ContentPart.text(content)], else: []
 
     tool_parts = Enum.map(tool_calls, &parse_tool_call/1)
-    text_parts ++ tool_parts
+    reasoning_parts ++ text_parts ++ tool_parts
   end
 
   # Handle tool_calls without content field (common in OpenAI-compatible APIs)
@@ -367,11 +369,29 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
     Enum.map(tool_calls, &parse_tool_call/1)
   end
 
-  defp default_parse_message(%{"content" => content}) when is_binary(content) do
-    [ContentPart.text(content)]
+  defp default_parse_message(%{"content" => content} = msg) when is_binary(content) do
+    reasoning_parts = extract_reasoning(msg)
+    reasoning_parts ++ [ContentPart.text(content)]
   end
 
   defp default_parse_message(_), do: []
+
+  # Extract reasoning/thinking content from the message if present.
+  # Providers use different field names:
+  # - "reasoning_content" — LM Studio, DeepSeek
+  # - "reasoning" — some OpenAI-compatible providers
+  defp extract_reasoning(msg) do
+    reasoning =
+      case msg["reasoning_content"] do
+        r when is_binary(r) and r != "" -> r
+        _ -> msg["reasoning"]
+      end
+
+    case reasoning do
+      r when is_binary(r) and r != "" -> [ContentPart.thinking(String.trim(r))]
+      _ -> []
+    end
+  end
 
   defp parse_tool_call(%{"id" => id, "function" => %{"name" => name, "arguments" => args}}) do
     ContentPart.tool_call(id, name, decode_args(args))
@@ -418,6 +438,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
       # Provider-specific hook handled it
       hook_result != nil ->
         {hook_result, acc}
+
+      # Reasoning/thinking delta (streamed before content)
+      is_binary(Map.get(delta, "reasoning_content")) and
+          Map.get(delta, "reasoning_content") != "" ->
+        evt = %StreamEvent{
+          type: :delta,
+          data: %{"thinking" => delta["reasoning_content"], "raw" => raw}
+        }
+
+        {evt, acc}
 
       # Text delta
       is_binary(Map.get(delta, "content")) and Map.get(delta, "content") != "" ->
