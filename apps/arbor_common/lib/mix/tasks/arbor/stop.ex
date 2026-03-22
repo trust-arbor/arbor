@@ -20,8 +20,25 @@ defmodule Mix.Tasks.Arbor.Stop do
     Config.ensure_distribution()
 
     unless Config.server_running?() do
-      Mix.shell().info("Arbor is not running.")
-      cleanup_stale_pid()
+      # Node not reachable by name — but the OS process might still be running
+      # (e.g., node name changed between start and stop)
+      case Config.read_pid() do
+        nil ->
+          Mix.shell().info("Arbor is not running.")
+
+        pid ->
+          if os_process_alive?(pid) do
+            Mix.shell().info("Arbor node not reachable, but OS process #{pid} is alive. Sending SIGTERM...")
+            System.cmd("kill", [to_string(pid)], stderr_to_stdout: true)
+            Process.sleep(1_000)
+            Mix.shell().info("Arbor server stopped (via PID file).")
+          else
+            Mix.shell().info("Arbor is not running.")
+          end
+
+          cleanup_pid_file()
+      end
+
       return_ok()
     end
 
@@ -71,10 +88,10 @@ defmodule Mix.Tasks.Arbor.Stop do
     File.rm(Config.pid_file())
   end
 
-  defp cleanup_stale_pid do
-    if File.exists?(Config.pid_file()) do
-      Mix.shell().info("Removing stale PID file.")
-      File.rm(Config.pid_file())
+  defp os_process_alive?(pid) do
+    case System.cmd("kill", ["-0", to_string(pid)], stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
     end
   end
 
