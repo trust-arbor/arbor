@@ -286,8 +286,8 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case find_profile(ref) do
       {:ok, profile} ->
-        if Mix.shell().yes?(
-             "Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data."
+        if confirm_destructive?(
+             "Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data. [yN] "
            ) do
           # Stop first if running
           remote(Arbor.Agent.Manager, :stop_agent, [profile.agent_id])
@@ -525,5 +525,11 @@ defmodule Mix.Tasks.Arbor.Agent do
       [] -> "0s"
       _ -> Enum.join(parts, " ")
     end
+  end
+
+  # Like Mix.shell().yes?/1 but defaults to No (safer for destructive ops)
+  defp confirm_destructive?(prompt) do
+    answer = IO.gets(prompt) |> String.trim() |> String.downcase()
+    answer in ["y", "yes"]
   end
 end
