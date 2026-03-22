@@ -404,12 +404,22 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_call({:send_message, message}, from, state) do
-    case authorize_orchestrator(state) do
-      :ok ->
-        do_send_message_async(message, from, state)
+    alias Arbor.Common.CommandRouter
 
-      {:error, reason} ->
-        {:reply, {:error, {:unauthorized, reason}}, state}
+    case CommandRouter.parse(message) do
+      {:command, cmd_name, args} ->
+        context = build_command_context(state)
+        result = CommandRouter.execute(cmd_name, args, context)
+        {:reply, format_command_result(result), state}
+
+      {:prompt, _text} ->
+        case authorize_orchestrator(state) do
+          :ok ->
+            do_send_message_async(message, from, state)
+
+          {:error, reason} ->
+            {:reply, {:error, {:unauthorized, reason}}, state}
+        end
     end
   end
 
@@ -440,6 +450,27 @@ defmodule Arbor.Orchestrator.Session do
         {:reply, {:error, reason}, state}
     end
   end
+
+  defp build_command_context(state) do
+    %{
+      agent_id: state.agent_id,
+      display_name: state[:display_name],
+      model: get_in(state, [:config, :model]) || state[:model],
+      provider: get_in(state, [:config, :provider]) || state[:provider],
+      session_id: state[:session_id],
+      session_pid: self(),
+      trust_tier: state[:trust_tier],
+      turn_count: state[:turn_count],
+      tools: state[:current_tools],
+      session_started: state[:started_at]
+    }
+  end
+
+  defp format_command_result({:ok, text}), do: {:ok, %{text: text, type: :command}}
+  defp format_command_result({:error, {:unknown_command, msg}}), do: {:ok, %{text: msg, type: :command_error}}
+  defp format_command_result({:error, {:unavailable, msg}}), do: {:ok, %{text: msg, type: :command_error}}
+  defp format_command_result({:error, {:command_error, msg}}), do: {:ok, %{text: "Command error: #{msg}", type: :command_error}}
+  defp format_command_result({:error, reason}), do: {:ok, %{text: "Error: #{inspect(reason)}", type: :command_error}}
 
   defp do_send_message_async(message, from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)

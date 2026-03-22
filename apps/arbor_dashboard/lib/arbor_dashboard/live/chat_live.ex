@@ -290,6 +290,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           end
 
           # Spawn async query — keeps LiveView responsive during LLM calls
+          # Command routing happens centrally in Manager.chat/Session.send_message
           dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
 
           {:noreply, socket}
