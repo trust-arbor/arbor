@@ -438,6 +438,11 @@ defmodule Arbor.Agent.Lifecycle do
     # Clean up signing key
     Arbor.Security.delete_signing_key(agent_id)
 
+    # Remove identity from registry
+    if function_exported?(Arbor.Security, :deregister_identity, 1) do
+      Arbor.Security.deregister_identity(agent_id)
+    end
+
     # Remove profile from store (and legacy JSON)
     ProfileStore.delete_profile(agent_id)
 
