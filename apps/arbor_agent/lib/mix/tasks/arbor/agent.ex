@@ -492,6 +492,7 @@ defmodule Mix.Tasks.Arbor.Agent do
       "local" -> :local
       "ollama" -> :ollama
       "lmstudio" -> :lmstudio
+      "lm_studio" -> :lmstudio
       "acp" -> :acp
       "gemini" -> :gemini
       "xai" -> :xai
