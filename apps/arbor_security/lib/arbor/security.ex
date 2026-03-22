@@ -268,6 +268,14 @@ defmodule Arbor.Security do
     do: register_agent_identity_with_public_key(identity)
 
   @doc """
+  Remove an agent's identity from the registry.
+  """
+  @spec deregister_identity(String.t()) :: :ok | {:error, term()}
+  def deregister_identity(agent_id) when is_binary(agent_id) do
+    Registry.deregister(agent_id)
+  end
+
+  @doc """
   Look up the public key for an agent.
   """
   @spec lookup_public_key(String.t()) :: {:ok, binary()} | {:error, :not_found}
