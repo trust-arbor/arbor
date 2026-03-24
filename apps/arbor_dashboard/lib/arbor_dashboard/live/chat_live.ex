@@ -624,9 +624,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       {:noreply, socket}
   end
 
-  # Process monitor: agent crashed or was killed
+  # Process monitor: agent supervisor crashed or was killed
   def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
-    if pid == socket.assigns[:agent] do
+    if pid == socket.assigns[:supervisor_pid] or pid == socket.assigns[:agent] do
       {:noreply, clear_agent_assigns(socket)}
     else
       {:noreply, socket}
@@ -811,12 +811,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  defp update_agent_state(socket, _agent) do
-    # Use host_pid for GenServer calls — agent may be the BranchSupervisor
-    host = socket.assigns[:host_pid] || socket.assigns[:agent]
-
+  defp update_agent_state(socket, agent) do
     socket
-    |> assign(memory_stats: get_memory_stats(host))
+    |> assign(memory_stats: get_memory_stats(agent))
     |> assign(query_count: socket.assigns.query_count + 1)
   end
 
@@ -1023,13 +1020,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp reconnect_to_agent(socket, agent_id, pid, metadata) do
+    # pid from Registry is the BranchSupervisor — monitor it for :DOWN
     Process.monitor(pid)
 
     model_config = metadata[:model_config] || %{}
     backend = metadata[:backend] || model_config[:backend]
     display_name = metadata[:display_name]
 
-    # Use host_pid for GenServer calls — pid may be the BranchSupervisor
+    # Use host_pid as the primary `agent` assign — it's the APIAgent GenServer
+    # that handles :query, :memory_stats, etc. The supervisor PID is only for monitoring.
     host_pid = metadata[:host_pid] || pid
     memory_stats = get_memory_stats(host_pid)
     tokens = ChatState.get_tokens(agent_id)
@@ -1037,8 +1036,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     socket
     |> assign(
-      agent: pid,
-      host_pid: host_pid,
+      agent: host_pid,
+      supervisor_pid: pid,
       agent_id: agent_id,
       display_name: display_name,
       error: nil,
