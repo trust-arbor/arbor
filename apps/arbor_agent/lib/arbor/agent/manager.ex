@@ -116,6 +116,7 @@ defmodule Arbor.Agent.Manager do
     lifecycle_opts =
       [template: template] ++
         Keyword.take(opts, [
+          :trust_tier,
           :capabilities,
           :initial_goals,
           :delegator_id,
