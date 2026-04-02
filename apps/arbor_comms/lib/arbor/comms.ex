@@ -27,6 +27,8 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
+  require Logger
+
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
 
@@ -189,7 +191,9 @@ defmodule Arbor.Comms do
       {{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}
     ])
   rescue
-    _ -> []
+    e ->
+      Logger.debug("[Comms] list_channels failed: #{Exception.message(e)}")
+      []
   end
 
   @doc "Get channel info by ID."
@@ -269,9 +273,13 @@ defmodule Arbor.Comms do
       |> Enum.take(limit)
     end
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[Comms] search_channels failed: #{Exception.message(e)}")
+      []
   catch
-    :exit, _ -> []
+    :exit, reason ->
+      Logger.warning("[Comms] search_channels exited: #{inspect(reason)}")
+      []
   end
 
   @doc """
@@ -327,9 +335,13 @@ defmodule Arbor.Comms do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Comms] delete_channel failed for #{channel_id}: #{Exception.message(e)}")
+      :ok
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("[Comms] delete_channel exited for #{channel_id}: #{inspect(reason)}")
+      :ok
   end
 
   defp channel_store_available? do

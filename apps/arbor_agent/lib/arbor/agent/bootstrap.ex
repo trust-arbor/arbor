@@ -216,9 +216,13 @@ defmodule Arbor.Agent.Bootstrap do
       []
     end
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[Bootstrap] auto-start profile listing failed: #{Exception.message(e)}")
+      []
   catch
-    :exit, _ -> []
+    :exit, reason ->
+      Logger.warning("[Bootstrap] auto-start profile listing exited: #{inspect(reason)}")
+      []
   end
 
   defp safe_emit(type, data) do

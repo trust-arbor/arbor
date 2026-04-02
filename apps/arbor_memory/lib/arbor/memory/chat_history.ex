@@ -299,9 +299,13 @@ defmodule Arbor.Memory.ChatHistory do
       []
     end
   rescue
-    _ -> []
+    e ->
+      Logger.debug("[ChatHistory] channel store load failed: #{Exception.message(e)}")
+      []
   catch
-    :exit, _ -> []
+    :exit, reason ->
+      Logger.debug("[ChatHistory] channel store load exited: #{inspect(reason)}")
+      []
   end
 
   defp channel_message_to_chat_msg(cm) do
@@ -404,7 +408,9 @@ defmodule Arbor.Memory.ChatHistory do
       Logger.warning("ChatHistory: failed to load from ChannelStore: #{inspect(e)}")
       false
   catch
-    :exit, _ -> false
+    :exit, reason ->
+      Logger.warning("ChatHistory: ChannelStore load exited: #{inspect(reason)}")
+      false
   end
 
   defp load_channel_messages_to_ets(channel) do

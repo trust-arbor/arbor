@@ -145,7 +145,9 @@ defmodule Arbor.Agent.Verification do
       {:ok, :verified}
     end
   rescue
-    _ -> {:error, :process_inspection_failed}
+    e ->
+      Logger.debug("[Verification] process inspection failed: #{Exception.message(e)}")
+      {:error, :process_inspection_failed}
   end
 
   defp verify_action(_anomaly, :stop_supervisor, pid) when is_pid(pid) do
@@ -220,7 +222,9 @@ defmodule Arbor.Agent.Verification do
         end
     end
   rescue
-    _ -> {:error, :verification_failed}
+    e ->
+      Logger.debug("[Verification] process condition check failed: #{Exception.message(e)}")
+      {:error, :verification_failed}
   end
 
   defp verify_condition(%{skill: :beam, details: details}) do
@@ -241,7 +245,9 @@ defmodule Arbor.Agent.Verification do
         {:ok, :verified}
     end
   rescue
-    _ -> {:error, :verification_failed}
+    e ->
+      Logger.debug("[Verification] BEAM condition check failed: #{Exception.message(e)}")
+      {:error, :verification_failed}
   end
 
   defp verify_condition(%{skill: :supervisor, details: details}) do
@@ -341,8 +347,12 @@ defmodule Arbor.Agent.Verification do
   defp safe_call(fun) do
     fun.()
   rescue
-    _ -> nil
+    e ->
+      Logger.debug("[Verification] safe_call failed: #{Exception.message(e)}")
+      nil
   catch
-    :exit, _ -> nil
+    :exit, reason ->
+      Logger.debug("[Verification] safe_call exited: #{inspect(reason)}")
+      nil
   end
 end

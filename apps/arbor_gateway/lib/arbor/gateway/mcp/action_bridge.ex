@@ -11,6 +11,8 @@ defmodule Arbor.Gateway.MCP.ActionBridge do
       # => [%{"name" => "file_read", "description" => "...", "inputSchema" => %{...}}, ...]
   """
 
+  require Logger
+
   @doc """
   Convert an Arbor action module to an MCP tool definition.
 
@@ -58,9 +60,13 @@ defmodule Arbor.Gateway.MCP.ActionBridge do
       []
     end
   rescue
-    _ -> []
+    e ->
+      Logger.debug("[ActionBridge] all_mcp_tools failed: #{Exception.message(e)}")
+      []
   catch
-    :exit, _ -> []
+    :exit, reason ->
+      Logger.debug("[ActionBridge] all_mcp_tools exited: #{inspect(reason)}")
+      []
   end
 
   # Fallback name extraction from module atom

@@ -225,9 +225,13 @@ defmodule Arbor.Agent.MaintenanceServer do
             0
         end
       rescue
-        _ -> 0
+        e ->
+          Logger.debug("[Maintenance] #{agent_id}: thought pruning failed: #{Exception.message(e)}")
+          0
       catch
-        :exit, _ -> 0
+        :exit, reason ->
+          Logger.debug("[Maintenance] #{agent_id}: thought pruning exited: #{inspect(reason)}")
+          0
       end
     else
       0
@@ -267,9 +271,13 @@ defmodule Arbor.Agent.MaintenanceServer do
             0
         end
       rescue
-        _ -> 0
+        e ->
+          Logger.debug("[Maintenance] #{agent_id}: WM trimming failed: #{Exception.message(e)}")
+          0
       catch
-        :exit, _ -> 0
+        :exit, reason ->
+          Logger.debug("[Maintenance] #{agent_id}: WM trimming exited: #{inspect(reason)}")
+          0
       end
     else
       0
@@ -317,9 +325,13 @@ defmodule Arbor.Agent.MaintenanceServer do
             0
         end
       rescue
-        _ -> 0
+        e ->
+          Logger.debug("[Maintenance] #{agent_id}: SK dedup failed: #{Exception.message(e)}")
+          0
       catch
-        :exit, _ -> 0
+        :exit, reason ->
+          Logger.debug("[Maintenance] #{agent_id}: SK dedup exited: #{inspect(reason)}")
+          0
       end
     else
       0
@@ -360,9 +372,13 @@ defmodule Arbor.Agent.MaintenanceServer do
               %{}
           end
         rescue
-          _ -> %{}
+          e ->
+            Logger.debug("[Maintenance] #{agent_id}: consolidation failed: #{Exception.message(e)}")
+            %{}
         catch
-          :exit, _ -> %{}
+          :exit, reason ->
+            Logger.debug("[Maintenance] #{agent_id}: consolidation exited: #{inspect(reason)}")
+            %{}
         end
       else
         %{}

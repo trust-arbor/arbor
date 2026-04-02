@@ -131,7 +131,10 @@ defmodule Arbor.Agent.Manager do
       try do
         ProfileStore.store_profile(updated_profile)
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[Manager] Failed to persist agent profile on create: #{Exception.message(e)}"
+          )
       end
 
       agent_id = updated_profile.agent_id
@@ -671,7 +674,10 @@ defmodule Arbor.Agent.Manager do
       try do
         ProfileStore.store_profile(updated_profile)
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[Manager] Failed to persist model config update: #{Exception.message(e)}"
+          )
       end
     end
   end

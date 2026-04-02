@@ -696,9 +696,13 @@ defmodule Arbor.Gateway.MCP.Handler do
       "Pipeline registry not available (orchestrator not started)"
     end
   rescue
-    _ -> "Pipeline registry unavailable"
+    e ->
+      Logger.debug("[MCPHandler] pipeline status failed: #{Exception.message(e)}")
+      "Pipeline registry unavailable"
   catch
-    :exit, _ -> "Pipeline registry unavailable"
+    :exit, reason ->
+      Logger.debug("[MCPHandler] pipeline status exited: #{inspect(reason)}")
+      "Pipeline registry unavailable"
   end
 
   defp format_pipeline_status(active, recent) do
