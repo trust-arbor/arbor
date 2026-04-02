@@ -343,7 +343,9 @@ defmodule Arbor.Gateway.Memory.Router do
       :ok
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[MemoryRouter] memory access authorization failed: #{Exception.message(e)}")
+      :ok
   end
 
   defp authorize_memory_access(_agent_id, _action), do: {:error, :invalid_agent_id}

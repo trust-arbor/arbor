@@ -411,7 +411,9 @@ defmodule Arbor.Agent.AgentSeed do
         :ok
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.debug("[AgentSeed] intent result handling failed: #{Exception.message(e)}")
+      :ok
   end
 
   defp handle_intent_failure(agent_id, intent_id, percept) do
@@ -604,7 +606,9 @@ defmodule Arbor.Agent.AgentSeed do
       state
     end
   rescue
-    _ -> state
+    e ->
+      Logger.debug("[AgentSeed] update_working_memory failed for #{state.id}: #{Exception.message(e)}")
+      state
   end
 
   defp maybe_consolidate(state) do
@@ -625,7 +629,9 @@ defmodule Arbor.Agent.AgentSeed do
 
     state
   rescue
-    _ -> state
+    e ->
+      Logger.debug("[AgentSeed] maybe_consolidate failed for #{state.id}: #{Exception.message(e)}")
+      state
   end
 
   # ============================================================================

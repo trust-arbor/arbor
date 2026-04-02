@@ -383,9 +383,11 @@ defmodule Arbor.Comms.Channel do
       try do
         apply(Phoenix.PubSub, :broadcast, [pubsub, state.pubsub_topic, message])
       rescue
-        _ -> :ok
+        e ->
+          Logger.debug("[Channel] broadcast failed for #{state.channel_id}: #{Exception.message(e)}")
       catch
-        :exit, _ -> :ok
+        :exit, reason ->
+          Logger.debug("[Channel] broadcast exited for #{state.channel_id}: #{inspect(reason)}")
       end
     end
   end
@@ -405,9 +407,10 @@ defmodule Arbor.Comms.Channel do
         data = Map.put(data, :origin_node, node())
         apply(Arbor.Signals, :emit, [:comms, type, data, [scope: :cluster]])
       rescue
-        _ -> :ok
+        e ->
+          Logger.debug("[Channel] signal emission failed: #{Exception.message(e)}")
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end
   end
@@ -549,9 +552,13 @@ defmodule Arbor.Comms.Channel do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Channel] key distribution failed for #{channel_id}: #{Exception.message(e)}")
+      :ok
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("[Channel] key distribution exited for #{channel_id}: #{inspect(reason)}")
+      :ok
   end
 
   defp maybe_rotate_encryption_key(%{encryption_key: nil} = state, _removed_member_id), do: state
@@ -596,9 +603,13 @@ defmodule Arbor.Comms.Channel do
       content
     end
   rescue
-    _ -> content
+    e ->
+      Logger.warning("[Channel] encryption failed: #{Exception.message(e)}")
+      content
   catch
-    :exit, _ -> content
+    :exit, reason ->
+      Logger.warning("[Channel] encryption exited: #{inspect(reason)}")
+      content
   end
 
   @doc false
@@ -629,9 +640,13 @@ defmodule Arbor.Comms.Channel do
         "[encrypted]"
     end
   rescue
-    _ -> "[encrypted]"
+    e ->
+      Logger.warning("[Channel] decryption failed: #{Exception.message(e)}")
+      "[encrypted]"
   catch
-    :exit, _ -> "[encrypted]"
+    :exit, reason ->
+      Logger.warning("[Channel] decryption exited: #{inspect(reason)}")
+      "[encrypted]"
   end
 
   def decrypt_content(content, _key), do: content
@@ -662,9 +677,13 @@ defmodule Arbor.Comms.Channel do
       try do
         apply(registry, :lookup, [agent_id])
       rescue
-        _ -> {:error, :registry_unavailable}
+        e ->
+          Logger.debug("[Channel] identity lookup failed for #{agent_id}: #{Exception.message(e)}")
+          {:error, :registry_unavailable}
       catch
-        :exit, _ -> {:error, :registry_unavailable}
+        :exit, reason ->
+          Logger.debug("[Channel] identity lookup exited for #{agent_id}: #{inspect(reason)}")
+          {:error, :registry_unavailable}
       end
     else
       {:error, :registry_unavailable}
@@ -678,9 +697,13 @@ defmodule Arbor.Comms.Channel do
       try do
         apply(crypto, :verify, [message, signature, public_key])
       rescue
-        _ -> nil
+        e ->
+          Logger.debug("[Channel] crypto verify failed: #{Exception.message(e)}")
+          nil
       catch
-        :exit, _ -> nil
+        :exit, reason ->
+          Logger.debug("[Channel] crypto verify exited: #{inspect(reason)}")
+          nil
       end
     else
       nil

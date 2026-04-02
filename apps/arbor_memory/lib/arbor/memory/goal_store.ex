@@ -395,7 +395,9 @@ defmodule Arbor.Memory.GoalStore do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[GoalStore] reload_for_agent failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
   end
 
   # ============================================================================

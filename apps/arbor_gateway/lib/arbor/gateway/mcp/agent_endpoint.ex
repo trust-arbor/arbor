@@ -311,9 +311,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       []
     end
   rescue
-    _ -> []
+    e ->
+      Logger.debug("[AgentEndpoint] discover_all_actions failed: #{Exception.message(e)}")
+      []
   catch
-    :exit, _ -> []
+    :exit, reason ->
+      Logger.debug("[AgentEndpoint] discover_all_actions exited: #{inspect(reason)}")
+      []
   end
 
   defp authorized_execution_available? do

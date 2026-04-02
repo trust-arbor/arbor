@@ -93,7 +93,9 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
         IdentityConsolidator.save_self_knowledge(agent_id, updated)
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.debug("[ReflectionIntegrations] self-learning route failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
   end
 
   defp route_learning_by_category(agent_id, "technical", content) do
@@ -108,7 +110,9 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
         })
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.debug("[ReflectionIntegrations] technical learning route failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
   end
 
   defp route_learning_by_category(_agent_id, _category, _content), do: :ok
@@ -307,7 +311,9 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
     |> Enum.filter(&(&1.status == :active))
     |> Enum.each(&add_goal_to_kg(agent_id, &1))
   rescue
-    _ -> :ok
+    e ->
+      Logger.debug("[ReflectionIntegrations] add_goals_to_kg failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
   end
 
   defp add_goal_to_kg(agent_id, goal) do

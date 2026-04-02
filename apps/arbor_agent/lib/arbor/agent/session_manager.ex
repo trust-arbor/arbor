@@ -212,9 +212,15 @@ defmodule Arbor.Agent.SessionManager do
       try do
         apply(Arbor.Agent.ActionCycleSupervisor, :start_server, [agent_id, opts])
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[SessionManager] Failed to start ActionCycleServer for #{agent_id}: #{Exception.message(e)}"
+          )
       catch
-        :exit, _ -> :ok
+        :exit, reason ->
+          Logger.warning(
+            "[SessionManager] ActionCycleServer start exited for #{agent_id}: #{inspect(reason)}"
+          )
       end
     end
 
@@ -223,9 +229,15 @@ defmodule Arbor.Agent.SessionManager do
       try do
         apply(Arbor.Agent.MaintenanceSupervisor, :start_server, [agent_id, opts])
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[SessionManager] Failed to start MaintenanceServer for #{agent_id}: #{Exception.message(e)}"
+          )
       catch
-        :exit, _ -> :ok
+        :exit, reason ->
+          Logger.warning(
+            "[SessionManager] MaintenanceServer start exited for #{agent_id}: #{inspect(reason)}"
+          )
       end
     end
   end
@@ -235,9 +247,12 @@ defmodule Arbor.Agent.SessionManager do
       try do
         apply(Arbor.Agent.ActionCycleSupervisor, :stop_server, [agent_id])
       rescue
-        _ -> :ok
+        e ->
+          Logger.debug(
+            "[SessionManager] ActionCycleServer stop failed for #{agent_id}: #{Exception.message(e)}"
+          )
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end
 
@@ -245,9 +260,12 @@ defmodule Arbor.Agent.SessionManager do
       try do
         apply(Arbor.Agent.MaintenanceSupervisor, :stop_server, [agent_id])
       rescue
-        _ -> :ok
+        e ->
+          Logger.debug(
+            "[SessionManager] MaintenanceServer stop failed for #{agent_id}: #{Exception.message(e)}"
+          )
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end
   end

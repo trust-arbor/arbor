@@ -269,9 +269,13 @@ defmodule Arbor.Agent.Registry do
     try do
       :pg.join(:arbor_agents, group, pid)
     rescue
-      _ -> :ok
+      e ->
+        Logger.debug("[Registry] pg_join failed for #{inspect(group)}: #{Exception.message(e)}")
+        :ok
     catch
-      :exit, _ -> :ok
+      :exit, reason ->
+        Logger.debug("[Registry] pg_join exited for #{inspect(group)}: #{inspect(reason)}")
+        :ok
     end
   end
 

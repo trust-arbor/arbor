@@ -350,7 +350,9 @@ defmodule Arbor.Memory.IntentStore do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[IntentStore] reload_for_agent failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
   end
 
   # ============================================================================

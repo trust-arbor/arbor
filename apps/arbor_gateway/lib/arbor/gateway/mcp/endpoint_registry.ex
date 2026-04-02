@@ -152,7 +152,9 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry do
 
     :ok
   catch
-    _, _ -> :ok
+    kind, reason ->
+      Logger.debug("[EndpointRegistry] signal broadcast failed: #{kind} #{inspect(reason)}")
+      :ok
   end
 
   defp subscribe_to_distributed_signals do
@@ -171,6 +173,8 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry do
 
     :ok
   catch
-    _, _ -> :ok
+    kind, reason ->
+      Logger.debug("[EndpointRegistry] signal subscription failed: #{kind} #{inspect(reason)}")
+      :ok
   end
 end

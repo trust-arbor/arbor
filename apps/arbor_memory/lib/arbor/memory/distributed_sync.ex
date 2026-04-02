@@ -190,7 +190,9 @@ defmodule Arbor.Memory.DistributedSync do
 
     :ok
   catch
-    _, _ -> :ok
+    kind, reason ->
+      Logger.debug("[DistributedSync] signal subscription failed: #{kind} #{inspect(reason)}")
+      :ok
   end
 
   defp distributed_signals_enabled? do

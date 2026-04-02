@@ -358,7 +358,9 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     try do
       ExMCP.Client.disconnect(pid)
     catch
-      :exit, _ -> :ok
+      :exit, reason ->
+        Logger.debug("[ClientConnection] disconnect exited: #{inspect(reason)}")
+        :ok
     end
 
     %{state | client_pid: nil, connection_status: :disconnected, tools: [], resources: []}
@@ -397,9 +399,13 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
         error
     end
   rescue
-    _ -> {:ok, []}
+    e ->
+      Logger.debug("[ClientConnection] discover_resources failed: #{Exception.message(e)}")
+      {:ok, []}
   catch
-    :exit, _ -> {:ok, []}
+    :exit, reason ->
+      Logger.debug("[ClientConnection] discover_resources exited: #{inspect(reason)}")
+      {:ok, []}
   end
 
   defp do_read_resource(client_pid, uri, timeout) do
