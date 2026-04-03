@@ -8,6 +8,8 @@ defmodule Arbor.Agent.SessionConfig do
   (legacy path).
   """
 
+  require Logger
+
   @doc """
   Build session init options from agent opts.
 
@@ -26,7 +28,7 @@ defmodule Arbor.Agent.SessionConfig do
   - `:tenant_context` — multi-user context
   - `:context_management` — :none, :heuristic, or :full (default: :full)
   - `:heartbeat_dot` — override heartbeat DOT path
-  - `:recover_session` — whether to load saved session entries (default: false)
+  - `:recover_session` — whether to load saved session entries (default: true)
   """
   @spec build(String.t(), keyword()) :: keyword()
   def build(agent_id, opts) do
@@ -64,7 +66,7 @@ defmodule Arbor.Agent.SessionConfig do
       end
 
     # Optionally recover saved session entries from Postgres
-    if Keyword.get(opts, :recover_session, false) do
+    if Keyword.get(opts, :recover_session, true) do
       session_id = "agent-session-#{agent_id}"
       recover_session(base, session_id)
     else
@@ -154,22 +156,35 @@ defmodule Arbor.Agent.SessionConfig do
   # ── Session recovery ─────────────────────────────────────────────
 
   defp recover_session(base, session_id) do
-    session_store = Arbor.Agent.SessionStore
+    session_store = Arbor.Persistence.SessionStore
 
     if Code.ensure_loaded?(session_store) and
-         function_exported?(session_store, :load_entries, 1) do
-      case apply(session_store, :load_entries, [session_id]) do
-        {:ok, entries} when entries != [] ->
-          Keyword.put(base, :checkpoint, %{messages: entries})
+         function_exported?(session_store, :load_entries_by_session_id, 1) and
+         apply(session_store, :available?, []) do
+      entries = apply(session_store, :load_entries_by_session_id, [session_id])
 
-        _ ->
-          base
+      if is_list(entries) and entries != [] do
+        # Convert Ecto structs to message maps for the session checkpoint
+        messages =
+          Enum.map(entries, fn entry ->
+            %{
+              "role" => entry.role || entry.entry_type,
+              "content" => entry.content || ""
+            }
+          end)
+
+        Logger.info("[SessionConfig] Recovered #{length(messages)} messages for #{session_id}")
+        Keyword.put(base, :checkpoint, %{messages: messages})
+      else
+        base
       end
     else
       base
     end
   rescue
-    _ -> base
+    e ->
+      Logger.debug("[SessionConfig] Session recovery failed: #{Exception.message(e)}")
+      base
   catch
     :exit, _ -> base
   end

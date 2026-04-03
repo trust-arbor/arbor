@@ -547,6 +547,9 @@ defmodule Arbor.Orchestrator.Session do
     # Phase 3: notify ActionCycleServer of chat percept
     maybe_enqueue_chat_percept(state.agent_id, message)
 
+    # Persist user + assistant messages for session recovery across restarts
+    maybe_persist_turn(state.session_id, state.agent_id, message, response)
+
     usage = Map.get(result.context, "session.usage", %{})
 
     # Record turn telemetry
@@ -929,6 +932,69 @@ defmodule Arbor.Orchestrator.Session do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Persist user message + assistant response to SessionStore for recovery across restarts.
+  # Async via Task.start — never blocks the turn response.
+  defp maybe_persist_turn(session_id, agent_id, user_message, response_text) do
+    session_store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(session_store) and
+         function_exported?(session_store, :available?, 0) and
+         apply(session_store, :available?, []) do
+      Task.start(fn ->
+        try do
+          # Ensure session record exists (idempotent — creates only if not found)
+          session_uuid =
+            case apply(session_store, :get_session, [session_id]) do
+              {:ok, session} ->
+                session.id
+
+              {:error, :not_found} ->
+                case apply(session_store, :create_session, [agent_id, [session_id: session_id]]) do
+                  {:ok, session} -> session.id
+                  {:error, _} -> nil
+                end
+            end
+
+          if session_uuid do
+            now = DateTime.utc_now()
+
+            # Persist user message
+            if is_binary(user_message) and user_message != "" do
+              apply(session_store, :append_entry, [
+                session_uuid,
+                %{
+                  entry_type: "user",
+                  role: "user",
+                  content: user_message,
+                  timestamp: now
+                }
+              ])
+            end
+
+            # Persist assistant response
+            if is_binary(response_text) and response_text != "" do
+              apply(session_store, :append_entry, [
+                session_uuid,
+                %{
+                  entry_type: "assistant",
+                  role: "assistant",
+                  content: response_text,
+                  timestamp: now
+                }
+              ])
+            end
+          end
+        rescue
+          e ->
+            Logger.debug("[Session] Turn persistence failed: #{Exception.message(e)}")
+        catch
+          kind, reason ->
+            Logger.debug("[Session] Turn persistence failed: #{inspect({kind, reason})}")
+        end
+      end)
+    end
   end
 
   # Record agent telemetry via the Store (non-critical — failures are silently ignored)
