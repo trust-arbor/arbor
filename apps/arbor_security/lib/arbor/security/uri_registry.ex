@@ -73,6 +73,7 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/action",
     "arbor://agent/lifecycle",
     "arbor://agent/intent",
+    "arbor://agent/discover_tools",
 
     # Memory facade
     "arbor://memory/read",
