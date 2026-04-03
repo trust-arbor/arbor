@@ -208,11 +208,27 @@ defmodule Arbor.Agent.SimpleAgent do
             new_messages = messages ++ [assistant_msg | tool_msgs]
 
             # Update compactor if active
+            old_compression_count =
+              if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
+
             new_compactor =
               if state.compactor do
-                [assistant_msg | tool_msgs]
-                |> Enum.reduce(state.compactor, &ContextCompactor.append(&2, &1))
-                |> ContextCompactor.maybe_compact()
+                compacted =
+                  [assistant_msg | tool_msgs]
+                  |> Enum.reduce(state.compactor, &ContextCompactor.append(&2, &1))
+                  |> ContextCompactor.maybe_compact()
+
+                # Record compaction telemetry if compaction occurred
+                if Map.get(compacted, :compression_count, 0) > old_compression_count do
+                  utilization =
+                    if Map.get(compacted, :effective_window, 0) > 0,
+                      do: Map.get(compacted, :token_count, 0) / compacted.effective_window,
+                      else: 0.0
+
+                  maybe_record_compaction_telemetry(state.agent_id, utilization)
+                end
+
+                compacted
               end
 
             new_state = %{
@@ -515,5 +531,18 @@ defmodule Arbor.Agent.SimpleAgent do
         {k, v}
       end
     end)
+  end
+
+  # Runtime bridge to AgentTelemetry.Store (arbor_common is not a compile dep of arbor_agent)
+  defp maybe_record_compaction_telemetry(agent_id, utilization) do
+    store = Module.concat([:Arbor, :Common, :AgentTelemetry, :Store])
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :record_compaction, 2) do
+      apply(store, :record_compaction, [agent_id, utilization])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

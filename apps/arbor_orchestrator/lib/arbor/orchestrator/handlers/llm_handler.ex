@@ -588,9 +588,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
       case decision do
         %{action: :proceed} ->
+          maybe_record_routing_telemetry(agent_id, :classified)
           {provider, model}
 
         %{action: :rerouted, alternative: {p, m}} = d ->
+          maybe_record_routing_telemetry(agent_id, :rerouted)
+
           # Store routing decision in process dict for context_updates propagation.
           # call_llm_and_respond merges this into the Outcome's context_updates.
           Process.put(:__routing_decision__, %{
@@ -605,6 +608,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           {to_string(p), m}
 
         %{action: :blocked, reason: reason} ->
+          maybe_record_routing_telemetry(agent_id, :blocked)
           {:error, {:sensitivity_blocked, reason}}
       end
     else
@@ -770,5 +774,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           _ -> :ok
         end
     end
+  end
+
+  defp maybe_record_routing_telemetry(agent_id, decision) do
+    store = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store) do
+      store.record_routing(agent_id, decision)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
