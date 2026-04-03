@@ -1,87 +1,97 @@
 defmodule Arbor.Contracts.Agent.Telemetry do
   @moduledoc """
-  Telemetry domain — agent performance metrics.
+  Data structure for agent telemetry metrics.
+
+  Tracks per-agent resource consumption, performance, and operational statistics
+  across both session-scoped and lifetime-scoped windows.
 
   Lifecycle: write-heavy, continuous. Externalized to ETS, not part of
   core agent GenServer state. Async writes via Signal Bus.
 
   Storage: single global ETS table `:arbor_agent_telemetry` with
   `read_concurrency: true`, keyed by agent_id.
+
+  ## Scopes
+
+  - **Session**: Reset when the agent's session resets (e.g., context compaction,
+    explicit `/clear`). Useful for per-conversation cost tracking.
+  - **Lifetime**: Accumulated from agent creation until deletion. Never reset.
+
+  ## Tracked Metrics
+
+  - Token usage (input, output, cached) by provider
+  - Cost breakdown by provider
+  - LLM call latency (P50/P95 from rolling window)
+  - Tool call statistics (per-tool success/failure/gated rates)
+  - Sensitivity routing decisions
+  - Context compaction frequency and utilization
   """
 
-  @type token_counts :: %{
-          input: non_neg_integer(),
-          output: non_neg_integer(),
-          cached: non_neg_integer()
-        }
-
-  @type cost_breakdown :: %{
-          session: float(),
-          lifetime: float(),
-          by_provider: %{atom() => float()}
-        }
-
-  @type latency_stats :: %{
-          recent_llm_ms: [non_neg_integer()],
-          recent_tool_ms: [non_neg_integer()],
-          p50_ms: non_neg_integer(),
-          p95_ms: non_neg_integer()
-        }
-
   @type tool_stats :: %{
+          calls: non_neg_integer(),
           succeeded: non_neg_integer(),
           failed: non_neg_integer(),
           gated: non_neg_integer(),
-          total_duration_ms: non_neg_integer(),
-          call_count: non_neg_integer()
+          total_duration_ms: non_neg_integer()
         }
 
   @type routing_stats :: %{
-          classifications: non_neg_integer(),
+          classified: non_neg_integer(),
           rerouted: non_neg_integer(),
           tokenized: non_neg_integer(),
           blocked: non_neg_integer()
         }
 
-  @type context_stats :: %{
-          compaction_triggers: non_neg_integer(),
-          total_utilization: float(),
-          utilization_samples: non_neg_integer(),
-          resets: non_neg_integer()
-        }
-
   @type t :: %__MODULE__{
           agent_id: String.t(),
-          tokens: %{
-            session: token_counts(),
-            lifetime: token_counts(),
-            by_provider: %{atom() => token_counts()}
-          },
-          cost: cost_breakdown(),
-          latency: latency_stats(),
-          tools: %{String.t() => tool_stats()},
-          routing: routing_stats(),
-          context: context_stats(),
+          # Session-scoped token counts
+          session_input_tokens: non_neg_integer(),
+          session_output_tokens: non_neg_integer(),
+          session_cached_tokens: non_neg_integer(),
+          session_cost: float(),
+          # Lifetime token counts
+          lifetime_input_tokens: non_neg_integer(),
+          lifetime_output_tokens: non_neg_integer(),
+          lifetime_cached_tokens: non_neg_integer(),
+          lifetime_cost: float(),
+          # Per-provider cost breakdown: %{"anthropic" => 0.05, "openai" => 0.02}
+          cost_by_provider: %{String.t() => float()},
+          # Turn counter
           turn_count: non_neg_integer(),
-          started_at: DateTime.t(),
-          last_turn_at: DateTime.t() | nil
+          # LLM latency rolling windows (last 100 each)
+          llm_latencies: [non_neg_integer()],
+          tool_latencies: [non_neg_integer()],
+          # Per-tool stats: %{"file.read" => %{calls: 5, succeeded: 4, ...}}
+          tool_stats: %{String.t() => tool_stats()},
+          # Sensitivity routing counters
+          routing_stats: routing_stats(),
+          # Context compaction
+          compaction_count: non_neg_integer(),
+          avg_utilization: float(),
+          # Timestamps
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
         }
 
-  @enforce_keys [:agent_id]
   defstruct [
     :agent_id,
-    :last_turn_at,
-    tokens: %{
-      session: %{input: 0, output: 0, cached: 0},
-      lifetime: %{input: 0, output: 0, cached: 0},
-      by_provider: %{}
-    },
-    cost: %{session: 0.0, lifetime: 0.0, by_provider: %{}},
-    latency: %{recent_llm_ms: [], recent_tool_ms: [], p50_ms: 0, p95_ms: 0},
-    tools: %{},
-    routing: %{classifications: 0, rerouted: 0, tokenized: 0, blocked: 0},
-    context: %{compaction_triggers: 0, total_utilization: 0.0, utilization_samples: 0, resets: 0},
+    session_input_tokens: 0,
+    session_output_tokens: 0,
+    session_cached_tokens: 0,
+    session_cost: 0.0,
+    lifetime_input_tokens: 0,
+    lifetime_output_tokens: 0,
+    lifetime_cached_tokens: 0,
+    lifetime_cost: 0.0,
+    cost_by_provider: %{},
     turn_count: 0,
-    started_at: nil
+    llm_latencies: [],
+    tool_latencies: [],
+    tool_stats: %{},
+    routing_stats: %{classified: 0, rerouted: 0, tokenized: 0, blocked: 0},
+    compaction_count: 0,
+    avg_utilization: 0.0,
+    created_at: nil,
+    updated_at: nil
   ]
 end

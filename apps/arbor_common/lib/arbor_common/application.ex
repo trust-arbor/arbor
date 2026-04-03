@@ -22,6 +22,7 @@ defmodule Arbor.Common.Application do
           Arbor.Common.PipelineResolver,
           Arbor.Common.ActionRegistry,
           {Arbor.Common.SkillLibrary, skill_dirs: [".arbor/skills"]},
+          Arbor.Common.AgentTelemetry.Store,
           {Arbor.Common.CapabilityIndex,
            providers: [
              Arbor.Common.CapabilityProviders.ActionProvider,
