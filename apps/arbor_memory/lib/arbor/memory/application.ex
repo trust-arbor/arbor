@@ -6,7 +6,6 @@ defmodule Arbor.Memory.Application do
   @graph_ets :arbor_memory_graphs
   @working_memory_ets :arbor_working_memory
   @proposals_ets :arbor_memory_proposals
-  @chat_history_ets :arbor_chat_history
   @preferences_ets :arbor_preferences
 
   @impl true
@@ -19,7 +18,6 @@ defmodule Arbor.Memory.Application do
         ensure_ets(@graph_ets)
         ensure_ets(@working_memory_ets)
         ensure_ets(@proposals_ets)
-        ensure_ets(@chat_history_ets)
         ensure_ets(@preferences_ets)
 
         [
@@ -35,7 +33,6 @@ defmodule Arbor.Memory.Application do
           {Arbor.Memory.IntentStore, []},
           {Arbor.Memory.Thinking, []},
           {Arbor.Memory.CodeStore, []},
-          {Arbor.Memory.ChatHistory, []},
           {Arbor.Memory.DistributedSync, []}
         ]
       else

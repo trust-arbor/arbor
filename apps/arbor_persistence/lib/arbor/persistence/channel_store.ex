@@ -3,9 +3,8 @@ defmodule Arbor.Persistence.ChannelStore do
   Persistence context for communication channels and messages.
 
   Channels are shared message containers with sender identity tracking.
-  Currently used as the durable backend for ChatHistory (DM channels)
-  and will serve as the foundation for the unified channel communications
-  architecture.
+  Serves as the foundation for the unified channel communications
+  architecture (DM channels, group chats).
   """
 
   import Ecto.Query

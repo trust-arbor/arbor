@@ -192,10 +192,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
       }
 
       try do
-        if socket.assigns.agent || socket.assigns.group_id do
-          agent_key = socket.assigns.agent || socket.assigns.group_id
-          Arbor.Memory.append_chat_message(agent_key, msg_entry)
-        end
+        group_id = socket.assigns.group_id
+        if group_id, do: persist_group_message(group_id, msg_entry)
       rescue
         _ -> :ok
       end
@@ -263,6 +261,46 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
 
   defp sender_color_hue(sender_id) do
     :erlang.phash2(sender_id, 360)
+  end
+
+  defp persist_group_message(group_id, msg) do
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :available?, 0) and
+         apply(store, :available?, []) do
+      session_id = "group-session-#{group_id}"
+
+      session_uuid =
+        case apply(store, :get_session, [session_id]) do
+          {:ok, s} ->
+            s.id
+
+          {:error, :not_found} ->
+            case apply(store, :create_session, [group_id, [session_id: session_id]]) do
+              {:ok, s} -> s.id
+              _ -> nil
+            end
+        end
+
+      if session_uuid do
+        role = if msg[:role] in [:user, "user"], do: "user", else: "assistant"
+        content_text = if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
+
+        apply(store, :append_entry, [
+          session_uuid,
+          %{
+            entry_type: role,
+            role: role,
+            content: [%{"type" => "text", "text" => content_text}],
+            timestamp: msg[:timestamp] || DateTime.utc_now()
+          }
+        ])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp comms_channel_members(channel_id) do

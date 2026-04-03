@@ -238,10 +238,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           |> stream_insert(:messages, user_msg)
           |> assign(input: "", error: nil)
 
-        # Persist to chat history
+        # Persist to session store
         try do
           if socket.assigns.group_id do
-            Arbor.Memory.append_chat_message(socket.assigns.group_id, user_msg)
+            persist_group_message(socket.assigns.group_id, user_msg)
           end
         rescue
           _ -> :ok
@@ -279,15 +279,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             socket
             |> stream_insert(:messages, user_msg)
             |> assign(input: "", loading: true, error: nil, streaming_text: "")
-
-          # Persist to chat history (agent_id is the string ID, not the PID)
-          try do
-            if socket.assigns.agent_id do
-              Arbor.Memory.append_chat_message(socket.assigns.agent_id, user_msg)
-            end
-          rescue
-            _ -> :ok
-          end
 
           # Spawn async query — keeps LiveView responsive during LLM calls
           # Command routing happens centrally in Manager.chat/Session.send_message
@@ -340,10 +331,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     if agent_id && cursor do
       try do
+        sess_id = "agent-session-#{agent_id}"
+
         older =
-          Arbor.Memory.load_recent_chat_history(agent_id,
+          load_session_history(sess_id,
             limit: @chat_page_size,
-            before: cursor
+            before_timestamp: cursor
           )
 
         older_with_ids =
@@ -353,7 +346,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
         new_cursor =
           case older_with_ids do
-            [first | _] -> first[:id]
+            [first | _] -> first[:timestamp]
             [] -> cursor
           end
 
@@ -518,17 +511,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       session_id: nil,
       memory_count: length(response[:recalled_memories] || [])
     }
-
-    # Persist to chat history
-    try do
-      agent_id = socket.assigns[:agent_id]
-
-      if agent_id do
-        Arbor.Memory.append_chat_message(agent_id, assistant_msg)
-      end
-    rescue
-      _ -> :ok
-    end
 
     socket =
       socket
@@ -703,17 +685,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp process_query_response(socket, agent, response) do
     assistant_msg = build_assistant_message(response)
-
-    # Persist to chat history (use agent_id string, not the PID)
-    try do
-      agent_id = socket.assigns[:agent_id]
-
-      if agent_id do
-        Arbor.Memory.append_chat_message(agent_id, assistant_msg)
-      end
-    rescue
-      _ -> :ok
-    end
 
     socket
     |> stream_insert(:messages, assistant_msg)
@@ -1031,7 +1002,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # that handles :query, :memory_stats, etc. The supervisor PID is only for monitoring.
     host_pid = metadata[:host_pid] || pid
     memory_stats = get_memory_stats(host_pid)
-    tokens = ChatState.get_tokens(agent_id)
+    tokens = get_telemetry_tokens(agent_id)
     ChatState.touch_agent(agent_id)
 
     socket
@@ -1068,10 +1039,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       selected_heartbeat_model: nil
     )
     |> then(fn socket ->
-      # Load recent chat history with pagination
+      # Load recent chat history from SessionStore with pagination
       try do
-        history = Arbor.Memory.load_recent_chat_history(agent_id, limit: @chat_page_size)
-        total = Arbor.Memory.chat_history_count(agent_id)
+        sess_id = "agent-session-#{agent_id}"
+        history = load_session_history(sess_id, limit: @chat_page_size)
+        total = session_message_count(sess_id)
 
         # Ensure each message has an :id field for streaming
         history_with_ids =
@@ -1079,15 +1051,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             Map.put_new(msg, :id, "hist-#{System.unique_integer([:positive])}")
           end)
 
-        oldest_id =
+        oldest_timestamp =
           case history_with_ids do
-            [first | _] -> first[:id]
+            [first | _] -> first[:timestamp]
             [] -> nil
           end
 
         socket
         |> assign(
-          chat_history_cursor: oldest_id,
+          chat_history_cursor: oldest_timestamp,
           chat_has_more: total > length(history_with_ids)
         )
         |> stream(:messages, history_with_ids, reset: true)
@@ -1158,8 +1130,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     cost = usage[:cost] || usage["cost"]
 
     if input > 0 or output > 0 do
-      agent_id = socket.assigns.agent_id
-      tokens = ChatState.add_tokens(agent_id, input, output, cached)
+      new_input = (socket.assigns[:input_tokens] || 0) + input
+      new_output = (socket.assigns[:output_tokens] || 0) + output
+      new_cached = (socket.assigns[:cached_tokens] || 0) + cached
+      new_count = (socket.assigns[:llm_call_count] || 0) + 1
 
       cost_assigns =
         if cost do
@@ -1172,11 +1146,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       assign(
         socket,
         [
-          input_tokens: tokens.input,
-          output_tokens: tokens.output,
-          cached_tokens: tokens.cached,
-          total_tokens: tokens.input + tokens.output,
-          llm_call_count: tokens.count
+          input_tokens: new_input,
+          output_tokens: new_output,
+          cached_tokens: new_cached,
+          total_tokens: new_input + new_output,
+          llm_call_count: new_count
         ] ++ cost_assigns
       )
     else
@@ -1237,15 +1211,17 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {input, output, cached}
   end
 
-  defp apply_token_usage(socket, agent_id, input, output, cached) do
-    tokens = ChatState.add_tokens(agent_id, input, output, nil)
-    if cached > 0, do: ChatState.add_cached_tokens(agent_id, cached)
+  defp apply_token_usage(socket, _agent_id, input, output, cached) do
+    new_input = (socket.assigns[:input_tokens] || 0) + input
+    new_output = (socket.assigns[:output_tokens] || 0) + output
+    new_cached = (socket.assigns[:cached_tokens] || 0) + cached
+    new_count = (socket.assigns[:llm_call_count] || 0) + 1
 
     assign(socket,
-      input_tokens: tokens.input,
-      output_tokens: tokens.output,
-      cached_tokens: if(cached > 0, do: tokens.cached + cached, else: tokens.cached),
-      llm_call_count: tokens.count
+      input_tokens: new_input,
+      output_tokens: new_output,
+      cached_tokens: new_cached,
+      llm_call_count: new_count
     )
   end
 
@@ -1277,5 +1253,99 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     e -> {:error, Exception.message(e)}
   catch
     :exit, reason -> {:error, reason}
+  end
+
+  # ── SessionStore Helpers ─────────────────────────────────────────
+
+  defp load_session_history(session_id, opts) do
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :load_recent_for_display, 2) do
+      apply(store, :load_recent_for_display, [session_id, opts])
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp session_message_count(session_id) do
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :message_count_by_session_id, 1) do
+      apply(store, :message_count_by_session_id, [session_id])
+    else
+      0
+    end
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
+  end
+
+  defp persist_group_message(group_id, msg) do
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :available?, 0) and
+         apply(store, :available?, []) do
+      session_id = "group-session-#{group_id}"
+
+      session_uuid =
+        case apply(store, :get_session, [session_id]) do
+          {:ok, s} ->
+            s.id
+
+          {:error, :not_found} ->
+            case apply(store, :create_session, [group_id, [session_id: session_id]]) do
+              {:ok, s} -> s.id
+              _ -> nil
+            end
+        end
+
+      if session_uuid do
+        role = if msg[:role] in [:user, "user"], do: "user", else: "assistant"
+        content_text = if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
+
+        apply(store, :append_entry, [
+          session_uuid,
+          %{
+            entry_type: role,
+            role: role,
+            content: [%{"type" => "text", "text" => content_text}],
+            timestamp: msg[:timestamp] || DateTime.utc_now()
+          }
+        ])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp get_telemetry_tokens(agent_id) do
+    store = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store) do
+      case apply(store, :get, [agent_id]) do
+        nil ->
+          %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
+
+        t ->
+          %{
+            input: t.session_input_tokens,
+            output: t.session_output_tokens,
+            cached: t.session_cached_tokens,
+            count: t.turn_count,
+            last_duration: List.first(t.llm_latencies || [])
+          }
+      end
+    else
+      %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
+    end
+  rescue
+    _ -> %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
   end
 end
