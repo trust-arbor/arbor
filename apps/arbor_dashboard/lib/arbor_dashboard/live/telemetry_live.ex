@@ -70,6 +70,12 @@ defmodule Arbor.Dashboard.Live.TelemetryLive do
 
     <%= if @selected_agent_telemetry do %>
       <TelemetryComponent.agent_detail selected_agent_telemetry={@selected_agent_telemetry} />
+
+      <%= if @history_loaded do %>
+        <TelemetryComponent.cost_over_time history_cost_trend={@history_cost_trend} />
+        <TelemetryComponent.event_timeline history_events={@history_events} />
+        <TelemetryComponent.tool_failures history_tool_failures={@history_tool_failures} />
+      <% end %>
     <% end %>
     """
   end
