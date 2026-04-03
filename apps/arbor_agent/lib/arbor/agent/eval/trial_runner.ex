@@ -264,10 +264,10 @@ defmodule Arbor.Agent.Eval.TrialRunner do
       end
     end)
 
-    # Seed chat history
+    # Seed chat history via SessionStore
     for msg <- seed.chat_history do
       safe_call(fn ->
-        Arbor.Memory.append_chat_message(agent_id, %{
+        persist_chat_to_session_store(agent_id, %{
           role: msg.role,
           content: msg.content,
           timestamp: DateTime.utc_now()
@@ -412,7 +412,57 @@ defmodule Arbor.Agent.Eval.TrialRunner do
   end
 
   defp load_chat_history(agent_id) do
-    safe_call(fn -> Arbor.Memory.load_chat_history(agent_id) end) || []
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :load_recent_for_display, 2) do
+      apply(store, :load_recent_for_display, ["agent-session-#{agent_id}", [limit: 100]])
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp persist_chat_to_session_store(agent_id, msg) do
+    store = Arbor.Persistence.SessionStore
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :available?, 0) and
+         apply(store, :available?, []) do
+      session_id = "agent-session-#{agent_id}"
+
+      session_uuid =
+        case apply(store, :get_session, [session_id]) do
+          {:ok, s} ->
+            s.id
+
+          {:error, :not_found} ->
+            case apply(store, :create_session, [agent_id, [session_id: session_id]]) do
+              {:ok, s} -> s.id
+              _ -> nil
+            end
+        end
+
+      if session_uuid do
+        role = if msg[:role] in [:user, "user"], do: "user", else: "assistant"
+        content_text = if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
+
+        apply(store, :append_entry, [
+          session_uuid,
+          %{
+            entry_type: role,
+            role: role,
+            content: [%{"type" => "text", "text" => content_text}],
+            timestamp: msg[:timestamp] || DateTime.utc_now()
+          }
+        ])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp priority_to_int(:high), do: 80

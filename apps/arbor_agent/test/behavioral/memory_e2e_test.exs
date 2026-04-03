@@ -569,18 +569,9 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
       Memory.add_insight(agent_id, "code analysis", :capability, confidence: 0.8)
       Memory.add_insight(agent_id, "curious", :trait, confidence: 0.7)
 
-      Memory.append_chat_message(agent_id, %{
-        role: "user",
-        content: "Tell me about your memory system",
-        timestamp: DateTime.utc_now()
-      })
-
-      Memory.append_chat_message(agent_id, %{
-        role: "assistant",
-        content:
-          "I have several memory subsystems including goals, working memory, and self-knowledge.",
-        timestamp: DateTime.utc_now()
-      })
+      # Chat history is now stored via SessionStore (persistence layer),
+      # not through Memory facade. Seeding chat context is optional for
+      # heartbeat tests since the LLM prompt builds context independently.
 
       {:ok, goal_id: goal.id}
     end
@@ -848,14 +839,8 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
       Memory.add_insight(agent_id, value, :value, confidence: 0.75)
     end
 
-    # Seed chat history
-    for msg <- seed.chat_history do
-      Memory.append_chat_message(agent_id, %{
-        role: msg.role,
-        content: msg.content,
-        timestamp: DateTime.utc_now()
-      })
-    end
+    # Chat history is now stored via SessionStore (persistence layer),
+    # not through Memory facade. Seed chat history is skipped here.
 
     # Seed working memory
     wm = Memory.load_working_memory(agent_id) || %WorkingMemory{}

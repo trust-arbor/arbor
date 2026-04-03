@@ -13,7 +13,6 @@ defmodule Arbor.Memory.SessionOps do
   alias Arbor.Memory.{
     ActionPatterns,
     BackgroundChecks,
-    ChatHistory,
     CodeStore,
     ContextWindow,
     Patterns,
@@ -510,25 +509,6 @@ defmodule Arbor.Memory.SessionOps do
   """
   @spec configure_preconscious(String.t(), keyword()) :: :ok | {:error, term()}
   defdelegate configure_preconscious(agent_id, opts), to: Preconscious, as: :configure
-
-  # ============================================================================
-  # Chat History (Seed/Host Phase 3)
-  # ============================================================================
-
-  @doc "Append a chat message to an agent's conversation history."
-  defdelegate append_chat_message(agent_id, msg), to: ChatHistory, as: :append
-
-  @doc "Load chat history for an agent, sorted chronologically."
-  defdelegate load_chat_history(agent_id), to: ChatHistory, as: :load
-
-  @doc "Load recent chat history with pagination support."
-  defdelegate load_recent_chat_history(agent_id, opts \\ []), to: ChatHistory, as: :load_recent
-
-  @doc "Count total chat messages for an agent."
-  defdelegate chat_history_count(agent_id), to: ChatHistory, as: :count
-
-  @doc "Clear all chat history for an agent."
-  defdelegate clear_chat_history(agent_id), to: ChatHistory, as: :clear
 
   # ============================================================================
   # read_self -- Live System Introspection
