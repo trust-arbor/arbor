@@ -6,6 +6,9 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   lifecycle. All reads and writes go directly through ETS (which is
   concurrent-safe for single-key operations), avoiding GenServer bottlenecks.
 
+  Events are persisted asynchronously to Postgres for historical analysis.
+  Lifetime metrics are restored from the database on first access.
+
   ## Usage
 
       # Atomic read-modify-write for a turn
@@ -18,6 +21,9 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       # Dashboard overview
       Store.all()
       #=> [%Telemetry{}, ...]
+
+      # Historical query
+      Store.query_events("agent_abc", since: ~U[2026-04-01 00:00:00Z], limit: 50)
   """
 
   use GenServer
@@ -139,6 +145,110 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   end
 
   # ===========================================================================
+  # Historical queries
+  # ===========================================================================
+
+  @doc """
+  Load lifetime aggregate metrics from the database for an agent.
+
+  Queries aggregate values (SUM tokens, SUM cost, COUNT turns, etc.) via
+  raw SQL rather than replaying every event.
+
+  Returns a map of lifetime metrics or `nil` if the database is unavailable.
+  """
+  @spec load_lifetime_from_db(String.t()) :: map() | nil
+  def load_lifetime_from_db(agent_id) when is_binary(agent_id) do
+    with {:ok, repo} <- get_repo() do
+      sql = """
+      SELECT
+        COUNT(*) FILTER (WHERE event_type = 'turn_completed') AS turn_count,
+        COALESCE(SUM((data->>'input_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_input,
+        COALESCE(SUM((data->>'output_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_output,
+        COALESCE(SUM((data->>'cached_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_cached,
+        COALESCE(SUM((data->>'cost')::float) FILTER (WHERE event_type = 'turn_completed'), 0.0) AS total_cost,
+        COUNT(*) FILTER (WHERE event_type = 'compaction') AS compaction_count
+      FROM telemetry_events
+      WHERE agent_id = $1
+      """
+
+      case apply(repo, :query, [sql, [agent_id]]) do
+        {:ok, %{rows: [[tc, ti, to_, tca, tco, cc]]}} ->
+          %{
+            turn_count: tc,
+            lifetime_input_tokens: ti,
+            lifetime_output_tokens: to_,
+            lifetime_cached_tokens: tca,
+            lifetime_cost: tco,
+            compaction_count: cc
+          }
+
+        _ ->
+          nil
+      end
+    else
+      _ -> nil
+    end
+  rescue
+    e ->
+      Logger.debug("[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{Exception.message(e)}")
+      nil
+  end
+
+  @doc """
+  Query historical telemetry events for an agent.
+
+  ## Options
+
+  - `:event_type` - filter by event type atom (e.g. `:turn_completed`)
+  - `:since` - only events after this `DateTime`
+  - `:until` - only events before this `DateTime`
+  - `:limit` - max number of events (default 100)
+  - `:order` - `:asc` or `:desc` (default `:desc`)
+  """
+  @spec query_events(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def query_events(agent_id, opts \\ []) when is_binary(agent_id) do
+    with {:ok, repo} <- get_repo() do
+      limit_val = Keyword.get(opts, :limit, 100)
+      order = if Keyword.get(opts, :order, :desc) == :asc, do: "ASC", else: "DESC"
+
+      {where_clauses, params, _idx} = build_query_conditions(agent_id, opts)
+
+      sql = """
+      SELECT id, agent_id, event_type, timestamp, data
+      FROM telemetry_events
+      WHERE #{Enum.join(where_clauses, " AND ")}
+      ORDER BY timestamp #{order}
+      LIMIT #{limit_val}
+      """
+
+      case apply(repo, :query, [sql, params]) do
+        {:ok, %{rows: rows}} ->
+          events =
+            Enum.map(rows, fn [id, aid, etype, ts, data] ->
+              %{
+                id: id,
+                agent_id: aid,
+                event_type: etype,
+                timestamp: ts,
+                data: data || %{}
+              }
+            end)
+
+          {:ok, events}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      _ -> {:ok, []}
+    end
+  rescue
+    e ->
+      Logger.debug("[Telemetry.Store] Failed to query events: #{Exception.message(e)}")
+      {:ok, []}
+  end
+
+  # ===========================================================================
   # GenServer (table ownership only)
   # ===========================================================================
 
@@ -160,193 +270,81 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   end
 
   # ===========================================================================
-  # Persistence (async writes via runtime bridge)
-  # ===========================================================================
-
-  @doc """
-  Persist a telemetry event asynchronously to Postgres.
-
-  Uses `Task.start` to avoid blocking the ETS hot path. Errors are logged
-  inside the task body (never swallowed silently).
-  """
-  @spec persist_event(String.t(), atom(), map()) :: :ok
-  def persist_event(agent_id, event_type, data)
-      when is_binary(agent_id) and is_atom(event_type) do
-    Task.start(fn ->
-      try do
-        persist_event_sync(agent_id, event_type, data)
-      rescue
-        e ->
-          Logger.warning(
-            "Telemetry persist failed for #{agent_id}/#{event_type}: #{Exception.message(e)}"
-          )
-      catch
-        kind, reason ->
-          Logger.warning(
-            "Telemetry persist failed for #{agent_id}/#{event_type}: #{inspect({kind, reason})}"
-          )
-      end
-    end)
-
-    :ok
-  end
-
-  @doc """
-  Load lifetime aggregate metrics from the database for an agent.
-
-  Queries aggregate values (SUM tokens, SUM cost, COUNT turns, etc.) via
-  raw SQL rather than replaying every event, for efficiency on startup.
-
-  Returns a map of lifetime metrics or `nil` if the database is unavailable.
-  """
-  @spec load_lifetime_from_db(String.t()) :: map() | nil
-  def load_lifetime_from_db(agent_id) when is_binary(agent_id) do
-    with {:ok, repo} <- get_repo() do
-      try do
-        sql = """
-        SELECT
-          COUNT(*) FILTER (WHERE event_type = 'turn_completed') AS turn_count,
-          COALESCE(SUM((data->>'input_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_input,
-          COALESCE(SUM((data->>'output_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_output,
-          COALESCE(SUM((data->>'cached_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_cached,
-          COALESCE(SUM((data->>'cost')::float) FILTER (WHERE event_type = 'turn_completed'), 0.0) AS total_cost,
-          COUNT(*) FILTER (WHERE event_type = 'compaction') AS compaction_count
-        FROM telemetry_events
-        WHERE agent_id = $1
-        """
-
-        case apply(repo, :query, [sql, [agent_id]]) do
-          {:ok, %{rows: [[tc, ti, to_, tca, tco, cc]]}} ->
-            %{
-              turn_count: tc,
-              lifetime_input_tokens: ti,
-              lifetime_output_tokens: to_,
-              lifetime_cached_tokens: tca,
-              lifetime_cost: tco,
-              compaction_count: cc
-            }
-
-          _ ->
-            nil
-        end
-      rescue
-        e ->
-          Logger.warning(
-            "Failed to load lifetime telemetry for #{agent_id}: #{Exception.message(e)}"
-          )
-
-          nil
-      end
-    else
-      _ -> nil
-    end
-  end
-
-  @doc """
-  Query historical telemetry events for an agent.
-
-  ## Options
-
-  - `:event_type` - filter by event type atom (e.g. `:turn_completed`)
-  - `:since` - only events after this `DateTime`
-  - `:until` - only events before this `DateTime`
-  - `:limit` - max number of events (default 100)
-  - `:order` - `:asc` or `:desc` (default `:desc`)
-  """
-  @spec query_events(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
-  def query_events(agent_id, opts \\ []) when is_binary(agent_id) do
-    with {:ok, repo} <- get_repo() do
-      try do
-        limit_val = Keyword.get(opts, :limit, 100)
-        order = if Keyword.get(opts, :order, :desc) == :asc, do: "ASC", else: "DESC"
-
-        {where_clauses, params, _idx} =
-          build_query_conditions(agent_id, opts)
-
-        sql = """
-        SELECT id, agent_id, event_type, timestamp, data
-        FROM telemetry_events
-        WHERE #{Enum.join(where_clauses, " AND ")}
-        ORDER BY timestamp #{order}
-        LIMIT #{limit_val}
-        """
-
-        case apply(repo, :query, [sql, params]) do
-          {:ok, %{rows: rows}} ->
-            events =
-              Enum.map(rows, fn [id, aid, etype, ts, data] ->
-                %{
-                  id: id,
-                  agent_id: aid,
-                  event_type: etype,
-                  timestamp: ts,
-                  data: data || %{}
-                }
-              end)
-
-            {:ok, events}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-      rescue
-        e ->
-          Logger.warning("Failed to query telemetry events: #{Exception.message(e)}")
-          {:error, Exception.message(e)}
-      end
-    else
-      _ -> {:ok, []}
-    end
-  end
-
-  # ===========================================================================
   # Private
   # ===========================================================================
 
   defp get_or_create(agent_id) do
     case get(agent_id) do
-      nil -> AgentTelemetry.new(agent_id)
-      telemetry -> telemetry
+      nil ->
+        # Try to restore lifetime metrics from DB on first access
+        base = AgentTelemetry.new(agent_id)
+
+        case load_lifetime_from_db(agent_id) do
+          nil ->
+            base
+
+          lifetime ->
+            %{base |
+              lifetime_input_tokens: lifetime[:lifetime_input_tokens] || 0,
+              lifetime_output_tokens: lifetime[:lifetime_output_tokens] || 0,
+              lifetime_cached_tokens: lifetime[:lifetime_cached_tokens] || 0,
+              lifetime_cost: lifetime[:lifetime_cost] || 0.0,
+              turn_count: lifetime[:turn_count] || 0,
+              compaction_count: lifetime[:compaction_count] || 0
+            }
+        end
+
+      telemetry ->
+        telemetry
     end
   end
 
   defp build_query_conditions(agent_id, opts) do
-    # Start with agent_id condition
     clauses = ["agent_id = $1"]
     params = [agent_id]
     idx = 2
 
     {clauses, params, idx} =
       case Keyword.get(opts, :event_type) do
-        nil ->
-          {clauses, params, idx}
-
-        type ->
-          {clauses ++ ["event_type = $#{idx}"], params ++ [to_string(type)], idx + 1}
+        nil -> {clauses, params, idx}
+        type -> {clauses ++ ["event_type = $#{idx}"], params ++ [to_string(type)], idx + 1}
       end
 
     {clauses, params, idx} =
       case Keyword.get(opts, :since) do
-        nil ->
-          {clauses, params, idx}
-
-        since ->
-          {clauses ++ ["timestamp >= $#{idx}"], params ++ [since], idx + 1}
+        nil -> {clauses, params, idx}
+        since -> {clauses ++ ["timestamp >= $#{idx}"], params ++ [since], idx + 1}
       end
 
     {clauses, params, _idx} =
       case Keyword.get(opts, :until) do
-        nil ->
-          {clauses, params, idx}
-
-        until_dt ->
-          {clauses ++ ["timestamp <= $#{idx}"], params ++ [until_dt], idx + 1}
+        nil -> {clauses, params, idx}
+        until_dt -> {clauses ++ ["timestamp <= $#{idx}"], params ++ [until_dt], idx + 1}
       end
 
     {clauses, params, idx}
   end
 
-  # Runtime bridge: write event to Postgres without compile-time dependency
+  # Persist a telemetry event asynchronously to Postgres.
+  # Errors are logged inside the task body (never swallowed silently).
+  defp persist_event(agent_id, event_type, data) do
+    Task.start(fn ->
+      try do
+        persist_event_sync(agent_id, event_type, data)
+      rescue
+        e ->
+          Logger.debug(
+            "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{Exception.message(e)}"
+          )
+      catch
+        kind, reason ->
+          Logger.debug(
+            "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{inspect({kind, reason})}"
+          )
+      end
+    end)
+  end
+
   defp persist_event_sync(agent_id, event_type, data) do
     with {:ok, repo} <- get_repo(),
          {:ok, schema_mod} <- get_schema_mod(),
@@ -355,8 +353,6 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       attrs = apply(schema_mod, :from_contract, [event])
       changeset = apply(schema_mod, :changeset, [struct(schema_mod), attrs])
       apply(repo, :insert, [changeset])
-    else
-      {:error, :unavailable} -> :ok
     end
   end
 
@@ -372,21 +368,11 @@ defmodule Arbor.Common.AgentTelemetry.Store do
 
   defp get_schema_mod do
     mod = Arbor.Persistence.Schemas.TelemetryEvent
-
-    if Code.ensure_loaded?(mod) do
-      {:ok, mod}
-    else
-      {:error, :unavailable}
-    end
+    if Code.ensure_loaded?(mod), do: {:ok, mod}, else: {:error, :unavailable}
   end
 
   defp get_contract_mod do
     mod = Arbor.Contracts.Agent.TelemetryEvent
-
-    if Code.ensure_loaded?(mod) do
-      {:ok, mod}
-    else
-      {:error, :unavailable}
-    end
+    if Code.ensure_loaded?(mod), do: {:ok, mod}, else: {:error, :unavailable}
   end
 end
