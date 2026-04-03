@@ -201,6 +201,116 @@ defmodule Arbor.Persistence.SessionStore do
     Repo.one(from e in SessionEntry, where: e.session_id == ^session_uuid, select: count())
   end
 
+  # ── Dashboard display API ──────────────────────────────────────────
+
+  @doc """
+  Load recent messages for dashboard display by session_id string.
+
+  Returns display-ready maps with atom keys and unwrapped content.
+  Supports cursor-based pagination via `:before_timestamp`.
+
+  ## Options
+
+  - `:limit` — max messages (default 50)
+  - `:before_timestamp` — only messages before this DateTime (cursor)
+  """
+  @spec load_recent_for_display(String.t(), keyword()) :: [map()]
+  def load_recent_for_display(session_id, opts \\ []) do
+    case get_session(session_id) do
+      {:ok, session} ->
+        limit = Keyword.get(opts, :limit, 50)
+        before_ts = Keyword.get(opts, :before_timestamp)
+
+        query =
+          from e in SessionEntry,
+            where: e.session_id == ^session.id,
+            where: e.entry_type in ["user", "assistant"],
+            order_by: [desc: e.timestamp],
+            limit: ^limit
+
+        query =
+          if before_ts do
+            from e in query, where: e.timestamp < ^before_ts
+          else
+            query
+          end
+
+        Repo.all(query)
+        |> Enum.reverse()
+        |> Enum.map(&entry_to_display_map/1)
+
+      {:error, _} ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  Count user + assistant messages for a session by session_id string.
+  """
+  @spec message_count_by_session_id(String.t()) :: non_neg_integer()
+  def message_count_by_session_id(session_id) do
+    case get_session(session_id) do
+      {:ok, session} ->
+        Repo.one(
+          from e in SessionEntry,
+            where: e.session_id == ^session.id,
+            where: e.entry_type in ["user", "assistant"],
+            select: count()
+        )
+
+      {:error, _} ->
+        0
+    end
+  rescue
+    _ -> 0
+  end
+
+  # Convert a SessionEntry to a display-ready map for the dashboard
+  defp entry_to_display_map(entry) do
+    role =
+      case entry.role do
+        "user" -> :user
+        "assistant" -> :assistant
+        "system" -> :system
+        other -> String.to_existing_atom(other)
+      end
+
+    %{
+      id: entry.id,
+      role: role,
+      content: unwrap_content(entry.content),
+      timestamp: entry.timestamp,
+      model: entry.model,
+      token_usage: entry.token_usage
+    }
+  rescue
+    # If atom conversion fails, keep as string
+    _ -> %{
+      id: entry.id,
+      role: entry.role,
+      content: unwrap_content(entry.content),
+      timestamp: entry.timestamp,
+      model: entry.model,
+      token_usage: entry.token_usage
+    }
+  end
+
+  # Unwrap content blocks to plain text for display.
+  # Content may be: [%{"type" => "text", "text" => "hello"}], a plain string, or nil.
+  defp unwrap_content(nil), do: ""
+  defp unwrap_content(content) when is_binary(content), do: content
+  defp unwrap_content(content) when is_list(content) do
+    content
+    |> Enum.filter(fn
+      %{"type" => "text"} -> true
+      _ -> false
+    end)
+    |> Enum.map_join("\n", fn block -> block["text"] || "" end)
+  end
+  defp unwrap_content(_), do: ""
+
   # ── JSONL export ───────────────────────────────────────────────────
 
   @doc """

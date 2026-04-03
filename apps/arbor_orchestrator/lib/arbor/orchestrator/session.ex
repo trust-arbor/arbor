@@ -547,10 +547,10 @@ defmodule Arbor.Orchestrator.Session do
     # Phase 3: notify ActionCycleServer of chat percept
     maybe_enqueue_chat_percept(state.agent_id, message)
 
-    # Persist user + assistant messages for session recovery across restarts
-    maybe_persist_turn(state.session_id, state.agent_id, message, response)
-
     usage = Map.get(result.context, "session.usage", %{})
+
+    # Persist user + assistant messages for session recovery across restarts
+    maybe_persist_turn(state.session_id, state.agent_id, message, response, usage)
 
     # Record turn telemetry
     maybe_record_telemetry(:turn, state.agent_id, %{
@@ -936,7 +936,7 @@ defmodule Arbor.Orchestrator.Session do
 
   # Persist user message + assistant response to SessionStore for recovery across restarts.
   # Async via Task.start — never blocks the turn response.
-  defp maybe_persist_turn(session_id, agent_id, user_message, response_text) do
+  defp maybe_persist_turn(session_id, agent_id, user_message, response_text, usage) do
     session_store = Arbor.Persistence.SessionStore
 
     if Code.ensure_loaded?(session_store) and
@@ -959,28 +959,34 @@ defmodule Arbor.Orchestrator.Session do
 
           if session_uuid do
             now = DateTime.utc_now()
+            model = usage["model"] || usage[:model]
 
-            # Persist user message
+            # Persist user message (content wrapped as content blocks for schema compat)
             if is_binary(user_message) and user_message != "" do
               apply(session_store, :append_entry, [
                 session_uuid,
                 %{
                   entry_type: "user",
                   role: "user",
-                  content: user_message,
+                  content: [%{"type" => "text", "text" => user_message}],
                   timestamp: now
                 }
               ])
             end
 
-            # Persist assistant response
+            # Persist assistant response with model and token usage
             if is_binary(response_text) and response_text != "" do
               apply(session_store, :append_entry, [
                 session_uuid,
                 %{
                   entry_type: "assistant",
                   role: "assistant",
-                  content: response_text,
+                  content: [%{"type" => "text", "text" => response_text}],
+                  model: model,
+                  token_usage: Map.take(usage, [
+                    "input_tokens", "output_tokens", "cached_tokens",
+                    "duration_ms", "provider", :input_tokens, :output_tokens
+                  ]),
                   timestamp: now
                 }
               ])
