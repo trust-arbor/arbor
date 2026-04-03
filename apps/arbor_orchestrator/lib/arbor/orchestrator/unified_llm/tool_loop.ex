@@ -336,6 +336,17 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
             end
         })
 
+        # Record tool telemetry
+        tool_result_atom =
+          cond do
+            match?({:ok, _}, result) -> :ok
+            match?({:error, {:approval_required, _}}, result) -> :gated
+            match?({:error, {:gated, _}}, result) -> :gated
+            true -> :error
+          end
+
+        maybe_record_tool_telemetry(state.agent_id, tc.name, tool_result_atom, duration_ms)
+
         if state.on_tool_call do
           state.on_tool_call.(tc.name, args, result)
         end
@@ -575,5 +586,17 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     Builders.emit_signal(:agent, event, data)
   rescue
     _ -> :ok
+  end
+
+  defp maybe_record_tool_telemetry(agent_id, tool_name, result, duration_ms) do
+    store = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store) do
+      store.record_tool(agent_id, tool_name, result, duration_ms)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

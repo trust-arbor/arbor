@@ -549,6 +549,19 @@ defmodule Arbor.Orchestrator.Session do
 
     usage = Map.get(result.context, "session.usage", %{})
 
+    # Record turn telemetry
+    maybe_record_telemetry(:turn, state.agent_id, %{
+      input_tokens: usage["input_tokens"] || usage[:input_tokens] || 0,
+      output_tokens: usage["output_tokens"] || usage[:output_tokens] || 0,
+      cached_tokens:
+        usage["cached_tokens"] || usage[:cached_tokens] ||
+          usage["cache_read_input_tokens"] || 0,
+      duration_ms: usage["duration_ms"] || usage[:duration_ms],
+      provider:
+        Map.get(result.context, "session.provider") ||
+          Map.get(result.context, "session.llm_provider")
+    })
+
     reply =
       {:ok,
        PipelineResponse.normalize(%{
@@ -915,5 +928,34 @@ defmodule Arbor.Orchestrator.Session do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Record agent telemetry via the Store (non-critical — failures are silently ignored)
+  defp maybe_record_telemetry(type, agent_id, data) do
+    store = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store) do
+      case type do
+        :turn ->
+          store.record_turn(agent_id, data)
+
+        :tool ->
+          store.record_tool(agent_id, data[:name], data[:result], data[:duration_ms])
+
+        :routing ->
+          store.record_routing(agent_id, data[:decision])
+
+        :compaction ->
+          store.record_compaction(agent_id, data[:utilization])
+      end
+    end
+  rescue
+    e ->
+      Logger.debug("[Session] Telemetry recording failed: #{inspect(e)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.debug("[Session] Telemetry recording exit: #{inspect(reason)}")
+      :ok
   end
 end

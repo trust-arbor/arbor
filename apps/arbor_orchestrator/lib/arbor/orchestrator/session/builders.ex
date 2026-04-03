@@ -242,7 +242,20 @@ defmodule Arbor.Orchestrator.Session.Builders do
     new_turn_count = ContextBuilder.get_turn_count(state) + 1
 
     # Append messages to compactor and run compaction
+    old_compression_count =
+      if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
+
     compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
+
+    # Record compaction telemetry if compaction actually occurred
+    if compactor && Map.get(compactor, :compression_count, 0) > old_compression_count do
+      utilization =
+        if Map.get(compactor, :effective_window, 0) > 0,
+          do: Map.get(compactor, :token_count, 0) / compactor.effective_window,
+          else: 0.0
+
+      maybe_record_compaction_telemetry(state.agent_id, utilization)
+    end
 
     # Persist turn entries to session store (async, skip nil assistant)
     Persistence.persist_turn_entries(
@@ -502,4 +515,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp config_module, do: Arbor.Contracts.Session.Config
   defp state_module, do: Arbor.Contracts.Session.State
   defp behavior_module, do: Arbor.Contracts.Session.Behavior
+
+  defp maybe_record_compaction_telemetry(agent_id, utilization) do
+    store = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store) do
+      store.record_compaction(agent_id, utilization)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 end
