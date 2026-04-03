@@ -235,6 +235,146 @@ defmodule Arbor.Dashboard.Cores.TelemetryCore do
   end
 
   # ===========================================================================
+  # Historical Data (Convert)
+  # ===========================================================================
+
+  @doc """
+  Format a list of telemetry events for timeline display.
+
+  Returns a list of maps with human-readable event descriptions,
+  sorted by timestamp descending (most recent first).
+  """
+  @spec show_event_timeline([map()]) :: [map()]
+  def show_event_timeline(events) when is_list(events) do
+    events
+    |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
+    |> Enum.map(&format_event/1)
+  end
+
+  @doc """
+  Aggregate cost by hour for trend display.
+
+  Returns a list of `%{period, cost, cost_formatted, turn_count}` maps
+  sorted chronologically.
+  """
+  @spec show_cost_over_time([map()]) :: [map()]
+  def show_cost_over_time(events) when is_list(events) do
+    events
+    |> Enum.filter(&(&1.event_type == "turn_completed"))
+    |> Enum.group_by(fn event ->
+      ts = event.timestamp
+      # Truncate to hour
+      %{ts | minute: 0, second: 0, microsecond: {0, 0}}
+    end)
+    |> Enum.map(fn {hour, hour_events} ->
+      cost =
+        Enum.reduce(hour_events, 0.0, fn e, acc ->
+          acc + (get_data(e.data, "cost", 0.0) || 0.0)
+        end)
+
+      %{
+        period: Calendar.strftime(hour, "%Y-%m-%d %H:%M"),
+        cost: cost,
+        cost_formatted: format_cost(cost),
+        turn_count: length(hour_events)
+      }
+    end)
+    |> Enum.sort_by(& &1.period)
+  end
+
+  @doc """
+  List recent tool failures with timestamps.
+
+  Returns events where the tool result was `:error` or `"error"`.
+  """
+  @spec show_tool_failures([map()]) :: [map()]
+  def show_tool_failures(events) when is_list(events) do
+    events
+    |> Enum.filter(fn e ->
+      e.event_type == "tool_call" and
+        get_data(e.data, "result", nil) in ["error", :error]
+    end)
+    |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
+    |> Enum.map(&format_event/1)
+  end
+
+  @doc """
+  Format a single telemetry event for display.
+  """
+  @spec format_event(map()) :: map()
+  def format_event(%{event_type: type, timestamp: ts, data: data} = event) do
+    %{
+      id: Map.get(event, :id, ""),
+      agent_id: Map.get(event, :agent_id, ""),
+      event_type: type,
+      timestamp: format_timestamp(ts),
+      description: describe_event(type, data),
+      data: data
+    }
+  end
+
+  defp describe_event("turn_completed", data) do
+    cost = get_data(data, "cost", 0.0)
+    input = get_data(data, "input_tokens", 0)
+    output = get_data(data, "output_tokens", 0)
+    provider = get_data(data, "provider", "unknown")
+    "LLM turn (#{provider}): #{input}in/#{output}out, #{format_cost(cost)}"
+  end
+
+  defp describe_event("tool_call", data) do
+    tool = get_data(data, "tool_name", "unknown")
+    result = get_data(data, "result", "unknown")
+    ms = get_data(data, "duration_ms", 0)
+    "Tool #{tool}: #{result} (#{ms}ms)"
+  end
+
+  defp describe_event("routing_decision", data) do
+    decision = get_data(data, "decision", "unknown")
+    "Routing: #{decision}"
+  end
+
+  defp describe_event("compaction", data) do
+    util = get_data(data, "utilization", 0.0)
+
+    pct =
+      if is_number(util) do
+        Float.round(util * 100, 1)
+      else
+        0.0
+      end
+
+    "Compaction at #{pct}% utilization"
+  end
+
+  defp describe_event(type, _data), do: "#{type}"
+
+  # Handle both string and atom keys in data maps
+  defp get_data(data, key, default) when is_map(data) do
+    case Map.get(data, key) do
+      nil ->
+        atom_key =
+          try do
+            String.to_existing_atom(key)
+          rescue
+            ArgumentError -> nil
+          end
+
+        if atom_key, do: Map.get(data, atom_key, default), else: default
+
+      val ->
+        val
+    end
+  end
+
+  defp get_data(_data, _key, default), do: default
+
+  defp format_timestamp(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  end
+
+  defp format_timestamp(other), do: inspect(other)
+
+  # ===========================================================================
   # Formatters (pure)
   # ===========================================================================
 

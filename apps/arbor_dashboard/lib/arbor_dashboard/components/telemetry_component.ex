@@ -29,6 +29,10 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
     |> Phoenix.Component.assign(:telemetry_agents, TelemetryCore.show_agent_table(state))
     |> Phoenix.Component.assign(:selected_agent_telemetry, nil)
     |> Phoenix.Component.assign(:sort_field, :cost)
+    |> Phoenix.Component.assign(:history_events, [])
+    |> Phoenix.Component.assign(:history_cost_trend, [])
+    |> Phoenix.Component.assign(:history_tool_failures, [])
+    |> Phoenix.Component.assign(:history_loaded, false)
   end
 
   @doc """
@@ -47,6 +51,19 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
 
   # Catch-all for unknown 2-arg events
   def update_telemetry(socket, _event), do: socket
+
+  def update_telemetry(socket, "load_history", %{"agent_id" => agent_id}) do
+    events = fetch_history_events(agent_id)
+    timeline = TelemetryCore.show_event_timeline(events)
+    cost_trend = TelemetryCore.show_cost_over_time(events)
+    tool_failures = TelemetryCore.show_tool_failures(events)
+
+    socket
+    |> Phoenix.Component.assign(:history_events, timeline)
+    |> Phoenix.Component.assign(:history_cost_trend, cost_trend)
+    |> Phoenix.Component.assign(:history_tool_failures, tool_failures)
+    |> Phoenix.Component.assign(:history_loaded, true)
+  end
 
   def update_telemetry(socket, "select_agent", %{"id" => agent_id}) do
     state = TelemetryCore.select_agent(socket.assigns.telemetry_state, agent_id)
@@ -179,9 +196,19 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
         <h2 style="font-size: 1.1rem; font-weight: 600; font-family: monospace;">
           {truncate_id(@selected_agent_telemetry.agent_id)}
         </h2>
-        <span style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">
-          {Integer.to_string(@selected_agent_telemetry.turn_count)} turns
-        </span>
+        <div style="display: flex; gap: 0.75rem; align-items: center;">
+          <span style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">
+            {Integer.to_string(@selected_agent_telemetry.turn_count)} turns
+          </span>
+          <button
+            phx-click="telemetry:load_history"
+            phx-value-agent_id={@selected_agent_telemetry.agent_id}
+            class="aw-btn"
+            style="font-size: 0.75rem; padding: 0.25rem 0.5rem;"
+          >
+            Load History
+          </button>
+        </div>
       </div>
 
       <%!-- Token Breakdown --%>
@@ -332,6 +359,119 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
     """
   end
 
+  @doc """
+  Scrollable event timeline for historical telemetry events.
+  """
+  attr :history_events, :list, required: true
+
+  def event_timeline(assigns) do
+    ~H"""
+    <div class="aw-card" style="margin-top: 1rem; padding: 1.25rem;">
+      <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem;">Event Timeline</h3>
+      <%= if @history_events == [] do %>
+        <div style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">
+          No historical events found
+        </div>
+      <% else %>
+        <div style="max-height: 300px; overflow-y: auto;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
+            <thead>
+              <tr style="border-bottom: 1px solid var(--aw-border, #333); text-align: left; position: sticky; top: 0; background: var(--aw-bg-secondary, #18181b);">
+                <th style="padding: 0.35rem 0.5rem;">Time</th>
+                <th style="padding: 0.35rem 0.5rem;">Type</th>
+                <th style="padding: 0.35rem 0.5rem;">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for event <- @history_events do %>
+                <tr style="border-bottom: 1px solid var(--aw-border, #222);">
+                  <td style="padding: 0.35rem 0.5rem; white-space: nowrap; color: var(--aw-text-secondary, #71717a);">
+                    {event.timestamp}
+                  </td>
+                  <td style="padding: 0.35rem 0.5rem;">
+                    <span style={"padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; #{event_type_style(event.event_type)}"}>
+                      {event.event_type}
+                    </span>
+                  </td>
+                  <td style="padding: 0.35rem 0.5rem;">{event.description}</td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  @doc """
+  Cost trend table showing cost per time period.
+  """
+  attr :history_cost_trend, :list, required: true
+
+  def cost_over_time(assigns) do
+    ~H"""
+    <div class="aw-card" style="margin-top: 1rem; padding: 1.25rem;">
+      <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem;">Cost Trend</h3>
+      <%= if @history_cost_trend == [] do %>
+        <div style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">
+          No cost data available
+        </div>
+      <% else %>
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
+          <thead>
+            <tr style="border-bottom: 1px solid var(--aw-border, #333); text-align: left;">
+              <th style="padding: 0.35rem 0.5rem;">Period</th>
+              <th style="padding: 0.35rem 0.5rem; text-align: right;">Turns</th>
+              <th style="padding: 0.35rem 0.5rem; text-align: right;">Cost</th>
+              <th style="padding: 0.35rem 0.5rem;">Bar</th>
+            </tr>
+          </thead>
+          <tbody>
+            <%= for entry <- @history_cost_trend do %>
+              <tr style="border-bottom: 1px solid var(--aw-border, #222);">
+                <td style="padding: 0.35rem 0.5rem; white-space: nowrap;">{entry.period}</td>
+                <td style="padding: 0.35rem 0.5rem; text-align: right;">{entry.turn_count}</td>
+                <td style="padding: 0.35rem 0.5rem; text-align: right;">{entry.cost_formatted}</td>
+                <td style="padding: 0.35rem 0.5rem;">
+                  <div style="height: 8px; background: var(--aw-bg-tertiary, #27272a); border-radius: 4px; overflow: hidden;">
+                    <div style={"height: 100%; background: #6366f1; border-radius: 4px; width: #{cost_trend_bar_width(@history_cost_trend, entry.cost)}%;"}></div>
+                  </div>
+                </td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      <% end %>
+    </div>
+    """
+  end
+
+  @doc """
+  Tool failures list showing recent errors.
+  """
+  attr :history_tool_failures, :list, required: true
+
+  def tool_failures(assigns) do
+    ~H"""
+    <div class="aw-card" style="margin-top: 1rem; padding: 1.25rem;">
+      <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem;">Recent Tool Failures</h3>
+      <%= if @history_tool_failures == [] do %>
+        <div style="font-size: 0.8rem; color: #4ade80;">No recent failures</div>
+      <% else %>
+        <div style="max-height: 200px; overflow-y: auto;">
+          <%= for failure <- @history_tool_failures do %>
+            <div style="padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--aw-border, #222); font-size: 0.8rem;">
+              <span style="color: var(--aw-text-secondary, #71717a);">{failure.timestamp}</span>
+              <span style="color: #f87171; margin-left: 0.5rem;">{failure.description}</span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================
@@ -375,6 +515,23 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
     :exit, _ -> []
   end
 
+  defp fetch_history_events(agent_id) do
+    store_mod = Arbor.Common.AgentTelemetry.Store
+
+    if Code.ensure_loaded?(store_mod) and function_exported?(store_mod, :query_events, 2) do
+      case apply(store_mod, :query_events, [agent_id, [limit: 200, order: :desc]]) do
+        {:ok, events} -> events
+        _ -> []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
   defp truncate_id(id) when is_binary(id) do
     if String.length(id) > 24 do
       String.slice(id, 0, 21) <> "..."
@@ -398,4 +555,25 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
   end
 
   defp cost_bar_width(_cost, _provider_cost), do: 0
+
+  defp event_type_style("turn_completed"),
+    do: "background: rgba(99,102,241,0.2); color: #818cf8;"
+
+  defp event_type_style("tool_call"), do: "background: rgba(74,222,128,0.2); color: #4ade80;"
+
+  defp event_type_style("routing_decision"),
+    do: "background: rgba(251,191,36,0.2); color: #fbbf24;"
+
+  defp event_type_style("compaction"), do: "background: rgba(248,113,113,0.2); color: #f87171;"
+  defp event_type_style(_), do: "background: rgba(113,113,122,0.2); color: #71717a;"
+
+  defp cost_trend_bar_width(trend, cost) do
+    max_cost = Enum.reduce(trend, 0.0, fn e, acc -> max(acc, e.cost) end)
+
+    if max_cost > 0 do
+      Float.round(cost / max_cost * 100, 1)
+    else
+      0
+    end
+  end
 end
