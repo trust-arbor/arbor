@@ -186,10 +186,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
+        # Merge duration and provider/model into usage for telemetry
+        usage_with_meta =
+          (response.usage || %{})
+          |> Map.put("duration_ms", elapsed)
+          |> Map.put("provider", provider)
+          |> Map.put("model", model)
+
         updates =
           base_updates
           |> Map.put("last_response", response_text)
-          |> Map.put("session.usage", response.usage)
+          |> Map.put("session.usage", usage_with_meta)
           |> Map.put("session.tool_round_count", response.tool_rounds)
           |> maybe_put_perspective_key(node.attrs, response_text)
           |> maybe_put_routing_decision()

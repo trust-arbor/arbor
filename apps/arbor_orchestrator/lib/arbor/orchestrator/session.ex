@@ -558,7 +558,8 @@ defmodule Arbor.Orchestrator.Session do
           usage["cache_read_input_tokens"] || 0,
       duration_ms: usage["duration_ms"] || usage[:duration_ms],
       provider:
-        Map.get(result.context, "session.provider") ||
+        usage["provider"] || usage[:provider] ||
+          Map.get(result.context, "session.provider") ||
           Map.get(result.context, "session.llm_provider")
     })
 
