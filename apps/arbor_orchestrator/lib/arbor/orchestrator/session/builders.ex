@@ -114,6 +114,19 @@ defmodule Arbor.Orchestrator.Session.Builders do
         opts
       end
 
+    # Also inject signer into initial_values (pipeline context) so LlmHandler
+    # can access it via Context.get(context, "session.signer"). Engine opts
+    # get stripped by Placement.strip_function_opts for RPC safety, but
+    # context values survive.
+    initial_values =
+      if state.signer do
+        Map.put(initial_values, "session.signer", state.signer)
+      else
+        initial_values
+      end
+
+    opts = Keyword.put(opts, :initial_values, initial_values)
+
     # Wire streaming callback with source tag so the dashboard can
     # route turn deltas to chat and heartbeat deltas to the heartbeat panel.
     source = Keyword.get(opts_overrides, :source, :turn)
