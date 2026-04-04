@@ -105,7 +105,8 @@ defmodule Arbor.Consensus.Coordinator do
   @spec submit(map() | Proposal.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def submit(proposal_or_attrs, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:submit, proposal_or_attrs, opts})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:submit, proposal_or_attrs, opts}, timeout)
   end
 
   @doc """
