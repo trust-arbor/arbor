@@ -101,7 +101,9 @@ defmodule Arbor.Security.Escalation do
     # Submit as human_approval — skips automated council evaluation.
     # The proposal stays :pending until force_approve/force_reject.
     # ActionsExecutor.await_approval_and_retry blocks until resolved.
-    case consensus_module.submit(proposal, human_approval: true) do
+    # Use a generous timeout — the Coordinator may be busy with other proposals.
+    # The 5s default GenServer.call timeout is too short for a busy system.
+    case consensus_module.submit(proposal, human_approval: true, timeout: 30_000) do
       {:ok, proposal_id} ->
         {:ok, :pending_approval, proposal_id}
 
