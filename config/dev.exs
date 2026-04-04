@@ -92,7 +92,7 @@ config :arbor_agent, :auto_start_agents, [
     module: Arbor.Agent.APIAgent,
     template: "diagnostician",
     model_config: %{
-      id: "arcee-ai/trinity-large-preview:free",
+      id: "arcee-ai/trinity-large-thinking",
       provider: :openrouter,
       backend: :api
     },
