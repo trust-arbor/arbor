@@ -290,19 +290,13 @@ defmodule Arbor.Agent.APIAgent do
         {:reply, {:ok, response}, new_state}
 
       {:error, reason} ->
-        Logger.warning("Session query failed, falling back to direct: #{inspect(reason)}",
-          agent_id: state.id
-        )
-
-        handle_direct_query(prompt, opts, state)
+        Logger.warning("Session query failed: #{inspect(reason)}", agent_id: state.id)
+        {:reply, {:error, {:session_failed, reason}}, state}
     end
   rescue
     e ->
-      Logger.warning("Session query crashed, falling back to direct: #{Exception.message(e)}",
-        agent_id: state.id
-      )
-
-      handle_direct_query(prompt, opts, state)
+      Logger.warning("Session query crashed: #{Exception.message(e)}", agent_id: state.id)
+      {:reply, {:error, {:session_crashed, Exception.message(e)}}, state}
   end
 
   defp handle_direct_query(prompt, opts, state) do
