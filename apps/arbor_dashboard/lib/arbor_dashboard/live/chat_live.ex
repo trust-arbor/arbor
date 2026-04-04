@@ -501,27 +501,33 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # Session path uses tool_history, legacy uses tool_calls
     tool_uses = response[:tool_history] || response[:tool_calls] || []
 
-    assistant_msg = %{
-      id: "msg-#{System.unique_integer([:positive])}",
-      role: :assistant,
-      content: text,
-      tool_uses: tool_uses,
-      timestamp: DateTime.utc_now(),
-      model: "#{model_config[:provider]}:#{model_config[:id]}",
-      session_id: nil,
-      memory_count: length(response[:recalled_memories] || [])
-    }
+    # Detect empty responses (rate-limited or model error)
+    if (text == "" or text == nil) and tool_uses == [] do
+      error_msg = ChatHelpers.format_query_error(:empty_response)
+      {:noreply, assign(socket, loading: false, streaming_text: "", error: error_msg)}
+    else
+      assistant_msg = %{
+        id: "msg-#{System.unique_integer([:positive])}",
+        role: :assistant,
+        content: text,
+        tool_uses: tool_uses,
+        timestamp: DateTime.utc_now(),
+        model: "#{model_config[:provider]}:#{model_config[:id]}",
+        session_id: nil,
+        memory_count: length(response[:recalled_memories] || [])
+      }
 
-    socket =
-      socket
-      |> assign(streaming_text: "")
-      |> stream_insert(:messages, assistant_msg)
-      |> assign(loading: false, query_count: socket.assigns.query_count + 1)
-      |> add_tool_use_actions(tool_uses)
-      |> maybe_extract_api_usage(response)
-      |> maybe_add_recalled_memories_api(response)
+      socket =
+        socket
+        |> assign(streaming_text: "")
+        |> stream_insert(:messages, assistant_msg)
+        |> assign(loading: false, query_count: socket.assigns.query_count + 1)
+        |> add_tool_use_actions(tool_uses)
+        |> maybe_extract_api_usage(response)
+        |> maybe_add_recalled_memories_api(response)
 
-    {:noreply, socket}
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:query_result, _backend, {:error, reason}}, socket) do

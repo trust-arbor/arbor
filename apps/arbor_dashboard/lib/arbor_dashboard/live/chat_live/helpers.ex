@@ -156,7 +156,31 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
     "Model returned an empty response (may be rate-limited). Try again in a moment."
   end
 
-  def format_query_error(reason) do
-    "Query failed: #{inspect(reason)}"
+  def format_query_error({:session_failed, {:turn_task_crashed, {:timeout, _}}}) do
+    "Request timed out waiting for approval. Check the Consensus panel for pending approvals."
   end
+
+  def format_query_error({:session_failed, reason}) do
+    "Session error: #{format_reason(reason)}"
+  end
+
+  def format_query_error({:session_crashed, reason}) do
+    "Session crashed: #{format_reason(reason)}"
+  end
+
+  def format_query_error(reason) do
+    "Query failed: #{format_reason(reason)}"
+  end
+
+  defp format_reason(reason) when is_binary(reason), do: reason
+
+  defp format_reason(%{message: msg, status: 429}) do
+    "Rate limited: #{msg}. Wait a moment and try again."
+  end
+
+  defp format_reason(%{message: msg, status: status}) do
+    "Provider error (#{status}): #{msg}"
+  end
+
+  defp format_reason(reason), do: inspect(reason)
 end
