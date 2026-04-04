@@ -113,6 +113,14 @@ defmodule Arbor.Security.Escalation do
       {:error, reason} ->
         {:error, {:consensus_submission_failed, reason}}
     end
+  catch
+    :exit, {:timeout, _} ->
+      Logger.warning("Escalation: consensus submit timed out for #{resource_uri}")
+      {:error, {:consensus_timeout, resource_uri}}
+
+    :exit, reason ->
+      Logger.warning("Escalation: consensus submit exited for #{resource_uri}: #{inspect(reason)}")
+      {:error, {:consensus_exit, reason}}
   end
 
   # Check if the consensus module is available (process running)
