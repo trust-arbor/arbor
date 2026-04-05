@@ -958,7 +958,7 @@ defmodule Arbor.Agent.Lifecycle do
       agent_id: agent_id,
       display_name: display_name,
       character: character,
-      trust_tier: Keyword.get(opts, :trust_tier, :untrusted),
+      trust_tier: Keyword.get(opts, :trust_tier) || :untrusted,
       template: template,
       initial_goals: Keyword.get(opts, :initial_goals, []),
       initial_capabilities: Keyword.get(opts, :capabilities, []),

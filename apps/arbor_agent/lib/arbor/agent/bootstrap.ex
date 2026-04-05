@@ -150,7 +150,8 @@ defmodule Arbor.Agent.Bootstrap do
       [display_name: display_name] ++
         if(config[:template], do: [template: config.template], else: []) ++
         if(config[:model_config], do: [model_config: config.model_config], else: []) ++
-        if(config[:start_host], do: [start_host: true], else: [])
+        if(config[:start_host], do: [start_host: true], else: []) ++
+        if(config[:trust_tier], do: [trust_tier: config.trust_tier], else: [])
 
     case Manager.start_or_resume(module, display_name, opts) do
       {:ok, agent_id, _pid} ->
