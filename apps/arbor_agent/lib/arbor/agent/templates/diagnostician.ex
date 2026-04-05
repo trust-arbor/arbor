@@ -72,7 +72,9 @@ defmodule Arbor.Agent.Templates.Diagnostician do
   end
 
   @impl true
-  def trust_tier, do: :established
+  # :veteran tier maps to :hands_off profile — most tools auto-approved,
+  # shell and governance still gated. System diagnostic agent needs broad access.
+  def trust_tier, do: :veteran
 
   @impl true
   def initial_goals do
