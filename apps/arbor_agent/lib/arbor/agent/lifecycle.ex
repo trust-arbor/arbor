@@ -1073,11 +1073,21 @@ defmodule Arbor.Agent.Lifecycle do
   # If the template module exports trust_preset/0, apply those rules after creation.
   defp ensure_trust_profile(agent_id, opts) do
     trust = Arbor.Trust
+    trust_tier = Keyword.get(opts, :trust_tier) || :untrusted
 
     if Code.ensure_loaded?(trust) and function_exported?(trust, :create_trust_profile, 1) do
       case apply(trust, :get_trust_profile, [agent_id]) do
-        {:ok, _} -> :ok
-        {:error, :not_found} -> apply(trust, :create_trust_profile, [agent_id])
+        {:ok, _} ->
+          :ok
+
+        {:error, :not_found} ->
+          apply(trust, :create_trust_profile, [agent_id])
+
+          # Update the trust profile with the correct tier from the template/spec.
+          # create_trust_profile always creates with :untrusted defaults.
+          if trust_tier != :untrusted do
+            update_trust_tier(agent_id, trust_tier, trust)
+          end
       end
 
       # Apply template-specific trust preset if available
@@ -1085,6 +1095,35 @@ defmodule Arbor.Agent.Lifecycle do
     end
   rescue
     _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Update the trust profile's tier after creation.
+  # Trust.Store profile is separate from Agent.Profile — they both need the tier.
+  defp update_trust_tier(agent_id, tier, trust_mod) do
+    store = Arbor.Trust.Store
+
+    if Code.ensure_loaded?(store) and function_exported?(store, :get_profile, 1) do
+      case apply(store, :get_profile, [agent_id]) do
+        {:ok, profile} ->
+          updated = %{profile | tier: tier}
+          apply(store, :store_profile, [updated])
+
+          # Re-grant tier capabilities with the correct tier
+          if function_exported?(trust_mod, :grant_tier_capabilities, 2) do
+            apply(trust_mod, :grant_tier_capabilities, [agent_id, tier])
+          end
+
+          Logger.info("Trust profile updated to tier #{tier} for #{agent_id}")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.debug("Failed to update trust tier for #{agent_id}: #{Exception.message(e)}")
   catch
     :exit, _ -> :ok
   end
