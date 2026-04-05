@@ -732,28 +732,43 @@ defmodule Arbor.Consensus.Coordinator do
   # Human users (OIDC-authenticated) skip crypto verification since they're
   # already authenticated at the session level.
   defp check_force_authorization(actor_id) do
-    # Human users are authenticated via OIDC session token, not crypto signing
-    opts = if String.starts_with?(actor_id, "human_"), do: [verify_identity: false], else: []
+    # Use AuthDecision (pure function) instead of Security.authorize to avoid
+    # deadlock: Security.authorize → Escalation → Consensus.submit would call
+    # back into this GenServer. AuthDecision only reads from ETS — no GenServer calls.
+    auth_decision = Arbor.Security.AuthDecision
 
-    case Arbor.Security.authorize(actor_id, "arbor://consensus/admin", :force, opts) do
-      {:ok, :authorized} ->
-        :ok
+    if Code.ensure_loaded?(auth_decision) do
+      case auth_decision.evaluate(actor_id, "arbor://consensus/admin", :force) do
+        :authorized ->
+          :ok
 
-      {:ok, :pending_approval, _proposal_id} ->
-        Logger.warning("Force operation by #{actor_id} requires approval")
-        {:error, {:unauthorized, :pending_approval}}
+        {:requires_approval, _cap} ->
+          # For consensus admin, requires_approval means "has the capability but
+          # it's gated." Since this IS the approval system, just authorize it —
+          # the human is already authenticated via OIDC session.
+          if String.starts_with?(actor_id, "human_") do
+            :ok
+          else
+            Logger.warning("Force operation by #{actor_id} requires approval")
+            {:error, {:unauthorized, :pending_approval}}
+          end
 
-      {:error, reason} ->
-        Logger.warning("Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}")
-        {:error, {:unauthorized, :consensus_admin_required}}
+        {:error, reason} ->
+          Logger.warning(
+            "Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}"
+          )
+
+          {:error, {:unauthorized, :consensus_admin_required}}
+      end
+    else
+      # AuthDecision not available — fail closed
+      {:error, {:unauthorized, :security_unavailable}}
     end
   rescue
     _ ->
-      # If security module isn't available, deny by default (fail-closed)
       {:error, {:unauthorized, :security_unavailable}}
   catch
     :exit, _ ->
-      # GenServer not running (Identity.Registry etc.) — fail closed
       {:error, {:unauthorized, :security_unavailable}}
   end
 
