@@ -113,18 +113,26 @@ defmodule Arbor.Agent.Manager do
         Map.get(model_config, :template) ||
         resolve_template(model_config)
 
-    lifecycle_opts =
-      [template: template] ++
+    # Build a fully-resolved AgentSpec — single source of truth for all agent config.
+    # This resolves template, trust_tier, model, tools in one pure function.
+    spec_opts =
+      [
+        display_name: display_name,
+        template: template,
+        model_config: model_config
+      ] ++
         Keyword.take(opts, [
           :trust_tier,
           :capabilities,
           :initial_goals,
           :delegator_id,
-          :delegator_private_key,
-          :tenant_context
+          :tenant_context,
+          :character
         ])
 
-    with {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
+    with {:ok, spec} <- Arbor.Agent.Spec.new(spec_opts),
+         lifecycle_opts = Arbor.Agent.Spec.to_lifecycle_opts(spec),
+         {:ok, profile} <- Lifecycle.create(display_name, lifecycle_opts) do
       # Persist model config for resume
       updated_profile = put_in(profile.metadata[:last_model_config], model_config)
 
@@ -143,10 +151,8 @@ defmodule Arbor.Agent.Manager do
       # and registers in Agent.Registry
       start_opts =
         Keyword.merge(opts,
-          model:
-            model_config[:id] || model_config["id"] || model_config[:model] ||
-              model_config["model"],
-          provider: model_config[:provider] || model_config["provider"],
+          model: spec.model,
+          provider: spec.provider,
           model_config: model_config
         )
 
