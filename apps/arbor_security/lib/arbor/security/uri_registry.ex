@@ -92,6 +92,7 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://consensus/cancel",
     "arbor://consensus/force_approve",
     "arbor://consensus/force_reject",
+    "arbor://consensus/admin",
 
     # Comms facade
     "arbor://comms/send",
