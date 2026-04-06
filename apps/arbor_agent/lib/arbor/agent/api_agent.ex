@@ -119,15 +119,21 @@ defmodule Arbor.Agent.APIAgent do
     # Resolve tiered config: global → per-model → agent-level
     config = APIConfig.resolve(opts)
 
-    # Host-specific state
+    # Host-specific state — resolve model profile via ConfigCore for context window info
+    model = Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end)
+
+    model_profile =
+      model
+      |> Arbor.Agent.ConfigCore.resolve_model_profile()
+
     host_state = %{
-      # Query model config
-      model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
+      model: model,
       provider:
         Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end),
       max_tokens: config.max_tokens,
       temperature: config.temperature,
-      max_turns: config.max_turns
+      max_turns: config.max_turns,
+      model_profile: model_profile
     }
 
     # Initialize seed (memory, executor, signals, working memory, capabilities)
