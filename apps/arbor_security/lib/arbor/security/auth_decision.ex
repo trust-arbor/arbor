@@ -34,7 +34,7 @@ defmodule Arbor.Security.AuthDecision do
   """
 
   alias Arbor.Contracts.Security.AuthContext
-  alias Arbor.Security.{CapabilityStore, UriRegistry}
+  alias Arbor.Security.{CapabilityStore, Identity.Verifier, UriRegistry}
 
   require Logger
 
@@ -60,13 +60,13 @@ defmodule Arbor.Security.AuthDecision do
   or `{:error, reason, updated_auth}`. The updated auth has the decision recorded
   in its audit trail.
   """
-  @spec evaluate(AuthContext.t(), String.t(), atom()) :: decision_result()
-  def evaluate(%AuthContext{} = auth, resource_uri, _action \\ :execute) do
+  @spec evaluate(AuthContext.t(), String.t(), atom(), keyword()) :: decision_result()
+  def evaluate(%AuthContext{} = auth, resource_uri, _action \\ :execute, opts \\ []) do
     with {:ok, auth} <- check_uri(auth, resource_uri),
          {:ok, auth} <- check_identity(auth),
-         {:ok, auth} <- verify_signed_request(auth, resource_uri),
+         {:ok, auth} <- verify_signed_request(auth, resource_uri, opts),
          {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
-         {:ok, auth} <- check_scope_binding(auth, cap),
+         {:ok, auth} <- check_scope_binding(auth, cap, opts),
          {:ok, auth} <- check_delegation_chain(auth, cap),
          {:ok, auth} <- check_time_constraints(auth, cap),
          {:ok, auth} <- check_file_guard(auth, resource_uri),
@@ -99,7 +99,7 @@ defmodule Arbor.Security.AuthDecision do
       AuthContext.new(principal_id, opts)
       |> AuthContext.load()
 
-    case evaluate(auth, resource_uri, action) do
+    case evaluate(auth, resource_uri, action, opts) do
       {:ok, :authorized, _auth} -> :authorized
       {:ok, :requires_approval, cap, _auth} -> {:requires_approval, cap}
       {:error, reason, _auth} -> {:error, reason}
@@ -226,61 +226,79 @@ defmodule Arbor.Security.AuthDecision do
   end
 
   # Verify signed request — identity binding + resource binding
-  defp verify_signed_request(%AuthContext{identity_verified: true} = auth, _resource_uri) do
+  defp verify_signed_request(%AuthContext{identity_verified: true} = auth, _resource_uri, _opts) do
     # Already verified — skip
     {:ok, auth}
   end
 
-  defp verify_signed_request(%AuthContext{signed_request: nil} = auth, _resource_uri) do
-    # No signed request — check if verification is required
+  defp verify_signed_request(%AuthContext{} = auth, resource_uri, opts) do
+    # Check if verification is required: explicit opt > config default
     config = Arbor.Security.Config
 
-    if Code.ensure_loaded?(config) and function_exported?(config, :identity_verification_enabled?, 0) and
-         apply(config, :identity_verification_enabled?, []) do
-      {:error, :missing_signed_request, auth}
-    else
+    verify? =
+      case Keyword.get(opts, :verify_identity) do
+        nil ->
+          Code.ensure_loaded?(config) and function_exported?(config, :identity_verification_enabled?, 0) and
+            apply(config, :identity_verification_enabled?, [])
+
+        val ->
+          val
+      end
+
+    if not verify? do
       {:ok, auth}
+    else
+      do_verify_signed_request(auth, resource_uri, opts)
     end
   end
 
-  defp verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, resource_uri) do
-    verifier = Arbor.Security.Verifier
+  defp do_verify_signed_request(%AuthContext{signed_request: nil} = auth, _resource_uri, _opts) do
+    {:error, :missing_signed_request, auth}
+  end
 
-    if Code.ensure_loaded?(verifier) and function_exported?(verifier, :verify, 1) do
-      with {:ok, verified_id} <- apply(verifier, :verify, [sr]),
-           :ok <- check_identity_binding(verified_id, pid),
-           :ok <- check_resource_binding(sr, resource_uri) do
-        {:ok, AuthContext.mark_verified(auth)}
-      else
-        {:error, reason} -> {:error, reason, auth}
-      end
+  defp do_verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, resource_uri, opts) do
+    # Only check resource binding when caller explicitly sets expected_resource.
+    # Some signers use a different payload format (e.g., "authorize" string).
+    expected = Keyword.get(opts, :expected_resource)
+
+    with {:ok, verified_id} <- Verifier.verify(sr),
+         :ok <- check_identity_binding(verified_id, pid),
+         :ok <- maybe_check_resource_binding(sr, expected) do
+      {:ok, AuthContext.mark_verified(auth)}
     else
-      {:ok, auth}
+      {:error, reason} -> {:error, reason, auth}
     end
   rescue
-    _ -> {:ok, auth}
+    e ->
+      {:error, {:verification_error, Exception.message(e)}, auth}
   catch
-    :exit, _ -> {:ok, auth}
+    :exit, reason ->
+      {:error, {:verification_exit, reason}, auth}
   end
 
   defp check_identity_binding(verified_id, principal_id) do
     if verified_id == principal_id, do: :ok, else: {:error, {:identity_mismatch, verified_id, principal_id}}
   end
 
-  defp check_resource_binding(%{payload: payload}, resource_uri) do
-    # If the signed payload matches the resource, binding is valid.
-    # If payload is different (signed for a different resource), reject.
-    if payload == resource_uri, do: :ok, else: {:error, {:resource_mismatch, payload, resource_uri}}
+  defp maybe_check_resource_binding(_sr, nil), do: :ok
+
+  defp maybe_check_resource_binding(%{payload: payload}, expected) do
+    if payload == expected, do: :ok, else: {:error, {:resource_mismatch, payload, expected}}
   end
 
-  defp check_resource_binding(_, _), do: :ok
+  defp maybe_check_resource_binding(_, _), do: :ok
 
   # Scope binding — session_id/task_id must match if set on capability
-  defp check_scope_binding(auth, cap) do
+  defp check_scope_binding(auth, cap, opts) do
     cap_mod = Arbor.Contracts.Security.Capability
 
     if Code.ensure_loaded?(cap_mod) and function_exported?(cap_mod, :scope_matches?, 2) do
-      if apply(cap_mod, :scope_matches?, [cap, [session_id: auth.session_id]]) do
+      scope_context =
+        [session_id: auth.session_id] ++
+          if(opts[:task_id], do: [task_id: opts[:task_id]], else: []) ++
+          if(opts[:principal_scope], do: [principal_scope: opts[:principal_scope]], else: [])
+
+      if apply(cap_mod, :scope_matches?, [cap, scope_context]) do
         {:ok, auth}
       else
         {:error, :scope_mismatch, auth}
@@ -387,13 +405,18 @@ defmodule Arbor.Security.AuthDecision do
   # Supports exact match and wildcard patterns (/** suffix).
   defp uri_matches?(cap_uri, resource_uri) when is_binary(cap_uri) and is_binary(resource_uri) do
     cond do
+      # Exact match
       cap_uri == resource_uri -> true
+      # Explicit wildcards
       String.ends_with?(cap_uri, "/**") ->
         prefix = String.trim_trailing(cap_uri, "/**")
         String.starts_with?(resource_uri, prefix)
       String.ends_with?(cap_uri, "/*") ->
         prefix = String.trim_trailing(cap_uri, "/*")
         String.starts_with?(resource_uri, prefix)
+      # Prefix match: arbor://shell/exec/git matches arbor://shell/exec/git/status
+      # (subpath access — matching CapabilityStore.find_authorizing behavior)
+      String.starts_with?(resource_uri, cap_uri <> "/") -> true
       true -> false
     end
   end

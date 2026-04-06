@@ -420,7 +420,7 @@ defmodule Arbor.Security do
       auth = build_auth_context(principal_id, opts)
 
       # Step 3: Pure authorization decision (no side effects)
-      case AuthDecision.evaluate(auth, resource_uri, action) do
+      case AuthDecision.evaluate(auth, resource_uri, action, opts) do
         {:ok, :authorized, auth} ->
           handle_authorized(auth, principal_id, resource_uri, action, opts)
 
