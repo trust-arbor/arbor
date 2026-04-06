@@ -443,7 +443,7 @@ defmodule Arbor.Security do
     # Stateful constraint checks (rate limiting)
     cap = find_capability_for_side_effects(principal_id, resource_uri)
 
-    with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri) do
+    with :ok <- if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
       # FileGuard for fs:// URIs with file_path
       case maybe_check_file_guard(principal_id, resource_uri, opts) do
         :ok ->

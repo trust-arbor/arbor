@@ -171,44 +171,48 @@ defmodule Arbor.Security.AuthDecision do
       end
   end
 
-  defp find_matching_capability(%AuthContext{capabilities: caps} = auth, resource_uri)
-       when caps != [] do
-    # Search pre-loaded capabilities first (pure — no ETS read)
-    matching =
-      Enum.find(caps, fn cap ->
-        uri_matches?(cap.resource_uri, resource_uri)
-      end)
-
-    if matching do
-      {:ok, matching, auth}
-    else
-      # Capabilities were pre-loaded but none match — try PolicyEnforcer for JIT grant
-      case try_policy_enforcer(auth.principal_id, resource_uri) do
-        {:ok, cap} -> {:ok, cap, auth}
-        {:error, _} -> {:error, :unauthorized, auth}
-      end
-    end
-  end
-
   defp find_matching_capability(%AuthContext{} = auth, resource_uri) do
-    # No pre-loaded capabilities — fall back to CapabilityStore (ETS read)
+    # Always use CapabilityStore.find_authorizing when available — it verifies
+    # issuer_signature on lookup, catching tampered capabilities. Pre-loaded
+    # capabilities in AuthContext are used as fallback when the store isn't running.
     if Code.ensure_loaded?(CapabilityStore) and
          function_exported?(CapabilityStore, :find_authorizing, 2) do
       case CapabilityStore.find_authorizing(auth.principal_id, resource_uri) do
-        {:ok, cap} -> {:ok, cap, auth}
+        {:ok, cap} ->
+          {:ok, cap, auth}
+
         {:error, :not_found} ->
+          # Try PolicyEnforcer for JIT grant — do NOT fall back to pre-loaded
+          # capabilities (they haven't been signature-verified)
           case try_policy_enforcer(auth.principal_id, resource_uri) do
             {:ok, cap} -> {:ok, cap, auth}
             {:error, _} -> {:error, :unauthorized, auth}
           end
       end
     else
-      {:error, :capability_store_unavailable, auth}
+      # Store not available — fall back to pre-loaded capabilities
+      try_preloaded_capabilities(auth, resource_uri)
     end
   rescue
-    _ -> {:error, :capability_lookup_failed, auth}
+    _ -> try_preloaded_capabilities(auth, resource_uri)
   catch
-    :exit, _ -> {:error, :capability_lookup_failed, auth}
+    :exit, _ -> try_preloaded_capabilities(auth, resource_uri)
+  end
+
+  # Fallback: search pre-loaded capabilities (no signature verification)
+  defp try_preloaded_capabilities(%AuthContext{capabilities: caps} = auth, resource_uri)
+       when caps != [] do
+    matching = Enum.find(caps, fn cap -> uri_matches?(cap.resource_uri, resource_uri) end)
+
+    if matching do
+      {:ok, matching, auth}
+    else
+      {:error, :unauthorized, auth}
+    end
+  end
+
+  defp try_preloaded_capabilities(auth, _resource_uri) do
+    {:error, :unauthorized, auth}
   end
 
   defp try_policy_enforcer(principal_id, resource_uri) do
