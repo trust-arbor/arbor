@@ -61,10 +61,15 @@ defmodule Arbor.Security.AuthDecision do
   in its audit trail.
   """
   @spec evaluate(AuthContext.t(), String.t(), atom()) :: decision_result()
-  def evaluate(%AuthContext{} = auth, resource_uri, action \\ :execute) do
+  def evaluate(%AuthContext{} = auth, resource_uri, _action \\ :execute) do
     with {:ok, auth} <- check_uri(auth, resource_uri),
          {:ok, auth} <- check_identity(auth),
+         {:ok, auth} <- verify_signed_request(auth, resource_uri),
          {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
+         {:ok, auth} <- check_scope_binding(auth, cap),
+         {:ok, auth} <- check_delegation_chain(auth, cap),
+         {:ok, auth} <- check_time_constraints(auth, cap),
+         {:ok, auth} <- check_file_guard(auth, resource_uri),
          result <- check_approval(auth, cap, resource_uri) do
       case result do
         {:authorized, auth} ->
@@ -126,25 +131,44 @@ defmodule Arbor.Security.AuthDecision do
     if String.starts_with?(pid, "human_") do
       {:ok, auth}
     else
-      case identity_active?(pid) do
-        true -> {:ok, auth}
-        false -> {:error, {:identity_inactive, pid}, auth}
-      end
+      check_identity_status(auth, pid)
     end
   end
 
-  defp identity_active?(principal_id) do
+  # Match the permissive/strict mode behavior from Security.authorize.
+  # In strict mode: unknown identity → reject. In permissive mode: allow through.
+  defp check_identity_status(auth, principal_id) do
     registry = Arbor.Security.Identity.Registry
+    config = Arbor.Security.Config
 
-    if Code.ensure_loaded?(registry) and function_exported?(registry, :active?, 1) do
-      apply(registry, :active?, [principal_id])
+    strict? =
+      Code.ensure_loaded?(config) and function_exported?(config, :strict_identity_mode?, 0) and
+        apply(config, :strict_identity_mode?, [])
+
+    if Code.ensure_loaded?(registry) and function_exported?(registry, :identity_status, 1) do
+      case apply(registry, :identity_status, [principal_id]) do
+        {:ok, :active} -> {:ok, auth}
+        {:ok, :suspended} -> {:error, {:unauthorized, :identity_suspended}, auth}
+        {:ok, :revoked} -> {:error, {:unauthorized, :identity_revoked}, auth}
+        {:error, :not_found} ->
+          if strict?, do: {:error, {:unauthorized, :unknown_identity}, auth}, else: {:ok, auth}
+      end
     else
-      true
+      # Registry not loaded — permissive by default
+      {:ok, auth}
     end
   rescue
-    _ -> true
+    _ -> {:ok, auth}
   catch
-    :exit, _ -> true
+    :exit, _ ->
+      config = Arbor.Security.Config
+
+      if Code.ensure_loaded?(config) and function_exported?(config, :strict_identity_mode?, 0) and
+           apply(config, :strict_identity_mode?, []) do
+        {:error, {:unauthorized, :identity_registry_unavailable}, auth}
+      else
+        {:ok, auth}
+      end
   end
 
   defp find_matching_capability(%AuthContext{capabilities: caps} = auth, resource_uri)
@@ -199,6 +223,134 @@ defmodule Arbor.Security.AuthDecision do
     _ -> {:error, :unauthorized}
   catch
     :exit, _ -> {:error, :unauthorized}
+  end
+
+  # Verify signed request — identity binding + resource binding
+  defp verify_signed_request(%AuthContext{identity_verified: true} = auth, _resource_uri) do
+    # Already verified — skip
+    {:ok, auth}
+  end
+
+  defp verify_signed_request(%AuthContext{signed_request: nil} = auth, _resource_uri) do
+    # No signed request — check if verification is required
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :identity_verification_enabled?, 0) and
+         apply(config, :identity_verification_enabled?, []) do
+      {:error, :missing_signed_request, auth}
+    else
+      {:ok, auth}
+    end
+  end
+
+  defp verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, resource_uri) do
+    verifier = Arbor.Security.Verifier
+
+    if Code.ensure_loaded?(verifier) and function_exported?(verifier, :verify, 1) do
+      with {:ok, verified_id} <- apply(verifier, :verify, [sr]),
+           :ok <- check_identity_binding(verified_id, pid),
+           :ok <- check_resource_binding(sr, resource_uri) do
+        {:ok, AuthContext.mark_verified(auth)}
+      else
+        {:error, reason} -> {:error, reason, auth}
+      end
+    else
+      {:ok, auth}
+    end
+  rescue
+    _ -> {:ok, auth}
+  catch
+    :exit, _ -> {:ok, auth}
+  end
+
+  defp check_identity_binding(verified_id, principal_id) do
+    if verified_id == principal_id, do: :ok, else: {:error, {:identity_mismatch, verified_id, principal_id}}
+  end
+
+  defp check_resource_binding(%{payload: payload}, resource_uri) do
+    # If the signed payload matches the resource, binding is valid.
+    # If payload is different (signed for a different resource), reject.
+    if payload == resource_uri, do: :ok, else: {:error, {:resource_mismatch, payload, resource_uri}}
+  end
+
+  defp check_resource_binding(_, _), do: :ok
+
+  # Scope binding — session_id/task_id must match if set on capability
+  defp check_scope_binding(auth, cap) do
+    cap_mod = Arbor.Contracts.Security.Capability
+
+    if Code.ensure_loaded?(cap_mod) and function_exported?(cap_mod, :scope_matches?, 2) do
+      if apply(cap_mod, :scope_matches?, [cap, [session_id: auth.session_id]]) do
+        {:ok, auth}
+      else
+        {:error, :scope_mismatch, auth}
+      end
+    else
+      {:ok, auth}
+    end
+  end
+
+  # Delegation chain verification (pure crypto — may need key lookup from ETS)
+  defp check_delegation_chain(auth, %{delegation_chain: []}) do
+    {:ok, auth}
+  end
+
+  defp check_delegation_chain(auth, cap) do
+    config = Arbor.Security.Config
+    signer = Arbor.Security.Signer
+    registry = Arbor.Security.Identity.Registry
+
+    enabled =
+      Code.ensure_loaded?(config) and function_exported?(config, :delegation_chain_verification_enabled?, 0) and
+        apply(config, :delegation_chain_verification_enabled?, [])
+
+    if enabled and Code.ensure_loaded?(signer) and function_exported?(signer, :verify_delegation_chain, 2) do
+      key_lookup_fn = fn agent_id ->
+        if Code.ensure_loaded?(registry) and function_exported?(registry, :lookup, 1) do
+          apply(registry, :lookup, [agent_id])
+        else
+          {:error, :registry_unavailable}
+        end
+      end
+
+      case apply(signer, :verify_delegation_chain, [cap, key_lookup_fn]) do
+        :ok -> {:ok, auth}
+        {:error, reason} -> {:error, {:delegation_chain_invalid, reason}, auth}
+      end
+    else
+      {:ok, auth}
+    end
+  rescue
+    _ -> {:ok, auth}
+  catch
+    :exit, _ -> {:ok, auth}
+  end
+
+  # Time constraints — not_before / expires_at (pure time comparison)
+  defp check_time_constraints(auth, cap) do
+    now = DateTime.utc_now()
+
+    cond do
+      cap.not_before && DateTime.compare(now, cap.not_before) == :lt ->
+        {:error, {:not_yet_valid, cap.not_before}, auth}
+
+      cap.expires_at && DateTime.compare(now, cap.expires_at) == :gt ->
+        {:error, {:expired, cap.expires_at}, auth}
+
+      true ->
+        {:ok, auth}
+    end
+  end
+
+  # File guard — path validation for arbor://fs/* URIs (pure)
+  defp check_file_guard(auth, resource_uri) do
+    if String.starts_with?(resource_uri, "arbor://fs/") do
+      # FileGuard check happens in the imperative shell (Security.authorize)
+      # because it needs the file_path from opts. AuthDecision just passes through.
+      {:ok, auth}
+    else
+      {:ok, auth}
+    end
   end
 
   defp check_approval(%AuthContext{} = auth, cap, resource_uri) do

@@ -52,6 +52,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Config
   alias Arbor.Security.Constraint
   alias Arbor.Security.Constraint.RateLimiter
+  alias Arbor.Security.AuthDecision
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
@@ -411,46 +412,51 @@ defmodule Arbor.Security do
         action,
         opts
       ) do
-    # Build reflex check context from the authorization parameters
+    # Step 1: Reflexes — instant safety block, must run before anything else
     reflex_context = build_reflex_context(resource_uri, action, opts)
 
-    # URI registry check: reject unregistered URIs when enforcement is enabled
-    with :ok <- Arbor.Security.UriRegistry.validate(resource_uri),
-         # Check reflexes (instant block before expensive checks)
-         :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts),
-         :ok <- check_identity_status(principal_id),
-         :ok <- maybe_verify_identity(principal_id, opts),
-         {:ok, cap} <- find_capability(principal_id, resource_uri, opts),
-         :ok <- check_scope_binding(cap, opts),
-         :ok <- maybe_verify_delegation_chain(cap),
-         :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
-         escalation_result <-
-           Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
-      case escalation_result do
+    with :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts) do
+      # Step 2: Build AuthContext with identity, capabilities, trust profile
+      auth = build_auth_context(principal_id, opts)
+
+      # Step 3: Pure authorization decision (no side effects)
+      case AuthDecision.evaluate(auth, resource_uri, action) do
+        {:ok, :authorized, auth} ->
+          handle_authorized(auth, principal_id, resource_uri, action, opts)
+
+        {:ok, :requires_approval, cap, auth} ->
+          handle_requires_approval(cap, auth, principal_id, resource_uri, action, opts)
+
+        {:error, reason, _auth} ->
+          Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+          {:error, reason}
+      end
+    else
+      {:error, reason} = error ->
+        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+        error
+    end
+  end
+
+  # Side effects for authorized decisions
+  defp handle_authorized(_auth, principal_id, resource_uri, action, opts) do
+    # Stateful constraint checks (rate limiting)
+    cap = find_capability_for_side_effects(principal_id, resource_uri)
+
+    with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri) do
+      # FileGuard for fs:// URIs with file_path
+      case maybe_check_file_guard(principal_id, resource_uri, opts) do
         :ok ->
-          # For fs:// URIs with a file_path option, verify path via FileGuard
-          case maybe_check_file_guard(principal_id, resource_uri, opts) do
-            :ok ->
-              Events.record_authorization_granted(principal_id, resource_uri, opts)
-              maybe_check_max_uses(cap)
-              maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
-              {:ok, :authorized}
+          Events.record_authorization_granted(principal_id, resource_uri, opts)
+          if cap, do: maybe_check_max_uses(cap)
+          if cap, do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+          {:ok, :authorized}
 
-            {:ok, resolved_path} ->
-              Events.record_authorization_granted(principal_id, resource_uri, opts)
-              maybe_check_max_uses(cap)
-              maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
-              {:ok, :authorized, resolved_path}
-
-            {:error, reason} ->
-              Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
-              {:error, reason}
-          end
-
-        {:ok, :pending_approval, proposal_id} ->
-          Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
-          maybe_emit_receipt(cap, principal_id, resource_uri, action, :pending_approval, opts)
-          {:ok, :pending_approval, proposal_id}
+        {:ok, resolved_path} ->
+          Events.record_authorization_granted(principal_id, resource_uri, opts)
+          if cap, do: maybe_check_max_uses(cap)
+          if cap, do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+          {:ok, :authorized, resolved_path}
 
         {:error, reason} ->
           Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
@@ -461,6 +467,53 @@ defmodule Arbor.Security do
         Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
         error
     end
+  end
+
+  # Side effects for requires_approval decisions
+  defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
+    # Escalate to Consensus via ApprovalGuard (side effect — GenServer call)
+    case Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
+      :ok ->
+        # Graduated — treat as authorized
+        Events.record_authorization_granted(principal_id, resource_uri, opts)
+        maybe_check_max_uses(cap)
+        maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+        {:ok, :authorized}
+
+      {:ok, :pending_approval, proposal_id} ->
+        Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
+        maybe_emit_receipt(cap, principal_id, resource_uri, action, :pending_approval, opts)
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+        {:error, reason}
+    end
+  end
+
+  defp build_auth_context(principal_id, opts) do
+    alias Arbor.Contracts.Security.AuthContext
+
+    AuthContext.new(principal_id,
+      signed_request: Keyword.get(opts, :signed_request),
+      signer: Keyword.get(opts, :signer),
+      session_id: Keyword.get(opts, :session_id)
+    )
+    |> AuthContext.load()
+  end
+
+  # Look up capability for side-effect operations (max_uses, receipt).
+  # AuthDecision already verified the capability exists — this is just
+  # to get the struct for the side-effect helpers.
+  defp find_capability_for_side_effects(principal_id, resource_uri) do
+    case CapabilityStore.find_authorizing(principal_id, resource_uri) do
+      {:ok, cap} -> cap
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   @impl Arbor.Contracts.API.Security
