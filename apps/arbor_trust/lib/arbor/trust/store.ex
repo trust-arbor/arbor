@@ -28,7 +28,7 @@ defmodule Arbor.Trust.Store do
   use GenServer
 
   alias Arbor.Contracts.Trust.{Event, Profile}
-  alias Arbor.Trust.{Calculator, Config}
+  alias Arbor.Trust.{Authority, Calculator, Config}
 
   require Logger
 
@@ -146,11 +146,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_action_success(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_action_success(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_action_success()
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_action_success/1)
   end
 
   @doc """
@@ -158,11 +154,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_action_failure(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_action_failure(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_action_failure()
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_action_failure/1)
   end
 
   @doc """
@@ -170,11 +162,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_security_violation(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_security_violation(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_security_violation()
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_security_violation/1)
   end
 
   @doc """
@@ -183,11 +171,7 @@ defmodule Arbor.Trust.Store do
   @spec record_test_result(String.t(), :passed | :failed) ::
           {:ok, Profile.t()} | {:error, term()}
   def record_test_result(agent_id, result) when result in [:passed, :failed] do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_test_result(result)
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_test_result(&1, result))
   end
 
   @doc """
@@ -233,11 +217,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_proposal_approved(String.t(), atom()) :: {:ok, Profile.t()} | {:error, term()}
   def record_proposal_approved(agent_id, impact \\ :medium) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_proposal_approved(impact)
-      |> recalculate_with_points(profile)
-    end)
+    update_profile(agent_id, &Authority.record_proposal_approved(&1, impact))
   end
 
   @doc """
