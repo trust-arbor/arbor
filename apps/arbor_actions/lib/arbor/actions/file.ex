@@ -60,11 +60,14 @@ defmodule Arbor.Actions.File do
           {:ok, String.t()} | {:error, term()}
   def authorize_file_op(context, path, operation) do
     if context[:agent_id] do
-      # Agent-scoped: authorize via Security + FileGuard.
-      # Identity already verified at action layer (authorize_and_execute).
-      # Skip re-verification to avoid nonce replay on the signed_request.
+      # Facade-level auth: check capability for the specific file operation.
+      # Identity was already verified at the action layer — skip re-verification
+      # to avoid nonce replay on signed_request.
       resource_uri = "arbor://fs/#{operation}"
 
+      # If AuthContext is available and identity is verified, we can be explicit
+      # about why we skip identity verification. Either way, facade auth never
+      # re-verifies identity (that's the action layer's job).
       case Arbor.Security.authorize(context[:agent_id], resource_uri, :execute,
              file_path: path, verify_identity: false) do
         {:ok, :authorized, resolved_path} -> {:ok, resolved_path}

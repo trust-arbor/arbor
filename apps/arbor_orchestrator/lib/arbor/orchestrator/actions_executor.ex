@@ -63,16 +63,33 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             |> maybe_inject_workdir(workdir)
 
           # Sign with the canonical module-derived resource URI.
-          # Params are passed so self-scoped URIs include the agent_id,
-          # matching what authorize_and_execute will verify.
           signed_request = signed_request || sign_for_module(signer, action_module, params)
 
-          context =
-            if signed_request do
-              %{signed_request: signed_request}
+          # Build AuthContext — single struct with everything auth needs.
+          # The signed_request and signer are included so downstream code
+          # (authorize_and_execute, facade auth) can access them.
+          auth_context =
+            if Code.ensure_loaded?(Arbor.Contracts.Security.AuthContext) do
+              Arbor.Contracts.Security.AuthContext.new(agent_id,
+                signer: signer,
+                signed_request: signed_request,
+                session_id: Keyword.get(opts, :session_id)
+              )
             else
-              %{}
+              nil
             end
+
+          Logger.debug(
+            "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
+              "auth_context=#{auth_context != nil}, agent=#{agent_id}, module=#{action_module}"
+          )
+
+          # Context passed to the action's run/2 — includes signed_request
+          # so facade auth can see it, and auth_context for the new flow.
+          context =
+            %{}
+            |> then(fn c -> if signed_request, do: Map.put(c, :signed_request, signed_request), else: c end)
+            |> then(fn c -> if auth_context, do: Map.put(c, :auth_context, auth_context), else: c end)
 
           case apply(@actions_mod, :authorize_and_execute, [
                  agent_id,
@@ -459,8 +476,13 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     resource = apply(@actions_mod, :canonical_uri_for, [action_module, params])
 
     case signer.(resource) do
-      {:ok, signed_request} -> signed_request
-      {:error, _} -> nil
+      {:ok, signed_request} ->
+        Logger.debug("[ActionsExecutor] Signed for #{resource}")
+        signed_request
+
+      {:error, reason} ->
+        Logger.warning("[ActionsExecutor] Signing failed for #{resource}: #{inspect(reason)}")
+        nil
     end
   end
 
