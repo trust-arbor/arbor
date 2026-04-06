@@ -34,8 +34,6 @@ defmodule Arbor.Trust.Store do
 
   @table_name :trust_profile_cache
   @events_table :trust_events_cache
-  # 1 hour TTL for cached profiles
-  @cache_ttl_seconds 3600
 
   defstruct [
     :profiles_table,
@@ -71,10 +69,24 @@ defmodule Arbor.Trust.Store do
 
   @doc """
   Get a trust profile by agent ID.
+
+  Reads directly from ETS for sub-microsecond latency on the authorization
+  hot path. Falls back to GenServer (DB lookup) on cache miss.
   """
   @spec get_profile(String.t()) :: {:ok, Profile.t()} | {:error, :not_found}
   def get_profile(agent_id) do
-    GenServer.call(__MODULE__, {:get_profile, agent_id})
+    case :ets.lookup(@table_name, agent_id) do
+      [{^agent_id, profile}] ->
+        {:ok, profile}
+
+      [] ->
+        # Cache miss — try DB fallback via GenServer
+        GenServer.call(__MODULE__, {:get_profile_from_db, agent_id})
+    end
+  rescue
+    ArgumentError ->
+      # ETS table not yet created
+      {:error, :not_found}
   end
 
   @doc """
@@ -82,7 +94,9 @@ defmodule Arbor.Trust.Store do
   """
   @spec profile_exists?(String.t()) :: boolean()
   def profile_exists?(agent_id) do
-    GenServer.call(__MODULE__, {:profile_exists, agent_id})
+    :ets.member(@table_name, agent_id)
+  rescue
+    ArgumentError -> false
   end
 
   @doc """
@@ -179,11 +193,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_rollback(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_rollback(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_rollback()
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_rollback/1)
   end
 
   @doc """
@@ -191,11 +201,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_improvement(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_improvement(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_improvement()
-      |> Profile.recalculate()
-    end)
+    update_profile(agent_id, &Authority.record_improvement/1)
   end
 
   # Council-based trust earning functions
@@ -205,11 +211,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_proposal_submitted(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_proposal_submitted(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_proposal_submitted()
-      |> recalculate_with_points(profile)
-    end)
+    update_profile(agent_id, &Authority.record_proposal_submitted/1)
   end
 
   @doc """
@@ -226,11 +228,7 @@ defmodule Arbor.Trust.Store do
   @spec record_installation_success(String.t(), atom()) ::
           {:ok, Profile.t()} | {:error, term()}
   def record_installation_success(agent_id, impact \\ :medium) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_installation_success(impact)
-      |> recalculate_with_points(profile)
-    end)
+    update_profile(agent_id, &Authority.record_installation_success(&1, impact))
   end
 
   @doc """
@@ -238,11 +236,7 @@ defmodule Arbor.Trust.Store do
   """
   @spec record_installation_rollback(String.t()) :: {:ok, Profile.t()} | {:error, term()}
   def record_installation_rollback(agent_id) do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.record_installation_rollback()
-      |> recalculate_with_points(profile)
-    end)
+    update_profile(agent_id, &Authority.record_installation_rollback/1)
   end
 
   @doc """
@@ -251,10 +245,7 @@ defmodule Arbor.Trust.Store do
   @spec award_trust_points(String.t(), non_neg_integer()) ::
           {:ok, Profile.t()} | {:error, term()}
   def award_trust_points(agent_id, points) when points >= 0 do
-    update_profile(agent_id, fn profile ->
-      updated = %{profile | trust_points: profile.trust_points + points}
-      recalculate_with_points(updated, profile)
-    end)
+    update_profile(agent_id, &Authority.award_trust_points(&1, points))
   end
 
   @doc """
@@ -263,35 +254,7 @@ defmodule Arbor.Trust.Store do
   @spec deduct_trust_points(String.t(), non_neg_integer(), atom()) ::
           {:ok, Profile.t()} | {:error, term()}
   def deduct_trust_points(agent_id, points, reason) when points >= 0 do
-    update_profile(agent_id, fn profile ->
-      profile
-      |> Profile.deduct_trust_points(points, reason)
-      |> recalculate_with_points(profile)
-    end)
-  end
-
-  # Helper to recalculate trust score incorporating trust points
-  defp recalculate_with_points(profile, _old_profile) do
-    # Recalculate the weighted score first
-    recalculated = Profile.recalculate(profile)
-
-    # The tier is now determined by the higher of:
-    # 1. The weighted component score
-    # 2. The trust points tier
-    weighted_tier = recalculated.tier
-    points_tier = Profile.points_to_tier(recalculated.trust_points)
-
-    # Use the higher tier (trust points can boost tier, but not lower it)
-    final_tier = higher_tier(weighted_tier, points_tier)
-
-    %{recalculated | tier: final_tier}
-  end
-
-  defp higher_tier(tier1, tier2) do
-    tier_order = Config.tiers()
-    idx1 = Enum.find_index(tier_order, &(&1 == tier1)) || 0
-    idx2 = Enum.find_index(tier_order, &(&1 == tier2)) || 0
-    Enum.at(tier_order, max(idx1, idx2))
+    update_profile(agent_id, &Authority.deduct_trust_points(&1, points, reason))
   end
 
   @doc """
@@ -362,7 +325,7 @@ defmodule Arbor.Trust.Store do
     profiles_table =
       :ets.new(@table_name, [
         :set,
-        :protected,
+        :public,
         :named_table,
         {:read_concurrency, true},
         {:write_concurrency, true}
@@ -410,31 +373,17 @@ defmodule Arbor.Trust.Store do
   end
 
   @impl true
-  def handle_call({:get_profile, agent_id}, _from, state) do
-    case get_profile_from_cache(agent_id, state) do
+  def handle_call({:get_profile_from_db, agent_id}, _from, state) do
+    case load_profile_from_db(agent_id, state) do
       {:ok, profile} ->
-        new_stats = update_stats(state.cache_stats, :hits, 1)
+        put_profile_in_cache(profile, state)
+        new_stats = update_stats(state.cache_stats, :misses, 1)
         {:reply, {:ok, profile}, %{state | cache_stats: new_stats}}
 
       {:error, :not_found} ->
-        # Try DB fallback if available
-        case load_profile_from_db(agent_id, state) do
-          {:ok, profile} ->
-            put_profile_in_cache(profile, state)
-            new_stats = update_stats(state.cache_stats, :misses, 1)
-            {:reply, {:ok, profile}, %{state | cache_stats: new_stats}}
-
-          {:error, :not_found} ->
-            new_stats = update_stats(state.cache_stats, :misses, 1)
-            {:reply, {:error, :not_found}, %{state | cache_stats: new_stats}}
-        end
+        new_stats = update_stats(state.cache_stats, :misses, 1)
+        {:reply, {:error, :not_found}, %{state | cache_stats: new_stats}}
     end
-  end
-
-  @impl true
-  def handle_call({:profile_exists, agent_id}, _from, state) do
-    exists = :ets.member(state.profiles_table, agent_id)
-    {:reply, exists, state}
   end
 
   @impl true
@@ -507,7 +456,7 @@ defmodule Arbor.Trust.Store do
 
     profiles =
       :ets.tab2list(state.profiles_table)
-      |> Enum.map(fn {_key, {profile, _expiry}} -> profile end)
+      |> Enum.map(fn {_key, profile} -> profile end)
       |> maybe_filter_by_tier(tier_filter)
       |> Enum.sort_by(& &1.trust_score, :desc)
       |> Enum.take(limit)
@@ -520,7 +469,7 @@ defmodule Arbor.Trust.Store do
     now = DateTime.utc_now()
 
     :ets.tab2list(state.profiles_table)
-    |> Enum.each(fn {_agent_id, {profile, _expiry}} ->
+    |> Enum.each(fn {_agent_id, profile} ->
       updated = Calculator.recalculate_profile(profile, now)
       put_profile_in_cache(updated, state)
     end)
@@ -594,29 +543,18 @@ defmodule Arbor.Trust.Store do
   # Private functions
 
   defp put_profile_in_cache(profile, state) do
-    cache_entry = {profile, cache_expiry()}
-    :ets.insert(state.profiles_table, {profile.agent_id, cache_entry})
+    :ets.insert(state.profiles_table, {profile.agent_id, profile})
     :ok
   end
 
   defp get_profile_from_cache(agent_id, state) do
     case :ets.lookup(state.profiles_table, agent_id) do
-      [{^agent_id, {profile, expiry}}] ->
-        if DateTime.compare(DateTime.utc_now(), expiry) == :lt do
-          {:ok, profile}
-        else
-          # Expired, but still return it (soft expiry)
-          # A background job should refresh stale entries
-          {:ok, profile}
-        end
+      [{^agent_id, profile}] ->
+        {:ok, profile}
 
       [] ->
         {:error, :not_found}
     end
-  end
-
-  defp cache_expiry do
-    DateTime.add(DateTime.utc_now(), @cache_ttl_seconds, :second)
   end
 
   defp update_stats(stats, key, increment) do

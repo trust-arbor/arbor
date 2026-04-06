@@ -106,6 +106,68 @@ defmodule Arbor.Trust.Authority do
     |> touch()
   end
 
+  @doc "Record a proposal submission and recalculate."
+  @spec record_proposal_submitted(Profile.t()) :: Profile.t()
+  def record_proposal_submitted(%Profile{} = profile) do
+    profile
+    |> Profile.record_proposal_submitted()
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Record a successful installation and recalculate."
+  @spec record_installation_success(Profile.t(), atom()) :: Profile.t()
+  def record_installation_success(%Profile{} = profile, impact \\ :medium) do
+    profile
+    |> Profile.record_installation_success(impact)
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Record an installation rollback and recalculate."
+  @spec record_installation_rollback(Profile.t()) :: Profile.t()
+  def record_installation_rollback(%Profile{} = profile) do
+    profile
+    |> Profile.record_installation_rollback()
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Record a rollback and recalculate."
+  @spec record_rollback(Profile.t()) :: Profile.t()
+  def record_rollback(%Profile{} = profile) do
+    profile
+    |> Profile.record_rollback()
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Record an improvement and recalculate."
+  @spec record_improvement(Profile.t()) :: Profile.t()
+  def record_improvement(%Profile{} = profile) do
+    profile
+    |> Profile.record_improvement()
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Award trust points and recalculate tier."
+  @spec award_trust_points(Profile.t(), non_neg_integer()) :: Profile.t()
+  def award_trust_points(%Profile{} = profile, points) when points >= 0 do
+    %{profile | trust_points: profile.trust_points + points}
+    |> recalculate_scores()
+    |> touch()
+  end
+
+  @doc "Deduct trust points and recalculate tier."
+  @spec deduct_trust_points(Profile.t(), non_neg_integer(), atom()) :: Profile.t()
+  def deduct_trust_points(%Profile{} = profile, points, reason) when points >= 0 do
+    profile
+    |> Profile.deduct_trust_points(points, reason)
+    |> recalculate_scores()
+    |> touch()
+  end
+
   @doc "Apply trust decay for inactivity."
   @spec apply_decay(Profile.t(), non_neg_integer()) :: Profile.t()
   def apply_decay(%Profile{frozen: true} = profile, _days_inactive), do: profile

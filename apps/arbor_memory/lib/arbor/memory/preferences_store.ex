@@ -8,6 +8,8 @@ defmodule Arbor.Memory.PreferencesStore do
 
   alias Arbor.Memory.{Preferences, Signals}
 
+  require Logger
+
   @preferences_ets :arbor_preferences
 
   # ============================================================================
@@ -31,6 +33,8 @@ defmodule Arbor.Memory.PreferencesStore do
   @spec save_preferences(String.t(), Preferences.t()) :: :ok
   def save_preferences(agent_id, prefs) do
     :ets.insert(@preferences_ets, {agent_id, prefs})
+    # Async persist to BufferedStore for crash recovery
+    persist_async(agent_id, prefs)
     :ok
   end
 
@@ -181,4 +185,72 @@ defmodule Arbor.Memory.PreferencesStore do
   def save_preferences_for_agent(agent_id, prefs) do
     save_preferences(agent_id, prefs)
   end
+
+  @doc """
+  Restore persisted preferences into ETS on startup.
+
+  Called from Application.start. Loads all preferences from the
+  MemoryStore backend into ETS for fast access.
+  """
+  @spec restore_from_store() :: :ok
+  def restore_from_store do
+    if store_available?() do
+      case Arbor.Memory.MemoryStore.load_all("preferences") do
+        {:ok, pairs} when pairs != [] ->
+          Enum.each(pairs, fn {key, data} ->
+            agent_id = extract_agent_id(key)
+
+            if agent_id do
+              prefs = Preferences.deserialize(data)
+              :ets.insert(@preferences_ets, {agent_id, prefs})
+            end
+          end)
+
+          Logger.info("[PreferencesStore] Restored #{length(pairs)} preferences from store")
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # ===========================================================================
+  # Private — Persistence
+  # ===========================================================================
+
+  defp persist_async(agent_id, prefs) do
+    Task.start(fn ->
+      try do
+        if store_available?() do
+          data = Preferences.serialize(prefs)
+          Arbor.Memory.MemoryStore.persist("preferences", agent_id, data)
+        end
+      rescue
+        e ->
+          Logger.debug("[PreferencesStore] Persist failed for #{agent_id}: #{Exception.message(e)}")
+      end
+    end)
+  end
+
+  defp store_available? do
+    Arbor.Memory.MemoryStore.available?()
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp extract_agent_id(key) when is_binary(key) do
+    # Keys may be "preferences:agent_id" or just "agent_id"
+    case String.split(key, ":", parts: 2) do
+      [_ns, agent_id] -> agent_id
+      [agent_id] -> agent_id
+    end
+  end
+
+  defp extract_agent_id(_), do: nil
 end

@@ -498,12 +498,14 @@ defmodule Arbor.Trust.StoreTest do
       assert stats.writes >= 1
     end
 
-    test "tracks cache hits", %{profile: profile} do
+    test "direct ETS reads bypass GenServer (no hit tracking)", %{profile: profile} do
       :ok = Store.store_profile(profile)
       {:ok, _} = Store.get_profile(profile.agent_id)
 
+      # Direct ETS reads skip GenServer, so hits aren't tracked
+      # This is intentional — the hot path avoids serialization
       stats = Store.get_cache_stats()
-      assert stats.hits >= 1
+      assert stats.hits == 0
     end
 
     test "tracks cache misses" do
