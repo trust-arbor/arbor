@@ -33,18 +33,15 @@ defmodule Arbor.Trust.Store do
   require Logger
 
   @table_name :trust_profile_cache
-  @events_table :trust_events_cache
 
   defstruct [
     :profiles_table,
-    :events_table,
     :db_module,
     :cache_stats
   ]
 
   @type state :: %__MODULE__{
           profiles_table: :ets.table(),
-          events_table: :ets.table(),
           db_module: module() | nil,
           cache_stats: map()
         }
@@ -278,22 +275,6 @@ defmodule Arbor.Trust.Store do
   end
 
   @doc """
-  Store a trust event.
-  """
-  @spec store_event(Event.t()) :: :ok
-  def store_event(%Event{} = event) do
-    GenServer.call(__MODULE__, {:store_event, event})
-  end
-
-  @doc """
-  Get recent events for an agent.
-  """
-  @spec get_events(String.t(), keyword()) :: {:ok, [Event.t()]}
-  def get_events(agent_id, opts \\ []) do
-    GenServer.call(__MODULE__, {:get_events, agent_id, opts})
-  end
-
-  @doc """
   List all profiles (for admin/debugging).
   """
   @spec list_profiles(keyword()) :: {:ok, [Profile.t()]}
@@ -331,22 +312,13 @@ defmodule Arbor.Trust.Store do
         {:write_concurrency, true}
       ])
 
-    events_table =
-      :ets.new(@events_table, [
-        :ordered_set,
-        :protected,
-        :named_table,
-        {:read_concurrency, true}
-      ])
-
     # Optional PostgreSQL persistence module
     db_module = opts[:db_module]
 
     state = %__MODULE__{
       profiles_table: profiles_table,
-      events_table: events_table,
       db_module: db_module,
-      cache_stats: %{hits: 0, misses: 0, writes: 0, deletes: 0, events: 0}
+      cache_stats: %{hits: 0, misses: 0, writes: 0, deletes: 0}
     }
 
     subscribe_to_distributed_signals()
@@ -426,30 +398,6 @@ defmodule Arbor.Trust.Store do
   end
 
   @impl true
-  def handle_call({:store_event, event}, _from, state) do
-    # Use timestamp + id as key for ordering
-    key = {event.timestamp, event.id}
-    :ets.insert(state.events_table, {{event.agent_id, key}, event})
-
-    new_stats = update_stats(state.cache_stats, :events, 1)
-    {:reply, :ok, %{state | cache_stats: new_stats}}
-  end
-
-  @impl true
-  def handle_call({:get_events, agent_id, opts}, _from, state) do
-    limit = Keyword.get(opts, :limit, 50)
-
-    # Get all events for this agent
-    events =
-      :ets.match_object(state.events_table, {{agent_id, :_}, :_})
-      |> Enum.map(fn {_key, event} -> event end)
-      |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
-      |> Enum.take(limit)
-
-    {:reply, {:ok, events}, state}
-  end
-
-  @impl true
   def handle_call({:list_profiles, opts}, _from, state) do
     limit = Keyword.get(opts, :limit, 100)
     tier_filter = Keyword.get(opts, :tier)
@@ -483,12 +431,10 @@ defmodule Arbor.Trust.Store do
       try do
         %{
           profiles_size: :ets.info(state.profiles_table, :size),
-          profiles_memory: :ets.info(state.profiles_table, :memory),
-          events_size: :ets.info(state.events_table, :size),
-          events_memory: :ets.info(state.events_table, :memory)
+          profiles_memory: :ets.info(state.profiles_table, :memory)
         }
       rescue
-        _ -> %{profiles_size: 0, profiles_memory: 0, events_size: 0, events_memory: 0}
+        _ -> %{profiles_size: 0, profiles_memory: 0}
       end
 
     stats = Map.merge(state.cache_stats, table_info)
@@ -501,10 +447,6 @@ defmodule Arbor.Trust.Store do
 
     if :ets.info(state.profiles_table) != :undefined do
       :ets.delete(state.profiles_table)
-    end
-
-    if :ets.info(state.events_table) != :undefined do
-      :ets.delete(state.events_table)
     end
 
     :ok
@@ -784,7 +726,7 @@ defmodule Arbor.Trust.Store do
     _, _ -> :ok
   end
 
-  defp emit_tier_change_event(old_profile, new_profile, state) do
+  defp emit_tier_change_event(old_profile, new_profile, _state) do
     {:ok, event} =
       Event.tier_change_event(
         new_profile.agent_id,
@@ -794,9 +736,10 @@ defmodule Arbor.Trust.Store do
         new_score: new_profile.trust_score
       )
 
-    # Store the event
-    key = {event.timestamp, event.id}
-    :ets.insert(state.events_table, {{event.agent_id, key}, event})
+    # Persist to EventStore
+    if Code.ensure_loaded?(Arbor.Trust.EventStore) and Process.whereis(Arbor.Trust.EventStore) do
+      Arbor.Trust.EventStore.record_event(event)
+    end
 
     # Broadcast via PubSub for real-time LiveView updates
     try do

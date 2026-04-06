@@ -152,7 +152,7 @@ defmodule Arbor.Trust.Manager do
   """
   @spec get_events(String.t(), keyword()) :: {:ok, [Event.t()]}
   def get_events(agent_id, opts \\ []) do
-    Store.get_events(agent_id, opts)
+    EventStore.get_events(Keyword.merge(opts, agent_id: agent_id))
   end
 
   @doc """
@@ -251,8 +251,7 @@ defmodule Arbor.Trust.Manager do
             new_score: profile.trust_score
           )
 
-        Store.store_event(event)
-        persist_to_event_store(event, state)
+        record_event(event, state)
 
         Logger.info("Trust unfrozen for agent #{agent_id}",
           agent_id: agent_id
@@ -279,8 +278,7 @@ defmodule Arbor.Trust.Manager do
         new_score: 0
       )
 
-    Store.store_event(event)
-    persist_to_event_store(event, state)
+    record_event(event, state)
 
     Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
 
@@ -303,8 +301,7 @@ defmodule Arbor.Trust.Manager do
             previous_score: profile.trust_score
           )
 
-        Store.store_event(event)
-        persist_to_event_store(event, state)
+        record_event(event, state)
 
         Logger.info("Trust profile deleted for agent #{agent_id}",
           agent_id: agent_id
@@ -362,10 +359,7 @@ defmodule Arbor.Trust.Manager do
                metadata: metadata
              ) do
           {:ok, event} ->
-            Store.store_event(event)
-
-            # Persist to durable event store
-            persist_to_event_store(event, state)
+            record_event(event, state)
 
             # Broadcast event
             broadcast_trust_event(agent_id, event_type, metadata)
@@ -470,7 +464,7 @@ defmodule Arbor.Trust.Manager do
 
   defp check_circuit_breaker(agent_id, state) do
     # Get recent events to check for patterns
-    {:ok, events} = Store.get_events(agent_id, limit: 20)
+    {:ok, events} = EventStore.get_events(agent_id: agent_id, limit: 20)
 
     now = DateTime.utc_now()
     one_minute_ago = DateTime.add(now, -60, :second)
@@ -526,8 +520,7 @@ defmodule Arbor.Trust.Manager do
             new_score: profile.trust_score
           )
 
-        Store.store_event(event)
-        persist_to_event_store(event, state)
+        record_event(event, state)
 
         Logger.warning("Trust frozen for agent #{agent_id}: #{reason}",
           agent_id: agent_id,
@@ -631,7 +624,7 @@ defmodule Arbor.Trust.Manager do
         metadata: %{days_inactive: days_inactive}
       )
 
-    Store.store_event(event)
+    safe_record_event(event)
 
     Logger.debug("Trust decayed for inactive agent #{profile.agent_id}",
       agent_id: profile.agent_id,
@@ -674,18 +667,20 @@ defmodule Arbor.Trust.Manager do
     :exit, _ -> :ok
   end
 
-  defp persist_to_event_store(event, state) do
+  defp record_event(event, state) do
     if state.event_store_enabled do
-      case EventStore.record_event(event) do
-        :ok ->
-          :ok
+      safe_record_event(event)
+    end
+  end
 
-        {:error, reason} ->
-          Logger.warning("Failed to persist trust event to EventStore: #{inspect(reason)}")
-          :ok
-      end
-    else
-      :ok
+  defp safe_record_event(event) do
+    case EventStore.record_event(event) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist trust event to EventStore: #{inspect(reason)}")
+        :ok
     end
   rescue
     e ->
