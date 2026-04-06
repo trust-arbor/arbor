@@ -1103,11 +1103,26 @@ defmodule Arbor.Agent.Lifecycle do
   # Trust.Store profile is separate from Agent.Profile — they both need the tier.
   defp update_trust_tier(agent_id, tier, trust_mod) do
     store = Arbor.Trust.Store
+    policy = Arbor.Trust.Policy
 
     if Code.ensure_loaded?(store) and function_exported?(store, :get_profile, 1) do
       case apply(store, :get_profile, [agent_id]) do
         {:ok, profile} ->
-          updated = %{profile | tier: tier}
+          # Update tier AND apply the preset rules for that tier.
+          # The preset determines baseline mode (:ask, :allow, :auto) and
+          # per-URI rules. Without this, the tier changes but the agent
+          # still has the old :cautious baseline (everything needs approval).
+          updated =
+            if Code.ensure_loaded?(policy) and function_exported?(policy, :tier_to_preset, 1) and
+                 function_exported?(policy, :preset_rules, 1) do
+              preset = apply(policy, :tier_to_preset, [tier])
+              {baseline, rules} = apply(policy, :preset_rules, [preset])
+
+              %{profile | tier: tier, baseline: baseline, rules: Map.merge(profile.rules, rules)}
+            else
+              %{profile | tier: tier}
+            end
+
           apply(store, :store_profile, [updated])
 
           # Re-grant tier capabilities with the correct tier
@@ -1115,7 +1130,7 @@ defmodule Arbor.Agent.Lifecycle do
             apply(trust_mod, :grant_tier_capabilities, [agent_id, tier])
           end
 
-          Logger.info("Trust profile updated to tier #{tier} for #{agent_id}")
+          Logger.info("Trust profile updated to tier #{tier} (preset rules applied) for #{agent_id}")
 
         _ ->
           :ok
