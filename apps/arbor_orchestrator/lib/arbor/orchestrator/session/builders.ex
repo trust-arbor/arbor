@@ -241,7 +241,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
       end
 
     # Pure: increment turn count
-    new_turn_count = SessionCore.increment_turn(ContextBuilder.get_turn_count(state))
+    new_turn_count =
+      state
+      |> ContextBuilder.get_turn_count()
+      |> SessionCore.increment_turn()
 
     # Side effect: compactor (may trigger compaction)
     old_compression_count =
