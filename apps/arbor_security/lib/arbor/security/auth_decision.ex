@@ -256,7 +256,7 @@ defmodule Arbor.Security.AuthDecision do
     {:error, :missing_signed_request, auth}
   end
 
-  defp do_verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, resource_uri, opts) do
+  defp do_verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, _resource_uri, opts) do
     # Only check resource binding when caller explicitly sets expected_resource.
     # Some signers use a different payload format (e.g., "authorize" string).
     expected = Keyword.get(opts, :expected_resource)

@@ -818,107 +818,7 @@ defmodule Arbor.Security do
   # Private functions
   # ===========================================================================
 
-  # H2: Fail closed on unknown identities when strict identity mode is enabled.
-  # In permissive mode (default for dev/test), unknown identities proceed to
-  # capability check. In strict mode (production), unknown identities are rejected.
-  defp check_identity_status(principal_id) do
-    case Registry.identity_status(principal_id) do
-      {:ok, :active} ->
-        :ok
-
-      {:ok, :suspended} ->
-        {:error, {:unauthorized, :identity_suspended}}
-
-      {:ok, :revoked} ->
-        {:error, {:unauthorized, :identity_revoked}}
-
-      {:error, :not_found} ->
-        if Config.strict_identity_mode?() do
-          {:error, {:unauthorized, :unknown_identity}}
-        else
-          # P0-3: Permissive mode — allow through but log for observability.
-          # This surfaces unknown identities in dev/test without blocking.
-          Logger.warning(
-            "[Security] Unknown identity #{principal_id} allowed in permissive mode"
-          )
-
-          :ok
-        end
-    end
-  catch
-    :exit, _ ->
-      # Identity.Registry GenServer not running (start_children: false in test/dev).
-      # Respect strict_identity_mode: fail closed in strict, allow in permissive.
-      if Config.strict_identity_mode?() do
-        {:error, {:unauthorized, :identity_registry_unavailable}}
-      else
-        :ok
-      end
-  end
-
-  # H1: When identity verification is enabled, verify the signed request AND
-  # bind the verified agent_id to the principal_id being authorized.
-  # A valid signature from agent A must not authorize principal B.
-  # H3: When expected_resource is provided, verify the signed payload matches
-  # the resource being authorized (prevents cross-resource replay).
-  defp maybe_verify_identity(principal_id, opts) do
-    verify? = Keyword.get(opts, :verify_identity, Config.identity_verification_enabled?())
-    signed_request = Keyword.get(opts, :signed_request)
-
-    cond do
-      not verify? ->
-        :ok
-
-      is_nil(signed_request) ->
-        {:error, :missing_signed_request}
-
-      true ->
-        with {:ok, verified_agent_id} <- Verifier.verify(signed_request),
-             :ok <- check_identity_binding(verified_agent_id, principal_id) do
-          check_resource_binding(signed_request, opts)
-        end
-    end
-  end
-
-  # The verified agent_id must match the principal_id being authorized
-  defp check_identity_binding(verified_agent_id, principal_id) do
-    if verified_agent_id == principal_id do
-      :ok
-    else
-      {:error, {:identity_mismatch, verified_agent_id, principal_id}}
-    end
-  end
-
-  # If expected_resource is provided, the signed payload must match it.
-  # This prevents a signed request for resource A from authorizing resource B.
-  defp check_resource_binding(signed_request, opts) do
-    case Keyword.get(opts, :expected_resource) do
-      nil ->
-        :ok
-
-      expected ->
-        if signed_request.payload == expected do
-          :ok
-        else
-          {:error, {:resource_mismatch, signed_request.payload, expected}}
-        end
-    end
-  end
-
-  defp find_capability(principal_id, resource_uri, opts) do
-    case CapabilityStore.find_authorizing(principal_id, resource_uri) do
-      {:ok, cap} ->
-        {:ok, cap}
-
-      {:error, :not_found} ->
-        # JIT: check trust profile and auto-grant if allowed
-        Arbor.Security.PolicyEnforcer.check(principal_id, resource_uri, opts)
-    end
-  catch
-    :exit, {:noproc, _} ->
-      # CapabilityStore not running — fall through to PolicyEnforcer
-      Arbor.Security.PolicyEnforcer.check(principal_id, resource_uri, opts)
-  end
+  # Old helpers moved to AuthDecision — deleted to avoid dead code.
 
   defp maybe_emit_receipt(cap, principal_id, resource_uri, action, result, opts) do
     if Config.invocation_receipts_enabled?() do
@@ -950,13 +850,7 @@ defmodule Arbor.Security do
     _ -> :ok
   end
 
-  defp check_scope_binding(cap, opts) do
-    if Capability.scope_matches?(cap, opts) do
-      :ok
-    else
-      {:error, :scope_mismatch}
-    end
-  end
+  # check_scope_binding moved to AuthDecision
 
   defp maybe_check_max_uses(%Capability{max_uses: nil}), do: :ok
 
@@ -974,23 +868,7 @@ defmodule Arbor.Security do
     end
   end
 
-  defp maybe_verify_delegation_chain(%Capability{delegation_chain: []}), do: :ok
-
-  defp maybe_verify_delegation_chain(%Capability{} = cap) do
-    if Config.delegation_chain_verification_enabled?() do
-      key_lookup_fn = fn agent_id ->
-        Registry.lookup(agent_id)
-      end
-
-      Signer.verify_delegation_chain(cap, key_lookup_fn)
-    else
-      :ok
-    end
-  catch
-    :exit, _ ->
-      # Registry not running — skip verification in permissive mode
-      if Config.strict_identity_mode?(), do: {:error, :delegation_chain_verification_unavailable}, else: :ok
-  end
+  # maybe_verify_delegation_chain moved to AuthDecision
 
   defp maybe_enforce_constraints(cap, principal_id, resource_uri) do
     if Config.constraint_enforcement_enabled?() and cap.constraints != %{} do
