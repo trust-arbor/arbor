@@ -528,27 +528,8 @@ defmodule Arbor.Trust.Store do
   @buffered_store :arbor_trust_profiles
 
   defp load_persisted_profiles(state) do
-    if Process.whereis(@buffered_store) do
-      case Arbor.Persistence.BufferedStore.list(name: @buffered_store) do
-        {:ok, keys} ->
-          Logger.info("[Trust.Store] Loading #{length(keys)} persisted profiles from BufferedStore")
-
-          Enum.count(keys, fn key ->
-            case load_profile_from_db(key, state) do
-              {:ok, profile} ->
-                put_profile_in_cache(profile, state)
-                true
-
-              other ->
-                Logger.warning("[Trust.Store] Failed to load profile #{key}: #{inspect(other)}")
-                false
-            end
-          end)
-
-        other ->
-          Logger.warning("[Trust.Store] Unexpected list result from BufferedStore: #{inspect(other)}")
-          0
-      end
+    if buffered_store_running?() do
+      list_and_load_profiles(state)
     else
       Logger.warning("[Trust.Store] BufferedStore :arbor_trust_profiles not running on init")
       0
@@ -557,6 +538,32 @@ defmodule Arbor.Trust.Store do
     e ->
       Logger.warning("[Trust.Store] load_persisted_profiles crashed: #{inspect(e)}")
       0
+  end
+
+  defp buffered_store_running?, do: Process.whereis(@buffered_store) != nil
+
+  defp list_and_load_profiles(state) do
+    case Arbor.Persistence.BufferedStore.list(name: @buffered_store) do
+      {:ok, keys} ->
+        Logger.info("[Trust.Store] Loading #{length(keys)} persisted profiles from BufferedStore")
+        Enum.count(keys, &load_one_profile(&1, state))
+
+      other ->
+        Logger.warning("[Trust.Store] Unexpected list result from BufferedStore: #{inspect(other)}")
+        0
+    end
+  end
+
+  defp load_one_profile(key, state) do
+    case load_profile_from_db(key, state) do
+      {:ok, profile} ->
+        put_profile_in_cache(profile, state)
+        true
+
+      other ->
+        Logger.warning("[Trust.Store] Failed to load profile #{key}: #{inspect(other)}")
+        false
+    end
   end
 
   defp persist_profile(profile, _state) do
