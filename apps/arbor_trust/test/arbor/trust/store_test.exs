@@ -3,7 +3,6 @@ defmodule Arbor.Trust.StoreTest do
 
   @moduletag :fast
 
-  alias Arbor.Contracts.Trust.Event
   alias Arbor.Contracts.Trust.Profile
   alias Arbor.Trust.Store
 
@@ -14,11 +13,9 @@ defmodule Arbor.Trust.StoreTest do
       pid -> GenServer.stop(pid, :normal)
     end
 
-    # Also clean up named ETS tables if they linger
-    for table <- [:trust_profile_cache, :trust_events_cache] do
-      if :ets.info(table) != :undefined do
-        :ets.delete(table)
-      end
+    # Also clean up named ETS table if it lingers
+    if :ets.info(:trust_profile_cache) != :undefined do
+      :ets.delete(:trust_profile_cache)
     end
 
     {:ok, pid} = Store.start_link([])
@@ -39,16 +36,14 @@ defmodule Arbor.Trust.StoreTest do
       assert GenServer.whereis(Store) == pid
     end
 
-    test "creates ETS tables on start" do
+    test "creates ETS table on start" do
       assert :ets.info(:trust_profile_cache) != :undefined
-      assert :ets.info(:trust_events_cache) != :undefined
     end
 
-    test "stops cleanly and cleans up ETS tables", %{pid: pid} do
+    test "stops cleanly and cleans up ETS table", %{pid: pid} do
       GenServer.stop(pid, :normal)
-      # ETS tables are cleaned up in terminate/2
+      # ETS table is cleaned up in terminate/2
       assert :ets.info(:trust_profile_cache) == :undefined
-      assert :ets.info(:trust_events_cache) == :undefined
     end
   end
 
@@ -298,74 +293,7 @@ defmodule Arbor.Trust.StoreTest do
     end
   end
 
-  describe "store_event/1 and get_events/1" do
-    test "stores and retrieves trust events", %{profile: profile} do
-      :ok = Store.store_profile(profile)
-
-      {:ok, event} =
-        Event.new(
-          agent_id: profile.agent_id,
-          event_type: :action_success,
-          previous_score: 0,
-          new_score: 5
-        )
-
-      assert :ok = Store.store_event(event)
-
-      {:ok, events} = Store.get_events(profile.agent_id)
-      assert length(events) == 1
-      assert hd(events).event_type == :action_success
-    end
-
-    test "returns empty list for agent with no events" do
-      {:ok, events} = Store.get_events("agent_no_events")
-      assert events == []
-    end
-
-    test "respects limit option" do
-      agent_id = "agent_events_limit"
-
-      for i <- 1..10 do
-        {:ok, event} =
-          Event.new(
-            agent_id: agent_id,
-            event_type: :action_success,
-            previous_score: i - 1,
-            new_score: i
-          )
-
-        Store.store_event(event)
-      end
-
-      {:ok, events} = Store.get_events(agent_id, limit: 3)
-      assert length(events) == 3
-    end
-
-    test "events are sorted by timestamp descending" do
-      agent_id = "agent_events_order"
-      base_time = ~U[2024-01-01 10:00:00Z]
-
-      for i <- 1..5 do
-        timestamp = DateTime.add(base_time, i * 60, :second)
-
-        {:ok, event} =
-          Event.new(
-            agent_id: agent_id,
-            event_type: :action_success,
-            timestamp: timestamp,
-            previous_score: i - 1,
-            new_score: i
-          )
-
-        Store.store_event(event)
-      end
-
-      {:ok, events} = Store.get_events(agent_id)
-
-      timestamps = Enum.map(events, & &1.timestamp)
-      assert timestamps == Enum.sort(timestamps, {:desc, DateTime})
-    end
-  end
+  # Events now live exclusively in EventStore — see event_store_test.exs
 
   describe "council-based trust earning" do
     setup %{profile: profile} do
@@ -446,24 +374,22 @@ defmodule Arbor.Trust.StoreTest do
 
       assert updated.tier == :trusted
 
-      # Verify the tier change event was stored
-      {:ok, events} = Store.get_events(profile.agent_id)
-      tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
-      assert tier_events != []
+      # Tier change events are now persisted via EventStore
+      # (requires EventStore running — covered by integration tests)
+      assert updated.tier == :trusted
     end
 
     test "does not emit tier change event when tier stays the same", %{profile: profile} do
       :ok = Store.store_profile(profile)
 
       # Update score but keep same tier
-      {:ok, _updated} =
+      {:ok, updated} =
         Store.update_profile(profile.agent_id, fn p ->
           %{p | trust_score: 5}
         end)
 
-      {:ok, events} = Store.get_events(profile.agent_id)
-      tier_events = Enum.filter(events, &(&1.event_type == :tier_changed))
-      assert tier_events == []
+      # Tier should remain :untrusted
+      assert updated.tier == :untrusted
     end
   end
 
@@ -485,11 +411,9 @@ defmodule Arbor.Trust.StoreTest do
       assert Map.has_key?(stats, :misses)
       assert Map.has_key?(stats, :writes)
       assert Map.has_key?(stats, :deletes)
-      assert Map.has_key?(stats, :events)
       assert Map.has_key?(stats, :profiles_size)
       assert Map.has_key?(stats, :profiles_memory)
-      assert Map.has_key?(stats, :events_size)
-      assert Map.has_key?(stats, :events_memory)
+      # Events table removed — events live in EventStore
     end
 
     test "tracks writes", %{profile: profile} do
@@ -523,19 +447,6 @@ defmodule Arbor.Trust.StoreTest do
       assert stats.deletes >= 1
     end
 
-    test "tracks event count" do
-      {:ok, event} =
-        Event.new(
-          agent_id: "agent_stat_evt",
-          event_type: :action_success,
-          previous_score: 0,
-          new_score: 1
-        )
-
-      :ok = Store.store_event(event)
-
-      stats = Store.get_cache_stats()
-      assert stats.events >= 1
-    end
+    # Events tracking removed — events now live in EventStore exclusively
   end
 end

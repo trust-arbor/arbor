@@ -33,7 +33,7 @@ defmodule Arbor.Trust.Decay do
 
   alias Arbor.Contracts.Trust.{Event, Profile}
   alias Arbor.Signals
-  alias Arbor.Trust.{Config, Store}
+  alias Arbor.Trust.{Config, EventStore, Store}
 
   require Logger
 
@@ -245,7 +245,7 @@ defmodule Arbor.Trust.Decay do
         metadata: %{days_inactive: days_inactive}
       )
 
-    Store.store_event(event)
+    EventStore.record_event(event)
 
     Logger.debug("Trust decayed for agent #{new_profile.agent_id}",
       agent_id: new_profile.agent_id,
