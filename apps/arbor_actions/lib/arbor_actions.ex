@@ -146,7 +146,23 @@ defmodule Arbor.Actions do
       result
       when result == {:ok, :authorized} or
              (is_tuple(result) and elem(result, 0) == :ok and elem(result, 1) == :authorized) ->
-        # Authorized (with or without resolved file path)
+        # Authorized — identity verified at this layer.
+        # Mark auth_context as verified so facade auth skips re-verification.
+        clean_context =
+          if clean_context[:auth_context] do
+            auth_mod = Arbor.Contracts.Security.AuthContext
+
+            if Code.ensure_loaded?(auth_mod) and function_exported?(auth_mod, :mark_verified, 1) do
+              Map.put(clean_context, :auth_context,
+                apply(auth_mod, :mark_verified, [clean_context[:auth_context]])
+              )
+            else
+              clean_context
+            end
+          else
+            clean_context
+          end
+
         # Check taint before executing
         case TaintEnforcement.check(action_module, params, clean_context) do
           :ok ->
