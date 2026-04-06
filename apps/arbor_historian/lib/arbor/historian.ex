@@ -75,7 +75,7 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/#{stream}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
       {:ok, :authorized} ->
         query(query_opts)
 
@@ -114,7 +114,7 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/#{category}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
       {:ok, :authorized} ->
         for_category(category, query_opts)
 
@@ -154,7 +154,7 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/agent"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(caller_id, resource, :query, trace_id: trace_id) do
+    case Arbor.Security.authorize(caller_id, resource, :query, trace_id: trace_id, verify_identity: false) do
       {:ok, :authorized} ->
         for_agent(target_agent_id, query_opts)
 
@@ -192,7 +192,7 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/global"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id) do
+    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
       {:ok, :authorized} ->
         recent(query_opts)
 

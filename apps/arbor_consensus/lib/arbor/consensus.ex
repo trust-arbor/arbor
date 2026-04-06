@@ -519,15 +519,15 @@ defmodule Arbor.Consensus do
   # so we use Code.ensure_loaded? + function_exported? to avoid hard coupling.
   defp authorize(caller_id, resource_uri) do
     if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 3) and
+         function_exported?(Arbor.Security, :authorize, 4) and
          security_available?() do
-      case Arbor.Security.authorize(caller_id, resource_uri, %{}) do
+      # Identity already verified at action layer — just check capability
+      case Arbor.Security.authorize(caller_id, resource_uri, :execute, verify_identity: false) do
         {:ok, :authorized} -> :ok
         {:ok, :pending_approval, _proposal_id} = pending -> pending
         {:error, reason} -> {:error, reason}
       end
     else
-      # No security module available or not running — permit
       :ok
     end
   end
