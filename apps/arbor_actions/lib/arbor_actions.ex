@@ -114,8 +114,10 @@ defmodule Arbor.Actions do
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | {:taint_blocked, atom(), atom(), atom()} | term()}
   def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
-    # Extract signing data from context (if present) before passing to action
-    {signed_request, clean_context} = Map.pop(context, :signed_request)
+    # Extract signing data for action-level auth, but keep it in context
+    # so facade-level auth (e.g., File.authorize_file_op) can also use it.
+    signed_request = Map.get(context, :signed_request)
+    clean_context = context
 
     # Ensure agent_id is available in context for actions that need it.
     # Actions use agent_id to decide whether to enforce facade-level auth
