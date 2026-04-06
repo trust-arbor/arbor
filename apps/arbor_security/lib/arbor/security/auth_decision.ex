@@ -1,97 +1,139 @@
 defmodule Arbor.Security.AuthDecision do
   @moduledoc """
-  Pure authorization decision function — no GenServer calls, no side effects.
+  Pure authorization decision — no GenServer calls, no side effects.
 
-  Evaluates whether a principal is authorized for a resource/action by checking:
-  1. URI registry (is the URI known?)
-  2. Identity status (is the principal active?)
-  3. Capability lookup (does the principal have a matching capability?)
-  4. Trust profile mode (what does the profile say about this resource?)
+  Takes an `AuthContext` (pre-loaded identity, capabilities, trust profile)
+  and a resource URI. Returns a decision. The caller handles the decision
+  (escalate, deny, proceed).
 
-  Returns a decision atom — the caller decides what to do with it.
-  This function NEVER submits proposals, calls Consensus, or triggers
-  Escalation. It only reads from ETS (CapabilityStore, Trust.Store).
+  ## Usage with AuthContext (preferred)
 
-  ## Usage
+      auth = AuthContext.new("agent_123", signer: signer) |> AuthContext.load()
 
-      case AuthDecision.evaluate("agent_123", "arbor://fs/read", :execute) do
+      case AuthDecision.evaluate(auth, "arbor://fs/read") do
+        {:ok, :authorized, auth} → proceed (auth has updated decisions trail)
+        {:ok, :requires_approval, cap, auth} → escalate externally
+        {:error, reason, auth} → deny
+      end
+
+  ## Usage with loose params (convenience, builds AuthContext internally)
+
+      case AuthDecision.check("agent_123", "arbor://fs/read") do
         :authorized → proceed
-        {:requires_approval, cap} → submit proposal externally
-        :unauthorized → deny
+        {:requires_approval, cap} → escalate
+        {:error, reason} → deny
       end
 
   ## Why This Exists
 
-  The previous `Security.authorize` function called ApprovalGuard → Escalation →
-  Consensus.Coordinator.submit, which deadlocked when called from within the
-  Coordinator's own GenServer. This pure function breaks that cycle.
+  `Security.authorize` mixed pure decisions with side effects (Escalation,
+  Consensus.submit, event emission). This caused deadlocks when called from
+  within the Consensus Coordinator. AuthDecision is purely functional —
+  it reads from the AuthContext struct (or ETS on fallback) and returns a
+  decision without triggering any side effects.
   """
 
+  alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Security.{CapabilityStore, UriRegistry}
 
-  @type decision ::
+  require Logger
+
+  @type decision_result ::
+          {:ok, :authorized, AuthContext.t()}
+          | {:ok, :requires_approval, map(), AuthContext.t()}
+          | {:error, term(), AuthContext.t()}
+
+  @type simple_decision ::
           :authorized
           | {:requires_approval, map()}
           | :unauthorized
           | {:error, term()}
 
+  # ===========================================================================
+  # Primary API — AuthContext-based (pure)
+  # ===========================================================================
+
   @doc """
-  Evaluate authorization purely — no side effects, no GenServer calls.
+  Evaluate authorization using a pre-loaded AuthContext.
 
-  ## Options
-
-  - `:verify_identity` — whether to require identity verification (default: from config)
-  - `:signed_request` — signed request for identity verification
-  - `:skip_uri_check` — skip URI registry validation (default: false)
+  Returns `{:ok, :authorized, updated_auth}`, `{:ok, :requires_approval, cap, updated_auth}`,
+  or `{:error, reason, updated_auth}`. The updated auth has the decision recorded
+  in its audit trail.
   """
-  @spec evaluate(String.t(), String.t(), atom(), keyword()) :: decision()
-  def evaluate(principal_id, resource_uri, _action \\ :execute, opts \\ []) do
-    with :ok <- maybe_check_uri(resource_uri, opts),
-         :ok <- check_identity_status(principal_id),
-         {:ok, cap} <- find_capability(principal_id, resource_uri),
-         decision <- check_approval_requirement(cap, principal_id, resource_uri) do
-      decision
+  @spec evaluate(AuthContext.t(), String.t(), atom()) :: decision_result()
+  def evaluate(%AuthContext{} = auth, resource_uri, action \\ :execute) do
+    with {:ok, auth} <- check_uri(auth, resource_uri),
+         {:ok, auth} <- check_identity(auth),
+         {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
+         result <- check_approval(auth, cap, resource_uri) do
+      case result do
+        {:authorized, auth} ->
+          {:ok, :authorized, AuthContext.record_decision(auth, resource_uri, :authorized)}
+
+        {:requires_approval, cap, auth} ->
+          {:ok, :requires_approval, cap,
+           AuthContext.record_decision(auth, resource_uri, {:requires_approval, cap.id})}
+      end
     else
-      {:error, reason} -> {:error, reason}
+      {:error, reason, auth} ->
+        {:error, reason, AuthContext.record_decision(auth, resource_uri, {:error, reason})}
     end
   end
 
   # ===========================================================================
-  # Private — all pure reads from ETS, no GenServer calls
+  # Convenience API — loose params (builds AuthContext internally)
   # ===========================================================================
 
-  defp maybe_check_uri(resource_uri, opts) do
-    if Keyword.get(opts, :skip_uri_check, false) do
-      :ok
+  @doc """
+  Simple authorization check with loose params. Builds AuthContext internally.
+  Used by code that doesn't have an AuthContext yet (e.g., Coordinator).
+  """
+  @spec check(String.t(), String.t(), atom(), keyword()) :: simple_decision()
+  def check(principal_id, resource_uri, action \\ :execute, opts \\ []) do
+    auth =
+      AuthContext.new(principal_id, opts)
+      |> AuthContext.load()
+
+    case evaluate(auth, resource_uri, action) do
+      {:ok, :authorized, _auth} -> :authorized
+      {:ok, :requires_approval, cap, _auth} -> {:requires_approval, cap}
+      {:error, reason, _auth} -> {:error, reason}
+    end
+  end
+
+  # ===========================================================================
+  # Private — pure decision functions
+  # ===========================================================================
+
+  defp check_uri(auth, resource_uri) do
+    if Code.ensure_loaded?(UriRegistry) and function_exported?(UriRegistry, :validate, 1) do
+      case UriRegistry.validate(resource_uri) do
+        :ok -> {:ok, auth}
+        {:error, reason} -> {:error, {:uri_rejected, reason}, auth}
+      end
     else
-      if Code.ensure_loaded?(UriRegistry) and function_exported?(UriRegistry, :validate, 1) do
-        UriRegistry.validate(resource_uri)
-      else
-        :ok
+      {:ok, auth}
+    end
+  end
+
+  defp check_identity(%AuthContext{identity_verified: true} = auth) do
+    # Already verified — skip
+    {:ok, auth}
+  end
+
+  defp check_identity(%AuthContext{principal_id: pid} = auth) do
+    # Human identities are always considered active
+    if String.starts_with?(pid, "human_") do
+      {:ok, auth}
+    else
+      case identity_active?(pid) do
+        true -> {:ok, auth}
+        false -> {:error, {:identity_inactive, pid}, auth}
       end
     end
   end
 
-  defp check_identity_status(principal_id) do
-    # Human identities are always considered active (authenticated via OIDC)
-    if String.starts_with?(principal_id, "human_") do
-      :ok
-    else
-      registry = Arbor.Contracts.Security.Identity.Registry
-
-      if Code.ensure_loaded?(registry) do
-        # Identity.Registry is ETS-backed — pure read
-        case registry_active?(principal_id) do
-          true -> :ok
-          false -> {:error, {:identity_inactive, principal_id}}
-        end
-      else
-        :ok
-      end
-    end
-  end
-
-  defp registry_active?(principal_id) do
+  defp identity_active?(principal_id) do
     registry = Arbor.Security.Identity.Registry
 
     if Code.ensure_loaded?(registry) and function_exported?(registry, :active?, 1) do
@@ -105,31 +147,51 @@ defmodule Arbor.Security.AuthDecision do
     :exit, _ -> true
   end
 
-  defp find_capability(principal_id, resource_uri) do
-    if Code.ensure_loaded?(CapabilityStore) and
-         function_exported?(CapabilityStore, :find_authorizing, 2) do
-      case CapabilityStore.find_authorizing(principal_id, resource_uri) do
-        {:ok, cap} -> {:ok, cap}
-        {:error, :not_found} -> try_policy_enforcer(principal_id, resource_uri)
-      end
+  defp find_matching_capability(%AuthContext{capabilities: caps} = auth, resource_uri)
+       when caps != [] do
+    # Search pre-loaded capabilities first (pure — no ETS read)
+    matching =
+      Enum.find(caps, fn cap ->
+        uri_matches?(cap.resource_uri, resource_uri)
+      end)
+
+    if matching do
+      {:ok, matching, auth}
     else
-      {:error, :capability_store_unavailable}
+      # Capabilities were pre-loaded but none match — try PolicyEnforcer for JIT grant
+      case try_policy_enforcer(auth.principal_id, resource_uri) do
+        {:ok, cap} -> {:ok, cap, auth}
+        {:error, _} -> {:error, :unauthorized, auth}
+      end
     end
-  rescue
-    _ -> {:error, :capability_lookup_failed}
-  catch
-    :exit, _ -> {:error, :capability_lookup_failed}
   end
 
-  # PolicyEnforcer JIT-grants capabilities based on trust profile
+  defp find_matching_capability(%AuthContext{} = auth, resource_uri) do
+    # No pre-loaded capabilities — fall back to CapabilityStore (ETS read)
+    if Code.ensure_loaded?(CapabilityStore) and
+         function_exported?(CapabilityStore, :find_authorizing, 2) do
+      case CapabilityStore.find_authorizing(auth.principal_id, resource_uri) do
+        {:ok, cap} -> {:ok, cap, auth}
+        {:error, :not_found} ->
+          case try_policy_enforcer(auth.principal_id, resource_uri) do
+            {:ok, cap} -> {:ok, cap, auth}
+            {:error, _} -> {:error, :unauthorized, auth}
+          end
+      end
+    else
+      {:error, :capability_store_unavailable, auth}
+    end
+  rescue
+    _ -> {:error, :capability_lookup_failed, auth}
+  catch
+    :exit, _ -> {:error, :capability_lookup_failed, auth}
+  end
+
   defp try_policy_enforcer(principal_id, resource_uri) do
     enforcer = Arbor.Security.PolicyEnforcer
 
     if Code.ensure_loaded?(enforcer) and function_exported?(enforcer, :check, 3) do
-      case apply(enforcer, :check, [principal_id, resource_uri, []]) do
-        {:ok, cap} -> {:ok, cap}
-        {:error, _} -> {:error, :unauthorized}
-      end
+      apply(enforcer, :check, [principal_id, resource_uri, []])
     else
       {:error, :unauthorized}
     end
@@ -139,25 +201,22 @@ defmodule Arbor.Security.AuthDecision do
     :exit, _ -> {:error, :unauthorized}
   end
 
-  # Check if the capability requires approval — pure check, no escalation
-  defp check_approval_requirement(cap, principal_id, resource_uri) do
+  defp check_approval(%AuthContext{} = auth, cap, resource_uri) do
     has_approval_constraint =
       cap.constraints[:requires_approval] == true or
         cap.constraints["requires_approval"] == true
 
     if has_approval_constraint do
-      # Check if graduated (confirm-then-automate)
-      if graduated?(principal_id, resource_uri) do
-        :authorized
+      if graduated?(auth.principal_id, resource_uri) do
+        {:authorized, auth}
       else
-        {:requires_approval, cap}
+        {:requires_approval, cap, auth}
       end
     else
-      :authorized
+      {:authorized, auth}
     end
   end
 
-  # Check graduation via ConfirmationTracker (ETS read — pure)
   defp graduated?(principal_id, resource_uri) do
     tracker = Arbor.Trust.ConfirmationTracker
 
@@ -171,4 +230,21 @@ defmodule Arbor.Security.AuthDecision do
   catch
     :exit, _ -> false
   end
+
+  # Check if a capability URI matches a resource URI.
+  # Supports exact match and wildcard patterns (/** suffix).
+  defp uri_matches?(cap_uri, resource_uri) when is_binary(cap_uri) and is_binary(resource_uri) do
+    cond do
+      cap_uri == resource_uri -> true
+      String.ends_with?(cap_uri, "/**") ->
+        prefix = String.trim_trailing(cap_uri, "/**")
+        String.starts_with?(resource_uri, prefix)
+      String.ends_with?(cap_uri, "/*") ->
+        prefix = String.trim_trailing(cap_uri, "/*")
+        String.starts_with?(resource_uri, prefix)
+      true -> false
+    end
+  end
+
+  defp uri_matches?(_, _), do: false
 end
