@@ -21,8 +21,6 @@ defmodule Arbor.Orchestrator.SessionCore do
       |> SessionCore.for_llm()   # → messages ready for LLM API
   """
 
-  alias Arbor.Contracts.Agent.Context.Session, as: SessionState
-
   # ===========================================================================
   # Construct
   # ===========================================================================
@@ -46,10 +44,11 @@ defmodule Arbor.Orchestrator.SessionCore do
 
   @doc "Build an assistant message map. Returns nil for empty responses."
   @spec build_assistant_message(String.t() | nil, DateTime.t()) :: map() | nil
+  def build_assistant_message(content, timestamp \\ DateTime.utc_now())
   def build_assistant_message(nil, _timestamp), do: nil
   def build_assistant_message("", _timestamp), do: nil
 
-  def build_assistant_message(content, timestamp \\ DateTime.utc_now()) do
+  def build_assistant_message(content, timestamp) do
     trimmed = String.trim(content)
 
     if trimmed == "" do

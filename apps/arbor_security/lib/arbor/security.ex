@@ -850,8 +850,6 @@ defmodule Arbor.Security do
     _ -> :ok
   end
 
-  # check_scope_binding moved to AuthDecision
-
   defp maybe_check_max_uses(%Capability{max_uses: nil}), do: :ok
 
   defp maybe_check_max_uses(%Capability{max_uses: max_uses} = cap) do
@@ -867,8 +865,6 @@ defmodule Arbor.Security do
         :ok
     end
   end
-
-  # maybe_verify_delegation_chain moved to AuthDecision
 
   defp maybe_enforce_constraints(cap, principal_id, resource_uri) do
     if Config.constraint_enforcement_enabled?() and cap.constraints != %{} do

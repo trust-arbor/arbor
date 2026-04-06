@@ -751,15 +751,7 @@ defmodule Arbor.Trust.Manager do
 
   # Initialize trust profile rules from the default preset for new agents.
   # New profiles start at :untrusted tier, which maps to the :cautious preset.
-  defp initialize_profile_rules(profile) do
-    if profile.rules == %{} do
-      preset_name = Arbor.Trust.Policy.tier_to_preset(profile.tier)
-      {baseline, rules} = Arbor.Trust.Policy.preset_rules(preset_name)
-      %{profile | baseline: baseline, rules: rules}
-    else
-      profile
-    end
-  end
+  # initialize_profile_rules — deleted, replaced by Authority.new_profile
 
   # Update trust profile rules when tier changes (if rules haven't been customized).
   # This ensures that as an agent earns trust, their default rules expand.
