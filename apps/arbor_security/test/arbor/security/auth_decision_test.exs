@@ -89,22 +89,45 @@ defmodule Arbor.Security.AuthDecisionTest do
       assert hd(updated.decisions).resource == "arbor://test/first"
     end
 
-    test "wildcard capability matches" do
-      cap = %Arbor.Contracts.Security.Capability{
-        id: "cap_wild",
-        resource_uri: "arbor://fs/**",
-        principal_id: "agent_test",
-        granted_at: DateTime.utc_now(),
-        constraints: %{}
-      }
+    test "wildcard capability matches via CapabilityStore" do
+      # When CapabilityStore is running, AuthDecision uses it (signature verified).
+      # Grant a real capability through the store for this test.
+      agent_id = "agent_wild_test_#{:erlang.unique_integer([:positive])}"
 
-      # Mark verified to skip identity check (no Identity.Registry in test)
-      auth = AuthContext.new("agent_test", capabilities: [cap]) |> AuthContext.mark_verified()
+      if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
+           Process.whereis(Arbor.Security.CapabilityStore) != nil do
+        Arbor.Security.CapabilityStore.put(%Arbor.Contracts.Security.Capability{
+          id: "cap_wild_#{:erlang.unique_integer([:positive])}",
+          resource_uri: "arbor://fs/**",
+          principal_id: agent_id,
+          granted_at: DateTime.utc_now(),
+          constraints: %{}
+        })
 
-      case AuthDecision.evaluate(auth, "arbor://fs/read") do
-        {:ok, :authorized, _} -> :ok
-        {:error, {:uri_rejected, _}, _} -> :ok  # URI registry may block
-        other -> flunk("Unexpected: #{inspect(other)}")
+        auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()
+
+        case AuthDecision.evaluate(auth, "arbor://fs/read") do
+          {:ok, :authorized, _} -> :ok
+          {:error, {:uri_rejected, _}, _} -> :ok
+          other -> flunk("Unexpected: #{inspect(other)}")
+        end
+      else
+        # CapabilityStore not running — test pre-loaded path
+        cap = %Arbor.Contracts.Security.Capability{
+          id: "cap_wild",
+          resource_uri: "arbor://fs/**",
+          principal_id: agent_id,
+          granted_at: DateTime.utc_now(),
+          constraints: %{}
+        }
+
+        auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+        case AuthDecision.evaluate(auth, "arbor://fs/read") do
+          {:ok, :authorized, _} -> :ok
+          {:error, {:uri_rejected, _}, _} -> :ok
+          other -> flunk("Unexpected: #{inspect(other)}")
+        end
       end
     end
   end
