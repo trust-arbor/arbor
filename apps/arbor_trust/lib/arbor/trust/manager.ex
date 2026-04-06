@@ -36,7 +36,7 @@ defmodule Arbor.Trust.Manager do
 
   alias Arbor.Contracts.Trust.{Event, Profile}
   alias Arbor.Trust.Behaviour, as: Trust
-  alias Arbor.Trust.{Calculator, Config, EventStore, Store}
+  alias Arbor.Trust.{Authority, Calculator, Config, EventStore, Store}
 
   require Logger
 
@@ -268,38 +268,26 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_call({:create_trust_profile, agent_id}, _from, state) do
-    case Profile.new(agent_id) do
-      {:ok, profile} ->
-        # Initialize trust profile rules from default preset
-        profile = initialize_profile_rules(profile)
+    # Use Authority.new_profile for correct tier + preset in one call.
+    profile = Authority.new_profile(agent_id, :untrusted)
+    Store.store_profile(profile)
 
-        Store.store_profile(profile)
+    {:ok, event} =
+      Event.new(
+        agent_id: agent_id,
+        event_type: :profile_created,
+        new_score: 0
+      )
 
-        {:ok, event} =
-          Event.new(
-            agent_id: agent_id,
-            event_type: :profile_created,
-            new_score: 0
-          )
+    Store.store_event(event)
+    persist_to_event_store(event, state)
 
-        Store.store_event(event)
-        persist_to_event_store(event, state)
+    Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
 
-        Logger.info("Trust profile created for agent #{agent_id}",
-          agent_id: agent_id
-        )
+    broadcast_trust_event(agent_id, :profile_created, %{tier: :untrusted})
+    safe_grant_tier_capabilities(agent_id, profile.tier)
 
-        # Broadcast event to trigger capability sync
-        broadcast_trust_event(agent_id, :profile_created, %{tier: :untrusted})
-
-        # Grant initial tier capabilities via Policy
-        safe_grant_tier_capabilities(agent_id, profile.tier)
-
-        {:reply, {:ok, profile}, state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+    {:reply, {:ok, profile}, state}
   end
 
   @impl true
