@@ -401,7 +401,7 @@ defmodule Arbor.Actions.Code do
         if agent_id && security_available?() do
           uri = "arbor://code/hot_load/#{module_str}"
 
-          case Arbor.Security.authorize(agent_id, uri, %{}) do
+          case Arbor.Security.authorize(agent_id, uri, :execute, verify_identity: false) do
             {:ok, :authorized} -> :ok
             {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
             {:error, reason} -> {:error, {:unauthorized, reason}}

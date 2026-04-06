@@ -519,12 +519,17 @@ defmodule Arbor.Memory do
   # Runtime bridge for authorization — arbor_memory does not have a compile-time
   # dependency on arbor_security, so we use Code.ensure_loaded? + function_exported?
   # to avoid hard coupling.
-  defp authorize(caller_id, resource_uri) do
+  defp authorize(caller_id, resource_uri, opts \\ []) do
     if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 3) and
+         function_exported?(Arbor.Security, :authorize, 4) and
          security_available?() do
-      case Arbor.Security.authorize(caller_id, resource_uri, %{}) do
+      # Facade-level auth: identity was already verified by authorize_and_execute
+      # at the action layer. Skip identity re-verification here — just check capability.
+      auth_opts = Keyword.put_new(opts, :verify_identity, false)
+
+      case Arbor.Security.authorize(caller_id, resource_uri, :execute, auth_opts) do
         {:ok, :authorized} -> :ok
+        {:ok, :authorized, _} -> :ok
         {:ok, :pending_approval, _proposal_id} = pending -> pending
         {:error, reason} -> {:error, reason}
       end
