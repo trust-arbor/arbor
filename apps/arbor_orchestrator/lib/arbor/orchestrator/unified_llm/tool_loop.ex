@@ -295,19 +295,19 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
         start_time = System.monotonic_time(:millisecond)
 
-        # Sign the tool call if a signer function is available.
-        # Each tool call gets a fresh SignedRequest (unique nonce + timestamp).
-        signed_request = sign_tool_call(state.signer, tc.name)
-
+        # Pass the signer function to the executor — it signs with the correct
+        # canonical URI (including params/agent_id scoping) after resolving the
+        # action module. Pre-signing here used a different URI path that could
+        # mismatch with what authorize_and_execute expects.
         exec_opts =
           [agent_id: state.agent_id]
-          |> maybe_add_signed_request(signed_request)
+          |> maybe_add_signer(state.signer)
 
         result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
         duration_ms = System.monotonic_time(:millisecond) - start_time
 
         Logger.info(
-          "[ToolLoop] tool=#{tc.name} signed=#{signed_request != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
+          "[ToolLoop] tool=#{tc.name} signer=#{state.signer != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
         )
 
         case result do
@@ -357,39 +357,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
     {results, state}
   end
 
-  # Sign a tool call with the resource URI as the payload.
-  # Returns {:ok, signed_request} or nil if no signer is available.
-  defp sign_tool_call(nil, _tool_name), do: nil
-
-  defp sign_tool_call(signer, tool_name) when is_function(signer, 1) do
-    resource = resolve_canonical_uri(tool_name)
-
-    case signer.(resource) do
-      {:ok, signed_request} -> signed_request
-      {:error, _} -> nil
-    end
-  end
-
-  # Resolve a tool name to its canonical facade URI via Arbor.Actions.
-  # Falls back to legacy URI format when the actions module isn't available.
-  defp resolve_canonical_uri(tool_name) do
-    actions_mod = Module.concat([:Arbor, :Actions])
-
-    if Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) do
-      case apply(actions_mod, :tool_name_to_canonical_uri, [tool_name]) do
-        {:ok, uri} -> uri
-        :error -> "arbor://actions/execute/#{tool_name}"
-      end
-    else
-      "arbor://actions/execute/#{tool_name}"
-    end
-  end
-
-  defp maybe_add_signed_request(opts, nil), do: opts
-
-  defp maybe_add_signed_request(opts, signed_request),
-    do: [{:signed_request, signed_request} | opts]
+  # Pass the signer function to the executor so it can sign with the correct
+  # canonical URI after resolving the action module and params.
+  defp maybe_add_signer(opts, nil), do: opts
+  defp maybe_add_signer(opts, signer), do: [{:signer, signer} | opts]
 
   defp build_assistant_message(response) do
     # Reconstruct the assistant message including tool calls
