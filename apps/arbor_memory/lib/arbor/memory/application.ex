@@ -40,7 +40,15 @@ defmodule Arbor.Memory.Application do
       end
 
     opts = [strategy: :one_for_one, name: Arbor.Memory.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+
+    # Restore persisted preferences into ETS after supervisor is up
+    # (needs BufferedStore / MemoryStore running)
+    if Application.get_env(:arbor_memory, :start_children, true) do
+      Arbor.Memory.PreferencesStore.restore_from_store()
+    end
+
+    result
   end
 
   defp ensure_ets(name) do
