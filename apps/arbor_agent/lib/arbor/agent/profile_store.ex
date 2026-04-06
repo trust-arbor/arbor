@@ -197,9 +197,16 @@ defmodule Arbor.Agent.ProfileStore do
   defp load_from_json_fallback(agent_id) do
     case read_json_profile(agent_id) do
       {:ok, profile} ->
-        # Lazy-migrate into store
+        Logger.warning(
+          "[ProfileStore] Migrating legacy JSON profile for #{agent_id} — " <>
+            "JSON profiles are deprecated, use BufferedStore (Postgres)"
+        )
+
+        # Lazy-migrate into store and remove JSON file
         if available?() do
           store_profile(profile)
+          path = legacy_profile_path(agent_id)
+          File.rm(path)
         end
 
         {:ok, profile}
