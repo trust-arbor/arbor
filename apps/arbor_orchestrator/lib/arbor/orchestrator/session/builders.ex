@@ -214,36 +214,24 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @spec apply_turn_result(Arbor.Orchestrator.Session.t(), String.t() | map(), Engine.run_result()) ::
           Arbor.Orchestrator.Session.t()
   def apply_turn_result(state, message, %{context: result_ctx}) do
+    alias Arbor.Orchestrator.SessionCore
+
     response = Map.get(result_ctx, "session.response", "")
     now = DateTime.utc_now()
-    now_iso = DateTime.to_iso8601(now)
 
-    user_msg = %{
-      "role" => "user",
-      "content" => normalize_message(message),
-      "timestamp" => now_iso
-    }
+    # Pure: build message structs via SessionCore
+    user_msg = SessionCore.build_user_message(message, now)
+    assistant_msg = SessionCore.build_assistant_message(response, now)
 
-    # Only add assistant message if response has actual content
-    # Empty responses pollute the history and teach the LLM to respond with nothing
-    response_str = if is_binary(response), do: String.trim(response), else: ""
-
-    assistant_msg =
-      if response_str != "" do
-        %{"role" => "assistant", "content" => response_str, "timestamp" => now_iso}
-      end
-
+    # Pure: update message list
     updated_messages =
       case Map.get(result_ctx, "session.messages") do
         msgs when is_list(msgs) ->
           if assistant_msg, do: msgs ++ [assistant_msg], else: msgs
 
         _ ->
-          if assistant_msg do
-            ContextBuilder.get_messages(state) ++ [user_msg, assistant_msg]
-          else
-            ContextBuilder.get_messages(state) ++ [user_msg]
-          end
+          base = ContextBuilder.get_messages(state) ++ [user_msg]
+          if assistant_msg, do: base ++ [assistant_msg], else: base
       end
 
     updated_wm =
@@ -252,15 +240,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
         _ -> ContextBuilder.get_working_memory(state)
       end
 
-    new_turn_count = ContextBuilder.get_turn_count(state) + 1
+    # Pure: increment turn count
+    new_turn_count = SessionCore.increment_turn(ContextBuilder.get_turn_count(state))
 
-    # Append messages to compactor and run compaction
+    # Side effect: compactor (may trigger compaction)
     old_compression_count =
       if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
 
     compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
 
-    # Record compaction telemetry if compaction actually occurred
+    # Side effect: telemetry recording
     if compactor && Map.get(compactor, :compression_count, 0) > old_compression_count do
       utilization =
         if Map.get(compactor, :effective_window, 0) > 0,
@@ -270,7 +259,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       maybe_record_compaction_telemetry(state.agent_id, utilization)
     end
 
-    # Persist turn entries to session store (async, skip nil assistant)
+    # Side effect: persist to SessionStore
     Persistence.persist_turn_entries(
       state,
       now,
@@ -279,6 +268,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       result_ctx
     )
 
+    # Update GenServer state
     state = %{
       state
       | messages: updated_messages,
@@ -411,10 +401,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   # ── Message normalization ────────────────────────────────────────────
 
   @doc false
-  def normalize_message(message) when is_binary(message), do: message
-  def normalize_message(%{"content" => content}), do: content
-  def normalize_message(%{content: content}), do: content
-  def normalize_message(message), do: inspect(message)
+  defdelegate normalize_message(message), to: Arbor.Orchestrator.SessionCore
 
   @doc false
   def safe_to_atom(string, fallback) do
