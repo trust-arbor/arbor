@@ -738,7 +738,7 @@ defmodule Arbor.Consensus.Coordinator do
     auth_decision = Arbor.Security.AuthDecision
 
     if Code.ensure_loaded?(auth_decision) do
-      case auth_decision.evaluate(actor_id, "arbor://consensus/admin", :force) do
+      case auth_decision.check(actor_id, "arbor://consensus/admin", :force) do
         :authorized ->
           :ok
 
