@@ -59,4 +59,19 @@ defmodule Arbor.AgentTest do
       assert Arbor.Agent.count() >= 0
     end
   end
+
+  describe "summary/1 (the 2am rule)" do
+    test "returns not_found for nonexistent agent" do
+      assert {:error, :not_found} =
+               Arbor.Agent.summary("does-not-exist-#{System.unique_integer()}")
+    end
+
+    test "function is defined and returns the documented error shape" do
+      # Positive cases require ProfileStore + Trust + Telemetry running
+      # (covered by integration tests). Here we just verify the function
+      # exists, takes a binary, and returns the documented error shape.
+      assert function_exported?(Arbor.Agent, :summary, 1)
+      assert {:error, :not_found} = Arbor.Agent.summary("nonexistent")
+    end
+  end
 end
