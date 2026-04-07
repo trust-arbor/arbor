@@ -111,18 +111,33 @@ defmodule Arbor.Actions.SessionGoals do
       end
     end
 
+    # Iterates `new_goals` while threading the seen-descriptions MapSet through
+    # the loop. Previous version used Enum.each with a snapshot of existing
+    # descriptions, which meant duplicates WITHIN a single batch (e.g. when
+    # the LLM returns the same goal multiple times in one response) all passed
+    # the dedup check. Use Enum.reduce so each successful add is reflected in
+    # the running MapSet for subsequent iterations.
     defp add_new_goals(goal_store, new_goals, existing_descriptions, agent_id) do
-      Enum.each(new_goals, fn goal_desc ->
+      Enum.reduce(new_goals, existing_descriptions, fn goal_desc, seen ->
         description = extract_goal_description(goal_desc)
+        normalized = if description != "", do: String.downcase(description), else: ""
 
-        if description != "" and
-             not MapSet.member?(existing_descriptions, String.downcase(description)) do
-          Arbor.Actions.SessionMemory.bridge(
-            goal_store,
-            :add_goal,
-            [agent_id, description, []],
-            :ok
-          )
+        cond do
+          description == "" ->
+            seen
+
+          MapSet.member?(seen, normalized) ->
+            seen
+
+          true ->
+            Arbor.Actions.SessionMemory.bridge(
+              goal_store,
+              :add_goal,
+              [agent_id, description, []],
+              :ok
+            )
+
+            MapSet.put(seen, normalized)
         end
       end)
     end

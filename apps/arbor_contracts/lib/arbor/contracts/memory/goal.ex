@@ -63,6 +63,21 @@ defmodule Arbor.Contracts.Memory.Goal do
 
   @doc """
   Creates a new Goal with a generated ID and timestamp.
+
+  The `:priority` option is coerced to an integer in the 0..100 range:
+  - Integers are used as-is (clamped to 0..100)
+  - Floats in (0.0, 1.0] are interpreted as confidence-style values and
+    multiplied by 100 (so 0.95 → 95)
+  - Floats > 1.0 are rounded to the nearest integer
+  - The atom `:medium` (sometimes passed by upstream code) becomes 50
+  - Anything else (nil, garbage) defaults to 50
+
+  This coercion exists because the LLM occasionally returns float
+  "confidence" values in the priority field, which then propagate through
+  the goal system as decimals like P0.95 / P0.85 / P0.75 — making goals
+  with the same description appear as "different" goals with different
+  priorities. Coercing at construction time means the priority field has
+  a single shape across the system.
   """
   @spec new(String.t(), keyword()) :: t()
   def new(description, opts \\ []) do
@@ -71,7 +86,7 @@ defmodule Arbor.Contracts.Memory.Goal do
       description: description,
       type: opts[:type] || :achieve,
       status: opts[:status] || :active,
-      priority: opts[:priority] || 50,
+      priority: coerce_priority(opts[:priority]),
       parent_id: opts[:parent_id],
       progress: opts[:progress] || 0.0,
       created_at: opts[:created_at] || DateTime.utc_now(),
@@ -84,6 +99,28 @@ defmodule Arbor.Contracts.Memory.Goal do
       referenced_date: opts[:referenced_date]
     }
   end
+
+  @doc false
+  @spec coerce_priority(term()) :: 0..100
+  def coerce_priority(nil), do: 50
+  def coerce_priority(:low), do: 25
+  def coerce_priority(:medium), do: 50
+  def coerce_priority(:high), do: 75
+  def coerce_priority(:critical), do: 100
+
+  def coerce_priority(n) when is_integer(n), do: clamp(n, 0, 100)
+
+  def coerce_priority(n) when is_float(n) do
+    cond do
+      n > 1.0 -> n |> round() |> clamp(0, 100)
+      n > 0.0 -> n |> Kernel.*(100) |> round() |> clamp(0, 100)
+      true -> 0
+    end
+  end
+
+  def coerce_priority(_), do: 50
+
+  defp clamp(n, lo, hi), do: n |> max(lo) |> min(hi)
 
   @doc """
   Marks the goal as achieved with a timestamp.

@@ -30,6 +30,39 @@ defmodule Arbor.Memory.GoalStoreTest do
       assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "   ")
       assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "\n\t")
     end
+
+    test "refuses to add when at the per-agent goal limit (regression for runaway loop)" do
+      agent_id = "test_agent_limit_#{System.unique_integer([:positive])}"
+      on_exit(fn -> GoalStore.clear_goals(agent_id) end)
+
+      # Temporarily lower the limit so the test isn't slow.
+      original = Application.get_env(:arbor_memory, :goal_limit_per_agent)
+      Application.put_env(:arbor_memory, :goal_limit_per_agent, 5)
+      on_exit(fn -> Application.put_env(:arbor_memory, :goal_limit_per_agent, original) end)
+
+      # Add up to the limit — all succeed
+      for n <- 1..5 do
+        assert {:ok, _} = GoalStore.add_goal(agent_id, "goal #{n}")
+      end
+
+      # The 6th add is refused
+      assert {:error, :goal_limit_reached} = GoalStore.add_goal(agent_id, "goal 6")
+
+      # Subsequent attempts also refused — no half-state
+      assert {:error, :goal_limit_reached} = GoalStore.add_goal(agent_id, "goal 7")
+    end
+
+    test "goal_limit/0 reads from Application config" do
+      original = Application.get_env(:arbor_memory, :goal_limit_per_agent)
+
+      Application.put_env(:arbor_memory, :goal_limit_per_agent, 17)
+      assert GoalStore.goal_limit() == 17
+
+      Application.delete_env(:arbor_memory, :goal_limit_per_agent)
+      assert GoalStore.goal_limit() == 50
+
+      Application.put_env(:arbor_memory, :goal_limit_per_agent, original)
+    end
   end
 
   describe "get_goal/2" do

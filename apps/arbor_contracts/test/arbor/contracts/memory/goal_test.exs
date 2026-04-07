@@ -35,6 +35,40 @@ defmodule Arbor.Contracts.Memory.GoalTest do
       goal = Goal.new("Custom", id: "goal_custom123")
       assert goal.id == "goal_custom123"
     end
+
+    test "coerces float priority (0..1] to integer percent" do
+      # Regression for the diagnostician runaway loop where the LLM put float
+      # confidence values in the priority field, causing identical-description
+      # goals to look "different" with priorities like 0.95, 0.9, 0.85.
+      assert Goal.new("g", priority: 0.95).priority == 95
+      assert Goal.new("g", priority: 0.5).priority == 50
+      assert Goal.new("g", priority: 0.85).priority == 85
+      assert Goal.new("g", priority: 1.0).priority == 100
+    end
+
+    test "coerces float priority > 1.0 by rounding" do
+      assert Goal.new("g", priority: 50.7).priority == 51
+      assert Goal.new("g", priority: 99.9).priority == 100
+    end
+
+    test "clamps integer priority to 0..100" do
+      assert Goal.new("g", priority: -5).priority == 0
+      assert Goal.new("g", priority: 200).priority == 100
+      assert Goal.new("g", priority: 50).priority == 50
+    end
+
+    test "maps named priorities to integers" do
+      assert Goal.new("g", priority: :low).priority == 25
+      assert Goal.new("g", priority: :medium).priority == 50
+      assert Goal.new("g", priority: :high).priority == 75
+      assert Goal.new("g", priority: :critical).priority == 100
+    end
+
+    test "defaults nil and unknown priority to 50" do
+      assert Goal.new("g", priority: nil).priority == 50
+      assert Goal.new("g", priority: "garbage").priority == 50
+      assert Goal.new("g").priority == 50
+    end
   end
 
   describe "achieve/1" do
