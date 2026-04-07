@@ -271,11 +271,7 @@ defmodule Arbor.Trust.Policy do
       #=> :balanced
   """
   @spec tier_to_preset(atom()) :: atom()
-  def tier_to_preset(tier) when tier in [:untrusted, :probationary], do: :cautious
-  def tier_to_preset(:trusted), do: :balanced
-  def tier_to_preset(:veteran), do: :hands_off
-  def tier_to_preset(:autonomous), do: :full_trust
-  def tier_to_preset(_), do: :cautious
+  defdelegate tier_to_preset(tier), to: Arbor.Trust.Authority
 
   @doc """
   Initialize trust profile rules from a preset.
