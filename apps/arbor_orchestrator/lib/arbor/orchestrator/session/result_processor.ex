@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
 
   require Logger
 
+  alias Arbor.Contracts.Session.HeartbeatResult
   alias Arbor.Orchestrator.Session.ContextBuilder
 
   # ── Goal changes ──────────────────────────────────────────────────
@@ -316,44 +317,9 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
   def emit_turn_signal(_state, _result), do: :ok
 
   @doc false
-  def emit_heartbeat_signal(state, %{context: result_ctx}) do
-    actions = Map.get(result_ctx, "session.actions", [])
-    goal_updates = Map.get(result_ctx, "session.goal_updates", [])
-    new_goals = Map.get(result_ctx, "session.new_goals", [])
-    memory_notes = Map.get(result_ctx, "session.memory_notes", [])
-    cognitive_mode = Map.get(result_ctx, "session.cognitive_mode", "reflection")
-    concerns = Map.get(result_ctx, "session.concerns", [])
-    curiosity = Map.get(result_ctx, "session.curiosity", [])
-    identity_insights = Map.get(result_ctx, "session.identity_insights", [])
-    decompositions = Map.get(result_ctx, "session.decompositions", [])
-    proposal_decisions = Map.get(result_ctx, "session.proposal_decisions", [])
-    usage = Map.get(result_ctx, "session.usage") || Map.get(result_ctx, "llm.usage") || %{}
-
-    emit_signal(
-      :agent,
-      :heartbeat_complete,
-      %{
-        agent_id: state.agent_id,
-        session_id: state.session_id,
-        cognitive_mode: cognitive_mode,
-        actions: List.wrap(actions),
-        llm_actions: length(List.wrap(actions)),
-        goal_updates_count: length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
-        memory_notes_count: length(List.wrap(memory_notes)),
-        memory_notes: List.wrap(memory_notes),
-        concerns: List.wrap(concerns),
-        curiosity: List.wrap(curiosity),
-        identity_insights: List.wrap(identity_insights),
-        decompositions: List.wrap(decompositions),
-        proposal_decisions: List.wrap(proposal_decisions),
-        goal_updates: List.wrap(goal_updates),
-        new_goals: List.wrap(new_goals),
-        agent_thinking: Map.get(result_ctx, "llm.content"),
-        usage: usage,
-        completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
-      },
-      state.tenant_context
-    )
+  def emit_heartbeat_signal(state, %{context: _ctx} = result) do
+    hr = HeartbeatResult.from_result_ctx(state, result)
+    emit_signal(:agent, :heartbeat_complete, HeartbeatResult.to_signal_data(hr), state.tenant_context)
   end
 
   def emit_heartbeat_signal(_state, _result), do: :ok
