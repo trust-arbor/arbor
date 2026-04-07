@@ -95,7 +95,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         streaming_text: "",
         # Chat history pagination
         chat_history_cursor: nil,
-        chat_has_more: false
+        chat_has_more: false,
+        signal_count: 0,
+        thinking_count: 0,
+        memories_count: 0,
+        llm_interactions_count: 0,
+        approvals_count: 0
       )
       |> assign(GroupChat.init_assigns())
       |> stream(:messages, [])
@@ -577,7 +582,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         created_at: signal.timestamp || DateTime.utc_now()
       }
 
-      {:noreply, stream_insert(socket, :approvals, approval)}
+      {:noreply,
+       socket
+       |> stream_insert(:approvals, approval)
+       |> update(:approvals_count, &(&1 + 1))}
     else
       {:noreply, socket}
     end
@@ -617,6 +625,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         socket =
           socket
           |> stream_insert(:signals, signal_entry)
+          |> update(:signal_count, &(&1 + 1))
           |> SignalTracker.process_signal(signal)
 
         {:noreply, socket}
@@ -771,7 +780,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         timestamp: DateTime.utc_now()
       }
 
-      stream_insert(acc, :thinking, entry)
+      acc
+      |> stream_insert(:thinking, entry)
+      |> update(:thinking_count, &(&1 + 1))
     end)
   end
 
@@ -787,7 +798,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         timestamp: DateTime.utc_now()
       }
 
-      stream_insert(acc, :memories, entry)
+      acc
+      |> stream_insert(:memories, entry)
+      |> update(:memories_count, &(&1 + 1))
     end)
   end
 
@@ -1110,6 +1123,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           |> stream(:messages, [], reset: true)
       end
     end)
+    |> assign(
+      signal_count: 0,
+      thinking_count: 0,
+      memories_count: 0,
+      llm_interactions_count: 0
+    )
     |> stream(:signals, [], reset: true)
     |> stream(:thinking, [], reset: true)
     |> stream(:memories, [], reset: true)
@@ -1119,7 +1138,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # arrived before this LiveView connected (or that signal-bridge dropped
     # under backpressure) are visible immediately. Signals continue to deliver
     # low-latency updates; this is the polling fallback.
-    |> stream(:approvals, fetch_pending_approvals(agent_id), reset: true)
+    |> then(fn s ->
+      pending = fetch_pending_approvals(agent_id)
+
+      s
+      |> assign(:approvals_count, length(pending))
+      |> stream(:approvals, pending, reset: true)
+    end)
   end
 
   # Poll Consensus for pending approvals targeting this agent. Used as a
@@ -1249,7 +1274,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           timestamp: DateTime.utc_now()
         }
 
-        stream_insert(sock, :memories, entry)
+        sock
+        |> stream_insert(:memories, entry)
+        |> update(:memories_count, &(&1 + 1))
       end)
     else
       socket

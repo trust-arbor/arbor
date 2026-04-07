@@ -9,7 +9,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   use Phoenix.Component
 
   import Arbor.Web.Components
-  import Arbor.Web.Helpers, only: [format_token_count: 1, format_duration: 1, stream_empty?: 1]
+  import Arbor.Web.Helpers, only: [format_token_count: 1, format_duration: 1]
 
   alias Arbor.Dashboard.Live.ChatLive.Helpers, as: H
   alias Arbor.Web.Helpers, as: WebHelpers
@@ -154,7 +154,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       </div>
       <div style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
         <.empty_state
-          :if={stream_empty?(@streams.signals)}
+          :if={@signal_count == 0}
           icon="📡"
           title="Waiting for signals..."
           hint=""
@@ -355,7 +355,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         </div>
         <div style="padding: 0.4rem; text-align: center;">
           <.empty_state
-            :if={stream_empty?(@streams.llm_interactions)}
+            :if={@llm_interactions_count == 0}
             icon="🔄"
             title="No LLM heartbeats yet"
             hint="LLM calls happen during heartbeat cycles"
@@ -379,7 +379,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         <strong style="font-size: 0.85em;">🔐 Approvals</strong>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <span
-            :if={!stream_empty?(@streams.approvals)}
+            :if={@approvals_count > 0}
             style="background: #ef4444; color: white; font-size: 0.7em; padding: 0.1rem 0.4rem; border-radius: 8px; font-weight: 600;"
           >
             pending
@@ -440,7 +440,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       </div>
       <div :if={@show_approvals} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
         <.empty_state
-          :if={stream_empty?(@streams.approvals)}
+          :if={@approvals_count == 0}
           icon="🔐"
           title="No pending approvals"
           hint="Tool approvals appear here when agent actions need your permission"
@@ -836,7 +836,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       </div>
       <div :if={@show_thinking} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
         <.empty_state
-          :if={stream_empty?(@streams.thinking)}
+          :if={@thinking_count == 0}
           icon="🧠"
           title="No thinking yet"
           hint="Thinking blocks appear after queries"
@@ -888,7 +888,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       </div>
       <div :if={@show_memories} style="padding: 0.4rem; text-align: center; flex-shrink: 0;">
         <.empty_state
-          :if={stream_empty?(@streams.memories)}
+          :if={@memories_count == 0}
           icon="📝"
           title="No memories recalled"
           hint="Relevant memories appear here"
