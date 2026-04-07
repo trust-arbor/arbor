@@ -148,9 +148,81 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
     end
   end
 
+  describe "security ceilings — defense in depth (regression guard)" do
+    # These ceilings live in ProfileResolver.default_security_ceilings/0 and
+    # apply to ALL profiles regardless of baseline/preset. Even the most
+    # trusting profile (:hands_off / :veteran) must still confirm code and
+    # filesystem writes. Without these ceilings, a veteran agent can write
+    # arbitrary code and files without prompting — defeating the purpose of
+    # any reflective oversight.
+    test "code/write requires approval even for permissive profiles",
+         %{agent_id: agent_id} do
+      promote_to_hands_off(agent_id)
+      uri = "arbor://code/write/foo.ex"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
+    end
+
+    test "fs/write requires approval even for permissive profiles",
+         %{agent_id: agent_id} do
+      promote_to_hands_off(agent_id)
+      uri = "arbor://fs/write/tmp/x.txt"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
+    end
+
+    test "file.write canonical action URI requires approval", %{agent_id: agent_id} do
+      promote_to_hands_off(agent_id)
+      uri = "arbor://actions/execute/file.write"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
+    end
+
+    test "file.edit canonical action URI requires approval", %{agent_id: agent_id} do
+      promote_to_hands_off(agent_id)
+      uri = "arbor://actions/execute/file.edit"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
+    end
+
+    test "file.read remains auto even after the new ceilings", %{agent_id: agent_id} do
+      promote_to_hands_off(agent_id)
+      uri = "arbor://actions/execute/file.read"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      case AuthDecision.evaluate(auth, uri, :execute) do
+        {:ok, :authorized, _} ->
+          :ok
+
+        {:ok, :requires_approval, _, _} ->
+          flunk("file.read should NOT require approval — ceiling too broad?")
+
+        other ->
+          flunk("unexpected: #{inspect(other)}")
+      end
+    end
+  end
+
   # ============================================================================
   # Helpers
   # ============================================================================
+
+  # Promote a profile to the most permissive (`:hands_off`) preset, which is
+  # what happens to system agents like the diagnostician via tier mapping.
+  # The point of this test family is to prove the security ceilings still
+  # gate writes even at maximum trust.
+  defp promote_to_hands_off(agent_id) do
+    {baseline, rules} = Arbor.Trust.Authority.preset_rules(:hands_off)
+
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: baseline, rules: rules}
+    end)
+  end
 
   # Grants a capability with no `requires_approval` constraint flag — the
   # exact shape that produced the 2026-04-07 regression.
