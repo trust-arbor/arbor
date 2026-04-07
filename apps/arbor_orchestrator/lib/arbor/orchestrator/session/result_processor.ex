@@ -327,6 +327,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
     identity_insights = Map.get(result_ctx, "session.identity_insights", [])
     decompositions = Map.get(result_ctx, "session.decompositions", [])
     proposal_decisions = Map.get(result_ctx, "session.proposal_decisions", [])
+    usage = Map.get(result_ctx, "session.usage") || Map.get(result_ctx, "llm.usage") || %{}
 
     emit_signal(
       :agent,
@@ -348,6 +349,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
         goal_updates: List.wrap(goal_updates),
         new_goals: List.wrap(new_goals),
         agent_thinking: Map.get(result_ctx, "llm.content"),
+        usage: usage,
         completed_nodes: Map.get(result_ctx, "__completed_nodes__", [])
       },
       state.tenant_context
