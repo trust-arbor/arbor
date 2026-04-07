@@ -179,11 +179,13 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           {if @show_actions, do: "▼", else: "▶"}
         </span>
       </div>
+      <%!-- Container stays in DOM regardless of @show_actions so stream items
+            inserted while collapsed survive (LiveView streams + :if drops items
+            that arrive when the container is hidden). Visibility via CSS. --%>
       <div
-        :if={@show_actions}
         id="actions-container"
         phx-update="stream"
-        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+        style={"flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem; #{if @show_actions, do: "", else: "display: none;"}"}
       >
         <details
           :for={{dom_id, action} <- @streams.actions}
@@ -245,7 +247,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           </span>
         </div>
       </div>
-      <div :if={@show_llm_panel} style="flex: 1; overflow-y: auto; min-height: 0;">
+      <%!-- Container stays in DOM (CSS visibility) so LLM interaction stream
+            items arriving while collapsed survive. The inner llm-interactions-container
+            uses phx-update="stream" so its DOM lifetime matters. --%>
+      <div style={"flex: 1; overflow-y: auto; min-height: 0; #{if @show_llm_panel, do: "", else: "display: none;"}"}>
         <%!-- Last heartbeat structured data --%>
         <div
           :if={@last_llm_thinking}
@@ -384,11 +389,13 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           </span>
         </div>
       </div>
+      <%!-- Container stays in DOM (CSS visibility) so approval signals arriving
+            while collapsed survive. Critical: this is the user's only path to
+            approve/deny tool calls in chat. --%>
       <div
-        :if={@show_approvals}
         id="approvals-container"
         phx-update="stream"
-        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+        style={"flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem; #{if @show_approvals, do: "", else: "display: none;"}"}
       >
         <div
           :for={{dom_id, approval} <- @streams.approvals}
@@ -804,11 +811,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           {if @show_thinking, do: "▼", else: "▶"}
         </span>
       </div>
+      <%!-- Container stays in DOM (CSS visibility) so thinking blocks arriving
+            while collapsed survive. --%>
       <div
-        :if={@show_thinking}
         id="thinking-container"
         phx-update="stream"
-        style="flex: 1; overflow-y: auto; padding: 0.4rem; min-height: 0;"
+        style={"flex: 1; overflow-y: auto; padding: 0.4rem; min-height: 0; #{if @show_thinking, do: "", else: "display: none;"}"}
       >
         <div
           :for={{dom_id, block} <- @streams.thinking}
@@ -853,11 +861,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           {if @show_memories, do: "▼", else: "▶"}
         </span>
       </div>
+      <%!-- Container stays in DOM (CSS visibility) so memory items arriving
+            while collapsed survive. --%>
       <div
-        :if={@show_memories}
         id="memories-container"
         phx-update="stream"
-        style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;"
+        style={"flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem; #{if @show_memories, do: "", else: "display: none;"}"}
       >
         <div
           :for={{dom_id, memory} <- @streams.memories}
