@@ -85,8 +85,10 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
   end
 
   describe "trust_tier/0" do
-    test "returns :established" do
-      assert Diagnostician.trust_tier() == :established
+    test "returns :veteran" do
+      # Diagnostician is a system SRE agent — :veteran maps to :hands_off
+      # profile so most tool calls are auto-approved (commit c8aa8ff0).
+      assert Diagnostician.trust_tier() == :veteran
     end
   end
 

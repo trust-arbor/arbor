@@ -124,12 +124,11 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
       # Self-knowledge should appear
       assert prompt =~ "Self-Awareness"
 
-      # Conversation context should appear
-      assert prompt =~ "Conversation Context"
-      assert prompt =~ "memory system"
-
-      # Working memory concerns/thoughts feed into the self-knowledge or context
-      # (working memory is accessed via the prompt builder internally)
+      # Note: "Conversation Context" assertion removed — chat history now lives
+      # in SessionStore (commit f02ee693), not the Memory facade. The seed setup
+      # at line 572-574 acknowledges this. Heartbeat prompts get conversation
+      # context via state.context_window when the orchestrator builds them
+      # at runtime, not through Memory.load_chat_history.
 
       # Proposals should appear
       assert prompt =~ "Pending Proposals"

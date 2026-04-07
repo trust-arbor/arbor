@@ -15,8 +15,8 @@ defmodule Arbor.Agent.DiagnosticianTemplateTest do
       assert length(char.instructions) >= 5
     end
 
-    test "trust_tier is :established" do
-      assert Diagnostician.trust_tier() == :established
+    test "trust_tier is :veteran" do
+      assert Diagnostician.trust_tier() == :veteran
     end
 
     test "initial_goals are well-defined" do
