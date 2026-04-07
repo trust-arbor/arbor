@@ -17,26 +17,35 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
 
   import Arbor.Web.Components
 
+  alias Arbor.Dashboard.Cores.MonitorCore
+
   @refresh_interval 2_000
-  @history_limit 20
 
   @impl true
   def mount(_params, _session, socket) do
+    state = MonitorCore.new(safe_fetch_metrics(), safe_fetch_anomalies(), safe_fetch_status())
+
     socket =
       socket
       |> assign(:page_title, "Monitor")
-      |> assign(:metrics, safe_fetch_metrics())
-      |> assign(:anomalies, safe_fetch_anomalies())
-      |> assign(:status, safe_fetch_status())
-      |> assign(:selected_skill, nil)
-      |> assign(:history, %{})
+      |> assign(:monitor_state, state)
+      |> assign(:dashboard, MonitorCore.show_dashboard(state))
 
     socket =
       if connected?(socket) do
         :timer.send_interval(@refresh_interval, :refresh)
 
         subscribe_signals(socket, "monitor.*", fn s ->
-          assign(s, anomalies: safe_fetch_anomalies())
+          new_state = MonitorCore.update_data(
+            s.assigns.monitor_state,
+            s.assigns.monitor_state.metrics,
+            safe_fetch_anomalies(),
+            s.assigns.monitor_state.status
+          )
+
+          s
+          |> assign(:monitor_state, new_state)
+          |> assign(:dashboard, MonitorCore.show_dashboard(new_state))
         end)
       else
         socket
@@ -47,16 +56,18 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
 
   @impl true
   def handle_info(:refresh, socket) do
-    metrics = safe_fetch_metrics()
+    new_state =
+      MonitorCore.update_data(
+        socket.assigns.monitor_state,
+        safe_fetch_metrics(),
+        safe_fetch_anomalies(),
+        safe_fetch_status()
+      )
 
-    socket =
-      socket
-      |> assign(:metrics, metrics)
-      |> assign(:anomalies, safe_fetch_anomalies())
-      |> assign(:status, safe_fetch_status())
-      |> update_history(metrics)
-
-    {:noreply, socket}
+    {:noreply,
+     socket
+     |> assign(:monitor_state, new_state)
+     |> assign(:dashboard, MonitorCore.show_dashboard(new_state))}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -64,32 +75,39 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
   @impl true
   def handle_event("select_skill", %{"skill" => skill}, socket) do
     skill_atom = safe_to_existing_atom(skill)
+    new_state = MonitorCore.select_skill(socket.assigns.monitor_state, skill_atom)
 
-    selected =
-      if socket.assigns.selected_skill == skill_atom do
-        nil
-      else
-        skill_atom
-      end
-
-    {:noreply, assign(socket, selected_skill: selected)}
+    {:noreply,
+     socket
+     |> assign(:monitor_state, new_state)
+     |> assign(:dashboard, MonitorCore.show_dashboard(new_state))}
   end
 
   def handle_event("close_detail", _params, socket) do
-    {:noreply, assign(socket, selected_skill: nil)}
+    new_state = MonitorCore.select_skill(socket.assigns.monitor_state, nil)
+
+    {:noreply,
+     socket
+     |> assign(:monitor_state, new_state)
+     |> assign(:dashboard, MonitorCore.show_dashboard(new_state))}
   end
 
   def handle_event("refresh", _params, socket) do
     # Trigger a metrics collection
     safe_collect()
 
-    socket =
-      socket
-      |> assign(:metrics, safe_fetch_metrics())
-      |> assign(:anomalies, safe_fetch_anomalies())
-      |> assign(:status, safe_fetch_status())
+    new_state =
+      MonitorCore.update_data(
+        socket.assigns.monitor_state,
+        safe_fetch_metrics(),
+        safe_fetch_anomalies(),
+        safe_fetch_status()
+      )
 
-    {:noreply, socket}
+    {:noreply,
+     socket
+     |> assign(:monitor_state, new_state)
+     |> assign(:dashboard, MonitorCore.show_dashboard(new_state))}
   end
 
   @impl true
@@ -104,30 +122,26 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
     </.dashboard_header>
 
     <div class="aw-monitor-status-bar">
-      <div class={"aw-monitor-health-indicator aw-health-#{@status.status}"}>
+      <div class={"aw-monitor-health-indicator aw-health-#{@dashboard.status_card.status_code}"}>
         <span class="aw-health-dot"></span>
-        <span class="aw-health-label">{format_status(@status.status)}</span>
+        <span class="aw-health-label">{@dashboard.status_card.status_label}</span>
       </div>
       <div class="aw-monitor-stats">
         <span class="aw-monitor-stat">
-          <strong>{@status.anomaly_count}</strong> anomalies
+          <strong>{@dashboard.status_card.anomaly_count}</strong> anomalies
         </span>
         <span class="aw-monitor-stat">
-          <strong>{length(@status.skills)}</strong> skills active
+          <strong>{@dashboard.status_card.skill_count}</strong> skills active
         </span>
       </div>
     </div>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
-      <%= for skill <- @status.skills do %>
-        <.skill_card
-          skill={skill}
-          data={Map.get(@metrics, skill, %{})}
-          selected={@selected_skill == skill}
-        />
+      <%= for card <- @dashboard.skill_cards do %>
+        <.skill_card card={card} />
       <% end %>
 
-      <%= if @status.skills == [] do %>
+      <%= if @dashboard.skill_cards == [] do %>
         <.empty_state
           icon="📊"
           title="No skills available"
@@ -138,7 +152,7 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
 
     <div class="aw-monitor-section" style="margin-top: 2rem;">
       <h2 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem;">Recent Anomalies</h2>
-      <%= if @anomalies == [] do %>
+      <%= if @dashboard.anomaly_cards == [] do %>
         <.empty_state
           icon="✅"
           title="No anomalies detected"
@@ -146,7 +160,7 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
         />
       <% else %>
         <div class="aw-anomaly-list">
-          <%= for anomaly <- @anomalies do %>
+          <%= for anomaly <- @dashboard.anomaly_cards do %>
             <.anomaly_card anomaly={anomaly} />
           <% end %>
         </div>
@@ -154,17 +168,13 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
     </div>
 
     <.modal
-      :if={@selected_skill}
+      :if={@dashboard.selected_skill_detail}
       id="skill-detail"
-      show={@selected_skill != nil}
-      title={format_skill_name(@selected_skill)}
+      show={@dashboard.selected_skill_detail != nil}
+      title={@dashboard.selected_skill_detail.name}
       on_cancel={Phoenix.LiveView.JS.push("close_detail")}
     >
-      <.skill_detail
-        skill={@selected_skill}
-        data={Map.get(@metrics, @selected_skill, %{})}
-        history={Map.get(@history, @selected_skill, [])}
-      />
+      <.skill_detail detail={@dashboard.selected_skill_detail} />
     </.modal>
     """
   end
@@ -176,46 +186,41 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
   defp skill_card(assigns) do
     ~H"""
     <div
-      class={"aw-skill-card #{if @selected, do: "aw-skill-card-selected"}"}
+      class={"aw-skill-card #{if @card.selected, do: "aw-skill-card-selected"}"}
       phx-click="select_skill"
-      phx-value-skill={@skill}
+      phx-value-skill={@card.key}
     >
       <div class="aw-skill-header">
-        <span class="aw-skill-icon">{skill_icon(@skill)}</span>
-        <span class="aw-skill-name">{format_skill_name(@skill)}</span>
+        <span class="aw-skill-icon">{@card.icon}</span>
+        <span class="aw-skill-name">{@card.name}</span>
       </div>
       <div class="aw-skill-summary">
-        {skill_summary(@skill, @data)}
+        {@card.summary}
       </div>
     </div>
     """
   end
 
   defp anomaly_card(assigns) do
-    severity = Map.get(assigns.anomaly, :severity, :info)
-    assigns = assign(assigns, :severity, severity)
-
     ~H"""
-    <div class={"aw-anomaly-card aw-severity-#{@severity}"}>
+    <div class={"aw-anomaly-card aw-severity-#{@anomaly.severity}"}>
       <div class="aw-anomaly-header">
-        <span class="aw-anomaly-severity">{severity_icon(@severity)}</span>
-        <span class="aw-anomaly-metric">{@anomaly[:metric] || "unknown"}</span>
+        <span class="aw-anomaly-severity">{@anomaly.severity_icon}</span>
+        <span class="aw-anomaly-metric">{@anomaly.metric}</span>
       </div>
       <div class="aw-anomaly-body">
         <div class="aw-anomaly-value">
-          Current: <strong>{format_value(@anomaly[:value])}</strong>
+          Current: <strong>{@anomaly.value}</strong>
         </div>
         <div class="aw-anomaly-baseline">
-          Baseline: {format_value(@anomaly[:baseline])}
+          Baseline: {@anomaly.baseline}
         </div>
-        <%= if @anomaly[:deviation] do %>
-          <div class="aw-anomaly-deviation">
-            {Float.round(@anomaly[:deviation] * 1.0, 1)} stddev
-          </div>
+        <%= if @anomaly.deviation do %>
+          <div class="aw-anomaly-deviation">{@anomaly.deviation}</div>
         <% end %>
       </div>
       <div class="aw-anomaly-time">
-        {format_time(@anomaly[:detected_at] || @anomaly[:timestamp])}
+        {format_time(@anomaly.detected_at)}
       </div>
     </div>
     """
@@ -225,26 +230,26 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
     ~H"""
     <div class="aw-skill-detail">
       <div class="aw-skill-metrics">
-        <%= if @data == %{} do %>
+        <%= if @detail.flat_metrics == [] do %>
           <p class="aw-text-gray">No metrics available</p>
         <% else %>
-          <%= for {key, value} <- flatten_metrics(@data) do %>
+          <%= for {key, value} <- @detail.flat_metrics do %>
             <div class="aw-metric-row">
               <span class="aw-metric-key">{key}</span>
-              <span class="aw-metric-value">{format_value(value)}</span>
+              <span class="aw-metric-value">{MonitorCore.format_value(value)}</span>
             </div>
           <% end %>
         <% end %>
       </div>
 
-      <%= if @history != [] do %>
+      <%= if @detail.history != [] do %>
         <div class="aw-skill-history" style="margin-top: 1rem;">
           <h4 style="font-size: 0.875rem; color: var(--aw-text-secondary); margin-bottom: 0.5rem;">
             Recent Values
           </h4>
           <div class="aw-history-values">
-            <%= for val <- Enum.take(@history, 10) do %>
-              <span class="aw-history-value">{format_value(val)}</span>
+            <%= for val <- @detail.history do %>
+              <span class="aw-history-value">{val}</span>
             <% end %>
           </div>
         </div>
@@ -289,90 +294,9 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
     :exit, _ -> %{}
   end
 
-  defp update_history(socket, metrics) do
-    history = socket.assigns.history
-
-    new_history =
-      Enum.reduce(metrics, history, fn {skill, data}, acc ->
-        # Extract a representative value for history tracking
-        value = extract_primary_value(skill, data)
-        existing = Map.get(acc, skill, [])
-        updated = [value | existing] |> Enum.take(@history_limit)
-        Map.put(acc, skill, updated)
-      end)
-
-    assign(socket, history: new_history)
-  end
-
-  defp extract_primary_value(:memory, data), do: data[:total_mb]
-  defp extract_primary_value(:processes, data), do: data[:count]
-  defp extract_primary_value(:ets, data), do: data[:table_count]
-  defp extract_primary_value(:scheduler, data), do: data[:total_utilization]
-  defp extract_primary_value(:gc, data), do: data[:total_collections]
-  defp extract_primary_value(_skill, data) when is_map(data), do: map_size(data)
-  defp extract_primary_value(_skill, _data), do: nil
-
-  defp format_status(:healthy), do: "Healthy"
-  defp format_status(:warning), do: "Warning"
-  defp format_status(:critical), do: "Critical"
-  defp format_status(:emergency), do: "Emergency"
-  defp format_status(_), do: "Unknown"
-
-  defp skill_icon(:beam), do: "🔮"
-  defp skill_icon(:memory), do: "💾"
-  defp skill_icon(:ets), do: "📊"
-  defp skill_icon(:processes), do: "⚙️"
-  defp skill_icon(:supervisor), do: "👁️"
-  defp skill_icon(:system), do: "🖥️"
-  defp skill_icon(:gc), do: "🗑️"
-  defp skill_icon(:allocator), do: "📦"
-  defp skill_icon(:ports), do: "🔌"
-  defp skill_icon(:scheduler), do: "📅"
-  defp skill_icon(_), do: "📈"
-
-  defp format_skill_name(skill) when is_atom(skill) do
-    skill
-    |> to_string()
-    |> String.split("_")
-    |> Enum.map_join(" ", &String.capitalize/1)
-  end
-
-  defp format_skill_name(skill), do: to_string(skill)
-
-  defp skill_summary(:memory, data), do: "#{data[:total_mb] || "?"}MB used"
-  defp skill_summary(:processes, data), do: "#{data[:count] || "?"}procs"
-  defp skill_summary(:ets, data), do: "#{data[:table_count] || "?"}tables"
-  defp skill_summary(:scheduler, data), do: "#{data[:total_utilization] || "?"}%util"
-  defp skill_summary(:gc, data), do: "#{data[:total_collections] || "?"}GCs"
-  defp skill_summary(:ports, data), do: "#{data[:count] || "?"}ports"
-  defp skill_summary(:system, data), do: "#{data[:otp_release] || "?"}"
-  defp skill_summary(:beam, data), do: "v#{data[:version] || "?"}"
-  defp skill_summary(_, data) when map_size(data) > 0, do: "#{map_size(data)} metrics"
-  defp skill_summary(_, _), do: "-"
-
-  defp severity_icon(:emergency), do: "🚨"
-  defp severity_icon(:critical), do: "❌"
-  defp severity_icon(:warning), do: "⚠️"
-  defp severity_icon(:info), do: "ℹ️"
-  defp severity_icon(_), do: "📋"
-
-  defp flatten_metrics(data) when is_map(data) do
-    Enum.flat_map(data, fn
-      {k, v} when is_map(v) ->
-        Enum.map(v, fn {k2, v2} -> {"#{k}.#{k2}", v2} end)
-
-      {k, v} ->
-        [{to_string(k), v}]
-    end)
-    |> Enum.sort_by(fn {k, _} -> k end)
-  end
-
-  defp flatten_metrics(_), do: []
-
-  defp format_value(v) when is_float(v), do: Float.round(v, 2)
-  defp format_value(v) when is_integer(v), do: v
-  defp format_value(nil), do: "-"
-  defp format_value(v), do: inspect(v)
+  # Display formatting (icons, labels, primary values, summaries) lives in
+  # MonitorCore. The LiveView only handles signal subscription, GenServer
+  # fetches, and rendering pre-shaped data.
 
   defp format_time(nil), do: "-"
 
