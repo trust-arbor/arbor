@@ -45,6 +45,7 @@ defmodule Arbor.Dashboard.MixProject do
       # Level 2
       {:arbor_agent, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
 
       # Standalone
       {:arbor_common, in_umbrella: true},

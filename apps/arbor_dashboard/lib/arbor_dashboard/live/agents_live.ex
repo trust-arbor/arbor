@@ -387,6 +387,39 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
             </div>
           </div>
 
+          <%!-- Trust summary (from Authority.show_summary CRC convert) --%>
+          <div :if={detail.trust_summary} style="margin-bottom: 1.5rem;">
+            <h4 style="margin-bottom: 0.75rem;">Trust</h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem;">
+              <div>
+                <strong>Score:</strong>
+                <span>{detail.trust_summary.trust_score}</span>
+              </div>
+              <div>
+                <strong>Points:</strong>
+                <span>{detail.trust_summary.trust_points}</span>
+              </div>
+              <div>
+                <strong>Baseline:</strong>
+                <span>{detail.trust_summary.baseline}</span>
+              </div>
+              <div>
+                <strong>Rules:</strong>
+                <span>{detail.trust_summary.rule_count}</span>
+              </div>
+              <div :if={detail.trust_summary.frozen}>
+                <strong>Frozen:</strong>
+                <.badge label="frozen" color={:red} />
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.5rem; margin-top: 0.5rem; font-size: 0.85em; color: var(--aw-text-muted, #888);">
+              <div>Actions: {detail.trust_summary.stats.actions}</div>
+              <div>Violations: {detail.trust_summary.stats.violations}</div>
+              <div>Proposals: {detail.trust_summary.stats.proposals}</div>
+              <div>Tests: {detail.trust_summary.stats.tests}</div>
+            </div>
+          </div>
+
           <%!-- Model config --%>
           <div :if={detail.model_config} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Model Configuration</h4>
@@ -635,6 +668,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     goals = safe_goals(agent_id)
     thinking = safe_thinking(agent_id)
     model_config = safe_model_config(agent_id, profile, running)
+    trust_summary = safe_trust_summary(agent_id)
 
     %{
       profile: profile,
@@ -643,8 +677,20 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       reasoning: reasoning,
       goals: goals,
       thinking: thinking,
-      model_config: model_config
+      model_config: model_config,
+      trust_summary: trust_summary
     }
+  end
+
+  defp safe_trust_summary(agent_id) do
+    case Arbor.Trust.get_trust_profile(agent_id) do
+      {:ok, profile} -> Arbor.Trust.Authority.show_summary(profile)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_model_config(agent_id, profile, running) do
