@@ -119,10 +119,11 @@ defmodule Arbor.Trust.ProfileResolver do
       iex> ProfileResolver.most_restrictive([:block, :auto])
       :block
   """
-  @spec most_restrictive([mode()]) :: mode()
+  @spec most_restrictive([mode() | String.t() | nil]) :: mode()
   def most_restrictive(modes) do
     modes
     |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Arbor.Trust.Authority.normalize_mode/1)
     |> Enum.min_by(fn mode -> Map.get(@mode_order, mode, 3) end, fn -> :ask end)
   end
 
@@ -136,8 +137,10 @@ defmodule Arbor.Trust.ProfileResolver do
       iex> ProfileResolver.at_least_as_restrictive?(:auto, :ask)
       false
   """
-  @spec at_least_as_restrictive?(mode(), mode()) :: boolean()
+  @spec at_least_as_restrictive?(mode() | String.t(), mode() | String.t()) :: boolean()
   def at_least_as_restrictive?(a, b) do
+    a = Arbor.Trust.Authority.normalize_mode(a)
+    b = Arbor.Trust.Authority.normalize_mode(b)
     Map.get(@mode_order, a, 3) <= Map.get(@mode_order, b, 3)
   end
 
