@@ -116,6 +116,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         <span style="color: #f97316;">
           BEATS: <strong>{@heartbeat_count}</strong>
         </span>
+        <span :if={@hb_total_cost > 0} style="color: #f59e0b;">
+          COST: <strong>{"$#{Float.round(@hb_total_cost * 1.0, 4)}"}</strong>
+        </span>
       </div>
     </div>
     """
