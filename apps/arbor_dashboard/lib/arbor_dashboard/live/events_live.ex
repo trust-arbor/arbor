@@ -302,45 +302,13 @@ defmodule Arbor.Dashboard.Live.EventsLive do
     """
   end
 
-  # ── Helpers ──────────────────────────────────────────────────────────
+  # ── Helpers (delegate to EventsCore — single source of truth) ──────
 
-  defp time_label(:all), do: "All time"
-  defp time_label(:hour), do: "Last hour"
-  defp time_label(:today), do: "Today"
+  alias Arbor.Dashboard.Cores.EventsCore
 
-  defp format_event_subtitle(event) do
-    parts = []
-
-    agent =
-      get_in(event.data, [:agent_id]) || get_in(event.data, ["agent_id"])
-
-    parts = if agent, do: ["agent: #{agent}" | parts], else: parts
-
-    stream_part =
-      if event.stream_id && event.stream_id != "unknown",
-        do: "stream: #{event.stream_id}",
-        else: nil
-
-    parts = if stream_part, do: [stream_part | parts], else: parts
-    parts = [format_data_summary(event.data) | parts]
-    Enum.join(parts, " | ")
-  end
-
-  defp format_data_summary(data) when data == %{}, do: "(empty)"
-
-  defp format_data_summary(data) when is_map(data) do
-    data
-    |> Enum.take(3)
-    |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
-    |> Helpers.truncate(60)
-  end
-
-  defp format_json(data) do
-    case Jason.encode(data, pretty: true) do
-      {:ok, json} -> json
-      _ -> inspect(data, pretty: true)
-    end
-  end
+  defp time_label(filter), do: EventsCore.time_label(filter)
+  defp format_event_subtitle(event), do: EventsCore.format_event_subtitle(event)
+  defp format_json(data), do: EventsCore.format_json(data)
 
   defp reload_events(socket) do
     events = fetch_filtered_events(socket.assigns)
@@ -377,12 +345,7 @@ defmodule Arbor.Dashboard.Live.EventsLive do
     end
   end
 
-  defp matches_agent?(event, agent_id) do
-    sig_agent =
-      get_in(event.data, [:agent_id]) || get_in(event.data, ["agent_id"]) || ""
-
-    String.contains?(to_string(sig_agent), agent_id)
-  end
+  defp matches_agent?(event, agent_id), do: EventsCore.matches_agent?(event, agent_id)
 
   # ── Safe API wrappers ───────────────────────────────────────────────
 
@@ -435,7 +398,5 @@ defmodule Arbor.Dashboard.Live.EventsLive do
     :exit, _ -> %{}
   end
 
-  defp default_stats do
-    %{stream_count: 0, total_events: 0}
-  end
+  defp default_stats, do: EventsCore.default_stats()
 end
