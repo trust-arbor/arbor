@@ -277,15 +277,17 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
       assert ProfileResolver.effective_mode(profile, @shell_exec, security_ceilings: %{}) == :ask
     end
 
-    test ":hands_off preset allows most, asks for shell and governance" do
+    test ":hands_off preset auto-runs most, asks for shell and governance" do
       preset = ProfileResolver.preset(:hands_off)
       profile = build_profile(Map.put(preset, :agent_id, "hands_off_agent"))
 
-      # Most things are :allow (baseline)
-      assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :allow
-      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :allow
+      # fs/memory/historian are now silent (:auto) under hands_off — explicit
+      # rules override the :allow baseline so common operations don't generate
+      # user notifications. This matches the diagnostician's expected behavior.
+      assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :auto
+      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :auto
 
-      # Shell and governance capped to :ask by rules
+      # Shell and governance still capped to :ask by rules
       assert ProfileResolver.effective_mode(profile, @shell_exec, security_ceilings: %{}) == :ask
       assert ProfileResolver.effective_mode(profile, @governance_vote, security_ceilings: %{}) == :ask
     end

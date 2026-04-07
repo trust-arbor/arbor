@@ -219,15 +219,11 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
-        # Orchestrator required for all agents to function
-        "arbor://orchestrator" => :auto,
-        # Reads are frictionless
         "arbor://code/read" => :auto,
+        "arbor://code/write" => :block,
         "arbor://fs/read" => :auto,
         "arbor://historian/query" => :auto,
-        # Writes blocked (too risky for cautious users)
-        "arbor://code/write" => :block,
-        # Shell blocked by default, but single commands can be approved
+        "arbor://orchestrator" => :auto,
         "arbor://shell" => :block,
         "arbor://shell/exec" => :ask
       }
@@ -238,18 +234,14 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :ask,
       rules: %{
-        # Orchestrator required for all agents to function
-        "arbor://orchestrator" => :auto,
-        # Reads are frictionless
         "arbor://code/read" => :auto,
-        "arbor://fs/read" => :auto,
-        "arbor://historian/query" => :auto,
-        # Writes are gated
         "arbor://code/write" => :ask,
+        "arbor://fs/read" => :auto,
         "arbor://fs/write" => :allow,
-        # Shell blocked by default, but single commands can be approved
-        "arbor://shell" => :block,
-        "arbor://shell/exec" => :ask
+        "arbor://historian/query" => :auto,
+        "arbor://orchestrator" => :auto,
+        "arbor://shell" => :ask,
+        "arbor://memory" => :auto
       }
     }
   end
@@ -258,12 +250,12 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :allow,
       rules: %{
-        # Orchestrator required for all agents to function
-        "arbor://orchestrator" => :auto,
-        # Reads and writes are automatic
         "arbor://code/read" => :auto,
         "arbor://code/write" => :auto,
-        # Shell and governance always gated
+        "arbor://fs" => :auto,
+        "arbor://historian" => :auto,
+        "arbor://orchestrator" => :auto,
+        "arbor://memory" => :auto,
         "arbor://shell" => :ask,
         "arbor://governance" => :ask
       }
@@ -274,16 +266,14 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       baseline: :auto,
       rules: %{
-        # Orchestrator required for all agents to function
-        "arbor://orchestrator" => :auto,
-        # Shell and governance always gated (security ceiling)
         "arbor://shell" => :ask,
         "arbor://governance" => :ask
       }
     }
   end
 
-  def preset(_unknown), do: preset(:balanced)
+  # Unknown presets fall back to :cautious — the most secure default.
+  def preset(_unknown), do: preset(:cautious)
 
   # ── Private ─────────────────────────────────────────────────────────
 
