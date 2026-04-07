@@ -619,78 +619,10 @@ defmodule Arbor.Trust.Store do
   defp unwrap_record(%Arbor.Contracts.Persistence.Record{data: data}), do: data
   defp unwrap_record(%{} = data), do: data
 
-  defp serialize_profile(%Profile{} = profile) do
-    profile
-    |> Map.from_struct()
-    |> Map.update(:rules, %{}, &(&1 || %{}))
-    |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
-    |> Map.update(:updated_at, nil, &maybe_to_iso8601/1)
-    |> Map.update(:last_activity_at, nil, &maybe_to_iso8601/1)
-    |> Map.update(:frozen_at, nil, &maybe_to_iso8601/1)
-  end
-
-  defp deserialize_profile(data) when is_map(data) do
-    agent_id = data[:agent_id] || data["agent_id"]
-
-    if agent_id do
-      {:ok, profile} = Profile.new(agent_id)
-
-      profile =
-        Enum.reduce(data, profile, fn
-          {k, v}, acc when is_binary(k) ->
-            atom_key = safe_to_existing_atom(k)
-            if atom_key && Map.has_key?(acc, atom_key), do: %{acc | atom_key => v}, else: acc
-
-          {k, v}, acc when is_atom(k) ->
-            if Map.has_key?(acc, k), do: %{acc | k => v}, else: acc
-        end)
-
-      # Restore DateTime fields
-      profile = %{profile |
-        created_at: maybe_parse_datetime(profile.created_at),
-        updated_at: maybe_parse_datetime(profile.updated_at),
-        last_activity_at: maybe_parse_datetime(profile.last_activity_at),
-        frozen_at: maybe_parse_datetime(profile.frozen_at)
-      }
-
-      # Ensure rules keys are strings
-      rules = for {k, v} <- (profile.rules || %{}), into: %{} do
-        {to_string(k), safe_mode(v)}
-      end
-
-      {:ok, %{profile | rules: rules}}
-    else
-      {:error, :invalid_data}
-    end
-  end
-
-  defp deserialize_profile(_), do: {:error, :invalid_data}
-
-  defp maybe_to_iso8601(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp maybe_to_iso8601(other), do: other
-
-  defp maybe_parse_datetime(nil), do: nil
-  defp maybe_parse_datetime(%DateTime{} = dt), do: dt
-  defp maybe_parse_datetime(str) when is_binary(str) do
-    case DateTime.from_iso8601(str) do
-      {:ok, dt, _} -> dt
-      _ -> nil
-    end
-  end
-  defp maybe_parse_datetime(_), do: nil
-
-  defp safe_mode(v) when v in [:block, :ask, :allow, :auto], do: v
-  defp safe_mode("block"), do: :block
-  defp safe_mode("ask"), do: :ask
-  defp safe_mode("allow"), do: :allow
-  defp safe_mode("auto"), do: :auto
-  defp safe_mode(_), do: :ask
-
-  defp safe_to_existing_atom(str) when is_binary(str) do
-    String.to_existing_atom(str)
-  rescue
-    ArgumentError -> nil
-  end
+  # Profile serialization lives on Authority — single source of truth so the
+  # encoding can't drift between Store and any future persistence layers.
+  defp serialize_profile(%Profile{} = profile), do: Authority.for_persistence(profile)
+  defp deserialize_profile(data), do: Authority.from_persistence(data)
 
   defp emit_distributed_signal(type, agent_id) do
     if Code.ensure_loaded?(Arbor.Signals) do

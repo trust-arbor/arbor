@@ -338,6 +338,73 @@ defmodule Arbor.Trust.Authority do
     }
   end
 
+  @doc """
+  Serialize a Profile to a JSON-safe map for persistence.
+
+  Converts DateTime fields to ISO8601 strings. The result is suitable for
+  storage in JSONB columns or any backend that needs JSON-serializable data.
+
+  Pair with `from_persistence/1` to round-trip.
+  """
+  @spec for_persistence(Profile.t()) :: map()
+  def for_persistence(%Profile{} = profile) do
+    profile
+    |> Map.from_struct()
+    |> Map.update(:rules, %{}, &(&1 || %{}))
+    |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
+    |> Map.update(:updated_at, nil, &maybe_to_iso8601/1)
+    |> Map.update(:last_activity_at, nil, &maybe_to_iso8601/1)
+    |> Map.update(:frozen_at, nil, &maybe_to_iso8601/1)
+  end
+
+  @doc """
+  Deserialize a Profile from a persistence map (e.g. loaded from Postgres).
+
+  Handles both atom-keyed and string-keyed maps. Restores DateTime fields,
+  coerces rule modes to atoms via `safe_mode/1`, and falls back to defaults
+  for missing fields. Returns `{:ok, profile}` or `{:error, :invalid_data}`.
+
+  Pair with `for_persistence/1` for round-trip.
+  """
+  @spec from_persistence(map()) :: {:ok, Profile.t()} | {:error, :invalid_data}
+  def from_persistence(data) when is_map(data) do
+    agent_id = data[:agent_id] || data["agent_id"]
+
+    if agent_id do
+      {:ok, profile} = Profile.new(agent_id)
+
+      profile =
+        Enum.reduce(data, profile, fn
+          {k, v}, acc when is_binary(k) ->
+            atom_key = safe_to_existing_atom(k)
+            if atom_key && Map.has_key?(acc, atom_key), do: %{acc | atom_key => v}, else: acc
+
+          {k, v}, acc when is_atom(k) ->
+            if Map.has_key?(acc, k), do: %{acc | k => v}, else: acc
+        end)
+
+      # Restore DateTime fields
+      profile = %{profile |
+        created_at: maybe_parse_datetime(profile.created_at),
+        updated_at: maybe_parse_datetime(profile.updated_at),
+        last_activity_at: maybe_parse_datetime(profile.last_activity_at),
+        frozen_at: maybe_parse_datetime(profile.frozen_at)
+      }
+
+      # Ensure rules keys are strings and modes are valid atoms
+      rules =
+        for {k, v} <- (profile.rules || %{}), into: %{} do
+          {to_string(k), safe_mode(v)}
+        end
+
+      {:ok, %{profile | rules: rules}}
+    else
+      {:error, :invalid_data}
+    end
+  end
+
+  def from_persistence(_), do: {:error, :invalid_data}
+
   # ===========================================================================
   # Pure Helpers
   # ===========================================================================
@@ -586,5 +653,35 @@ defmodule Arbor.Trust.Authority do
       "arbor://shell" => :ask,
       "arbor://governance" => :ask
     }
+  end
+
+  # ── Persistence helpers (used by for_persistence/from_persistence) ─────────
+
+  defp maybe_to_iso8601(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp maybe_to_iso8601(other), do: other
+
+  defp maybe_parse_datetime(nil), do: nil
+  defp maybe_parse_datetime(%DateTime{} = dt), do: dt
+
+  defp maybe_parse_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _} -> dt
+      _ -> nil
+    end
+  end
+
+  defp maybe_parse_datetime(_), do: nil
+
+  defp safe_mode(v) when v in [:block, :ask, :allow, :auto], do: v
+  defp safe_mode("block"), do: :block
+  defp safe_mode("ask"), do: :ask
+  defp safe_mode("allow"), do: :allow
+  defp safe_mode("auto"), do: :auto
+  defp safe_mode(_), do: :ask
+
+  defp safe_to_existing_atom(str) when is_binary(str) do
+    String.to_existing_atom(str)
+  rescue
+    ArgumentError -> nil
   end
 end
