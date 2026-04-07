@@ -533,85 +533,85 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
             </div>
           </div>
 
-          <%!-- Executor stats --%>
-          <div :if={detail.executor} style="margin-bottom: 1.5rem;">
+          <%!-- Executor stats (from AgentDetailCore.show_executor) --%>
+          <div :if={detail.drilldown.executor} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Executor</h4>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem;">
               <.stat_card
-                value={to_string(detail.executor.status)}
+                value={detail.drilldown.executor.status_label}
                 label="Status"
-                color={executor_status_color(detail.executor.status)}
+                color={detail.drilldown.executor.status_color}
               />
               <.stat_card
-                value={get_in(detail.executor, [:stats, :intents_received]) || 0}
+                value={detail.drilldown.executor.intents_received}
                 label="Received"
                 color={:blue}
               />
               <.stat_card
-                value={get_in(detail.executor, [:stats, :intents_executed]) || 0}
+                value={detail.drilldown.executor.intents_executed}
                 label="Executed"
                 color={:green}
               />
               <.stat_card
-                value={get_in(detail.executor, [:stats, :intents_blocked]) || 0}
+                value={detail.drilldown.executor.intents_blocked}
                 label="Blocked"
                 color={:error}
               />
             </div>
           </div>
 
-          <%!-- Reasoning loop --%>
-          <div :if={detail.reasoning} style="margin-bottom: 1.5rem;">
+          <%!-- Reasoning loop (from AgentDetailCore.show_reasoning) --%>
+          <div :if={detail.drilldown.reasoning} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Reasoning Loop</h4>
             <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem;">
               <div>
                 <strong>Mode:</strong>
-                <.badge label={to_string(detail.reasoning.mode)} color={:purple} />
+                <.badge label={detail.drilldown.reasoning.mode_label} color={:purple} />
               </div>
               <div>
                 <strong>Status:</strong>
                 <.badge
-                  label={to_string(detail.reasoning.status)}
-                  color={reasoning_status_color(detail.reasoning.status)}
+                  label={detail.drilldown.reasoning.status_label}
+                  color={detail.drilldown.reasoning.status_color}
                 />
               </div>
               <div>
                 <strong>Iteration:</strong>
-                <span>{detail.reasoning.iteration}</span>
+                <span>{detail.drilldown.reasoning.iteration}</span>
               </div>
             </div>
           </div>
 
-          <%!-- Goals --%>
-          <div :if={detail.goals != []} style="margin-bottom: 1.5rem;">
+          <%!-- Goals (from AgentDetailCore.show_goals) --%>
+          <div :if={detail.drilldown.goals != []} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Active Goals</h4>
             <div
-              :for={goal <- detail.goals}
+              :for={goal <- detail.drilldown.goals}
               style="border: 1px solid var(--aw-border, #333); border-radius: 4px; padding: 0.75rem; margin-bottom: 0.5rem;"
             >
               <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <span>{goal_icon(goal)}</span>
-                <strong>{goal.description || goal.type}</strong>
+                <span>{goal.icon}</span>
+                <strong>{goal.label}</strong>
                 <.badge :if={goal.priority} label={to_string(goal.priority)} color={:gray} />
               </div>
             </div>
           </div>
 
-          <%!-- Recent thinking --%>
-          <div :if={detail.thinking != []} style="margin-top: 1.5rem;">
+          <%!-- Recent thinking (from AgentDetailCore.show_thinking) --%>
+          <div :if={detail.drilldown.thinking != []} style="margin-top: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Recent Thinking</h4>
             <div
-              :for={block <- Enum.take(detail.thinking, 5)}
+              :for={block <- detail.drilldown.thinking}
               style="border: 1px solid var(--aw-border, #333); border-radius: 4px; padding: 0.75rem; margin-bottom: 0.5rem; font-size: 0.9em;"
             >
               <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                <.badge :if={block[:significant]} label="significant" color={:purple} />
+                <.badge :if={block.significant} label="significant" color={:purple} />
                 <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
-                  {format_thinking_time(block[:created_at])}
+                  {block.time_relative}
                 </span>
               </div>
               <p style="color: var(--aw-text-muted, #888); white-space: pre-wrap;">
-                {Helpers.truncate(block[:text] || "", 300)}
+                {block.text}
               </p>
             </div>
           </div>
@@ -649,8 +649,9 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   defp format_created(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
   defp format_created(_), do: ""
 
-  defp format_thinking_time(%DateTime{} = dt), do: Helpers.format_relative_time(dt)
-  defp format_thinking_time(_), do: ""
+  # Drill-down section formatters (executor_status_color, reasoning_status_color,
+  # goal_icon, format_thinking_time) live in AgentDetailCore — see safe_load_detail
+  # which pre-shapes the drill-down sections via show_drilldown/1.
 
   defp tier_color(:full_partner), do: :green
   defp tier_color(:trusted), do: :green
@@ -660,20 +661,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   defp tier_color(:untrusted), do: :gray
   defp tier_color(:restricted), do: :error
   defp tier_color(_), do: :gray
-
-  defp executor_status_color(:running), do: :green
-  defp executor_status_color(:paused), do: :purple
-  defp executor_status_color(:stopped), do: :gray
-  defp executor_status_color(_), do: :gray
-
-  defp reasoning_status_color(:thinking), do: :blue
-  defp reasoning_status_color(:idle), do: :gray
-  defp reasoning_status_color(:awaiting_percept), do: :purple
-  defp reasoning_status_color(_), do: :gray
-
-  defp goal_icon(%{type: :maintain}), do: "\u{1F504}"
-  defp goal_icon(%{type: :achieve}), do: "\u{1F3AF}"
-  defp goal_icon(_), do: "\u{2B50}"
 
   defp status_dot_color(running_ids, agent_id) do
     if MapSet.member?(running_ids, agent_id) do
@@ -737,7 +724,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     model_summary = safe_model_summary(model_config)
     trust_summary = safe_trust_summary(agent_id)
 
-    %{
+    detail = %{
       summary: summary,
       profile: profile,
       running: running,
@@ -749,6 +736,11 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       model_summary: model_summary,
       trust_summary: trust_summary
     }
+
+    # Pre-shape drill-down sections via AgentDetailCore so the template
+    # iterates over already-formatted maps instead of reaching into raw
+    # executor/reasoning/goals/thinking structs inline.
+    Map.put(detail, :drilldown, Arbor.Dashboard.Cores.AgentDetailCore.show_drilldown(detail))
   end
 
   defp safe_summary(agent_id) do
