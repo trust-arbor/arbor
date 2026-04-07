@@ -34,12 +34,19 @@ defmodule Arbor.Agent.CircuitBreakerTest do
     test "allows one attempt when circuit is half-open after cooldown", %{breaker: breaker} do
       key = :test_key
 
-      # Open the circuit
+      # Open the circuit (3 casts, async)
       for _ <- 1..3, do: CircuitBreaker.record_failure(breaker, key)
-      Process.sleep(10)
 
-      # Wait for cooldown (100ms)
-      Process.sleep(110)
+      # Sync barrier: get_state is a call so it serializes after all preceding
+      # casts. Once this returns :open, opened_at has been set inside the
+      # GenServer. Without this barrier, there's a race where the test could
+      # start the cooldown timer BEFORE opened_at is captured, causing the
+      # cooldown check to fail under load.
+      {:open, _, _} = CircuitBreaker.get_state(breaker, key)
+
+      # Wait for cooldown (100ms) plus generous margin for scheduler jitter
+      # on loaded test runners. 200ms total = 100ms cooldown + 100ms slack.
+      Process.sleep(200)
 
       # Should allow one attempt (half-open)
       assert CircuitBreaker.can_attempt?(breaker, key)
@@ -53,23 +60,20 @@ defmodule Arbor.Agent.CircuitBreakerTest do
     test "closes circuit and resets failure count", %{breaker: breaker} do
       key = :test_key
 
-      # Open the circuit
+      # Open the circuit (3 casts, async)
       for _ <- 1..3, do: CircuitBreaker.record_failure(breaker, key)
-      Process.sleep(10)
 
+      # Sync barrier — confirms circuit is :open with all casts processed
       {state, failures, _} = CircuitBreaker.get_state(breaker, key)
       assert state == :open
       assert failures == 3
 
-      # Wait for cooldown and allow half-open attempt
-      Process.sleep(110)
+      # Wait for cooldown (100ms) plus margin for scheduler jitter
+      Process.sleep(200)
       CircuitBreaker.can_attempt?(breaker, key)
 
-      # Record success
+      # Record success and sync barrier via get_state
       CircuitBreaker.record_success(breaker, key)
-      Process.sleep(10)
-
-      # Should be closed now
       {state, failures, _} = CircuitBreaker.get_state(breaker, key)
       assert state == :closed
       assert failures == 0
