@@ -497,6 +497,31 @@ defmodule Arbor.Trust.CalculatorTest do
       assert result.tier == :veteran
     end
 
+    test "trust_points can boost tier above what score alone would give (regression)" do
+      # Regression test for the divergence between Calculator and Authority:
+      # Calculator was using only the score-derived tier, ignoring trust_points.
+      # Bulk recalculation could silently demote agents who earned tier through
+      # council approvals (trust_points). Calculator now uses Authority.compute_tier
+      # to honor points-based progression.
+      now = ~U[2024-01-15 14:00:00Z]
+
+      profile = build_profile(%{
+        # Low component scores → score-derived tier would be :untrusted
+        total_actions: 10,
+        successful_actions: 0,
+        security_violations: 5,
+        last_activity_at: ~U[2024-01-15 12:00:00Z],
+        # But high trust_points → points-derived tier is :veteran (>= 500)
+        trust_points: 600
+      })
+
+      result = Calculator.recalculate_profile(profile, now, @weights)
+
+      # Score-derived tier would be :untrusted, but points override
+      assert result.tier == :veteran,
+             "expected :veteran from points override; got #{result.tier} (score=#{result.trust_score})"
+    end
+
     test "handles brand new profile with no activity" do
       now = ~U[2024-01-15 14:00:00Z]
       profile = build_profile()
