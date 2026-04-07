@@ -219,10 +219,25 @@ defmodule Arbor.Trust.ProfileResolver do
   @spec default_security_ceilings() :: rules()
   def default_security_ceilings do
     %{
+      # Shell — never auto, even for veteran agents.
       "arbor://shell" => :ask,
       "arbor://actions/execute/shell." => :ask,
+      # Governance changes — never auto.
       "arbor://governance" => :ask,
-      "arbor://actions/execute/governance." => :ask
+      "arbor://actions/execute/governance." => :ask,
+      # Defense in depth: code and filesystem writes need confirmation
+      # even on the most trusting profiles. Reads remain unrestricted.
+      # Without these, a veteran agent on the :hands_off preset can write
+      # arbitrary code/files without prompting — that's an "I trust you"
+      # ceiling that's too generous to be the default.
+      "arbor://code/write" => :ask,
+      "arbor://fs/write" => :ask,
+      # Per-action canonical URIs. Listed precisely (not by prefix) so we
+      # don't accidentally gate read operations like file.list / file.glob.
+      "arbor://actions/execute/file.write" => :ask,
+      "arbor://actions/execute/file.edit" => :ask,
+      "arbor://actions/execute/code.compile_and_test" => :ask,
+      "arbor://actions/execute/code.hot_load" => :ask
     }
   end
 
