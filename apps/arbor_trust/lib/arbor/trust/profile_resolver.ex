@@ -203,12 +203,23 @@ defmodule Arbor.Trust.ProfileResolver do
   Default security ceilings preserving existing invariants.
 
   Shell and governance always require at least `:ask`.
+
+  The keys here are URI **prefixes** matched longest-first by
+  `Authority.effective_mode/3`. Both the legacy short-namespace form
+  (`arbor://shell`) and the canonical action-URI form
+  (`arbor://actions/execute/shell.`) are listed because action
+  authorization passes the canonical form (e.g.
+  `arbor://actions/execute/shell.execute`) which would not match the
+  short namespace alone — that mismatch produced a real security
+  regression where shell.execute auto-ran without approval.
   """
   @spec default_security_ceilings() :: rules()
   def default_security_ceilings do
     %{
       "arbor://shell" => :ask,
-      "arbor://governance" => :ask
+      "arbor://actions/execute/shell." => :ask,
+      "arbor://governance" => :ask,
+      "arbor://actions/execute/governance." => :ask
     }
   end
 

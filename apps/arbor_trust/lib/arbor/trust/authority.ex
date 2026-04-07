@@ -512,12 +512,31 @@ defmodule Arbor.Trust.Authority do
 
   def preset_rules(_), do: preset_rules(:cautious)
 
-  @doc "Most restrictive mode from a list."
-  @spec most_restrictive([atom()]) :: atom()
+  @doc """
+  Most restrictive mode from a list.
+
+  Normalizes string-form modes (`"allow"`, `"ask"`, `"block"`, `"auto"`)
+  to their atom equivalents before comparing — historical persistence
+  paths sometimes hand back string baselines, and we don't want a stray
+  string slipping past the security ceilings because `Enum.min_by`
+  preserved its original (non-atom) shape.
+  """
+  @spec most_restrictive([atom() | String.t()]) :: atom()
   def most_restrictive(modes) do
     modes
+    |> Enum.map(&normalize_mode/1)
     |> Enum.min_by(&mode_index/1)
   end
+
+  @doc false
+  @spec normalize_mode(atom() | String.t() | term()) :: atom()
+  def normalize_mode(mode) when is_atom(mode), do: mode
+  def normalize_mode("block"), do: :block
+  def normalize_mode("ask"), do: :ask
+  def normalize_mode("allow"), do: :allow
+  def normalize_mode("auto"), do: :auto
+  # Unknown / garbage modes default to :ask — fail safe.
+  def normalize_mode(_), do: :ask
 
   @doc "Trust points awarded for impact level."
   @spec points_for_impact(atom()) :: non_neg_integer()
@@ -634,6 +653,9 @@ defmodule Arbor.Trust.Authority do
   defp mode_index(:ask), do: 1
   defp mode_index(:allow), do: 2
   defp mode_index(:auto), do: 3
+  # Unknown / non-atom modes are treated as `:ask` (rank 1) — fail safe.
+  # Callers should normalize via `normalize_mode/1` first so this branch is
+  # only ever reached for genuinely unknown atoms.
   defp mode_index(_), do: 1
 
   defp tier_index(:untrusted), do: 0
