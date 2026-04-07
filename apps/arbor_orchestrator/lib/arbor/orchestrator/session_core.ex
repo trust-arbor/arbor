@@ -67,34 +67,36 @@ defmodule Arbor.Orchestrator.SessionCore do
   # ===========================================================================
 
   @doc """
-  Append a user message to the session. Returns updated messages list + turn metadata.
+  Append a user message to the session. Returns just the updated messages list.
+
+  Pipeable — chains with other Reduce functions. If you need the constructed
+  user message itself (e.g. for telemetry), call `build_user_message/2`
+  separately or use `List.last/1` on the result.
 
   Pure — does not persist or emit events.
   """
-  @spec append_user_message([map()], String.t(), DateTime.t()) :: {[map()], map()}
+  @spec append_user_message([map()], String.t(), DateTime.t()) :: [map()]
   def append_user_message(messages, content, timestamp \\ DateTime.utc_now()) do
-    user_msg = build_user_message(content, timestamp)
-    {messages ++ [user_msg], user_msg}
+    messages ++ [build_user_message(content, timestamp)]
   end
 
   @doc """
-  Apply an LLM response to the session messages. Returns updated messages + assistant msg.
+  Apply an LLM response to the session messages. Returns just the updated messages.
 
-  Filters empty responses — only appends if the response has actual content.
+  Filters empty responses — only appends if the response has actual content,
+  so the result may equal the input when the response is nil/empty.
+
+  Pipeable — chains with other Reduce functions. If you need the constructed
+  assistant message itself, call `build_assistant_message/2` separately.
+
   Pure — does not persist or emit events.
   """
-  @spec apply_llm_response([map()], String.t() | nil, DateTime.t()) :: {[map()], map() | nil}
+  @spec apply_llm_response([map()], String.t() | nil, DateTime.t()) :: [map()]
   def apply_llm_response(messages, response_text, timestamp \\ DateTime.utc_now()) do
-    assistant_msg = build_assistant_message(response_text, timestamp)
-
-    updated =
-      if assistant_msg do
-        messages ++ [assistant_msg]
-      else
-        messages
-      end
-
-    {updated, assistant_msg}
+    case build_assistant_message(response_text, timestamp) do
+      nil -> messages
+      assistant_msg -> messages ++ [assistant_msg]
+    end
   end
 
   @doc """

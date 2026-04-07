@@ -97,38 +97,94 @@ defmodule Arbor.Memory.MemoryCoreTest do
   end
 
   describe "achieve_goal/2" do
-    test "removes goal and returns it achieved" do
+    test "removes goal from active list" do
       goals = [%{id: "g1", status: :active, progress: 0.5}]
-      {remaining, achieved} = MemoryCore.achieve_goal(goals, "g1")
+      remaining = MemoryCore.achieve_goal(goals, "g1")
       assert remaining == []
-      assert achieved.status == :achieved
-      assert achieved.progress == 1.0
     end
 
-    test "returns nil for unknown goal" do
-      {goals, achieved} = MemoryCore.achieve_goal([], "nope")
-      assert goals == []
-      assert achieved == nil
+    test "returns unchanged list for unknown goal" do
+      assert MemoryCore.achieve_goal([], "nope") == []
+    end
+
+    test "is pipeable" do
+      goals = [
+        %{id: "g1", status: :active},
+        %{id: "g2", status: :active},
+        %{id: "g3", status: :active}
+      ]
+
+      remaining =
+        goals
+        |> MemoryCore.achieve_goal("g1")
+        |> MemoryCore.abandon_goal("g2", "not needed")
+
+      assert length(remaining) == 1
+      assert hd(remaining).id == "g3"
     end
   end
 
   describe "abandon_goal/3" do
-    test "removes goal with reason note" do
+    test "removes goal from active list" do
       goals = [%{id: "g1", status: :active, notes: []}]
-      {remaining, abandoned} = MemoryCore.abandon_goal(goals, "g1", "not needed")
+      remaining = MemoryCore.abandon_goal(goals, "g1", "not needed")
       assert remaining == []
-      assert abandoned.status == :abandoned
-      assert "not needed" in abandoned.notes
     end
   end
 
   describe "fail_goal/3" do
-    test "removes goal with failure note" do
+    test "removes goal from active list" do
       goals = [%{id: "g1", status: :active, notes: []}]
-      {remaining, failed} = MemoryCore.fail_goal(goals, "g1", "timeout")
+      remaining = MemoryCore.fail_goal(goals, "g1", "timeout")
       assert remaining == []
+    end
+  end
+
+  describe "find_goal/2 and transition_goal/3" do
+    test "find_goal returns the matching goal" do
+      goals = [%{id: "g1", status: :active}, %{id: "g2", status: :active}]
+      assert MemoryCore.find_goal(goals, "g1").id == "g1"
+      assert MemoryCore.find_goal(goals, "nope") == nil
+    end
+
+    test "transition_goal stamps :achieved with progress 1.0" do
+      goal = %{id: "g1", status: :active, progress: 0.5}
+      achieved = MemoryCore.transition_goal(goal, :achieved, nil)
+      assert achieved.status == :achieved
+      assert achieved.progress == 1.0
+    end
+
+    test "transition_goal stamps :abandoned with reason note" do
+      goal = %{id: "g1", status: :active, notes: []}
+      abandoned = MemoryCore.transition_goal(goal, :abandoned, "not needed")
+      assert abandoned.status == :abandoned
+      assert "not needed" in abandoned.notes
+    end
+
+    test "transition_goal stamps :failed with prefixed reason" do
+      goal = %{id: "g1", status: :active, notes: []}
+      failed = MemoryCore.transition_goal(goal, :failed, "timeout")
       assert failed.status == :failed
-      assert Enum.any?(failed.notes, &String.contains?(&1, "timeout"))
+      assert Enum.any?(failed.notes, &String.contains?(&1, "Failed: timeout"))
+    end
+
+    test "transition_goal handles nil goal" do
+      assert MemoryCore.transition_goal(nil, :achieved, nil) == nil
+    end
+
+    test "find + transition + achieve composes" do
+      goals = [%{id: "g1", status: :active, progress: 0.5}]
+
+      # Capture transitioned goal for side effects, then update list
+      transitioned =
+        goals
+        |> MemoryCore.find_goal("g1")
+        |> MemoryCore.transition_goal(:achieved, nil)
+
+      remaining = MemoryCore.achieve_goal(goals, "g1")
+
+      assert transitioned.status == :achieved
+      assert remaining == []
     end
   end
 
