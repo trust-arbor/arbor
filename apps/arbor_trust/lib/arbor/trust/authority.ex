@@ -397,7 +397,18 @@ defmodule Arbor.Trust.Authority do
           {to_string(k), safe_mode(v)}
         end
 
-      {:ok, %{profile | rules: rules}}
+      # Normalize the top-level mode/tier fields too — JSON persistence
+      # round-trips them as strings, and a string `baseline` slipped past
+      # the security ceiling check until 2026-04-07 because
+      # `most_restrictive` couldn't compare it with the atom ceilings.
+      profile = %{
+        profile
+        | rules: rules,
+          baseline: safe_mode(profile.baseline),
+          tier: safe_tier(profile.tier)
+      }
+
+      {:ok, profile}
     else
       {:error, :invalid_data}
     end
@@ -700,6 +711,17 @@ defmodule Arbor.Trust.Authority do
   defp safe_mode("allow"), do: :allow
   defp safe_mode("auto"), do: :auto
   defp safe_mode(_), do: :ask
+
+  # Tier names are bounded — coerce strings to existing atoms only.
+  defp safe_tier(v) when is_atom(v), do: v
+
+  defp safe_tier(v) when is_binary(v) do
+    String.to_existing_atom(v)
+  rescue
+    ArgumentError -> :new
+  end
+
+  defp safe_tier(_), do: :new
 
   defp safe_to_existing_atom(str) when is_binary(str) do
     String.to_existing_atom(str)
