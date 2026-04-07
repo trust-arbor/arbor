@@ -30,6 +30,18 @@ defmodule Arbor.Memory.GoalStore do
 
   @ets_table :arbor_memory_goals
 
+  # Per-agent hard cap on goal count. Configurable via Application config:
+  #
+  #     config :arbor_memory, :goal_limit_per_agent, 50
+  #
+  # Defense in depth against runaway goal creation. The diagnostician can
+  # accumulate hundreds of goals when dedup logic upstream has bugs and the
+  # LLM keeps proposing new variants. With a cap, the worst-case is "agent
+  # has 50 goals and refuses to add more" instead of "78KB prompt, LLM
+  # timeouts, signal storm." See `.arbor/roadmap/0-inbox/` for the deeper
+  # discussion.
+  @default_goal_limit 50
+
   # ============================================================================
   # Client API
   # ============================================================================
@@ -42,10 +54,19 @@ defmodule Arbor.Memory.GoalStore do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  @doc "Per-agent goal limit. Reads from Application config, defaults to 50."
+  @spec goal_limit() :: pos_integer()
+  def goal_limit do
+    Application.get_env(:arbor_memory, :goal_limit_per_agent, @default_goal_limit)
+  end
+
   @doc """
   Add a goal for an agent.
 
   Accepts a `Goal` struct or a keyword list of options passed to `Goal.new/2`.
+
+  Returns `{:error, :goal_limit_reached}` if the agent is already at the
+  per-agent goal cap (see `goal_limit/0`).
 
   ## Examples
 
@@ -54,18 +75,28 @@ defmodule Arbor.Memory.GoalStore do
 
       {:ok, goal} = GoalStore.add_goal("agent_001", "Fix the login bug", type: :achieve)
   """
-  @spec add_goal(String.t(), Goal.t()) :: {:ok, Goal.t()}
+  @spec add_goal(String.t(), Goal.t()) :: {:ok, Goal.t()} | {:error, :goal_limit_reached}
   def add_goal(agent_id, %Goal{} = goal) do
-    :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
-    persist_goal_async(agent_id, goal)
+    if at_goal_limit?(agent_id) do
+      Logger.warning(
+        "[GoalStore] Refusing to add goal for #{agent_id}: at limit (#{goal_limit()}). " <>
+          "Description: #{goal.description}"
+      )
 
-    Signals.emit_goal_created(agent_id, goal)
-    Logger.debug("Goal added for #{agent_id}: #{goal.id} - #{goal.description}")
+      {:error, :goal_limit_reached}
+    else
+      :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+      persist_goal_async(agent_id, goal)
 
-    {:ok, goal}
+      Signals.emit_goal_created(agent_id, goal)
+      Logger.debug("Goal added for #{agent_id}: #{goal.id} - #{goal.description}")
+
+      {:ok, goal}
+    end
   end
 
-  @spec add_goal(String.t(), String.t(), keyword()) :: {:ok, Goal.t()} | {:error, :empty_description}
+  @spec add_goal(String.t(), String.t(), keyword()) ::
+          {:ok, Goal.t()} | {:error, :empty_description | :goal_limit_reached}
   def add_goal(agent_id, description, opts \\ []) when is_binary(description) do
     if String.trim(description) == "" do
       {:error, :empty_description}
@@ -73,6 +104,16 @@ defmodule Arbor.Memory.GoalStore do
       goal = Goal.new(description, opts)
       add_goal(agent_id, goal)
     end
+  end
+
+  # Count active goals for an agent and check against the cap.
+  defp at_goal_limit?(agent_id) do
+    count = :ets.select_count(@ets_table, [{{{agent_id, :_}, :_}, [], [true]}])
+    count >= goal_limit()
+  rescue
+    # If ETS doesn't exist or select_count fails, allow the add (fallback to
+    # old behavior so we don't break the system on a transient ETS issue).
+    _ -> false
   end
 
   @doc """

@@ -736,14 +736,31 @@ defmodule Arbor.Memory.Proposal do
   # Domain store writers (all runtime bridges)
   defp store_goal(agent_id, proposal) do
     content = proposal.content || ""
+    trimmed = String.trim(content)
 
-    if String.trim(content) == "" do
-      Logger.warning("Skipping blank goal proposal for #{agent_id}")
-      {:error, :empty_description}
-    else
-      goal_data = Map.get(proposal.metadata, :goal_data, %{})
+    cond do
+      trimmed == "" ->
+        Logger.warning("Skipping blank goal proposal for #{agent_id}")
+        {:error, :empty_description}
 
-      if Code.ensure_loaded?(Arbor.Memory.GoalStore) do
+      not Code.ensure_loaded?(Arbor.Memory.GoalStore) ->
+        {:ok, "goal_" <> generate_id()}
+
+      goal_with_description_exists?(agent_id, trimmed) ->
+        # Defense against double-creation: this proposal-based path used to
+        # have no dedup at all, so an LLM that returned the same `new_goals`
+        # entry across multiple heartbeats (or via parallel paths) would
+        # accumulate identical copies. Same downcased-trim match used by
+        # SessionGoals.UpdateGoals.
+        Logger.debug(
+          "[Proposal] Skipping duplicate goal for #{agent_id}: #{trimmed}"
+        )
+
+        {:ok, :duplicate}
+
+      true ->
+        goal_data = Map.get(proposal.metadata, :goal_data, %{})
+
         case apply(Arbor.Memory.GoalStore, :add_goal, [
                agent_id,
                content,
@@ -752,10 +769,21 @@ defmodule Arbor.Memory.Proposal do
           {:ok, goal} -> {:ok, Map.get(goal, :id, generate_id())}
           error -> error
         end
-      else
-        {:ok, "goal_" <> generate_id()}
-      end
     end
+  end
+
+  defp goal_with_description_exists?(agent_id, description) do
+    needle = description |> String.trim() |> String.downcase()
+
+    Arbor.Memory.GoalStore.get_active_goals(agent_id)
+    |> Enum.any?(fn g ->
+      existing = g |> Map.get(:description, "") |> String.trim() |> String.downcase()
+      existing == needle
+    end)
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp store_goal_update(agent_id, proposal) do
