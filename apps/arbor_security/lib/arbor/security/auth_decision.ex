@@ -376,19 +376,49 @@ defmodule Arbor.Security.AuthDecision do
   end
 
   defp check_approval(%AuthContext{} = auth, cap, resource_uri) do
-    has_approval_constraint =
-      cap.constraints[:requires_approval] == true or
-        cap.constraints["requires_approval"] == true
+    # A capability needs approval if EITHER:
+    #   1. It carries a per-capability `requires_approval` constraint flag, OR
+    #   2. The agent's trust profile says this URI is gated (e.g. shell.execute,
+    #      governance changes — security ceiling-enforced).
+    #
+    # Without (2), the trust profile is silently ignored at this layer — which
+    # is exactly the security regression Hysun caught on 2026-04-07: shell ran
+    # without approval because the capability didn't carry the constraint flag,
+    # and AuthDecision never consulted Trust.Policy. Fix: consult both.
+    needs_approval =
+      has_approval_constraint?(cap) or
+        trust_profile_gates?(auth.principal_id, resource_uri)
 
-    if has_approval_constraint do
-      if graduated?(auth.principal_id, resource_uri) do
-        {:authorized, auth}
-      else
-        {:requires_approval, cap, auth}
+    cond do
+      not needs_approval -> {:authorized, auth}
+      graduated?(auth.principal_id, resource_uri) -> {:authorized, auth}
+      true -> {:requires_approval, cap, auth}
+    end
+  end
+
+  defp has_approval_constraint?(cap) do
+    cap.constraints[:requires_approval] == true or
+      cap.constraints["requires_approval"] == true
+  end
+
+  defp trust_profile_gates?(principal_id, resource_uri) do
+    # Runtime indirection — arbor_trust depends on arbor_security, not the
+    # other way around, so we can't import Trust.Policy directly.
+    policy = Arbor.Trust.Policy
+
+    if Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 2) do
+      case apply(policy, :confirmation_mode, [principal_id, resource_uri]) do
+        :gated -> true
+        :deny -> true
+        _ -> false
       end
     else
-      {:authorized, auth}
+      false
     end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp graduated?(principal_id, resource_uri) do
