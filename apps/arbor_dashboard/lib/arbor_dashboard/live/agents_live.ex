@@ -361,6 +361,61 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
             <% end %>
           </div>
 
+          <%!-- Summary card (Agent.summary/1 — the "2am rule") --%>
+          <div :if={detail.summary} style="margin-bottom: 1.5rem; padding: 0.75rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; background: rgba(96, 165, 250, 0.05);">
+            <h4 style="margin: 0 0 0.5rem 0; font-size: 0.9em; color: var(--aw-text-muted, #888); text-transform: uppercase; letter-spacing: 0.05em;">
+              Summary
+            </h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.5rem; font-size: 0.9em;">
+              <div>
+                <strong>Name:</strong>
+                <span>{detail.summary.display_name}</span>
+              </div>
+              <div>
+                <strong>Status:</strong>
+                <.badge
+                  label={to_string(detail.summary.status)}
+                  color={if detail.summary.status == :running, do: :green, else: :gray}
+                />
+              </div>
+              <div :if={detail.summary.template}>
+                <strong>Template:</strong>
+                <span>{detail.summary.template}</span>
+              </div>
+              <div :if={detail.summary.model}>
+                <strong>Model:</strong>
+                <code style="font-size: 0.85em;">{detail.summary.model}</code>
+              </div>
+              <div>
+                <strong>Tier:</strong>
+                <.badge
+                  label={to_string(detail.summary.trust_tier)}
+                  color={tier_color(detail.summary.trust_tier)}
+                />
+              </div>
+              <div :if={detail.summary.trust_score}>
+                <strong>Score:</strong>
+                <span>{detail.summary.trust_score}</span>
+              </div>
+              <div :if={detail.summary.turn_count}>
+                <strong>Turns:</strong>
+                <span>{detail.summary.turn_count}</span>
+              </div>
+              <div>
+                <strong>Goals:</strong>
+                <span>{detail.summary.active_goals_count}</span>
+              </div>
+              <div :if={detail.summary.session_cost}>
+                <strong>Cost:</strong>
+                <span>${:erlang.float_to_binary(detail.summary.session_cost, decimals: 4)}</span>
+              </div>
+              <div :if={detail.summary.avg_latency_ms}>
+                <strong>p50 latency:</strong>
+                <span>{detail.summary.avg_latency_ms}ms</span>
+              </div>
+            </div>
+          </div>
+
           <%!-- Profile section --%>
           <div :if={detail.profile} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Profile</h4>
@@ -671,6 +726,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   end
 
   defp safe_load_detail(agent_id) do
+    summary = safe_summary(agent_id)
     profile = safe_find_profile(agent_id)
     running = safe_lookup(agent_id)
     executor = safe_executor_status(agent_id)
@@ -682,6 +738,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     trust_summary = safe_trust_summary(agent_id)
 
     %{
+      summary: summary,
       profile: profile,
       running: running,
       executor: executor,
@@ -692,6 +749,17 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       model_summary: model_summary,
       trust_summary: trust_summary
     }
+  end
+
+  defp safe_summary(agent_id) do
+    case Arbor.Agent.summary(agent_id) do
+      {:ok, summary} -> summary
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_model_summary(nil), do: nil
