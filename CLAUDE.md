@@ -8,12 +8,21 @@ Don't perform actions just to unblock something immediately so you can move on. 
 
 ## Testing While Server is Running
 
-**Never run `mix test` directly in the main project while the Arbor server is running.** Compilation and Application config changes can crash the live dashboard. Instead, use worktree-based testing:
+The risk: full `mix test` runs can change Application config or restart subsystems and crash the live dashboard. Risk scales with scope.
 
-- Spawn a subagent with `isolation: "worktree"` to run tests in an isolated copy
-- Or use `mix test` only when the server is stopped
+**Default to worktree-based testing** — spawn a subagent with `isolation: "worktree"` to run tests in an isolated copy. This is the safe path for any test run.
 
-This ensures test runs don't interfere with the user's live session.
+**Acceptable in foreground without a worktree:**
+- Single test files that don't touch Application config or restart subsystems
+- Targeted reruns of specific failing tests (e.g., `mix test path/to/test.exs:42`)
+- Use this when the worktree mechanism is unavailable, returns stale state, or for fast iteration
+
+**Always use a worktree (or stop the server) for:**
+- Full `mix test` runs
+- Test files that change Application env, start/stop GenServers the live server uses, or touch shared ETS tables/registries
+- Anything you're unsure about
+
+When in doubt, ask first or spawn a worktree.
 
 ## Always Learning
 
