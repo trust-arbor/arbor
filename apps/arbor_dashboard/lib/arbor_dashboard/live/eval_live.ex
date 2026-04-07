@@ -552,201 +552,32 @@ defmodule Arbor.Dashboard.Live.EvalLive do
     :exit, _ -> %{}
   end
 
-  # ── Stats ───────────────────────────────────────────────────────────
+  # ── Stats (delegate to EvalCore) ────────────────────────────────────
 
-  defp compute_stats(runs) do
-    total = length(runs)
+  defp compute_stats(runs), do: Arbor.Dashboard.Cores.EvalCore.compute_stats(runs)
+  defp default_stats, do: Arbor.Dashboard.Cores.EvalCore.default_stats()
 
-    completed =
-      Enum.count(runs, fn r -> run_field(r, :status) == "completed" end)
+  # ── Formatting helpers (delegate to EvalCore — single source of truth) ──
 
-    completed_pct =
-      if total > 0, do: "#{Float.round(completed / total * 100, 1)}%", else: "--"
+  alias Arbor.Dashboard.Cores.EvalCore
 
-    accuracies =
-      runs
-      |> Enum.filter(fn r -> run_field(r, :status) == "completed" end)
-      |> Enum.map(fn r -> get_accuracy(run_field(r, :metrics)) end)
-      |> Enum.filter(&is_number/1)
+  defp run_field(run, key), do: EvalCore.run_field(run, key)
+  defp get_accuracy(metrics), do: EvalCore.get_accuracy(metrics)
+  defp format_accuracy(metrics), do: EvalCore.format_accuracy(metrics)
+  defp format_mean_score(metrics), do: EvalCore.format_mean_score(metrics)
+  defp format_pct(val), do: EvalCore.format_pct(val)
+  defp format_sample_count(n), do: EvalCore.format_sample_count(n)
+  defp format_duration(ms), do: EvalCore.format_duration(ms)
+  defp format_graders(graders), do: EvalCore.format_graders(graders)
+  defp format_scores(scores), do: EvalCore.format_scores(scores)
+  defp format_relative_time(value), do: EvalCore.format_relative_time(value)
+  defp datetime_compare_desc(a, b), do: EvalCore.datetime_compare_desc(a, b)
 
-    avg_accuracy =
-      if accuracies != [] do
-        format_pct(Enum.sum(accuracies) / length(accuracies))
-      else
-        "--"
-      end
-
-    durations =
-      runs
-      |> Enum.filter(fn r -> run_field(r, :status) == "completed" end)
-      |> Enum.map(fn r -> run_field(r, :duration_ms) end)
-      |> Enum.filter(&is_number/1)
-
-    avg_duration =
-      if durations != [] do
-        avg_ms = Enum.sum(durations) / length(durations)
-        format_duration(round(avg_ms))
-      else
-        "--"
-      end
-
-    %{
-      total: total,
-      completed_pct: completed_pct,
-      avg_accuracy: avg_accuracy,
-      avg_duration: avg_duration
-    }
-  end
-
-  defp default_stats do
-    %{total: 0, completed_pct: "--", avg_accuracy: "--", avg_duration: "--"}
-  end
-
-  # ── Formatting helpers ──────────────────────────────────────────────
-
-  defp run_field(run, key) when is_atom(key) do
-    Map.get(run, key) || Map.get(run, Atom.to_string(key))
-  end
-
-  defp get_accuracy(nil), do: nil
-
-  defp get_accuracy(metrics) when is_map(metrics) do
-    metrics["accuracy"] || metrics[:accuracy]
-  end
-
-  defp get_accuracy(_), do: nil
-
-  defp format_accuracy(nil), do: "--"
-
-  defp format_accuracy(metrics) when is_map(metrics) do
-    case get_accuracy(metrics) do
-      nil -> "--"
-      acc when is_number(acc) -> format_pct(acc)
-      _ -> "--"
-    end
-  end
-
-  defp format_accuracy(_), do: "--"
-
-  defp format_mean_score(nil), do: "--"
-
-  defp format_mean_score(metrics) when is_map(metrics) do
-    score = metrics["mean_score"] || metrics[:mean_score]
-    if is_number(score), do: Float.round(score * 1.0, 3) |> to_string(), else: "--"
-  end
-
-  defp format_mean_score(_), do: "--"
-
-  defp format_pct(nil), do: "--"
-  defp format_pct(val) when is_number(val), do: "#{Float.round(val * 100.0, 1)}%"
-  defp format_pct(_), do: "--"
-
-  defp format_sample_count(nil), do: "0"
-  defp format_sample_count(n) when is_integer(n), do: Integer.to_string(n)
-  defp format_sample_count(_), do: "0"
-
-  defp format_duration(nil), do: "--"
-  defp format_duration(0), do: "--"
-  defp format_duration(ms) when is_integer(ms) and ms < 1000, do: "#{ms}ms"
-
-  defp format_duration(ms) when is_integer(ms) and ms < 60_000 do
-    "#{Float.round(ms / 1000, 1)}s"
-  end
-
-  defp format_duration(ms) when is_integer(ms) do
-    mins = div(ms, 60_000)
-    secs = div(rem(ms, 60_000), 1000)
-    "#{mins}m #{secs}s"
-  end
-
-  defp format_duration(_), do: "--"
-
-  defp format_graders(nil), do: "--"
-  defp format_graders([]), do: "--"
-  defp format_graders(graders) when is_list(graders), do: Enum.join(graders, ", ")
-  defp format_graders(_), do: "--"
-
-  defp format_scores(nil), do: ""
-
-  defp format_scores(scores) when is_map(scores) do
-    scores
-    |> Enum.map(fn {grader, score_data} ->
-      score =
-        if is_map(score_data), do: score_data["score"] || score_data[:score], else: score_data
-
-      if is_number(score), do: "#{grader}: #{Float.round(score * 1.0, 2)}", else: nil
-    end)
-    |> Enum.filter(& &1)
-    |> Enum.join(" · ")
-  end
-
-  defp format_scores(_), do: ""
-
-  defp format_relative_time(nil), do: ""
-
-  defp format_relative_time(%DateTime{} = dt) do
-    diff = DateTime.diff(DateTime.utc_now(), dt, :second)
-
-    cond do
-      diff < 60 -> "just now"
-      diff < 3600 -> "#{div(diff, 60)}m ago"
-      diff < 86_400 -> "#{div(diff, 3600)}h ago"
-      true -> "#{div(diff, 86_400)}d ago"
-    end
-  end
-
-  defp format_relative_time(%NaiveDateTime{} = ndt) do
-    case DateTime.from_naive(ndt, "Etc/UTC") do
-      {:ok, dt} -> format_relative_time(dt)
-      _ -> ""
-    end
-  end
-
-  defp format_relative_time(str) when is_binary(str) do
-    case DateTime.from_iso8601(str) do
-      {:ok, dt, _offset} -> format_relative_time(dt)
-      _ -> str
-    end
-  end
-
-  defp format_relative_time(_), do: ""
-
-  defp datetime_compare_desc(a, b) do
-    case {a, b} do
-      {%DateTime{} = da, %DateTime{} = db} -> DateTime.compare(da, db) != :lt
-      {%NaiveDateTime{} = na, %NaiveDateTime{} = nb} -> NaiveDateTime.compare(na, nb) != :lt
-      _ -> true
-    end
-  end
-
-  # ── Colors ──────────────────────────────────────────────────────────
-
-  defp domain_color("coding"), do: :blue
-  defp domain_color("chat"), do: :green
-  defp domain_color("heartbeat"), do: :purple
-  defp domain_color("embedding"), do: :orange
-  defp domain_color("advisory_consultation"), do: :yellow
-  defp domain_color("llm_judge"), do: :red
-  defp domain_color(_), do: :gray
-
-  defp status_color("completed"), do: :green
-  defp status_color("running"), do: :blue
-  defp status_color("failed"), do: :error
-  defp status_color(_), do: :gray
-
-  defp data_source_label(:postgres), do: "Postgres"
-  defp data_source_label(:unavailable), do: "Offline"
-  defp data_source_label(_), do: "Unknown"
-
-  defp data_source_color(:postgres), do: :green
-  defp data_source_color(:unavailable), do: :error
-  defp data_source_color(_), do: :gray
-
-  # ── Tab helpers ─────────────────────────────────────────────────────
-
-  defp tab_label("runs"), do: "Runs"
-  defp tab_label("models"), do: "Models"
-  defp tab_label(other), do: String.capitalize(other)
+  defp domain_color(domain), do: EvalCore.domain_color(domain)
+  defp status_color(status), do: EvalCore.status_color(status)
+  defp data_source_label(source), do: EvalCore.data_source_label(source)
+  defp data_source_color(source), do: EvalCore.data_source_color(source)
+  defp tab_label(tab), do: EvalCore.tab_label(tab)
 
   # ── Data source detection ───────────────────────────────────────────
 
@@ -765,9 +596,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
 
   # ── Utilities ───────────────────────────────────────────────────────
 
-  defp blank_to_nil(""), do: nil
-  defp blank_to_nil(nil), do: nil
-  defp blank_to_nil(str), do: str
+  defp blank_to_nil(value), do: Arbor.Dashboard.Cores.EvalCore.blank_to_nil(value)
 
   defp stream_empty?(stream) do
     # Phoenix.LiveView.stream_empty? isn't available in older versions
