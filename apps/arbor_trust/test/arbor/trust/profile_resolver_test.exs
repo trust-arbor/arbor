@@ -216,12 +216,13 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert preset.rules["arbor://fs/read"] == :auto
     end
 
-    test ":balanced allows file writes, asks for shell exec" do
+    test ":balanced allows file writes, asks for shell" do
       preset = ProfileResolver.preset(:balanced)
       assert preset.baseline == :ask
       assert preset.rules["arbor://fs/write"] == :allow
-      # Shell exec covered by shell/exec => :ask (covers all exec subcommands)
-      assert preset.rules["arbor://shell/exec"] == :ask
+      # All shell operations require asking (no separate shell/exec carve-out)
+      assert preset.rules["arbor://shell"] == :ask
+      assert preset.rules["arbor://memory"] == :auto
     end
 
     test ":hands_off allows most, asks for shell and governance" do
@@ -238,9 +239,9 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert preset.rules["arbor://governance"] == :ask
     end
 
-    test "unknown preset defaults to :balanced" do
+    test "unknown preset defaults to :cautious (most secure)" do
       preset = ProfileResolver.preset(:nonexistent)
-      assert preset == ProfileResolver.preset(:balanced)
+      assert preset == ProfileResolver.preset(:cautious)
     end
   end
 
