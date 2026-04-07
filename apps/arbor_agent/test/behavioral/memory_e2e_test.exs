@@ -673,7 +673,6 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
 
   defp build_agent_state(agent_id, beat) do
     goals = safe_call(fn -> Memory.get_active_goals(agent_id) end) || []
-    chat = safe_call(fn -> Memory.load_chat_history(agent_id) end) || []
 
     mode =
       cond do
@@ -682,7 +681,10 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
         true -> :reflection
       end
 
-    state = %{
+    # Note: chat history lives in SessionStore now (commit f02ee693), not the
+    # Memory facade. context_window is built by the orchestrator at runtime
+    # from the live session, not seeded into test state here.
+    %{
       agent_id: agent_id,
       id: agent_id,
       heartbeat_count: beat,
@@ -691,22 +693,6 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
       pending_messages: [],
       background_suggestions: []
     }
-
-    # Add context window from chat history
-    if chat != [] do
-      window = %{
-        entries:
-          Enum.map(chat, fn msg ->
-            content = Map.get(msg, :content) || Map.get(msg, "content", "")
-            ts = Map.get(msg, :timestamp) || Map.get(msg, "timestamp")
-            {:message, content, ts}
-          end)
-      }
-
-      Map.put(state, :context_window, window)
-    else
-      state
-    end
   end
 
   defp run_mock_heartbeat(agent_id, beat, mock_json) do
