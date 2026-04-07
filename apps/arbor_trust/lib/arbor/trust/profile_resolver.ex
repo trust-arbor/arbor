@@ -55,23 +55,28 @@ defmodule Arbor.Trust.ProfileResolver do
   """
   @spec effective_mode(map(), String.t(), keyword()) :: mode()
   def effective_mode(profile, resource_uri, opts \\ []) do
-    rules = Map.get(profile, :rules, %{})
-    baseline = Map.get(profile, :baseline, :ask)
-    model_constraints = Map.get(profile, :model_constraints, %{})
+    # Resolve security ceilings from config (Authority is pure — no config
+    # access — so we inject the ceiling lookup here at the caller boundary).
+    opts = Keyword.put_new_lazy(opts, :security_ceilings, &security_ceilings/0)
 
-    # Layer 1: User preference (longest-prefix match)
-    user_mode = resolve_prefix(rules, resource_uri, baseline)
+    profile
+    |> ensure_profile_struct()
+    |> Arbor.Trust.Authority.effective_mode(resource_uri, opts)
+  end
 
-    # Layer 2: Security ceiling (system-enforced)
-    ceilings = Keyword.get(opts, :security_ceilings, security_ceilings())
-    security_ceiling = resolve_prefix(ceilings, resource_uri, :auto)
+  defp ensure_profile_struct(%Arbor.Contracts.Trust.Profile{} = profile), do: profile
 
-    # Layer 3: Model constraint (optional)
-    model_class = Keyword.get(opts, :model_class)
-    model_ceiling = resolve_model_constraint(model_constraints, resource_uri, model_class)
+  defp ensure_profile_struct(profile_map) when is_map(profile_map) do
+    # Backward-compat: callers passing a generic map get coerced into a
+    # partial Profile struct so Authority's pattern match succeeds.
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new("__profile_resolver_stub__")
 
-    # Effective = most restrictive of all three
-    most_restrictive([user_mode, security_ceiling, model_ceiling])
+    %{
+      profile
+      | baseline: Map.get(profile_map, :baseline, :ask),
+        rules: Map.get(profile_map, :rules, %{}),
+        model_constraints: Map.get(profile_map, :model_constraints, %{})
+    }
   end
 
   @doc """
@@ -215,65 +220,10 @@ defmodule Arbor.Trust.ProfileResolver do
   Presets are onboarding templates that initialize a trust profile.
   """
   @spec preset(atom()) :: %{baseline: mode(), rules: rules()}
-  def preset(:cautious) do
-    %{
-      baseline: :ask,
-      rules: %{
-        "arbor://code/read" => :auto,
-        "arbor://code/write" => :block,
-        "arbor://fs/read" => :auto,
-        "arbor://historian/query" => :auto,
-        "arbor://orchestrator" => :auto,
-        "arbor://shell" => :block,
-        "arbor://shell/exec" => :ask
-      }
-    }
+  def preset(preset_name) do
+    {baseline, rules} = Arbor.Trust.Authority.preset_rules(preset_name)
+    %{baseline: baseline, rules: rules}
   end
-
-  def preset(:balanced) do
-    %{
-      baseline: :ask,
-      rules: %{
-        "arbor://code/read" => :auto,
-        "arbor://code/write" => :ask,
-        "arbor://fs/read" => :auto,
-        "arbor://fs/write" => :allow,
-        "arbor://historian/query" => :auto,
-        "arbor://orchestrator" => :auto,
-        "arbor://shell" => :ask,
-        "arbor://memory" => :auto
-      }
-    }
-  end
-
-  def preset(:hands_off) do
-    %{
-      baseline: :allow,
-      rules: %{
-        "arbor://code/read" => :auto,
-        "arbor://code/write" => :auto,
-        "arbor://fs" => :auto,
-        "arbor://historian" => :auto,
-        "arbor://orchestrator" => :auto,
-        "arbor://memory" => :auto,
-        "arbor://shell" => :ask,
-        "arbor://governance" => :ask
-      }
-    }
-  end
-
-  def preset(:full_trust) do
-    %{
-      baseline: :auto,
-      rules: %{
-        "arbor://shell" => :ask,
-        "arbor://governance" => :ask
-      }
-    }
-  end
-
-  # Unknown presets fall back to :cautious — the most secure default.
-  def preset(_unknown), do: preset(:cautious)
 
   # ── Private ─────────────────────────────────────────────────────────
 
