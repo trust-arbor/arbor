@@ -161,11 +161,42 @@ defmodule Arbor.Trust.AuthorityTest do
   end
 
   describe "set_tier/2" do
-    test "updates tier and applies preset rules" do
+    test "updates only the tier label, leaving baseline and rules untouched" do
+      profile = Authority.new_profile("agent_123", :untrusted)
+      original_baseline = profile.baseline
+      original_rules = profile.rules
+
+      updated = Authority.set_tier(profile, :veteran)
+
+      assert updated.tier == :veteran
+      assert updated.baseline == original_baseline
+      assert updated.rules == original_rules
+    end
+
+    test "preserves user-customized rules across tier changes (regression)" do
+      # Footgun fix: graduating to a higher tier used to silently overwrite
+      # the user's "always allow" customizations with the new preset's rules.
+      profile =
+        "agent_123"
+        |> Authority.new_profile(:untrusted)
+        |> then(fn p ->
+          # User customization: explicit allow on a URI not in any preset
+          %{p | rules: Map.put(p.rules, "arbor://custom/private/api", :auto)}
+        end)
+
+      updated = Authority.set_tier(profile, :veteran)
+
+      assert updated.rules["arbor://custom/private/api"] == :auto,
+             "user customization should survive tier promotion"
+    end
+  end
+
+  describe "apply_tier_preset/2" do
+    test "explicitly resets baseline and merges preset rules" do
       profile = Authority.new_profile("agent_123", :untrusted)
       assert profile.baseline == :ask
 
-      updated = Authority.set_tier(profile, :veteran)
+      updated = Authority.apply_tier_preset(profile, :veteran)
       assert updated.tier == :veteran
       assert updated.baseline == :allow
       assert updated.rules["arbor://shell"] == :ask
