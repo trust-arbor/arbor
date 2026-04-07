@@ -139,6 +139,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           socket
       end
 
+    # Periodic approvals re-sync — defense in depth against signal drops at
+    # the SignalLive bridge under backpressure. Every 5s, re-fetch pending
+    # approvals from Consensus and reset the stream so dropped approvals can't
+    # leave the user with no way to see/approve a pending tool call.
+    if connected?(socket) do
+      :timer.send_interval(5_000, :refresh_approvals)
+    end
+
     {:ok, socket}
   end
 
@@ -612,6 +620,21 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       {:noreply, socket}
   end
 
+  # Periodic re-sync of pending approvals from Consensus. Defense against
+  # signals dropped at the bridge under backpressure (see fetch_pending_approvals).
+  def handle_info(:refresh_approvals, socket) do
+    case socket.assigns[:agent_id] do
+      nil ->
+        {:noreply, socket}
+
+      agent_id ->
+        approvals = fetch_pending_approvals(agent_id)
+        {:noreply, stream(socket, :approvals, approvals, reset: true)}
+    end
+  rescue
+    _ -> {:noreply, socket}
+  end
+
   # Process monitor: agent supervisor crashed or was killed
   def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
     if pid == socket.assigns[:supervisor_pid] or pid == socket.assigns[:agent] do
@@ -1082,7 +1105,47 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     |> stream(:memories, [], reset: true)
     |> stream(:actions, [], reset: true)
     |> stream(:llm_interactions, [], reset: true)
-    |> stream(:approvals, [], reset: true)
+    # Seed the approvals stream from Consensus so any pending approvals that
+    # arrived before this LiveView connected (or that signal-bridge dropped
+    # under backpressure) are visible immediately. Signals continue to deliver
+    # low-latency updates; this is the polling fallback.
+    |> stream(:approvals, fetch_pending_approvals(agent_id), reset: true)
+  end
+
+  # Poll Consensus for pending approvals targeting this agent. Used as a
+  # defense-in-depth fallback alongside the security.authorization_pending
+  # signal subscription, which is lossy by design (subscribe_raw silently
+  # drops signals when the LiveView mailbox queue is over the bridge limit,
+  # and signals can also race with mount/reconnect timing).
+  defp fetch_pending_approvals(nil), do: []
+
+  defp fetch_pending_approvals(agent_id) do
+    case safe_consensus_pending() do
+      [] ->
+        []
+
+      proposals ->
+        proposals
+        |> Enum.filter(fn p -> Map.get(p, :proposer) == agent_id end)
+        |> Enum.map(&proposal_to_approval/1)
+    end
+  end
+
+  defp safe_consensus_pending do
+    Arbor.Consensus.list_pending()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp proposal_to_approval(proposal) do
+    %{
+      id: proposal.id,
+      proposer: proposal.proposer,
+      metadata: Map.get(proposal, :metadata, %{}),
+      created_at: proposal.created_at
+    }
   end
 
   defp clear_agent_assigns(socket) do
