@@ -117,24 +117,27 @@ defmodule Arbor.Agent.APIAgent do
     id = Keyword.get(opts, :id, @default_id)
 
     # Resolve tiered config: global → per-model → agent-level
-    config = APIConfig.resolve(opts)
+    api_config = APIConfig.resolve(opts)
 
-    # Host-specific state — resolve model profile via ConfigCore for context window info
+    # Build the canonical Config struct for host state. This consolidates
+    # provider, model, model_profile, and generation params into one typed
+    # struct so callers can't drift on field names or miss fields when
+    # passing config around.
     model = Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end)
+    provider = Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
 
-    model_profile =
-      model
-      |> Arbor.Agent.ConfigCore.resolve_model_profile()
-
-    host_state = %{
+    config = %Arbor.Contracts.Agent.Config{
+      provider: provider,
       model: model,
-      provider:
-        Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end),
-      max_tokens: config.max_tokens,
-      temperature: config.temperature,
-      max_turns: config.max_turns,
-      model_profile: model_profile
+      model_profile: Arbor.Agent.ConfigCore.resolve_model_profile(model),
+      generation_params: %{
+        max_tokens: api_config.max_tokens,
+        temperature: api_config.temperature,
+        max_turns: api_config.max_turns
+      }
     }
+
+    host_state = %{config: config}
 
     # Initialize seed (memory, executor, signals, working memory, capabilities)
     seed_opts =
@@ -145,9 +148,9 @@ defmodule Arbor.Agent.APIAgent do
 
     Logger.info("API agent started",
       id: id,
-      model: state.model,
-      provider: state.provider,
-      max_tokens: state.max_tokens,
+      model: state.config.model,
+      provider: state.config.provider,
+      max_tokens: gen_param(state, :max_tokens),
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
       executor: state.executor_pid != nil
@@ -156,8 +159,8 @@ defmodule Arbor.Agent.APIAgent do
     seed_emit_signal(:agent_started, %{
       id: id,
       type: :api_agent,
-      model: state.model,
-      provider: state.provider,
+      model: state.config.model,
+      provider: state.config.provider,
       memory_enabled: state.memory_enabled,
       memory_initialized: state.memory_initialized,
       executor_started: state.executor_pid != nil
@@ -165,6 +168,10 @@ defmodule Arbor.Agent.APIAgent do
 
     {:ok, state}
   end
+
+  # Convenience accessor for generation_params keys. Avoids verbose
+  # `state.config.generation_params[:max_tokens]` chains at every call site.
+  defp gen_param(state, key), do: Map.get(state.config.generation_params, key)
 
   @impl true
   def handle_call({:query, prompt, opts}, _from, state) do
@@ -283,8 +290,8 @@ defmodule Arbor.Agent.APIAgent do
           text: text,
           thinking: nil,
           usage: normalized.usage,
-          model: to_string(state.model),
-          provider: to_string(state.provider),
+          model: to_string(state.config.model),
+          provider: to_string(state.config.provider),
           tool_calls: normalized.tool_history,
           tool_rounds: normalized.tool_rounds,
           recalled_memories: recalled,
@@ -321,8 +328,8 @@ defmodule Arbor.Agent.APIAgent do
         if text == "" and tool_calls == [] do
           Logger.warning("Empty response from API (no text, no tool calls)",
             agent_id: state.id,
-            model: state.model,
-            provider: state.provider
+            model: state.config.model,
+            provider: state.config.provider
           )
 
           {:reply, {:error, :empty_response}, state}
@@ -350,7 +357,7 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   defp execute_query(prompt, state, _opts) do
-    prompt_opts = [state: state, model: state.model, provider: state.provider]
+    prompt_opts = [state: state, model: state.config.model, provider: state.config.provider]
 
     # Stable system prompt (identity, self-knowledge, tools — cacheable)
     system_prompt = Arbor.AI.build_stable_system_prompt(state.id, prompt_opts)
@@ -365,21 +372,21 @@ defmodule Arbor.Agent.APIAgent do
         else: volatile_context <> "\n\n---\n\n## User Message\n" <> prompt
 
     api_opts = [
-      provider: state.provider,
-      model: state.model,
+      provider: state.config.provider,
+      model: state.config.model,
       agent_id: state.id,
       system_prompt: system_prompt,
-      max_tokens: state.max_tokens,
-      temperature: state.temperature,
+      max_tokens: gen_param(state, :max_tokens),
+      temperature: gen_param(state, :temperature),
       auto_execute: true,
-      max_turns: state.max_turns
+      max_turns: gen_param(state, :max_turns)
     ]
 
     case Arbor.AI.generate_text_with_tools(full_prompt, api_opts) do
       {:ok, response} ->
         new_state = %{state | query_count: state.query_count + 1}
 
-        emit_query_completed(state.id, state.model, response)
+        emit_query_completed(state.id, state.config.model, response)
 
         {:ok, response, new_state}
 
