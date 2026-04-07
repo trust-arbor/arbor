@@ -14,7 +14,8 @@ defmodule Arbor.Contracts.Agent.Config do
   @type generation_params :: %{
           optional(:temperature) => float(),
           optional(:top_p) => float(),
-          optional(:max_tokens) => pos_integer()
+          optional(:max_tokens) => pos_integer(),
+          optional(:max_turns) => pos_integer()
         }
 
   @type heartbeat_config :: %{
