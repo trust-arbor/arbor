@@ -8,7 +8,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   """
 
   import Phoenix.LiveView
-  import Phoenix.Component, only: [assign: 2, assign: 3]
+  import Phoenix.Component, only: [assign: 2, assign: 3, update: 3]
 
   @doc """
   Process a signal that matches the current agent.
@@ -278,7 +278,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
         timestamp: timestamp
       }
 
-      stream_insert(socket, :llm_interactions, interaction)
+      socket
+      |> stream_insert(:llm_interactions, interaction)
+      |> update(:llm_interactions_count, &(&1 + 1))
     else
       socket
     end
