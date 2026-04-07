@@ -6,6 +6,22 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 
 Don't perform actions just to unblock something immediately so you can move on. Always fix the root cause.
 
+## Security Bug Fixes Need Regression Tests
+
+When you fix a security bug — anything where a check failed open, an authorization gate was bypassed, an invariant was silently violated — the diff MUST include a committed test that:
+
+- **fails on `git checkout HEAD~1`** (proves the bug existed)
+- **passes on `HEAD`** (proves the fix closes it)
+
+A live verification via tidewave / iex is not enough. It tells you the gate is closed *today*. It does not tell you the gate stays closed when someone refactors the auth pipeline six months from now. Without a committed test, every security fix is a one-shot — the next refactor can silently re-open the hole and nothing will catch it.
+
+The test should:
+- Live in the same library as the fix (so it runs when that library's tests run)
+- Have a name that includes "security regression" or the bug's nature (so future-you knows not to delete it as "redundant")
+- Assert behaviorally — call the public API (`Security.authorize/4`, `Shell.authorize_and_execute/3`, etc.) and assert the gate fires, not internal helpers
+
+This rule exists because of the 2026-04-07 shell auto-execution regression: ceiling key namespace mismatch + missing trust integration in `AuthDecision.check_approval` let shell.execute auto-run for an unknown number of weeks. The fixes were verified manually via tidewave at the time but not committed as regression tests, so future drift could re-open the hole.
+
 ## Testing While Server is Running
 
 The risk: full `mix test` runs can change Application config or restart subsystems and crash the live dashboard. Risk scales with scope.
