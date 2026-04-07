@@ -148,56 +148,76 @@ defmodule Arbor.Memory.MemoryCore do
     end)
   end
 
-  @doc "Mark a goal as achieved."
-  @spec achieve_goal([map()], String.t()) :: {[map()], map() | nil}
+  @doc """
+  Mark a goal as achieved — removes it from the active goals list.
+
+  Pipeable. If you need the transitioned goal for side effects (logging,
+  signal emission), call `find_goal/2` first or use `transition_goal/3`.
+  """
+  @spec achieve_goal([map()], String.t()) :: [map()]
   def achieve_goal(goals, goal_id) do
-    case Enum.split_with(goals, fn g -> g[:id] == goal_id end) do
-      {[goal], rest} ->
-        achieved = %{goal | status: :achieved, progress: 1.0}
-        {rest, achieved}
-
-      _ ->
-        {goals, nil}
-    end
+    Enum.reject(goals, fn g -> g[:id] == goal_id end)
   end
 
-  @doc "Mark a goal as abandoned."
-  @spec abandon_goal([map()], String.t(), String.t() | nil) :: {[map()], map() | nil}
-  def abandon_goal(goals, goal_id, reason \\ nil) do
-    case Enum.split_with(goals, fn g -> g[:id] == goal_id end) do
-      {[goal], rest} ->
-        abandoned =
-          goal
-          |> Map.put(:status, :abandoned)
-          |> then(fn g ->
-            if reason, do: Map.update(g, :notes, [reason], &[reason | &1]), else: g
-          end)
+  @doc """
+  Mark a goal as abandoned — removes it from the active goals list.
 
-        {rest, abandoned}
-
-      _ ->
-        {goals, nil}
-    end
+  Pipeable. See `achieve_goal/2` notes if you need the transitioned goal.
+  """
+  @spec abandon_goal([map()], String.t(), String.t() | nil) :: [map()]
+  def abandon_goal(goals, goal_id, _reason \\ nil) do
+    Enum.reject(goals, fn g -> g[:id] == goal_id end)
   end
 
-  @doc "Mark a goal as failed."
-  @spec fail_goal([map()], String.t(), String.t() | nil) :: {[map()], map() | nil}
-  def fail_goal(goals, goal_id, reason \\ nil) do
-    case Enum.split_with(goals, fn g -> g[:id] == goal_id end) do
-      {[goal], rest} ->
-        failed =
-          goal
-          |> Map.put(:status, :failed)
-          |> then(fn g ->
-            if reason, do: Map.update(g, :notes, [reason], &["Failed: #{reason}" | &1]), else: g
-          end)
+  @doc """
+  Mark a goal as failed — removes it from the active goals list.
 
-        {rest, failed}
-
-      _ ->
-        {goals, nil}
-    end
+  Pipeable. See `achieve_goal/2` notes if you need the transitioned goal.
+  """
+  @spec fail_goal([map()], String.t(), String.t() | nil) :: [map()]
+  def fail_goal(goals, goal_id, _reason \\ nil) do
+    Enum.reject(goals, fn g -> g[:id] == goal_id end)
   end
+
+  @doc """
+  Find a goal in the active goals list by ID. Returns nil if not found.
+
+  Use this before `achieve_goal/2`, `abandon_goal/3`, or `fail_goal/3`
+  if you need access to the goal for logging or signal emission.
+  """
+  @spec find_goal([map()], String.t()) :: map() | nil
+  def find_goal(goals, goal_id) do
+    Enum.find(goals, fn g -> g[:id] == goal_id end)
+  end
+
+  @doc """
+  Apply a status transition to a single goal (does not touch the list).
+
+  Returns the transformed goal map. Pure — no list manipulation. Useful
+  with `find_goal/2` when you need to construct a transitioned goal for
+  signal emission or logging without removing it from the active list yet.
+  """
+  @spec transition_goal(map() | nil, :achieved | :abandoned | :failed, String.t() | nil) ::
+          map() | nil
+  def transition_goal(nil, _status, _reason), do: nil
+
+  def transition_goal(goal, :achieved, _reason),
+    do: %{goal | status: :achieved, progress: 1.0}
+
+  def transition_goal(goal, :abandoned, reason) do
+    goal
+    |> Map.put(:status, :abandoned)
+    |> maybe_add_note(reason)
+  end
+
+  def transition_goal(goal, :failed, reason) do
+    goal
+    |> Map.put(:status, :failed)
+    |> maybe_add_note(reason && "Failed: #{reason}")
+  end
+
+  defp maybe_add_note(goal, nil), do: goal
+  defp maybe_add_note(goal, note), do: Map.update(goal, :notes, [note], &[note | &1])
 
   @doc "Add a note to a goal."
   @spec add_goal_note([map()], String.t(), String.t()) :: [map()]
