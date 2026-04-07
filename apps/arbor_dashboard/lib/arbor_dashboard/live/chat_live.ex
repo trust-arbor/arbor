@@ -88,6 +88,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         hb_input_tokens: 0,
         hb_output_tokens: 0,
         hb_cached_tokens: 0,
+        hb_total_cost: 0.0,
         # Heartbeat model selection (API agents only)
         heartbeat_models: Application.get_env(:arbor_dashboard, :heartbeat_models, []),
         selected_heartbeat_model: nil,
@@ -1088,6 +1089,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       hb_input_tokens: 0,
       hb_output_tokens: 0,
       hb_cached_tokens: 0,
+      hb_total_cost: 0.0,
       selected_heartbeat_model: nil
     )
     |> then(fn socket ->

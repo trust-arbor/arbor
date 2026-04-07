@@ -243,7 +243,9 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       identity_insights: flex_get(data, :identity_insights) || [],
       hb_in: flex_get(usage, :input_tokens) || 0,
       hb_out: flex_get(usage, :output_tokens) || 0,
-      hb_cached: flex_get(usage, :cache_read_input_tokens) || 0
+      hb_cached:
+        flex_get(usage, :cache_read_tokens) || flex_get(usage, :cache_read_input_tokens) || 0,
+      hb_cost: flex_get(usage, :cost) || 0.0
     }
   end
 
@@ -259,7 +261,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
       memory_notes_total: socket.assigns.memory_notes_total + hb.notes_count,
       hb_input_tokens: socket.assigns.hb_input_tokens + hb.hb_in,
       hb_output_tokens: socket.assigns.hb_output_tokens + hb.hb_out,
-      hb_cached_tokens: socket.assigns.hb_cached_tokens + hb.hb_cached
+      hb_cached_tokens: socket.assigns.hb_cached_tokens + hb.hb_cached,
+      hb_total_cost: (socket.assigns[:hb_total_cost] || 0.0) + (hb.hb_cost || 0.0)
     )
   end
 
