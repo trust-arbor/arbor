@@ -306,7 +306,11 @@ defmodule Arbor.Trust.Calculator do
     %{profile | trust_score: calculate(profile, weights)}
   end
 
-  defp update_tier(%Profile{trust_score: score} = profile) do
-    %{profile | tier: Config.resolve_tier(score)}
+  defp update_tier(%Profile{trust_score: score, trust_points: points} = profile) do
+    # Use Authority's points-aware tier computation. Tier resolution must
+    # honor trust_points (earned via council approvals) so bulk recalculation
+    # never silently demotes a points-based agent below where event-based
+    # updates put them.
+    %{profile | tier: Arbor.Trust.Authority.compute_tier(score, points)}
   end
 end

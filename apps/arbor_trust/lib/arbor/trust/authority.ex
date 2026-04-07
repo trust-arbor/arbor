@@ -332,6 +332,24 @@ defmodule Arbor.Trust.Authority do
   def resolve_tier_from_points(points) when points >= 25, do: :probationary
   def resolve_tier_from_points(_), do: :untrusted
 
+  @doc """
+  Compute the effective tier from a score AND trust points.
+
+  Trust points (earned via council approvals) can boost an agent's tier
+  beyond what their component scores alone would justify. This function
+  takes the maximum of the score-derived tier and the points-derived tier
+  so points-based progression is always honored.
+
+  This is the canonical tier computation — Authority and Calculator both
+  use it so bulk recalculation never silently demotes a points-based agent.
+  """
+  @spec compute_tier(non_neg_integer(), non_neg_integer()) :: atom()
+  def compute_tier(score, trust_points) do
+    score_tier = resolve_tier(score)
+    points_tier = resolve_tier_from_points(trust_points)
+    max_tier(score_tier, points_tier)
+  end
+
   @doc "Map tier to preset name."
   @spec tier_to_preset(atom()) :: atom()
   def tier_to_preset(tier) when tier in [:untrusted, :probationary], do: :cautious
@@ -455,18 +473,13 @@ defmodule Arbor.Trust.Authority do
           rollback * @weights.rollback
       )
 
-    # Points-based tier can boost beyond score-based tier
-    score_tier = resolve_tier(score)
-    points_tier = resolve_tier_from_points(profile.trust_points)
-    effective_tier = max_tier(score_tier, points_tier)
-
     %{profile |
       success_rate_score: success_rate,
       security_score: security,
       test_pass_score: test_pass,
       rollback_score: rollback,
       trust_score: score,
-      tier: effective_tier,
+      tier: compute_tier(score, profile.trust_points),
       updated_at: DateTime.utc_now()
     }
   end
