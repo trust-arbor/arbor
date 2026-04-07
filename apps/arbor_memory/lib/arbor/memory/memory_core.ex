@@ -342,12 +342,19 @@ defmodule Arbor.Memory.MemoryCore do
   @doc "Format working memory for dashboard display."
   @spec for_dashboard(map()) :: map()
   def for_dashboard(wm) do
+    concerns = wm[:concerns] || []
+    curiosity = wm[:curiosity] || []
+    recent_thoughts = wm[:recent_thoughts] || []
+    active_goals_list = wm[:active_goals] || []
+
     %{
       agent_id: wm[:agent_id] || wm.agent_id,
-      thought_count: length(wm[:recent_thoughts] || []),
-      goal_count: length(wm[:active_goals] || []),
+      thought_count: length(recent_thoughts),
+      goal_count: length(active_goals_list),
+      concerns_count: length(concerns),
+      curiosity_count: length(curiosity),
       active_goals:
-        (wm[:active_goals] || [])
+        active_goals_list
         |> Enum.filter(&(&1[:status] == :active))
         |> Enum.map(fn g ->
           %{
@@ -357,8 +364,9 @@ defmodule Arbor.Memory.MemoryCore do
             priority: g[:priority] || 50
           }
         end),
-      concerns: wm[:concerns] || [],
-      curiosity: wm[:curiosity] || [],
+      concerns: concerns,
+      curiosity: curiosity,
+      recent_thoughts: recent_thoughts,
       engagement_level: wm[:engagement_level] || 0.5
     }
   end
