@@ -549,8 +549,13 @@ defmodule Arbor.Orchestrator.Session do
 
     usage = Map.get(result.context, "session.usage", %{})
 
-    # Persist user + assistant messages for session recovery across restarts
-    maybe_persist_turn(state.session_id, state.agent_id, message, response, usage)
+    # NOTE: turn persistence is handled inside `Builders.apply_turn_result/3`
+    # via `Persistence.persist_turn_entries/5`. Calling a second persistence
+    # path here used to double-write every turn, leaving an orphan duplicate
+    # of the user message at the end of restored chat history (the legacy
+    # path read `session.response` which is now `""`, so only the user write
+    # succeeded — assistant write was gated out, producing the asymmetric
+    # duplicate Hysun reported on 2026-04-07).
 
     # Record turn telemetry
     maybe_record_telemetry(:turn, state.agent_id, %{
@@ -934,74 +939,6 @@ defmodule Arbor.Orchestrator.Session do
     :exit, _ -> :ok
   end
 
-  # Persist user message + assistant response to SessionStore for recovery across restarts.
-  # Async via Task.start — never blocks the turn response.
-  defp maybe_persist_turn(session_id, agent_id, user_message, response_text, usage) do
-    session_store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(session_store) and
-         function_exported?(session_store, :available?, 0) and
-         apply(session_store, :available?, []) do
-      Task.start(fn ->
-        try do
-          # Ensure session record exists (idempotent — creates only if not found)
-          session_uuid =
-            case apply(session_store, :get_session, [session_id]) do
-              {:ok, session} ->
-                session.id
-
-              {:error, :not_found} ->
-                case apply(session_store, :create_session, [agent_id, [session_id: session_id]]) do
-                  {:ok, session} -> session.id
-                  {:error, _} -> nil
-                end
-            end
-
-          if session_uuid do
-            now = DateTime.utc_now()
-            model = usage["model"] || usage[:model]
-
-            # Persist user message (content wrapped as content blocks for schema compat)
-            if is_binary(user_message) and user_message != "" do
-              apply(session_store, :append_entry, [
-                session_uuid,
-                %{
-                  entry_type: "user",
-                  role: "user",
-                  content: [%{"type" => "text", "text" => user_message}],
-                  timestamp: now
-                }
-              ])
-            end
-
-            # Persist assistant response with model and token usage
-            if is_binary(response_text) and response_text != "" do
-              apply(session_store, :append_entry, [
-                session_uuid,
-                %{
-                  entry_type: "assistant",
-                  role: "assistant",
-                  content: [%{"type" => "text", "text" => response_text}],
-                  model: model,
-                  token_usage: Map.take(usage, [
-                    "input_tokens", "output_tokens", "cached_tokens",
-                    "duration_ms", "provider", :input_tokens, :output_tokens
-                  ]),
-                  timestamp: now
-                }
-              ])
-            end
-          end
-        rescue
-          e ->
-            Logger.debug("[Session] Turn persistence failed: #{Exception.message(e)}")
-        catch
-          kind, reason ->
-            Logger.debug("[Session] Turn persistence failed: #{inspect({kind, reason})}")
-        end
-      end)
-    end
-  end
 
   # Record agent telemetry via the Store (non-critical — failures are silently ignored)
   defp maybe_record_telemetry(type, agent_id, data) do
