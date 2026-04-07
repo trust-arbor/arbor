@@ -174,7 +174,17 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
   @spec build_stream_request(Request.t(), String.t() | nil, config()) :: map()
   def build_stream_request(%Request{} = request, api_key, config) do
     req = build_request(request, api_key, config)
-    %{req | body: Map.put(req.body, "stream", true)}
+
+    # OpenAI/OpenRouter omit the `usage` block from streamed responses unless
+    # the client opts in via stream_options.include_usage. Without this, every
+    # streamed call returns no token counts and our telemetry/heartbeat panel
+    # shows IN: 0 / OUT: 0 forever.
+    body =
+      req.body
+      |> Map.put("stream", true)
+      |> Map.put("stream_options", %{"include_usage" => true})
+
+    %{req | body: body}
   end
 
   defp message_to_chat(%Message{role: :tool} = msg) do
