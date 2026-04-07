@@ -403,6 +403,109 @@ defmodule Arbor.Agent do
   end
 
   @doc """
+  Inspectable summary of an agent — the "2am rule".
+
+  Single Convert function that pulls from all 4 domains (authority, config,
+  context, telemetry) and returns one map answering: who is this agent, how
+  is it set up, what is it doing right now, and how is it performing?
+
+  Designed to be readable in one screen without scrolling. Returns
+  `{:error, :not_found}` if no profile exists for the agent.
+
+  ## Example
+
+      iex> Arbor.Agent.summary("agent_abc123")
+      {:ok, %{
+        agent_id: "agent_abc123",
+        display_name: "Diagnostician",
+        status: :running,
+        template: :diagnostician,
+        model: "anthropic/claude-sonnet-4-5",
+        trust_tier: :veteran,
+        trust_score: 87,
+        turn_count: 42,
+        active_goals_count: 3,
+        session_cost: 0.15,
+        avg_latency_ms: 1240
+      }}
+  """
+  @spec summary(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def summary(agent_id) when is_binary(agent_id) do
+    case load_profile(agent_id) do
+      {:ok, profile} -> {:ok, build_summary(agent_id, profile)}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp build_summary(agent_id, profile) do
+    running? = match?({:ok, _}, lookup(agent_id))
+    trust = safe_call(fn -> trust_summary_for(agent_id) end)
+    telemetry = safe_call(fn -> telemetry_summary_for(agent_id) end)
+    goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
+
+    %{
+      # Identity (who)
+      agent_id: agent_id,
+      display_name: profile.display_name || agent_id,
+      status: if(running?, do: :running, else: :stopped),
+
+      # Configuration (how it's set up)
+      template: profile.template,
+      model: get_in(profile.metadata || %{}, [:last_model_config, :model]),
+
+      # Authority (what it can do)
+      trust_tier: profile.trust_tier,
+      trust_score: trust && trust.trust_score,
+
+      # Current activity (what it's doing now)
+      turn_count: telemetry && telemetry.turn_count,
+      active_goals_count: length(goals),
+
+      # Telemetry (how it's performing)
+      session_cost: telemetry && telemetry.session_cost,
+      avg_latency_ms: telemetry && telemetry.llm_p50_ms
+    }
+  end
+
+  defp trust_summary_for(agent_id) do
+    with {:ok, profile} <- Arbor.Trust.get_trust_profile(agent_id) do
+      Arbor.Trust.Authority.show_summary(profile)
+    else
+      _ -> nil
+    end
+  end
+
+  defp telemetry_summary_for(agent_id) do
+    case Arbor.Common.AgentTelemetry.Store.get(agent_id) do
+      nil ->
+        nil
+
+      telemetry ->
+        %{
+          turn_count: telemetry.turn_count,
+          session_cost: telemetry.session_cost,
+          llm_p50_ms: percentile(telemetry.llm_latencies, 50)
+        }
+    end
+  end
+
+  defp percentile([], _), do: nil
+
+  defp percentile(values, p) when is_list(values) do
+    sorted = Enum.sort(values)
+    idx = round(length(sorted) * p / 100) - 1
+    Enum.at(sorted, max(idx, 0))
+  end
+
+  defp safe_call(fun) do
+    fun.()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc """
   Manually trigger a checkpoint save for an agent.
   """
   @spec checkpoint(String.t()) :: :ok | {:error, term()}
