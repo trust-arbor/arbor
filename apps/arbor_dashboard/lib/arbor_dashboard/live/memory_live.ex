@@ -889,9 +889,11 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     wm = get_in(result, [:memory_system, :working_memory]) || %{}
     proposals_summary = get_in(result, [:memory_system, :proposals]) || %{}
     goals = unwrap_list(safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end)) |> to_maps()
-    engagement = get_in(result, [:cognition, :working_memory, :engagement]) || 0.5
 
-    direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end))
+    direct_wm = unwrap_map(safe_call(fn -> Arbor.Memory.load_working_memory(agent_id) end)) || %{}
+
+    # Convert via CRC core — single source of truth for dashboard shape
+    wm_dashboard = Arbor.Memory.MemoryCore.for_dashboard(direct_wm)
 
     proposals_list =
       unwrap_list(safe_call(fn -> Arbor.Memory.get_proposals(agent_id) end)) |> to_maps()
@@ -908,18 +910,13 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
       proposals: proposals_list,
       near_threshold: near_threshold,
       working_memory: direct_wm,
-      engagement: wm_field(direct_wm, :engagement_level, engagement),
-      thought_count: wm_list_count(direct_wm, :recent_thoughts),
-      concerns_count: wm_list_count(direct_wm, :concerns),
-      curiosity_count: wm_list_count(direct_wm, :curiosity)
+      engagement: wm_dashboard.engagement_level,
+      thought_count: wm_dashboard.thought_count,
+      concerns_count: wm_dashboard.concerns_count,
+      curiosity_count: wm_dashboard.curiosity_count
     }
   end
 
-  defp wm_field(nil, _key, default), do: default
-  defp wm_field(wm, key, default), do: Map.get(wm, key, default)
-
-  defp wm_list_count(nil, _key), do: 0
-  defp wm_list_count(wm, key), do: length(Map.get(wm, key, []))
 
   # Refresh section-specific data when expanding from Overview
   defp maybe_load_section_data(socket, nil, _agent_id), do: socket
