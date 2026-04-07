@@ -420,33 +420,45 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
             </div>
           </div>
 
-          <%!-- Model config --%>
-          <div :if={detail.model_config} style="margin-bottom: 1.5rem;">
+          <%!-- Model config (from ConfigCore.show_config CRC convert) --%>
+          <div :if={detail.model_summary} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Model Configuration</h4>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
-              <div :if={model_field(detail.model_config, :provider)}>
+              <div :if={detail.model_summary.provider}>
                 <strong>Provider:</strong>
-                <span>{model_field(detail.model_config, :provider)}</span>
+                <span>{detail.model_summary.provider}</span>
               </div>
-              <div :if={
-                model_field(detail.model_config, :id) || model_field(detail.model_config, :model)
-              }>
+              <div :if={detail.model_summary.model}>
                 <strong>Model:</strong>
-                <code style="font-size: 0.85em;">
-                  {model_field(detail.model_config, :id) || model_field(detail.model_config, :model)}
-                </code>
+                <code style="font-size: 0.85em;">{detail.model_summary.model}</code>
               </div>
-              <div :if={model_field(detail.model_config, :backend)}>
+              <div :if={detail.model_summary.backend}>
                 <strong>Backend:</strong>
-                <.badge label={to_string(model_field(detail.model_config, :backend))} color={:blue} />
+                <.badge label={to_string(detail.model_summary.backend)} color={:blue} />
               </div>
-              <div :if={model_field(detail.model_config, :temperature)}>
+              <div :if={detail.model_summary.temperature}>
                 <strong>Temperature:</strong>
-                <span>{model_field(detail.model_config, :temperature)}</span>
+                <span>{detail.model_summary.temperature}</span>
               </div>
-              <div :if={model_field(detail.model_config, :max_tokens)}>
+              <div :if={detail.model_summary.max_tokens}>
                 <strong>Max tokens:</strong>
-                <span>{model_field(detail.model_config, :max_tokens)}</span>
+                <span>{detail.model_summary.max_tokens}</span>
+              </div>
+              <div>
+                <strong>Context:</strong>
+                <span>{format_token_count(detail.model_summary.context_window)}</span>
+              </div>
+              <div>
+                <strong>Effective:</strong>
+                <span>{format_token_count(detail.model_summary.effective_window)}</span>
+              </div>
+              <div>
+                <strong>Max output:</strong>
+                <span>{format_token_count(detail.model_summary.max_output)}</span>
+              </div>
+              <div>
+                <strong>Tools:</strong>
+                <span>{detail.model_summary.tool_count}</span>
               </div>
             </div>
           </div>
@@ -566,11 +578,9 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   # ── Helpers ──────────────────────────────────────────────────────────
 
   # Model config may have atom or string keys depending on source
-  defp model_field(nil, _key), do: nil
-
-  defp model_field(config, key) when is_map(config) do
-    Map.get(config, key) || Map.get(config, to_string(key))
-  end
+  defp format_token_count("unknown"), do: "—"
+  defp format_token_count(n) when is_integer(n) and n >= 1000, do: "#{div(n, 1000)}k"
+  defp format_token_count(n), do: to_string(n)
 
   defp agent_name(profile) do
     case profile do
@@ -668,6 +678,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
     goals = safe_goals(agent_id)
     thinking = safe_thinking(agent_id)
     model_config = safe_model_config(agent_id, profile, running)
+    model_summary = safe_model_summary(model_config)
     trust_summary = safe_trust_summary(agent_id)
 
     %{
@@ -678,8 +689,22 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       goals: goals,
       thinking: thinking,
       model_config: model_config,
+      model_summary: model_summary,
       trust_summary: trust_summary
     }
+  end
+
+  defp safe_model_summary(nil), do: nil
+
+  defp safe_model_summary(model_config) do
+    case Arbor.Agent.ConfigCore.from_metadata(model_config) do
+      nil -> nil
+      config -> Arbor.Agent.ConfigCore.show_config(config)
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe_trust_summary(agent_id) do
