@@ -363,24 +363,13 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
     """
   end
 
-  # ── Helpers ─────────────────────────────────────────────────────
+  # ── Helpers (delegate to ChannelsCore) ─────────────────────────────
 
-  defp type_color(:public), do: :green
-  defp type_color(:private), do: :purple
-  defp type_color(:dm), do: :blue
-  defp type_color(:ops_room), do: :yellow
-  defp type_color(:group), do: :gray
-  defp type_color(_), do: :gray
+  alias Arbor.Dashboard.Cores.ChannelsCore
 
-  defp format_datetime(nil), do: ""
-  defp format_datetime(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M")
-  defp format_datetime(other), do: to_string(other)
-
-  defp count_stats(channels) do
-    total = length(channels)
-    public = Enum.count(channels, &(&1.type == :public))
-    {total, public}
-  end
+  defp type_color(type), do: ChannelsCore.type_color(type)
+  defp format_datetime(value), do: ChannelsCore.format_datetime(value)
+  defp count_stats(channels), do: ChannelsCore.count_stats(channels)
 
   # ── Safe wrappers ───────────────────────────────────────────────
 
