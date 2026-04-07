@@ -422,48 +422,15 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     end
   end
 
-  defp time_label(:all), do: "All time"
-  defp time_label(:hour), do: "Last hour"
-  defp time_label(:today), do: "Today"
+  # Display formatters and filter predicates delegate to SignalsCore.
+  alias Arbor.Dashboard.Cores.SignalsCore
 
-  defp matches_time?(_signal, :all), do: true
-
-  defp matches_time?(signal, :hour) do
-    DateTime.diff(DateTime.utc_now(), signal.timestamp, :second) < 3600
-  end
-
-  defp matches_time?(signal, :today) do
-    DateTime.diff(DateTime.utc_now(), signal.timestamp, :second) < 86_400
-  end
-
-  defp matches_agent?(_signal, nil), do: true
-
-  defp matches_agent?(signal, agent_id) do
-    sig_agent =
-      get_in(signal.data, [:agent_id]) || get_in(signal.data, ["agent_id"]) || ""
-
-    String.contains?(to_string(sig_agent), agent_id)
-  end
-
-  defp format_signal_data(data) when data == %{}, do: "(empty)"
-
-  defp format_signal_data(data) when is_map(data) do
-    data
-    |> Enum.take(3)
-    |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
-    |> Helpers.truncate(80)
-  end
-
-  defp format_signal_json(data) do
-    case Jason.encode(data, pretty: true) do
-      {:ok, json} -> json
-      _ -> inspect(data, pretty: true)
-    end
-  end
-
-  defp format_time(nil), do: "-"
-  defp format_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
-  defp format_time(%NaiveDateTime{} = ndt), do: Calendar.strftime(ndt, "%H:%M:%S")
+  defp time_label(filter), do: SignalsCore.time_label(filter)
+  defp matches_time?(signal, filter), do: SignalsCore.matches_time?(signal, filter)
+  defp matches_agent?(signal, agent_id), do: SignalsCore.matches_agent?(signal, agent_id)
+  defp format_signal_data(data), do: SignalsCore.format_signal_data(data)
+  defp format_signal_json(data), do: SignalsCore.format_signal_json(data)
+  defp format_time(value), do: SignalsCore.format_time(value)
 
   defp safe_recent(opts) do
     case Arbor.Signals.recent(opts) do
@@ -490,7 +457,5 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     :exit, _ -> default_stats()
   end
 
-  defp default_stats do
-    %{current_count: 0, active_subscriptions: 0, healthy: false}
-  end
+  defp default_stats, do: SignalsCore.default_stats()
 end
