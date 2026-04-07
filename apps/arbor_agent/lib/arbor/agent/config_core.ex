@@ -63,6 +63,58 @@ defmodule Arbor.Agent.ConfigCore do
     }
   end
 
+  @doc """
+  Build a Config struct from an arbitrary metadata map.
+
+  Handles plain maps with mixed atom/string keys, as produced by registry
+  metadata, profile metadata, or DebugAgent state. Unknown fields land in
+  generation_params so they remain inspectable via `show_config/1`.
+  """
+  @spec from_metadata(map() | nil) :: Config.t() | nil
+  def from_metadata(nil), do: nil
+  def from_metadata(metadata) when map_size(metadata) == 0, do: nil
+
+  def from_metadata(metadata) when is_map(metadata) do
+    provider = get_field(metadata, :provider)
+    model = get_field(metadata, :model) || get_field(metadata, :id)
+
+    %Config{
+      provider: maybe_atom(provider),
+      model: model,
+      model_profile: resolve_model_profile(model),
+      system_prompt: get_field(metadata, :system_prompt),
+      generation_params: extract_generation_params(metadata),
+      tools: get_field(metadata, :tools) || [],
+      heartbeat: get_field(metadata, :heartbeat) || %{},
+      execution_mode: get_field(metadata, :execution_mode),
+      auto_start: get_field(metadata, :auto_start) || false
+    }
+  end
+
+  defp get_field(map, key) when is_atom(key) do
+    Map.get(map, key) || Map.get(map, to_string(key))
+  end
+
+  defp maybe_atom(nil), do: nil
+  defp maybe_atom(v) when is_atom(v), do: v
+  defp maybe_atom(v) when is_binary(v) do
+    try do
+      String.to_existing_atom(v)
+    rescue
+      ArgumentError -> v
+    end
+  end
+
+  defp extract_generation_params(metadata) do
+    [:temperature, :max_tokens, :top_p, :backend]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case get_field(metadata, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
   # ===========================================================================
   # Reduce
   # ===========================================================================
@@ -96,6 +148,8 @@ defmodule Arbor.Agent.ConfigCore do
   @doc "Format configuration for dashboard display."
   @spec show_config(Config.t()) :: map()
   def show_config(%Config{} = config) do
+    params = config.generation_params || %{}
+
     %{
       provider: config.provider,
       model: config.model,
@@ -104,7 +158,10 @@ defmodule Arbor.Agent.ConfigCore do
       max_output: get_in(config.model_profile, [:max_output_tokens]) || "unknown",
       tool_count: length(config.tools || []),
       heartbeat_enabled: config.heartbeat[:enabled] || false,
-      execution_mode: config.execution_mode
+      execution_mode: config.execution_mode,
+      temperature: Map.get(params, :temperature),
+      max_tokens: Map.get(params, :max_tokens),
+      backend: Map.get(params, :backend)
     }
   end
 
