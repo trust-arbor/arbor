@@ -163,7 +163,9 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             content: assistant_content,
             model: Map.get(result_ctx, "llm.model"),
             stop_reason: Map.get(result_ctx, "llm.stop_reason"),
-            token_usage: Map.get(result_ctx, "llm.usage"),
+            # `session.usage` is the live key written by LlmHandler.
+            # `llm.usage` was a dead-letter read — nothing wrote to it.
+            token_usage: Map.get(result_ctx, "session.usage"),
             timestamp: timestamp,
             metadata: %{
               "turn_count" => ContextBuilder.get_turn_count(state) + 1
@@ -192,7 +194,9 @@ defmodule Arbor.Orchestrator.Session.Persistence do
           persist_entry.(%{
             entry_type: "heartbeat",
             role: "assistant",
-            content: wrap_content(Map.get(result_ctx, "llm.content", "")),
+            # `last_response` is what LlmHandler actually writes; `llm.content`
+            # was a dead-letter read kept around from an earlier design.
+            content: wrap_content(Map.get(result_ctx, "last_response", "")),
             model: Map.get(result_ctx, "llm.model"),
             timestamp: DateTime.utc_now(),
             metadata: %{
