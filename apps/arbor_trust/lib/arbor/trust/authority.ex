@@ -195,9 +195,35 @@ defmodule Arbor.Trust.Authority do
     %{profile | frozen: false, frozen_reason: nil, frozen_at: nil}
   end
 
-  @doc "Update tier and apply the corresponding preset rules."
+  @doc """
+  Update the tier label on a profile, leaving rules and baseline unchanged.
+
+  Tier is now a display label that tracks score-based and points-based
+  progression — it does NOT modify the agent's authorization rules. User
+  customizations (e.g., "always allow" rules) are sacrosanct and never
+  overwritten by tier transitions.
+
+  See `apply_tier_preset/2` if you explicitly want to reset rules to a
+  preset (e.g., during agent creation or a deliberate factory reset).
+
+  See `.arbor/roadmap/0-inbox/trust-tiers-mental-model-review.md` for the
+  broader question of whether tiers should exist at all.
+  """
   @spec set_tier(Profile.t(), atom()) :: Profile.t()
   def set_tier(%Profile{} = profile, tier) do
+    %{profile | tier: tier}
+  end
+
+  @doc """
+  Apply a tier's preset baseline and rules to a profile, replacing the
+  existing baseline and merging the preset rules over current rules.
+
+  Use this only for explicit reset operations (e.g., agent creation via
+  `new_profile/2`, or a user-initiated "reset to defaults"). It is NOT
+  called automatically by tier promotion — see `set_tier/2`.
+  """
+  @spec apply_tier_preset(Profile.t(), atom()) :: Profile.t()
+  def apply_tier_preset(%Profile{} = profile, tier) do
     {baseline, rules} = preset_rules_for_tier(tier)
 
     %{profile |
