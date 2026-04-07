@@ -14,6 +14,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   import Arbor.Web.Components
 
   alias Arbor.Consensus.TopicRegistry
+  alias Arbor.Dashboard.Cores.ConsensusCore
   alias Arbor.Web.{Helpers, Icons}
 
   @impl true
@@ -639,100 +640,26 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     end
   end
 
-  defp format_proposal_subtitle(proposal) do
-    "#{proposal.topic} | #{proposal.mode} | #{proposal.proposer}"
-  end
+  # Display formatters delegate to ConsensusCore — single source of truth so
+  # the dashboard, future API endpoints, and tests all see the same shape.
+  defp format_proposal_subtitle(proposal), do: ConsensusCore.format_proposal_subtitle(proposal)
+  defp format_confidence(val), do: ConsensusCore.format_confidence(val)
+  defp format_event_type(type), do: ConsensusCore.format_event_type(type)
 
-  defp format_confidence(val) when is_float(val), do: "#{Float.round(val * 100, 0)}%"
-  defp format_confidence(_), do: "0%"
+  defp consultation_question(c), do: ConsensusCore.consultation_question(c)
+  defp consultation_subtitle(c), do: ConsensusCore.consultation_subtitle(c)
+  defp consultation_results(c), do: ConsensusCore.consultation_results(c)
 
-  defp format_event_type(type) do
-    type
-    |> to_string()
-    |> String.replace("_", " ")
-  end
+  defp perspective_icon_from_string(name), do: ConsensusCore.perspective_icon_from_string(name)
 
-  # ── Consultation helpers ───────────────────────────────────────────
+  defp result_vote(r), do: ConsensusCore.result_vote(r)
+  defp result_confidence(r), do: ConsensusCore.result_confidence(r)
+  defp result_model(r), do: ConsensusCore.result_model(r)
+  defp result_cost(r), do: ConsensusCore.result_cost(r)
+  defp result_concerns(r), do: ConsensusCore.result_concerns(r)
+  defp result_recommendations(r), do: ConsensusCore.result_recommendations(r)
 
-  defp consultation_question(consultation) do
-    case get_in(consultation, [Access.key(:config, %{}), "question"]) do
-      q when is_binary(q) and q != "" -> Helpers.truncate(q, 120)
-      _ -> consultation.dataset || "Unknown question"
-    end
-  end
-
-  defp consultation_subtitle(consultation) do
-    perspectives = consultation.sample_count || 0
-    status = consultation.status || "unknown"
-    "#{perspectives} perspectives | #{status}"
-  end
-
-  defp consultation_results(consultation) do
-    case Map.get(consultation, :results) do
-      %Ecto.Association.NotLoaded{} -> []
-      results when is_list(results) -> results
-      _ -> []
-    end
-  end
-
-  defp perspective_icon_from_string(name) when is_binary(name) do
-    atom =
-      try do
-        String.to_existing_atom(name)
-      rescue
-        ArgumentError -> nil
-      end
-
-    if atom, do: Icons.perspective_icon(atom), else: "🔍"
-  end
-
-  defp perspective_icon_from_string(_), do: "🔍"
-
-  defp result_vote(result) do
-    get_in(result, [Access.key(:scores, %{}), "vote"]) || "unknown"
-  end
-
-  defp result_confidence(result) do
-    case get_in(result, [Access.key(:scores, %{}), "confidence"]) do
-      val when is_float(val) -> format_confidence(val)
-      val when is_integer(val) -> "#{val}%"
-      _ -> "0%"
-    end
-  end
-
-  defp result_model(result) do
-    get_in(result, [Access.key(:metadata, %{}), "model"]) || ""
-  end
-
-  defp result_cost(result) do
-    case get_in(result, [Access.key(:metadata, %{}), "cost"]) do
-      cost when is_number(cost) and cost > 0 -> Float.round(cost * 1.0, 4)
-      _ -> nil
-    end
-  end
-
-  defp result_concerns(result) do
-    case get_in(result, [Access.key(:metadata, %{}), "concerns"]) do
-      list when is_list(list) -> list
-      _ -> []
-    end
-  end
-
-  defp result_recommendations(result) do
-    case get_in(result, [Access.key(:metadata, %{}), "recommendations"]) do
-      list when is_list(list) -> list
-      _ -> []
-    end
-  end
-
-  # ── Approval helpers ────────────────────────────────────────────────
-
-  defp approval_resource(proposal) do
-    case Map.get(proposal, :metadata) do
-      %{resource_uri: uri} when is_binary(uri) -> uri
-      _ -> proposal.description
-    end
-  end
+  defp approval_resource(proposal), do: ConsensusCore.approval_resource(proposal)
 
   # ── Safe API wrappers ───────────────────────────────────────────────
 
