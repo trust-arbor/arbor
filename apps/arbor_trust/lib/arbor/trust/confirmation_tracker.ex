@@ -51,14 +51,21 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   @table :arbor_confirmation_tracker
 
+  # Both legacy short namespaces (`arbor://shell`) and canonical action URIs
+  # (`arbor://actions/execute/shell.`) are listed because action authorization
+  # passes the canonical form, which would not match the short namespace as a
+  # prefix. The short forms are kept for backwards-compat with older code that
+  # still queries by short namespace.
   @default_thresholds %{
     "arbor://code/read" => 0,
     "arbor://code/write" => 3,
     "arbor://shell" => :never,
+    "arbor://actions/execute/shell." => :never,
     "arbor://network" => 5,
     "arbor://ai" => 3,
     "arbor://config" => 10,
-    "arbor://governance" => :never
+    "arbor://governance" => :never,
+    "arbor://actions/execute/governance." => :never
   }
 
   # =========================================================================
