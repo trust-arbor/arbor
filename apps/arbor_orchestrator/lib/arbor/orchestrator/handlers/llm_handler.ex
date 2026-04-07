@@ -432,10 +432,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp call_llm_direct(client, request, call_opts, nil) do
-    case Client.complete(client, request, call_opts) do
-      {:ok, response} -> {:ok, response.text}
-      {:error, _} = error -> error
-    end
+    # Return the full response struct (not just text) so the caller can read
+    # `response.usage`. PipelineResponse.normalize/1 accepts both strings and
+    # structs, so downstream code keeps working.
+    Client.complete(client, request, call_opts)
   end
 
   defp call_llm_direct(client, request, call_opts, on_stream) do
@@ -444,10 +444,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         events =
           Stream.each(events, fn event -> on_stream.(event) end)
 
-        case Client.collect_stream(events) do
-          {:ok, response} -> {:ok, response.text}
-          {:error, _} = error -> error
-        end
+        Client.collect_stream(events)
 
       {:error, {:stream_not_supported, _}} ->
         # Fall back to non-streaming for providers that don't support it
