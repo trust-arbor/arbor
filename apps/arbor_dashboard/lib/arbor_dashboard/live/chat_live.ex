@@ -549,7 +549,17 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     handle_agent_signal(signal, socket)
   end
 
-  # Signal: security authorization pending (tool approval requests)
+  # Signal: security authorization pending (tool approval requests).
+  #
+  # Only insert if the signal is for THIS chat's agent. The previous
+  # condition (`if agent_id && signal_agent`) accepted signals for any
+  # agent as long as both fields were non-nil — which meant a chat
+  # connected to agent X could see approval cards for agent Y that the
+  # user couldn't actually approve from there.
+  #
+  # When agent_id is nil (the chat hasn't connected to an agent yet),
+  # we drop the signal — the periodic polling fallback (handle_info
+  # :refresh_approvals, every 5s) will pick it up after connect.
   def handle_info(
         {:signal_received, %{category: :security, type: :authorization_pending} = signal},
         socket
@@ -557,7 +567,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     agent_id = socket.assigns.agent_id
     signal_agent = get_in(signal.data, [:principal_id]) || get_in(signal.data, ["principal_id"])
 
-    if agent_id && signal_agent do
+    if agent_id && signal_agent == agent_id do
       approval = %{
         id:
           signal.data[:proposal_id] || signal.data["proposal_id"] ||
