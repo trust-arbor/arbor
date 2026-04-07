@@ -241,4 +241,70 @@ defmodule Arbor.Trust.AuthorityTest do
       assert is_map(summary.stats)
     end
   end
+
+  describe "for_persistence/1 + from_persistence/1 round-trip" do
+    test "round-trips a fresh profile preserving all material fields" do
+      original = Authority.new_profile("agent_round_trip", :veteran)
+
+      serialized = Authority.for_persistence(original)
+      assert is_map(serialized)
+      # DateTime fields are ISO8601 strings in the serialized form
+      assert is_binary(serialized.created_at)
+      assert is_binary(serialized.updated_at)
+
+      {:ok, restored} = Authority.from_persistence(serialized)
+
+      assert restored.agent_id == original.agent_id
+      assert restored.tier == original.tier
+      assert restored.baseline == original.baseline
+      assert restored.rules == original.rules
+      assert %DateTime{} = restored.created_at
+      assert %DateTime{} = restored.updated_at
+    end
+
+    test "round-trips a profile with custom rules and trust_points" do
+      original =
+        "agent_custom"
+        |> Authority.new_profile(:trusted)
+        |> Authority.award_trust_points(150)
+        |> then(fn p ->
+          %{p | rules: Map.put(p.rules, "arbor://custom/api", :auto)}
+        end)
+
+      serialized = Authority.for_persistence(original)
+      {:ok, restored} = Authority.from_persistence(serialized)
+
+      assert restored.trust_points == 150
+      assert restored.rules["arbor://custom/api"] == :auto
+    end
+
+    test "from_persistence accepts string-keyed maps (e.g. JSONB roundtrip)" do
+      original = Authority.new_profile("agent_string_keyed", :balanced)
+      serialized = Authority.for_persistence(original)
+
+      string_keyed =
+        for {k, v} <- serialized, into: %{} do
+          {to_string(k), v}
+        end
+
+      {:ok, restored} = Authority.from_persistence(string_keyed)
+      assert restored.agent_id == "agent_string_keyed"
+      assert restored.tier == original.tier
+    end
+
+    test "from_persistence coerces invalid rule modes to :ask (safe default)" do
+      data = %{
+        agent_id: "agent_bad_mode",
+        rules: %{"arbor://something" => "garbage_mode"}
+      }
+
+      {:ok, profile} = Authority.from_persistence(data)
+      assert profile.rules["arbor://something"] == :ask
+    end
+
+    test "from_persistence rejects data without an agent_id" do
+      assert {:error, :invalid_data} = Authority.from_persistence(%{})
+      assert {:error, :invalid_data} = Authority.from_persistence(nil)
+    end
+  end
 end
