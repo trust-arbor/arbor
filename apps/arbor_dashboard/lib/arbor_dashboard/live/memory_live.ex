@@ -953,37 +953,15 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
 
   defp tabs, do: @tabs
 
-  defp tab_label("working_memory"), do: "💭 Working Memory"
-  defp tab_label("identity"), do: "🪞 Identity"
-  defp tab_label("goals"), do: "🎯 Goals"
-  defp tab_label("knowledge"), do: "🕸️ Knowledge"
-  defp tab_label("preferences"), do: "⚙️ Preferences"
-  defp tab_label("proposals"), do: "📋 Proposals"
-  defp tab_label("code"), do: "💻 Code"
-  defp tab_label(other), do: other
+  # Display formatters delegate to MemoryDashboardCore — single source of truth
+  # so the dashboard, future API, and tests all see the same shape.
+  alias Arbor.Dashboard.Cores.MemoryDashboardCore
 
-  defp goal_color(:active), do: :green
-  defp goal_color(:achieved), do: :blue
-  defp goal_color(:abandoned), do: :red
-  defp goal_color(:failed), do: :red
-  defp goal_color(_), do: :gray
-
-  defp proposal_status_color(:pending), do: :yellow
-  defp proposal_status_color("pending"), do: :yellow
-  defp proposal_status_color(:accepted), do: :green
-  defp proposal_status_color("accepted"), do: :green
-  defp proposal_status_color(:rejected), do: :red
-  defp proposal_status_color("rejected"), do: :red
-  defp proposal_status_color(:deferred), do: :gray
-  defp proposal_status_color("deferred"), do: :gray
-  defp proposal_status_color(_), do: :gray
-
-  defp format_pct(nil), do: "—"
-  defp format_pct(n) when is_number(n), do: "#{round(n * 100)}%"
-  defp format_pct(other), do: to_string(other)
-
-  defp format_deadline(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d")
-  defp format_deadline(other), do: to_string(other)
+  defp tab_label(tab), do: MemoryDashboardCore.tab_label(tab)
+  defp goal_color(status), do: MemoryDashboardCore.goal_color(status)
+  defp proposal_status_color(status), do: MemoryDashboardCore.proposal_status_color(status)
+  defp format_pct(value), do: MemoryDashboardCore.format_pct(value)
+  defp format_deadline(value), do: MemoryDashboardCore.format_deadline(value)
 
   # Structs (Goal, Proposal) don't implement Access — bracket access crashes.
   # Normalize to plain maps at the load boundary so templates can use map[:key].
@@ -991,27 +969,8 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
   defp to_map_safe(%_{} = struct), do: Map.from_struct(struct)
   defp to_map_safe(other), do: other
 
-  defp traits(nil), do: []
-
-  defp traits(sk) do
-    Map.get(sk, :personality_traits, [])
-    |> Enum.map(fn
-      %{trait: name, strength: s} -> {to_string(name), s}
-      %{"trait" => name, "strength" => s} -> {to_string(name), s}
-      other -> {inspect(other), 0.5}
-    end)
-  end
-
-  defp values(nil), do: []
-
-  defp values(sk) do
-    Map.get(sk, :values, [])
-    |> Enum.map(fn
-      %{value: name, importance: i} -> {to_string(name), i}
-      %{"value" => name, "importance" => i} -> {to_string(name), i}
-      other -> {inspect(other), 0.5}
-    end)
-  end
+  defp traits(sk), do: MemoryDashboardCore.extract_traits(sk)
+  defp values(sk), do: MemoryDashboardCore.extract_values(sk)
 
   defp discover_agents do
     # Combine agents from ETS tables and ChatState recent list
