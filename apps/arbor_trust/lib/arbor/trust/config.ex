@@ -413,15 +413,21 @@ defmodule Arbor.Trust.Config do
   """
   @spec resolve_tier(0..100) :: trust_tier()
   def resolve_tier(score) when is_integer(score) do
-    thresholds = tier_thresholds()
+    case Application.get_env(:arbor_trust, :tier_thresholds) do
+      nil ->
+        # No config override — delegate to the canonical CRC implementation.
+        Arbor.Trust.Authority.resolve_tier(score)
 
-    tiers()
-    |> Enum.map(fn tier -> {tier, Map.fetch!(thresholds, tier)} end)
-    |> Enum.sort_by(fn {_tier, threshold} -> threshold end, :desc)
-    |> Enum.find(fn {_tier, threshold} -> score >= threshold end)
-    |> case do
-      {tier, _} -> tier
-      nil -> List.first(tiers())
+      thresholds when is_map(thresholds) ->
+        # Custom thresholds configured — use them.
+        tiers()
+        |> Enum.map(fn tier -> {tier, Map.fetch!(thresholds, tier)} end)
+        |> Enum.sort_by(fn {_tier, threshold} -> threshold end, :desc)
+        |> Enum.find(fn {_tier, threshold} -> score >= threshold end)
+        |> case do
+          {tier, _} -> tier
+          nil -> List.first(tiers())
+        end
     end
   end
 
