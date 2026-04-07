@@ -271,7 +271,7 @@ defmodule Arbor.Memory.MemoryCoreTest do
   end
 
   describe "for_dashboard/1" do
-    test "formats for display" do
+    test "formats for display from a plain map" do
       wm = %{
         agent_id: "agent_123",
         recent_thoughts: [%{content: "a"}, %{content: "b"}],
@@ -287,6 +287,28 @@ defmodule Arbor.Memory.MemoryCoreTest do
       assert length(dashboard.active_goals) == 1
       assert hd(dashboard.active_goals).priority == 80
       assert dashboard.engagement_level == 0.7
+    end
+
+    test "formats for display from a WorkingMemory struct (regression)" do
+      # Regression: previous version used `wm[:field]` (Access protocol) which
+      # raises on structs that don't implement Access. WorkingMemory doesn't.
+      # This test exercises the function with a real struct so we don't ship
+      # the same bug twice. The crash signature was:
+      #   UndefinedFunctionError: Arbor.Memory.WorkingMemory.fetch/2 is undefined
+      wm = Arbor.Memory.WorkingMemory.new("agent_struct_test")
+
+      wm =
+        wm
+        |> Arbor.Memory.WorkingMemory.add_thought("a thought")
+        |> Arbor.Memory.WorkingMemory.add_concern("a concern")
+
+      # Must not raise
+      dashboard = MemoryCore.for_dashboard(wm)
+
+      assert dashboard.agent_id == "agent_struct_test"
+      assert dashboard.thought_count >= 1
+      assert dashboard.concerns_count >= 1
+      assert is_list(dashboard.active_goals)
     end
   end
 

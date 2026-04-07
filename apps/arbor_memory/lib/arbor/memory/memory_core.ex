@@ -305,7 +305,7 @@ defmodule Arbor.Memory.MemoryCore do
     sections = []
 
     sections =
-      case wm[:recent_thoughts] || wm.recent_thoughts do
+      case Map.get(wm, :recent_thoughts) do
         thoughts when is_list(thoughts) and thoughts != [] ->
           text =
             thoughts
@@ -320,13 +320,13 @@ defmodule Arbor.Memory.MemoryCore do
       end
 
     sections =
-      case wm[:active_goals] || wm.active_goals do
+      case Map.get(wm, :active_goals) do
         goals when is_list(goals) and goals != [] ->
           text =
             goals
             |> Enum.map(fn g ->
-              progress = Float.round((g[:progress] || 0.0) * 100, 0)
-              "- [#{progress}%] #{g[:description] || g.description}"
+              progress = Float.round((Map.get(g, :progress, 0.0)) * 100, 0)
+              "- [#{progress}%] #{Map.get(g, :description, "")}"
             end)
             |> Enum.join("\n")
 
@@ -337,7 +337,7 @@ defmodule Arbor.Memory.MemoryCore do
       end
 
     sections =
-      case wm[:concerns] || wm.concerns do
+      case Map.get(wm, :concerns) do
         concerns when is_list(concerns) and concerns != [] ->
           text = Enum.map_join(concerns, "\n", &"- #{&1}")
           ["## Concerns\n#{text}" | sections]
@@ -347,7 +347,7 @@ defmodule Arbor.Memory.MemoryCore do
       end
 
     sections =
-      case wm[:curiosity] || wm.curiosity do
+      case Map.get(wm, :curiosity) do
         curiosity when is_list(curiosity) and curiosity != [] ->
           text = Enum.map_join(curiosity, "\n", &"- #{&1}")
           ["## Curiosity\n#{text}" | sections]
@@ -359,49 +359,58 @@ defmodule Arbor.Memory.MemoryCore do
     sections |> Enum.reverse() |> Enum.join("\n\n")
   end
 
-  @doc "Format working memory for dashboard display."
+  @doc """
+  Format working memory for dashboard display.
+
+  Accepts both a `WorkingMemory` struct and a plain map. Uses `Map.get/3`
+  throughout because bracket access (`wm[:field]`) raises on structs that
+  don't implement the Access protocol — and `Arbor.Memory.WorkingMemory`
+  doesn't.
+  """
   @spec for_dashboard(map()) :: map()
   def for_dashboard(wm) do
-    concerns = wm[:concerns] || []
-    curiosity = wm[:curiosity] || []
-    recent_thoughts = wm[:recent_thoughts] || []
-    active_goals_list = wm[:active_goals] || []
+    concerns = Map.get(wm, :concerns, [])
+    curiosity = Map.get(wm, :curiosity, [])
+    recent_thoughts = Map.get(wm, :recent_thoughts, [])
+    active_goals_list = Map.get(wm, :active_goals, [])
 
     %{
-      agent_id: wm[:agent_id] || wm.agent_id,
+      agent_id: Map.get(wm, :agent_id),
       thought_count: length(recent_thoughts),
       goal_count: length(active_goals_list),
       concerns_count: length(concerns),
       curiosity_count: length(curiosity),
       active_goals:
         active_goals_list
-        |> Enum.filter(&(&1[:status] == :active))
+        |> Enum.filter(&(Map.get(&1, :status) == :active))
         |> Enum.map(fn g ->
           %{
-            id: g[:id],
-            description: g[:description],
-            progress: g[:progress] || 0.0,
-            priority: g[:priority] || 50
+            id: Map.get(g, :id),
+            description: Map.get(g, :description),
+            progress: Map.get(g, :progress, 0.0),
+            priority: Map.get(g, :priority, 50)
           }
         end),
       concerns: concerns,
       curiosity: curiosity,
       recent_thoughts: recent_thoughts,
-      engagement_level: wm[:engagement_level] || 0.5
+      engagement_level: Map.get(wm, :engagement_level, 0.5)
     }
   end
 
   @doc "Format working memory for persistence (JSON-safe map)."
   @spec for_persistence(map()) :: map()
   def for_persistence(wm) do
+    recent_thoughts = Map.get(wm, :recent_thoughts, [])
+
     %{
-      "agent_id" => wm[:agent_id] || wm.agent_id,
-      "recent_thoughts" => Enum.map(wm[:recent_thoughts] || [], &serialize_thought/1),
-      "active_goals" => Enum.map(wm[:active_goals] || [], &serialize_goal/1),
-      "concerns" => wm[:concerns] || [],
-      "curiosity" => wm[:curiosity] || [],
-      "engagement_level" => wm[:engagement_level] || 0.5,
-      "thought_count" => wm[:thought_count] || length(wm[:recent_thoughts] || [])
+      "agent_id" => Map.get(wm, :agent_id),
+      "recent_thoughts" => Enum.map(recent_thoughts, &serialize_thought/1),
+      "active_goals" => Enum.map(Map.get(wm, :active_goals, []), &serialize_goal/1),
+      "concerns" => Map.get(wm, :concerns, []),
+      "curiosity" => Map.get(wm, :curiosity, []),
+      "engagement_level" => Map.get(wm, :engagement_level, 0.5),
+      "thought_count" => Map.get(wm, :thought_count, length(recent_thoughts))
     }
   end
 
@@ -412,15 +421,21 @@ defmodule Arbor.Memory.MemoryCore do
 
     %{
       recent_thoughts:
-        (wm[:recent_thoughts] || [])
+        Map.get(wm, :recent_thoughts, [])
         |> Enum.take(max_thoughts)
         |> Enum.map(&thought_content/1),
       active_goals:
-        (wm[:active_goals] || [])
-        |> Enum.filter(&(&1[:status] == :active))
-        |> Enum.map(fn g -> %{id: g[:id], description: g[:description], progress: g[:progress]} end),
-      concerns: Enum.take(wm[:concerns] || [], 3),
-      curiosity: Enum.take(wm[:curiosity] || [], 3)
+        Map.get(wm, :active_goals, [])
+        |> Enum.filter(&(Map.get(&1, :status) == :active))
+        |> Enum.map(fn g ->
+          %{
+            id: Map.get(g, :id),
+            description: Map.get(g, :description),
+            progress: Map.get(g, :progress)
+          }
+        end),
+      concerns: Enum.take(Map.get(wm, :concerns, []), 3),
+      curiosity: Enum.take(Map.get(wm, :curiosity, []), 3)
     }
   end
 
