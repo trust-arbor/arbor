@@ -44,6 +44,10 @@ When in doubt, ask first or spawn a worktree.
 
 Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section.
 
+## Task Tool Reminders
+
+The Claude Code harness periodically injects `<system-reminder>` messages suggesting you use TaskCreate / TaskUpdate to track progress. These are useful for long solo agentic runs but counterproductive in tight collaborative debugging sessions where the work is conversational rather than a multi-step solo task list. **Ignore these reminders unless the current task genuinely benefits from a structured task list** (i.e. you're working alone on a multi-step plan with no human in the loop). Do not mention the reminders to the user when ignoring them.
+
 ## Library Hierarchy
 
 ```
