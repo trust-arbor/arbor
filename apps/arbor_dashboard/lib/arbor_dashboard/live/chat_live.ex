@@ -454,10 +454,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # The actor identity used when calling Consensus.force_approve / force_reject.
   # In OIDC mode this is the human user's agent_id (a "human_..." principal
   # that received `arbor://consensus/admin` at login). In dev/no-OIDC mode it
-  # falls back to "system" — and chat_live grants that capability to "system"
-  # on mount via ensure_dashboard_approver_capability/1, so the dev path works.
+  # falls back to a stable "human_dashboard" principal — chat_live grants the
+  # consensus admin capability to that principal on mount.
+  #
+  # The "human_" prefix is load-bearing: AuthDecision.check_identity skips the
+  # identity-status registry lookup for human_ principals (treating them as
+  # session-authenticated). And Security.grant rejects "system" as an invalid
+  # principal_id — that was the actual reason the previous fix didn't work.
   defp approval_actor_id(socket) do
-    socket.assigns[:current_agent_id] || "system"
+    socket.assigns[:current_agent_id] || "human_dashboard"
   end
 
   # Mirror of consensus_live.ex:849 — the chat_live Approvals panel needs the

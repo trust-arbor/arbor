@@ -161,6 +161,15 @@ defmodule Arbor.Orchestrator.Session.Persistence do
           assistant_content =
             build_assistant_content(assistant_msg["content"], tool_calls)
 
+          # Bump the assistant timestamp by one microsecond so user always
+          # sorts before assistant on the same turn. SessionEntry has only a
+          # `timestamp` field (no inserted_at, no sequence number) and the id
+          # is a UUID — so the SessionStore query has no deterministic
+          # tiebreaker on equal timestamps. Without this offset, restored
+          # chat history occasionally rendered the user message AFTER the
+          # assistant response. (2026-04-07 regression after 7ea0a943.)
+          assistant_timestamp = DateTime.add(timestamp, 1, :microsecond)
+
           persist_entry.(%{
             entry_type: "assistant",
             role: "assistant",
@@ -170,7 +179,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             # `session.usage` is the live key written by LlmHandler.
             # `llm.usage` was a dead-letter read — nothing wrote to it.
             token_usage: Map.get(result_ctx, "session.usage"),
-            timestamp: timestamp,
+            timestamp: assistant_timestamp,
             metadata: %{
               "turn_count" => ContextBuilder.get_turn_count(state) + 1
             }

@@ -737,8 +737,18 @@ defmodule Arbor.Consensus.Coordinator do
     # back into this GenServer. AuthDecision only reads from ETS — no GenServer calls.
     auth_decision = Arbor.Security.AuthDecision
 
+    # Skip signed_request verification: force_approve/force_reject are called
+    # from the dashboard process where the human is already authenticated at
+    # the OIDC session layer (or trusted in dev mode). The Coordinator's job
+    # here is to verify the principal HAS the consensus admin capability —
+    # not to re-verify their identity. Without this opt the check fails with
+    # :missing_signed_request because no signed_request is plumbed through
+    # GenServer.call boundaries. (2026-04-07: this is what was breaking the
+    # in-chat Approve button on chat_live.)
     if Code.ensure_loaded?(auth_decision) do
-      case auth_decision.check(actor_id, "arbor://consensus/admin", :force) do
+      case auth_decision.check(actor_id, "arbor://consensus/admin", :force,
+             verify_identity: false
+           ) do
         :authorized ->
           :ok
 
