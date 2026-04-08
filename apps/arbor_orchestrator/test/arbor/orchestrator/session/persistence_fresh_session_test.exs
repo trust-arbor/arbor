@@ -114,7 +114,11 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
     %{
       session_id: session_id,
       agent_id: agent_id,
-      adapters: nil
+      adapters: nil,
+      # ContextBuilder.get_turn_count/1 reads this; persist_turn_entries
+      # references it for the assistant entry's metadata.turn_count.
+      turn_count: 0,
+      messages: []
     }
   end
 
@@ -190,6 +194,152 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
       [{uuid, _attrs}] = FakeSessionStore.appended_entries()
       assert uuid == "uuid_pre_existing"
+    end
+  end
+
+  describe "persist_turn_entries/5 — user/assistant timestamp ordering (regression for 24246be2)" do
+    # The 2026-04-07 chat-history ordering bug: SessionEntry has only a
+    # `timestamp` field (no inserted_at, no sequence number) and a UUID `id`,
+    # so the SessionStore query has no deterministic tiebreaker on equal
+    # timestamps. The original fix bumped the assistant timestamp +1µs as a
+    # workaround. After the typed UserMessage envelope shipped, that
+    # workaround was removed in favor of real divergence (`user_sent_at`
+    # captured at the transport boundary, `assistant_completed_at` captured
+    # at turn completion).
+    #
+    # These tests guard against TWO failure modes:
+    #   1. Someone removes the explicit timestamp opts (regression to single
+    #      shared `now` for both entries)
+    #   2. Someone re-introduces the +1µs workaround AND drops the explicit
+    #      opts (a confusing partial revert)
+    #
+    # If either happens, these tests fail loudly.
+
+    test "user_sent_at is used for the user entry timestamp" do
+      {:ok, _} =
+        FakeSessionStore.start_link(
+          existing_sessions: %{"agent-session-ordering_a" => "uuid_a"}
+        )
+
+      on_exit(&FakeSessionStore.stop/0)
+
+      state = build_state("agent-session-ordering_a", "ordering_a")
+      sent_at = ~U[2026-04-08 15:00:00.000000Z]
+      completed_at = ~U[2026-04-08 15:00:42.500000Z]
+
+      Persistence.persist_turn_entries(
+        state,
+        %{"role" => "user", "content" => "hello"},
+        %{"role" => "assistant", "content" => "hi there"},
+        %{},
+        user_sent_at: sent_at,
+        assistant_completed_at: completed_at
+      )
+
+      # persist_turn_entries spawns a Task — give it a moment to land
+      :timer.sleep(50)
+
+      entries = FakeSessionStore.appended_entries()
+      assert length(entries) == 2
+
+      user_entry = Enum.find_value(entries, fn {_uuid, attrs} ->
+        if attrs[:entry_type] == "user", do: attrs
+      end)
+
+      assistant_entry = Enum.find_value(entries, fn {_uuid, attrs} ->
+        if attrs[:entry_type] == "assistant", do: attrs
+      end)
+
+      assert user_entry, "expected a user entry to be persisted"
+      assert assistant_entry, "expected an assistant entry to be persisted"
+
+      assert user_entry[:timestamp] == sent_at,
+             "user entry must use user_sent_at, not turn-end time " <>
+               "(got: #{inspect(user_entry[:timestamp])})"
+
+      assert assistant_entry[:timestamp] == completed_at,
+             "assistant entry must use assistant_completed_at " <>
+               "(got: #{inspect(assistant_entry[:timestamp])})"
+    end
+
+    test "user timestamp is strictly less than assistant timestamp (real divergence, not +1µs)" do
+      {:ok, _} =
+        FakeSessionStore.start_link(
+          existing_sessions: %{"agent-session-ordering_b" => "uuid_b"}
+        )
+
+      on_exit(&FakeSessionStore.stop/0)
+
+      state = build_state("agent-session-ordering_b", "ordering_b")
+      sent_at = ~U[2026-04-08 15:00:00.000000Z]
+      completed_at = ~U[2026-04-08 15:00:42.500000Z]
+
+      Persistence.persist_turn_entries(
+        state,
+        %{"role" => "user", "content" => "test"},
+        %{"role" => "assistant", "content" => "response"},
+        %{},
+        user_sent_at: sent_at,
+        assistant_completed_at: completed_at
+      )
+
+      :timer.sleep(50)
+
+      entries = FakeSessionStore.appended_entries()
+      user_ts = Enum.find_value(entries, fn {_uuid, attrs} ->
+        if attrs[:entry_type] == "user", do: attrs[:timestamp]
+      end)
+      asst_ts = Enum.find_value(entries, fn {_uuid, attrs} ->
+        if attrs[:entry_type] == "assistant", do: attrs[:timestamp]
+      end)
+
+      assert DateTime.compare(user_ts, asst_ts) == :lt,
+             "user.timestamp must be strictly less than assistant.timestamp " <>
+               "(real LLM-call latency divergence, NOT a +1µs synthetic offset). " <>
+               "user=#{inspect(user_ts)} assistant=#{inspect(asst_ts)}"
+
+      # The divergence should also be MORE than 1µs (the old workaround) — if
+      # it's exactly 1µs we may have regressed to the synthetic offset.
+      diff_us = DateTime.diff(asst_ts, user_ts, :microsecond)
+      assert diff_us > 1,
+             "timestamps diverge by exactly #{diff_us}µs — this looks like the " <>
+               "+1µs workaround crept back. Real LLM-call latency should be much larger."
+    end
+
+    test "missing opts fall back to DateTime.utc_now/0 for backwards compat" do
+      {:ok, _} =
+        FakeSessionStore.start_link(
+          existing_sessions: %{"agent-session-ordering_c" => "uuid_c"}
+        )
+
+      on_exit(&FakeSessionStore.stop/0)
+
+      state = build_state("agent-session-ordering_c", "ordering_c")
+      before = DateTime.utc_now()
+
+      Persistence.persist_turn_entries(
+        state,
+        %{"role" => "user", "content" => "test"},
+        %{"role" => "assistant", "content" => "reply"},
+        %{}
+      )
+
+      :timer.sleep(50)
+      after_time = DateTime.utc_now()
+
+      entries = FakeSessionStore.appended_entries()
+      assert length(entries) == 2
+
+      Enum.each(entries, fn {_uuid, attrs} ->
+        ts = attrs[:timestamp]
+        assert %DateTime{} = ts, "entry must have a DateTime timestamp"
+
+        assert DateTime.compare(ts, before) in [:gt, :eq],
+               "entry timestamp #{inspect(ts)} should be >= before=#{inspect(before)}"
+
+        assert DateTime.compare(ts, after_time) in [:lt, :eq],
+               "entry timestamp #{inspect(ts)} should be <= after=#{inspect(after_time)}"
+      end)
     end
   end
 end
