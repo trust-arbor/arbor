@@ -649,7 +649,17 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       agent_id ->
         approvals = fetch_pending_approvals(agent_id)
-        {:noreply, stream(socket, :approvals, approvals, reset: true)}
+
+        # Sync approvals_count with the polled list — without this the
+        # empty-state overlay covers the items whenever the polling
+        # fallback is the first thing to populate the stream (e.g. when
+        # the live signal got dropped under backpressure).
+        socket =
+          socket
+          |> assign(:approvals_count, length(approvals))
+          |> stream(:approvals, approvals, reset: true)
+
+        {:noreply, socket}
     end
   rescue
     _ -> {:noreply, socket}
