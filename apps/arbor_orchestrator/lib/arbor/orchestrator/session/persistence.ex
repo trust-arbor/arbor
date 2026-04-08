@@ -10,7 +10,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   alias Arbor.Orchestrator.Session.ContextBuilder
 
-  @session_store Arbor.Persistence.SessionStore
+  # Runtime-resolved so tests can inject a fake module via the
+  # `:session_store_module` application env. Default is the real one.
+  defp session_store do
+    Application.get_env(:arbor_orchestrator, :session_store_module, Arbor.Persistence.SessionStore)
+  end
 
   # ── Checkpoint application ────────────────────────────────────────
 
@@ -232,16 +236,42 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   @doc false
   def build_persist_fn_from_store(state) do
     if session_store_available?() do
-      case get_session_uuid(state.session_id) do
+      # Create the SessionStore session row if it doesn't exist yet — the
+      # first turn for a fresh agent needs the row to anchor entries to.
+      # The legacy `maybe_persist_turn` (removed in 6087feaf) used to do
+      # this; without it, fresh sessions silently dropped every entry and
+      # restored chat history was empty.
+      case ensure_session_uuid(state.session_id, state.agent_id) do
         nil -> nil
-        uuid -> fn attrs -> apply(@session_store, :append_entry, [uuid, attrs]) end
+        uuid -> fn attrs -> apply(session_store(), :append_entry, [uuid, attrs]) end
       end
     end
   end
 
   @doc false
+  def ensure_session_uuid(session_id, agent_id) do
+    case apply(session_store(), :get_session, [session_id]) do
+      {:ok, session} ->
+        session.id
+
+      {:error, :not_found} ->
+        case apply(session_store(), :create_session, [agent_id, [session_id: session_id]]) do
+          {:ok, session} -> session.id
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc false
   def get_session_uuid(session_id) do
-    case apply(@session_store, :get_session, [session_id]) do
+    case apply(session_store(), :get_session, [session_id]) do
       {:ok, session} -> session.id
       _ -> nil
     end
@@ -253,9 +283,9 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   @doc false
   def session_store_available? do
-    Code.ensure_loaded?(@session_store) and
-      function_exported?(@session_store, :available?, 0) and
-      apply(@session_store, :available?, [])
+    Code.ensure_loaded?(session_store()) and
+      function_exported?(session_store(), :available?, 0) and
+      apply(session_store(), :available?, [])
   end
 
   @doc false
