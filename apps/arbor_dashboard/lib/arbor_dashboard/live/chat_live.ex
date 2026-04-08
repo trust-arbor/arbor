@@ -101,7 +101,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         thinking_count: 0,
         memories_count: 0,
         llm_interactions_count: 0,
-        approvals_count: 0
+        approvals_count: 0,
+        known_approval_ids: MapSet.new()
       )
       |> assign(GroupChat.init_assigns())
       |> stream(:messages, [])
@@ -126,6 +127,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           else
             []
           end
+
+        # Grant the consensus admin capability to whatever actor will press
+        # Approve in this LiveView. Idempotent — Security.grant returns {:error,
+        # :already_exists} on subsequent calls and we don't care.
+        _ = ensure_dashboard_approver_capability(socket)
 
         socket
         |> SignalLive.subscribe_raw("agent.*")
@@ -385,11 +391,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("approve-tool", %{"id" => proposal_id}, socket) do
-    actor_id = socket.assigns[:current_agent_id] || "system"
+    actor_id = approval_actor_id(socket)
 
     case safe_consensus_approve(proposal_id, actor_id) do
       :ok ->
-        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+        {:noreply, drop_approval(socket, proposal_id)}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
@@ -401,7 +407,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
         socket
       ) do
-    actor_id = socket.assigns[:current_agent_id] || "system"
+    actor_id = approval_actor_id(socket)
 
     case safe_consensus_approve(proposal_id, actor_id) do
       :ok ->
@@ -412,7 +418,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           apply(store, :always_allow, [agent_id, resource])
         end
 
-        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+        {:noreply, drop_approval(socket, proposal_id)}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
@@ -420,15 +426,60 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("deny-tool", %{"id" => proposal_id}, socket) do
-    actor_id = socket.assigns[:current_agent_id] || "system"
+    actor_id = approval_actor_id(socket)
 
     case safe_consensus_reject(proposal_id, actor_id) do
       :ok ->
-        {:noreply, stream_delete_by_dom_id(socket, :approvals, "approvals-#{proposal_id}")}
+        {:noreply, drop_approval(socket, proposal_id)}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Deny failed: #{inspect(reason)}")}
     end
+  end
+
+  # Centralized "approval consumed" cleanup. Any path that resolves an
+  # approval (approve / always-allow / deny) needs to remove it from the
+  # stream AND decrement the count AND drop it from known_approval_ids
+  # so the polling fallback doesn't re-add it.
+  defp drop_approval(socket, proposal_id) do
+    seen = socket.assigns[:known_approval_ids] || MapSet.new()
+    new_count = max((socket.assigns[:approvals_count] || 0) - 1, 0)
+
+    socket
+    |> stream_delete_by_dom_id(:approvals, "approvals-#{proposal_id}")
+    |> assign(:approvals_count, new_count)
+    |> assign(:known_approval_ids, MapSet.delete(seen, proposal_id))
+  end
+
+  # The actor identity used when calling Consensus.force_approve / force_reject.
+  # In OIDC mode this is the human user's agent_id (a "human_..." principal
+  # that received `arbor://consensus/admin` at login). In dev/no-OIDC mode it
+  # falls back to "system" — and chat_live grants that capability to "system"
+  # on mount via ensure_dashboard_approver_capability/1, so the dev path works.
+  defp approval_actor_id(socket) do
+    socket.assigns[:current_agent_id] || "system"
+  end
+
+  # Mirror of consensus_live.ex:849 — the chat_live Approvals panel needs the
+  # same capability the standalone Consensus dashboard relies on. Without this,
+  # clicking Approve in chat_live fails with {:unauthorized, :consensus_admin_required}
+  # while the same action on /consensus would succeed. (Reproduced 2026-04-07.)
+  defp ensure_dashboard_approver_capability(socket) do
+    actor_id = approval_actor_id(socket)
+
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :grant, 1) do
+      Arbor.Security.grant(
+        principal: actor_id,
+        resource: "arbor://consensus/admin",
+        constraints: %{},
+        metadata: %{source: :chat_live}
+      )
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
@@ -583,10 +634,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         created_at: signal.timestamp || DateTime.utc_now()
       }
 
-      {:noreply,
-       socket
-       |> stream_insert(:approvals, approval)
-       |> update(:approvals_count, &(&1 + 1))}
+      seen = socket.assigns[:known_approval_ids] || MapSet.new()
+
+      if MapSet.member?(seen, approval.id) do
+        # Already streamed (e.g., via the polling fallback) — skip duplicate.
+        {:noreply, socket}
+      else
+        {:noreply,
+         socket
+         |> stream_insert(:approvals, approval)
+         |> update(:approvals_count, &(&1 + 1))
+         |> assign(:known_approval_ids, MapSet.put(seen, approval.id))}
+      end
     else
       {:noreply, socket}
     end
@@ -650,16 +709,39 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       agent_id ->
         approvals = fetch_pending_approvals(agent_id)
 
-        # Sync approvals_count with the polled list — without this the
-        # empty-state overlay covers the items whenever the polling
-        # fallback is the first thing to populate the stream (e.g. when
-        # the live signal got dropped under backpressure).
-        socket =
-          socket
-          |> assign(:approvals_count, length(approvals))
-          |> stream(:approvals, approvals, reset: true)
+        # Polling is a defense-in-depth fallback for signal drops, NOT an
+        # authoritative replacement of the stream. Earlier versions used
+        # `stream(reset: true, ...)` which wiped the panel every 5s and
+        # raced with the signal-arrival path: when Consensus returned an
+        # eventually-consistent empty snapshot, the polling reset blew away
+        # an item the signal had just delivered, then the next poll restored
+        # it — visible as the "No pending approvals" overlay flickering over
+        # real items.
+        #
+        # Instead: insert items from polling that aren't already in our local
+        # tracking set (so we catch dropped signals), and trust the signal +
+        # approve/reject handlers to remove items from the stream. The count
+        # only ever grows from polling — it shrinks via stream_delete on
+        # explicit user actions.
+        seen = socket.assigns[:known_approval_ids] || MapSet.new()
 
-        {:noreply, socket}
+        {socket, new_seen} =
+          Enum.reduce(approvals, {socket, seen}, fn approval, {acc_socket, acc_seen} ->
+            id = approval.id
+
+            if MapSet.member?(acc_seen, id) do
+              {acc_socket, acc_seen}
+            else
+              {
+                acc_socket
+                |> stream_insert(:approvals, approval)
+                |> update(:approvals_count, &(&1 + 1)),
+                MapSet.put(acc_seen, id)
+              }
+            end
+          end)
+
+        {:noreply, assign(socket, :known_approval_ids, new_seen)}
     end
   rescue
     _ -> {:noreply, socket}
@@ -1155,6 +1237,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       s
       |> assign(:approvals_count, length(pending))
+      |> assign(:known_approval_ids, MapSet.new(Enum.map(pending, & &1.id)))
       |> stream(:approvals, pending, reset: true)
     end)
   end
