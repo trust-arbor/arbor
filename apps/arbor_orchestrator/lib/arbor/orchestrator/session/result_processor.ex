@@ -319,7 +319,13 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
   @doc false
   def emit_heartbeat_signal(state, %{context: _ctx} = result) do
     hr = HeartbeatResult.from_result_ctx(state, result)
-    emit_signal(:agent, :heartbeat_complete, HeartbeatResult.to_signal_data(hr), state.tenant_context)
+
+    emit_signal(
+      :agent,
+      :heartbeat_complete,
+      HeartbeatResult.to_signal_data(hr),
+      state.tenant_context
+    )
   end
 
   def emit_heartbeat_signal(_state, _result), do: :ok

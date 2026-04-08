@@ -13,7 +13,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   # Runtime-resolved so tests can inject a fake module via the
   # `:session_store_module` application env. Default is the real one.
   defp session_store do
-    Application.get_env(:arbor_orchestrator, :session_store_module, Arbor.Persistence.SessionStore)
+    Application.get_env(
+      :arbor_orchestrator,
+      :session_store_module,
+      Arbor.Persistence.SessionStore
+    )
   end
 
   # ── Checkpoint application ────────────────────────────────────────

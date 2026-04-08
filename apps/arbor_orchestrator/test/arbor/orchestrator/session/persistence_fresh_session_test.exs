@@ -154,7 +154,13 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       assert is_function(persist_fn, 1)
 
       :ok = persist_fn.(%{entry_type: "user", role: "user", content: [%{"text" => "hi"}]})
-      :ok = persist_fn.(%{entry_type: "assistant", role: "assistant", content: [%{"text" => "hello"}]})
+
+      :ok =
+        persist_fn.(%{
+          entry_type: "assistant",
+          role: "assistant",
+          content: [%{"text" => "hello"}]
+        })
 
       entries = FakeSessionStore.appended_entries()
       assert length(entries) == 2

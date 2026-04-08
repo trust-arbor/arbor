@@ -119,7 +119,7 @@ defmodule Arbor.Dashboard.Cores.EventsCoreTest do
 
     test "returns false when no agent_id" do
       assert EventsCore.matches_agent?(%{data: %{}}, "any")
-      |> Kernel.==(false)
+             |> Kernel.==(false)
     end
 
     test "returns false for non-matching substring" do

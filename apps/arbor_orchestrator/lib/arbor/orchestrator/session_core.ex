@@ -304,11 +304,13 @@ defmodule Arbor.Orchestrator.SessionCore do
   # ===========================================================================
 
   defp parse_timestamp(%DateTime{} = dt), do: dt
+
   defp parse_timestamp(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
       {:ok, dt, _} -> dt
       _ -> DateTime.utc_now()
     end
   end
+
   defp parse_timestamp(_), do: DateTime.utc_now()
 end

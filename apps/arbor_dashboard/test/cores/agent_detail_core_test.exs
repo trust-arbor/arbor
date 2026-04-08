@@ -73,7 +73,13 @@ defmodule Arbor.Dashboard.Cores.AgentDetailCoreTest do
 
     test "shapes each goal with icon, label, type, priority" do
       goals = [
-        %{id: "g1", type: :achieve, description: "Ship the refactor", priority: 80, progress: 0.5},
+        %{
+          id: "g1",
+          type: :achieve,
+          description: "Ship the refactor",
+          priority: 80,
+          progress: 0.5
+        },
         %{id: "g2", type: :maintain, description: "Tests stay green", priority: 100}
       ]
 

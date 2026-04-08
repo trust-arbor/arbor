@@ -917,7 +917,6 @@ defmodule Arbor.Dashboard.Live.MemoryLive do
     }
   end
 
-
   # Refresh section-specific data when expanding from Overview
   defp maybe_load_section_data(socket, nil, _agent_id), do: socket
 

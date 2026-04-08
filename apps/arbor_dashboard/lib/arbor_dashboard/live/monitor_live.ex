@@ -36,12 +36,13 @@ defmodule Arbor.Dashboard.Live.MonitorLive do
         :timer.send_interval(@refresh_interval, :refresh)
 
         subscribe_signals(socket, "monitor.*", fn s ->
-          new_state = MonitorCore.update_data(
-            s.assigns.monitor_state,
-            s.assigns.monitor_state.metrics,
-            safe_fetch_anomalies(),
-            s.assigns.monitor_state.status
-          )
+          new_state =
+            MonitorCore.update_data(
+              s.assigns.monitor_state,
+              s.assigns.monitor_state.metrics,
+              safe_fetch_anomalies(),
+              s.assigns.monitor_state.status
+            )
 
           s
           |> assign(:monitor_state, new_state)
