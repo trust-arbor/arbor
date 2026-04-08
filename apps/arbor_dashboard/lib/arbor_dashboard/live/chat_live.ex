@@ -287,12 +287,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
           {:noreply, socket}
         else
-          # Add user message
+          # Capture the *real* send time once and use it for both display and
+          # persistence. The UserMessage envelope carries `sent_at` all the way
+          # down through APIAgent.query → Session.send_message → persist_turn_entries
+          # so the SessionStore user-entry timestamp matches the instant the
+          # user actually clicked Send (not the much-later turn-completion time).
+          user_message =
+            Arbor.Contracts.Session.UserMessage.from_dashboard(
+              input,
+              socket.assigns[:current_agent_id]
+            )
+
+          # Local stream display map — uses the SAME sent_at as the envelope
+          # so display and persistence agree on the timestamp for the same
+          # logical event.
           user_msg = %{
             id: "msg-#{System.unique_integer([:positive])}",
             role: :user,
             content: input,
-            timestamp: DateTime.utc_now()
+            timestamp: user_message.sent_at
           }
 
           socket =
@@ -300,9 +313,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             |> stream_insert(:messages, user_msg)
             |> assign(input: "", loading: true, error: nil, streaming_text: "")
 
-          # Spawn async query — keeps LiveView responsive during LLM calls
-          # Command routing happens centrally in Manager.chat/Session.send_message
-          dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, input)
+          # Spawn async query — keeps LiveView responsive during LLM calls.
+          # Command routing happens centrally in Manager.chat/Session.send_message.
+          dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, user_message)
 
           {:noreply, socket}
         end
@@ -997,7 +1010,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end)
   end
 
-  defp run_query(:cli, agent, input) do
+  # CLI backend (Claude SDK) needs the bare-string content. The UserMessage
+  # envelope's `sent_at` is dropped here because the Claude SDK doesn't have
+  # a slot for it — that path doesn't go through Arbor's Session/persistence,
+  # so the timestamp isn't used downstream anyway.
+  defp run_query(:cli, agent, %Arbor.Contracts.Session.UserMessage{} = um) do
+    run_query(:cli, agent, um.content)
+  end
+
+  defp run_query(:cli, agent, input) when is_binary(input) do
     result =
       try do
         Claude.query(agent, input, timeout: :infinity, permission_mode: :bypass)
@@ -1008,6 +1029,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:cli, result}
   end
 
+  # API backend threads the UserMessage envelope (or a bare string) all the way
+  # to Session.send_message via APIAgent.query → handle_session_query → GenServer.call.
   defp run_query(:api, agent, input) do
     result =
       try do
