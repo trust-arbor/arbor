@@ -78,7 +78,8 @@ defmodule Arbor.Agent.APIAgent do
   - `:recall_memories` - Whether to recall memories (default: true)
   - `:index_response` - Whether to index response facts (default: true)
   """
-  @spec query(t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec query(t(), String.t() | Arbor.Contracts.Session.UserMessage.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
   def query(agent, prompt, opts \\ []) do
     GenServer.call(agent, {:query, prompt, opts}, Keyword.get(opts, :timeout, 600_000))
   end
@@ -269,21 +270,35 @@ defmodule Arbor.Agent.APIAgent do
   # Private: Query Handling
   # ============================================================================
 
-  defp handle_session_query(prompt, opts, state, session_pid) do
+  # Extract the bare-string content from either a UserMessage envelope or a
+  # plain string. The session-query path uses this to feed prepare_query and
+  # finalize_query (which need string content) while still passing the typed
+  # value down to the Session GenServer for end-to-end timestamp threading.
+  defp message_content(%Arbor.Contracts.Session.UserMessage{content: c}), do: c
+  defp message_content(content) when is_binary(content), do: content
+  defp message_content(other), do: inspect(other)
+
+  defp handle_session_query(message, opts, state, session_pid) do
+    # `message` may be a bare string OR an Arbor.Contracts.Session.UserMessage —
+    # extract content for memory recall/indexing (which need the string), but
+    # pass the original typed value through to Session so the user_sent_at
+    # timestamp from the transport adapter is preserved end-to-end.
+    content = message_content(message)
+
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    {_enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
+    {_enhanced_prompt, recalled, state} = prepare_query(content, state, enhance_prompt: false)
     recalled = if recall, do: recalled, else: []
 
-    case GenServer.call(session_pid, {:send_message, prompt}, 600_000) do
+    case GenServer.call(session_pid, {:send_message, message}, 600_000) do
       {:ok, raw_response} ->
         normalized = PipelineResponse.normalize(raw_response)
         text = normalized.content
 
         new_state =
           if index do
-            finalize_query(prompt, text, state)
+            finalize_query(content, text, state)
           else
             state
           end
@@ -314,11 +329,17 @@ defmodule Arbor.Agent.APIAgent do
       {:reply, {:error, {:session_crashed, Exception.message(e)}}, state}
   end
 
-  defp handle_direct_query(prompt, opts, state) do
+  defp handle_direct_query(message, opts, state) do
+    # Direct query bypasses Session entirely (no session row, no SessionStore
+    # persistence) so the UserMessage envelope's `sent_at` doesn't get
+    # threaded anywhere — we just need the content. Accept the typed shape
+    # for API consistency with handle_session_query.
+    content = message_content(message)
+
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    {enhanced_prompt, recalled, state} = prepare_query(prompt, state, enhance_prompt: false)
+    {enhanced_prompt, recalled, state} = prepare_query(content, state, enhance_prompt: false)
     recalled = if recall, do: recalled, else: []
 
     case execute_query(enhanced_prompt, state, opts) do
@@ -338,7 +359,7 @@ defmodule Arbor.Agent.APIAgent do
         else
           new_state =
             if index do
-              finalize_query(prompt, text, new_state)
+              finalize_query(content, text, new_state)
             else
               new_state
             end
