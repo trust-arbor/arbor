@@ -1512,7 +1512,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       if session_uuid do
         role = if msg[:role] in [:user, "user"], do: "user", else: "assistant"
-        content_text = if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
+
+        content_text =
+          if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
 
         apply(store, :append_entry, [
           session_uuid,

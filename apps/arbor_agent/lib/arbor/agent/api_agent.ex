@@ -124,7 +124,9 @@ defmodule Arbor.Agent.APIAgent do
     # struct so callers can't drift on field names or miss fields when
     # passing config around.
     model = Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end)
-    provider = Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+
+    provider =
+      Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
 
     config = %Arbor.Contracts.Agent.Config{
       provider: provider,

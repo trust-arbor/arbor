@@ -72,6 +72,7 @@ defmodule Arbor.Actions.SessionGoalsTest do
       ensure_goal_store()
       agent_id = "test_dedup_within_batch_#{System.unique_integer([:positive])}"
       goal_store = Arbor.Memory.GoalStore
+
       on_exit(fn ->
         try do
           goal_store.clear_goals(agent_id)
@@ -111,6 +112,7 @@ defmodule Arbor.Actions.SessionGoalsTest do
       ensure_goal_store()
       agent_id = "test_dedup_existing_#{System.unique_integer([:positive])}"
       goal_store = Arbor.Memory.GoalStore
+
       on_exit(fn ->
         try do
           goal_store.clear_goals(agent_id)
@@ -163,8 +165,12 @@ defmodule Arbor.Actions.SessionGoalsTest do
 
   defp wait_for_goal_store(retries \\ 50) do
     cond do
-      Process.whereis(Arbor.Memory.GoalStore) != nil -> :ok
-      retries == 0 -> raise "GoalStore failed to start"
+      Process.whereis(Arbor.Memory.GoalStore) != nil ->
+        :ok
+
+      retries == 0 ->
+        raise "GoalStore failed to start"
+
       true ->
         Process.sleep(10)
         wait_for_goal_store(retries - 1)

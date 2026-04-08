@@ -467,10 +467,18 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp format_command_result({:ok, text}), do: {:ok, %{text: text, type: :command}}
-  defp format_command_result({:error, {:unknown_command, msg}}), do: {:ok, %{text: msg, type: :command_error}}
-  defp format_command_result({:error, {:unavailable, msg}}), do: {:ok, %{text: msg, type: :command_error}}
-  defp format_command_result({:error, {:command_error, msg}}), do: {:ok, %{text: "Command error: #{msg}", type: :command_error}}
-  defp format_command_result({:error, reason}), do: {:ok, %{text: "Error: #{inspect(reason)}", type: :command_error}}
+
+  defp format_command_result({:error, {:unknown_command, msg}}),
+    do: {:ok, %{text: msg, type: :command_error}}
+
+  defp format_command_result({:error, {:unavailable, msg}}),
+    do: {:ok, %{text: msg, type: :command_error}}
+
+  defp format_command_result({:error, {:command_error, msg}}),
+    do: {:ok, %{text: "Command error: #{msg}", type: :command_error}}
+
+  defp format_command_result({:error, reason}),
+    do: {:ok, %{text: "Error: #{inspect(reason)}", type: :command_error}}
 
   defp do_send_message_async(message, from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
@@ -938,7 +946,6 @@ defmodule Arbor.Orchestrator.Session do
   catch
     :exit, _ -> :ok
   end
-
 
   # Record agent telemetry via the Store (non-critical — failures are silently ignored)
   defp maybe_record_telemetry(type, agent_id, data) do

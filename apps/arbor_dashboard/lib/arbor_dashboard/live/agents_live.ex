@@ -362,7 +362,10 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
           </div>
 
           <%!-- Summary card (Agent.summary/1 — the "2am rule") --%>
-          <div :if={detail.summary} style="margin-bottom: 1.5rem; padding: 0.75rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; background: rgba(96, 165, 250, 0.05);">
+          <div
+            :if={detail.summary}
+            style="margin-bottom: 1.5rem; padding: 0.75rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; background: rgba(96, 165, 250, 0.05);"
+          >
             <h4 style="margin: 0 0 0.5rem 0; font-size: 0.9em; color: var(--aw-text-muted, #888); text-transform: uppercase; letter-spacing: 0.05em;">
               Summary
             </h4>

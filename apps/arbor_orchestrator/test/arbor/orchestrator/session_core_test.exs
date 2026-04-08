@@ -247,7 +247,8 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       msg = %{"content" => String.duplicate("x", 100)}
       tokens = SessionCore.estimate_message_tokens(msg)
       assert tokens > 0
-      assert tokens == 26  # 100/4 + 1
+      # 100/4 + 1
+      assert tokens == 26
     end
 
     test "handles missing content" do

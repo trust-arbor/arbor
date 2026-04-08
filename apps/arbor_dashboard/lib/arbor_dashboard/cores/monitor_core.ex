@@ -59,7 +59,9 @@ defmodule Arbor.Dashboard.Cores.MonitorCore do
     }
   end
 
-  defp normalize_status(nil), do: %{status: :unknown, anomaly_count: 0, skills: [], metrics_available: []}
+  defp normalize_status(nil),
+    do: %{status: :unknown, anomaly_count: 0, skills: [], metrics_available: []}
+
   defp normalize_status(s) when is_map(s) do
     %{
       status: Map.get(s, :status, :unknown),
@@ -261,9 +263,11 @@ defmodule Arbor.Dashboard.Cores.MonitorCore do
   def skill_summary(:ports, data), do: "#{data[:count] || "?"} ports"
   def skill_summary(:system, data), do: "OTP #{data[:otp_release] || "?"}"
   def skill_summary(:beam, data), do: "v#{data[:version] || "?"}"
+
   def skill_summary(_skill, data) when is_map(data) and map_size(data) > 0 do
     "#{map_size(data)} metrics"
   end
+
   def skill_summary(_skill, _data), do: "no data"
 
   @doc "Severity icon for an anomaly."
@@ -281,9 +285,11 @@ defmodule Arbor.Dashboard.Cores.MonitorCore do
   def format_value(v), do: inspect(v)
 
   defp format_deviation(nil), do: nil
+
   defp format_deviation(d) when is_number(d) do
     "#{Float.round(d * 1.0, 1)} stddev"
   end
+
   defp format_deviation(_), do: nil
 
   @doc "Flatten a nested metrics map into [{key_path, value}] tuples."
