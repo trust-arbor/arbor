@@ -214,7 +214,10 @@ defmodule Arbor.Orchestrator.Session do
   message history, processed through classify -> authorize -> recall -> LLM -> format,
   and the response is returned.
   """
-  @spec send_message(GenServer.server(), String.t() | map()) ::
+  @spec send_message(
+          GenServer.server(),
+          String.t() | map() | Arbor.Contracts.Session.UserMessage.t()
+        ) ::
           {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
           | {:error, term()}
   def send_message(session, message) do
@@ -405,8 +408,27 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_call({:send_message, message}, from, state) do
     alias Arbor.Common.CommandRouter
+    alias Arbor.Contracts.Session.UserMessage
 
-    case CommandRouter.parse(message) do
+    # Coerce any incoming shape (bare string, %UserMessage{}, legacy map)
+    # into a UserMessage envelope at the entry boundary. This is the single
+    # point in the pipeline where we know the message has just arrived from
+    # an adapter, so it's the right place to capture `sent_at`. Bare-string
+    # callers fall through `from_string/1` which stamps `DateTime.utc_now/0`
+    # as the fallback — same behavior as before for them, but adapters that
+    # provide a richer envelope (dashboard, future Signal/Discord/Slack) get
+    # their real send time honored.
+    user_message =
+      case message do
+        %UserMessage{} = um -> um
+        bin when is_binary(bin) -> UserMessage.from_string(bin)
+        # Legacy map shape — extract content if possible, fall back to inspect/0
+        %{"content" => c} when is_binary(c) -> UserMessage.from_string(c)
+        %{content: c} when is_binary(c) -> UserMessage.from_string(c)
+        other -> UserMessage.from_string(inspect(other))
+      end
+
+    case CommandRouter.parse(user_message.content) do
       {:command, cmd_name, args} ->
         context = build_command_context(state)
         result = CommandRouter.execute(cmd_name, args, context)
@@ -415,7 +437,7 @@ defmodule Arbor.Orchestrator.Session do
       {:prompt, _text} ->
         case authorize_orchestrator(state) do
           :ok ->
-            do_send_message_async(message, from, state)
+            do_send_message_async(user_message, from, state)
 
           {:error, reason} ->
             {:reply, {:error, {:unauthorized, reason}}, state}
@@ -480,9 +502,12 @@ defmodule Arbor.Orchestrator.Session do
   defp format_command_result({:error, reason}),
     do: {:ok, %{text: "Error: #{inspect(reason)}", type: :command_error}}
 
-  defp do_send_message_async(message, from, state) do
+  defp do_send_message_async(%Arbor.Contracts.Session.UserMessage{} = user_message, from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)
-    values = Builders.build_turn_values(state, message)
+    # The engine still receives the bare content string — only the persistence
+    # path needs the typed envelope, and that's threaded via the {:turn_result,
+    # user_message, result} tuple below.
+    values = Builders.build_turn_values(state, user_message.content)
     engine_opts = Builders.build_engine_opts(state, values)
 
     session_pid = self()
@@ -496,7 +521,7 @@ defmodule Arbor.Orchestrator.Session do
           e -> {:error, {:engine_crash, Exception.message(e)}}
         end
 
-      send(session_pid, {:turn_result, message, result})
+      send(session_pid, {:turn_result, user_message, result})
     end
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor
@@ -529,13 +554,13 @@ defmodule Arbor.Orchestrator.Session do
     {:noreply, state}
   end
 
-  def handle_info({:turn_result, message, {:ok, result}}, state) do
+  def handle_info({:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}}, state) do
     completed = Map.get(result.context, "__completed_nodes__", [])
 
     new_state =
       state
       |> transition_phase(:processing, :complete, :idle)
-      |> Builders.apply_turn_result(message, result)
+      |> Builders.apply_turn_result(user_message.content, result, user_message: user_message)
       |> persist_discovered_tools(result)
       |> Builders.maybe_checkpoint()
 
@@ -553,7 +578,7 @@ defmodule Arbor.Orchestrator.Session do
     Builders.emit_turn_signal(new_state, result)
 
     # Phase 3: notify ActionCycleServer of chat percept
-    maybe_enqueue_chat_percept(state.agent_id, message)
+    maybe_enqueue_chat_percept(state.agent_id, user_message.content)
 
     usage = Map.get(result.context, "session.usage", %{})
 
@@ -594,7 +619,7 @@ defmodule Arbor.Orchestrator.Session do
     {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
   end
 
-  def handle_info({:turn_result, _message, {:error, reason}}, state) do
+  def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
     Logger.warning("[Session] Turn FAILED for #{state.agent_id}: #{inspect(reason)}")
     new_state = transition_phase(state, :processing, :complete, :idle)
 

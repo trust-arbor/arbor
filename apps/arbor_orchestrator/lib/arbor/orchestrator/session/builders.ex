@@ -211,16 +211,36 @@ defmodule Arbor.Orchestrator.Session.Builders do
   # ── Result application ───────────────────────────────────────────────
 
   @doc false
-  @spec apply_turn_result(Arbor.Orchestrator.Session.t(), String.t() | map(), Engine.run_result()) ::
-          Arbor.Orchestrator.Session.t()
-  def apply_turn_result(state, message, %{context: result_ctx}) do
+  @spec apply_turn_result(
+          Arbor.Orchestrator.Session.t(),
+          String.t() | map(),
+          Engine.run_result(),
+          keyword()
+        ) :: Arbor.Orchestrator.Session.t()
+  def apply_turn_result(state, message, result, opts \\ [])
+
+  def apply_turn_result(state, message, %{context: result_ctx}, opts) do
+    alias Arbor.Contracts.Session.UserMessage
     alias Arbor.Orchestrator.SessionCore
 
     response = Map.get(result_ctx, "session.response", "")
     now = DateTime.utc_now()
 
-    # Pure: build message structs via SessionCore
-    user_msg = SessionCore.build_user_message(message, now)
+    # The user's send-time comes from the typed UserMessage envelope when
+    # available (dashboard / future Signal/Discord/Slack adapters carry it).
+    # When absent, we fall back to `now` — that's the legacy behavior and
+    # is no worse than what was happening before this envelope existed.
+    user_sent_at =
+      case Keyword.get(opts, :user_message) do
+        %UserMessage{sent_at: %DateTime{} = sent_at} -> sent_at
+        _ -> now
+      end
+
+    # Pure: build message structs via SessionCore. The user_msg gets its
+    # real send time; the assistant_msg gets `now` (turn-completion time).
+    # These naturally diverge, which is what gives the SessionStore query
+    # a real ordering instead of needing the +1µs workaround.
+    user_msg = SessionCore.build_user_message(message, user_sent_at)
     assistant_msg = SessionCore.build_assistant_message(response, now)
 
     # Pure: update message list
@@ -262,13 +282,15 @@ defmodule Arbor.Orchestrator.Session.Builders do
       maybe_record_compaction_telemetry(state.agent_id, utilization)
     end
 
-    # Side effect: persist to SessionStore
+    # Side effect: persist to SessionStore. Pass both timestamps explicitly
+    # so user/assistant entries get distinct, accurate times.
     Persistence.persist_turn_entries(
       state,
-      now,
       user_msg,
       assistant_msg || %{"role" => "assistant", "content" => ""},
-      result_ctx
+      result_ctx,
+      user_sent_at: user_sent_at,
+      assistant_completed_at: now
     )
 
     # Update GenServer state

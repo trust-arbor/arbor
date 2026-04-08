@@ -145,8 +145,21 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   # ── Session entry persistence (runtime bridge) ────────────────────
 
   @doc false
-  def persist_turn_entries(state, timestamp, user_msg, assistant_msg, result_ctx) do
+  def persist_turn_entries(state, user_msg, assistant_msg, result_ctx, opts \\ []) do
     persist_entry = get_persist_entry_fn(state)
+
+    # Distinct timestamps for user vs assistant entries:
+    #   - `user_sent_at`: when the user actually sent the message (carried by
+    #     the UserMessage envelope from the transport adapter, falling back
+    #     to apply-time if no envelope was provided)
+    #   - `assistant_completed_at`: when the turn finished and the assistant
+    #     reply was ready
+    #
+    # These naturally diverge across LLM call latency, giving SessionStore a
+    # real ordering on equal-timestamp ties. The previous +1µs workaround
+    # (commit 24246be2) is removed in favor of this real divergence.
+    user_sent_at = Keyword.get(opts, :user_sent_at) || DateTime.utc_now()
+    assistant_completed_at = Keyword.get(opts, :assistant_completed_at) || DateTime.utc_now()
 
     if persist_entry do
       Task.start(fn ->
@@ -156,7 +169,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             entry_type: "user",
             role: "user",
             content: wrap_content(user_msg["content"]),
-            timestamp: timestamp
+            timestamp: user_sent_at
           })
 
           # Build assistant content array (may include tool_use blocks)
@@ -164,15 +177,6 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
           assistant_content =
             build_assistant_content(assistant_msg["content"], tool_calls)
-
-          # Bump the assistant timestamp by one microsecond so user always
-          # sorts before assistant on the same turn. SessionEntry has only a
-          # `timestamp` field (no inserted_at, no sequence number) and the id
-          # is a UUID — so the SessionStore query has no deterministic
-          # tiebreaker on equal timestamps. Without this offset, restored
-          # chat history occasionally rendered the user message AFTER the
-          # assistant response. (2026-04-07 regression after 7ea0a943.)
-          assistant_timestamp = DateTime.add(timestamp, 1, :microsecond)
 
           persist_entry.(%{
             entry_type: "assistant",
@@ -183,7 +187,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             # `session.usage` is the live key written by LlmHandler.
             # `llm.usage` was a dead-letter read — nothing wrote to it.
             token_usage: Map.get(result_ctx, "session.usage"),
-            timestamp: assistant_timestamp,
+            timestamp: assistant_completed_at,
             metadata: %{
               "turn_count" => ContextBuilder.get_turn_count(state) + 1
             }
