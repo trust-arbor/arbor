@@ -43,9 +43,16 @@ type Message struct {
 
 // ContentItem represents an item in the content array
 type ContentItem struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	Name string `json:"name"` // for tool_use items
+	Type  string                 `json:"type"`
+	Text  string                 `json:"text"`
+	Name  string                 `json:"name"`  // for tool_use items
+	Input map[string]interface{} `json:"input"` // for tool_use items (tool arguments)
+}
+
+// FileOp records a file operation with its tool and operation type.
+type FileOp struct {
+	Path string
+	Op   string // "read", "edit", "write"
 }
 
 // ParseContent extracts text from the message content
@@ -132,7 +139,10 @@ func main() {
 	var userMessages []string
 	var toolsUsed = make(map[string]int)
 	var assistantTexts []string
+	var fileOps []FileOp
+	seenFiles := make(map[string]string) // file path → most recent op
 	var totalRecords int
+	var assistantTurns int
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -160,6 +170,7 @@ func main() {
 			}
 
 		case "assistant":
+			assistantTurns++
 			// Check for direct text content
 			if directText != "" {
 				truncated := directText
@@ -183,18 +194,27 @@ func main() {
 					if item.Name != "" {
 						toolsUsed[item.Name]++
 					}
+					// Extract file_path from known file-touching tools
+					if path, op := extractFilePath(item.Name, item.Input); path != "" {
+						// Promote write/edit over read for the same file in seenFiles
+						existing, exists := seenFiles[path]
+						if !exists || opPriority(op) > opPriority(existing) {
+							seenFiles[path] = op
+						}
+						fileOps = append(fileOps, FileOp{Path: path, Op: op})
+					}
 				}
 			}
 		}
 	}
 
 	debugContent += fmt.Sprintf("Processed %d records from transcript\n", totalRecords)
-	debugContent += fmt.Sprintf("Found %d user messages, %d tool types, %d assistant texts\n",
-		len(userMessages), len(toolsUsed), len(assistantTexts))
+	debugContent += fmt.Sprintf("Found %d user messages, %d tool types, %d assistant texts, %d file ops\n",
+		len(userMessages), len(toolsUsed), len(assistantTexts), len(fileOps))
 	os.WriteFile(debugFile, []byte(debugContent), 0644)
 
 	// Build context document
-	context := buildContextDocument(userMessages, toolsUsed, assistantTexts, totalRecords)
+	context := buildContextDocument(userMessages, toolsUsed, assistantTexts, seenFiles, totalRecords, assistantTurns)
 
 	if err := os.WriteFile(contextFile, []byte(context), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing context file: %v\n", err)
@@ -254,16 +274,25 @@ func isSystemMessage(msg string) bool {
 	return false
 }
 
-func buildContextDocument(userMessages []string, toolsUsed map[string]int, assistantTexts []string, totalRecords int) string {
+func buildContextDocument(
+	userMessages []string,
+	toolsUsed map[string]int,
+	assistantTexts []string,
+	seenFiles map[string]string,
+	totalRecords int,
+	assistantTurns int,
+) string {
 	var sb strings.Builder
 
-	// Compact header
+	// Compact header with session shape
 	sb.WriteString(fmt.Sprintf("# Previous Session (%s)\n\n",
 		time.Now().UTC().Format("2006-01-02 15:04 UTC")))
+	sb.WriteString(fmt.Sprintf("**Session shape:** %d turns, %d records\n\n",
+		assistantTurns, totalRecords))
 
-	// Last 3 user messages, compact format
+	// Recent user messages — last 5, compact
 	sb.WriteString("**Recent requests:**\n")
-	start := len(userMessages) - 3
+	start := len(userMessages) - 5
 	if start < 0 {
 		start = 0
 	}
@@ -284,14 +313,156 @@ func buildContextDocument(userMessages []string, toolsUsed map[string]int, assis
 	}
 	sb.WriteString("\n")
 
-	// Last assistant response only (where we left off)
+	// Where we left off — last 3 assistant texts (richer context than just 1)
 	if len(assistantTexts) > 0 {
-		last := assistantTexts[len(assistantTexts)-1]
-		if len(last) > 300 {
-			last = last[:300] + "..."
+		sb.WriteString("**Where we left off:**\n")
+		txStart := len(assistantTexts) - 3
+		if txStart < 0 {
+			txStart = 0
 		}
-		sb.WriteString(fmt.Sprintf("**Where we left off:** %s\n", last))
+		for _, tx := range assistantTexts[txStart:] {
+			truncated := tx
+			if len(truncated) > 300 {
+				truncated = truncated[:300] + "..."
+			}
+			truncated = strings.ReplaceAll(truncated, "\n", " ")
+			sb.WriteString(fmt.Sprintf("- %s\n", truncated))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Files touched during the session — operational state, sorted by op priority
+	// then path. Future-me can immediately see "what files matter" for re-orientation.
+	if len(seenFiles) > 0 {
+		sb.WriteString("**Files touched** (write/edit before read):\n")
+		// Sort: writes first, then edits, then reads, alphabetical within each
+		paths := make([]string, 0, len(seenFiles))
+		for p := range seenFiles {
+			paths = append(paths, p)
+		}
+		sortFilesByPriority(paths, seenFiles)
+
+		// Cap at 20 to keep the handoff note small
+		max := 20
+		if len(paths) > max {
+			paths = paths[:max]
+		}
+		for _, p := range paths {
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", seenFiles[p], shortenPath(p)))
+		}
+		if len(seenFiles) > max {
+			sb.WriteString(fmt.Sprintf("- ... (+%d more)\n", len(seenFiles)-max))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Tools used summary — counts of each tool, compact one-liner
+	if len(toolsUsed) > 0 {
+		sb.WriteString("**Tools used:** ")
+		// Sort by count descending so the dominant tools are first
+		type toolCount struct {
+			name  string
+			count int
+		}
+		var tools []toolCount
+		for n, c := range toolsUsed {
+			tools = append(tools, toolCount{n, c})
+		}
+		// Simple insertion sort (small N)
+		for i := 1; i < len(tools); i++ {
+			for j := i; j > 0 && tools[j].count > tools[j-1].count; j-- {
+				tools[j], tools[j-1] = tools[j-1], tools[j]
+			}
+		}
+		var parts []string
+		for _, t := range tools {
+			parts = append(parts, fmt.Sprintf("%s×%d", t.name, t.count))
+		}
+		sb.WriteString(strings.Join(parts, ", "))
+		sb.WriteString("\n")
 	}
 
 	return sb.String()
+}
+
+// extractFilePath pulls a file path out of a tool_use's input map for known
+// file-touching tools. Returns ("", "") for tools that don't operate on files.
+func extractFilePath(toolName string, input map[string]interface{}) (string, string) {
+	if input == nil {
+		return "", ""
+	}
+
+	switch toolName {
+	case "Read":
+		if p, ok := input["file_path"].(string); ok {
+			return p, "read"
+		}
+	case "Write":
+		if p, ok := input["file_path"].(string); ok {
+			return p, "write"
+		}
+	case "Edit", "MultiEdit":
+		if p, ok := input["file_path"].(string); ok {
+			return p, "edit"
+		}
+	case "NotebookEdit":
+		if p, ok := input["notebook_path"].(string); ok {
+			return p, "edit"
+		}
+	}
+	return "", ""
+}
+
+// opPriority returns a numeric priority for file operations so write > edit > read.
+// Used to promote the "most significant" op for a file when it's touched multiple times.
+func opPriority(op string) int {
+	switch op {
+	case "write":
+		return 3
+	case "edit":
+		return 2
+	case "read":
+		return 1
+	}
+	return 0
+}
+
+// sortFilesByPriority sorts file paths by the priority of their operation
+// (write > edit > read), then alphabetically within each priority bucket.
+//
+// TODO: Consider sorting by recency of last touch instead of (or in addition
+// to) op priority. For very long transcripts (e.g. a single project that
+// keeps the same JSONL across many Claude Code sessions), the "files touched"
+// list can be dominated by historical writes that aren't relevant to "where
+// we left off." A recency-weighted sort would surface the most recently
+// touched files first, which is what future-me actually wants for re-orientation.
+// Would need a per-file-op turn-index tracker; the current FileOp slice doesn't
+// preserve that.
+func sortFilesByPriority(paths []string, seenFiles map[string]string) {
+	for i := 1; i < len(paths); i++ {
+		for j := i; j > 0; j-- {
+			a, b := paths[j], paths[j-1]
+			pa, pb := opPriority(seenFiles[a]), opPriority(seenFiles[b])
+			if pa > pb || (pa == pb && a < b) {
+				paths[j], paths[j-1] = paths[j-1], paths[j]
+			} else {
+				break
+			}
+		}
+	}
+}
+
+// shortenPath drops the home directory prefix and the leading repo path
+// from a file path so the handoff note is readable. Keeps absolute paths
+// outside the repo intact.
+func shortenPath(p string) string {
+	homeDir, err := os.UserHomeDir()
+	if err == nil && strings.HasPrefix(p, homeDir) {
+		p = "~" + strings.TrimPrefix(p, homeDir)
+	}
+	// Trim common Arbor repo prefix for project-local files
+	if idx := strings.Index(p, "/code/trust-arbor/arbor/"); idx >= 0 {
+		p = p[idx+len("/code/trust-arbor/arbor/"):]
+	}
+	return p
 }
