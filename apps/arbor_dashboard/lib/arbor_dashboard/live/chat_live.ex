@@ -1044,24 +1044,58 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   # Builds the command Context from the LiveView's current socket assigns.
-  # Looks up the agent in the registry to get its model_config (the home
-  # model lives there, NOT in Session.config). Returns {:ok, %Context{}} or
-  # {:error, reason} if the agent or session can't be located.
+  #
+  # ## Why we trust ONLY agent_id from the socket
+  #
+  # ChatLive's socket assigns hold several PIDs that go stale whenever the
+  # focused agent's BranchSupervisor restarts a child (which is reasonably
+  # often — any crash in the host/executor/session triggers a rest_for_one
+  # cascade and produces fresh PIDs). The LiveView never refreshes its
+  # assigns when this happens, so:
+  #
+  # - `socket.assigns.agent` (the host PID) — STALE after restart
+  # - `socket.assigns.supervisor_pid` (the BranchSupervisor PID) — also
+  #   STALE after restart, because the BS itself can be restarted by its
+  #   parent (e.g. when Lifecycle.start re-creates an agent)
+  # - `socket.assigns.agent_id` (the agent ID STRING) — never stale, the
+  #   agent's identity is stable across restarts
+  #
+  # So this function takes ONLY the agent_id from the socket and resolves
+  # everything else fresh through `Arbor.Agent.Registry.lookup/1`, which
+  # validates that its primary pid (the current BranchSupervisor) is alive
+  # and cleans up dead entries. From there we walk the live BranchSupervisor's
+  # children to find the current `:session` child.
+  #
+  # This pattern bypasses BOTH the dashboard's stale assigns AND the
+  # registry metadata's stale child PIDs (the BranchSupervisor-stale-PID
+  # bug tracked separately in .arbor/roadmap/0-inbox/branchsupervisor-restart-stale-registry-pids.md).
+  #
+  # ## ChatLive socket assigns — canonical reference (still misnamed)
+  #
+  # | Assign                          | Type               | Meaning                                                |
+  # |---------------------------------|--------------------|--------------------------------------------------------|
+  # | `socket.assigns.agent`          | `pid() | nil`      | Host PID of the focused agent (NOT an agent ID; goes stale) |
+  # | `socket.assigns.agent_id`       | `String.t() | nil` | The focused agent's ID string (STABLE — use this)      |
+  # | `socket.assigns.supervisor_pid` | `pid() | nil`      | BranchSupervisor PID at mount time (goes stale)        |
+  # | `socket.assigns.current_agent_id` | `String.t() | nil` | The HUMAN acting principal's ID (NOT an agent!)      |
+  #
+  # These names are doing real damage. Renaming them is a follow-up.
   defp build_command_context(socket) do
-    agent_id = socket.assigns[:current_agent_id]
+    agent_id = socket.assigns[:agent_id]
 
     with true <- is_binary(agent_id) or {:error, :no_current_agent},
          {:ok, entry} <- Arbor.Agent.Registry.lookup(agent_id),
-         {:ok, session_pid} <- find_session_pid(entry) do
+         {:ok, session_pid} <- find_live_session_pid(entry.pid) do
       state = :sys.get_state(session_pid)
+      model_config = entry.metadata[:model_config] || %{}
 
       ctx =
         Arbor.Orchestrator.SessionCore.build_command_context(
           state,
           session_pid,
           origin: :dashboard,
-          user_id: socket.assigns[:user_id] || "dashboard_user",
-          model_config: entry.metadata[:model_config] || %{}
+          user_id: socket.assigns[:current_agent_id] || "dashboard_user",
+          model_config: model_config
         )
 
       {:ok, ctx}
@@ -1074,19 +1108,24 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     e -> {:error, Exception.message(e)}
   end
 
-  # Walks the agent's BranchSupervisor children to find the live session
-  # process. Bypasses the registry's metadata.session_pid which can be
-  # stale after a restart (see arbor inbox entry from 2026-04-09).
-  defp find_session_pid(entry) do
-    sup_pid = entry.metadata[:supervisor_pid]
+  # Walks the live BranchSupervisor's children for the current :session
+  # child. Takes the BranchSupervisor PID directly from the registry's
+  # primary pid (which lookup/1 has just validated is alive), NOT from
+  # socket assigns (which go stale).
+  defp find_live_session_pid(nil), do: {:error, :no_supervisor_pid}
 
-    if is_pid(sup_pid) and Process.alive?(sup_pid) do
-      case Enum.find(Supervisor.which_children(sup_pid), fn {id, _, _, _} -> id == :session end) do
-        {:session, pid, _, _} when is_pid(pid) -> {:ok, pid}
-        _ -> {:error, :no_session_child}
+  defp find_live_session_pid(sup_pid) when is_pid(sup_pid) do
+    if Process.alive?(sup_pid) do
+      try do
+        case Enum.find(Supervisor.which_children(sup_pid), fn {id, _, _, _} -> id == :session end) do
+          {:session, pid, _, _} when is_pid(pid) -> {:ok, pid}
+          _ -> {:error, :no_session_child}
+        end
+      catch
+        :exit, _ -> {:error, :supervisor_call_failed}
       end
     else
-      {:error, :no_supervisor}
+      {:error, :supervisor_dead}
     end
   end
 
