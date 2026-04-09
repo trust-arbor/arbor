@@ -75,6 +75,7 @@ defmodule Arbor.Orchestrator.Session do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.SessionCore
 
   @default_heartbeat_interval 30_000
 
@@ -473,19 +474,14 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  # Slash command context — delegated to the testable pure function in
+  # SessionCore. The previous inline defp used `state[:field]` bracket access
+  # on the Session struct, which crashes (structs don't implement Access).
+  # Discovered 2026-04-09 from a `/help` test in the dashboard. There is now
+  # a regression test in `session_core_test.exs` that exercises this against
+  # a real Session struct so the same class of bug can't reappear.
   defp build_command_context(state) do
-    %{
-      agent_id: state.agent_id,
-      display_name: state[:display_name],
-      model: get_in(state, [:config, :model]) || state[:model],
-      provider: get_in(state, [:config, :provider]) || state[:provider],
-      session_id: state[:session_id],
-      session_pid: self(),
-      trust_tier: state[:trust_tier],
-      turn_count: state[:turn_count],
-      tools: state[:current_tools],
-      session_started: state[:started_at]
-    }
+    SessionCore.build_command_context(state, self())
   end
 
   defp format_command_result({:ok, text}), do: {:ok, %{text: text, type: :command}}

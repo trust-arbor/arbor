@@ -300,6 +300,60 @@ defmodule Arbor.Orchestrator.SessionCore do
   end
 
   # ===========================================================================
+  # Slash command context
+  # ===========================================================================
+
+  @doc """
+  Build the read-only context map passed to slash command modules.
+
+  Takes a `%Arbor.Orchestrator.Session{}` struct and a session_pid, returns a
+  plain map suitable for `Arbor.Common.CommandRouter.execute/3`.
+
+  IMPORTANT: `state` is a struct, NOT a plain map. Structs do NOT implement
+  Access by default — `state[:foo]` and `get_in(state, [:a, :b])` both crash
+  with `UndefinedFunctionError`. Always use direct field access (`state.field`)
+  here, or pull from `state.config` (which IS a regular map).
+
+  Lives in SessionCore (rather than as a defp in Session) so it can be
+  exercised by unit tests without spinning up the full GenServer. Discovered
+  2026-04-09 that the previous defp version had never been exercised by any
+  test and crashed on the very first slash command from the dashboard.
+  """
+  @spec build_command_context(struct(), pid() | nil) :: map()
+  def build_command_context(state, session_pid \\ nil) do
+    config = Map.get(state, :config) || %{}
+
+    %{
+      agent_id: Map.get(state, :agent_id),
+      # display_name not yet in the struct — fall back to agent_id. Could be
+      # populated from Arbor.Agent.Registry metadata in a follow-up.
+      display_name: Map.get(state, :agent_id),
+      model: config[:model],
+      provider: config[:provider],
+      session_id: Map.get(state, :session_id),
+      session_pid: session_pid,
+      trust_tier: Map.get(state, :trust_tier),
+      turn_count: Map.get(state, :turn_count),
+      # Convert MapSet of discovered tool names → sorted list of strings.
+      # /tools' renderer has a `name when is_binary(name)` clause that prints
+      # bare names without "name — desc" formatting, which is what we want
+      # until we wire descriptions from ActionRegistry.
+      tools: discovered_tools_list(Map.get(state, :discovered_tools)),
+      # session_started not tracked on the struct; omit for now. /session
+      # already gracefully handles missing fields.
+      session_started: nil
+    }
+  end
+
+  defp discovered_tools_list(nil), do: []
+
+  defp discovered_tools_list(%MapSet{} = set) do
+    set |> MapSet.to_list() |> Enum.sort()
+  end
+
+  defp discovered_tools_list(_), do: []
+
+  # ===========================================================================
   # Private
   # ===========================================================================
 
