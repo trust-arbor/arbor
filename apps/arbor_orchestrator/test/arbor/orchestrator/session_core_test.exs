@@ -279,4 +279,140 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       assert hd(persistence).content == [%{"type" => "text", "text" => "hello"}]
     end
   end
+
+  # ===========================================================================
+  # Slash command context — regression for 2026-04-09 Session Access crash
+  # ===========================================================================
+  #
+  # Background: the previous version of `build_command_context/1` lived as a
+  # `defp` in `Session` and used `state[:field]` bracket access on the Session
+  # struct. Structs do NOT implement Access by default, so the very first slash
+  # command typed in the dashboard crashed with `UndefinedFunctionError`. The
+  # bug went unnoticed because no test exercised the function — `/help` was
+  # the only command tested, and Help doesn't go through this code path.
+  #
+  # These tests construct a real `%Arbor.Orchestrator.Session{}` and call
+  # `build_command_context/2` against it, asserting that:
+  #   1. It does NOT crash (the original failure mode)
+  #   2. It returns a plain map with the expected keys
+  #   3. It pulls model/provider from `state.config` (which IS a regular map)
+  #   4. It safely handles missing/nil discovered_tools
+  #
+  # If any future refactor reintroduces bracket access on the Session struct
+  # or removes a key the slash commands depend on, these tests should fail.
+  describe "build_command_context/2 — regression for Session Access crash" do
+    alias Arbor.Orchestrator.Session
+
+    test "does not crash on a real Session struct (the original bug)" do
+      session = %Session{
+        session_id: "test-session-1",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 5,
+        config: %{model: "claude-opus-4-6", provider: :anthropic}
+      }
+
+      # The bug: this used to crash with UndefinedFunctionError because the
+      # old defp was doing `state[:display_name]` on the struct. If this test
+      # crashes (rather than failing an assertion), the regression is back.
+      assert context = SessionCore.build_command_context(session, self())
+      assert is_map(context)
+    end
+
+    test "pulls model and provider from state.config" do
+      session = %Session{
+        session_id: "test-session-2",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{model: "gpt-5", provider: :openai}
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.model == "gpt-5"
+      assert context.provider == :openai
+    end
+
+    test "exposes core read-only fields used by /status, /session, /trust" do
+      session = %Session{
+        session_id: "test-session-3",
+        agent_id: "agent_xyz",
+        trust_tier: :partner,
+        turn_count: 12,
+        config: %{}
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.agent_id == "agent_xyz"
+      assert context.session_id == "test-session-3"
+      assert context.trust_tier == :partner
+      assert context.turn_count == 12
+      assert context.session_pid == self()
+    end
+
+    test "converts discovered_tools MapSet to a sorted list of strings" do
+      session = %Session{
+        session_id: "test-session-4",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{},
+        discovered_tools: MapSet.new(["file_write", "shell_execute", "file_read"])
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      # Sorted alphabetically, plain strings (so /tools renders them with the
+      # bare-name clause rather than "name — desc" with empty desc).
+      assert context.tools == ["file_read", "file_write", "shell_execute"]
+    end
+
+    test "handles nil discovered_tools gracefully" do
+      session = %Session{
+        session_id: "test-session-5",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{},
+        discovered_tools: nil
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.tools == []
+    end
+
+    test "handles nil config (defensive)" do
+      # Should never happen in practice (struct default is %{}), but defensive
+      # against a future refactor that initializes config to nil.
+      session = %Session{
+        session_id: "test-session-6",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: nil
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.model == nil
+      assert context.provider == nil
+    end
+
+    test "session_pid defaults to nil if not provided" do
+      session = %Session{
+        session_id: "test-session-7",
+        agent_id: "agent_test",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{}
+      }
+
+      context = SessionCore.build_command_context(session)
+
+      assert context.session_pid == nil
+    end
+  end
 end
