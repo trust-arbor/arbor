@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Arbor.Agent do
       mix arbor.agent stop <name|id>            # stop running agent
       mix arbor.agent destroy <name|id>         # delete agent + all data
       mix arbor.agent status <name|id>          # detailed agent status
+      mix arbor.agent summary <name|id>         # 2am-rule summary across all 4 domains
       mix arbor.agent chat <name|id> "message"  # send message, print response
       mix arbor.agent auto-start <name|id>      # toggle auto-start on/off
 
@@ -63,6 +64,7 @@ defmodule Mix.Tasks.Arbor.Agent do
       ["stop", ref | _] -> do_stop(ref)
       ["destroy", ref | _] -> do_destroy(ref)
       ["status", ref | _] -> do_status(ref)
+      ["summary", ref | _] -> do_summary(ref)
       ["chat", ref, message | _] -> do_chat(ref, message, opts)
       ["chat", ref] -> do_chat_interactive(ref, opts)
       ["auto-start", ref | _] -> do_auto_start(ref)
@@ -303,6 +305,55 @@ defmodule Mix.Tasks.Arbor.Agent do
   end
 
   # ── Status ────────────────────────────────────────────────────────────
+
+  # ── Summary (the "2am rule") ──────────────────────────────────────────
+  #
+  # Calls `Arbor.Agent.summary/1` via RPC. That function is the single
+  # cross-domain Convert pulling identity, config, authority, activity,
+  # and telemetry into one map. Designed for "what's going on with this
+  # agent right now?" inspection at 2am when something's broken.
+  defp do_summary(ref) do
+    ensure_server!()
+
+    agent_id =
+      case find_profile(ref) do
+        {:ok, p} -> p.agent_id
+        :not_found -> ref
+      end
+
+    case remote(Arbor.Agent, :summary, [agent_id]) do
+      {:ok, s} ->
+        Mix.shell().info("Agent Summary — #{s.display_name}")
+        Mix.shell().info(String.duplicate("=", 50))
+        Mix.shell().info("  Agent ID:        #{s.agent_id}")
+        Mix.shell().info("  Status:          #{s.status}")
+        Mix.shell().info("")
+        Mix.shell().info("  Template:        #{format_template(s.template)}")
+        Mix.shell().info("  Model:           #{s.model || "(unknown)"}")
+        Mix.shell().info("")
+        Mix.shell().info("  Trust Tier:      #{s.trust_tier}")
+        Mix.shell().info("  Trust Score:     #{format_value(s.trust_score)}")
+        Mix.shell().info("")
+        Mix.shell().info("  Turns:           #{format_value(s.turn_count)}")
+        Mix.shell().info("  Active Goals:    #{s.active_goals_count}")
+        Mix.shell().info("")
+        Mix.shell().info("  Session Cost:    #{format_cost(s.session_cost)}")
+        Mix.shell().info("  Avg Latency:     #{format_latency(s.avg_latency_ms)}")
+
+      {:error, :not_found} ->
+        Mix.shell().error("Agent '#{ref}' not found.")
+    end
+  end
+
+  defp format_value(nil), do: "(none)"
+  defp format_value(v), do: to_string(v)
+
+  defp format_cost(nil), do: "(none)"
+  defp format_cost(c) when is_number(c), do: "$#{:erlang.float_to_binary(c / 1, decimals: 4)}"
+  defp format_cost(c), do: to_string(c)
+
+  defp format_latency(nil), do: "(none)"
+  defp format_latency(ms), do: "#{ms}ms"
 
   defp do_status(ref) do
     ensure_server!()
