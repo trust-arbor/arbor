@@ -44,7 +44,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       socket
       |> assign(
         page_title: "Chat",
-        agent: nil,
+        agent_host_pid: nil,
+        agent_supervisor_pid: nil,
         agent_id: nil,
         display_name: nil,
         session_id: nil,
@@ -166,8 +167,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   @impl true
   def handle_params(%{"agent_id" => agent_id}, _uri, socket) do
-    # Skip if we're already connected to this agent
-    if socket.assigns.agent == agent_id do
+    # Skip if we're already connected to this agent.
+    #
+    # NOTE: previously this read `socket.assigns.agent`, which was a host
+    # PID — comparing it to the agent_id string from URL params always
+    # returned false. The "skip if same" optimization was silently broken.
+    # Discovered 2026-04-09 during the assign rename. Now reads :agent_id
+    # (the stable identity string).
+    if socket.assigns[:agent_id] == agent_id do
       {:noreply, socket}
     else
       {:noreply, connect_or_resume_agent(socket, agent_id)}
@@ -281,7 +288,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         {:noreply, socket}
 
       # Single-agent mode (existing flow)
-      socket.assigns.agent != nil ->
+      socket.assigns.agent_host_pid != nil ->
         # Slash command intake — check FIRST, before the loading guard.
         # Commands are pure and synchronous; they don't conflict with an
         # in-flight LLM query, so we can run them immediately even when
@@ -294,9 +301,25 @@ defmodule Arbor.Dashboard.Live.ChatLive do
             send_prompt(input, socket)
         end
 
-      # No agent or group
+      # No agent connected — but slash commands can still run.
+      # Display commands like /help work without an agent context;
+      # agent-bound commands like /status correctly return "not available."
+      # Regular prompts get a helpful error pointing them at /help.
       true ->
-        {:noreply, socket}
+        case CommandIntake.classify(input) do
+          {:command, _, _} ->
+            handle_slash_command(input, socket)
+
+          {:prompt, _} ->
+            socket =
+              socket
+              |> stream_insert_command_error(
+                "No agent connected. Type /help to see available commands, or start an agent first."
+              )
+              |> assign(input: "")
+
+            {:noreply, socket}
+        end
     end
   end
 
@@ -527,7 +550,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     socket =
       socket
       |> assign(streaming_text: "")
-      |> process_query_response(socket.assigns.agent, response)
+      |> process_query_response(socket.assigns.agent_host_pid, response)
 
     {:noreply, socket}
   end
@@ -741,7 +764,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Process monitor: agent supervisor crashed or was killed
   def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
-    if pid == socket.assigns[:supervisor_pid] or pid == socket.assigns[:agent] do
+    if pid == socket.assigns[:agent_supervisor_pid] or pid == socket.assigns[:agent_host_pid] do
       {:noreply, clear_agent_assigns(socket)}
     else
       {:noreply, socket}
@@ -754,7 +777,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # Another tab started an agent — reconnect if we have none
   defp handle_agent_signal(%{type: :started} = signal, socket) do
-    if socket.assigns[:agent] == nil do
+    if socket.assigns[:agent_host_pid] == nil do
       agent_id = Map.get(signal.data, :agent_id)
       model_config = Map.get(signal.data, :model_config, %{})
       pid = Map.get(signal.data, :pid)
@@ -1001,7 +1024,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         |> stream_insert(:messages, user_msg)
         |> assign(input: "", loading: true, error: nil, streaming_text: "")
 
-      dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, user_message)
+      dispatch_query(socket.assigns.chat_backend, socket.assigns.agent_host_pid, user_message)
 
       {:noreply, socket}
     end
@@ -1053,8 +1076,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # cascade and produces fresh PIDs). The LiveView never refreshes its
   # assigns when this happens, so:
   #
-  # - `socket.assigns.agent` (the host PID) — STALE after restart
-  # - `socket.assigns.supervisor_pid` (the BranchSupervisor PID) — also
+  # - `socket.assigns.agent_host_pid` (host PID) — STALE after restart
+  # - `socket.assigns.agent_supervisor_pid` (BranchSupervisor PID) — also
   #   STALE after restart, because the BS itself can be restarted by its
   #   parent (e.g. when Lifecycle.start re-creates an agent)
   # - `socket.assigns.agent_id` (the agent ID STRING) — never stale, the
@@ -1070,21 +1093,41 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # registry metadata's stale child PIDs (the BranchSupervisor-stale-PID
   # bug tracked separately in .arbor/roadmap/0-inbox/branchsupervisor-restart-stale-registry-pids.md).
   #
-  # ## ChatLive socket assigns — canonical reference (still misnamed)
+  # ## ChatLive socket assigns — canonical reference (post-rename 2026-04-09)
   #
-  # | Assign                          | Type               | Meaning                                                |
-  # |---------------------------------|--------------------|--------------------------------------------------------|
-  # | `socket.assigns.agent`          | `pid() | nil`      | Host PID of the focused agent (NOT an agent ID; goes stale) |
-  # | `socket.assigns.agent_id`       | `String.t() | nil` | The focused agent's ID string (STABLE — use this)      |
-  # | `socket.assigns.supervisor_pid` | `pid() | nil`      | BranchSupervisor PID at mount time (goes stale)        |
-  # | `socket.assigns.current_agent_id` | `String.t() | nil` | The HUMAN acting principal's ID (NOT an agent!)      |
+  # | Assign                              | Type               | Meaning                                          |
+  # |-------------------------------------|--------------------|--------------------------------------------------|
+  # | `socket.assigns.agent_id`           | `String.t() | nil` | Focused agent's ID string (STABLE — use this)    |
+  # | `socket.assigns.agent_host_pid`     | `pid() | nil`      | Host GenServer pid for sending :query to        |
+  # | `socket.assigns.agent_supervisor_pid` | `pid() | nil`    | BranchSupervisor pid (goes stale across restart) |
+  # | `socket.assigns.display_name`       | `String.t() | nil` | Friendly name for UI display                     |
+  # | `socket.assigns.current_agent_id`   | `String.t() | nil` | **HUMAN acting principal's ID** (LEGACY NAME — set by oidc_auth.ex; rename deferred because it crosses the auth path) |
   #
-  # These names are doing real damage. Renaming them is a follow-up.
+  # The PID assigns can go stale; only `:agent_id` is safe to trust over time.
+  # Use `current_agent_id` only when you want the *human user*, not the agent
+  # — the name is misleading and a wider rename is tracked in a follow-up.
   defp build_command_context(socket) do
     agent_id = socket.assigns[:agent_id]
+    user_id = socket.assigns[:current_agent_id] || "dashboard_user"
 
-    with true <- is_binary(agent_id) or {:error, :no_current_agent},
-         {:ok, entry} <- Arbor.Agent.Registry.lookup(agent_id),
+    cond do
+      # No agent connected — return a system-only Context. Slash commands
+      # like /help still work; agent-bound commands (/status, /clear,
+      # /model X) will correctly return "not available in this context"
+      # via their `available?/1` checks. This is exactly the use case the
+      # Context's optional agent fields were designed for.
+      not is_binary(agent_id) ->
+        {:ok, Context.new(origin: :dashboard, user_id: user_id)}
+
+      true ->
+        build_agent_command_context(agent_id, user_id)
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp build_agent_command_context(agent_id, user_id) do
+    with {:ok, entry} <- Arbor.Agent.Registry.lookup(agent_id),
          {:ok, session_pid} <- find_live_session_pid(entry.pid) do
       state = :sys.get_state(session_pid)
       model_config = entry.metadata[:model_config] || %{}
@@ -1094,18 +1137,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           state,
           session_pid,
           origin: :dashboard,
-          user_id: socket.assigns[:current_agent_id] || "dashboard_user",
+          user_id: user_id,
           model_config: model_config
         )
 
       {:ok, ctx}
-    else
-      {:error, _} = err -> err
-      false -> {:error, :no_current_agent}
-      other -> {:error, {:context_build_failed, other}}
     end
-  rescue
-    e -> {:error, Exception.message(e)}
   end
 
   # Walks the live BranchSupervisor's children for the current :session
@@ -1389,8 +1426,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     socket
     |> assign(
-      agent: host_pid,
-      supervisor_pid: pid,
+      # Renamed 2026-04-09: `:agent` → `:agent_host_pid`, `:supervisor_pid`
+      # → `:agent_supervisor_pid` because the old names lied about what they
+      # contained (the old `:agent` was a host pid, not an agent id; the old
+      # `:supervisor_pid` was unqualified). See feedback memory:
+      # feedback_audit_design_before_patching.md
+      agent_host_pid: host_pid,
+      agent_supervisor_pid: pid,
       agent_id: agent_id,
       display_name: display_name,
       error: nil,
@@ -1517,7 +1559,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp clear_agent_assigns(socket) do
     assign(socket,
-      agent: nil,
+      agent_host_pid: nil,
+      agent_supervisor_pid: nil,
       agent_id: nil,
       display_name: nil,
       session_id: nil,

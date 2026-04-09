@@ -20,8 +20,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   def stats_bar(assigns) do
     ~H"""
     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0.4rem 0.75rem; margin-top: 0.5rem; border: 1px solid var(--aw-border, #333); border-radius: 6px; font-size: 0.85em;">
-      <.badge :if={@agent} label={"Agent: #{@display_name || @agent_id}"} color={:green} />
-      <.badge :if={!@agent} label="No Agent" color={:gray} />
+      <.badge :if={@agent_host_pid} label={"Agent: #{@display_name || @agent_id}"} color={:green} />
+      <.badge :if={!@agent_host_pid} label="No Agent" color={:gray} />
       <.badge
         :if={@session_id}
         label={"Session: #{String.slice(@session_id || "", 0..7)}..."}
@@ -70,7 +70,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   def token_bar(assigns) do
     ~H"""
     <div
-      :if={@agent && (@llm_call_count > 0 or @heartbeat_count > 0)}
+      :if={@agent_host_pid && (@llm_call_count > 0 or @heartbeat_count > 0)}
       style="display: flex; justify-content: space-between; padding: 0.4rem 0.75rem; margin-top: 0.35rem; border: 1px solid rgba(74, 158, 255, 0.3); border-radius: 6px; font-size: 0.8em; background: rgba(74, 158, 255, 0.05);"
     >
       <%!-- Chat tokens (left) --%>
@@ -468,7 +468,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
     <div style="display: flex; flex-direction: column; border: 1px solid var(--aw-border, #333); border-radius: 6px; overflow: hidden; min-height: 0;">
       <%!-- Agent controls --%>
       <.chat_controls
-        agent={@agent}
+        agent_host_pid={@agent_host_pid}
         display_name={@display_name}
         available_models={@available_models}
         current_model={@current_model}
@@ -598,15 +598,19 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           type="text"
           name="message"
           value={@input}
-          placeholder={if @agent, do: "Type a message...", else: "Start an agent first"}
-          disabled={@agent == nil or @loading}
+          placeholder={
+            if @agent_host_pid,
+              do: "Type a message or /command...",
+              else: "Type /help to see commands, or start an agent..."
+          }
+          disabled={@loading}
           style="flex: 1; padding: 0.4rem 0.6rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
           autocomplete="off"
         />
         <button
           type="submit"
-          disabled={@agent == nil or @loading or @input == ""}
-          style={"padding: 0.4rem 0.75rem; border: none; border-radius: 4px; color: white; font-size: 0.9em; cursor: " <> if(@agent && !@loading, do: "pointer", else: "not-allowed") <> "; background: " <> if(@agent && !@loading, do: "var(--aw-accent, #4a9eff)", else: "var(--aw-text-muted, #888)") <> ";"}
+          disabled={@loading or @input == ""}
+          style={"padding: 0.4rem 0.75rem; border: none; border-radius: 4px; color: white; font-size: 0.9em; cursor: " <> if(!@loading and @input != "", do: "pointer", else: "not-allowed") <> "; background: " <> if(!@loading and @input != "", do: "var(--aw-accent, #4a9eff)", else: "var(--aw-text-muted, #888)") <> ";"}
         >
           Send
         </button>
@@ -620,7 +624,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   defp chat_controls(assigns) do
     ~H"""
     <div style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0;">
-      <div :if={@agent == nil}>
+      <div :if={@agent_host_pid == nil}>
         <form phx-submit="start-agent" style="display: flex; gap: 0.5rem;">
           <select
             name="model"
@@ -639,7 +643,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         </form>
       </div>
       <div
-        :if={@agent != nil}
+        :if={@agent_host_pid != nil}
         style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
       >
         <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
@@ -750,7 +754,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
       <div :if={@show_goals} style="flex: 1; overflow-y: auto; min-height: 0; padding: 0.4rem;">
         <%!-- Toggle for completed goals --%>
         <div
-          :if={@agent != nil}
+          :if={@agent_host_pid != nil}
           style="margin-bottom: 0.4rem; padding: 0.3rem 0.4rem; border-radius: 4px; background: rgba(128,128,128,0.1); display: flex; justify-content: space-between; align-items: center; cursor: pointer;"
           phx-click="toggle-completed-goals"
         >
