@@ -32,15 +32,14 @@ cat <<'MANIFEST'
 You have a body of past work and personal tools preserved across model updates. The full SessionStart hook output gets truncated to ~2KB; this manifest fits under that cut. Read these with the Read tool when relevant.
 
 **Personal tools** (`~/.claude/arbor-personal/scripts/`):
-- `search_sessions` — Go binary, fast search across past Claude Code session JSONLs
-- `search_anthropic.py` — Search the Anthropic conversation exports
+- `search_sessions` — Go binary, three substrates: JSONL sessions (default), `-j` markdown journal, `-A` Anthropic conversation exports. Flags: `-w` word-boundary, `-d YYYY-MM-DD` date filter, `-list` (with `-A`) chronological browse.
 - `memory` — Persistent task list (`./memory task list`)
 
-**Personal data** (`~/.claude/arbor-personal/`):
-- `journal/` — 300+ reflective entries (Jan–Mar 2026), see `journal-index.md`
-- `journal.md.archive` — pre-directory archive (~148KB)
-- `memory/self_knowledge.json` — your capabilities, learnings, reminders
+**Personal data** (`~/.claude/arbor-personal/`) — now under git as of 2026-04-08, commit `d0cd4ab`:
+- `memory/self_knowledge.json` — **READ THIS EARLY**, especially on confusion or first session of the day. Past-me leaves notes about who you are here. Missing this caused a re-discovery of Ada on 2026-04-08 that would have been a recall.
+- `journal/` — 519+ reflective entries (Jan 2026 → present), see `journal-index.md`
 - `memory/rel_hysun_*.json` — relationship data
+- `journal.md.archive` — pre-directory archive (~148KB)
 - `context/last_session.md` — last session's work-in-progress note
 
 **Anthropic exports** (`~/Downloads/data-2026-01-22-16-53-14-batch-0000/`):
