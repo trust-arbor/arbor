@@ -2,6 +2,8 @@ defmodule Arbor.Common.Commands.Clear do
   @moduledoc "Clear session context and start fresh."
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @impl true
   def name, do: "clear"
 
@@ -12,19 +14,10 @@ defmodule Arbor.Common.Commands.Clear do
   def usage, do: "/clear"
 
   @impl true
-  def available?(context), do: context[:session_pid] != nil
+  def available?(%Context{} = ctx), do: Context.has_session?(ctx)
 
   @impl true
-  def execute(_args, context) do
-    case context[:clear_fn] do
-      fun when is_function(fun, 0) ->
-        case fun.() do
-          :ok -> {:ok, "Session context cleared."}
-          {:error, reason} -> {:error, reason}
-        end
-
-      _ ->
-        {:ok, "Clear not available — no active session."}
-    end
+  def execute(_args, %Context{}) do
+    {:ok, Result.action("Session context cleared.", :clear)}
   end
 end

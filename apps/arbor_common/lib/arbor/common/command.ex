@@ -2,51 +2,82 @@ defmodule Arbor.Common.Command do
   @moduledoc """
   Behaviour for slash commands in agent chat.
 
-  Commands intercept user input before it reaches the LLM, providing
-  fast operations like `/help`, `/model`, `/status`, and `/compact`.
+  Commands intercept user input before it reaches the LLM, providing fast
+  operations like `/help`, `/model`, `/status`, and `/compact`. They are
+  invoked the same way from every entry point — dashboard, arbor_comms,
+  ACP, CLI — by going through `Arbor.Common.CommandIntake.handle/3`.
 
-  ## Context
+  ## Pure functions, no side effects
 
-  The `context` map is built by the caller (Session, Manager, CLI) and
-  contains whatever state is available at that entry point:
+  Commands are PURE: data in (`%Context{}`), data out (`%Result{}`). They
+  do not perform side effects directly. If a command needs the caller to
+  do something (clear a session, switch a model, etc.), it returns a
+  `%Result{}` with an `:action` field describing what should happen. The
+  caller (CommandIntake.handle's invoker) interprets the action and
+  performs the side effect.
 
-      %{
-        agent_id: "agent_abc123",
-        session_pid: pid,
-        model: "anthropic/claude-sonnet-4",
-        trust_profile: %{...},
-        # ... caller-specific keys
-      }
+  This separation makes commands trivially testable in isolation, lets
+  them work from any entry point without coupling, and removes the
+  fn-in-context anti-pattern of the original design.
 
-  Commands should degrade gracefully when context keys are missing.
+  ## Example — display command
 
-  ## Example
-
-      defmodule Arbor.Common.Commands.Help do
+      defmodule Arbor.Common.Commands.Status do
         @behaviour Arbor.Common.Command
 
-        @impl true
-        def name, do: "help"
+        alias Arbor.Contracts.Commands.{Context, Result}
 
         @impl true
-        def aliases, do: ["h", "?"]
+        def name, do: "status"
 
         @impl true
-        def description, do: "List available commands"
+        def description, do: "Show agent status (model, session, trust)"
 
         @impl true
-        def usage, do: "/help [command]"
+        def usage, do: "/status"
 
         @impl true
-        def execute(_args, context) do
-          commands = Arbor.Common.CommandRouter.list_commands(context)
-          {:ok, format_commands(commands)}
+        def available?(%Context{} = ctx), do: Context.has_agent?(ctx)
+
+        @impl true
+        def execute(_args, %Context{} = ctx) do
+          text = "Agent: \#{ctx.display_name}\\nModel: \#{ctx.model}"
+          {:ok, Result.ok(text)}
         end
+      end
+
+  ## Example — action command
+
+      defmodule Arbor.Common.Commands.Clear do
+        @behaviour Arbor.Common.Command
+
+        alias Arbor.Contracts.Commands.{Context, Result}
 
         @impl true
-        def available?(_context), do: true
+        def name, do: "clear"
+
+        @impl true
+        def description, do: "Clear session context"
+
+        @impl true
+        def usage, do: "/clear"
+
+        @impl true
+        def available?(%Context{} = ctx), do: Context.has_session?(ctx)
+
+        @impl true
+        def execute(_args, %Context{}) do
+          {:ok, Result.action("Session context cleared.", :clear)}
+        end
       end
+
+  The command itself does NOT call `Session.clear/1`. The caller of
+  `CommandIntake.handle` sees `result.action == :clear` and routes the
+  side effect to the appropriate handler (Session for agent-bound
+  actions, Manager for system-wide actions, etc.).
   """
+
+  alias Arbor.Contracts.Commands.{Context, Result}
 
   @doc "Primary command name (e.g. \"help\", \"model\")."
   @callback name() :: String.t()
@@ -63,18 +94,24 @@ defmodule Arbor.Common.Command do
   @doc """
   Execute the command with parsed arguments and caller context.
 
-  Returns `{:ok, text}` for display, or `{:error, reason}`.
+  Returns `{:ok, %Result{}}` for both display-only commands and commands
+  that need the caller to perform an action (the action is described in
+  `result.action`). Returns `{:error, reason}` for infrastructure failures
+  that the command itself can't represent (e.g. malformed args). For
+  command-level errors that should be displayed to the user, return
+  `{:ok, Result.error("...")}`.
   """
-  @callback execute(args :: String.t(), context :: map()) ::
-              {:ok, String.t()} | {:error, term()}
+  @callback execute(args :: String.t(), context :: Context.t()) ::
+              {:ok, Result.t()} | {:error, term()}
 
   @doc """
   Whether this command is visible/available given the current context.
 
-  Used for trust-aware filtering — e.g., `/shell` only available when
-  the agent's trust profile allows `arbor://shell/exec`.
+  Used by `/help` to filter the command list and by `CommandIntake` to
+  reject commands that can't run in the current context (e.g. agent-bound
+  commands when no agent is selected).
   """
-  @callback available?(context :: map()) :: boolean()
+  @callback available?(context :: Context.t()) :: boolean()
 
   @optional_callbacks [aliases: 0]
 end

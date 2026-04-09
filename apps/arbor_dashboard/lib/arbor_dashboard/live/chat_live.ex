@@ -16,6 +16,8 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Dashboard.Live.ChatLive.Components
 
   alias Arbor.Agent.{APIAgent, Claude, Lifecycle, Manager}
+  alias Arbor.Common.CommandIntake
+  alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Dashboard.ChatState
   alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
@@ -280,44 +282,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       # Single-agent mode (existing flow)
       socket.assigns.agent != nil ->
-        # Guard: don't send a second message while a query is in flight.
-        # Without this, the Session returns {:error, :turn_in_progress}
-        # and the APIAgent falls back to direct query (potentially with stale context).
-        if socket.assigns.loading do
-          Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
-          {:noreply, socket}
-        else
-          # Capture the *real* send time once and use it for both display and
-          # persistence. The UserMessage envelope carries `sent_at` all the way
-          # down through APIAgent.query → Session.send_message → persist_turn_entries
-          # so the SessionStore user-entry timestamp matches the instant the
-          # user actually clicked Send (not the much-later turn-completion time).
-          user_message =
-            Arbor.Contracts.Session.UserMessage.from_dashboard(
-              input,
-              socket.assigns[:current_agent_id]
-            )
+        # Slash command intake — check FIRST, before the loading guard.
+        # Commands are pure and synchronous; they don't conflict with an
+        # in-flight LLM query, so we can run them immediately even when
+        # `loading` is true.
+        case CommandIntake.classify(input) do
+          {:command, _, _} ->
+            handle_slash_command(input, socket)
 
-          # Local stream display map — uses the SAME sent_at as the envelope
-          # so display and persistence agree on the timestamp for the same
-          # logical event.
-          user_msg = %{
-            id: "msg-#{System.unique_integer([:positive])}",
-            role: :user,
-            content: input,
-            timestamp: user_message.sent_at
-          }
-
-          socket =
-            socket
-            |> stream_insert(:messages, user_msg)
-            |> assign(input: "", loading: true, error: nil, streaming_text: "")
-
-          # Spawn async query — keeps LiveView responsive during LLM calls.
-          # Command routing happens centrally in Manager.chat/Session.send_message.
-          dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, user_message)
-
-          {:noreply, socket}
+          {:prompt, _} ->
+            send_prompt(input, socket)
         end
 
       # No agent or group
@@ -997,6 +971,202 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
     <.group_modal {assigns} />
     """
+  end
+
+  # ── Slash Command Intake (added 2026-04-09 — see slash-commands.md v2) ─
+
+  # Sends a regular (non-command) prompt through the existing async query
+  # path. Extracted from handle_event("send-message") so the slash command
+  # branch and the prompt branch are visually parallel.
+  defp send_prompt(input, socket) do
+    if socket.assigns.loading do
+      Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
+      {:noreply, socket}
+    else
+      user_message =
+        Arbor.Contracts.Session.UserMessage.from_dashboard(
+          input,
+          socket.assigns[:current_agent_id]
+        )
+
+      user_msg = %{
+        id: "msg-#{System.unique_integer([:positive])}",
+        role: :user,
+        content: input,
+        timestamp: user_message.sent_at
+      }
+
+      socket =
+        socket
+        |> stream_insert(:messages, user_msg)
+        |> assign(input: "", loading: true, error: nil, streaming_text: "")
+
+      dispatch_query(socket.assigns.chat_backend, socket.assigns.agent, user_message)
+
+      {:noreply, socket}
+    end
+  end
+
+  # Routes a slash command through CommandIntake. Builds a typed Context
+  # from the live session state + agent registry metadata, runs the
+  # command, displays the result inline (no LLM call), and dispatches any
+  # action description the command returned.
+  defp handle_slash_command(input, socket) do
+    user_msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: :user,
+      content: input,
+      timestamp: DateTime.utc_now()
+    }
+
+    socket =
+      socket
+      |> stream_insert(:messages, user_msg)
+      |> assign(input: "", error: nil)
+
+    case build_command_context(socket) do
+      {:ok, %Context{} = context} ->
+        intake_result =
+          CommandIntake.handle(input, context, fn _prompt ->
+            # Should never reach here — classify already returned :command.
+            # Defense-in-depth fallback in case parse and classify ever drift.
+            {:fallback_unexpected, input}
+          end)
+
+        socket = handle_intake_result(intake_result, context, socket)
+        {:noreply, socket}
+
+      {:error, reason} ->
+        Logger.warning("[ChatLive] Failed to build command context: #{inspect(reason)}")
+        socket = stream_insert_command_error(socket, "Couldn't build command context: #{inspect(reason)}")
+        {:noreply, socket}
+    end
+  end
+
+  # Builds the command Context from the LiveView's current socket assigns.
+  # Looks up the agent in the registry to get its model_config (the home
+  # model lives there, NOT in Session.config). Returns {:ok, %Context{}} or
+  # {:error, reason} if the agent or session can't be located.
+  defp build_command_context(socket) do
+    agent_id = socket.assigns[:current_agent_id]
+
+    with true <- is_binary(agent_id) or {:error, :no_current_agent},
+         {:ok, entry} <- Arbor.Agent.Registry.lookup(agent_id),
+         {:ok, session_pid} <- find_session_pid(entry) do
+      state = :sys.get_state(session_pid)
+
+      ctx =
+        Arbor.Orchestrator.SessionCore.build_command_context(
+          state,
+          session_pid,
+          origin: :dashboard,
+          user_id: socket.assigns[:user_id] || "dashboard_user",
+          model_config: entry.metadata[:model_config] || %{}
+        )
+
+      {:ok, ctx}
+    else
+      {:error, _} = err -> err
+      false -> {:error, :no_current_agent}
+      other -> {:error, {:context_build_failed, other}}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  # Walks the agent's BranchSupervisor children to find the live session
+  # process. Bypasses the registry's metadata.session_pid which can be
+  # stale after a restart (see arbor inbox entry from 2026-04-09).
+  defp find_session_pid(entry) do
+    sup_pid = entry.metadata[:supervisor_pid]
+
+    if is_pid(sup_pid) and Process.alive?(sup_pid) do
+      case Enum.find(Supervisor.which_children(sup_pid), fn {id, _, _, _} -> id == :session end) do
+        {:session, pid, _, _} when is_pid(pid) -> {:ok, pid}
+        _ -> {:error, :no_session_child}
+      end
+    else
+      {:error, :no_supervisor}
+    end
+  end
+
+  # Dispatches the result returned by CommandIntake.handle into the LiveView
+  # message stream + (optionally) a side-effect handler for any action.
+  defp handle_intake_result({:command_result, %Result{} = result}, context, socket) do
+    socket = stream_insert_command_result(socket, result)
+
+    if result.action != nil do
+      dispatch_command_action(result.action, context, socket)
+    else
+      socket
+    end
+  end
+
+  defp handle_intake_result({:command_error, message}, _context, socket) do
+    stream_insert_command_error(socket, message)
+  end
+
+  defp handle_intake_result(other, _context, socket) do
+    Logger.warning("[ChatLive] Unexpected intake result: #{inspect(other)}")
+    stream_insert_command_error(socket, "Unexpected command result.")
+  end
+
+  # Action dispatch — currently logs the request and tells the user the
+  # action was acknowledged but not yet executed. The Session-level
+  # action handlers (Session.clear/1, Session.compact/1, Session.set_model/2)
+  # are scheduled as a follow-up to this refactor — see slash-commands v2
+  # notes in 5-completed/.
+  defp dispatch_command_action(action, _context, socket) do
+    Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
+
+    note =
+      "(Action #{format_action(action)} acknowledged. " <>
+        "Side-effect execution is the next batch of work — the architecture is in place but Session.#{action_function(action)}/N isn't built yet.)"
+
+    stream_insert_system_note(socket, note)
+  end
+
+  defp format_action(:clear), do: ":clear"
+  defp format_action(:compact), do: ":compact"
+  defp format_action({:switch_model, name}), do: "{:switch_model, \"#{name}\"}"
+  defp format_action(other), do: inspect(other)
+
+  defp action_function(:clear), do: "clear"
+  defp action_function(:compact), do: "compact"
+  defp action_function({:switch_model, _}), do: "set_model"
+  defp action_function(_), do: "?"
+
+  defp stream_insert_command_result(socket, %Result{text: text}) do
+    msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: :assistant,
+      content: text,
+      timestamp: DateTime.utc_now()
+    }
+
+    stream_insert(socket, :messages, msg)
+  end
+
+  defp stream_insert_command_error(socket, message) do
+    msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: :assistant,
+      content: "⚠️  " <> message,
+      timestamp: DateTime.utc_now()
+    }
+
+    stream_insert(socket, :messages, msg)
+  end
+
+  defp stream_insert_system_note(socket, note) do
+    msg = %{
+      id: "msg-#{System.unique_integer([:positive])}",
+      role: :assistant,
+      content: note,
+      timestamp: DateTime.utc_now()
+    }
+
+    stream_insert(socket, :messages, msg)
   end
 
   # ── Agent Lifecycle Helpers ──────────────────────────────────────────

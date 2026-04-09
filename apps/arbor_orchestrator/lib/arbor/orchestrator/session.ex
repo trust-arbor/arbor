@@ -75,7 +75,6 @@ defmodule Arbor.Orchestrator.Session do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
-  alias Arbor.Orchestrator.SessionCore
 
   @default_heartbeat_interval 30_000
 
@@ -408,7 +407,6 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_call({:send_message, message}, from, state) do
-    alias Arbor.Common.CommandRouter
     alias Arbor.Contracts.Session.UserMessage
 
     # Coerce any incoming shape (bare string, %UserMessage{}, legacy map)
@@ -429,20 +427,23 @@ defmodule Arbor.Orchestrator.Session do
         other -> UserMessage.from_string(inspect(other))
       end
 
-    case CommandRouter.parse(user_message.content) do
-      {:command, cmd_name, args} ->
-        context = build_command_context(state)
-        result = CommandRouter.execute(cmd_name, args, context)
-        {:reply, format_command_result(result), state}
+    # Slash commands no longer intercepted here. As of 2026-04-09 (slash
+    # commands v2 / CRC refactor), every entry point — dashboard ChatLive,
+    # arbor_comms.MessageHandler, future ACP/CLI — is responsible for parsing
+    # commands at its OWN intake layer via Arbor.Common.CommandIntake.handle/3.
+    # By the time a message reaches Session.send_message, it has already been
+    # classified as a regular prompt, not a command.
+    #
+    # Session is back to being a pure agent-runtime container with no UI or
+    # CommandRouter knowledge. If a "/foo" string somehow reaches Session
+    # anyway (entry point forgot to pre-parse), it will simply be forwarded to
+    # the LLM as a regular prompt — which is the right defensive behavior.
+    case authorize_orchestrator(state) do
+      :ok ->
+        do_send_message_async(user_message, from, state)
 
-      {:prompt, _text} ->
-        case authorize_orchestrator(state) do
-          :ok ->
-            do_send_message_async(user_message, from, state)
-
-          {:error, reason} ->
-            {:reply, {:error, {:unauthorized, reason}}, state}
-        end
+      {:error, reason} ->
+        {:reply, {:error, {:unauthorized, reason}}, state}
     end
   end
 
@@ -473,30 +474,6 @@ defmodule Arbor.Orchestrator.Session do
         {:reply, {:error, reason}, state}
     end
   end
-
-  # Slash command context — delegated to the testable pure function in
-  # SessionCore. The previous inline defp used `state[:field]` bracket access
-  # on the Session struct, which crashes (structs don't implement Access).
-  # Discovered 2026-04-09 from a `/help` test in the dashboard. There is now
-  # a regression test in `session_core_test.exs` that exercises this against
-  # a real Session struct so the same class of bug can't reappear.
-  defp build_command_context(state) do
-    SessionCore.build_command_context(state, self())
-  end
-
-  defp format_command_result({:ok, text}), do: {:ok, %{text: text, type: :command}}
-
-  defp format_command_result({:error, {:unknown_command, msg}}),
-    do: {:ok, %{text: msg, type: :command_error}}
-
-  defp format_command_result({:error, {:unavailable, msg}}),
-    do: {:ok, %{text: msg, type: :command_error}}
-
-  defp format_command_result({:error, {:command_error, msg}}),
-    do: {:ok, %{text: "Command error: #{msg}", type: :command_error}}
-
-  defp format_command_result({:error, reason}),
-    do: {:ok, %{text: "Error: #{inspect(reason)}", type: :command_error}}
 
   defp do_send_message_async(%Arbor.Contracts.Session.UserMessage{} = user_message, from, state) do
     state = transition_phase(state, :idle, :input_received, :processing)

@@ -2,6 +2,8 @@ defmodule Arbor.Common.Commands.Compact do
   @moduledoc "Trigger context compaction for the current session."
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @impl true
   def name, do: "compact"
 
@@ -12,38 +14,10 @@ defmodule Arbor.Common.Commands.Compact do
   def usage, do: "/compact"
 
   @impl true
-  def available?(context), do: context[:session_pid] != nil
+  def available?(%Context{} = ctx), do: Context.has_session?(ctx)
 
   @impl true
-  def execute(_args, context) do
-    case context[:compact_fn] do
-      fun when is_function(fun, 0) ->
-        case fun.() do
-          :ok -> {:ok, "Context compacted."}
-          {:ok, stats} -> {:ok, "Context compacted. #{format_stats(stats)}"}
-          {:error, reason} -> {:error, reason}
-        end
-
-      _ ->
-        {:ok, "Compaction not available — no active session."}
-    end
+  def execute(_args, %Context{}) do
+    {:ok, Result.action("Compacting context...", :compact)}
   end
-
-  defp format_stats(stats) when is_map(stats) do
-    parts = []
-
-    parts =
-      if before = stats[:messages_before],
-        do: parts ++ ["#{before} → #{stats[:messages_after] || "?"} messages"],
-        else: parts
-
-    parts =
-      if ratio = stats[:compression_ratio],
-        do: parts ++ ["#{Float.round(ratio * 100, 1)}% reduction"],
-        else: parts
-
-    Enum.join(parts, ", ")
-  end
-
-  defp format_stats(_), do: ""
 end

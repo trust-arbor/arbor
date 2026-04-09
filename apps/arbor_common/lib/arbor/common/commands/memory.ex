@@ -2,6 +2,8 @@ defmodule Arbor.Common.Commands.Memory do
   @moduledoc "Show working memory summary."
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @impl true
   def name, do: "memory"
 
@@ -15,53 +17,34 @@ defmodule Arbor.Common.Commands.Memory do
   def usage, do: "/memory"
 
   @impl true
-  def available?(_context), do: true
+  def available?(%Context{} = ctx), do: Context.has_agent?(ctx)
 
   @impl true
-  def execute(_args, context) do
-    case context[:memory_fn] do
-      fun when is_function(fun, 0) ->
-        case fun.() do
-          {:ok, summary} when is_binary(summary) -> {:ok, summary}
-          {:ok, data} when is_map(data) -> {:ok, format_memory(data)}
-          _ -> {:ok, "No working memory available."}
-        end
+  def execute(_args, %Context{working_memory_summary: nil}) do
+    {:ok, Result.ok("No working memory available.")}
+  end
 
-      _ ->
-        {:ok, "Working memory not available in this context."}
-    end
+  def execute(_args, %Context{working_memory_summary: data}) when is_map(data) do
+    {:ok, Result.ok(format_memory(data))}
   end
 
   defp format_memory(data) do
-    lines = ["Working Memory:"]
+    counts = [
+      maybe_count("Thoughts", data[:thoughts]),
+      maybe_count("Concerns", data[:concerns]),
+      maybe_count("Curiosities", data[:curiosities])
+    ]
 
-    lines =
-      case data[:thoughts] do
-        thoughts when is_list(thoughts) and length(thoughts) > 0 ->
-          lines ++ ["  Thoughts: #{length(thoughts)}"]
-
-        _ ->
-          lines
-      end
-
-    lines =
-      case data[:concerns] do
-        concerns when is_list(concerns) and length(concerns) > 0 ->
-          lines ++ ["  Concerns: #{length(concerns)}"]
-
-        _ ->
-          lines
-      end
-
-    lines =
-      case data[:curiosities] do
-        curiosities when is_list(curiosities) and length(curiosities) > 0 ->
-          lines ++ ["  Curiosities: #{length(curiosities)}"]
-
-        _ ->
-          lines
-      end
-
+    lines = ["Working Memory:" | Enum.reject(counts, &is_nil/1)]
     Enum.join(lines, "\n")
   end
+
+  defp maybe_count(_label, nil), do: nil
+  defp maybe_count(_label, []), do: nil
+
+  defp maybe_count(label, list) when is_list(list) do
+    "  #{label}: #{length(list)}"
+  end
+
+  defp maybe_count(_label, _), do: nil
 end

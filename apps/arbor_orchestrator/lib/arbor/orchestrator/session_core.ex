@@ -1,4 +1,6 @@
 defmodule Arbor.Orchestrator.SessionCore do
+  alias Arbor.Contracts.Commands.Context
+
   @moduledoc """
   Pure CRC module for session state operations.
 
@@ -304,45 +306,66 @@ defmodule Arbor.Orchestrator.SessionCore do
   # ===========================================================================
 
   @doc """
-  Build the read-only context map passed to slash command modules.
+  Build a typed `%Arbor.Contracts.Commands.Context{}` from a Session struct.
 
-  Takes a `%Arbor.Orchestrator.Session{}` struct and a session_pid, returns a
-  plain map suitable for `Arbor.Common.CommandRouter.execute/3`.
+  ## Why this lives here
 
-  IMPORTANT: `state` is a struct, NOT a plain map. Structs do NOT implement
-  Access by default — `state[:foo]` and `get_in(state, [:a, :b])` both crash
-  with `UndefinedFunctionError`. Always use direct field access (`state.field`)
-  here, or pull from `state.config` (which IS a regular map).
+  This function is a CRC "Convert" — Session state in, Context out. It
+  lives in SessionCore rather than as a `defp` in Session for two reasons:
 
-  Lives in SessionCore (rather than as a defp in Session) so it can be
-  exercised by unit tests without spinning up the full GenServer. Discovered
-  2026-04-09 that the previous defp version had never been exercised by any
-  test and crashed on the very first slash command from the dashboard.
+  1. It's pure (no side effects, no GenServer calls), so it can be
+     exercised by unit tests without spinning up the full GenServer.
+  2. It depends only on Level 0 contracts (Context), so it doesn't drag
+     orchestrator-specific knowledge into the contract layer.
+
+  ## Library hierarchy and the model_config dependency
+
+  The agent's home model lives in `Arbor.Agent.Registry`'s metadata, NOT in
+  the Session struct (state.config is a per-session override). But
+  arbor_orchestrator can't depend on arbor_agent (Level 2 → Level 2 horizontal
+  dep would violate the hierarchy). So we accept `model_config` as an
+  `opts` parameter — the caller (which DOES have access to the registry,
+  e.g. ChatLive in the dashboard or MessageHandler in arbor_comms) looks
+  it up and passes the resolved metadata in.
+
+  When `model_config` is passed, it provides the canonical model/provider.
+  If `state.config` also has model/provider set, those win (per-session
+  override semantics).
+
+  ## Discovery 2026-04-09
+
+  The previous version of this function returned a plain map and used
+  bracket access on the Session struct, which crashed on the first slash
+  command from the dashboard because structs don't implement Access. The
+  rewrite to a typed Context struct + Map.get-based field reads + library-
+  hierarchy-respecting model lookup is the proper architectural fix.
   """
-  @spec build_command_context(struct(), pid() | nil) :: map()
-  def build_command_context(state, session_pid \\ nil) do
-    config = Map.get(state, :config) || %{}
+  @spec build_command_context(struct(), pid() | nil, keyword()) :: Context.t()
+  def build_command_context(state, session_pid \\ nil, opts \\ []) do
+    state_config = Map.get(state, :config) || %{}
+    model_config = Keyword.get(opts, :model_config, %{})
 
-    %{
+    Context.new(
+      origin: Keyword.get(opts, :origin, :unknown),
+      user_id: Keyword.get(opts, :user_id),
       agent_id: Map.get(state, :agent_id),
-      # display_name not yet in the struct — fall back to agent_id. Could be
-      # populated from Arbor.Agent.Registry metadata in a follow-up.
-      display_name: Map.get(state, :agent_id),
-      model: config[:model],
-      provider: config[:provider],
+      display_name:
+        Keyword.get(opts, :display_name) ||
+          model_config[:display_name] ||
+          Map.get(state, :agent_id),
+      model: state_config[:model] || model_config[:id] || model_config[:model],
+      provider: state_config[:provider] || model_config[:provider],
       session_id: Map.get(state, :session_id),
       session_pid: session_pid,
       trust_tier: Map.get(state, :trust_tier),
+      trust_profile: Keyword.get(opts, :trust_profile),
       turn_count: Map.get(state, :turn_count),
-      # Convert MapSet of discovered tool names → sorted list of strings.
-      # /tools' renderer has a `name when is_binary(name)` clause that prints
-      # bare names without "name — desc" formatting, which is what we want
-      # until we wire descriptions from ActionRegistry.
       tools: discovered_tools_list(Map.get(state, :discovered_tools)),
-      # session_started not tracked on the struct; omit for now. /session
-      # already gracefully handles missing fields.
-      session_started: nil
-    }
+      session_started: Keyword.get(opts, :session_started),
+      working_memory_summary:
+        Keyword.get(opts, :working_memory_summary) ||
+          working_memory_summary_from_state(Map.get(state, :working_memory))
+    )
   end
 
   defp discovered_tools_list(nil), do: []
@@ -351,7 +374,27 @@ defmodule Arbor.Orchestrator.SessionCore do
     set |> MapSet.to_list() |> Enum.sort()
   end
 
+  defp discovered_tools_list(list) when is_list(list) do
+    list |> Enum.map(&to_string/1) |> Enum.sort()
+  end
+
   defp discovered_tools_list(_), do: []
+
+  # The session struct has `working_memory` as an arbitrary map. We don't
+  # want to leak its full shape into the Context, so produce a small
+  # summary map with the counts /memory wants to display.
+  defp working_memory_summary_from_state(nil), do: nil
+  defp working_memory_summary_from_state(wm) when wm == %{}, do: nil
+
+  defp working_memory_summary_from_state(wm) when is_map(wm) do
+    %{
+      thoughts: Map.get(wm, :thoughts) || Map.get(wm, "thoughts") || [],
+      concerns: Map.get(wm, :concerns) || Map.get(wm, "concerns") || [],
+      curiosities: Map.get(wm, :curiosities) || Map.get(wm, "curiosities") || []
+    }
+  end
+
+  defp working_memory_summary_from_state(_), do: nil
 
   # ===========================================================================
   # Private

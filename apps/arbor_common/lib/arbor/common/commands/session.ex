@@ -2,6 +2,8 @@ defmodule Arbor.Common.Commands.Session do
   @moduledoc "Show session info."
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @impl true
   def name, do: "session"
 
@@ -12,32 +14,23 @@ defmodule Arbor.Common.Commands.Session do
   def usage, do: "/session"
 
   @impl true
-  def available?(context), do: context[:session_pid] != nil or context[:session_id] != nil
+  def available?(%Context{} = ctx), do: Context.has_session?(ctx) or ctx.session_id != nil
 
   @impl true
-  def execute(_args, context) do
-    lines = []
-
+  def execute(_args, %Context{} = ctx) do
     lines =
-      if session_id = context[:session_id],
-        do: lines ++ ["Session ID: #{session_id}"],
-        else: lines ++ ["No active session"]
+      if ctx.session_id do
+        [
+          "Session ID: #{ctx.session_id}",
+          if(ctx.turn_count, do: "Turns: #{ctx.turn_count}"),
+          if(ctx.model, do: "Model: #{ctx.model}"),
+          if(ctx.session_started, do: "Started: #{ctx.session_started}")
+        ]
+        |> Enum.reject(&is_nil/1)
+      else
+        ["No active session"]
+      end
 
-    lines =
-      if turn_count = context[:turn_count],
-        do: lines ++ ["Turns: #{turn_count}"],
-        else: lines
-
-    lines =
-      if model = context[:model],
-        do: lines ++ ["Model: #{model}"],
-        else: lines
-
-    lines =
-      if started = context[:session_started],
-        do: lines ++ ["Started: #{started}"],
-        else: lines
-
-    {:ok, Enum.join(lines, "\n")}
+    {:ok, Result.ok(Enum.join(lines, "\n"))}
   end
 end

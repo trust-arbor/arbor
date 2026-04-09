@@ -281,25 +281,31 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
   end
 
   # ===========================================================================
-  # Slash command context — regression for 2026-04-09 Session Access crash
+  # Slash command context — regression + CRC refactor coverage
   # ===========================================================================
   #
-  # Background: the previous version of `build_command_context/1` lived as a
-  # `defp` in `Session` and used `state[:field]` bracket access on the Session
-  # struct. Structs do NOT implement Access by default, so the very first slash
-  # command typed in the dashboard crashed with `UndefinedFunctionError`. The
-  # bug went unnoticed because no test exercised the function — `/help` was
-  # the only command tested, and Help doesn't go through this code path.
+  # History: yesterday's version of `build_command_context/1` lived as a `defp`
+  # in `Session` and used `state[:field]` bracket access on the Session struct.
+  # Structs do NOT implement Access by default, so the very first slash command
+  # from the dashboard crashed with `UndefinedFunctionError`. The bug went
+  # unnoticed because NO test exercised the function — `/help` was the only
+  # command tested, and Help doesn't go through this code path.
+  #
+  # The first round of tests (2026-04-08) added regression coverage against
+  # the bracket-access crash. The second round (2026-04-09, this file) adds
+  # coverage for the CRC refactor that moved this function to SessionCore as
+  # a typed-Context constructor and introduced the model_config opts path
+  # so the agent's home model is properly resolved by the caller.
   #
   # These tests construct a real `%Arbor.Orchestrator.Session{}` and call
-  # `build_command_context/2` against it, asserting that:
-  #   1. It does NOT crash (the original failure mode)
-  #   2. It returns a plain map with the expected keys
-  #   3. It pulls model/provider from `state.config` (which IS a regular map)
-  #   4. It safely handles missing/nil discovered_tools
-  #
-  # If any future refactor reintroduces bracket access on the Session struct
-  # or removes a key the slash commands depend on, these tests should fail.
+  # `build_command_context/2,3` against it, asserting that:
+  #   1. It does NOT crash on the struct (the original 2026-04-08 failure)
+  #   2. It returns a typed `%Arbor.Contracts.Commands.Context{}`
+  #   3. It pulls model/provider from `state.config` first, then from
+  #      the model_config opts as fallback (per-session override wins)
+  #   4. It safely handles missing/nil discovered_tools, working_memory, config
+  #   5. It populates origin/user_id/model_config/working_memory_summary
+  #      from the opts keyword list
   describe "build_command_context/2 — regression for Session Access crash" do
     alias Arbor.Orchestrator.Session
 
@@ -413,6 +419,109 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       context = SessionCore.build_command_context(session)
 
       assert context.session_pid == nil
+    end
+
+    test "returns a typed %Context{} struct (not a plain map)" do
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{}
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert %Arbor.Contracts.Commands.Context{} = context
+    end
+
+    test "accepts :origin and :user_id via opts" do
+      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+
+      context =
+        SessionCore.build_command_context(session, self(),
+          origin: :dashboard,
+          user_id: "human_42"
+        )
+
+      assert context.origin == :dashboard
+      assert context.user_id == "human_42"
+    end
+
+    test "model_config from opts populates model and provider when state.config is empty" do
+      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+
+      context =
+        SessionCore.build_command_context(session, self(),
+          model_config: %{id: "arcee-ai/trinity-large-thinking", provider: :openrouter}
+        )
+
+      assert context.model == "arcee-ai/trinity-large-thinking"
+      assert context.provider == :openrouter
+    end
+
+    test "state.config wins over model_config (per-session override semantics)" do
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{model: "session-override", provider: :anthropic}
+      }
+
+      context =
+        SessionCore.build_command_context(session, self(),
+          model_config: %{id: "registry-default", provider: :openrouter}
+        )
+
+      assert context.model == "session-override"
+      assert context.provider == :anthropic
+    end
+
+    test "working_memory_summary is populated from state.working_memory when present" do
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{},
+        working_memory: %{
+          thoughts: ["first thought", "second thought"],
+          concerns: ["one concern"],
+          curiosities: []
+        }
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.working_memory_summary == %{
+               thoughts: ["first thought", "second thought"],
+               concerns: ["one concern"],
+               curiosities: []
+             }
+    end
+
+    test "working_memory_summary is nil when working_memory is empty" do
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{},
+        working_memory: %{}
+      }
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.working_memory_summary == nil
+    end
+
+    test "default origin is :unknown when not provided via opts" do
+      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+
+      context = SessionCore.build_command_context(session, self())
+
+      assert context.origin == :unknown
     end
   end
 end
