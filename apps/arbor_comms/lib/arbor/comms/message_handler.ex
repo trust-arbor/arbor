@@ -12,6 +12,8 @@ defmodule Arbor.Comms.MessageHandler do
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
+  alias Arbor.Common.CommandIntake
+  alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Contracts.Comms.Message
 
   require Logger
@@ -128,20 +130,47 @@ defmodule Arbor.Comms.MessageHandler do
     generate_and_send_response(msg)
   end
 
-  defp handle_command(%Message{content: "/help" <> _} = msg) do
-    response = "Available commands: /help, /status"
-    send_response(msg, response)
-  end
-
-  defp handle_command(%Message{content: "/status" <> _} = msg) do
-    channels = Config.configured_channels()
-    response = "Arbor comms active. Channels: #{Enum.join(channels, ", ")}"
-    send_response(msg, response)
-  end
-
+  # Slash command handling — migrated 2026-04-09 from hardcoded if/else to
+  # the unified Arbor.Common.CommandIntake helper. Now shares the SAME
+  # CommandRouter, command modules, and Result handling as the dashboard.
+  # Previously this had two stub clauses (/help, /status) that returned
+  # hardcoded strings, plus an "unknown command" fallback. The bifurcation
+  # is gone — every entry point now goes through the same router.
   defp handle_command(%Message{} = msg) do
-    response = "Unknown command. Try /help"
-    send_response(msg, response)
+    context = build_command_context(msg)
+
+    intake_result =
+      CommandIntake.handle(msg.content, context, fn _prompt ->
+        # Should never reach: classify already returned :command before we got here.
+        {:fallback_unexpected, msg.content}
+      end)
+
+    case intake_result do
+      {:command_result, %Result{text: text}} ->
+        send_response(msg, text)
+
+      {:command_error, message} ->
+        send_response(msg, message)
+
+      other ->
+        Logger.warning("[arbor_comms] Unexpected intake result: #{inspect(other)}")
+        send_response(msg, "Sorry, that command couldn't be handled.")
+    end
+  end
+
+  # Builds a command Context for arbor_comms — origin :arbor_comms with no
+  # current agent. The agent-bound commands (/status, /model, /clear, etc.)
+  # will correctly return "not available in this context" via their
+  # available?/1 checks. System-wide commands (/help and future /agents,
+  # /spawn) work as expected.
+  #
+  # When future system-wide commands need data like the agent list, populate
+  # the relevant Context fields (e.g. :all_agents) here from the registry.
+  defp build_command_context(%Message{} = msg) do
+    Context.new(
+      origin: :arbor_comms,
+      user_id: msg.from
+    )
   end
 
   defp generate_and_send_response(msg) do

@@ -15,6 +15,10 @@ defmodule Arbor.Common.CommandRouter do
 
   ## Usage
 
+  Most callers should use `Arbor.Common.CommandIntake.handle/3` instead of
+  calling `parse/1` and `execute/3` directly. The intake helper centralizes
+  the parse → dispatch → fallback flow that every entry point needs.
+
       case CommandRouter.parse(input) do
         {:command, name, args} ->
           CommandRouter.execute(name, args, context)
@@ -22,7 +26,18 @@ defmodule Arbor.Common.CommandRouter do
         {:prompt, text} ->
           # send to LLM as normal
       end
+
+  ## Context and Result
+
+  As of the 2026-04-09 CRC refactor, `execute/3` takes a typed
+  `Arbor.Contracts.Commands.Context` struct and returns
+  `{:ok, %Arbor.Contracts.Commands.Result{}}`. Commands are pure — they
+  never perform side effects. If a command needs the caller to do
+  something, the Result carries an `:action` field describing it; the
+  caller dispatches the action.
   """
+
+  alias Arbor.Contracts.Commands.{Context, Result}
 
   @behaviour_mod Arbor.Common.Command
 
@@ -72,12 +87,16 @@ defmodule Arbor.Common.CommandRouter do
   def parse(input), do: {:prompt, input}
 
   @doc """
-  Execute a named command with arguments and context.
+  Execute a named command with arguments and a typed Context.
 
-  Returns `{:ok, text}` on success, `{:error, reason}` on failure.
+  Returns `{:ok, %Result{}}` for both display-only and action commands
+  (action commands carry their action description in `result.action`).
+  Returns `{:error, term}` for unknown commands, unavailable commands, or
+  infrastructure failures during command execution.
   """
-  @spec execute(String.t(), String.t(), map()) :: {:ok, String.t()} | {:error, term()}
-  def execute(name, args, context) do
+  @spec execute(String.t(), String.t(), Context.t()) ::
+          {:ok, Result.t()} | {:error, term()}
+  def execute(name, args, %Context{} = context) do
     commands = command_map()
 
     case Map.get(commands, name) do
@@ -99,12 +118,12 @@ defmodule Arbor.Common.CommandRouter do
   end
 
   @doc """
-  List all registered commands, optionally filtered by availability.
+  List all registered commands, filtered by availability against the given Context.
 
-  Returns a list of `{name, description, usage}` tuples.
+  Returns a list of `{name, description, usage}` tuples sorted by name.
   """
-  @spec list_commands(map()) :: [{String.t(), String.t(), String.t()}]
-  def list_commands(context \\ %{}) do
+  @spec list_commands(Context.t()) :: [{String.t(), String.t(), String.t()}]
+  def list_commands(%Context{} = context) do
     command_modules()
     |> Enum.filter(& &1.available?(context))
     |> Enum.map(&{&1.name(), &1.description(), &1.usage()})

@@ -2,6 +2,8 @@ defmodule Arbor.Common.Commands.Tools do
   @moduledoc "List or search available tools."
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @impl true
   def name, do: "tools"
 
@@ -12,84 +14,41 @@ defmodule Arbor.Common.Commands.Tools do
   def usage, do: "/tools [find <query>]"
 
   @impl true
-  def available?(_context), do: true
+  def available?(%Context{} = ctx), do: Context.has_agent?(ctx)
 
   @impl true
-  def execute("", context) do
-    case context[:tools] do
-      tools when is_list(tools) and length(tools) > 0 ->
-        lines = Enum.map(tools, fn
-          %{name: name, description: desc} -> "  #{name} — #{desc}"
-          {name, desc} -> "  #{name} — #{desc}"
-          name when is_binary(name) -> "  #{name}"
-        end)
-
-        {:ok, "Available tools (#{length(tools)}):\n" <> Enum.join(lines, "\n")}
-
-      _ ->
-        {:ok, "No tools available in current context."}
-    end
+  def execute("", %Context{tools: []}) do
+    {:ok, Result.ok("No tools available in current context.")}
   end
 
-  def execute("find " <> query, context) do
-    query = String.trim(query)
-
-    case context[:find_tools_fn] do
-      fun when is_function(fun, 1) ->
-        case fun.(query) do
-          {:ok, results} when is_list(results) ->
-            if results == [] do
-              {:ok, "No tools matching \"#{query}\"."}
-            else
-              lines = Enum.map(results, fn
-                %{name: name, description: desc} -> "  #{name} — #{desc}"
-                {name, desc} -> "  #{name} — #{desc}"
-              end)
-
-              {:ok, "Tools matching \"#{query}\":\n" <> Enum.join(lines, "\n")}
-            end
-
-          _ ->
-            {:ok, "Tool search not available."}
-        end
-
-      _ ->
-        # Fall back to filtering context tools
-        case context[:tools] do
-          tools when is_list(tools) ->
-            q = String.downcase(query)
-
-            matches =
-              Enum.filter(tools, fn
-                %{name: name, description: desc} ->
-                  String.contains?(String.downcase(name), q) or
-                    String.contains?(String.downcase(desc || ""), q)
-
-                {name, desc} ->
-                  String.contains?(String.downcase(to_string(name)), q) or
-                    String.contains?(String.downcase(to_string(desc)), q)
-
-                name when is_binary(name) ->
-                  String.contains?(String.downcase(name), q)
-              end)
-
-            if matches == [] do
-              {:ok, "No tools matching \"#{query}\"."}
-            else
-              lines = Enum.map(matches, fn
-                %{name: name, description: desc} -> "  #{name} — #{desc}"
-                {name, desc} -> "  #{name} — #{desc}"
-                name -> "  #{name}"
-              end)
-
-              {:ok, "Tools matching \"#{query}\":\n" <> Enum.join(lines, "\n")}
-            end
-
-          _ ->
-            {:ok, "Tool search not available."}
-        end
-    end
+  def execute("", %Context{tools: tools}) when is_list(tools) do
+    lines = Enum.map(tools, &"  #{&1}")
+    {:ok, Result.ok("Available tools (#{length(tools)}):\n" <> Enum.join(lines, "\n"))}
   end
 
-  def execute(other, context), do: execute("find " <> other, context)
+  def execute("find " <> query, %Context{} = ctx) do
+    do_find(String.trim(query), ctx)
+  end
+
+  def execute(other, %Context{} = ctx) do
+    do_find(String.trim(other), ctx)
+  end
+
+  defp do_find(_query, %Context{tools: []}) do
+    {:ok, Result.ok("No tools available in current context.")}
+  end
+
+  defp do_find(query, %Context{tools: tools}) when is_list(tools) do
+    q = String.downcase(query)
+    matches = Enum.filter(tools, &String.contains?(String.downcase(&1), q))
+
+    case matches do
+      [] ->
+        {:ok, Result.ok("No tools matching \"#{query}\".")}
+
+      _ ->
+        lines = Enum.map(matches, &"  #{&1}")
+        {:ok, Result.ok("Tools matching \"#{query}\":\n" <> Enum.join(lines, "\n"))}
+    end
+  end
 end
