@@ -32,6 +32,7 @@ defmodule Arbor.Dashboard.Router do
       live "/memory", MemoryLive
       live "/memory/:agent_id", MemoryLive
       live "/telemetry", TelemetryLive
+      live "/settings", SettingsLive
     end
   end
 end
