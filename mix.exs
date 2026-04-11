@@ -35,10 +35,7 @@ defmodule Arbor.MixProject do
       # jido_sandbox has no Hex release yet
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
-      # TEMPORARY: path dep while developing the cached-body helper for
-      # Phase 0 external agent registration. Bump version + switch back to
-      # Hex pin (~> 0.10.0) once the change is released.
-      {:ex_mcp, path: "/Users/azmaveth/code/ex_mcp", override: true},
+      {:ex_mcp, "~> 0.9.1", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
