@@ -68,6 +68,60 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
           :ok
       end
     end
+
+    test "return_identity: true returns 3-tuple including freshly-generated identity" do
+      character = Character.new(name: "ExternalRegistration", tone: "formal")
+
+      result =
+        try do
+          Lifecycle.create("External Agent", character: character, return_identity: true)
+        rescue
+          ArgumentError -> {:error, :ets_not_started}
+        catch
+          :exit, {:noproc, _} -> {:error, :security_not_started}
+          :exit, _ -> {:error, :downstream_exit}
+        end
+
+      case result do
+        {:ok, profile, identity} ->
+          assert profile.agent_id == identity.agent_id
+          assert is_binary(identity.private_key)
+          assert byte_size(identity.private_key) in [32, 64]
+          assert is_binary(identity.public_key)
+          assert byte_size(identity.public_key) == 32
+
+        {:ok, _profile} ->
+          flunk("return_identity: true should return {:ok, profile, identity}, got 2-tuple")
+
+        {:error, _other_reason} ->
+          :ok
+      end
+    end
+
+    test "return_identity defaults to false (returns 2-tuple)" do
+      character = Character.new(name: "DefaultShape", tone: "formal")
+
+      result =
+        try do
+          Lifecycle.create("Default Agent", character: character)
+        rescue
+          ArgumentError -> {:error, :ets_not_started}
+        catch
+          :exit, {:noproc, _} -> {:error, :security_not_started}
+          :exit, _ -> {:error, :downstream_exit}
+        end
+
+      case result do
+        {:ok, _profile} ->
+          :ok
+
+        {:ok, _profile, _identity} ->
+          flunk("Default create/2 should return {:ok, profile}, not the 3-tuple shape")
+
+        {:error, _other_reason} ->
+          :ok
+      end
+    end
   end
 
   # ============================================================================

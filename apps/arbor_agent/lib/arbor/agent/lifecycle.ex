@@ -61,8 +61,21 @@ defmodule Arbor.Agent.Lifecycle do
   8. Set initial goals
   9. Build and persist profile
   10. Emit creation signal
+
+  ## Options of note
+
+  - `:return_identity` — when `true`, returns `{:ok, profile, identity}` with
+    the in-memory `Identity` struct **including the freshly-generated private
+    key**. Required for external-agent registration flows where the caller
+    (e.g., a dashboard event handler) must hand the private key to the external
+    tool exactly once. Defaults to `false`; when omitted, the standard
+    `{:ok, profile}` shape is returned and the private key is only stored in
+    encrypted at-rest form via SigningKeyStore.
   """
-  @spec create(String.t(), keyword()) :: {:ok, Profile.t()} | {:error, term()}
+  @spec create(String.t(), keyword()) ::
+          {:ok, Profile.t()}
+          | {:ok, Profile.t(), Arbor.Contracts.Security.Identity.t()}
+          | {:error, term()}
   def create(display_name, opts \\ []) do
     with {:ok, character, opts} <- resolve_template(opts),
          {:ok, identity} <- generate_identity(display_name),
@@ -84,7 +97,12 @@ defmodule Arbor.Agent.Lifecycle do
         :ok ->
           ensure_trust_profile(agent_id, opts)
           emit_created_signal(profile)
-          {:ok, profile}
+
+          if Keyword.get(opts, :return_identity, false) do
+            {:ok, profile, identity}
+          else
+            {:ok, profile}
+          end
 
         {:error, reason} ->
           {:error, {:persist_failed, reason}}
@@ -450,6 +468,42 @@ defmodule Arbor.Agent.Lifecycle do
   @spec list_agents() :: [Profile.t()]
   def list_agents do
     ProfileStore.list_profiles()
+  end
+
+  @doc """
+  Rename an agent's display name.
+
+  Loads the profile from disk, updates only the `display_name` field, and
+  persists it back. The cryptographic identity (`agent_id`, public key,
+  endorsement, signing key) is unchanged — display name is purely for
+  human-readable presentation in dashboards and listings.
+
+  Returns the updated profile.
+  """
+  @spec rename(String.t(), String.t()) :: {:ok, Profile.t()} | {:error, term()}
+  def rename(agent_id, new_display_name)
+      when is_binary(agent_id) and is_binary(new_display_name) do
+    trimmed = String.trim(new_display_name)
+
+    cond do
+      trimmed == "" ->
+        {:error, :empty_display_name}
+
+      String.length(trimmed) > 200 ->
+        {:error, :display_name_too_long}
+
+      true ->
+        with {:ok, profile} <- restore(agent_id),
+             updated = %{profile | display_name: trimmed},
+             :ok <- persist_profile(updated) do
+          dual_emit_lifecycle(:renamed, %{
+            agent_id: agent_id,
+            display_name: trimmed
+          })
+
+          {:ok, updated}
+        end
+    end
   end
 
   @doc """
