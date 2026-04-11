@@ -20,6 +20,7 @@ defmodule Arbor.Dashboard.Nav do
     MemoryLive,
     MonitorLive,
     RoadmapLive,
+    SettingsLive,
     SignalsLive,
     TelemetryLive
   }
@@ -36,7 +37,8 @@ defmodule Arbor.Dashboard.Nav do
     %{href: "/channels", label: "Channels", icon: "\u{1F4E2}", view: ChannelsLive},
     %{href: "/chat", label: "Chat", icon: "\u{1F4AC}", view: ChatLive},
     %{href: "/memory", label: "Memory", icon: "\u{1F9E0}", view: MemoryLive},
-    %{href: "/telemetry", label: "Telemetry", icon: "\u{1F4C8}", view: TelemetryLive}
+    %{href: "/telemetry", label: "Telemetry", icon: "\u{1F4C8}", view: TelemetryLive},
+    %{href: "/settings", label: "Settings", icon: "\u{2699}", view: SettingsLive}
   ]
 
   def on_mount(:default, _params, session, socket) do

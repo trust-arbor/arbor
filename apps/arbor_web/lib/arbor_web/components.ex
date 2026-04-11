@@ -148,13 +148,13 @@ defmodule Arbor.Web.Components do
 
   def modal(assigns) do
     ~H"""
-    <div
-      :if={@show}
-      id={@id}
-      class="aw-modal-overlay"
-      phx-click={@on_cancel}
-    >
-      <div class="aw-modal" phx-click-away={@on_cancel}>
+    <div :if={@show} id={@id} class="aw-modal-overlay">
+      <div
+        class="aw-modal"
+        phx-click-away={@on_cancel}
+        phx-window-keydown={@on_cancel}
+        phx-key="escape"
+      >
         <div :if={@title} class="aw-modal-header">
           <h3><%= @title %></h3>
           <button type="button" class="aw-modal-close" phx-click={@on_cancel}>
