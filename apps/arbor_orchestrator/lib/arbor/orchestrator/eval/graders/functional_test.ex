@@ -28,11 +28,12 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
     threshold = Keyword.get(opts, :pass_threshold, 0.5)
 
     tests = extract_tests(expected)
+    expected_module = extract_expected_module(expected)
 
     if tests == [] do
       %{score: 0.0, passed: false, detail: "no test assertions in expected field"}
     else
-      run_with_compiled_module(code, tests, timeout, threshold)
+      run_with_compiled_module(code, tests, timeout, threshold, expected_module)
     end
   end
 
@@ -40,10 +41,20 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
   defp extract_tests(%{tests: tests}) when is_list(tests), do: tests
   defp extract_tests(_), do: []
 
-  defp run_with_compiled_module(code, tests, timeout, threshold) do
+  defp extract_expected_module(%{"module" => m}) when is_binary(m), do: m
+  defp extract_expected_module(%{module: m}) when is_binary(m), do: m
+  defp extract_expected_module(_), do: nil
+
+  defp run_with_compiled_module(code, tests, timeout, threshold, expected_module) do
     # Add unique suffix to avoid module name collisions
     suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
     {munged_code, module_map} = munge_module_names(code, suffix)
+
+    # Build a separate map for rewriting TEST assertions. If the model defined
+    # the module under a different namespace than `expected.module` (e.g. model
+    # wrote `Arbor.CapabilityURI` but tests call `CapabilityURI.parse(...)`),
+    # add the short name → full-munged mapping so test rewrites resolve correctly.
+    test_rewrite_map = build_test_rewrite_map(module_map, expected_module)
 
     try do
       # Eval grader: compiles LLM-generated code for functional testing
@@ -52,7 +63,7 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
 
       results =
         Enum.map(tests, fn test_case ->
-          run_single_test(test_case, module_map, timeout)
+          run_single_test(test_case, test_rewrite_map, timeout)
         end)
 
       passed_count = Enum.count(results, & &1.passed)
@@ -162,6 +173,43 @@ defmodule Arbor.Orchestrator.Eval.Graders.FunctionalTest do
 
   defp check_result(_actual, call, _expect, _match_pattern, _module_map) do
     %{passed: true, call: call, detail: "no crash"}
+  end
+
+  # Build the map used to rewrite TEST assertions (call/setup/match/expect).
+  # Starts from the code's module_map (full-name → munged full-name) and
+  # adds entries so test calls using the short name `expected.module` resolve
+  # correctly even when the model used a different namespace.
+  #
+  # Example: model defined `Arbor.CapabilityURI`, expected.module = "CapabilityURI",
+  # and test calls "CapabilityURI.parse(...)".
+  #   module_map = %{"Arbor.CapabilityURI" => "Arbor.CapabilityURI_Eval_abc"}
+  #   expected = "CapabilityURI"
+  # Result: add "CapabilityURI" => "Arbor.CapabilityURI_Eval_abc" to the map,
+  # so rewriting the test call gives "Arbor.CapabilityURI_Eval_abc.parse(...)"
+  # which resolves to the compiled module.
+  defp build_test_rewrite_map(module_map, nil), do: module_map
+
+  defp build_test_rewrite_map(module_map, expected_module) do
+    # If expected_module is already in module_map (model used the exact same
+    # name), nothing to add.
+    if Map.has_key?(module_map, expected_module) do
+      module_map
+    else
+      # Find a munged module whose last segment matches the expected name.
+      short_match =
+        Enum.find(module_map, fn {original, _munged} ->
+          last_segment(original) == expected_module
+        end)
+
+      case short_match do
+        {_original, munged} -> Map.put(module_map, expected_module, munged)
+        nil -> module_map
+      end
+    end
+  end
+
+  defp last_segment(module_name) do
+    module_name |> String.split(".") |> List.last()
   end
 
   defp munge_module_names(code, suffix) do
