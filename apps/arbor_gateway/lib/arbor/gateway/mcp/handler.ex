@@ -109,7 +109,7 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_run",
         description:
-          "Execute an Arbor action. Use arbor_help first to check the required parameters.",
+          "Execute an Arbor action. Use arbor_help first to check the required parameters. The caller agent_id is resolved server-side from the authenticated request (SignedRequest auth) and cannot be passed in tool arguments.",
         inputSchema: %{
           type: "object",
           properties: %{
@@ -120,14 +120,9 @@ defmodule Arbor.Gateway.MCP.Handler do
             params: %{
               type: "object",
               description: "Parameters to pass to the action"
-            },
-            agent_id: %{
-              type: "string",
-              description:
-                "Agent ID for authorization. Required — all actions are authorization-checked."
             }
           },
-          required: ["action", "params", "agent_id"]
+          required: ["action", "params"]
         }
       },
       %{
@@ -180,9 +175,28 @@ defmodule Arbor.Gateway.MCP.Handler do
   def handle_call_tool("arbor_run", args, state) do
     action_name = args["action"]
     params = args["params"] || %{}
-    agent_id = args["agent_id"]
-    result = run_action(action_name, params, agent_id)
-    {:ok, %{content: [%{type: "text", text: result}]}, state}
+
+    case authenticated_agent_id() do
+      nil ->
+        {:ok,
+         %{
+           content: [
+             %{
+               type: "text",
+               text:
+                 "Error: arbor_run requires SignedRequest authentication. " <>
+                   "No verified agent_id in the current request context. " <>
+                   "Register an external agent via the dashboard and configure " <>
+                   "the resulting private key in your tool's Arbor settings."
+             }
+           ],
+           isError: true
+         }, state}
+
+      agent_id ->
+        result = run_action(action_name, params, agent_id)
+        {:ok, %{content: [%{type: "text", text: result}]}, state}
+    end
   end
 
   def handle_call_tool("arbor_status", args, state) do
@@ -198,6 +212,14 @@ defmodule Arbor.Gateway.MCP.Handler do
        content: [%{type: "text", text: "Unknown tool: #{name}"}],
        isError: true
      }, state}
+  end
+
+  # Per-request authenticated agent_id, set by Arbor.Gateway.SignedRequestAuth
+  # in the request process before ExMCP dispatches into this handler. The Plug
+  # pipeline runs synchronously in the request process, so the value is local
+  # to this request and is overwritten on the next one.
+  defp authenticated_agent_id do
+    Process.get(:arbor_authenticated_agent_id)
   end
 
   # ===========================================================================

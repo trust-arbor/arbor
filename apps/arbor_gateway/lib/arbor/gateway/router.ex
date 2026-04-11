@@ -20,6 +20,7 @@ defmodule Arbor.Gateway.Router do
   plug(Plug.Logger)
   plug(:match)
   plug(:conditional_parsers)
+  plug(:try_signed_request_auth)
   plug(:try_jwt_auth)
   plug(:require_auth_unless_health)
   # H13: Rate limiting on all authenticated endpoints
@@ -61,13 +62,34 @@ defmodule Arbor.Gateway.Router do
   defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
   defp conditional_parsers(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
 
+  # Try SignedRequest auth before JWT — non-destructive passthrough.
+  # External agents (Claude Code, etc.) authenticate per-request via Ed25519
+  # signatures over method+path+body, with the public key registered via the
+  # dashboard "External Agents" UI.
+  defp try_signed_request_auth(%{request_path: "/health"} = conn, _opts), do: conn
+
+  defp try_signed_request_auth(conn, _opts) do
+    Arbor.Gateway.SignedRequestAuth.call(conn, [])
+  end
+
   # Try JWT bearer token auth before API key auth — non-destructive passthrough
   defp try_jwt_auth(%{request_path: "/health"} = conn, _opts), do: conn
+  defp try_jwt_auth(%{assigns: %{signed_request_authenticated: true}} = conn, _opts), do: conn
   defp try_jwt_auth(conn, _opts), do: JwtAuth.call(conn, [])
 
-  # Skip auth for health check only — all other endpoints require API key auth
-  # C1: MCP no longer bypasses auth (was unauthenticated, enabling action execution without authorization)
+  # Skip auth for health check only — all other endpoints require auth.
+  # Three accepted credentials in priority order:
+  #   1. SignedRequest (Ed25519 per-request signature, for external agents)
+  #   2. JWT bearer (OIDC, for human dashboard sessions)
+  #   3. API key (shared secret, for machine-to-machine clients)
   defp require_auth_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+
+  defp require_auth_unless_health(
+         %{assigns: %{signed_request_authenticated: true}} = conn,
+         _opts
+       ),
+       do: conn
+
   defp require_auth_unless_health(%{assigns: %{jwt_authenticated: true}} = conn, _opts), do: conn
   defp require_auth_unless_health(conn, _opts), do: Auth.call(conn, [])
 end
