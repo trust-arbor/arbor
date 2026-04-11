@@ -48,6 +48,11 @@ defmodule Mix.Tasks.Arbor.Eval do
     - `--stream` — use streaming mode for TTFT measurement
     - `--timeout` — per-request timeout in ms (default: 60000)
     - `--save-outputs` — save raw model outputs to `.arbor/evals/dot_outputs/<model>/<sample>.dot`
+    - `--base-url` — override the OpenAI-compatible base URL for the provider.
+      Useful for pointing at a remote llama-server or non-default LM Studio port.
+      Supports `lm_studio` and `ollama` providers. Examples:
+      - `--base-url http://10.42.42.98:8080/v1 --provider lm_studio`  (P40 llama-server)
+      - `--base-url http://localhost:1234/v1 --provider lm_studio`   (local LM Studio, default)
     - `--set key=value` — store metadata (repeatable). Examples:
       - `--set quantization=Q4_K_M --set params=4B --set context_length=8192`
       - `--set gpu=RTX4090 --set vram_used=6.2GB`
@@ -93,7 +98,8 @@ defmodule Mix.Tasks.Arbor.Eval do
           stream: :boolean,
           timeout: :integer,
           save_outputs: :boolean,
-          set: :keep
+          set: :keep,
+          base_url: :string
         ]
       )
 
@@ -124,6 +130,31 @@ defmodule Mix.Tasks.Arbor.Eval do
     limit = Keyword.get(opts, :limit)
     num_runs = Keyword.get(opts, :runs, 1)
     save_outputs = Keyword.get(opts, :save_outputs, false)
+    base_url = Keyword.get(opts, :base_url)
+
+    # If --base-url is set for an OpenAI-compatible provider, override the
+    # adapter's Application config at runtime. Saved and restored so the
+    # override only affects this eval run. Supports lm_studio, ollama, and
+    # any other adapter that reads a `:base_url` from Application config.
+    original_config =
+      if base_url do
+        key =
+          case provider do
+            "lm_studio" -> :lm_studio
+            "ollama" -> :ollama
+            _ -> nil
+          end
+
+        if key do
+          orig = Application.get_env(:arbor_orchestrator, key, [])
+          Application.put_env(:arbor_orchestrator, key, Keyword.put(orig, :base_url, base_url))
+          Mix.shell().info("Base URL override: #{base_url} (provider: #{provider})")
+          {key, orig}
+        else
+          Mix.shell().info("Warning: --base-url set but provider '#{provider}' doesn't support runtime override")
+          nil
+        end
+      end
 
     models =
       case Keyword.get(opts, :models) do
@@ -253,6 +284,12 @@ defmodule Mix.Tasks.Arbor.Eval do
       if num_runs > 1 do
         print_cross_run_stats(model, all_run_metrics)
       end
+    end
+
+    # Restore Application config if we overrode it for --base-url
+    if original_config do
+      {key, orig} = original_config
+      Application.put_env(:arbor_orchestrator, key, orig)
     end
 
     Mix.shell().info("Done!")
