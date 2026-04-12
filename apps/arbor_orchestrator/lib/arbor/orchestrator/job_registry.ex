@@ -422,6 +422,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
   defp entry_exists?(key) do
     case Arbor.Persistence.BufferedStore.exists?(key, name: @store_name) do
       {:ok, exists} -> exists
+      bool when is_boolean(bool) -> bool
       _ -> false
     end
   end

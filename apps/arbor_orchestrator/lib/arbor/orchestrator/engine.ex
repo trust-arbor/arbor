@@ -758,7 +758,18 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp emit(opts, event) do
     pipeline_id = Keyword.get(opts, :pipeline_id, :all)
-    event = Map.put_new(event, :timestamp, DateTime.utc_now())
+
+    # Stamp every event with pipeline_id and run_id so downstream
+    # consumers (JobRegistry, SignalsBridge) can identify which pipeline
+    # the event belongs to. Without these, completion/failure events
+    # arrive anonymous and the JobRegistry can't update the correct entry
+    # — causing zombie :running entries that accumulate forever.
+    event =
+      event
+      |> Map.put_new(:timestamp, DateTime.utc_now())
+      |> Map.put_new(:pipeline_id, pipeline_id)
+      |> Map.put_new(:run_id, Keyword.get(opts, :run_id))
+
     EventEmitter.emit(pipeline_id, event, opts)
   end
 
