@@ -26,6 +26,11 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @default_delay_ms 1_000
   @heartbeat_check_interval_ms 30_000
   @stale_heartbeat_ms 90_000
+  # If a pipeline has completed 0 nodes for longer than this, mark it
+  # abandoned even if the owner node is still connected. The spawning
+  # Session process has almost certainly died without cleaning up.
+  # 10 minutes is generous — a healthy first node executes in seconds.
+  @zero_progress_abandon_ms 600_000
   @pg_group {:arbor, :recovery_coordinators}
 
   # Public API
@@ -298,10 +303,31 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                 []
               end
             else
-              Logger.warning(
-                "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
-                  "but owner #{entry.owner_node} is still connected"
-              )
+              # Owner node is connected. Normally they handle their own
+              # cleanup. But if zero nodes have completed for longer than
+              # @zero_progress_abandon_ms, the spawning Session process
+              # has likely died without cleanup (agent stopped, crash
+              # without terminate/2 firing, etc.). Mark abandoned rather
+              # than accumulating forever.
+              age_ms = DateTime.diff(DateTime.utc_now(), entry.started_at, :millisecond)
+
+              if (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms do
+                key = entry.run_id || entry.pipeline_id
+
+                if key do
+                  JobRegistry.mark_abandoned(key)
+
+                  Logger.info(
+                    "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
+                      "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
+                  )
+                end
+              else
+                Logger.warning(
+                  "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
+                    "but owner #{entry.owner_node} is still connected"
+                )
+              end
 
               []
             end
