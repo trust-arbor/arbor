@@ -5,6 +5,16 @@ defmodule Arbor.Orchestrator.Application do
 
   @impl true
   def start(_type, _args) do
+    # Pipeline run tracking — shared ETS table written by Engine processes,
+    # read by the PipelineStatus Facade. Public + write_concurrency so
+    # multiple Engine processes can write simultaneously without blocking.
+    # Read access goes through the Facade for trust-zone filtering.
+    :ets.new(:arbor_pipeline_runs, [
+      :set, :public, :named_table,
+      read_concurrency: true,
+      write_concurrency: true
+    ])
+
     event_log_name =
       Application.get_env(:arbor_orchestrator, :event_log_name, :orchestrator_events)
 

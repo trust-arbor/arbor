@@ -18,7 +18,12 @@ defmodule Arbor.Orchestrator.Engine.State do
           pending: [{String.t(), Edge.t() | nil}],
           opts: keyword(),
           pipeline_started_at: integer(),
-          tracking: map()
+          tracking: map(),
+          # Process-local lifecycle tracking via RunState CRC core.
+          # The Engine owns this state directly — no external GenServer
+          # dependency. Written to the :arbor_pipeline_runs ETS table
+          # on each transition for dashboard/Facade visibility.
+          run_state: Arbor.Orchestrator.RunState.Core.t() | nil
         }
 
   defstruct [
@@ -34,6 +39,7 @@ defmodule Arbor.Orchestrator.Engine.State do
     outcomes: %{},
     pending: [],
     opts: [],
+    run_state: nil,
     tracking: %{
       node_durations: %{},
       content_hashes: %{},
