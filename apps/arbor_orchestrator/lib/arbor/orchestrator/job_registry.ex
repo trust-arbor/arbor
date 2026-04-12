@@ -40,7 +40,12 @@ defmodule Arbor.Orchestrator.JobRegistry do
       # Phase 5: Distributed pipeline durability
       :owner_node,
       :origin_trust_zone,
-      :last_heartbeat
+      :last_heartbeat,
+      # The PID of the process that spawned this pipeline (e.g., the Session
+      # GenServer). Used by RecoveryCoordinator to check process-level
+      # liveness — the BEAM node may stay connected even after the spawning
+      # process dies (agent stopped, crash without cleanup).
+      :spawning_pid
     ]
   end
 
@@ -212,7 +217,8 @@ defmodule Arbor.Orchestrator.JobRegistry do
       source_node: Map.get(event, :source_node, Kernel.node()),
       owner_node: Kernel.node(),
       origin_trust_zone: resolve_trust_zone(),
-      last_heartbeat: now
+      last_heartbeat: now,
+      spawning_pid: Map.get(event, :spawning_pid)
     }
 
     put_entry(pipeline_id, entry)

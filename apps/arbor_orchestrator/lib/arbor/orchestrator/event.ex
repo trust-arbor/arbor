@@ -52,7 +52,8 @@ defmodule Arbor.Orchestrator.Event do
       node_count: Keyword.get(opts, :node_count),
       graph_hash: Keyword.get(opts, :graph_hash),
       dot_source_path: Keyword.get(opts, :dot_source_path),
-      source_node: Kernel.node()
+      source_node: Kernel.node(),
+      spawning_pid: Keyword.get(opts, :spawning_pid)
     }
   end
 

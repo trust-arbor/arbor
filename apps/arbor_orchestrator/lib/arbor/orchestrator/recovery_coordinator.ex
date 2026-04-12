@@ -303,30 +303,46 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                 []
               end
             else
-              # Owner node is connected. Normally they handle their own
-              # cleanup. But if zero nodes have completed for longer than
-              # @zero_progress_abandon_ms, the spawning Session process
-              # has likely died without cleanup (agent stopped, crash
-              # without terminate/2 firing, etc.). Mark abandoned rather
-              # than accumulating forever.
+              # Owner node is connected. Check process-level liveness
+              # first — the Session GenServer may have died even though the
+              # BEAM node is still up (agent stopped, crash, etc.).
+              spawner_alive = spawning_process_alive?(entry.spawning_pid)
               age_ms = DateTime.diff(DateTime.utc_now(), entry.started_at, :millisecond)
 
-              if (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms do
-                key = entry.run_id || entry.pipeline_id
+              cond do
+                # Spawning process is dead → mark abandoned immediately
+                entry.spawning_pid != nil and not spawner_alive ->
+                  key = entry.run_id || entry.pipeline_id
 
-                if key do
-                  JobRegistry.mark_abandoned(key)
+                  if key do
+                    JobRegistry.mark_abandoned(key)
 
-                  Logger.info(
-                    "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
-                      "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
+                    Logger.info(
+                      "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
+                        "spawning process #{inspect(entry.spawning_pid)} is dead"
+                    )
+                  end
+
+                # No spawning_pid recorded (legacy entry) + zero progress
+                # for too long → mark abandoned via TTL fallback
+                (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms ->
+                  key = entry.run_id || entry.pipeline_id
+
+                  if key do
+                    JobRegistry.mark_abandoned(key)
+
+                    Logger.info(
+                      "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
+                        "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
+                    )
+                  end
+
+                # Everything looks alive — genuine stale heartbeat, log warning
+                true ->
+                  Logger.warning(
+                    "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
+                      "but owner #{entry.owner_node} is still connected"
                   )
-                end
-              else
-                Logger.warning(
-                  "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
-                    "but owner #{entry.owner_node} is still connected"
-                )
               end
 
               []
@@ -594,4 +610,24 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   def compute_graph_hash(dot_source) when is_binary(dot_source) do
     :crypto.hash(:sha256, dot_source) |> Base.encode16(case: :lower)
   end
+
+  # Check if a spawning process is alive, handling both local and remote PIDs.
+  # For remote PIDs (process on a different BEAM node), uses :rpc.call to check
+  # on the owning node. Returns false for nil PIDs (legacy entries without the
+  # spawning_pid field).
+  defp spawning_process_alive?(nil), do: false
+
+  defp spawning_process_alive?(pid) when is_pid(pid) do
+    if node(pid) == Kernel.node() do
+      Process.alive?(pid)
+    else
+      try do
+        :rpc.call(node(pid), Process, :alive?, [pid]) == true
+      catch
+        :exit, _ -> false
+      end
+    end
+  end
+
+  defp spawning_process_alive?(_), do: false
 end
