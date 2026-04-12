@@ -185,132 +185,19 @@ defmodule Arbor.Orchestrator.JobRegistry do
     # Mark any :running entries from a previous life as :interrupted
     mark_stale_running_entries()
 
-    # Subscribe to all pipeline events
-    {:ok, _} = EventEmitter.subscribe(:all)
+    # NOTE: EventEmitter subscription REMOVED as part of the Engine lifecycle
+    # redesign. Pipeline tracking is now owned by the Engine process via
+    # RunState CRC core + ETS table. The JobRegistry retains its BufferedStore
+    # for historical data and recovery operations, but no longer receives
+    # pipeline lifecycle events. New pipeline runs are tracked in the
+    # :arbor_pipeline_runs ETS table, queried via PipelineStatus Facade.
+    #
+    # See .arbor/roadmap/2-planned/engine-lifecycle-redesign.md
 
     {:ok, %{}}
   end
 
   @impl true
-  def handle_info({:pipeline_event, %{type: :pipeline_started} = event}, state) do
-    pipeline_id = determine_pipeline_id(event)
-    run_id = Map.get(event, :run_id)
-
-    now = DateTime.utc_now()
-
-    entry = %Entry{
-      pipeline_id: pipeline_id,
-      run_id: run_id,
-      graph_id: Map.get(event, :graph_id),
-      graph_hash: Map.get(event, :graph_hash),
-      dot_source_path: Map.get(event, :dot_source_path),
-      logs_root: Map.get(event, :logs_root),
-      started_at: now,
-      current_node: nil,
-      completed_count: 0,
-      total_nodes: Map.get(event, :node_count, 0),
-      status: :running,
-      node_durations: %{},
-      finished_at: nil,
-      duration_ms: nil,
-      failure_reason: nil,
-      source_node: Map.get(event, :source_node, Kernel.node()),
-      owner_node: Kernel.node(),
-      origin_trust_zone: resolve_trust_zone(),
-      last_heartbeat: now,
-      spawning_pid: Map.get(event, :spawning_pid)
-    }
-
-    put_entry(pipeline_id, entry)
-    {:noreply, state}
-  end
-
-  def handle_info(
-        {:pipeline_event, %{type: :stage_started, node_id: node_id} = event},
-        state
-      ) do
-    case find_entry_key(event) do
-      nil ->
-        :ok
-
-      pipeline_id ->
-        update_entry(pipeline_id, fn entry ->
-          %{entry | current_node: node_id}
-        end)
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_info({:pipeline_event, %{type: :stage_completed} = event}, state) do
-    case find_entry_key(event) do
-      nil ->
-        :ok
-
-      pipeline_id ->
-        node_id = Map.get(event, :node_id)
-        duration_ms = Map.get(event, :duration_ms, 0)
-
-        update_entry(pipeline_id, fn entry ->
-          %{
-            entry
-            | completed_count: entry.completed_count + 1,
-              node_durations: Map.put(entry.node_durations || %{}, node_id, duration_ms)
-          }
-        end)
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_info({:pipeline_event, %{type: :pipeline_completed} = event}, state) do
-    case find_entry_key(event) do
-      nil ->
-        :ok
-
-      pipeline_id ->
-        duration_ms = Map.get(event, :duration_ms)
-
-        update_entry(pipeline_id, fn entry ->
-          %{
-            entry
-            | status: :completed,
-              finished_at: DateTime.utc_now(),
-              duration_ms: duration_ms
-          }
-        end)
-
-        cleanup_history()
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_info({:pipeline_event, %{type: :pipeline_failed} = event}, state) do
-    case find_entry_key(event) do
-      nil ->
-        :ok
-
-      pipeline_id ->
-        duration_ms = Map.get(event, :duration_ms)
-        failure_reason = Map.get(event, :reason)
-
-        update_entry(pipeline_id, fn entry ->
-          %{
-            entry
-            | status: :failed,
-              finished_at: DateTime.utc_now(),
-              duration_ms: duration_ms,
-              failure_reason: failure_reason
-          }
-        end)
-
-        cleanup_history()
-    end
-
-    {:noreply, state}
-  end
-
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
@@ -401,40 +288,16 @@ defmodule Arbor.Orchestrator.JobRegistry do
     end
   end
 
-  defp find_entry_key(event) do
-    # Try to find by pipeline_id from event first
-    pipeline_id = Map.get(event, :pipeline_id)
-    graph_id = Map.get(event, :graph_id)
-
-    cond do
-      pipeline_id && pipeline_id != :all && entry_exists?(pipeline_id) ->
-        pipeline_id
-
-      graph_id && entry_exists?(graph_id) ->
-        graph_id
-
-      true ->
-        # Scan for matching graph_id
-        find_by_graph_id(graph_id)
-    end
-  end
-
-  defp entry_exists?(key) do
-    case Arbor.Persistence.BufferedStore.exists?(key, name: @store_name) do
-      {:ok, exists} -> exists
-      bool when is_boolean(bool) -> bool
-      _ -> false
-    end
-  end
-
-  defp find_by_graph_id(nil), do: nil
-
-  defp find_by_graph_id(graph_id) do
-    store_list()
-    |> Enum.find_value(fn entry ->
-      if entry.graph_id == graph_id, do: entry.pipeline_id || entry.run_id
-    end)
-  end
+  # NOTE: find_entry_key/1, entry_exists?/1, and find_by_graph_id/1 were
+  # removed as part of the Engine lifecycle redesign. These functions were
+  # used by the event handlers (also removed) to correlate incoming events
+  # with stored entries. The entry_exists?/1 function had a contract mismatch
+  # bug (expected {:ok, bool} from BufferedStore but got raw bool) that caused
+  # ALL event-based updates to fail silently for months.
+  #
+  # Pipeline tracking is now handled by the Engine's RunState CRC core
+  # writing directly to the :arbor_pipeline_runs ETS table, queried via
+  # the PipelineStatus Facade. No event correlation needed.
 
   defp store_list do
     case Arbor.Persistence.BufferedStore.list(name: @store_name) do
