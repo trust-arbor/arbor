@@ -213,6 +213,7 @@ defmodule Arbor.Agent.Lifecycle do
         host_opts = build_host_opts(agent_id, profile, opts)
         executor_opts = build_executor_opts(agent_id, profile, opts)
         session_opts = build_branch_session_opts(agent_id, profile, opts)
+        heartbeat_opts = build_heartbeat_opts(agent_id, profile, opts, session_opts)
         start_session = Keyword.get(opts, :start_session, true)
 
         branch_opts = [
@@ -220,6 +221,7 @@ defmodule Arbor.Agent.Lifecycle do
           host_opts: host_opts,
           executor_opts: executor_opts,
           session_opts: session_opts,
+          heartbeat_opts: heartbeat_opts,
           start_session: start_session
         ]
 
@@ -399,6 +401,60 @@ defmodule Arbor.Agent.Lifecycle do
       SessionConfig.build(agent_id, session_opts)
     else
       nil
+    end
+  end
+
+  # Build opts for the HeartbeatService child (optional).
+  # Returns nil if heartbeats are disabled or session_opts is nil.
+  defp build_heartbeat_opts(_agent_id, _profile, _opts, nil), do: nil
+
+  defp build_heartbeat_opts(agent_id, profile, opts, session_opts) when is_list(session_opts) do
+    # Check if heartbeats should start (default: true, same as Session's start_heartbeat)
+    start_heartbeat = Keyword.get(opts, :start_heartbeat, true)
+
+    if start_heartbeat do
+      # Extract heartbeat config from template if available
+      heartbeat_config = extract_heartbeat_config(profile, opts)
+
+      if Map.get(heartbeat_config, :enabled, true) do
+        # HeartbeatService receives the same agent_id, signer, trust_tier as Session
+        signer =
+          case build_signer(agent_id) do
+            {:ok, signer_fn} -> signer_fn
+            {:error, _} -> nil
+          end
+
+        [
+          agent_id: agent_id,
+          signer: signer,
+          trust_tier: profile.trust_tier,
+          heartbeat_config: heartbeat_config,
+          heartbeat_dot: Keyword.get(session_opts, :heartbeat_dot)
+        ]
+      else
+        nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp extract_heartbeat_config(profile, _opts) do
+    # Try to get heartbeat config from the template module
+    template_mod = Keyword.get(profile.metadata || %{}, :template_module) ||
+      Map.get(profile.metadata || %{}, :template_module)
+
+    if template_mod && is_atom(template_mod) &&
+       Code.ensure_loaded?(template_mod) &&
+       function_exported?(template_mod, :heartbeat, 0) do
+      try do
+        template_mod.heartbeat()
+      rescue
+        _ -> %{enabled: true, interval: 30_000, graph: "heartbeat.dot"}
+      end
+    else
+      # Default heartbeat config when template doesn't define one
+      %{enabled: true, interval: 30_000, graph: "heartbeat.dot"}
     end
   end
 
