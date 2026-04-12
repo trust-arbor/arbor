@@ -569,10 +569,41 @@ defmodule Mix.Tasks.Arbor.Consult do
     end
   end
 
-  defp build_docs_context([]), do: %{}
+  defp build_docs_context(doc_paths) do
+    # Always include CLAUDE.md + its referenced docs so council members
+    # have project context (core concepts, patterns, library hierarchy).
+    # User-provided --docs are appended to the auto-included set.
+    auto = auto_include_project_docs()
+    user = Enum.flat_map(doc_paths, &split_paths/1)
+    all_paths = Enum.uniq(auto ++ user)
 
-  defp build_docs_context(doc_paths),
-    do: %{reference_docs: Enum.flat_map(doc_paths, &split_paths/1)}
+    if all_paths == [], do: %{}, else: %{reference_docs: all_paths}
+  end
+
+  defp auto_include_project_docs do
+    claude_md = "CLAUDE.md"
+
+    if File.exists?(claude_md) do
+      referenced = extract_md_references(claude_md)
+      [claude_md | referenced] |> Enum.filter(&File.exists?/1) |> Enum.uniq()
+    else
+      []
+    end
+  end
+
+  # Extract markdown link targets from a file: [text](path.md)
+  # Ignores external URLs (http/https).
+  defp extract_md_references(file_path) do
+    case File.read(file_path) do
+      {:ok, content} ->
+        Regex.scan(~r/\[.*?\]\(([^)]*?\.md)\)/, content)
+        |> Enum.map(fn [_, path] -> path end)
+        |> Enum.reject(&String.starts_with?(&1, "http"))
+
+      _ ->
+        []
+    end
+  end
 
   defp parse_context_string(str) do
     str

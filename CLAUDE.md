@@ -2,6 +2,21 @@
 
 Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrella project with capability-based security and contract-first design.
 
+## Core Concepts
+
+- **Agent**: A supervised entity with a cryptographic Ed25519 identity, trust profile, and granted capabilities. Created via `Arbor.Agent.Lifecycle.create/2`. Runs as a `BranchSupervisor` (rest_for_one) with children: APIAgent host, Executor, and Session.
+- **Session**: GenServer in `arbor_orchestrator` that drives agent turns (user messages → LLM responses) and heartbeats (autonomous cycles) by executing DOT graph pipelines via the Engine.
+- **Heartbeat**: An autonomous ~30-second cycle where the agent runs a DOT pipeline to check goals, select a cognitive mode (goal pursuit / reflection / plan execution / consolidation), optionally call an LLM, update memory, and execute pending actions — all without human input.
+- **DOT Pipeline**: A directed graph written in DOT/Graphviz syntax defining a sequence of `exec` nodes (Jido Actions) and `compute` nodes (LLM calls). Parsed and executed by the Engine. Supports conditional routing, retry loops, checkpoints, and fidelity resolution. See [DOT_PIPELINE_GUIDE.md](docs/arbor/DOT_PIPELINE_GUIDE.md).
+- **Engine** (`Arbor.Orchestrator.Engine`): Executes DOT pipeline graphs. Traverses nodes, dispatches to handlers (ExecHandler for actions, ComputeHandler/LlmHandler for LLM calls), manages checkpoints, emits lifecycle events. The execution model is sound; lifecycle tracking infrastructure around it is being redesigned (see `.arbor/roadmap/2-planned/engine-lifecycle-redesign.md`).
+- **CRC Pattern (Construct-Reduce-Convert)**: Pure functional modules that separate business logic from side effects. `new/1` constructs from input, operations transform state, `show/1` formats for output. All functions are pure — no DB, no GenServer calls, no IO. Used extensively in dashboard cores. See [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md).
+- **Socket-First Component**: Dashboard pattern replacing LiveComponent with plain Phoenix.Component modules that manage state on the parent LiveView's socket via delegate functions. Events namespaced as `"component:action"`. See [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).
+- **Trust Tier**: Graduated trust level governing agent capabilities: `untrusted` (0-19) → `probationary` (20-49) → `trusted` (50-74) → `veteran` (75-89) → `autonomous` (90-100). Managed by `arbor_trust`.
+- **Capability**: An unforgeable, signed token granting a specific permission on a resource URI (e.g., `arbor://fs/read/`, `arbor://shell/exec/git`). Granted via `Arbor.Security.grant/1`, checked via `Arbor.Security.authorize/4`. Supports delegation, expiry, constraints (rate limits), and revocation.
+- **Identity**: Ed25519 + X25519 keypair. Agent ID is `"agent_" <> hex(SHA-256(public_key))` — deterministically derived, unforgeable. Private keys stored encrypted at rest via `SigningKeyStore`. External agents authenticate via per-request `SignedRequest` signatures verified by `Arbor.Gateway.SignedRequestAuth`.
+- **Signal**: Fire-and-forget pub/sub event for observability. Emitted via `Arbor.Signals`, consumed by dashboards, event stores, and monitoring. NOT used for lifecycle tracking or execution control — observability only.
+- **Memory**: Per-agent working memory (ETS-backed `MemoryStore`), knowledge graph, and background health checks. Managed by `arbor_memory`. Goals and intents persisted via `BufferedStore` (ETS + optional Postgres backend).
+
 ## Fix the Root Cause
 
 Don't perform actions just to unblock something immediately so you can move on. Always fix the root cause.
@@ -63,6 +78,8 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
 
 - **Contract-First**: Shared types and behaviours in `arbor_contracts`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
 - **Facade Pattern**: Each library exposes one public facade (e.g., `Arbor.Security`). Never alias internal modules from another library.
+- **CRC (Construct-Reduce-Convert)**: Pure functional cores in `cores/` directories. Business logic with zero side effects — see Core Concepts above and [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md).
+- **Socket-First Components**: Dashboard components in `components/` directories with namespaced events — see [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).
 - **SafeAtom**: Never use `String.to_atom/1` with untrusted input (DoS risk). Use `Arbor.Common.SafeAtom` instead:
   - `to_existing/1` — only converts if atom already exists
   - `to_allowed/2` — only converts if in allowed list
