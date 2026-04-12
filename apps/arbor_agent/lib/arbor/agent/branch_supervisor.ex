@@ -92,6 +92,7 @@ defmodule Arbor.Agent.BranchSupervisor do
     host_opts = Keyword.get(opts, :host_opts, [])
     executor_opts = Keyword.get(opts, :executor_opts, [])
     session_opts = Keyword.get(opts, :session_opts)
+    heartbeat_opts = Keyword.get(opts, :heartbeat_opts)
     start_session = Keyword.get(opts, :start_session, true)
 
     children =
@@ -102,6 +103,11 @@ defmodule Arbor.Agent.BranchSupervisor do
         executor_child_spec(agent_id, executor_opts)
       ]
       |> maybe_add_session(agent_id, session_opts, start_session)
+      # Child 4 (optional): HeartbeatService — autonomous heartbeat cycles.
+      # MUST be AFTER Session in the child list. With rest_for_one:
+      #   Session crash → HeartbeatService also dies + restarts (no orphans)
+      #   HeartbeatService crash → only HeartbeatService restarts (doesn't kill Session)
+      |> maybe_add_heartbeat_service(agent_id, heartbeat_opts, session_opts)
 
     Logger.info("[BranchSupervisor] Starting for #{agent_id} with #{length(children)} children")
 
@@ -145,6 +151,32 @@ defmodule Arbor.Agent.BranchSupervisor do
       child = %{
         id: :session,
         start: {GenServer, :start_link, [@session_module, session_opts, []]},
+        restart: :permanent,
+        type: :worker
+      }
+
+      children ++ [child]
+    else
+      children
+    end
+  end
+
+  defp maybe_add_heartbeat_service(children, _agent_id, nil, _session_opts), do: children
+
+  defp maybe_add_heartbeat_service(children, _agent_id, heartbeat_opts, session_opts) do
+    heartbeat_config = Keyword.get(heartbeat_opts, :heartbeat_config, %{})
+    enabled = Map.get(heartbeat_config, :enabled, true)
+
+    if enabled and Code.ensure_loaded?(Arbor.Orchestrator.HeartbeatService) do
+      # HeartbeatService receives the same agent_id, signer, trust_tier
+      # as Session — extracted from the shared session_opts.
+      service_opts =
+        heartbeat_opts
+        |> Keyword.put_new(:heartbeat_dot, session_opts[:heartbeat_dot])
+
+      child = %{
+        id: :heartbeat_service,
+        start: {Arbor.Orchestrator.HeartbeatService, :start_link, [service_opts]},
         restart: :permanent,
         type: :worker
       }
