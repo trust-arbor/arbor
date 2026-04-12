@@ -7,8 +7,14 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 - **Agent**: A supervised entity with a cryptographic Ed25519 identity, trust profile, and granted capabilities. Created via `Arbor.Agent.Lifecycle.create/2`. Runs as a `BranchSupervisor` (rest_for_one) with children: APIAgent host, Executor, and Session.
 - **Session**: GenServer in `arbor_orchestrator` that drives agent turns (user messages → LLM responses) and heartbeats (autonomous cycles) by executing DOT graph pipelines via the Engine.
 - **Heartbeat**: An autonomous ~30-second cycle where the agent runs a DOT pipeline to check goals, select a cognitive mode (goal pursuit / reflection / plan execution / consolidation), optionally call an LLM, update memory, and execute pending actions — all without human input.
-- **DOT Pipeline**: A directed graph written in DOT/Graphviz syntax defining a sequence of `exec` nodes (Jido Actions) and `compute` nodes (LLM calls). Parsed and executed by the Engine. Supports conditional routing, retry loops, checkpoints, and fidelity resolution. See [DOT_PIPELINE_GUIDE.md](docs/arbor/DOT_PIPELINE_GUIDE.md).
-- **Engine** (`Arbor.Orchestrator.Engine`): Executes DOT pipeline graphs. Traverses nodes, dispatches to handlers (ExecHandler for actions, ComputeHandler/LlmHandler for LLM calls), manages checkpoints, emits lifecycle events. The execution model is sound; lifecycle tracking infrastructure around it is being redesigned (see `.arbor/roadmap/2-planned/engine-lifecycle-redesign.md`).
+- **DOT Pipeline**: A directed graph written in DOT/Graphviz syntax defining a workflow of typed nodes connected by edges. Node types:
+  - `exec` — runs a Jido Action (pure business logic) via ExecHandler
+  - `compute` — makes an LLM call via LlmHandler/ComputeHandler
+  - `diamond` (shape=diamond) — conditional routing based on a context key
+  - `start` (shape=Mdiamond) / `done` (shape=Msquare) — entry/exit sentinels
+  - `compose` / `invoke` — embed or call sub-pipelines via SubgraphHandler
+  Edges can be conditional (`condition="context.key=value"`), enabling branching and retry loops. A shared key-value **context** flows through the graph — nodes read from and write to it. The graph is a static definition; the Engine provides dynamic execution.
+- **Engine** (`Arbor.Orchestrator.Engine`): Executes DOT pipeline graphs by traversing nodes in topological order, dispatching each to the appropriate handler, managing checkpoints for resume, and emitting lifecycle events. The Engine is the core execution loop — it calls handlers, collects results, evaluates conditional edges to pick the next node, and tracks node durations. The execution model itself is sound; the lifecycle tracking infrastructure around it (how completed/failed status is recorded) is being redesigned — see `.arbor/roadmap/2-planned/engine-lifecycle-redesign.md`.
 - **CRC Pattern (Construct-Reduce-Convert)**: Pure functional modules that separate business logic from side effects. `new/1` constructs from input, operations transform state, `show/1` formats for output. All functions are pure — no DB, no GenServer calls, no IO. Used extensively in dashboard cores. See [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md).
 - **Socket-First Component**: Dashboard pattern replacing LiveComponent with plain Phoenix.Component modules that manage state on the parent LiveView's socket via delegate functions. Events namespaced as `"component:action"`. See [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).
 - **Trust Tier**: Graduated trust level governing agent capabilities: `untrusted` (0-19) → `probationary` (20-49) → `trusted` (50-74) → `veteran` (75-89) → `autonomous` (90-100). Managed by `arbor_trust`.
@@ -108,7 +114,7 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
 
 ## DOT Pipelines
 
-For writing and running orchestrator DOT pipelines, see [DOT_PIPELINE_GUIDE.md](docs/arbor/DOT_PIPELINE_GUIDE.md).
+See Core Concepts above for the conceptual overview (node types, handlers, execution model). The full syntax reference with attribute tables and examples is at `docs/arbor/DOT_PIPELINE_GUIDE.md`.
 
 ## Custom Aliases
 
