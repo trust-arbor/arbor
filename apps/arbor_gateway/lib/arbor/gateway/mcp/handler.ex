@@ -710,21 +710,45 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp format_goal(goal), do: "- #{inspect(goal)}"
 
   defp get_pipeline_status do
+    # Primary: read from the ETS-backed PipelineStatus Facade (Engine-owned tracking).
+    # Fallback: read from the legacy JobRegistry (event-based tracking) if the
+    # Facade module isn't available or returns empty results. This supports the
+    # dual-write migration period where both paths coexist.
+    if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
+      active = apply(Arbor.Orchestrator.PipelineStatus, :list_active, [])
+      recent = apply(Arbor.Orchestrator.PipelineStatus, :list_recent, [[limit: 10]])
+
+      if active == [] and recent == [] do
+        # ETS table may not exist yet (pre-restart). Fall back to JobRegistry.
+        get_pipeline_status_legacy()
+      else
+        format_pipeline_status(active, recent)
+      end
+    else
+      get_pipeline_status_legacy()
+    end
+  rescue
+    e ->
+      Logger.debug("[MCPHandler] pipeline status failed: #{Exception.message(e)}")
+      get_pipeline_status_legacy()
+  catch
+    :exit, reason ->
+      Logger.debug("[MCPHandler] pipeline status exited: #{inspect(reason)}")
+      get_pipeline_status_legacy()
+  end
+
+  defp get_pipeline_status_legacy do
     if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
       active = apply(Arbor.Orchestrator.JobRegistry, :list_active, [])
       recent = apply(Arbor.Orchestrator.JobRegistry, :list_recent, [])
       format_pipeline_status(active, recent)
     else
-      "Pipeline registry not available (orchestrator not started)"
+      "Pipeline status not available (orchestrator not started)"
     end
   rescue
-    e ->
-      Logger.debug("[MCPHandler] pipeline status failed: #{Exception.message(e)}")
-      "Pipeline registry unavailable"
+    _ -> "Pipeline status unavailable"
   catch
-    :exit, reason ->
-      Logger.debug("[MCPHandler] pipeline status exited: #{inspect(reason)}")
-      "Pipeline registry unavailable"
+    :exit, _ -> "Pipeline status unavailable"
   end
 
   defp format_pipeline_status(active, recent) do
