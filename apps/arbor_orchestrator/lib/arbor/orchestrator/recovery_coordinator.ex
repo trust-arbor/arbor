@@ -278,7 +278,33 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   def handle_info(:check_stale_heartbeats, state) do
     if state.enabled do
-      stale = JobRegistry.list_stale_heartbeats(@stale_heartbeat_ms)
+      # Check both the legacy JobRegistry (BufferedStore) and the new
+      # PipelineStatus (ETS) for stale entries. During the migration
+      # period, entries may exist in either store.
+      legacy_stale = JobRegistry.list_stale_heartbeats(@stale_heartbeat_ms)
+
+      ets_stale =
+        if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
+          try do
+            Arbor.Orchestrator.PipelineStatus.list_active()
+            |> Enum.filter(fn entry ->
+              Arbor.Orchestrator.PipelineStatus.stale?(entry)
+            end)
+          rescue
+            _ -> []
+          catch
+            :exit, _ -> []
+          end
+        else
+          []
+        end
+
+      # Deduplicate by run_id in case both stores have the same entry
+      stale_map =
+        (legacy_stale ++ ets_stale)
+        |> Enum.uniq_by(fn entry -> entry.run_id || entry[:pipeline_id] end)
+
+      stale = stale_map
 
       if stale != [] do
         # Only claim pipelines owned by this node (stale local pipelines)

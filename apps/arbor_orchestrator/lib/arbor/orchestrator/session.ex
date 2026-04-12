@@ -809,11 +809,27 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp cleanup_stale_heartbeat_pipelines do
-    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
-      Arbor.Orchestrator.JobRegistry.list_stale_heartbeats()
+    # Primary: clean up via PipelineStatus Facade (ETS-backed)
+    if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
+      Arbor.Orchestrator.PipelineStatus.list_active()
       |> Enum.each(fn entry ->
-        Arbor.Orchestrator.JobRegistry.mark_abandoned(entry.run_id)
+        Arbor.Orchestrator.PipelineStatus.mark_abandoned(entry.run_id)
       end)
+    end
+
+    # Legacy fallback: also clean up stale entries in the JobRegistry
+    # BufferedStore (for entries created before the ETS migration)
+    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
+      try do
+        Arbor.Orchestrator.JobRegistry.list_stale_heartbeats()
+        |> Enum.each(fn entry ->
+          Arbor.Orchestrator.JobRegistry.mark_abandoned(entry.run_id)
+        end)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
     end
   rescue
     _ -> :ok

@@ -637,18 +637,37 @@ defmodule Arbor.Orchestrator.Engine do
   # Touch pipeline heartbeat if enough time has passed since the last one.
   # Uses monotonic time in tracking to avoid DateTime overhead on every node.
   defp maybe_touch_heartbeat(%State{} = state) do
-    now = System.monotonic_time(:millisecond)
+    now_mono = System.monotonic_time(:millisecond)
     last = Map.get(state.tracking, :last_heartbeat_touch, 0)
 
-    if now - last >= @heartbeat_interval_ms do
+    if now_mono - last >= @heartbeat_interval_ms do
+      # Update RunState heartbeat + sync to ETS (new path)
+      run_state =
+        if state.run_state do
+          rs = Arbor.Orchestrator.RunState.Core.touch_heartbeat(state.run_state, DateTime.utc_now())
+          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+          rs
+        else
+          state.run_state
+        end
+
+      # Also touch the legacy JobRegistry for backward compatibility
+      # during the migration period. Can be removed once the
+      # RecoveryCoordinator fully migrates to PipelineStatus.
       run_id = Keyword.get(state.opts, :run_id)
 
       if run_id do
-        Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
+        try do
+          Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
       end
 
-      tracking = Map.put(state.tracking, :last_heartbeat_touch, now)
-      %{state | tracking: tracking}
+      tracking = Map.put(state.tracking, :last_heartbeat_touch, now_mono)
+      %{state | tracking: tracking, run_state: run_state}
     else
       state
     end
