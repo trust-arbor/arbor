@@ -780,7 +780,13 @@ defmodule Arbor.Orchestrator.Session do
         try do
           Engine.run(heartbeat_graph, engine_opts)
         rescue
-          e -> {:error, {:engine_crash, Exception.message(e)}}
+          e ->
+            Logger.error(
+              "[Session] Heartbeat engine crash for #{state.agent_id}: " <>
+                "#{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+            )
+
+            {:error, {:engine_crash, Exception.message(e)}}
         end
 
       send(session_pid, {:heartbeat_result, result})
