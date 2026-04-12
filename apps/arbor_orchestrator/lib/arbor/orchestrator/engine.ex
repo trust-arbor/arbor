@@ -76,6 +76,19 @@ defmodule Arbor.Orchestrator.Engine do
     graph_hash = Keyword.get(opts, :graph_hash)
     dot_source_path = Keyword.get(opts, :dot_source_path)
 
+    # Initialize process-local lifecycle tracking via RunState CRC core.
+    # This is the Engine's own tracking — no external GenServer dependency.
+    run_state =
+      Arbor.Orchestrator.RunState.Core.new(run_id, graph.id, map_size(graph.nodes),
+        now: DateTime.utc_now(),
+        pipeline_id: Keyword.get(opts, :pipeline_id, run_id),
+        owner_node: Kernel.node(),
+        source_node: Keyword.get(opts, :source_node, Kernel.node()),
+        spawning_pid: Keyword.get(opts, :spawning_pid)
+      )
+
+    sync_run_state(run_id, run_state)
+
     :ok = write_manifest(graph, logs_root, run_id)
 
     emit(
@@ -139,7 +152,8 @@ defmodule Arbor.Orchestrator.Engine do
           pending: [],
           opts: opts,
           pipeline_started_at: pipeline_started_at,
-          tracking: tracking
+          tracking: tracking,
+          run_state: run_state
         }
 
         loop(engine_state)
@@ -534,6 +548,13 @@ defmodule Arbor.Orchestrator.Engine do
     duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
     run_id = Keyword.get(state.opts, :run_id)
 
+    # Update RunState to :completed and sync to ETS
+    if state.run_state do
+      alias Arbor.Orchestrator.RunState.Core, as: RS
+      completed_state = RS.mark_completed(state.run_state, duration_ms, now: DateTime.utc_now())
+      sync_run_state(run_id, completed_state)
+    end
+
     emit(state.opts, Event.pipeline_completed(ordered, duration_ms))
 
     # Clean up checkpoint from durable store (no longer needed)
@@ -772,6 +793,24 @@ defmodule Arbor.Orchestrator.Engine do
 
     EventEmitter.emit(pipeline_id, event, opts)
   end
+
+  # Write the RunState to the shared ETS table for dashboard/Facade visibility.
+  # Non-blocking: if the write fails (ETS table gone, process exit), the Engine
+  # continues executing. Dashboard goes stale; agent keeps thinking.
+  # This is the "graceful degradation" model the council recommended.
+  defp sync_run_state(run_id, %Arbor.Orchestrator.RunState.Core{} = run_state) do
+    now = DateTime.utc_now()
+    synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
+    entry = Arbor.Orchestrator.RunState.Core.to_ets_entry(synced)
+    :ets.insert(:arbor_pipeline_runs, {run_id, entry})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp sync_run_state(_run_id, nil), do: :ok
 
   defp write_manifest(graph, logs_root, run_id \\ nil) do
     payload = %{
