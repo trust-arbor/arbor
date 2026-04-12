@@ -766,7 +766,11 @@ defmodule Arbor.Orchestrator.Session do
   defp do_start_heartbeat_task(state) do
     session_pid = self()
     values = Builders.build_heartbeat_values(state)
-    engine_opts = Builders.build_engine_opts(state, values, source: :heartbeat)
+
+    engine_opts =
+      Builders.build_engine_opts(state, values, source: :heartbeat)
+      |> Keyword.put(:spawning_pid, session_pid)
+
     heartbeat_graph = state.heartbeat_graph
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor

@@ -85,7 +85,8 @@ defmodule Arbor.Orchestrator.Engine do
         logs_root: logs_root,
         node_count: map_size(graph.nodes),
         graph_hash: graph_hash,
-        dot_source_path: dot_source_path
+        dot_source_path: dot_source_path,
+        spawning_pid: Keyword.get(opts, :spawning_pid)
       )
     )
 
