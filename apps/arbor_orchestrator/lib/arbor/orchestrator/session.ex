@@ -699,6 +699,19 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  @impl true
+  def terminate(_reason, _state) do
+    # Clean up stale heartbeat pipeline entries from the JobRegistry.
+    # Without this, heartbeat pipelines that were registered as :running
+    # but never completed (0/N nodes) accumulate forever because the
+    # RecoveryCoordinator only checks node-level liveness (the BEAM node
+    # stays connected even after the Session process dies). This terminate
+    # callback is the "clean up after yourself" fix — each Session marks
+    # its orphaned heartbeat entries as abandoned on shutdown.
+    cleanup_stale_heartbeat_pipelines()
+    :ok
+  end
+
   # ── Private helpers ──────────────────────────────────────────────────
 
   # Persist tools discovered via find_tools during this turn into session state.
@@ -783,6 +796,19 @@ defmodule Arbor.Orchestrator.Session do
     if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
     ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
     %{state | heartbeat_ref: ref}
+  end
+
+  defp cleanup_stale_heartbeat_pipelines do
+    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
+      Arbor.Orchestrator.JobRegistry.list_stale_heartbeats()
+      |> Enum.each(fn entry ->
+        Arbor.Orchestrator.JobRegistry.mark_abandoned(entry.run_id)
+      end)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ── Gate-level orchestrator authorization ────────────────────────────
