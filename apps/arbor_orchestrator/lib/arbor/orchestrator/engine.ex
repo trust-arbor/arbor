@@ -376,6 +376,16 @@ defmodule Arbor.Orchestrator.Engine do
       emit(state.opts, Event.stage_started(node.id))
       emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
+      # Update RunState with node_started + sync to ETS
+      run_state =
+        if state.run_state do
+          rs = Arbor.Orchestrator.RunState.Core.node_started(state.run_state, node.id)
+          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+          rs
+        else
+          state.run_state
+        end
+
       stage_started_at = System.monotonic_time(:millisecond)
 
       # Determine idempotency class for WAL wrapping
@@ -459,6 +469,16 @@ defmodule Arbor.Orchestrator.Engine do
       outcomes = Map.put(state.outcomes, node.id, outcome)
       stage_duration = System.monotonic_time(:millisecond) - stage_started_at
 
+      # Update RunState with node_completed + sync to ETS
+      run_state =
+        if run_state do
+          rs = Arbor.Orchestrator.RunState.Core.node_completed(run_state, node.id, stage_duration)
+          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+          rs
+        else
+          run_state
+        end
+
       tracking =
         tracking
         |> put_in([:node_durations, node.id], stage_duration)
@@ -499,7 +519,8 @@ defmodule Arbor.Orchestrator.Engine do
           completed: completed,
           retries: retries,
           outcomes: outcomes,
-          tracking: tracking
+          tracking: tracking,
+          run_state: run_state
       }
 
       if Router.terminal?(node) do
