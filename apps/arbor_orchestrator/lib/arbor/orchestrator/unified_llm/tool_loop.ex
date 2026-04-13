@@ -328,11 +328,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
           duration_ms: duration_ms,
           result_preview:
             case result do
-              {:ok, text} when is_binary(text) -> String.slice(text, 0..200)
+              {:ok, text} when is_binary(text) ->
+                String.slice(text, 0..200)
+
               {:error, reason} ->
                 err = classify_error(reason)
                 "ERROR [#{err.type}]: #{err.message}"
-              _ -> inspect(result) |> String.slice(0..200)
+
+              _ ->
+                inspect(result) |> String.slice(0..200)
             end
         })
 

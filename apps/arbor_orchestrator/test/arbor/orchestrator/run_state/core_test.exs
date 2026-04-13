@@ -13,8 +13,8 @@ defmodule Arbor.Orchestrator.RunState.CoreTest do
       Keyword.get(opts, :graph_id, "Heartbeat"),
       Keyword.get(opts, :total_nodes, 19),
       now: Keyword.get(opts, :now, @now),
-      owner_node: :"test@localhost",
-      source_node: :"test@localhost",
+      owner_node: :test@localhost,
+      source_node: :test@localhost,
       spawning_pid: self()
     )
   end
@@ -201,9 +201,9 @@ defmodule Arbor.Orchestrator.RunState.CoreTest do
 
   describe "mark_delegated/2" do
     test "transitions from :running with target node" do
-      state = new_state() |> Core.mark_delegated(:"node_b@remote")
+      state = new_state() |> Core.mark_delegated(:node_b@remote)
       assert state.status == :delegated
-      assert state.failure_reason == {:delegated_to, :"node_b@remote"}
+      assert state.failure_reason == {:delegated_to, :node_b@remote}
     end
   end
 

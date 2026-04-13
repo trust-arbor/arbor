@@ -36,12 +36,13 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Status
 
     test "shows agent info from context" do
-      context = ctx(
-        agent_id: "agent_abc",
-        display_name: "TestBot",
-        model: "anthropic/claude-sonnet-4",
-        provider: "anthropic"
-      )
+      context =
+        ctx(
+          agent_id: "agent_abc",
+          display_name: "TestBot",
+          model: "anthropic/claude-sonnet-4",
+          provider: "anthropic"
+        )
 
       assert {:ok, %Result{text: text}} = Status.execute("", context)
       assert String.contains?(text, "TestBot")
@@ -73,6 +74,7 @@ defmodule Arbor.Common.CommandsTest do
     test "switch model with agent returns action" do
       assert {:ok, %Result{text: text, action: {:switch_model, "gpt-4o"}}} =
                Model.execute("gpt-4o", ctx(agent_id: "agent_test"))
+
       assert String.contains?(text, "gpt-4o")
     end
 
@@ -116,12 +118,13 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Session
 
     test "shows session info" do
-      context = ctx(
-        session_id: "sess_123",
-        turn_count: 5,
-        model: "anthropic/claude-sonnet-4",
-        session_pid: self()
-      )
+      context =
+        ctx(
+          session_id: "sess_123",
+          turn_count: 5,
+          model: "anthropic/claude-sonnet-4",
+          session_pid: self()
+        )
 
       assert {:ok, %Result{text: text}} = Session.execute("", context)
       assert String.contains?(text, "sess_123")

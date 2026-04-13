@@ -151,7 +151,10 @@ defmodule Mix.Tasks.Arbor.Eval do
           Mix.shell().info("Base URL override: #{base_url} (provider: #{provider})")
           {key, orig}
         else
-          Mix.shell().info("Warning: --base-url set but provider '#{provider}' doesn't support runtime override")
+          Mix.shell().info(
+            "Warning: --base-url set but provider '#{provider}' doesn't support runtime override"
+          )
+
           nil
         end
       end

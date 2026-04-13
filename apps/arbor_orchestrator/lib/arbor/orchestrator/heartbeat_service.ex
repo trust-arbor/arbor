@@ -154,7 +154,9 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   def handle_info({:heartbeat_result, {:error, reason}}, state) do
-    Logger.warning("[HeartbeatService] Heartbeat failed for #{state.agent_id}: #{inspect(reason)}")
+    Logger.warning(
+      "[HeartbeatService] Heartbeat failed for #{state.agent_id}: #{inspect(reason)}"
+    )
 
     emit_heartbeat_failed_signal(state, reason)
 
@@ -184,7 +186,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
           do_start_heartbeat_task(state)
 
         {:error, reason} ->
-          Logger.warning("[HeartbeatService] Heartbeat blocked: unauthorized (#{inspect(reason)})")
+          Logger.warning(
+            "[HeartbeatService] Heartbeat blocked: unauthorized (#{inspect(reason)})"
+          )
+
           state
       end
     end
@@ -391,9 +396,14 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   defp resolve_dot_path(graph_name, _opts) do
     # The heartbeat DOT files live alongside the session pipeline specs
-    base = Path.join([
-      "apps", "arbor_orchestrator", "specs", "pipelines", "session"
-    ])
+    base =
+      Path.join([
+        "apps",
+        "arbor_orchestrator",
+        "specs",
+        "pipelines",
+        "session"
+      ])
 
     Path.join(base, graph_name)
   end

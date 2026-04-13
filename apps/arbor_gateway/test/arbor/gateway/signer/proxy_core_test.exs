@@ -237,9 +237,7 @@ defmodule Arbor.Gateway.Signer.ProxyCoreTest do
 
     test "includes data field when provided" do
       result =
-        ProxyCore.jsonrpc_error_response("req-1", -32_700, "parse error",
-          %{"line" => 5}
-        )
+        ProxyCore.jsonrpc_error_response("req-1", -32_700, "parse error", %{"line" => 5})
 
       assert result["error"]["data"] == %{"line" => 5}
       assert result["id"] == "req-1"

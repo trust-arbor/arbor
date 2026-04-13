@@ -226,7 +226,10 @@ defmodule Arbor.Agent.MaintenanceServer do
         end
       rescue
         e ->
-          Logger.debug("[Maintenance] #{agent_id}: thought pruning failed: #{Exception.message(e)}")
+          Logger.debug(
+            "[Maintenance] #{agent_id}: thought pruning failed: #{Exception.message(e)}"
+          )
+
           0
       catch
         :exit, reason ->
@@ -373,7 +376,10 @@ defmodule Arbor.Agent.MaintenanceServer do
           end
         rescue
           e ->
-            Logger.debug("[Maintenance] #{agent_id}: consolidation failed: #{Exception.message(e)}")
+            Logger.debug(
+              "[Maintenance] #{agent_id}: consolidation failed: #{Exception.message(e)}"
+            )
+
             %{}
         catch
           :exit, reason ->

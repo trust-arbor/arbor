@@ -196,8 +196,15 @@ defmodule Arbor.Agent.Spec do
 
     opts = if spec.template, do: Keyword.put(opts, :template, spec.template), else: opts
     opts = if spec.character, do: Keyword.put(opts, :character, spec.character), else: opts
-    opts = if spec.delegator_id, do: Keyword.put(opts, :delegator_id, spec.delegator_id), else: opts
-    opts = if spec.tenant_context, do: Keyword.put(opts, :tenant_context, spec.tenant_context), else: opts
+
+    opts =
+      if spec.delegator_id, do: Keyword.put(opts, :delegator_id, spec.delegator_id), else: opts
+
+    opts =
+      if spec.tenant_context,
+        do: Keyword.put(opts, :tenant_context, spec.tenant_context),
+        else: opts
+
     opts
   end
 
@@ -281,13 +288,14 @@ defmodule Arbor.Agent.Spec do
               do: mod.required_capabilities(),
               else: []
 
-          %{spec |
-            character: character,
-            trust_tier: trust_tier || spec.trust_tier,
-            template: mod,
-            template_module: mod,
-            initial_goals: goals,
-            initial_capabilities: caps
+          %{
+            spec
+            | character: character,
+              trust_tier: trust_tier || spec.trust_tier,
+              template: mod,
+              template_module: mod,
+              initial_goals: goals,
+              initial_capabilities: caps
           }
         else
           spec
@@ -313,12 +321,13 @@ defmodule Arbor.Agent.Spec do
   end
 
   defp apply_template_data(spec, name, kw) do
-    %{spec |
-      character: kw[:character] || spec.character,
-      trust_tier: kw[:trust_tier] || spec.trust_tier,
-      template: name,
-      initial_goals: kw[:initial_goals] || spec.initial_goals,
-      initial_capabilities: kw[:required_capabilities] || spec.initial_capabilities
+    %{
+      spec
+      | character: kw[:character] || spec.character,
+        trust_tier: kw[:trust_tier] || spec.trust_tier,
+        template: name,
+        initial_goals: kw[:initial_goals] || spec.initial_goals,
+        initial_capabilities: kw[:required_capabilities] || spec.initial_capabilities
     }
   end
 
@@ -336,11 +345,12 @@ defmodule Arbor.Agent.Spec do
 
     system_prompt = model_config[:system_prompt] || model_config["system_prompt"]
 
-    %{spec |
-      provider: safe_to_atom(provider) || spec.provider,
-      model: model || spec.model,
-      system_prompt: system_prompt || spec.system_prompt,
-      model_config: model_config
+    %{
+      spec
+      | provider: safe_to_atom(provider) || spec.provider,
+        model: model || spec.model,
+        system_prompt: system_prompt || spec.system_prompt,
+        model_config: model_config
     }
   end
 
@@ -379,6 +389,7 @@ defmodule Arbor.Agent.Spec do
 
   defp safe_to_atom(nil), do: nil
   defp safe_to_atom(a) when is_atom(a), do: a
+
   defp safe_to_atom(s) when is_binary(s) do
     try do
       String.to_existing_atom(s)

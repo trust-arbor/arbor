@@ -173,7 +173,10 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
 
           <%= if @telemetry_agents == [] do %>
             <tr>
-              <td colspan="5" style="padding: 2rem; text-align: center; color: var(--aw-text-secondary, #71717a);">
+              <td
+                colspan="5"
+                style="padding: 2rem; text-align: center; color: var(--aw-text-secondary, #71717a);"
+              >
                 No agent telemetry data available
               </td>
             </tr>
@@ -216,7 +219,9 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
         <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem;">Token Usage</h3>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
           <div>
-            <div style="font-size: 0.75rem; color: var(--aw-text-secondary, #71717a); margin-bottom: 0.25rem;">Session</div>
+            <div style="font-size: 0.75rem; color: var(--aw-text-secondary, #71717a); margin-bottom: 0.25rem;">
+              Session
+            </div>
             <div style="font-size: 0.8rem;">
               In: {@selected_agent_telemetry.tokens.session.input_formatted} |
               Out: {@selected_agent_telemetry.tokens.session.output_formatted} |
@@ -224,7 +229,9 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
             </div>
           </div>
           <div>
-            <div style="font-size: 0.75rem; color: var(--aw-text-secondary, #71717a); margin-bottom: 0.25rem;">Lifetime</div>
+            <div style="font-size: 0.75rem; color: var(--aw-text-secondary, #71717a); margin-bottom: 0.25rem;">
+              Lifetime
+            </div>
             <div style="font-size: 0.8rem;">
               In: {@selected_agent_telemetry.tokens.lifetime.input_formatted} |
               Out: {@selected_agent_telemetry.tokens.lifetime.output_formatted} |
@@ -288,7 +295,9 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
     <div style="margin-bottom: 1.25rem;">
       <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem;">Tool Report</h3>
       <%= if @tool_report == [] do %>
-        <div style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">No tool calls recorded</div>
+        <div style="font-size: 0.8rem; color: var(--aw-text-secondary, #71717a);">
+          No tool calls recorded
+        </div>
       <% else %>
         <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
           <thead>
@@ -307,9 +316,15 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
               <tr style="border-bottom: 1px solid var(--aw-border, #222);">
                 <td style="padding: 0.35rem 0.5rem; font-family: monospace;">{tool.name}</td>
                 <td style="padding: 0.35rem 0.5rem; text-align: right;">{tool.calls}</td>
-                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #4ade80;">{tool.succeeded}</td>
-                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #f87171;">{tool.failed}</td>
-                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #fbbf24;">{tool.gated}</td>
+                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #4ade80;">
+                  {tool.succeeded}
+                </td>
+                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #f87171;">
+                  {tool.failed}
+                </td>
+                <td style="padding: 0.35rem 0.5rem; text-align: right; color: #fbbf24;">
+                  {tool.gated}
+                </td>
                 <td style="padding: 0.35rem 0.5rem; text-align: right;">{tool.success_rate}%</td>
                 <td style="padding: 0.35rem 0.5rem; text-align: right;">{tool.avg_duration_ms}</td>
               </tr>
@@ -348,9 +363,12 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
                 {provider_entry.provider}
               </span>
               <div style="flex: 1; height: 8px; background: var(--aw-bg-tertiary, #27272a); border-radius: 4px; overflow: hidden;">
-                <div style={"height: 100%; background: #6366f1; border-radius: 4px; width: #{cost_bar_width(@cost, provider_entry.cost)}%;"}></div>
+                <div style={"height: 100%; background: #6366f1; border-radius: 4px; width: #{cost_bar_width(@cost, provider_entry.cost)}%;"}>
+                </div>
               </div>
-              <span style="font-size: 0.75rem; min-width: 60px; text-align: right;">{provider_entry.cost_formatted}</span>
+              <span style="font-size: 0.75rem; min-width: 60px; text-align: right;">
+                {provider_entry.cost_formatted}
+              </span>
             </div>
           <% end %>
         </div>
@@ -435,7 +453,8 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
                 <td style="padding: 0.35rem 0.5rem; text-align: right;">{entry.cost_formatted}</td>
                 <td style="padding: 0.35rem 0.5rem;">
                   <div style="height: 8px; background: var(--aw-bg-tertiary, #27272a); border-radius: 4px; overflow: hidden;">
-                    <div style={"height: 100%; background: #6366f1; border-radius: 4px; width: #{cost_trend_bar_width(@history_cost_trend, entry.cost)}%;"}></div>
+                    <div style={"height: 100%; background: #6366f1; border-radius: 4px; width: #{cost_trend_bar_width(@history_cost_trend, entry.cost)}%;"}>
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -455,7 +474,9 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
   def tool_failures(assigns) do
     ~H"""
     <div class="aw-card" style="margin-top: 1rem; padding: 1.25rem;">
-      <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem;">Recent Tool Failures</h3>
+      <h3 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem;">
+        Recent Tool Failures
+      </h3>
       <%= if @history_tool_failures == [] do %>
         <div style="font-size: 0.8rem; color: #4ade80;">No recent failures</div>
       <% else %>

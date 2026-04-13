@@ -48,26 +48,26 @@ defmodule Arbor.Orchestrator.RunState.Core do
   typedstruct enforce: true do
     @typedoc "Pipeline run lifecycle state — metadata only, no agent context."
 
-    field :run_id, String.t()
-    field :pipeline_id, String.t()
-    field :graph_id, String.t()
-    field :status, status(), default: :running
-    field :total_nodes, non_neg_integer(), default: 0
-    field :completed_count, non_neg_integer(), default: 0
-    field :completed_nodes, [String.t()], default: []
-    field :current_node, String.t() | nil, default: nil, enforce: false
-    field :node_durations, %{String.t() => non_neg_integer()}, default: %{}
-    field :started_at, DateTime.t()
-    field :finished_at, DateTime.t() | nil, default: nil, enforce: false
-    field :duration_ms, non_neg_integer() | nil, default: nil, enforce: false
-    field :failure_reason, term(), default: nil, enforce: false
-    field :owner_node, atom(), enforce: false
-    field :source_node, atom(), enforce: false
-    field :spawning_pid, pid() | nil, default: nil, enforce: false
-    field :last_heartbeat, DateTime.t(), enforce: false
+    field(:run_id, String.t())
+    field(:pipeline_id, String.t())
+    field(:graph_id, String.t())
+    field(:status, status(), default: :running)
+    field(:total_nodes, non_neg_integer(), default: 0)
+    field(:completed_count, non_neg_integer(), default: 0)
+    field(:completed_nodes, [String.t()], default: [])
+    field(:current_node, String.t() | nil, default: nil, enforce: false)
+    field(:node_durations, %{String.t() => non_neg_integer()}, default: %{})
+    field(:started_at, DateTime.t())
+    field(:finished_at, DateTime.t() | nil, default: nil, enforce: false)
+    field(:duration_ms, non_neg_integer() | nil, default: nil, enforce: false)
+    field(:failure_reason, term(), default: nil, enforce: false)
+    field(:owner_node, atom(), enforce: false)
+    field(:source_node, atom(), enforce: false)
+    field(:spawning_pid, pid() | nil, default: nil, enforce: false)
+    field(:last_heartbeat, DateTime.t(), enforce: false)
     # Council recommendation: "Last Synced" timestamp so the dashboard
     # can show "stale data" warnings when the Engine stops updating.
-    field :last_ets_sync, DateTime.t() | nil, default: nil, enforce: false
+    field(:last_ets_sync, DateTime.t() | nil, default: nil, enforce: false)
   end
 
   # ===========================================================================
@@ -113,11 +113,12 @@ defmodule Arbor.Orchestrator.RunState.Core do
   @doc "Record that a node completed successfully."
   @spec node_completed(t(), String.t(), non_neg_integer()) :: t()
   def node_completed(%__MODULE__{status: :running} = state, node_id, duration_ms) do
-    %{state |
-      current_node: nil,
-      completed_count: state.completed_count + 1,
-      completed_nodes: [node_id | state.completed_nodes],
-      node_durations: Map.put(state.node_durations, node_id, duration_ms)
+    %{
+      state
+      | current_node: nil,
+        completed_count: state.completed_count + 1,
+        completed_nodes: [node_id | state.completed_nodes],
+        node_durations: Map.put(state.node_durations, node_id, duration_ms)
     }
   end
 
@@ -126,10 +127,7 @@ defmodule Arbor.Orchestrator.RunState.Core do
   @doc "Record that a node failed."
   @spec node_failed(t(), String.t(), term()) :: t()
   def node_failed(%__MODULE__{status: :running} = state, node_id, reason) do
-    %{state |
-      current_node: node_id,
-      failure_reason: {:node_failed, node_id, reason}
-    }
+    %{state | current_node: node_id, failure_reason: {:node_failed, node_id, reason}}
   end
 
   def node_failed(%__MODULE__{} = state, _node_id, _reason), do: state
@@ -141,12 +139,7 @@ defmodule Arbor.Orchestrator.RunState.Core do
   def mark_completed(%__MODULE__{status: :running} = state, duration_ms, opts) do
     now = Keyword.get(opts, :now, state.started_at)
 
-    %{state |
-      status: :completed,
-      current_node: nil,
-      duration_ms: duration_ms,
-      finished_at: now
-    }
+    %{state | status: :completed, current_node: nil, duration_ms: duration_ms, finished_at: now}
   end
 
   def mark_completed(%__MODULE__{} = state, _duration_ms, _opts), do: state
@@ -159,12 +152,13 @@ defmodule Arbor.Orchestrator.RunState.Core do
       when status in [:running, :suspended] do
     now = Keyword.get(opts, :now, state.started_at)
 
-    %{state |
-      status: :failed,
-      current_node: nil,
-      failure_reason: reason,
-      duration_ms: duration_ms,
-      finished_at: now
+    %{
+      state
+      | status: :failed,
+        current_node: nil,
+        failure_reason: reason,
+        duration_ms: duration_ms,
+        finished_at: now
     }
   end
 
@@ -198,11 +192,7 @@ defmodule Arbor.Orchestrator.RunState.Core do
   @doc "Mark the pipeline as delegated to another node or agent."
   @spec mark_delegated(t(), atom()) :: t()
   def mark_delegated(%__MODULE__{status: :running} = state, target_node) do
-    %{state |
-      status: :delegated,
-      current_node: nil,
-      failure_reason: {:delegated_to, target_node}
-    }
+    %{state | status: :delegated, current_node: nil, failure_reason: {:delegated_to, target_node}}
   end
 
   def mark_delegated(%__MODULE__{} = state, _target_node), do: state

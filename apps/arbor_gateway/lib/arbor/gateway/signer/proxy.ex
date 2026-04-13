@@ -70,7 +70,10 @@ defmodule Arbor.Gateway.Signer.Proxy do
   @spec start(keyword()) :: :ok | {:error, term()}
   def start(opts) do
     with {:ok, config} <- build_config(opts) do
-      log_stderr("[arbor.signer] starting — agent_id=#{config.key_material.agent_id} upstream=#{config.upstream_url}")
+      log_stderr(
+        "[arbor.signer] starting — agent_id=#{config.key_material.agent_id} upstream=#{config.upstream_url}"
+      )
+
       loop(config)
     else
       {:error, reason} = err ->
@@ -169,9 +172,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
         log_stderr("[arbor.signer] signing failed: #{inspect(reason)}")
         id = parse_id_safely(body)
 
-        ProxyCore.jsonrpc_error_response(id, -32_603, "proxy signing error",
-          %{"reason" => inspect(reason)}
-        )
+        ProxyCore.jsonrpc_error_response(id, -32_603, "proxy signing error", %{
+          "reason" => inspect(reason)
+        })
         |> Jason.encode!()
     end
   end
@@ -204,9 +207,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
         log_stderr("[arbor.signer] upstream request failed: #{inspect(reason)}")
         id = parse_id_safely(body)
 
-        ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable",
-          %{"reason" => inspect(reason)}
-        )
+        ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable", %{
+          "reason" => inspect(reason)
+        })
         |> Jason.encode!()
     end
   end
@@ -234,10 +237,13 @@ defmodule Arbor.Gateway.Signer.Proxy do
   defp do_post_httpc(url, body, headers) do
     # :httpc wants charlist URL and tuple headers
     url_chars = String.to_charlist(url)
-    content_type = headers |> Enum.find_value(~c"application/json", fn
-      {"content-type", v} -> String.to_charlist(v)
-      _ -> nil
-    end)
+
+    content_type =
+      headers
+      |> Enum.find_value(~c"application/json", fn
+        {"content-type", v} -> String.to_charlist(v)
+        _ -> nil
+      end)
 
     httpc_headers =
       headers

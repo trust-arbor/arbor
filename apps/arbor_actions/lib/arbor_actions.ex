@@ -153,7 +153,9 @@ defmodule Arbor.Actions do
             auth_mod = Arbor.Contracts.Security.AuthContext
 
             if Code.ensure_loaded?(auth_mod) and function_exported?(auth_mod, :mark_verified, 1) do
-              Map.put(clean_context, :auth_context,
+              Map.put(
+                clean_context,
+                :auth_context,
                 apply(auth_mod, :mark_verified, [clean_context[:auth_context]])
               )
             else

@@ -55,7 +55,9 @@ defmodule Arbor.Agent.HeartbeatLLM do
           Fitness.record_llm_latency(agent_id, llm_duration)
         rescue
           e ->
-            Logger.debug("[HeartbeatLLM] fitness latency recording failed: #{Exception.message(e)}")
+            Logger.debug(
+              "[HeartbeatLLM] fitness latency recording failed: #{Exception.message(e)}"
+            )
         catch
           :exit, _reason -> :ok
         end

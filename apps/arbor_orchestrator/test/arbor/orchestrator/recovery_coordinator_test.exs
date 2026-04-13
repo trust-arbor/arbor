@@ -106,9 +106,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
         last_heartbeat: DateTime.utc_now()
       }
 
-      Arbor.Persistence.BufferedStore.put("run_active_1", entry,
-        name: :arbor_orchestrator_jobs
-      )
+      Arbor.Persistence.BufferedStore.put("run_active_1", entry, name: :arbor_orchestrator_jobs)
 
       assert {:error, {:invalid_status, :running}} =
                Arbor.Orchestrator.resume("run_active_1")
@@ -149,9 +147,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
           last_heartbeat: DateTime.utc_now()
         }
 
-        Arbor.Persistence.BufferedStore.put(run_id, entry,
-          name: :arbor_orchestrator_jobs
-        )
+        Arbor.Persistence.BufferedStore.put(run_id, entry, name: :arbor_orchestrator_jobs)
       end
 
       JobRegistry.mark_interrupted("run_with_cp")

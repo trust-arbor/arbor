@@ -29,7 +29,9 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
     # Create or clear the ETS table for this test
     try do
       :ets.new(@ets_table, [
-        :set, :public, :named_table,
+        :set,
+        :public,
+        :named_table,
         read_concurrency: true,
         write_concurrency: true
       ])
@@ -208,8 +210,18 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
   describe "PipelineStatus.count_by_status/0" do
     test "groups and counts correctly" do
-      insert_ets_entry("r1", %{status: :running, spawning_pid: self(), started_at: DateTime.utc_now()})
-      insert_ets_entry("r2", %{status: :running, spawning_pid: self(), started_at: DateTime.utc_now()})
+      insert_ets_entry("r1", %{
+        status: :running,
+        spawning_pid: self(),
+        started_at: DateTime.utc_now()
+      })
+
+      insert_ets_entry("r2", %{
+        status: :running,
+        spawning_pid: self(),
+        started_at: DateTime.utc_now()
+      })
+
       insert_ets_entry("c1", %{status: :completed, started_at: DateTime.utc_now()})
       insert_ets_entry("f1", %{status: :failed, started_at: DateTime.utc_now()})
 

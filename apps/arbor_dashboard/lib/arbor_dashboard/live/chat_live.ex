@@ -1061,7 +1061,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
       {:error, reason} ->
         Logger.warning("[ChatLive] Failed to build command context: #{inspect(reason)}")
-        socket = stream_insert_command_error(socket, "Couldn't build command context: #{inspect(reason)}")
+
+        socket =
+          stream_insert_command_error(
+            socket,
+            "Couldn't build command context: #{inspect(reason)}"
+          )
+
         {:noreply, socket}
     end
   end

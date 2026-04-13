@@ -45,10 +45,7 @@ defmodule Arbor.Common.Commands.Model do
          {:switch_model, model_spec}
        )}
     else
-      {:ok,
-       Result.error(
-         "Cannot switch model: no current agent in this context."
-       )}
+      {:ok, Result.error("Cannot switch model: no current agent in this context.")}
     end
   end
 end

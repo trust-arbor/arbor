@@ -72,9 +72,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
         |> reload_state()
 
       {:error, reason} ->
-        Logger.warning(
-          "[ExternalAgentsComponent] Registration failed: #{inspect(reason)}"
-        )
+        Logger.warning("[ExternalAgentsComponent] Registration failed: #{inspect(reason)}")
 
         assign(socket, :external_agents_error, ExternalAgentsCore.format_error(reason))
     end
@@ -310,7 +308,8 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
       <.card title="External Agents">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
           Register external tools (Claude Code, Codex, others) to authenticate to this Arbor cluster.
-          Each registration generates an Ed25519 keypair; the private key is shown <strong>once</strong>
+          Each registration generates an Ed25519 keypair; the private key is shown
+          <strong>once</strong>
           and must be copied or downloaded before dismissal.
         </p>
 
@@ -531,7 +530,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
         <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
           <button
             type="button"
-            onclick={"navigator.clipboard.writeText(document.getElementById('just-registered-key').value); this.textContent='Copied!'"}
+            onclick="navigator.clipboard.writeText(document.getElementById('just-registered-key').value); this.textContent='Copied!'"
             class="aw-button-secondary"
           >
             Copy

@@ -335,7 +335,9 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Agent.Registry.register(agent_id, sup_pid, metadata)
   rescue
     e ->
-      Logger.warning("[Lifecycle] Registry registration failed for #{agent_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Lifecycle] Registry registration failed for #{agent_id}: #{Exception.message(e)}"
+      )
   catch
     :exit, reason ->
       Logger.warning("[Lifecycle] Registry registration exit for #{agent_id}: #{inspect(reason)}")
@@ -445,8 +447,8 @@ defmodule Arbor.Agent.Lifecycle do
     template_mod = Map.get(metadata, :template_module) || Map.get(metadata, "template_module")
 
     if template_mod && is_atom(template_mod) &&
-       Code.ensure_loaded?(template_mod) &&
-       function_exported?(template_mod, :heartbeat, 0) do
+         Code.ensure_loaded?(template_mod) &&
+         function_exported?(template_mod, :heartbeat, 0) do
       try do
         template_mod.heartbeat()
       rescue

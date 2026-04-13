@@ -644,7 +644,9 @@ defmodule Arbor.Orchestrator.Engine do
       # Update RunState heartbeat + sync to ETS (new path)
       run_state =
         if state.run_state do
-          rs = Arbor.Orchestrator.RunState.Core.touch_heartbeat(state.run_state, DateTime.utc_now())
+          rs =
+            Arbor.Orchestrator.RunState.Core.touch_heartbeat(state.run_state, DateTime.utc_now())
+
           sync_run_state(Keyword.get(state.opts, :run_id), rs)
           rs
         else

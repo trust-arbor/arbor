@@ -28,7 +28,10 @@ defmodule Mix.Tasks.Arbor.Stop do
 
         pid ->
           if os_process_alive?(pid) do
-            Mix.shell().info("Arbor node not reachable, but OS process #{pid} is alive. Sending SIGTERM...")
+            Mix.shell().info(
+              "Arbor node not reachable, but OS process #{pid} is alive. Sending SIGTERM..."
+            )
+
             System.cmd("kill", [to_string(pid)], stderr_to_stdout: true)
             Process.sleep(1_000)
             Mix.shell().info("Arbor server stopped (via PID file).")

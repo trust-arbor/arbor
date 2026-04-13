@@ -607,7 +607,10 @@ defmodule Arbor.Agent.AgentSeed do
     end
   rescue
     e ->
-      Logger.debug("[AgentSeed] update_working_memory failed for #{state.id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[AgentSeed] update_working_memory failed for #{state.id}: #{Exception.message(e)}"
+      )
+
       state
   end
 
@@ -630,7 +633,10 @@ defmodule Arbor.Agent.AgentSeed do
     state
   rescue
     e ->
-      Logger.debug("[AgentSeed] maybe_consolidate failed for #{state.id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[AgentSeed] maybe_consolidate failed for #{state.id}: #{Exception.message(e)}"
+      )
+
       state
   end
 

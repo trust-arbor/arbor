@@ -53,7 +53,10 @@ defmodule Arbor.Dashboard.Live.TelemetryLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <.dashboard_header title="Agent Telemetry" subtitle="Token usage, costs, latency, and tool metrics">
+    <.dashboard_header
+      title="Agent Telemetry"
+      subtitle="Token usage, costs, latency, and tool metrics"
+    >
       <:actions>
         <button phx-click="telemetry:refresh" class="aw-btn">
           Refresh

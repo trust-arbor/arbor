@@ -69,7 +69,9 @@ defmodule Arbor.Actions.File do
       # about why we skip identity verification. Either way, facade auth never
       # re-verifies identity (that's the action layer's job).
       case Arbor.Security.authorize(context[:agent_id], resource_uri, :execute,
-             file_path: path, verify_identity: false) do
+             file_path: path,
+             verify_identity: false
+           ) do
         {:ok, :authorized, resolved_path} -> {:ok, resolved_path}
         {:ok, :authorized} -> {:ok, path}
         {:error, reason} -> {:error, {:unauthorized, reason}}
