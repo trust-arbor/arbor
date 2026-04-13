@@ -64,7 +64,8 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSkills do
         "DROP TRIGGER IF EXISTS skills_searchable_update ON skills"
       )
 
-      # Semantic search: pgvector embedding column with DiskANN index
+      # Semantic search: pgvector embedding column with HNSW index.
+      # A future migration can upgrade to DiskANN when vectorscale is available.
       execute(
         "ALTER TABLE skills ADD COLUMN embedding vector(768)",
         "ALTER TABLE skills DROP COLUMN IF EXISTS embedding"
@@ -72,11 +73,11 @@ defmodule Arbor.Persistence.Repo.Migrations.CreateSkills do
 
       execute(
         """
-        CREATE INDEX skills_embedding_diskann_idx ON skills
-        USING diskann (embedding)
+        CREATE INDEX skills_embedding_idx ON skills
+        USING hnsw (embedding vector_cosine_ops)
         WHERE embedding IS NOT NULL
         """,
-        "DROP INDEX IF EXISTS skills_embedding_diskann_idx"
+        "DROP INDEX IF EXISTS skills_embedding_idx"
       )
     else
       # SQLite: add embedding column as TEXT (JSON array for future sqlite-vec use)
