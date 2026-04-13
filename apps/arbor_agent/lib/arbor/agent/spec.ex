@@ -11,7 +11,7 @@ defmodule Arbor.Agent.Spec do
       spec = Spec.new(
         display_name: "diagnostician",
         template: "diagnostician",
-        model_config: %{id: "arcee-ai/trinity-large-thinking", provider: :openrouter}
+        model_config: %{id: "arcee-ai/trinity-large-preview:free", provider: :openrouter}
       )
 
   ## Convert

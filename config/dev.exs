@@ -92,7 +92,8 @@ config :arbor_agent, :auto_start_agents, [
     module: Arbor.Agent.APIAgent,
     template: "diagnostician",
     model_config: %{
-      id: "arcee-ai/trinity-large-thinking",
+      # NOTE: trinity-large-preview:free retiring April 22 2026
+      id: "arcee-ai/trinity-large-preview:free",
       provider: :openrouter,
       backend: :api
     },
