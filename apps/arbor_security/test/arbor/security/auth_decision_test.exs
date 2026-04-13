@@ -36,7 +36,7 @@ defmodule Arbor.Security.AuthDecisionTest do
       auth = AuthContext.new("agent_test", capabilities: [cap])
 
       case AuthDecision.evaluate(auth, "arbor://test/action") do
-        {:ok, :authorized, updated_auth} ->
+        {:ok, :authorized, _cap, updated_auth} ->
           assert length(updated_auth.decisions) == 1
           assert hd(updated_auth.decisions).result == :authorized
 
@@ -83,7 +83,11 @@ defmodule Arbor.Security.AuthDecisionTest do
     test "records decisions in audit trail" do
       auth = AuthContext.new("agent_test")
 
-      {_, _, updated} = AuthDecision.evaluate(auth, "arbor://test/first")
+      updated =
+        case AuthDecision.evaluate(auth, "arbor://test/first") do
+          {:ok, _, _, auth} -> auth
+          {:error, _, auth} -> auth
+        end
 
       assert length(updated.decisions) == 1
       assert hd(updated.decisions).resource == "arbor://test/first"
@@ -107,7 +111,9 @@ defmodule Arbor.Security.AuthDecisionTest do
         auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()
 
         case AuthDecision.evaluate(auth, "arbor://fs/read") do
-          {:ok, :authorized, _} -> :ok
+          {:ok, :authorized, _, _} -> :ok
+          # Trust-gated: wildcard matched but untrusted agent needs approval
+          {:ok, :requires_approval, _, _} -> :ok
           {:error, {:uri_rejected, _}, _} -> :ok
           other -> flunk("Unexpected: #{inspect(other)}")
         end
@@ -124,7 +130,8 @@ defmodule Arbor.Security.AuthDecisionTest do
         auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
 
         case AuthDecision.evaluate(auth, "arbor://fs/read") do
-          {:ok, :authorized, _} -> :ok
+          {:ok, :authorized, _, _} -> :ok
+          {:ok, :requires_approval, _, _} -> :ok
           {:error, {:uri_rejected, _}, _} -> :ok
           other -> flunk("Unexpected: #{inspect(other)}")
         end

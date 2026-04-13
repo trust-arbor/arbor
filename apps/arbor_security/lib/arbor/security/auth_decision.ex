@@ -11,7 +11,7 @@ defmodule Arbor.Security.AuthDecision do
       auth = AuthContext.new("agent_123", signer: signer) |> AuthContext.load()
 
       case AuthDecision.evaluate(auth, "arbor://fs/read") do
-        {:ok, :authorized, auth} → proceed (auth has updated decisions trail)
+        {:ok, :authorized, cap, auth} → proceed (cap is the matching capability)
         {:ok, :requires_approval, cap, auth} → escalate externally
         {:error, reason, auth} → deny
       end
@@ -39,7 +39,7 @@ defmodule Arbor.Security.AuthDecision do
   require Logger
 
   @type decision_result ::
-          {:ok, :authorized, AuthContext.t()}
+          {:ok, :authorized, map(), AuthContext.t()}
           | {:ok, :requires_approval, map(), AuthContext.t()}
           | {:error, term(), AuthContext.t()}
 
@@ -73,7 +73,8 @@ defmodule Arbor.Security.AuthDecision do
          result <- check_approval(auth, cap, resource_uri) do
       case result do
         {:authorized, auth} ->
-          {:ok, :authorized, AuthContext.record_decision(auth, resource_uri, :authorized)}
+          {:ok, :authorized, cap,
+           AuthContext.record_decision(auth, resource_uri, :authorized)}
 
         {:requires_approval, cap, auth} ->
           {:ok, :requires_approval, cap,
@@ -100,7 +101,7 @@ defmodule Arbor.Security.AuthDecision do
       |> AuthContext.load()
 
     case evaluate(auth, resource_uri, action, opts) do
-      {:ok, :authorized, _auth} -> :authorized
+      {:ok, :authorized, _cap, _auth} -> :authorized
       {:ok, :requires_approval, cap, _auth} -> {:requires_approval, cap}
       {:error, reason, _auth} -> {:error, reason}
     end

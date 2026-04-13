@@ -147,10 +147,11 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") == :ask
     end
 
-    test "hands_off preset auto-approves writes", %{agent_id: agent_id} do
+    test "hands_off preset gates writes due to security ceiling", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :hands_off)
-      # hands_off has code/write => :auto
-      assert Policy.effective_mode(agent_id, "arbor://code/write/self/impl/*") == :auto
+      # hands_off has code/write => :auto, but security ceiling enforces :ask
+      # most_restrictive(:auto, :ask) = :ask
+      assert Policy.effective_mode(agent_id, "arbor://code/write/self/impl/*") == :ask
     end
 
     test "hands_off preset allows unmatched URIs", %{agent_id: agent_id} do
@@ -206,10 +207,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.requires_approval?(agent_id, "arbor://fs/read") == false
     end
 
-    test "returns false for :allow mode", %{agent_id: agent_id} do
+    test "returns true for fs/write due to security ceiling", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
-      # balanced has file.write => :allow
-      assert Policy.requires_approval?(agent_id, "arbor://fs/write") == false
+      # balanced has file.write => :allow, but security ceiling enforces :ask
+      assert Policy.requires_approval?(agent_id, "arbor://fs/write") == true
     end
 
     test "returns true for :ask mode on shell exec (cautious allows exec with approval)", %{agent_id: agent_id} do
@@ -254,10 +255,10 @@ defmodule Arbor.Trust.PolicyTest do
              ) == :gated
     end
 
-    test "auto for allow-mode capability", %{agent_id: agent_id} do
+    test "gated for fs/write due to security ceiling", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
-      # balanced has file.write => :allow → maps to :auto
-      assert Policy.confirmation_mode(agent_id, "arbor://fs/write") == :auto
+      # balanced has file.write => :allow, but security ceiling enforces :ask → :gated
+      assert Policy.confirmation_mode(agent_id, "arbor://fs/write") == :gated
     end
   end
 
