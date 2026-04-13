@@ -110,11 +110,15 @@ defmodule Arbor.Security.ApprovalGuardTest do
                ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
     end
 
-    test "auto-approves codebase write for veteran agent", %{agent_id: agent_id} do
+    test "gates codebase write for veteran agent (security ceiling enforces :ask)", %{agent_id: agent_id} do
+      # Security ceilings in ProfileResolver set code/write to :ask regardless
+      # of trust tier. Even veteran agents need approval for code writes.
       create_profile_at_tier(agent_id, :veteran)
       cap = make_capability("arbor://code/write/#{agent_id}/impl/file.ex")
 
-      assert :ok = ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
+      # Gated → delegates to Escalation → escalation disabled in test config
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
     end
 
     test "gates shell exec for restricted agent (cautious allows exec with approval)", %{agent_id: agent_id} do

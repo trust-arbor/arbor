@@ -103,7 +103,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
       # branch so the test fails loudly on misconfiguration but doesn't false-fail
       # on harmless preset evolution.
       case AuthDecision.evaluate(auth, uri, :query) do
-        {:ok, :authorized, _} ->
+        {:ok, :authorized, _, _} ->
           :ok
 
         {:ok, :requires_approval, _, _} ->
@@ -196,7 +196,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
       auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
 
       case AuthDecision.evaluate(auth, uri, :execute) do
-        {:ok, :authorized, _} ->
+        {:ok, :authorized, _, _} ->
           :ok
 
         {:ok, :requires_approval, _, _} ->
