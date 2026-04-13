@@ -15,7 +15,7 @@ defmodule Arbor.Memory.EmbeddingTest do
   alias Ecto.Adapters.SQL.Sandbox
 
   @test_agent_id "test_agent_embedding"
-  @dimension 384
+  @dimension 768
 
   setup do
     # Start the sandbox for database transactions

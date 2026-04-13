@@ -17,7 +17,7 @@ end
 # get OwnershipError because they never called Sandbox.checkout.
 if System.get_env("ARBOR_DB") == "postgres" do
   case Supervisor.start_child(Arbor.Persistence.Supervisor, Arbor.Persistence.Repo) do
-    {:ok, _} -> Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, {:shared, self()})
+    {:ok, _} -> Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :auto)
     {:error, {:already_started, _}} -> :ok
     {:error, reason} -> IO.puts("[test_helper] Repo start failed: #{inspect(reason)}")
   end
