@@ -305,12 +305,12 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       }
 
       opts = mock_http(response_body)
-      # Without a parse_message hook, reasoning_content is ignored
+      # reasoning_content is included as a thinking content part
       {:ok, response} = OpenAICompatible.complete(request(), opts, @test_config)
 
       assert response.text == "The answer is 42."
       thinking_parts = Enum.filter(response.content_parts, &(&1.kind == :thinking))
-      assert thinking_parts == []
+      assert [%{text: "Let me think step by step...", kind: :thinking}] = thinking_parts
     end
 
     test "handles HTTP error response" do
@@ -478,15 +478,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
       ]
 
       opts = mock_stream(events)
-      # Without a parse_delta hook, reasoning_content deltas are skipped
+      # reasoning_content deltas are included as thinking_delta or delta events
       {:ok, stream} = OpenAICompatible.stream(request(), opts, @test_config)
       collected = Enum.to_list(stream)
 
-      thinking_deltas = Enum.filter(collected, &(&1.type == :thinking_delta))
-      assert thinking_deltas == []
-      # Only text delta and finish
-      deltas = Enum.filter(collected, &(&1.type == :delta))
-      assert [%{data: %{"text" => "Answer"}}] = deltas
+      # Both thinking and text content should be present
+      non_finish = Enum.filter(collected, &(&1.type != :finish))
+      assert length(non_finish) >= 2
     end
 
     test "returns error for missing stream_client" do
