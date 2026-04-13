@@ -1,6 +1,8 @@
 defmodule Arbor.Agent.HeartbeatLLMTest do
   use ExUnit.Case, async: true
-  @moduletag :fast
+  # These tests call HeartbeatLLM.think/2 which makes real LLM API calls.
+  # Tagged :llm so they run in CI (with free model) but not in mix test.fast.
+  @moduletag :llm
 
   alias Arbor.Agent.HeartbeatLLM
 
