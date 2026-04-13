@@ -11,4 +11,6 @@ for child <- children do
   Supervisor.start_child(Arbor.Agent.AppSupervisor, child)
 end
 
+Arbor.Persistence.SandboxHelper.setup()
+
 ExUnit.start(exclude: [:skip, :integration, :external, :llm, :llm_local])
