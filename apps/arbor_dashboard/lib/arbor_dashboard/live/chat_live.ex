@@ -447,6 +447,40 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
+  def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
+    {:noreply, assign(socket, selected_heartbeat_model: nil)}
+  end
+
+  def handle_event("set-heartbeat-model", %{"heartbeat_model" => model_id}, socket) do
+    # Heartbeat model is now managed by the DOT Session — this UI event
+    # only updates the local assign for display purposes.
+    hb_config =
+      Enum.find(socket.assigns.heartbeat_models, &(&1[:id] == model_id))
+
+    {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
+  end
+
+  def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("show-join-groups" = e, p, s), do: GroupChat.handle_event(e, p, s)
+
+  def handle_event("join-group" = e, p, s) do
+    {:noreply, socket} = GroupChat.handle_event(e, p, s)
+    {:noreply, maybe_connect_group_agent(socket)}
+  end
+
+  def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
+
+  def handle_event("confirm-create-group" = e, p, s) do
+    {:noreply, socket} = GroupChat.handle_event(e, p, s)
+    {:noreply, maybe_connect_group_agent(socket)}
+  end
+
+  def handle_event("cancel-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
+  def handle_event("leave-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
+
+  def handle_event("noop", _params, socket), do: {:noreply, socket}
+
   # Centralized "approval consumed" cleanup. Any path that resolves an
   # approval (approve / always-allow / deny) needs to remove it from the
   # stream AND decrement the count AND drop it from known_approval_ids
@@ -496,40 +530,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   catch
     :exit, _ -> :ok
   end
-
-  def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
-    {:noreply, assign(socket, selected_heartbeat_model: nil)}
-  end
-
-  def handle_event("set-heartbeat-model", %{"heartbeat_model" => model_id}, socket) do
-    # Heartbeat model is now managed by the DOT Session — this UI event
-    # only updates the local assign for display purposes.
-    hb_config =
-      Enum.find(socket.assigns.heartbeat_models, &(&1[:id] == model_id))
-
-    {:noreply, assign(socket, selected_heartbeat_model: hb_config)}
-  end
-
-  def handle_event("show-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("show-join-groups" = e, p, s), do: GroupChat.handle_event(e, p, s)
-
-  def handle_event("join-group" = e, p, s) do
-    {:noreply, socket} = GroupChat.handle_event(e, p, s)
-    {:noreply, maybe_connect_group_agent(socket)}
-  end
-
-  def handle_event("toggle-group-agent" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("update-group-name" = e, p, s), do: GroupChat.handle_event(e, p, s)
-
-  def handle_event("confirm-create-group" = e, p, s) do
-    {:noreply, socket} = GroupChat.handle_event(e, p, s)
-    {:noreply, maybe_connect_group_agent(socket)}
-  end
-
-  def handle_event("cancel-group-modal" = e, p, s), do: GroupChat.handle_event(e, p, s)
-  def handle_event("leave-group" = e, p, s), do: GroupChat.handle_event(e, p, s)
-
-  def handle_event("noop", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_info({:query_result, :cli, {:ok, response}}, socket) do
