@@ -10,6 +10,10 @@ defmodule Arbor.Persistence.Repo.Migrations.AddVectorscaleDiskann do
   use Ecto.Migration
   import Arbor.Persistence.MigrationHelper
 
+  # Disable transaction wrapping — CREATE EXTENSION failures poison
+  # the transaction even when rescued, preventing subsequent SQL.
+  @disable_ddl_transaction true
+
   def up do
     # Skip entirely on SQLite — no vector indexes needed
     if postgres?() do
