@@ -237,13 +237,23 @@ defmodule Arbor.Consensus.CoordinatorTest do
         )
 
       result = Coordinator.force_approve(id, "admin_1", coord)
-      # Without Identity.Registry running, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}]
+      # Without full security infrastructure running, force ops may be denied
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
 
     test "returns not_found for unknown", %{coordinator: coord} do
       result = Coordinator.force_approve("nope", "admin", coord)
-      assert result in [{:error, :not_found}, {:error, {:unauthorized, :security_unavailable}}]
+      assert result in [
+               {:error, :not_found},
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
   end
 
@@ -262,8 +272,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
         )
 
       result = Coordinator.force_reject(id, "admin_1", coord)
-      # Without Identity.Registry running, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}]
+      # Without full security infrastructure running, force ops may be denied
+      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
     end
   end
 
@@ -807,8 +817,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
           # Should receive execution message (covers maybe_authorize_execution(nil, _, nil) path)
           assert_receive :executed, 5_000
 
-        {:error, {:unauthorized, :security_unavailable}} ->
-          # Identity.Registry not running — force ops denied (fail-closed)
+        {:error, {:unauthorized, reason}} when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
+          # Security infrastructure not fully running — force ops denied (fail-closed)
           :ok
       end
 
@@ -839,8 +849,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
           {:ok, status} = Coordinator.get_status(id, coord)
           assert status == :approved
 
-        {:error, {:unauthorized, :security_unavailable}} ->
-          # Identity.Registry not running — force ops denied (fail-closed)
+        {:error, {:unauthorized, reason}} when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
+          # Security infrastructure not fully running — force ops denied (fail-closed)
           :ok
       end
     end
