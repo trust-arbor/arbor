@@ -136,7 +136,9 @@ defmodule Arbor.Orchestrator.RunState.Core do
 
   @doc "Mark the pipeline as successfully completed."
   @spec mark_completed(t(), non_neg_integer(), keyword()) :: t()
-  def mark_completed(%__MODULE__{status: :running} = state, duration_ms, opts \\ []) do
+  def mark_completed(state, duration_ms, opts \\ [])
+
+  def mark_completed(%__MODULE__{status: :running} = state, duration_ms, opts) do
     now = Keyword.get(opts, :now, state.started_at)
 
     %{state |
@@ -151,7 +153,9 @@ defmodule Arbor.Orchestrator.RunState.Core do
 
   @doc "Mark the pipeline as failed."
   @spec mark_failed(t(), term(), non_neg_integer(), keyword()) :: t()
-  def mark_failed(%__MODULE__{status: status} = state, reason, duration_ms, opts \\ [])
+  def mark_failed(state, reason, duration_ms, opts \\ [])
+
+  def mark_failed(%__MODULE__{status: status} = state, reason, duration_ms, opts)
       when status in [:running, :suspended] do
     now = Keyword.get(opts, :now, state.started_at)
 
