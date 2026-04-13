@@ -193,9 +193,11 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
 
   describe "concurrent sessions" do
     @tag :perf
+    @tag timeout: 120_000
     test "N sessions each processing M turns concurrently", ctx do
-      session_counts = [1, 5, 10, 25, 50]
-      turns_per_session = 10
+      # Reduced scale for CI VMs with fewer CPUs
+      session_counts = [1, 5, 10]
+      turns_per_session = 5
 
       results =
         for n <- session_counts do
@@ -212,7 +214,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
                   end)
                 end
 
-              Task.await_many(tasks, 30_000)
+              Task.await_many(tasks, 60_000)
             end)
 
           total_turns = n * turns_per_session
