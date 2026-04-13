@@ -441,8 +441,8 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp extract_heartbeat_config(profile, _opts) do
     # Try to get heartbeat config from the template module
-    template_mod = Keyword.get(profile.metadata || %{}, :template_module) ||
-      Map.get(profile.metadata || %{}, :template_module)
+    metadata = profile.metadata || %{}
+    template_mod = Map.get(metadata, :template_module) || Map.get(metadata, "template_module")
 
     if template_mod && is_atom(template_mod) &&
        Code.ensure_loaded?(template_mod) &&

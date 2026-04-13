@@ -283,40 +283,8 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
     end
   end
 
-  # ── Test 3: Heartbeat interleaving ──
-
-  describe "heartbeat under load" do
-    @tag :perf
-    test "heartbeats don't block turn processing", ctx do
-      pid = start_session(ctx, "hb-interleave", simulated_latency: 10)
-
-      # Trigger 5 heartbeats
-      for _ <- 1..5, do: Session.heartbeat(pid)
-
-      # Immediately send turns — should not be blocked by heartbeats
-      times =
-        for i <- 1..20 do
-          {elapsed, {:ok, _}} =
-            :timer.tc(fn -> Session.send_message(pid, "Turn #{i}") end)
-
-          elapsed
-        end
-
-      avg_us = Enum.sum(times) / length(times)
-
-      IO.puts("\n── Heartbeat Interleaving ──")
-      IO.puts("  5 heartbeats triggered, then 20 turns")
-      IO.puts("  Avg turn latency: #{Float.round(avg_us / 1000, 2)} ms")
-
-      state = Session.get_state(pid)
-      IO.puts("  Turn count: #{state.turn_count}")
-      IO.puts("  Phase: #{state.phase}")
-
-      # Turns should still complete reasonably fast
-      assert state.turn_count == 20
-      assert state.phase == :idle
-    end
-  end
+  # Test 3 (heartbeat interleaving) removed — heartbeats are now handled by
+  # Arbor.Orchestrator.HeartbeatService, not Session.
 
   # ── Test 4: Session type comparison ──
 
@@ -391,7 +359,6 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
         agent_id: "agent_test",
         trust_tier: :established,
         turn_graph: nil,
-        heartbeat_graph: nil,
         phase: :processing,
         session_type: :consultation,
         trace_id: "trace-abc-def",

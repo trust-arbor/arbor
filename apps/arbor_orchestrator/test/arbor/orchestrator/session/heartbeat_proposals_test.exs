@@ -25,7 +25,6 @@ defmodule Arbor.Orchestrator.Session.HeartbeatProposalsTest do
       agent_id: agent_id,
       trust_tier: :established,
       turn_graph: nil,
-      heartbeat_graph: nil,
       cognitive_mode: :reflection,
       goals: [%{"id" => "g1", "description" => "Existing goal", "progress" => 0.3}],
       messages: [],
