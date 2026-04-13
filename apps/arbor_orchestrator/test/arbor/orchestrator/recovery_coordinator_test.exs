@@ -93,42 +93,33 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
     end
 
     test "resume rejects non-interrupted pipelines" do
-      pid = Process.whereis(JobRegistry)
+      entry = %JobRegistry.Entry{
+        pipeline_id: "run_active_1",
+        run_id: "run_active_1",
+        graph_id: "running_pipeline",
+        started_at: DateTime.utc_now(),
+        status: :running,
+        completed_count: 0,
+        total_nodes: 1,
+        node_durations: %{},
+        owner_node: node(),
+        last_heartbeat: DateTime.utc_now()
+      }
 
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "running_pipeline",
-           run_id: "run_active_1",
-           node_count: 1
-         }}
+      Arbor.Persistence.BufferedStore.put("run_active_1", entry,
+        name: :arbor_orchestrator_jobs
       )
-
-      Process.sleep(10)
 
       assert {:error, {:invalid_status, :running}} =
                Arbor.Orchestrator.resume("run_active_1")
 
       # Cleanup
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_completed,
-           graph_id: "running_pipeline",
-           pipeline_id: "run_active_1",
-           completed_nodes: [],
-           duration_ms: 0
-         }}
+      Arbor.Persistence.BufferedStore.delete("run_active_1",
+        name: :arbor_orchestrator_jobs
       )
-
-      Process.sleep(10)
     end
 
     test "list_resumable only includes entries with checkpoints" do
-      pid = Process.whereis(JobRegistry)
       tmp_dir = System.tmp_dir!()
 
       # Create entry with checkpoint
@@ -140,31 +131,28 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       logs_without = Path.join(tmp_dir, "resumable_without_#{:rand.uniform(100_000)}")
       File.mkdir_p!(logs_without)
 
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "with_cp",
-           run_id: "run_with_cp",
-           logs_root: logs_with,
-           node_count: 1
-         }}
-      )
+      for {run_id, graph_id, logs} <- [
+            {"run_with_cp", "with_cp", logs_with},
+            {"run_without_cp", "without_cp", logs_without}
+          ] do
+        entry = %JobRegistry.Entry{
+          pipeline_id: run_id,
+          run_id: run_id,
+          graph_id: graph_id,
+          logs_root: logs,
+          started_at: DateTime.utc_now(),
+          status: :running,
+          completed_count: 0,
+          total_nodes: 1,
+          node_durations: %{},
+          owner_node: node(),
+          last_heartbeat: DateTime.utc_now()
+        }
 
-      send(
-        pid,
-        {:pipeline_event,
-         %{
-           type: :pipeline_started,
-           graph_id: "without_cp",
-           run_id: "run_without_cp",
-           logs_root: logs_without,
-           node_count: 1
-         }}
-      )
-
-      Process.sleep(10)
+        Arbor.Persistence.BufferedStore.put(run_id, entry,
+          name: :arbor_orchestrator_jobs
+        )
+      end
 
       JobRegistry.mark_interrupted("run_with_cp")
       JobRegistry.mark_interrupted("run_without_cp")
