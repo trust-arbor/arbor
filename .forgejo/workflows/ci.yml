@@ -51,5 +51,9 @@ jobs:
         run: mix credo --strict
         continue-on-error: true
 
+      - name: Sobelow (security)
+        run: mix sobelow --config
+        continue-on-error: true
+
       - name: Run full test suite
         run: mix test --include llm --include integration --include slow --include database --include distributed --timeout 120000

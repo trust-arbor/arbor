@@ -12,8 +12,11 @@ defmodule Arbor.Cartographer.CapabilityRegistryTest do
     safe_stop(CapabilityRegistry)
     Process.sleep(50)
 
-    # Start fresh registry
-    {:ok, _pid} = CapabilityRegistry.start_link([])
+    # Start fresh registry (may already be running from another test)
+    case CapabilityRegistry.start_link([]) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
 
     on_exit(fn ->
       safe_stop(CapabilityRegistry)

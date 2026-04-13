@@ -38,16 +38,14 @@ end
 # Run them with: mix test --include database
 ExUnit.configure(exclude: [:database, :llm, :llm_local])
 
-# Start the Ecto Repo for database tests. Fails gracefully if Postgres
-# isn't available (database tests will be excluded anyway in that case).
-if System.get_env("ARBOR_DB") == "postgres" do
-  try do
-    {:ok, _} = Arbor.Persistence.Repo.start_link()
-    Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :manual)
-  rescue
-    _ -> IO.puts("[test_helper] Postgres not available, database tests will fail if included")
-  catch
-    :exit, _ -> IO.puts("[test_helper] Postgres not available, database tests will fail if included")
+# Ensure the Ecto Repo is running for database tests.
+# The Repo is started by arbor_persistence's test_helper when ARBOR_DB=postgres.
+# If running this app's tests standalone, start it here as a fallback.
+if System.get_env("ARBOR_DB") == "postgres" and not is_pid(Process.whereis(Arbor.Persistence.Repo)) do
+  case Supervisor.start_child(Arbor.Persistence.Supervisor, Arbor.Persistence.Repo) do
+    {:ok, _} -> Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :manual)
+    {:error, {:already_started, _}} -> :ok
+    {:error, reason} -> IO.puts("[memory test_helper] Repo start failed: #{inspect(reason)}")
   end
 end
 
