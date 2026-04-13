@@ -267,8 +267,8 @@ defmodule Arbor.Signals.RelayTest do
       # Simulate receiving a batch from a peer
       GenServer.cast(Relay, {:receive_batch, signals, :peer@host})
 
-      # Give it a moment to process
-      Process.sleep(10)
+      # Give it time to process (CI VMs may be slower)
+      Process.sleep(100)
 
       stats = Relay.stats()
       # In nonode@nohost mode, all peers are accepted
@@ -372,7 +372,7 @@ defmodule Arbor.Signals.RelayTest do
       signals = [Signal.new(:agent, :started, %{})]
 
       GenServer.cast(Relay, {:receive_batch, signals, :unknown@host})
-      Process.sleep(10)
+      Process.sleep(100)
 
       stats = Relay.stats()
       assert stats.relayed_in == 1

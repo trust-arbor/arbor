@@ -47,7 +47,11 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       Agent.start_link(fn -> initial end, name: __MODULE__)
     end
 
-    def stop, do: if(Process.whereis(__MODULE__), do: Agent.stop(__MODULE__))
+    def stop do
+      if Process.whereis(__MODULE__), do: Agent.stop(__MODULE__)
+    catch
+      :exit, _ -> :ok
+    end
 
     # ---- Mirrored API ------------------------------------------------------
 
