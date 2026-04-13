@@ -31,8 +31,6 @@ jobs:
             deps
             _build/test
           key: mix-test-${{ hashFiles('mix.lock') }}
-          restore-keys: |
-            mix-test-
 
       - name: Install dependencies
         run: mix deps.get
