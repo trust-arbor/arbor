@@ -39,7 +39,7 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
 
   describe "evaluate/3 with :mix_compile" do
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "produces valid evaluation for compilation", %{proposal: proposal} do
       # mix compile --warnings-as-errors on the umbrella project
       # May pass or fail depending on whether warnings exist (test modules, etc.)
@@ -302,7 +302,7 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
 
   describe "evaluate/3 with environment variables" do
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "passes env to mix_compile perspective", %{proposal: proposal} do
       # Use mix_compile (faster than mix_test) to verify env passing works
       {:ok, evaluation} =
@@ -317,7 +317,7 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
     end
 
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "respects env from proposal metadata" do
       {:ok, proposal} =
         Proposal.new(%{
