@@ -1,5 +1,3 @@
-Arbor.Persistence.SandboxHelper.setup()
-
 ExUnit.start(exclude: [:llm, :llm_local])
 
 # Start CapabilityStore and insert a wildcard capability for "agent_system".
