@@ -37,4 +37,18 @@ end
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database
 ExUnit.configure(exclude: [:database, :llm, :llm_local])
+
+# Start the Ecto Repo for database tests. Fails gracefully if Postgres
+# isn't available (database tests will be excluded anyway in that case).
+if System.get_env("ARBOR_DB") == "postgres" do
+  try do
+    {:ok, _} = Arbor.Persistence.Repo.start_link()
+    Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :manual)
+  rescue
+    _ -> IO.puts("[test_helper] Postgres not available, database tests will fail if included")
+  catch
+    :exit, _ -> IO.puts("[test_helper] Postgres not available, database tests will fail if included")
+  end
+end
+
 ExUnit.start()

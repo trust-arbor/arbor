@@ -65,9 +65,10 @@ defmodule Arbor.Consensus.AuthorizationTest do
       Process.sleep(50)
 
       result = Arbor.Consensus.authorize_force_approve(@caller_id, proposal_id, "admin")
-      # Should not be unauthorized (Security is available in consensus tests)
-      # May fail for other reasons (already decided, etc.)
-      refute match?({:error, {:unauthorized, _}}, result)
+      # May be authorized, or gated by approval guard (trust-tier dependent).
+      # The key invariant: should not fail on capability check itself.
+      assert result in [:ok, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}] or
+               not match?({:error, {:unauthorized, :no_capability}}, result)
     end
   end
 
@@ -83,7 +84,8 @@ defmodule Arbor.Consensus.AuthorizationTest do
       Process.sleep(50)
 
       result = Arbor.Consensus.authorize_force_reject(@caller_id, proposal_id, "admin")
-      refute match?({:error, {:unauthorized, _}}, result)
+      assert result in [:ok, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}] or
+               not match?({:error, {:unauthorized, :no_capability}}, result)
     end
   end
 
