@@ -43,7 +43,7 @@ ExUnit.configure(exclude: [:database, :llm, :llm_local])
 # If running this app's tests standalone, start it here as a fallback.
 if System.get_env("ARBOR_DB") == "postgres" and not is_pid(Process.whereis(Arbor.Persistence.Repo)) do
   case Supervisor.start_child(Arbor.Persistence.Supervisor, Arbor.Persistence.Repo) do
-    {:ok, _} -> Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :manual)
+    {:ok, _} -> Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, {:shared, self()})
     {:error, {:already_started, _}} -> :ok
     {:error, reason} -> IO.puts("[memory test_helper] Repo start failed: #{inspect(reason)}")
   end
