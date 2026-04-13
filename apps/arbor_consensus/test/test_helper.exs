@@ -1,5 +1,3 @@
-Arbor.Persistence.SandboxHelper.setup()
-
 # Add children to the empty app supervisors (start_children: false leaves them empty)
 # Order matters: TopicRegistry first (for topic-based routing), Registry, then Supervisor,
 # then EventStore, then Coordinator
