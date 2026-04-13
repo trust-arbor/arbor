@@ -850,8 +850,6 @@ defmodule Arbor.Orchestrator.Engine do
     :exit, _ -> :ok
   end
 
-  defp sync_run_state(_run_id, nil), do: :ok
-
   defp write_manifest(graph, logs_root, run_id \\ nil) do
     payload = %{
       graph_id: graph.id,

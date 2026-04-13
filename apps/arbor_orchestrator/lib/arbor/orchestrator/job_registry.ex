@@ -10,10 +10,7 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   use GenServer
 
-  alias Arbor.Orchestrator.EventEmitter
-
   @store_name :arbor_orchestrator_jobs
-  @max_history 50
 
   defmodule Entry do
     @moduledoc """
@@ -273,22 +270,8 @@ defmodule Arbor.Orchestrator.JobRegistry do
 
   # Private helpers
 
-  defp determine_pipeline_id(event) do
-    # Prefer run_id (unique per execution) over pipeline_id or graph_id
-    case Map.get(event, :run_id) do
-      nil ->
-        case Map.get(event, :pipeline_id) do
-          nil -> Map.get(event, :graph_id)
-          :all -> Map.get(event, :graph_id)
-          id -> id
-        end
-
-      run_id ->
-        run_id
-    end
-  end
-
-  # NOTE: find_entry_key/1, entry_exists?/1, and find_by_graph_id/1 were
+  # NOTE: find_entry_key/1, entry_exists?/1, find_by_graph_id/1, and
+  # determine_pipeline_id/1 were
   # removed as part of the Engine lifecycle redesign. These functions were
   # used by the event handlers (also removed) to correlate incoming events
   # with stored entries. The entry_exists?/1 function had a contract mismatch
@@ -346,27 +329,6 @@ defmodule Arbor.Orchestrator.JobRegistry do
     _ -> :ok
   end
 
-  defp cleanup_history do
-    finished =
-      store_list()
-      |> Enum.filter(fn %Entry{status: status} -> status in [:completed, :failed] end)
-      |> Enum.sort_by(
-        fn %Entry{finished_at: finished_at} -> finished_at end,
-        {:desc, DateTime}
-      )
-
-    if length(finished) > @max_history do
-      to_delete = Enum.drop(finished, @max_history)
-
-      Enum.each(to_delete, fn %Entry{pipeline_id: id, run_id: run_id} ->
-        key = id || run_id
-        if key, do: Arbor.Persistence.BufferedStore.delete(key, name: @store_name)
-      end)
-    end
-  rescue
-    _ -> :ok
-  end
-
   defp mark_stale_running_entries do
     list_by_status([:running])
     |> Enum.each(fn entry ->
@@ -413,18 +375,6 @@ defmodule Arbor.Orchestrator.JobRegistry do
     String.to_existing_atom(n)
   rescue
     ArgumentError -> String.to_atom(n)
-  end
-
-  defp resolve_trust_zone do
-    mod = Arbor.Cartographer.ClusterKeeper
-
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :trust_zone, 1) do
-      apply(mod, :trust_zone, [Kernel.node()])
-    else
-      0
-    end
-  rescue
-    _ -> 0
   end
 
   defp parse_status(s) when is_atom(s), do: s

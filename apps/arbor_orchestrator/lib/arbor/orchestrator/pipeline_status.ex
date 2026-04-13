@@ -36,8 +36,6 @@ defmodule Arbor.Orchestrator.PipelineStatus do
       PipelineStatus.count_by_status()
   """
 
-  alias Arbor.Orchestrator.RunState.Core, as: RunState
-
   @ets_table :arbor_pipeline_runs
 
   # If an entry hasn't been synced in this many ms, it's considered stale.
