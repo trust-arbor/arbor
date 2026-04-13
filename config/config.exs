@@ -105,9 +105,9 @@ config :arbor_signals,
 # AI routing defaults
 config :arbor_ai,
   # Default provider/model for API calls (via OpenRouter)
-  # Using Trinity Large Thinking model for agent operations
+  # Using Trinity Large Preview (free) — retiring April 22 2026, find replacement before then
   default_provider: :openrouter,
-  default_model: "arcee-ai/trinity-large-thinking",
+  default_model: "arcee-ai/trinity-large-preview:free",
   timeout: 120_000,
   enable_task_routing: true,
   default_backend: :api,
@@ -220,8 +220,9 @@ config :arbor_agent,
   idle_reflection_enabled: true,
   idle_reflection_chance: 0.3,
   # LLM heartbeat think cycle (via OpenRouter API)
-  heartbeat_model: "arcee-ai/trinity-large-thinking",
-  idle_heartbeat_model: "arcee-ai/trinity-large-thinking",
+  # NOTE: trinity-large-preview:free retiring April 22 2026 — find replacement
+  heartbeat_model: "arcee-ai/trinity-large-preview:free",
+  idle_heartbeat_model: "arcee-ai/trinity-large-preview:free",
   heartbeat_provider: :openrouter,
   # Checkpoint — periodic state persistence
   checkpoint_enabled: true,
@@ -287,8 +288,8 @@ config :arbor_dashboard,
     %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli},
     # OpenRouter models — use API backend
     %{
-      id: "arcee-ai/trinity-large-thinking",
-      label: "Trinity Large Thinking",
+      id: "arcee-ai/trinity-large-preview:free",
+      label: "Trinity Large Preview (free)",
       provider: :openrouter,
       backend: :api
     },
@@ -299,8 +300,8 @@ config :arbor_dashboard,
   # Heartbeat model choices (API models only — CLI models are too slow)
   heartbeat_models: [
     %{
-      id: "arcee-ai/trinity-large-thinking",
-      label: "Trinity Large Thinking",
+      id: "arcee-ai/trinity-large-preview:free",
+      label: "Trinity Large Preview (free)",
       provider: :openrouter
     },
     %{id: "openrouter/pony-alpha", label: "Pony Alpha", provider: :openrouter},
