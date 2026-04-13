@@ -987,7 +987,6 @@ defmodule Arbor.Orchestrator.SessionTest do
         agent_id: "agent_test123",
         trust_tier: :trusted_partner,
         turn_graph: nil,
-        heartbeat_graph: nil,
         turn_count: 3,
         messages: initial_messages,
         working_memory: %{"key" => "value"},
@@ -1208,8 +1207,6 @@ defmodule Arbor.Orchestrator.SessionTest do
       File.write!(heartbeat_path, heartbeat_dot)
 
       adapters = Keyword.get(opts, :adapters, %{})
-      heartbeat_interval = Keyword.get(opts, :heartbeat_interval, 30_000)
-      start_heartbeat = Keyword.get(opts, :start_heartbeat, false)
 
       {:ok, pid} =
         Arbor.Orchestrator.Session.start_link(
@@ -1218,46 +1215,14 @@ defmodule Arbor.Orchestrator.SessionTest do
           trust_tier: :established,
           turn_dot: turn_path,
           heartbeat_dot: heartbeat_path,
-          adapters: adapters,
-          start_heartbeat: start_heartbeat,
-          heartbeat_interval: heartbeat_interval
+          adapters: adapters
         )
 
       {pid, tmp_dir}
     end
 
-    @tag :spike
-    test "heartbeat fires during long turn" do
-      # Use a custom turn DOT that includes a slow simulated step.
-      # The compute simulate="true" is fast, so we inject a small delay
-      # via the adapters to simulate a slow turn.
-      # Note: With the new architecture, adapters don't control compute nodes.
-      # Instead, we rely on the simulated nodes being fast but test heartbeat
-      # scheduling logic.
-
-      {pid, tmp_dir} =
-        start_session(
-          heartbeat_interval: 100,
-          start_heartbeat: true
-        )
-
-      on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid)
-        File.rm_rf(tmp_dir)
-      end)
-
-      # Send a message
-      assert {:ok, %{content: _text}} =
-               Arbor.Orchestrator.Session.send_message(pid, "hello")
-
-      # After the turn completes, check that the session is functional
-      state = Arbor.Orchestrator.Session.get_state(pid)
-
-      # The session should be idle
-      assert state.turn_in_flight == false
-      # The heartbeat timer should still be scheduled
-      assert state.heartbeat_ref != nil
-    end
+    # Heartbeat scheduling test removed — heartbeats are now managed by
+    # Arbor.Orchestrator.HeartbeatService. See heartbeat_service_test.exs.
 
     @tag :spike
     test "concurrent turn rejection" do

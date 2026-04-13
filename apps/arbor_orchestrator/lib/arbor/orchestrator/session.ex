@@ -1,20 +1,22 @@
 defmodule Arbor.Orchestrator.Session do
   @moduledoc """
-  Session GenServer — drives agent turns and heartbeats through DOT graphs.
+  Session GenServer — drives agent turns through DOT graphs.
 
-  Each Session holds pre-parsed turn and heartbeat graphs, accumulated messages,
+  Each Session holds a pre-parsed turn graph, accumulated messages,
   working memory, goals, and cognitive mode. External dependencies (LLM, tools,
   memory, etc.) are injected as adapter functions — the Session itself is pure
   orchestration.
 
+  Heartbeats are handled by `Arbor.Orchestrator.HeartbeatService`, a separate
+  supervised GenServer started as child #4 of `Arbor.Agent.BranchSupervisor`.
+
   ## Architecture
 
   A Session is the convergence point between `Arbor.Orchestrator.Engine` and
-  the agent lifecycle. Rather than hand-coding turn/heartbeat logic in procedural
+  the agent lifecycle. Rather than hand-coding turn logic in procedural
   Elixir, the Session delegates to graph execution:
 
       send_message/2  →  Engine.run(turn_graph, initial_values)  →  apply_turn_result/2
-      :heartbeat      →  Task → Engine.run(heartbeat_graph)     →  {:heartbeat_result, _}
 
   Node implementations are provided by Jido Actions (via `exec target="action"`)
   and LlmHandler (via `compute` nodes). Session-specific actions live in
@@ -34,21 +36,16 @@ defmodule Arbor.Orchestrator.Session do
 
     * `:legacy`  — Session rejects `send_message/2` with `{:error, :legacy_mode}`.
                    Callers (Claude GenServer, APIAgent) use their native path.
-    * `:session` — Session handles turns and heartbeats through DOT graphs (default).
+    * `:session` — Session handles turns through DOT graphs (default).
     * `:graph`   — Full DOT graph execution with no fallback path.
 
-  ## Turn vs Heartbeat execution
+  ## Turn execution
 
   **Turns** run in a spawned `Task` — the caller blocks on `GenServer.call` but
-  the GenServer itself is free to handle heartbeats. When the Task completes,
+  the GenServer itself remains responsive. When the Task completes,
   the result is sent back as `{:turn_result, message, result}` and
   `GenServer.reply/2` unblocks the original caller. Only one turn can be
   in-flight at a time (concurrent turns get `{:error, :turn_in_progress}`).
-
-  **Heartbeats** also run in a spawned `Task` — the heartbeat result is sent
-  back as `{:heartbeat_result, result}` and applied asynchronously. Both a
-  turn and a heartbeat can overlap safely since adapters are stateless and
-  memory stores are ETS-backed GenServers.
 
   ## Example
 
@@ -76,8 +73,6 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
 
-  @default_heartbeat_interval 30_000
-
   # ── Contract module availability (runtime bridge) ──────────────────
   # Checked at runtime so the orchestrator works standalone without
   # arbor_contracts in the dependency tree.
@@ -94,10 +89,8 @@ defmodule Arbor.Orchestrator.Session do
     :agent_id,
     :trust_tier,
     :turn_graph,
-    :heartbeat_graph,
-    # DOT file paths — stored so reload_dot/1 can re-parse without restarting
+    # DOT file path — stored so reload_dot/1 can re-parse without restarting
     :turn_dot_path,
-    :heartbeat_dot_path,
     :trace_id,
     :seed_ref,
     :signal_topic,
@@ -117,9 +110,6 @@ defmodule Arbor.Orchestrator.Session do
     goals: [],
     cognitive_mode: :reflection,
     adapters: %{},
-    heartbeat_interval: @default_heartbeat_interval,
-    heartbeat_ref: nil,
-    heartbeat_in_flight: false,
     # Async turn execution state
     turn_in_flight: false,
     turn_from: nil,
@@ -141,9 +131,7 @@ defmodule Arbor.Orchestrator.Session do
           agent_id: String.t(),
           trust_tier: atom(),
           turn_graph: Arbor.Orchestrator.Graph.t(),
-          heartbeat_graph: Arbor.Orchestrator.Graph.t(),
           turn_dot_path: String.t() | nil,
-          heartbeat_dot_path: String.t() | nil,
           phase: phase(),
           session_type: session_type(),
           execution_mode: execution_mode(),
@@ -157,9 +145,6 @@ defmodule Arbor.Orchestrator.Session do
           goals: [map()],
           cognitive_mode: atom(),
           adapters: map(),
-          heartbeat_interval: pos_integer(),
-          heartbeat_ref: reference() | nil,
-          heartbeat_in_flight: boolean(),
           turn_in_flight: boolean(),
           turn_from: GenServer.from() | nil,
           turn_task_ref: reference() | nil,
@@ -181,16 +166,14 @@ defmodule Arbor.Orchestrator.Session do
     * `:agent_id`      — the agent this session belongs to
     * `:trust_tier`    — atom trust tier (e.g. `:established`)
     * `:turn_dot`      — path to the turn pipeline DOT file
-    * `:heartbeat_dot` — path to the heartbeat pipeline DOT file
+    * `:heartbeat_dot` — path to the heartbeat pipeline DOT file (passed through for HeartbeatService)
 
   ## Optional
 
     * `:adapters`           — map of adapter functions (legacy, unused with action-based DOTs).
                               Include `:trust_tier_resolver` (`fn agent_id -> {:ok, tier}`)
                               to verify trust_tier against the authority (e.g. `Arbor.Trust`)
-    * `:heartbeat_interval` — ms between heartbeats (default #{@default_heartbeat_interval})
     * `:name`               — GenServer name registration
-    * `:start_heartbeat`    — whether to schedule heartbeat on init (default true)
     * `:session_type`       — `:primary | :background | :delegation | :consultation` (default `:primary`)
     * `:execution_mode`     — `:legacy | :session | :graph` (default `:session`)
     * `:config`             — session-level settings map (max_turns, model, temperature, etc.)
@@ -222,18 +205,6 @@ defmodule Arbor.Orchestrator.Session do
           | {:error, term()}
   def send_message(session, message) do
     GenServer.call(session, {:send_message, message}, :infinity)
-  end
-
-  @doc """
-  Trigger an immediate heartbeat cycle.
-
-  Runs asynchronously in a Task — the heartbeat graph executes without blocking
-  the GenServer, and results are applied via `{:heartbeat_result, _}` message.
-  Returns immediately.
-  """
-  @spec heartbeat(GenServer.server()) :: :ok
-  def heartbeat(session) do
-    GenServer.cast(session, :heartbeat)
   end
 
   @doc """
@@ -282,11 +253,7 @@ defmodule Arbor.Orchestrator.Session do
   @doc false
   defdelegate build_turn_values(state, message), to: Builders
   @doc false
-  defdelegate build_heartbeat_values(state), to: Builders
-  @doc false
   defdelegate apply_turn_result(state, message, result), to: Builders
-  @doc false
-  defdelegate apply_heartbeat_result(state, result), to: Builders
   @doc false
   defdelegate contracts_available?(), to: Builders
 
@@ -298,11 +265,8 @@ defmodule Arbor.Orchestrator.Session do
     agent_id = Keyword.fetch!(opts, :agent_id)
     trust_tier = Keyword.fetch!(opts, :trust_tier)
     turn_dot_path = Keyword.fetch!(opts, :turn_dot)
-    heartbeat_dot_path = Keyword.fetch!(opts, :heartbeat_dot)
 
     adapters = Keyword.get(opts, :adapters, %{})
-    heartbeat_interval = Keyword.get(opts, :heartbeat_interval, @default_heartbeat_interval)
-    start_heartbeat = Keyword.get(opts, :start_heartbeat, true)
     session_type = Keyword.get(opts, :session_type, :primary)
     execution_mode = Keyword.get(opts, :execution_mode, :session)
     config = Keyword.get(opts, :config, %{})
@@ -320,8 +284,7 @@ defmodule Arbor.Orchestrator.Session do
     # Initialize compactor if configured (runtime bridge — module lives in arbor_agent)
     compactor = Builders.init_compactor(Keyword.get(opts, :compactor))
 
-    with {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path),
-         {:ok, heartbeat_graph} <- Builders.parse_dot_file(heartbeat_dot_path) do
+    with {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path) do
       # Build contract structs if available (runtime bridge)
       {session_config, session_state, behavior} =
         Builders.build_contract_structs(
@@ -339,12 +302,9 @@ defmodule Arbor.Orchestrator.Session do
         agent_id: agent_id,
         trust_tier: trust_tier,
         turn_graph: turn_graph,
-        heartbeat_graph: heartbeat_graph,
         turn_dot_path: turn_dot_path,
-        heartbeat_dot_path: heartbeat_dot_path,
         compactor: compactor,
         adapters: adapters,
-        heartbeat_interval: heartbeat_interval,
         session_type: session_type,
         execution_mode: execution_mode,
         config: config,
@@ -383,13 +343,6 @@ defmodule Arbor.Orchestrator.Session do
 
       # Subscribe to trust profile changes for reactive tool updates
       safe_subscribe_profile_signals(agent_id)
-
-      state =
-        if start_heartbeat do
-          schedule_heartbeat(state)
-        else
-          state
-        end
 
       {:ok, state}
     else
@@ -460,15 +413,14 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_call(:reload_dot, _from, state) do
-    with {:ok, turn_graph} <- Builders.parse_dot_file(state.turn_dot_path),
-         {:ok, heartbeat_graph} <- Builders.parse_dot_file(state.heartbeat_dot_path) do
-      Logger.info("[Session] Reloaded DOT graphs for #{state.agent_id}")
-      new_state = %{state | turn_graph: turn_graph, heartbeat_graph: heartbeat_graph}
-      {:reply, :ok, new_state}
-    else
+    case Builders.parse_dot_file(state.turn_dot_path) do
+      {:ok, turn_graph} ->
+        Logger.info("[Session] Reloaded turn DOT graph for #{state.agent_id}")
+        {:reply, :ok, %{state | turn_graph: turn_graph}}
+
       {:error, reason} ->
         Logger.warning(
-          "[Session] Failed to reload DOT graphs for #{state.agent_id}: #{inspect(reason)}"
+          "[Session] Failed to reload DOT graph for #{state.agent_id}: #{inspect(reason)}"
         )
 
         {:reply, {:error, reason}, state}
@@ -515,18 +467,6 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @impl true
-  def handle_cast(:heartbeat, state) do
-    state = start_heartbeat_task(state)
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info(:heartbeat, state) do
-    state = start_heartbeat_task(state)
-    state = schedule_heartbeat(state)
-    {:noreply, state}
-  end
-
   def handle_info({:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}}, state) do
     completed = Map.get(result.context, "__completed_nodes__", [])
 
@@ -602,48 +542,6 @@ defmodule Arbor.Orchestrator.Session do
     {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
   end
 
-  def handle_info({:heartbeat_result, {:ok, result}}, state) do
-    completed = Map.get(result.context, "__completed_nodes__", [])
-    llm_content = Map.get(result.context, "llm.content")
-
-    Logger.info(
-      "[Session] Heartbeat completed for #{state.agent_id}: " <>
-        "#{length(completed)} nodes, content=#{if llm_content, do: "#{String.length(to_string(llm_content))} chars", else: "nil"}"
-    )
-
-    new_state =
-      state
-      |> Map.put(:heartbeat_in_flight, false)
-      |> Builders.apply_heartbeat_result(result)
-      |> Builders.maybe_checkpoint()
-
-    Builders.emit_heartbeat_signal(new_state, result)
-    {:noreply, new_state}
-  end
-
-  def handle_info({:heartbeat_result, {:error, reason}}, state) do
-    Logger.warning("[Session] Heartbeat failed for #{state.agent_id}: #{inspect(reason)}")
-
-    # Heartbeat failures are non-fatal — continue with current state
-    new_state =
-      state
-      |> Map.put(:heartbeat_in_flight, false)
-      |> maybe_increment_errors()
-
-    Builders.emit_signal(
-      :agent,
-      :heartbeat_failed,
-      %{
-        agent_id: state.agent_id,
-        session_id: state.session_id,
-        reason: inspect(reason)
-      },
-      state.tenant_context
-    )
-
-    {:noreply, new_state}
-  end
-
   # Handle Task DOWN messages
   def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
     # Clean up turn_task_ref if it matches
@@ -661,8 +559,7 @@ defmodule Arbor.Orchestrator.Session do
       safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
       {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
     else
-      # Heartbeat task crashed — reset in_flight flag
-      {:noreply, %{state | heartbeat_in_flight: false}}
+      {:noreply, state}
     end
   end
 
@@ -699,19 +596,6 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  @impl true
-  def terminate(_reason, _state) do
-    # Clean up stale heartbeat pipeline entries from the JobRegistry.
-    # Without this, heartbeat pipelines that were registered as :running
-    # but never completed (0/N nodes) accumulate forever because the
-    # RecoveryCoordinator only checks node-level liveness (the BEAM node
-    # stays connected even after the Session process dies). This terminate
-    # callback is the "clean up after yourself" fix — each Session marks
-    # its orphaned heartbeat entries as abandoned on shutdown.
-    cleanup_stale_heartbeat_pipelines()
-    :ok
-  end
-
   # ── Private helpers ──────────────────────────────────────────────────
 
   # Persist tools discovered via find_tools during this turn into session state.
@@ -747,99 +631,9 @@ defmodule Arbor.Orchestrator.Session do
     _, _ -> :ok
   end
 
-  defp start_heartbeat_task(state) do
-    if state.heartbeat_in_flight do
-      # Don't stack heartbeats — skip if one is already running
-      state
-    else
-      case authorize_orchestrator(state) do
-        :ok ->
-          do_start_heartbeat_task(state)
-
-        {:error, reason} ->
-          Logger.warning("[Session] Heartbeat blocked: unauthorized (#{inspect(reason)})")
-          state
-      end
-    end
-  end
-
-  defp do_start_heartbeat_task(state) do
-    session_pid = self()
-    values = Builders.build_heartbeat_values(state)
-
-    engine_opts =
-      Builders.build_engine_opts(state, values, source: :heartbeat)
-      |> Keyword.put(:spawning_pid, session_pid)
-
-    heartbeat_graph = state.heartbeat_graph
-
-    task_sup = Arbor.Orchestrator.Session.TaskSupervisor
-
-    task_fn = fn ->
-      result =
-        try do
-          Engine.run(heartbeat_graph, engine_opts)
-        rescue
-          e ->
-            Logger.error(
-              "[Session] Heartbeat engine crash for #{state.agent_id}: " <>
-                "#{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
-            )
-
-            {:error, {:engine_crash, Exception.message(e)}}
-        end
-
-      send(session_pid, {:heartbeat_result, result})
-    end
-
-    {:ok, _pid} =
-      if Process.whereis(task_sup) do
-        Task.Supervisor.start_child(task_sup, task_fn)
-      else
-        Task.start(task_fn)
-      end
-
-    %{state | heartbeat_in_flight: true}
-  end
-
-  defp schedule_heartbeat(state) do
-    if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
-    ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
-    %{state | heartbeat_ref: ref}
-  end
-
-  defp cleanup_stale_heartbeat_pipelines do
-    # Primary: clean up via PipelineStatus Facade (ETS-backed)
-    if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
-      Arbor.Orchestrator.PipelineStatus.list_active()
-      |> Enum.each(fn entry ->
-        Arbor.Orchestrator.PipelineStatus.mark_abandoned(entry.run_id)
-      end)
-    end
-
-    # Legacy fallback: also clean up stale entries in the JobRegistry
-    # BufferedStore (for entries created before the ETS migration)
-    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
-      try do
-        Arbor.Orchestrator.JobRegistry.list_stale_heartbeats()
-        |> Enum.each(fn entry ->
-          Arbor.Orchestrator.JobRegistry.mark_abandoned(entry.run_id)
-        end)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
   # ── Gate-level orchestrator authorization ────────────────────────────
   #
-  # Checks arbor://orchestrator/execute once per turn/heartbeat rather than
+  # Checks arbor://orchestrator/execute once per turn rather than
   # per-node. Council decision 2026-02-20: gate auth + action-level auth
   # provides defense-in-depth without O(N) per-node overhead.
 
@@ -897,20 +691,8 @@ defmodule Arbor.Orchestrator.Session do
     %{state | session_state: updated_ss}
   end
 
-  # Increment error count on heartbeat failures (when session_state is available).
-  defp maybe_increment_errors(%{session_state: nil} = state), do: state
-
-  defp maybe_increment_errors(%{session_state: ss} = state) when not is_nil(ss) do
-    if Builders.contracts_available?() do
-      %{state | session_state: apply(state_module(), :increment_errors, [ss])}
-    else
-      state
-    end
-  end
-
   # Module references via functions to avoid compile-time warnings
   # when arbor_contracts is not in the dependency tree.
-  defp state_module, do: Arbor.Contracts.Session.State
   defp behavior_module, do: Arbor.Contracts.Session.Behavior
 
   # ── Phase transition with behavior validation ──────────────────────
