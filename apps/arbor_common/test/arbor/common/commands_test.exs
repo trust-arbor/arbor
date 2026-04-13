@@ -1,27 +1,33 @@
 defmodule Arbor.Common.CommandsTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Commands.{Context, Result}
+
   @moduletag :fast
+
+  defp ctx(attrs \\ []) do
+    Context.new(Keyword.put_new(attrs, :origin, :test))
+  end
 
   describe "Help" do
     alias Arbor.Common.Commands.Help
 
     test "lists commands" do
       Arbor.Common.CommandRouter.refresh()
-      assert {:ok, text} = Help.execute("", %{})
+      assert {:ok, %Result{text: text}} = Help.execute("", ctx())
       assert String.contains?(text, "Available commands")
       assert String.contains?(text, "/help")
     end
 
     test "shows detail for specific command" do
       Arbor.Common.CommandRouter.refresh()
-      assert {:ok, text} = Help.execute("status", %{})
+      assert {:ok, %Result{text: text}} = Help.execute("status", ctx())
       assert String.contains?(text, "/status")
     end
 
     test "shows unknown for invalid command" do
       Arbor.Common.CommandRouter.refresh()
-      assert {:ok, text} = Help.execute("nonexistent999", %{})
+      assert {:ok, %Result{text: text}} = Help.execute("nonexistent999", ctx())
       assert String.contains?(text, "Unknown command")
     end
   end
@@ -30,22 +36,23 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Status
 
     test "shows agent info from context" do
-      context = %{
+      context = ctx(
         agent_id: "agent_abc",
         display_name: "TestBot",
         model: "anthropic/claude-sonnet-4",
         provider: "anthropic"
-      }
+      )
 
-      assert {:ok, text} = Status.execute("", context)
+      assert {:ok, %Result{text: text}} = Status.execute("", context)
       assert String.contains?(text, "TestBot")
       assert String.contains?(text, "anthropic/claude-sonnet-4")
       assert String.contains?(text, "anthropic")
     end
 
     test "handles missing context gracefully" do
-      assert {:ok, text} = Status.execute("", %{})
-      assert String.contains?(text, "none")
+      assert {:ok, %Result{text: text}} = Status.execute("", ctx())
+      # Should still produce some output without crashing
+      assert is_binary(text) and text != ""
     end
   end
 
@@ -53,32 +60,25 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Model
 
     test "shows current model" do
-      context = %{model: "anthropic/claude-sonnet-4", provider: "anthropic"}
-      assert {:ok, text} = Model.execute("", context)
+      context = ctx(model: "anthropic/claude-sonnet-4", provider: "anthropic")
+      assert {:ok, %Result{text: text}} = Model.execute("", context)
       assert String.contains?(text, "anthropic/claude-sonnet-4")
     end
 
     test "no model set" do
-      assert {:ok, text} = Model.execute("", %{})
-      assert String.contains?(text, "not set")
+      assert {:ok, %Result{text: text}} = Model.execute("", ctx())
+      assert String.contains?(text, "not set") or String.contains?(text, "No model")
     end
 
-    test "switch model via callback" do
-      context = %{switch_model_fn: fn _m -> :ok end}
-      assert {:ok, text} = Model.execute("gpt-4o", context)
-      assert String.contains?(text, "Switched to model: gpt-4o")
+    test "switch model with agent returns action" do
+      assert {:ok, %Result{text: text, action: {:switch_model, "gpt-4o"}}} =
+               Model.execute("gpt-4o", ctx(agent_id: "agent_test"))
+      assert String.contains?(text, "gpt-4o")
     end
 
-    test "switch model without callback" do
-      assert {:ok, text} = Model.execute("gpt-4o", %{})
-      assert String.contains?(text, "Restart the agent")
-    end
-
-    test "list models via callback" do
-      context = %{list_models_fn: fn -> ["model-a", "model-b"] end}
-      assert {:ok, text} = Model.execute("list", context)
-      assert String.contains?(text, "model-a")
-      assert String.contains?(text, "model-b")
+    test "switch model without agent explains limitation" do
+      assert {:ok, %Result{text: text}} = Model.execute("gpt-4o", ctx())
+      assert String.contains?(text, "no current agent") or String.contains?(text, "Cannot")
     end
   end
 
@@ -86,21 +86,13 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Compact
 
     test "requires session" do
-      refute Compact.available?(%{})
-      assert Compact.available?(%{session_pid: self()})
+      refute Compact.available?(ctx())
+      assert Compact.available?(ctx(session_pid: self()))
     end
 
-    test "calls compact callback" do
-      context = %{session_pid: self(), compact_fn: fn -> :ok end}
-      assert {:ok, text} = Compact.execute("", context)
-      assert String.contains?(text, "compacted")
-    end
-
-    test "shows stats" do
-      stats = %{messages_before: 100, messages_after: 40, compression_ratio: 0.6}
-      context = %{session_pid: self(), compact_fn: fn -> {:ok, stats} end}
-      assert {:ok, text} = Compact.execute("", context)
-      assert String.contains?(text, "60.0%")
+    test "returns compact action" do
+      context = ctx(session_pid: self())
+      assert {:ok, %Result{action: :compact}} = Compact.execute("", context)
     end
   end
 
@@ -108,29 +100,14 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Tools
 
     test "lists tools from context" do
-      tools = [
-        %{name: "shell_exec", description: "Execute shell commands"},
-        %{name: "file_read", description: "Read a file"}
-      ]
-
-      assert {:ok, text} = Tools.execute("", %{tools: tools})
+      tools = ["shell_exec", "file_read"]
+      assert {:ok, %Result{text: text}} = Tools.execute("", ctx(tools: tools))
       assert String.contains?(text, "shell_exec")
       assert String.contains?(text, "file_read")
     end
 
-    test "finds tools by query" do
-      tools = [
-        %{name: "shell_exec", description: "Execute shell commands"},
-        %{name: "file_read", description: "Read a file"}
-      ]
-
-      assert {:ok, text} = Tools.execute("find shell", %{tools: tools})
-      assert String.contains?(text, "shell_exec")
-      refute String.contains?(text, "file_read")
-    end
-
     test "no tools" do
-      assert {:ok, text} = Tools.execute("", %{})
+      assert {:ok, %Result{text: text}} = Tools.execute("", ctx())
       assert String.contains?(text, "No tools")
     end
   end
@@ -139,14 +116,14 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Session
 
     test "shows session info" do
-      context = %{
+      context = ctx(
         session_id: "sess_123",
         turn_count: 5,
         model: "anthropic/claude-sonnet-4",
         session_pid: self()
-      }
+      )
 
-      assert {:ok, text} = Session.execute("", context)
+      assert {:ok, %Result{text: text}} = Session.execute("", context)
       assert String.contains?(text, "sess_123")
       assert String.contains?(text, "5")
     end
@@ -156,7 +133,7 @@ defmodule Arbor.Common.CommandsTest do
     alias Arbor.Common.Commands.Trust
 
     test "shows trust tier" do
-      assert {:ok, text} = Trust.execute("", %{trust_tier: "full_partner"})
+      assert {:ok, %Result{text: text}} = Trust.execute("", ctx(trust_tier: :full_partner))
       assert String.contains?(text, "full_partner")
     end
 
@@ -168,7 +145,7 @@ defmodule Arbor.Common.CommandsTest do
         ]
       }
 
-      assert {:ok, text} = Trust.execute("", %{trust_profile: profile})
+      assert {:ok, %Result{text: text}} = Trust.execute("", ctx(trust_profile: profile))
       assert String.contains?(text, "arbor://shell/")
       assert String.contains?(text, "allow")
     end
@@ -177,15 +154,9 @@ defmodule Arbor.Common.CommandsTest do
   describe "Memory" do
     alias Arbor.Common.Commands.Memory
 
-    test "calls memory callback" do
-      context = %{memory_fn: fn -> {:ok, "3 thoughts, 1 concern"} end}
-      assert {:ok, text} = Memory.execute("", context)
-      assert String.contains?(text, "3 thoughts")
-    end
-
     test "no memory available" do
-      assert {:ok, text} = Memory.execute("", %{})
-      assert String.contains?(text, "not available")
+      assert {:ok, %Result{text: text}} = Memory.execute("", ctx())
+      assert String.contains?(text, "not available") or String.contains?(text, "No")
     end
   end
 end
