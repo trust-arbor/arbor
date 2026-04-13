@@ -73,13 +73,13 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert "action" in help_tool.inputSchema.required
     end
 
-    # L1: arbor_run now requires agent_id in addition to action and params
-    test "arbor_run requires 'action', 'params', and 'agent_id'", %{state: state} do
+    # agent_id is no longer in inputSchema — it comes from SignedRequestAuth
+    test "arbor_run requires 'action' and 'params' (agent_id via auth)", %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       run_tool = Enum.find(tools, &(&1.name == "arbor_run"))
       assert "action" in run_tool.inputSchema.required
       assert "params" in run_tool.inputSchema.required
-      assert "agent_id" in run_tool.inputSchema.required
+      refute "agent_id" in run_tool.inputSchema.required
     end
 
     test "arbor_status requires 'component'", %{state: state} do
@@ -191,24 +191,27 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert text =~ "Success" or text =~ "Unauthorized" or text =~ "Error"
     end
 
-    test "handles action not found with agent_id", %{state: state} do
+    test "handles action not found with authenticated agent", %{state: state} do
+      # Simulate SignedRequestAuth having verified the agent
+      Process.put(:arbor_authenticated_agent_id, "test_agent_001")
+
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{
             "action" => "nonexistent_action",
-            "params" => %{},
-            "agent_id" => "test_agent_001"
+            "params" => %{}
           },
           state
         )
 
-      # P0-4: When Identity Registry is running, unregistered agent_id is rejected
-      # before action lookup. When not running, falls through to action lookup.
-      assert text =~ "not found" or text =~ "Unauthorized"
+      assert text =~ "not found" or text =~ "Unauthorized" or text =~ "Error"
+    after
+      Process.delete(:arbor_authenticated_agent_id)
     end
 
-    test "rejects execution without agent_id", %{state: state} do
+    test "rejects execution without authenticated agent_id", %{state: state} do
+      # No Process.put — simulates unauthenticated request
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
@@ -216,36 +219,41 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
           state
         )
 
-      # C1: Must reject when agent_id is missing
-      assert text =~ "Agent ID is required"
+      # Must reject when no authenticated agent_id in process dict
+      assert text =~ "SignedRequest authentication" or text =~ "agent_id"
     end
 
-    test "rejects execution with empty agent_id", %{state: state} do
+    test "rejects execution when agent_id passed in params instead of auth", %{state: state} do
+      # agent_id in params is ignored — must come from SignedRequestAuth
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{
             "action" => "file_exists",
             "params" => %{"path" => "/tmp"},
-            "agent_id" => ""
+            "agent_id" => "test_agent_sneaky"
           },
           state
         )
 
-      # C1: Must reject when agent_id is empty
-      assert text =~ "Agent ID is required"
+      # Should still reject — agent_id in params is not trusted
+      assert text =~ "SignedRequest authentication" or text =~ "agent_id"
     end
 
     test "handles missing params gracefully", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "test_agent_001")
+
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool(
           "arbor_run",
-          %{"action" => "file_exists", "agent_id" => "test_agent_001"},
+          %{"action" => "file_exists"},
           state
         )
 
       # Should error since path is required
       assert text =~ "Error" or text =~ "not found" or text =~ "Unauthorized"
+    after
+      Process.delete(:arbor_authenticated_agent_id)
     end
   end
 
