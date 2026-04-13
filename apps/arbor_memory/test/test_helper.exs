@@ -41,19 +41,6 @@ ExUnit.configure(exclude: [:database, :llm, :llm_local])
 # Ensure the Ecto Repo is running for database tests.
 # The Repo is started by arbor_persistence's test_helper when ARBOR_DB=postgres.
 # If running this app's tests standalone, start it here as a fallback.
-# Ensure Sandbox is in shared mode for database tests.
-# The Repo may already be started by arbor_persistence's test_helper.
-if System.get_env("ARBOR_DB") == "postgres" do
-  if not is_pid(Process.whereis(Arbor.Persistence.Repo)) do
-    case Supervisor.start_child(Arbor.Persistence.Supervisor, Arbor.Persistence.Repo) do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
-      {:error, reason} -> IO.puts("[memory test_helper] Repo start failed: #{inspect(reason)}")
-    end
-  end
-
-  # Set shared mode using the Repo's own PID as the owner — it's long-lived
-  Ecto.Adapters.SQL.Sandbox.mode(Arbor.Persistence.Repo, :auto)
-end
+Arbor.Persistence.SandboxHelper.setup()
 
 ExUnit.start()
