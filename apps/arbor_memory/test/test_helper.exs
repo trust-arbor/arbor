@@ -36,11 +36,4 @@ end
 
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database
-ExUnit.configure(exclude: [:database, :llm, :llm_local])
-
-# Ensure the Ecto Repo is running for database tests.
-# The Repo is started by arbor_persistence's test_helper when ARBOR_DB=postgres.
-# If running this app's tests standalone, start it here as a fallback.
-Arbor.Persistence.SandboxHelper.setup()
-
-ExUnit.start()
+ExUnit.start(exclude: [:database, :llm, :llm_local])

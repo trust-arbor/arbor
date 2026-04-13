@@ -7,8 +7,6 @@ for child <- [
   Supervisor.start_child(Arbor.Persistence.Supervisor, child)
 end
 
-Arbor.Persistence.SandboxHelper.setup()
-
 # Exclude database tests by default (require PostgreSQL setup)
 # Run with: mix test --include database
 ExUnit.start(exclude: [:database, :llm, :llm_local])
