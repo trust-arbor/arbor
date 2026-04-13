@@ -102,7 +102,11 @@ defmodule Arbor.Common.CommandRouter do
     case Map.get(commands, name) do
       nil ->
         suggestion = suggest_command(name, Map.keys(commands))
-        msg = "Unknown command: /#{name}" <> if(suggestion, do: ". Did you mean /#{suggestion}?", else: "")
+
+        msg =
+          "Unknown command: /#{name}" <>
+            if(suggestion, do: ". Did you mean /#{suggestion}?", else: "")
+
         {:error, {:unknown_command, msg}}
 
       module ->

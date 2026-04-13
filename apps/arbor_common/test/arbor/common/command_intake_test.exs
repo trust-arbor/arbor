@@ -78,8 +78,8 @@ defmodule Arbor.Common.CommandIntakeTest do
     test "/clear returns a Result with action: :clear" do
       result = CommandIntake.handle("/clear", ctx(), fn _ -> :unreachable end)
 
-      assert {:command_result,
-              %Result{type: :command_action, action: :clear, text: text}} = result
+      assert {:command_result, %Result{type: :command_action, action: :clear, text: text}} =
+               result
 
       assert String.contains?(text, "cleared")
     end
@@ -93,8 +93,8 @@ defmodule Arbor.Common.CommandIntakeTest do
       result =
         CommandIntake.handle("/model anthropic/claude-opus-4-6", ctx(), fn _ -> :unreachable end)
 
-      assert {:command_result,
-              %Result{action: {:switch_model, "anthropic/claude-opus-4-6"}}} = result
+      assert {:command_result, %Result{action: {:switch_model, "anthropic/claude-opus-4-6"}}} =
+               result
     end
   end
 

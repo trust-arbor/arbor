@@ -190,7 +190,10 @@ defmodule Arbor.Common.AgentTelemetry.Store do
     end
   rescue
     e ->
-      Logger.debug("[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{Exception.message(e)}"
+      )
+
       nil
   end
 
@@ -284,13 +287,14 @@ defmodule Arbor.Common.AgentTelemetry.Store do
             base
 
           lifetime ->
-            %{base |
-              lifetime_input_tokens: lifetime[:lifetime_input_tokens] || 0,
-              lifetime_output_tokens: lifetime[:lifetime_output_tokens] || 0,
-              lifetime_cached_tokens: lifetime[:lifetime_cached_tokens] || 0,
-              lifetime_cost: lifetime[:lifetime_cost] || 0.0,
-              turn_count: lifetime[:turn_count] || 0,
-              compaction_count: lifetime[:compaction_count] || 0
+            %{
+              base
+              | lifetime_input_tokens: lifetime[:lifetime_input_tokens] || 0,
+                lifetime_output_tokens: lifetime[:lifetime_output_tokens] || 0,
+                lifetime_cached_tokens: lifetime[:lifetime_cached_tokens] || 0,
+                lifetime_cost: lifetime[:lifetime_cost] || 0.0,
+                turn_count: lifetime[:turn_count] || 0,
+                compaction_count: lifetime[:compaction_count] || 0
             }
         end
 

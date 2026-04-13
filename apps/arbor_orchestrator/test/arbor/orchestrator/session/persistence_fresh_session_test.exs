@@ -217,9 +217,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "user_sent_at is used for the user entry timestamp" do
       {:ok, _} =
-        FakeSessionStore.start_link(
-          existing_sessions: %{"agent-session-ordering_a" => "uuid_a"}
-        )
+        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_a" => "uuid_a"})
 
       on_exit(&FakeSessionStore.stop/0)
 
@@ -242,13 +240,15 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       entries = FakeSessionStore.appended_entries()
       assert length(entries) == 2
 
-      user_entry = Enum.find_value(entries, fn {_uuid, attrs} ->
-        if attrs[:entry_type] == "user", do: attrs
-      end)
+      user_entry =
+        Enum.find_value(entries, fn {_uuid, attrs} ->
+          if attrs[:entry_type] == "user", do: attrs
+        end)
 
-      assistant_entry = Enum.find_value(entries, fn {_uuid, attrs} ->
-        if attrs[:entry_type] == "assistant", do: attrs
-      end)
+      assistant_entry =
+        Enum.find_value(entries, fn {_uuid, attrs} ->
+          if attrs[:entry_type] == "assistant", do: attrs
+        end)
 
       assert user_entry, "expected a user entry to be persisted"
       assert assistant_entry, "expected an assistant entry to be persisted"
@@ -264,9 +264,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "user timestamp is strictly less than assistant timestamp (real divergence, not +1µs)" do
       {:ok, _} =
-        FakeSessionStore.start_link(
-          existing_sessions: %{"agent-session-ordering_b" => "uuid_b"}
-        )
+        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_b" => "uuid_b"})
 
       on_exit(&FakeSessionStore.stop/0)
 
@@ -286,12 +284,16 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       :timer.sleep(50)
 
       entries = FakeSessionStore.appended_entries()
-      user_ts = Enum.find_value(entries, fn {_uuid, attrs} ->
-        if attrs[:entry_type] == "user", do: attrs[:timestamp]
-      end)
-      asst_ts = Enum.find_value(entries, fn {_uuid, attrs} ->
-        if attrs[:entry_type] == "assistant", do: attrs[:timestamp]
-      end)
+
+      user_ts =
+        Enum.find_value(entries, fn {_uuid, attrs} ->
+          if attrs[:entry_type] == "user", do: attrs[:timestamp]
+        end)
+
+      asst_ts =
+        Enum.find_value(entries, fn {_uuid, attrs} ->
+          if attrs[:entry_type] == "assistant", do: attrs[:timestamp]
+        end)
 
       assert DateTime.compare(user_ts, asst_ts) == :lt,
              "user.timestamp must be strictly less than assistant.timestamp " <>
@@ -301,6 +303,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       # The divergence should also be MORE than 1µs (the old workaround) — if
       # it's exactly 1µs we may have regressed to the synthetic offset.
       diff_us = DateTime.diff(asst_ts, user_ts, :microsecond)
+
       assert diff_us > 1,
              "timestamps diverge by exactly #{diff_us}µs — this looks like the " <>
                "+1µs workaround crept back. Real LLM-call latency should be much larger."
@@ -308,9 +311,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "missing opts fall back to DateTime.utc_now/0 for backwards compat" do
       {:ok, _} =
-        FakeSessionStore.start_link(
-          existing_sessions: %{"agent-session-ordering_c" => "uuid_c"}
-        )
+        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_c" => "uuid_c"})
 
       on_exit(&FakeSessionStore.stop/0)
 

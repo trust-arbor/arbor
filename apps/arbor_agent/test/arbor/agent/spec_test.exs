@@ -105,7 +105,11 @@ defmodule Arbor.Agent.SpecTest do
         metadata: %{version: 1}
       }
 
-      model_config = %{"llm_model" => "arcee-ai/trinity-large-thinking", "llm_provider" => "openrouter"}
+      model_config = %{
+        "llm_model" => "arcee-ai/trinity-large-thinking",
+        "llm_provider" => "openrouter"
+      }
+
       {:ok, spec} = Spec.from_profile(profile, model_config)
 
       assert spec.display_name == "test"

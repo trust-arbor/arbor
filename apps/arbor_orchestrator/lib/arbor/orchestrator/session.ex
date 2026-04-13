@@ -467,7 +467,10 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @impl true
-  def handle_info({:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}}, state) do
+  def handle_info(
+        {:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}},
+        state
+      ) do
     completed = Map.get(result.context, "__completed_nodes__", [])
 
     new_state =

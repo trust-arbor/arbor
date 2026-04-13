@@ -45,11 +45,13 @@ defmodule Mix.Tasks.Arbor.Start do
     end
 
     host = Config.node_hostname()
-    host_source = cond do
-      System.get_env("ARBOR_NODE_HOST") -> "(from ARBOR_NODE_HOST)"
-      Config.detect_wireguard_ip() -> "(WireGuard auto-detected)"
-      true -> "(localhost — no VPN, local only)"
-    end
+
+    host_source =
+      cond do
+        System.get_env("ARBOR_NODE_HOST") -> "(from ARBOR_NODE_HOST)"
+        Config.detect_wireguard_ip() -> "(WireGuard auto-detected)"
+        true -> "(localhost — no VPN, local only)"
+      end
 
     Mix.shell().info("Starting Arbor server...")
     Mix.shell().info("  Host: #{host} #{host_source}")

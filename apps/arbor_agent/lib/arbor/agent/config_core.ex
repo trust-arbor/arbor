@@ -97,6 +97,7 @@ defmodule Arbor.Agent.ConfigCore do
 
   defp maybe_atom(nil), do: nil
   defp maybe_atom(v) when is_atom(v), do: v
+
   defp maybe_atom(v) when is_binary(v) do
     try do
       String.to_existing_atom(v)
@@ -122,11 +123,7 @@ defmodule Arbor.Agent.ConfigCore do
   @doc "Update the model on a Config struct."
   @spec update_model(Config.t(), atom(), String.t()) :: Config.t()
   def update_model(%Config{} = config, provider, model) do
-    %{config |
-      provider: provider,
-      model: model,
-      model_profile: resolve_model_profile(model)
-    }
+    %{config | provider: provider, model: model, model_profile: resolve_model_profile(model)}
   end
 
   @doc "Update the tool list."
@@ -183,6 +180,7 @@ defmodule Arbor.Agent.ConfigCore do
   @doc "Format model info as a display string."
   @spec format_model(Config.t()) :: String.t()
   def format_model(%Config{provider: nil}), do: "not configured"
+
   def format_model(%Config{provider: provider, model: model}) do
     "#{provider}:#{model}"
   end

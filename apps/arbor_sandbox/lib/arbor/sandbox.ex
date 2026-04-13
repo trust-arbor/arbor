@@ -89,7 +89,10 @@ defmodule Arbor.Sandbox do
     resource = "arbor://sandbox/create"
     {trace_id, opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(caller_id, resource, :create, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(caller_id, resource, :create,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         create(target_agent_id, opts)
 
@@ -129,7 +132,10 @@ defmodule Arbor.Sandbox do
     resource = "arbor://sandbox/destroy"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(caller_id, resource, :destroy, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(caller_id, resource, :destroy,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         destroy(sandbox_id)
 

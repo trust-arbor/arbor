@@ -100,7 +100,10 @@ defmodule Arbor.AI do
     resource = "arbor://ai/request/#{provider}"
     {trace_id, opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :request, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(agent_id, resource, :request,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         generate_text(prompt, opts)
 

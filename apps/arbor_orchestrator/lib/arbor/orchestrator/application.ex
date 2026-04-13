@@ -10,7 +10,9 @@ defmodule Arbor.Orchestrator.Application do
     # multiple Engine processes can write simultaneously without blocking.
     # Read access goes through the Facade for trust-zone filtering.
     :ets.new(:arbor_pipeline_runs, [
-      :set, :public, :named_table,
+      :set,
+      :public,
+      :named_table,
       read_concurrency: true,
       write_concurrency: true
     ])

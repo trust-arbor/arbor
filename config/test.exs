@@ -65,6 +65,7 @@ config :arbor_ai,
     (System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter") |> String.to_atom(),
   default_model:
     System.get_env("UNIFIED_LLM_DEFAULT_MODEL") || "arcee-ai/trinity-large-preview:free"
+
 config :arbor_consensus, start_children: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false

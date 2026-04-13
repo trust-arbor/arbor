@@ -88,8 +88,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           # so facade auth can see it, and auth_context for the new flow.
           context =
             %{}
-            |> then(fn c -> if signed_request, do: Map.put(c, :signed_request, signed_request), else: c end)
-            |> then(fn c -> if auth_context, do: Map.put(c, :auth_context, auth_context), else: c end)
+            |> then(fn c ->
+              if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
+            end)
+            |> then(fn c ->
+              if auth_context, do: Map.put(c, :auth_context, auth_context), else: c
+            end)
 
           case apply(@actions_mod, :authorize_and_execute, [
                  agent_id,

@@ -436,7 +436,13 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
     end
 
     test "accepts :origin and :user_id via opts" do
-      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{}
+      }
 
       context =
         SessionCore.build_command_context(session, self(),
@@ -449,7 +455,13 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
     end
 
     test "model_config from opts populates model and provider when state.config is empty" do
-      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{}
+      }
 
       context =
         SessionCore.build_command_context(session, self(),
@@ -517,7 +529,13 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
     end
 
     test "default origin is :unknown when not provided via opts" do
-      session = %Session{session_id: "s", agent_id: "a", trust_tier: :veteran, turn_count: 0, config: %{}}
+      session = %Session{
+        session_id: "s",
+        agent_id: "a",
+        trust_tier: :veteran,
+        turn_count: 0,
+        config: %{}
+      }
 
       context = SessionCore.build_command_context(session, self())
 

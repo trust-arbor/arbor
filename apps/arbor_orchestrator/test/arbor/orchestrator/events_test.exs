@@ -22,7 +22,8 @@ defmodule Arbor.Orchestrator.EventsTest do
     Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
 
     on_exit(fn ->
-      if prev, do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
+      if prev,
+        do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
         else: Application.delete_env(:arbor_orchestrator, :event_log_name)
 
       try do

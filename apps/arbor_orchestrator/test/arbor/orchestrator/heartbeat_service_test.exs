@@ -24,7 +24,9 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
     # Ensure the ETS table exists for pipeline tracking
     try do
       :ets.new(@ets_table, [
-        :set, :public, :named_table,
+        :set,
+        :public,
+        :named_table,
         read_concurrency: true,
         write_concurrency: true
       ])
@@ -134,26 +136,30 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       {:ok, pid} = start_test_service()
 
       # Insert a fake active entry in ETS
-      :ets.insert(@ets_table, {"run_heartbeat_test_001", %{
-        run_id: "run_heartbeat_test_001",
-        status: :running,
-        spawning_pid: pid,
-        current_node: "bg_checks",
-        started_at: DateTime.utc_now(),
-        last_ets_sync: DateTime.utc_now(),
-        completed_count: 0,
-        total_nodes: 19,
-        graph_id: "Heartbeat",
-        pipeline_id: "run_heartbeat_test_001",
-        completed_nodes: [],
-        node_durations: %{},
-        finished_at: nil,
-        duration_ms: nil,
-        failure_reason: nil,
-        owner_node: node(),
-        source_node: node(),
-        last_heartbeat: DateTime.utc_now()
-      }})
+      :ets.insert(
+        @ets_table,
+        {"run_heartbeat_test_001",
+         %{
+           run_id: "run_heartbeat_test_001",
+           status: :running,
+           spawning_pid: pid,
+           current_node: "bg_checks",
+           started_at: DateTime.utc_now(),
+           last_ets_sync: DateTime.utc_now(),
+           completed_count: 0,
+           total_nodes: 19,
+           graph_id: "Heartbeat",
+           pipeline_id: "run_heartbeat_test_001",
+           completed_nodes: [],
+           node_durations: %{},
+           finished_at: nil,
+           duration_ms: nil,
+           failure_reason: nil,
+           owner_node: node(),
+           source_node: node(),
+           last_heartbeat: DateTime.utc_now()
+         }}
+      )
 
       # Stop the service (triggers terminate)
       GenServer.stop(pid, :normal)
@@ -219,10 +225,11 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
         agent_id: "agent_test_heartbeat",
         signer: nil,
         trust_tier: :probationary,
-        heartbeat_config: Keyword.get(extra_opts, :heartbeat_config, %{
-          enabled: true,
-          interval: 30_000
-        })
+        heartbeat_config:
+          Keyword.get(extra_opts, :heartbeat_config, %{
+            enabled: true,
+            interval: 30_000
+          })
       ]
       |> Keyword.merge(extra_opts)
 

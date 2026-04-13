@@ -108,7 +108,9 @@ defmodule Arbor.AI.Security.SensitivityRoutingTest do
     end
 
     test "confidential data validation passes for high-trust providers" do
-      assert :ok = SensitivityRouter.validate(:anthropic, "claude-sonnet-4-5-20250514", :confidential)
+      assert :ok =
+               SensitivityRouter.validate(:anthropic, "claude-sonnet-4-5-20250514", :confidential)
+
       assert :ok = SensitivityRouter.validate(:ollama, "llama3.2", :confidential)
     end
 
