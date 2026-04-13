@@ -50,7 +50,7 @@ jobs:
         continue-on-error: true
 
       - name: Sobelow (security)
-        run: cd apps/arbor_dashboard && mix sobelow --config && cd ../arbor_gateway && mix sobelow --config
+        run: mix sobelow --config --root apps/arbor_dashboard && mix sobelow --config --root apps/arbor_gateway
         continue-on-error: true
 
       - name: Run full test suite
