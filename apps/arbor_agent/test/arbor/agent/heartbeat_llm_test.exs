@@ -1,8 +1,6 @@
 defmodule Arbor.Agent.HeartbeatLLMTest do
   use ExUnit.Case, async: true
-  # These tests call HeartbeatLLM.think/2 which makes real LLM API calls.
-  # Tagged :llm so they run in CI (with free model) but not in mix test.fast.
-  @moduletag :llm
+  @moduletag :fast
 
   alias Arbor.Agent.HeartbeatLLM
 
@@ -27,6 +25,8 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
   end
 
   describe "think/2" do
+    @tag :llm
+    @tag timeout: 10_000
     test "returns error tuple when AI is unavailable" do
       # If Arbor.AI is not running/configured, we get :ai_unavailable
       # This tests the error path without needing a real LLM
@@ -46,6 +46,8 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       end
     end
 
+    @tag :llm
+    @tag timeout: 10_000
     test "accepts opts for model and provider" do
       # Should not crash with custom opts
       result = HeartbeatLLM.think(minimal_state(), model: "test-model", provider: :test)
@@ -56,8 +58,8 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       end
     end
 
-    @tag :slow
-    @tag timeout: 300_000
+    @tag :llm
+    @tag timeout: 10_000
     test "builds prompt from state before calling AI" do
       # Verify it doesn't crash on various state shapes
       states = [
@@ -75,6 +77,8 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
   end
 
   describe "idle_think/2" do
+    @tag :llm
+    @tag timeout: 10_000
     test "returns error or valid result" do
       result = HeartbeatLLM.idle_think(minimal_state())
 
@@ -88,6 +92,8 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       end
     end
 
+    @tag :llm
+    @tag timeout: 10_000
     test "accepts opts" do
       result = HeartbeatLLM.idle_think(minimal_state(), model: "cheap-model")
       assert match?({:ok, _}, result) or match?({:error, _}, result)
