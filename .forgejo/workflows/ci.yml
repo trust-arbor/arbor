@@ -16,6 +16,8 @@ jobs:
       # Use free model for LLM tests in CI
       UNIFIED_LLM_DEFAULT_MODEL: "arcee-ai/trinity-large-preview:free"
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Enable Postgres for database tests
+      ARBOR_DB: postgres
 
     steps:
       - name: Checkout
@@ -37,6 +39,10 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Setup test database
+        run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
+        continue-on-error: true
+
       - name: Check formatting
         run: mix format --check-formatted
 
@@ -45,4 +51,4 @@ jobs:
         continue-on-error: true
 
       - name: Run full test suite
-        run: mix test --include llm --include integration --include slow --timeout 120000
+        run: mix test --include llm --include integration --include slow --include database --include distributed --timeout 120000
