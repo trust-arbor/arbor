@@ -47,6 +47,33 @@ config :arbor_comms, :handler,
 # Phase 3: Enable mandatory middleware (capability, taint, sanitization checks)
 config :arbor_orchestrator, mandatory_middleware: true
 
+# Pre-turn preprocessor pipeline. DISABLED by default; fails open when enabled.
+# Attaches enrichment to turn context under "session.preprocessor.*".
+# See docs/arbor/PREPROCESSOR.md. To enable: set preprocessor_enabled: true and
+# ensure the configured providers (Ollama / LM Studio) are reachable.
+config :arbor_orchestrator, preprocessor_enabled: false
+
+config :arbor_orchestrator, :preprocessor,
+  needs_tools: [
+    provider: :lm_studio,
+    model: "gemma-4-e4b-it@q4_k_xl",
+    base_url: "http://localhost:1234/v1"
+  ],
+  complexity: [provider: :ollama, model: "granite4.1:3b", base_url: "http://localhost:11434"],
+  intent: [provider: :ollama, model: "granite4.1:3b"],
+  decompose: [provider: :ollama, model: "granite4.1:3b", enabled: false],
+  retrieval: [
+    provider: :ollama,
+    model: "granite4:1b",
+    embed_model: "mxbai-embed-large",
+    enabled: false,
+    index_path: nil,
+    top_k: 5
+  ],
+  prompt_classifier: Arbor.Gateway.PromptClassifier,
+  intent_extractor: Arbor.Gateway.IntentExtractor,
+  timeout_ms: 30_000
+
 # P0-1: Default taint enforcement policy for authorize_and_execute.
 # :audit_only logs violations without blocking. Use :strict to block.
 config :arbor_actions, default_taint_policy: :audit_only
