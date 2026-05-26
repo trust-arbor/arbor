@@ -433,6 +433,12 @@ defmodule Arbor.Orchestrator.Session do
     # path needs the typed envelope, and that's threaded via the {:turn_result,
     # user_message, result} tuple below.
     values = Builders.build_turn_values(state, user_message.content)
+
+    # Pre-turn preprocessor (disabled by default, fails open). When enabled it
+    # attaches enrichment under "session.preprocessor.*". See
+    # Arbor.Orchestrator.Preprocessor and docs/arbor/PREPROCESSOR.md.
+    values = maybe_preprocess(values, user_message.content)
+
     engine_opts = Builders.build_engine_opts(state, values)
 
     session_pid = self()
@@ -464,6 +470,36 @@ defmodule Arbor.Orchestrator.Session do
 
     new_state = %{state | turn_in_flight: true, turn_from: from, turn_task_ref: task_ref}
     {:noreply, new_state}
+  end
+
+  # Run the pre-turn preprocessor when enabled; merge its output into turn values
+  # under "session.preprocessor.*". Disabled-by-default and fail-open: any failure
+  # leaves `values` unchanged so the turn proceeds exactly as before.
+  defp maybe_preprocess(values, content) do
+    {:ok, preproc} = Arbor.Orchestrator.Preprocessor.run(content)
+
+    if preproc == %{} do
+      values
+    else
+      namespaced = Map.new(preproc, fn {k, v} -> {"session.preprocessor.#{k}", v} end)
+      values = Map.merge(values, namespaced)
+      apply_preprocessor_tools(values, preproc)
+    end
+  rescue
+    _ -> values
+  end
+
+  # Engine consumption of the preprocessor: override the turn's tool list based on
+  # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
+  # so this controls exactly which tools the LLM call sees. DIRECT empties the list
+  # (no-tools fast lane) unless `direct_skips_tools` is disabled in config.
+  defp apply_preprocessor_tools(values, preproc) do
+    direct_skips? = Keyword.get(Arbor.Orchestrator.Config.preprocessor(), :direct_skips_tools, true)
+
+    case Arbor.Orchestrator.Preprocessor.tool_override(preproc, direct_skips_tools?: direct_skips?) do
+      {:override, tools} -> Map.put(values, "session.tools", tools)
+      :no_override -> values
+    end
   end
 
   @impl true
