@@ -139,6 +139,12 @@ defmodule Arbor.Cartographer.Scout do
   def handle_continue(:initial_detection, state) do
     state = detect_and_register(state)
 
+    # Pull capabilities from peers already connected at boot. detect_and_register
+    # only PUSHES our caps; nodes connected before Cartographer started fire no
+    # :nodeup, so we'd never learn their caps otherwise. sync_cluster does both
+    # push and pull across Node.list().
+    CapabilityRegistry.sync_cluster()
+
     # Schedule periodic updates
     schedule_introspection(state.introspection_interval)
     schedule_load_update(state.load_update_interval)
@@ -202,8 +208,12 @@ defmodule Arbor.Cartographer.Scout do
     load = calculate_load()
     state = %{state | load: load}
 
-    # Update registry
+    # Update local registry, then propagate to peers. Load changes frequently
+    # (every load_update_interval); without broadcasting it, peers only see the
+    # load captured in the last full capability broadcast — stale for load-based
+    # routing (least-loaded selection, min/max_load filters).
     CapabilityRegistry.update_load(Node.self(), load)
+    broadcast_load(load)
 
     schedule_load_update(state.load_update_interval)
     {:noreply, state}
@@ -251,6 +261,17 @@ defmodule Arbor.Cartographer.Scout do
           [Node.self(), capabilities],
           5_000
         )
+      end)
+    end
+  end
+
+  # Lightweight load-only propagation (frequent; avoids re-sending full caps).
+  defp broadcast_load(load) do
+    self_node = Node.self()
+
+    for node <- Node.list() do
+      Task.start(fn ->
+        :rpc.call(node, CapabilityRegistry, :update_load, [self_node, load], 5_000)
       end)
     end
   end
