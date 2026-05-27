@@ -44,10 +44,25 @@ defmodule Arbor.Orchestrator.Application do
 
     # Populate handler DI registries with core entries after supervision tree is up
     case result do
-      {:ok, _pid} -> Arbor.Orchestrator.Registrar.register_core()
-      _ -> :ok
+      {:ok, _pid} ->
+        Arbor.Orchestrator.Registrar.register_core()
+        maybe_preflight_models()
+
+      _ ->
+        :ok
     end
 
     result
+  end
+
+  # Warn-only preflight: verify configured local LLM models are actually loaded on
+  # their providers. Runs async so it never blocks/delays startup; failures only warn.
+  # Disabled in :test (see config/test.exs) so tests don't poke local providers.
+  defp maybe_preflight_models do
+    if Application.get_env(:arbor_orchestrator, :preflight_models_on_start, true) do
+      Task.start(fn -> Arbor.Orchestrator.UnifiedLLM.Preflight.check_and_log() end)
+    end
+
+    :ok
   end
 end

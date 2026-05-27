@@ -151,5 +151,9 @@ config :arbor_ai, embedding_test_fallback: true
 # Don't probe local LLM servers (LM Studio, Ollama) during tests
 config :arbor_orchestrator, discover_local_providers: false
 
+# Don't run the model-availability preflight at startup during tests (it would
+# poke LM Studio / Ollama). The Preflight module is still unit-tested directly.
+config :arbor_orchestrator, preflight_models_on_start: false
+
 # Enable mandatory middleware (Phase 5 handler primitives)
 config :arbor_orchestrator, mandatory_middleware: true
