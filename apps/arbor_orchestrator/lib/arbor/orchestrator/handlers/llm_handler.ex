@@ -149,7 +149,26 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     Process.delete(:__routing_decision__)
     start_time = System.monotonic_time(:millisecond)
 
-    case call_llm(prompt, node, context, graph, opts) do
+    # Telemetry span around the actual LLM call: emits
+    # [:arbor, :llm, :call, :start | :stop | :exception] with :duration. Stop metadata
+    # carries provider/model and :result (:ok | :error). Attach a handler via
+    # Arbor.Signals.Telemetry to profile LLM latency by provider/model.
+    span_meta = %{
+      agent_id: agent_id,
+      node_id: node.id,
+      provider: provider,
+      model: model,
+      use_tools: use_tools
+    }
+
+    llm_result =
+      :telemetry.span([:arbor, :llm, :call], span_meta, fn ->
+        result = call_llm(prompt, node, context, graph, opts)
+        outcome = if match?({:ok, _}, result), do: :ok, else: :error
+        {result, Map.put(span_meta, :result, outcome)}
+      end)
+
+    case llm_result do
       {:ok, raw_response} ->
         response = PipelineResponse.normalize(raw_response)
         response_text = response.content

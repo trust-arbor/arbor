@@ -114,6 +114,9 @@ defmodule Arbor.Orchestrator.Session do
     turn_in_flight: false,
     turn_from: nil,
     turn_task_ref: nil,
+    # Monotonic start time of the in-flight turn (native units), for the
+    # [:arbor, :session, :turn] telemetry event emitted on completion.
+    turn_started_at: nil,
     # Signer function for identity verification (fn resource -> {:ok, signed_request})
     signer: nil,
     # Progressive tool disclosure: tools discovered via find_tools during session
@@ -148,6 +151,7 @@ defmodule Arbor.Orchestrator.Session do
           turn_in_flight: boolean(),
           turn_from: GenServer.from() | nil,
           turn_task_ref: reference() | nil,
+          turn_started_at: integer() | nil,
           compactor: struct() | nil,
           session_config: struct() | nil,
           session_state: struct() | nil,
@@ -468,7 +472,14 @@ defmodule Arbor.Orchestrator.Session do
         {pid, ref}
       end
 
-    new_state = %{state | turn_in_flight: true, turn_from: from, turn_task_ref: task_ref}
+    new_state = %{
+      state
+      | turn_in_flight: true,
+        turn_from: from,
+        turn_task_ref: task_ref,
+        turn_started_at: System.monotonic_time()
+    }
+
     {:noreply, new_state}
   end
 
@@ -494,9 +505,12 @@ defmodule Arbor.Orchestrator.Session do
   # so this controls exactly which tools the LLM call sees. DIRECT empties the list
   # (no-tools fast lane) unless `direct_skips_tools` is disabled in config.
   defp apply_preprocessor_tools(values, preproc) do
-    direct_skips? = Keyword.get(Arbor.Orchestrator.Config.preprocessor(), :direct_skips_tools, true)
+    direct_skips? =
+      Keyword.get(Arbor.Orchestrator.Config.preprocessor(), :direct_skips_tools, true)
 
-    case Arbor.Orchestrator.Preprocessor.tool_override(preproc, direct_skips_tools?: direct_skips?) do
+    case Arbor.Orchestrator.Preprocessor.tool_override(preproc,
+           direct_skips_tools?: direct_skips?
+         ) do
       {:override, tools} -> Map.put(values, "session.tools", tools)
       :no_override -> values
     end
@@ -556,6 +570,12 @@ defmodule Arbor.Orchestrator.Session do
           Map.get(result.context, "session.llm_provider")
     })
 
+    emit_turn_telemetry(state.turn_started_at, %{
+      agent_id: state.agent_id,
+      status: :ok,
+      node_count: length(completed)
+    })
+
     reply =
       {:ok,
        PipelineResponse.normalize(%{
@@ -568,17 +588,35 @@ defmodule Arbor.Orchestrator.Session do
     safe_reply(state.turn_from, reply)
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
+
+    {:noreply,
+     %{
+       new_state
+       | turn_in_flight: false,
+         turn_from: nil,
+         turn_task_ref: nil,
+         turn_started_at: nil
+     }}
   end
 
   def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
     Logger.warning("[Session] Turn FAILED for #{state.agent_id}: #{inspect(reason)}")
     new_state = transition_phase(state, :processing, :complete, :idle)
 
+    emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
+
     safe_reply(state.turn_from, {:error, reason})
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
+
+    {:noreply,
+     %{
+       new_state
+       | turn_in_flight: false,
+         turn_from: nil,
+         turn_task_ref: nil,
+         turn_started_at: nil
+     }}
   end
 
   # Handle Task DOWN messages
@@ -596,7 +634,15 @@ defmodule Arbor.Orchestrator.Session do
       # Turn task crashed — reply to caller and reset
       new_state = transition_phase(state, :processing, :complete, :idle)
       safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
-      {:noreply, %{new_state | turn_in_flight: false, turn_from: nil, turn_task_ref: nil}}
+
+      {:noreply,
+       %{
+         new_state
+         | turn_in_flight: false,
+           turn_from: nil,
+           turn_task_ref: nil,
+           turn_started_at: nil
+       }}
     else
       {:noreply, state}
     end
@@ -816,6 +862,20 @@ defmodule Arbor.Orchestrator.Session do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Emit the [:arbor, :session, :turn] telemetry event on turn completion. Async turns
+  # can't use :telemetry.span/3 (dispatch and result land in different callbacks), so we
+  # time it manually: start captured in do_send_message_async, duration (native units)
+  # computed here. No-op when no start time was recorded. Attach a handler via
+  # Arbor.Signals.Telemetry to profile turn latency.
+  defp emit_turn_telemetry(nil, _meta), do: :ok
+
+  defp emit_turn_telemetry(started_at, meta) do
+    duration = System.monotonic_time() - started_at
+    :telemetry.execute([:arbor, :session, :turn], %{duration: duration}, meta)
+  rescue
+    _ -> :ok
   end
 
   # Record agent telemetry via the Store (non-critical — failures are silently ignored)
