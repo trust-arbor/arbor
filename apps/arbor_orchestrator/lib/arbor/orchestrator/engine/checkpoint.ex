@@ -35,6 +35,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           context_values: map(),
           node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()},
           context_lineage: map(),
+          pipeline_started_at: DateTime.t() | nil,
           content_hashes: map(),
           pending_intents: %{String.t() => pending_intent()},
           execution_digests: %{String.t() => execution_digest()}
@@ -55,6 +56,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
             context_values: %{},
             node_outcomes: %{},
             context_lineage: %{},
+            pipeline_started_at: nil,
             content_hashes: %{},
             pending_intents: %{},
             execution_digests: %{}
@@ -78,6 +80,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       context_values: Context.snapshot(context),
       node_outcomes: node_outcomes,
       context_lineage: Keyword.get(opts, :context_lineage, Context.lineage(context)),
+      pipeline_started_at:
+        Keyword.get(opts, :pipeline_started_at, Context.pipeline_started_at(context)),
       content_hashes: Keyword.get(opts, :content_hashes, %{}),
       pending_intents: Keyword.get(opts, :pending_intents, %{}),
       execution_digests: Keyword.get(opts, :execution_digests, %{})
@@ -294,11 +298,39 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       end)
       |> Map.new()
 
+    lineage = serialize_lineage(checkpoint.context_lineage)
+
     checkpoint
     |> Map.from_struct()
     |> Map.put(:node_outcomes, encoded_outcomes)
     |> Map.update(:context_values, %{}, &Map.drop(&1, @internal_keys))
+    |> maybe_encode_pipeline_started_at()
+    |> Map.put(:context_lineage, lineage)
   end
+
+  defp serialize_lineage(lineage) when is_map(lineage) do
+    Map.new(lineage, fn {key, entry} ->
+      {key, serialize_lineage_entry(entry)}
+    end)
+  end
+
+  defp serialize_lineage_entry(%Context.LineageEntry{} = e) do
+    %{
+      "node_id" => e.node_id,
+      "step_timestamp" => DateTime.to_iso8601(e.step_timestamp),
+      "pipeline_timestamp" => e.pipeline_timestamp && DateTime.to_iso8601(e.pipeline_timestamp),
+      "operation" => e.operation
+    }
+  end
+
+  # legacy map or string — pass through (we tolerate them on read)
+  defp serialize_lineage_entry(other), do: other
+
+  defp maybe_encode_pipeline_started_at(%{pipeline_started_at: %DateTime{} = dt} = map) do
+    Map.put(map, :pipeline_started_at, DateTime.to_iso8601(dt))
+  end
+
+  defp maybe_encode_pipeline_started_at(map), do: map
 
   # ---------------------------------------------------------------------------
   # Private — store operations
@@ -396,7 +428,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
        node_retries: Map.get(decoded, "node_retries", %{}),
        context_values: Map.get(decoded, "context_values", %{}),
        node_outcomes: outcomes,
-       context_lineage: Map.get(decoded, "context_lineage", %{}),
+       context_lineage: deserialize_lineage(Map.get(decoded, "context_lineage", %{})),
+       pipeline_started_at: parse_optional_datetime(Map.get(decoded, "pipeline_started_at")),
        content_hashes: Map.get(decoded, "content_hashes", %{}),
        pending_intents: deserialize_intents(Map.get(decoded, "pending_intents", %{})),
        execution_digests: deserialize_digests(Map.get(decoded, "execution_digests", %{}))
@@ -438,6 +471,37 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   defp deserialize_digests(_), do: %{}
 
+  defp deserialize_lineage(lineage) when is_map(lineage) do
+    Map.new(lineage, fn {key, entry} ->
+      {key, deserialize_lineage_entry(entry)}
+    end)
+  end
+
+  defp deserialize_lineage(_), do: %{}
+
+  defp deserialize_lineage_entry(
+         %{
+           "node_id" => node_id,
+           "step_timestamp" => step_str,
+           "operation" => op
+         } = m
+       ) do
+    %Context.LineageEntry{
+      node_id: node_id,
+      step_timestamp: parse_optional_datetime(step_str),
+      pipeline_timestamp: parse_optional_datetime(Map.get(m, "pipeline_timestamp")),
+      operation: parse_operation(op)
+    }
+  end
+
+  # Legacy plain map or string — leave as-is for the accessors to tolerate
+  defp deserialize_lineage_entry(other), do: other
+
+  defp parse_operation("set"), do: :set
+  defp parse_operation("merge"), do: :merge
+  defp parse_operation(atom) when is_atom(atom), do: atom
+  defp parse_operation(_), do: :set
+
   defp normalize_keys(data) when is_map(data) do
     data
     |> Enum.map(fn
@@ -468,6 +532,18 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp parse_status("fail"), do: :fail
   defp parse_status("skipped"), do: :skipped
   defp parse_status(_), do: :success
+
+  defp parse_optional_datetime(nil), do: nil
+
+  defp parse_optional_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp parse_optional_datetime(%DateTime{} = dt), do: dt
+  defp parse_optional_datetime(_), do: nil
 
   # ---------------------------------------------------------------------------
   # Private — HMAC AAD derivation

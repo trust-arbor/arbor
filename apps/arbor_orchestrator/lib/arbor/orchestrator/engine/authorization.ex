@@ -195,10 +195,12 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   end
 
   defp do_call_handler(handler, node, context, graph, opts) when is_atom(handler) do
+    alias Arbor.Orchestrator.Handlers.BehaviourHelpers
+
     if Arbor.Orchestrator.Handlers.Handler.three_phase?(handler) do
-      Arbor.Orchestrator.Handlers.Handler.execute_three_phase(handler, node, context, graph, opts)
+      BehaviourHelpers.execute_three_phase(handler, node, context, graph, opts)
     else
-      handler.execute(node, context, graph, opts)
+      BehaviourHelpers.execute(handler, node, context, graph, opts)
     end
   end
 

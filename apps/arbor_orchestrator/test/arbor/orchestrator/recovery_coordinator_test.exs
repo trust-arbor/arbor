@@ -84,6 +84,40 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       assert Arbor.Orchestrator.list_resumable() == []
     end
 
+    test "staleness decisions are deterministic when using explicit time (via JobRegistry)" do
+      # This exercises the time-threading path we added in Wave 3
+      # (RecoveryCoordinator → JobRegistry.list_stale_heartbeats with explicit now).
+      fixed_now = ~U[2026-05-21 12:00:00Z]
+
+      # Insert a running entry with a very old heartbeat
+      entry = %JobRegistry.Entry{
+        pipeline_id: "run_time_threading_test",
+        run_id: "run_time_threading_test",
+        graph_id: "time_threading",
+        started_at: ~U[2026-05-20 00:00:00Z],
+        status: :running,
+        completed_count: 0,
+        total_nodes: 5,
+        node_durations: %{},
+        owner_node: node(),
+        # very old
+        last_heartbeat: ~U[2026-05-20 00:00:00Z]
+      }
+
+      Arbor.Persistence.BufferedStore.put("run_time_threading_test", entry,
+        name: :arbor_orchestrator_jobs
+      )
+
+      # With a 1-hour cutoff using our fixed_now, this should be considered stale
+      stale = JobRegistry.list_stale_heartbeats(60 * 60 * 1000, fixed_now)
+      assert Enum.any?(stale, fn e -> e.run_id == "run_time_threading_test" end)
+
+      # Cleanup
+      Arbor.Persistence.BufferedStore.delete("run_time_threading_test",
+        name: :arbor_orchestrator_jobs
+      )
+    end
+
     test "resume returns :not_found for unknown run_id" do
       assert {:error, :not_found} = Arbor.Orchestrator.resume("nonexistent_run")
     end
@@ -162,6 +196,44 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       # Cleanup
       File.rm_rf(logs_with)
       File.rm_rf(logs_without)
+    end
+
+    test "staleness logic respects explicit time (via JobRegistry injection)" do
+      # Exercises the Wave 3 change: JobRegistry.list_stale_heartbeats threads an
+      # explicit `now` into its age calculation. We prove the *injected* time — not
+      # wall-clock — drives the verdict by flipping it with the cutoff alone, while
+      # `now` stays fixed. (The companion test only checks the stale side once.)
+      fixed_now = ~U[2026-05-21 12:00:00Z]
+
+      # A running entry whose last heartbeat is ~36h before fixed_now.
+      entry = %JobRegistry.Entry{
+        pipeline_id: "run_time_injection",
+        run_id: "run_time_injection",
+        graph_id: "time_injection",
+        started_at: ~U[2026-05-20 00:00:00Z],
+        status: :running,
+        completed_count: 0,
+        total_nodes: 3,
+        node_durations: %{},
+        owner_node: node(),
+        last_heartbeat: ~U[2026-05-20 00:00:00Z]
+      }
+
+      Arbor.Persistence.BufferedStore.put("run_time_injection", entry,
+        name: :arbor_orchestrator_jobs
+      )
+
+      # 1-hour cutoff against fixed_now → the 36h-old heartbeat is stale.
+      stale = JobRegistry.list_stale_heartbeats(60 * 60 * 1000, fixed_now)
+      assert Enum.any?(stale, &(&1.run_id == "run_time_injection"))
+
+      # 48-hour cutoff against the SAME fixed_now → no longer stale. Only the
+      # injected time makes this deterministic regardless of when the test runs.
+      not_stale = JobRegistry.list_stale_heartbeats(48 * 60 * 60 * 1000, fixed_now)
+      refute Enum.any?(not_stale, &(&1.run_id == "run_time_injection"))
+
+      # Cleanup
+      Arbor.Persistence.BufferedStore.delete("run_time_injection", name: :arbor_orchestrator_jobs)
     end
   end
 end

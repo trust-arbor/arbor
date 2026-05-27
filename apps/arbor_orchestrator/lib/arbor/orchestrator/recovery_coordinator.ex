@@ -278,10 +278,13 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   def handle_info(:check_stale_heartbeats, state) do
     if state.enabled do
+      # Capture time once per cycle for consistency, purity, and testability.
+      now = DateTime.utc_now()
+
       # Check both the legacy JobRegistry (BufferedStore) and the new
       # PipelineStatus (ETS) for stale entries. During the migration
       # period, entries may exist in either store.
-      legacy_stale = JobRegistry.list_stale_heartbeats(@stale_heartbeat_ms)
+      legacy_stale = JobRegistry.list_stale_heartbeats(@stale_heartbeat_ms, now)
 
       ets_stale =
         if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
@@ -333,7 +336,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
               # first — the Session GenServer may have died even though the
               # BEAM node is still up (agent stopped, crash, etc.).
               spawner_alive = spawning_process_alive?(entry.spawning_pid)
-              age_ms = DateTime.diff(DateTime.utc_now(), entry.started_at, :millisecond)
+              age_ms = DateTime.diff(now, entry.started_at, :millisecond)
 
               cond do
                 # Spawning process is dead → mark abandoned immediately

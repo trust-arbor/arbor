@@ -66,11 +66,13 @@ defmodule Arbor.Orchestrator.Engine do
     logs_root = Keyword.get(opts, :logs_root, Path.join(System.tmp_dir!(), "arbor_orchestrator"))
     max_steps = Keyword.get(opts, :max_steps, 500)
     pipeline_started_at = System.monotonic_time(:millisecond)
+    pipeline_started_at_dt = DateTime.utc_now()
     run_id = Keyword.get_lazy(opts, :run_id, fn -> generate_run_id(graph.id) end)
 
     # Thread run_id through opts so all events and checkpoints include it
     opts = Keyword.put(opts, :run_id, run_id)
     opts = Keyword.put_new(opts, :pipeline_id, run_id)
+    opts = Keyword.put(opts, :pipeline_started_at, pipeline_started_at_dt)
 
     # Compute graph hash for version checking on resume
     graph_hash = Keyword.get(opts, :graph_hash)
@@ -80,7 +82,7 @@ defmodule Arbor.Orchestrator.Engine do
     # This is the Engine's own tracking — no external GenServer dependency.
     run_state =
       Arbor.Orchestrator.RunState.Core.new(run_id, graph.id, map_size(graph.nodes),
-        now: DateTime.utc_now(),
+        now: pipeline_started_at_dt,
         pipeline_id: Keyword.get(opts, :pipeline_id, run_id),
         owner_node: Kernel.node(),
         source_node: Keyword.get(opts, :source_node, Kernel.node()),
@@ -186,6 +188,8 @@ defmodule Arbor.Orchestrator.Engine do
       workdir = Keyword.get(opts, :workdir)
       initial_values = Keyword.get(opts, :initial_values, %{})
 
+      pipeline_dt = Keyword.get(opts, :pipeline_started_at, DateTime.utc_now())
+
       context =
         Context.new(
           %{
@@ -193,7 +197,8 @@ defmodule Arbor.Orchestrator.Engine do
             "graph.label" => Map.get(graph.attrs, "label", "")
           }
           |> then(fn ctx -> if workdir, do: Map.put(ctx, "workdir", workdir), else: ctx end)
-          |> Map.merge(initial_values)
+          |> Map.merge(initial_values),
+          pipeline_started_at: pipeline_dt
         )
 
       with {:ok, start_id} <- find_start_node(graph) do
@@ -210,10 +215,13 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp state_from_checkpoint(graph, checkpoint) do
-    context = %{
-      Context.new(checkpoint.context_values || %{})
-      | lineage: checkpoint.context_lineage || %{}
-    }
+    context =
+      Context.new(
+        checkpoint.context_values || %{},
+        pipeline_started_at: checkpoint.pipeline_started_at
+      )
+
+    context = %{context | lineage: checkpoint.context_lineage || %{}}
 
     completed = checkpoint.completed_nodes || []
     retries = checkpoint.node_retries || %{}
@@ -315,11 +323,17 @@ defmodule Arbor.Orchestrator.Engine do
     node = Map.fetch!(state.graph.nodes, state.node_id)
     fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, state.context)
 
+    # Capture a single logical timestamp for all context lineage entries created
+    # while processing this node. This gives "one node execution step = one time"
+    # for lineage queries while still allowing pure callers to inject a deterministic
+    # timestamp via the new Context.set/5 and apply_updates/4 APIs.
+    step_now = DateTime.utc_now()
+
     context =
       state.context
-      |> Context.set("current_node", node.id, node.id)
-      |> Context.set("internal.fidelity.mode", fidelity.mode, node.id)
-      |> maybe_set_fidelity_thread(fidelity, node.id)
+      |> Context.set("current_node", node.id, node.id, step_now)
+      |> Context.set("internal.fidelity.mode", fidelity.mode, node.id, step_now)
+      |> maybe_set_fidelity_thread(fidelity, node.id, step_now)
 
     # Content-hash skip check
     computed_hash = ContentHash.compute(node, context)
@@ -341,8 +355,8 @@ defmodule Arbor.Orchestrator.Engine do
 
       context =
         context
-        |> Context.set("outcome", to_string(outcome.status), node.id)
-        |> Context.set("__completed_nodes__", completed, node.id)
+        |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
+        |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
       tracking =
         state.tracking
@@ -359,7 +373,8 @@ defmodule Arbor.Orchestrator.Engine do
           run_id: Keyword.get(state.opts, :run_id),
           graph_hash: Keyword.get(state.opts, :graph_hash),
           pending_intents: state.tracking.pending_intents,
-          execution_digests: state.tracking.execution_digests
+          execution_digests: state.tracking.execution_digests,
+          pipeline_started_at: Context.pipeline_started_at(context)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -486,10 +501,10 @@ defmodule Arbor.Orchestrator.Engine do
 
       context =
         context
-        |> Context.apply_updates(outcome.context_updates || %{}, node.id)
-        |> Context.set("outcome", to_string(outcome.status), node.id)
-        |> Context.set("__completed_nodes__", completed, node.id)
-        |> maybe_set_preferred_label(outcome, node.id)
+        |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+        |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
+        |> Context.set("__completed_nodes__", completed, node.id, step_now)
+        |> maybe_set_preferred_label(outcome, node.id, step_now)
 
       # Check for graph adaptation (graph.adapt handler stores mutated graph in context)
       {graph, context} = check_graph_adaptation(state.graph, context)
@@ -500,7 +515,8 @@ defmodule Arbor.Orchestrator.Engine do
           run_id: Keyword.get(state.opts, :run_id),
           graph_hash: Keyword.get(state.opts, :graph_hash),
           pending_intents: tracking.pending_intents,
-          execution_digests: tracking.execution_digests
+          execution_digests: tracking.execution_digests,
+          pipeline_started_at: Context.pipeline_started_at(context)
         )
 
       :ok = Checkpoint.write(checkpoint, state.logs_root)
@@ -778,17 +794,17 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp maybe_set_preferred_label(context, %Outcome{preferred_label: label}, node_id)
+  defp maybe_set_preferred_label(context, %Outcome{preferred_label: label}, node_id, now)
        when is_binary(label) do
-    Context.set(context, "preferred_label", label, node_id)
+    Context.set(context, "preferred_label", label, node_id, now)
   end
 
-  defp maybe_set_preferred_label(context, _, _node_id), do: context
+  defp maybe_set_preferred_label(context, _, _node_id, _now), do: context
 
-  defp maybe_set_fidelity_thread(context, %{thread_id: nil}, _node_id), do: context
+  defp maybe_set_fidelity_thread(context, %{thread_id: nil}, _node_id, _now), do: context
 
-  defp maybe_set_fidelity_thread(context, %{thread_id: thread_id}, node_id) do
-    Context.set(context, "internal.fidelity.thread_id", thread_id, node_id)
+  defp maybe_set_fidelity_thread(context, %{thread_id: thread_id}, node_id, now) do
+    Context.set(context, "internal.fidelity.thread_id", thread_id, node_id, now)
   end
 
   # --- Graph adaptation (self-modifying pipelines) ---

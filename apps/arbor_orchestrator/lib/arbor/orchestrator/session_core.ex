@@ -16,9 +16,11 @@ defmodule Arbor.Orchestrator.SessionCore do
 
   ## Pipeline Composability
 
+      now = DateTime.utc_now()
+
       session
-      |> SessionCore.append_user_message("hello")
-      |> SessionCore.apply_llm_response(response)
+      |> SessionCore.append_user_message("hello", now)
+      |> SessionCore.apply_llm_response(response, now)
       |> SessionCore.maybe_compact()
       |> SessionCore.for_llm()   # → messages ready for LLM API
   """
@@ -34,9 +36,9 @@ defmodule Arbor.Orchestrator.SessionCore do
   def normalize_message(%{content: content}) when is_binary(content), do: content
   def normalize_message(message), do: inspect(message)
 
-  @doc "Build a user message map."
+  @doc "Build a user message map. Timestamp must be provided by the caller (boundary layer)."
   @spec build_user_message(String.t(), DateTime.t()) :: map()
-  def build_user_message(content, timestamp \\ DateTime.utc_now()) do
+  def build_user_message(content, timestamp) do
     %{
       "role" => "user",
       "content" => normalize_message(content),
@@ -44,9 +46,8 @@ defmodule Arbor.Orchestrator.SessionCore do
     }
   end
 
-  @doc "Build an assistant message map. Returns nil for empty responses."
+  @doc "Build an assistant message map. Returns nil for empty responses. Timestamp must be provided by the caller."
   @spec build_assistant_message(String.t() | nil, DateTime.t()) :: map() | nil
-  def build_assistant_message(content, timestamp \\ DateTime.utc_now())
   def build_assistant_message(nil, _timestamp), do: nil
   def build_assistant_message("", _timestamp), do: nil
 
@@ -78,7 +79,7 @@ defmodule Arbor.Orchestrator.SessionCore do
   Pure — does not persist or emit events.
   """
   @spec append_user_message([map()], String.t(), DateTime.t()) :: [map()]
-  def append_user_message(messages, content, timestamp \\ DateTime.utc_now()) do
+  def append_user_message(messages, content, timestamp) do
     messages ++ [build_user_message(content, timestamp)]
   end
 
@@ -94,7 +95,7 @@ defmodule Arbor.Orchestrator.SessionCore do
   Pure — does not persist or emit events.
   """
   @spec apply_llm_response([map()], String.t() | nil, DateTime.t()) :: [map()]
-  def apply_llm_response(messages, response_text, timestamp \\ DateTime.utc_now()) do
+  def apply_llm_response(messages, response_text, timestamp) do
     case build_assistant_message(response_text, timestamp) do
       nil -> messages
       assistant_msg -> messages ++ [assistant_msg]
@@ -405,9 +406,9 @@ defmodule Arbor.Orchestrator.SessionCore do
   defp parse_timestamp(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
       {:ok, dt, _} -> dt
-      _ -> DateTime.utc_now()
+      _ -> nil   # Caller should provide a fallback if a real timestamp is required
     end
   end
 
-  defp parse_timestamp(_), do: DateTime.utc_now()
+  defp parse_timestamp(_), do: nil
 end

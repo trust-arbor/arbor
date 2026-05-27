@@ -38,10 +38,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @doc false
   @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map()) :: map()
   def build_turn_values(state, message) do
+    build_turn_values(state, message, DateTime.utc_now())
+  end
+
+  @doc false
+  @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map(), DateTime.t()) :: map()
+  def build_turn_values(state, message, now) do
     user_msg = %{
       "role" => "user",
       "content" => normalize_message(message),
-      "timestamp" => DateTime.to_iso8601(DateTime.utc_now())
+      "timestamp" => DateTime.to_iso8601(now)
     }
 
     # Use compactor's projected view if available, otherwise all messages

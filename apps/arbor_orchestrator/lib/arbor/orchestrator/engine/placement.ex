@@ -1,4 +1,6 @@
 defmodule Arbor.Orchestrator.Engine.Placement do
+  alias Arbor.Orchestrator.Handlers.{BehaviourHelpers, Handler}
+
   @moduledoc """
   Resolves node placement for distributed pipeline execution.
 
@@ -145,11 +147,16 @@ defmodule Arbor.Orchestrator.Engine.Placement do
 
   @doc """
   Execute a handler locally. Called via RPC on the target node.
+  All handler invocations go through BehaviourHelpers for return value validation.
   """
   @spec local_execute(module(), term(), term(), term(), keyword()) :: Outcome.t()
   def local_execute(handler, node, context, graph, opts) do
     if function_exported?(handler, :execute, 4) do
-      handler.execute(node, context, graph, opts)
+      if Handler.three_phase?(handler) do
+        BehaviourHelpers.execute_three_phase(handler, node, context, graph, opts)
+      else
+        BehaviourHelpers.execute(handler, node, context, graph, opts)
+      end
     else
       %Outcome{
         status: :fail,
