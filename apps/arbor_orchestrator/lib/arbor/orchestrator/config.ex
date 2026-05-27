@@ -42,7 +42,9 @@ defmodule Arbor.Orchestrator.Config do
       base_url: "http://localhost:1234/v1"
     ],
     complexity: [provider: :ollama, model: "granite4.1:3b", base_url: "http://localhost:11434"],
-    intent: [provider: :ollama, model: "granite4.1:3b"],
+    # intent (goal/risk_level) is the slowest stage and currently unconsumed —
+    # gated off by default. Enable once a downstream consumer reads it.
+    intent: [provider: :ollama, model: "granite4.1:3b", enabled: false],
     decompose: [provider: :ollama, model: "granite4.1:3b", enabled: false],
     retrieval: [
       provider: :ollama,
