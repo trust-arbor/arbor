@@ -68,10 +68,9 @@ The `arbor_orchestrator` implementation shows **strong overall adherence** to CR
    - **Opportunity**: Introduce `@behaviour Arbor.Orchestrator.Handler` with required callbacks and a wrapper validation function (inspired by `Ash.BehaviourHelpers`).
    - This would make the CRC boundary explicit: handlers declare whether they are pure or effectful.
 
-2. **Result Processing & Event Emission**
-   - `session/result_processor.ex` contains a `send/2`.
-   - Some result aggregation mixes context updates with telemetry/signals.
-   - **Recommendation**: Keep pure aggregation in a `Result.Core` module; move `send` and event emission to the Session or a dedicated emitter boundary.
+2. **Result Processing & Event Emission** — **Done (2026-05-27).**
+   - `session/result_processor.ex` mixed pure proposal-generation with effectful emission (`send/2`, signal bus).
+   - **Resolved**: the pure aggregation was extracted into `Arbor.Orchestrator.Session.ResultProcessor.Core` (now unit-tested); `ResultProcessor` is the effectful boundary that calls the core to build proposals, then performs the create/emit effects.
 
 3. **Graph & Pipeline Modules**
    - `graph.ex`, `graph_mutation.ex`, and DOT parsing modules are mostly pure.
@@ -87,9 +86,21 @@ The `arbor_orchestrator` implementation shows **strong overall adherence** to CR
 |----------|--------|--------|---------|---------------|
 | High | Pass `now` / timestamp into `Context.set/4` and `apply_updates/3` | Low | High testability | Stronger purity | **Completed 2026-05** (dual-clock `LineageEntry` + `pipeline_started_at`) |
 | High | Define `Arbor.Orchestrator.Handler` behaviour + validation wrapper | Medium | High extensibility & safety | Matches Ash pattern | **Complete** (2026-05) — helpers exist, main paths protected, all 28 handlers declare `@behaviour`, three-phase error hardening done (malformed callback returns → fail `Outcome` instead of `WithClauseError`, regression-tested). |
-| Medium | Extract `RunState.Boundary` module for ETS sync | Medium | Cleaner Engine | Clearer shell/core split |
-| Medium | Add CRC moduledoc sections to all engine/* modules | Low | Consistency | Documentation |
-| Low | Create `Result.Core` for pure aggregation logic | Medium | Testability | Better separation |
+| Medium | Extract `RunState.Boundary` module for ETS sync | Medium | Cleaner Engine | Clearer shell/core split | **Superseded (2026-05-27)** — see reassessment. |
+| Medium | Add CRC moduledoc sections to all engine/* modules | Low | Consistency | Documentation | **Reframed / mostly skip (2026-05-27)** — see reassessment. |
+| Low | Create `Result.Core` for pure aggregation logic | Medium | Testability | Better separation | **Done (2026-05-27)** — extracted as `ResultProcessor.Core` (pure proposal/goal logic + 17 new unit tests); `ResultProcessor` is now the effectful boundary. |
+
+## Reassessment of remaining items (2026-05-27)
+
+Both High-priority items are now **done and shipped** (Context timestamp purity in `d120867a`; handler behaviour + three-phase hardening in `a6243afb`). Re-evaluating the three Medium/Low leftovers against the *current* code:
+
+- **`RunState.Boundary` (Medium) — superseded.** The engine-lifecycle redesign is complete (`.arbor/roadmap/5-completed/engine-lifecycle-redesign.md`) and is what produced `RunState.Core`. The council explicitly chose **"process-local state + ETS-backed visibility"** as the architecture, so the RunState↔ETS boundary was just deliberately settled. Extracting a separate Boundary module now would reshuffle a freshly-blessed design for little gain. Skip unless the ETS-visibility writes are visibly tangling `engine.ex`.
+
+- **CRC moduledocs on all `engine/*` (Medium) — reframed, mostly skip.** "All engine/* modules" is the wrong scope: most (`engine`, `executor`, `placement`, `authorization`, `artifact_store`, `checkpoint`, `goal_gate`) are effect *boundaries*, not pure CRC cores — a "## CRC" header would misrepresent them. Only the ~6 genuinely-pure modules (`router`, `condition`, `outcome`, `state`, `content_hash`, `backoff`) merit a construct→reduce→convert note, and only where it adds clarity. Documentation polish — do opportunistically, not as a campaign.
+
+- **`Result.Core` (Low) — done (2026-05-27).** `session/result_processor.ex` mixed pure proposal-generation (`generate_heartbeat_proposals`, the six `maybe_add_*_proposals`, `extract_note_with_metadata`, goal aggregation) with effectful emission (`send/2`, signal-bus calls). The pure half is now `Arbor.Orchestrator.Session.ResultProcessor.Core` — with 17 unit tests where it previously had none — and `ResultProcessor` is the effectful boundary that calls the core then performs the create/emit effects. The single caller (`builders.ex`) and a `defdelegate` were repointed at the core.
+
+**Bottom line:** all of the audit's actionable work is now complete — both High-priority items and the one Medium/Low leftover with standalone merit (`Result.Core`). The other two (`RunState.Boundary` superseded by the lifecycle redesign, engine CRC moduledocs reframed) are not worth a dedicated effort. **The CRC audit is effectively closed.**
 
 ## Recommendations for AI Agents
 
@@ -103,7 +114,7 @@ When working on `arbor_orchestrator`:
 
 ## Conclusion
 
-The orchestrator is already in much better shape than a typical post-hoc CRC retrofit would suggest. The main issues are localized and mechanical (timestamp leakage) rather than fundamental architectural problems. Implementing the high-priority items above would bring the codebase into full alignment with the CRC ideal used elsewhere in Arbor and in the best Elixir projects (Ecto, Ash, Phoenix).
+The orchestrator is already in much better shape than a typical post-hoc CRC retrofit would suggest. The main issues were localized and mechanical (timestamp leakage, handler return-contract enforcement) rather than fundamental architectural problems — and both high-priority items are now implemented and shipped, bringing the codebase into alignment with the CRC ideal used elsewhere in Arbor and in the best Elixir projects (Ecto, Ash, Phoenix). The remaining Medium/Low items are organizational polish (see the 2026-05-27 reassessment); only `Result.Core` carries standalone merit.
 
 ---
 

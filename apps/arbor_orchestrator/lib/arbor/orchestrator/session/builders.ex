@@ -42,7 +42,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
   end
 
   @doc false
-  @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map(), DateTime.t()) :: map()
+  @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map(), DateTime.t()) ::
+          map()
   def build_turn_values(state, message, now) do
     user_msg = %{
       "role" => "user",
@@ -324,7 +325,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     # Phase 3: heartbeat becomes read-only — generate proposals instead of
     # directly mutating state. The ActionCycleServer reviews proposals.
-    proposals = ResultProcessor.generate_heartbeat_proposals(agent_id, state, result_ctx)
+    proposals = ResultProcessor.Core.generate_heartbeat_proposals(agent_id, state, result_ctx)
     created = ResultProcessor.create_proposals(agent_id, proposals)
 
     if created > 0 do
@@ -354,7 +355,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   # Delegate to ResultProcessor
   @doc false
-  defdelegate apply_goal_changes(existing_goals, updates, new_goals), to: ResultProcessor
+  defdelegate apply_goal_changes(existing_goals, updates, new_goals), to: ResultProcessor.Core
 
   # ── Signal emission ──────────────────────────────────────────────────
 
