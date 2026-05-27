@@ -1,20 +1,25 @@
 defmodule Arbor.Cartographer.CapabilityRegistry do
   @moduledoc """
-  Local capability registry using ETS.
+  Cluster-wide capability registry using ETS.
 
-  Stores and retrieves capability information for nodes. Currently supports
-  local-only operation with the current node's capabilities.
+  Stores capability information for every node in the cluster, keyed by node_id,
+  so any node can answer `find_nodes/2` across the whole cluster.
 
   ## Architecture
 
-  The registry stores node capabilities in an ETS table with the structure:
-  - Key: `node_id` (atom)
-  - Value: `node_capabilities` map
+  ETS table: key = `node_id` (atom), value = `node_capabilities` map.
 
-  ## Future Extensions
+  ## Cluster sync (mesh)
 
-  This module is designed to support cluster-wide capability queries once
-  mesh integration is added. Current implementation focuses on local operations.
+  Each node's `Scout` registers its own capabilities locally and propagates them:
+  - **Announce on register/boot** — `Scout` pushes its caps to all connected nodes
+    (`receive_capabilities/2`) and `handle_continue` calls `sync_cluster/0` to pull
+    peers already connected at boot (which fire no `:nodeup`).
+  - **On `:nodeup`** — request the new node's caps (falling back to remote
+    `Hardware.detect` via RPC if it has no Cartographer) and push ours.
+  - **On `:nodedown`** — evict the departed node's entry.
+  - **Load** — `Scout` broadcasts load updates (`update_load/2`) every interval so
+    load-based routing isn't stale between full capability broadcasts.
   """
 
   use GenServer
